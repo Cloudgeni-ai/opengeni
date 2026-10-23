@@ -2,17 +2,33 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { createPortal } from "react-dom";
 
 import { cn } from "../lib/cn";
 
 /** Keyboard steps in pixels: an arrow key, and an arrow key with Shift. */
-export const RESIZE_HANDLE_STEP = 16;
-export const RESIZE_HANDLE_LARGE_STEP = 64;
+const STEP = 16;
+const LARGE_STEP = 64;
 /** Two presses without movement within this many milliseconds are a double-click. */
 const DOUBLE_PRESS_MS = 400;
+/** A press that travels no further than this is a click, not a drag. */
+const CLICK_SLOP_PX = 4;
+/**
+ * Covers the page while dragging so an iframe under the pointer (a Site)
+ * cannot swallow the movement. Inline styles: it is portaled to the body,
+ * outside any styled root, and must also escape ancestors that would contain
+ * a fixed element (transform, filter, contain).
+ */
+const COVER_STYLE: CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 2147483646,
+  cursor: "col-resize",
+};
 
 export type ResizeHandleProps = {
   /** The accessible name, for example "Resize chat". */
@@ -45,14 +61,15 @@ function clamp(width: number, min: number, max: number) {
 }
 
 /**
- * A vertical window splitter on a panel's edge. At rest it is only the
- * panel's own border; hover thickens the line and a drag shows it in the
- * brand tint; keyboard focus wears the app's focus ring. It is a focusable
- * `separator` whose value is the panel width:
- * the arrow keys move it (Shift for larger steps), Home and End go to the
- * narrowest and widest, and Enter hides the panel when it can be hidden.
- * While dragging, a transparent layer covers the page so an iframe under the
- * pointer (a Site) cannot swallow the movement.
+ * A vertical window splitter on a panel's edge. Place it inside the panel,
+ * which must be `position: relative`. At rest it is only the panel's own
+ * border; hover thickens the line, a drag shows it in the brand tint and
+ * keyboard focus shows it in the accent colour. It is a focusable `separator` whose
+ * value is the panel width: the arrow keys move it (Shift for larger steps),
+ * Home and End go to the narrowest and widest, and Enter hides the panel when
+ * it can be hidden. While dragging, a transparent layer covers the page so an
+ * iframe under the pointer (a Site) cannot swallow the movement. Coarse
+ * pointers get a 44px target.
  */
 export function ResizeHandle({
   label,
@@ -87,57 +104,85 @@ export function ResizeHandle({
     const widthAt = (clientX: number) =>
       clamp(startWidth + direction * (clientX - startX), min, upper);
     let latest = startWidth;
+    // Whether the pointer travelled: a press that didn't is a click, even if
+    // a drag at a limit or out and back leaves the width where it started.
+    let moved = false;
     setDragging(true);
     setLiveValue(startWidth);
     const previousCursor = document.body.style.cursor;
     const previousSelect = document.body.style.userSelect;
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
-    const move = (moveEvent: PointerEvent) => {
-      const next = widthAt(moveEvent.clientX);
+    const track = (clientX: number) => {
+      if (Math.abs(clientX - startX) > CLICK_SLOP_PX) moved = true;
+      const next = widthAt(clientX);
       if (next === latest) return;
       latest = next;
       setLiveValue(next);
       onResize?.(next);
     };
+    const move = (moveEvent: PointerEvent) => {
+      // The release happened where this page couldn't see it.
+      if (moveEvent.buttons === 0) {
+        finish(moveEvent.clientX);
+        return;
+      }
+      track(moveEvent.clientX);
+    };
     const stop = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", cancel);
       document.body.style.cursor = previousCursor;
       document.body.style.userSelect = previousSelect;
       teardown.current = null;
       setDragging(false);
       setLiveValue(null);
     };
-    const up = (upEvent: PointerEvent) => {
-      latest = widthAt(upEvent.clientX);
+    // Ends the drag: commits a new width, or puts back the one it started at.
+    const settle = () => {
       stop();
       if (latest !== startWidth) {
-        lastPress.current = null;
         onResizeEnd(latest);
+        return true;
+      }
+      onResize?.(startWidth);
+      return false;
+    };
+    const finish = (clientX: number) => {
+      track(clientX);
+      settle();
+      if (moved) {
+        lastPress.current = null;
         return;
       }
       const now = Date.now();
       const previous = lastPress.current;
-      if (previous && now - previous.at <= DOUBLE_PRESS_MS && Math.abs(previous.x - startX) <= 4) {
+      if (
+        previous &&
+        now - previous.at <= DOUBLE_PRESS_MS &&
+        Math.abs(previous.x - startX) <= CLICK_SLOP_PX
+      ) {
         lastPress.current = null;
         onReset?.();
       } else lastPress.current = { at: now, x: startX };
     };
-    // A cancelled pointer (the window lost it) keeps where the drag got to.
+    const up = (upEvent: PointerEvent) => finish(upEvent.clientX);
+    // A cancelled pointer or a window losing focus keeps where the drag got to.
     const cancel = () => {
-      stop();
-      if (latest !== startWidth) onResizeEnd(latest);
+      lastPress.current = null;
+      settle();
     };
     teardown.current = stop;
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", cancel);
   };
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const step = event.shiftKey ? RESIZE_HANDLE_LARGE_STEP : RESIZE_HANDLE_STEP;
+    const step = event.shiftKey ? LARGE_STEP : STEP;
     const upper = Math.max(min, max);
     let next: number | null = null;
     switch (event.key) {
@@ -175,6 +220,7 @@ export function ResizeHandle({
         aria-label={label}
         aria-controls={controls}
         aria-valuenow={shown}
+        aria-valuetext={`${shown} pixels`}
         aria-valuemin={min}
         aria-valuemax={Math.max(min, max)}
         tabIndex={0}
@@ -182,8 +228,10 @@ export function ResizeHandle({
         onPointerDown={onPointerDown}
         onKeyDown={onKeyDown}
         className={cn(
-          "group absolute inset-y-0 z-20 w-2 cursor-col-resize touch-none select-none",
-          edge === "start" ? "-left-1" : "-right-1",
+          "group absolute inset-y-0 z-20 w-2 cursor-col-resize touch-none outline-hidden select-none pointer-coarse:w-11",
+          edge === "start"
+            ? "-left-1 pointer-coarse:-left-5.5"
+            : "-right-1 pointer-coarse:-right-5.5",
           className,
         )}
       >
@@ -193,13 +241,16 @@ export function ResizeHandle({
             "absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-[width,background-color] duration-150 motion-reduce:transition-none",
             dragging
               ? "w-0.5 bg-brand/70"
-              : "bg-transparent group-hover:w-0.5 group-hover:bg-border-strong",
+              : "bg-transparent group-hover:w-0.5 group-hover:bg-border-strong group-focus-visible:w-0.5 group-focus-visible:bg-og-accent",
           )}
         />
       </div>
-      {dragging ? (
-        <div aria-hidden="true" className="fixed inset-0 z-50 cursor-col-resize" />
-      ) : null}
+      {dragging && typeof document !== "undefined"
+        ? createPortal(
+            <div aria-hidden="true" data-resize-cover="" style={COVER_STYLE} />,
+            document.body,
+          )
+        : null}
     </>
   );
 }

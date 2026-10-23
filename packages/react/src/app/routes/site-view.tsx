@@ -68,7 +68,8 @@ type SiteState =
  * one conversation (the newest when the Site opens, unless one is chosen) as
  * a regular chat, narrower, and starts a new one. The sidebar lists the
  * Site's conversations, so the panel doesn't repeat them. The panel can be
- * resized and hidden; both are remembered per person.
+ * resized and hidden; both are remembered per person, and choosing a
+ * conversation brings a hidden panel back.
  */
 export function SiteViewRoute({
   workspaceId,
@@ -105,10 +106,8 @@ export function SiteViewRoute({
       });
     return () => abort.abort();
   }, [client, siteAttempt, siteId, workspaceId]);
-  const frame = useRef<HTMLDivElement>(null);
   return (
     <div
-      ref={frame}
       className="flex min-h-0 min-w-0 flex-1 max-lg:flex-col"
       data-workspace-scroll-owner="self-managed"
     >
@@ -124,7 +123,6 @@ export function SiteViewRoute({
       </div>
       <SiteChatPanel
         key={`${workspaceId}:${siteId}`}
-        frame={frame}
         workspaceId={workspaceId}
         siteId={siteId}
         site={site}
@@ -186,19 +184,27 @@ function useSiteConversations(workspaceId: string, siteId: string) {
   return { sessions, loaded: page !== null, error, refresh };
 }
 
-/** How wide the panel may be: its own limit, less what the Site needs beside it. */
-function useAvailableWidth(frame: RefObject<HTMLDivElement | null>) {
+/**
+ * How wide the panel may be: its own limit, less what the Site needs beside
+ * it. Measured through the panel's own element, since a parent's ref isn't
+ * attached yet when a child's layout effect first runs.
+ */
+function useAvailableWidth(panel: RefObject<HTMLElement | null>) {
   const [max, setMax] = useState(SITE_CHAT_MAX_WIDTH);
   useLayoutEffect(() => {
-    const element = frame.current;
+    const element = panel.current?.parentElement;
     if (!element) return;
     const measure = () => {
-      const room = element.getBoundingClientRect().width - SITE_MIN_WIDTH;
-      // An unmeasured frame (no layout yet) keeps the panel's own limit.
+      const { width } = element.getBoundingClientRect();
+      // An unmeasured frame (no layout yet) keeps the panel's own limit; a
+      // narrow one still lets the panel be its minimum.
       setMax(
-        room > 0
-          ? Math.max(SITE_CHAT_MIN_WIDTH, Math.min(SITE_CHAT_MAX_WIDTH, Math.floor(room)))
-          : SITE_CHAT_MAX_WIDTH,
+        width === 0
+          ? SITE_CHAT_MAX_WIDTH
+          : Math.max(
+              SITE_CHAT_MIN_WIDTH,
+              Math.min(SITE_CHAT_MAX_WIDTH, Math.floor(width - SITE_MIN_WIDTH)),
+            ),
       );
     };
     measure();
@@ -206,19 +212,17 @@ function useAvailableWidth(frame: RefObject<HTMLDivElement | null>) {
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [frame]);
+  }, [panel]);
   return max;
 }
 
 function SiteChatPanel({
-  frame,
   workspaceId,
   siteId,
   site,
   retrySite,
   conversation,
 }: {
-  frame: RefObject<HTMLDivElement | null>;
   workspaceId: string;
   siteId: string;
   site: SiteState;
@@ -234,7 +238,7 @@ function SiteChatPanel({
   const showButtonId = `${panelId}-show`;
   const list = useSiteConversations(workspaceId, siteId);
   const { layout, update: updateLayout } = useSiteChatPanelLayout(context.accessContext.subjectId);
-  const maxWidth = useAvailableWidth(frame);
+  const maxWidth = useAvailableWidth(panel);
   const width = Math.min(layout.width, maxWidth);
   const [composing, setComposing] = useState(false);
   const [handoff, setHandoff] = useState<CreatedConversation | null>(null);
@@ -255,17 +259,21 @@ function SiteChatPanel({
     if (list.loaded && pinned !== defaultId) setDefaultId(pinned);
   }, [defaultId, list.loaded, pinned]);
 
-  // Choosing a conversation anywhere (the rail, a link) ends composing.
+  // Choosing a conversation anywhere (the rail, a link) ends composing and
+  // shows a hidden panel: the sidebar is where conversations are chosen, so
+  // choosing one must show it. Opening the page keeps the panel as it was.
   // Returning to the Site itself, as its rail row does, opens its newest.
   const previousConversation = useRef(conversation);
   const startingNew = useRef(false);
   useEffect(() => {
     const previous = previousConversation.current;
     previousConversation.current = conversation;
-    if (conversation) setComposing(false);
-    else if (previous && !startingNew.current) setDefaultId(undefined);
+    if (conversation) {
+      setComposing(false);
+      if (conversation !== previous) updateLayout({ collapsed: false });
+    } else if (previous && !startingNew.current) setDefaultId(undefined);
     startingNew.current = false;
-  }, [conversation]);
+  }, [conversation, updateLayout]);
 
   const toSite = useCallback(
     (search: { conversation?: string }, replace = false) =>
@@ -331,7 +339,8 @@ function SiteChatPanel({
   useEffect(() => {
     if (!focusToggle) return;
     document.getElementById(focusToggle === "show" ? showButtonId : hideButtonId)?.focus();
-  }, [focusToggle, hideButtonId, layout.collapsed, showButtonId]);
+    setFocusToggle(null);
+  }, [focusToggle, hideButtonId, showButtonId]);
   const hide = () => {
     updateLayout({ collapsed: true });
     setFocusToggle("show");
@@ -400,8 +409,9 @@ function SiteChatPanel({
   const selected =
     list.sessions.find((session) => session.id === selectedId) ??
     (linked?.id === selectedId ? linked : null);
+  // While composing, the composer's own headline names what to do.
   const title = showComposer
-    ? "New conversation"
+    ? null
     : selected
       ? sessionDisplayTitle(selected)
       : handedOff?.initialMessage
@@ -413,7 +423,7 @@ function SiteChatPanel({
       <aside
         ref={panel}
         id={panelId}
-        aria-label="Conversation"
+        aria-label="Chat"
         hidden={layout.collapsed}
         style={{ [WIDTH_VARIABLE]: `${width}px` } as CSSProperties}
         className={cn(
@@ -440,8 +450,11 @@ function SiteChatPanel({
           className="max-lg:hidden"
         />
         <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border pr-2 pl-4">
-          <h2 className="min-w-0 flex-1 truncate text-sm font-medium text-fg" title={title}>
-            {title}
+          <h2
+            className="min-w-0 flex-1 truncate text-sm font-medium text-fg"
+            title={title ?? undefined}
+          >
+            {title ?? <span className="sr-only">New conversation</span>}
           </h2>
           {canCreate ? (
             <Button
@@ -539,11 +552,7 @@ function SiteChatPanel({
             ) : site.status === "error" ? (
               <Retry message="Couldn’t load this Site." onRetry={retrySite} />
             ) : (
-              <p className="py-4 pl-1 text-sm text-fg-muted">
-                {ready?.archived
-                  ? "No conversations yet."
-                  : "No conversations yet. Conversations started in this Site appear here."}
-              </p>
+              <p className="py-4 pl-1 text-sm text-fg-muted">No conversations yet.</p>
             )
           ) : selectedId ? (
             <SessionConversation

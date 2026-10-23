@@ -5799,6 +5799,11 @@
       }
     }
   }
+:where(.og-root).group-focus-visible\:w-0\.5,:where(.og-root) .group-focus-visible\:w-0\.5 {
+    &:is(:where(.group):focus-visible *) {
+      width: calc(var(--spacing) * 0.5);
+    }
+  }
 :where(.og-root).group-focus-visible\:bg-og-accent,:where(.og-root) .group-focus-visible\:bg-og-accent {
     &:is(:where(.group):focus-visible *) {
       background-color: var(--og-color-accent);
@@ -10391,6 +10396,11 @@
       top: auto;
     }
   }
+:where(.og-root).pointer-coarse\:-right-5\.5,:where(.og-root) .pointer-coarse\:-right-5\.5 {
+    @media (pointer: coarse) {
+      right: calc(var(--spacing) * -5.5);
+    }
+  }
 :where(.og-root).pointer-coarse\:right-0,:where(.og-root) .pointer-coarse\:right-0 {
     @media (pointer: coarse) {
       right: calc(var(--spacing) * 0);
@@ -10399,6 +10409,11 @@
 :where(.og-root).pointer-coarse\:bottom-0,:where(.og-root) .pointer-coarse\:bottom-0 {
     @media (pointer: coarse) {
       bottom: calc(var(--spacing) * 0);
+    }
+  }
+:where(.og-root).pointer-coarse\:-left-5\.5,:where(.og-root) .pointer-coarse\:-left-5\.5 {
+    @media (pointer: coarse) {
+      left: calc(var(--spacing) * -5.5);
     }
   }
 :where(.og-root).pointer-coarse\:-mx-\[19px\],:where(.og-root) .pointer-coarse\:-mx-\[19px\] {

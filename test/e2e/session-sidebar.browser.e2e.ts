@@ -895,7 +895,7 @@ const usageSiteId = "00000000-0000-4000-a000-000000000001";
 const checklistSiteId = "00000000-0000-4000-a000-000000000004";
 const conversationId = (n: number) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")}`;
 const sidebar = () => page.getByRole("complementary", { name: "Workspace sidebar" });
-const sitePanel = () => page.getByRole("complementary", { name: "Conversation", exact: true });
+const sitePanel = () => page.getByRole("complementary", { name: "Chat", exact: true });
 const siteRow = (title: string) =>
   sidebar().getByRole("link", { name: new RegExp(`^Open ${title}\\. Site`) });
 const railConversation = (title: string) =>
@@ -1023,14 +1023,31 @@ test("a Site row opens the Site beside its conversations; a nested one opens sel
     "page",
   );
 
-  // Closing the Site row is respected while one of its conversations is open.
+  // Closing the Site row is respected while moving between its conversations.
   await sidebar()
     .getByRole("button", { name: "Collapse 3 conversations from Opengeni usage", exact: true })
     .click();
+  await page.goBack();
+  await page.waitForURL(new RegExp(`conversation=${conversationId(903)}$`, "u"));
+  await sitePanel().getByText("one row per workspace and week").waitFor();
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .waitFor();
   // As for any collapsed branch, only the selected conversation stays visible.
-  expect(await railConversation("Weekly active users by plan").count()).toBe(1);
-  expect(await railConversation("Export usage to CSV").count()).toBe(0);
+  expect(await railConversation("Export usage to CSV").count()).toBe(1);
+  expect(await railConversation("Weekly active users by plan").count()).toBe(0);
   expect(await railConversation("Time filters across all graphs").count()).toBe(0);
+
+  // A hidden chat comes back when a conversation is chosen in the sidebar.
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  await sitePanel().getByRole("button", { name: "Hide chat" }).click();
+  await page.getByRole("button", { name: "Show chat", exact: true }).waitFor();
+  expect(await sitePanel().isHidden()).toBe(true);
+  await railConversation("Time filters across all graphs").click();
+  await page.waitForURL(new RegExp(`conversation=${conversationId(901)}$`, "u"));
+  await sitePanel().getByText("filters all four graphs together").waitFor();
 
   // New is the one action: the composer replaces the open conversation.
   await sitePanel().getByRole("button", { name: "New", exact: true }).click();

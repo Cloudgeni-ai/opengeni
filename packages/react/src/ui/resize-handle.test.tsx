@@ -56,12 +56,20 @@ describe("ResizeHandle", () => {
     act(async () => {
       element.dispatchEvent(new KeyboardEvent("keydown", { key: name, shiftKey, bubbles: true }));
     });
-  const pointer = (target: EventTarget, type: string, clientX: number) =>
+  // A move carries the pressed button unless told otherwise.
+  const pointer = (target: EventTarget, type: string, clientX: number, buttons?: number) =>
     act(async () => {
       target.dispatchEvent(
-        new PointerEvent(type, { clientX, button: 0, bubbles: true, cancelable: true }),
+        new PointerEvent(type, {
+          clientX,
+          button: 0,
+          buttons: buttons ?? (type === "pointermove" ? 1 : 0),
+          bubbles: true,
+          cancelable: true,
+        }),
       );
     });
+  const cover = () => document.body.querySelector("[data-resize-cover]");
 
   test("is a focusable vertical separator whose value is the panel width", async () => {
     const { handle } = await draw({ max: 280 });
@@ -70,6 +78,7 @@ describe("ResizeHandle", () => {
     expect(handle.getAttribute("aria-label")).toBe("Resize chat");
     expect(handle.getAttribute("aria-controls")).toBe("panel");
     expect(handle.getAttribute("aria-valuenow")).toBe("400");
+    expect(handle.getAttribute("aria-valuetext")).toBe("400 pixels");
     expect(handle.getAttribute("aria-valuemin")).toBe("320");
     // A window too narrow for the panel's own limit never reports max < min.
     expect(handle.getAttribute("aria-valuemax")).toBe("320");
@@ -117,8 +126,10 @@ describe("ResizeHandle", () => {
   test("dragging reports each width live and the chosen one once, within the limits", async () => {
     const { calls, handle } = await draw();
     await pointer(handle, "pointerdown", 1000);
-    // A cover keeps an iframe under the pointer from swallowing the drag.
-    expect(container.querySelector(".fixed.inset-0")).not.toBeNull();
+    // A cover over the whole page keeps an iframe under the pointer from
+    // swallowing the drag, outside any ancestor that could contain it.
+    expect(cover()?.parentElement).toBe(document.body);
+    expect(container.contains(cover())).toBe(false);
     expect(handle.getAttribute("data-dragging")).toBe("true");
     expect(document.body.style.cursor).toBe("col-resize");
     await pointer(window, "pointermove", 900);
@@ -128,7 +139,7 @@ describe("ResizeHandle", () => {
     await pointer(window, "pointerup", 0);
     expect(calls.resize).toEqual([500, 720]);
     expect(calls.end).toEqual([720]);
-    expect(container.querySelector(".fixed.inset-0")).toBeNull();
+    expect(cover()).toBeNull();
     expect(handle.hasAttribute("data-dragging")).toBe(false);
     expect(document.body.style.cursor).toBe("");
     // Released listeners: later movement changes nothing.
@@ -156,10 +167,56 @@ describe("ResizeHandle", () => {
     expect(calls.end).toEqual([440]);
   });
 
+  test("a drag that ends where it started puts the width back and isn't a click", async () => {
+    const { calls, handle } = await draw();
+    await pointer(handle, "pointerdown", 1000);
+    await pointer(window, "pointermove", 900);
+    await pointer(window, "pointerup", 1000);
+    expect(calls.resize.at(-1)).toBe(400);
+    expect(calls.end).toEqual([]);
+    // At a limit the width can't change, but the pointer moved: not a click.
+    const atMax = await draw({ value: 720 });
+    await pointer(atMax.handle, "pointerdown", 1000);
+    await pointer(window, "pointermove", 900);
+    await pointer(window, "pointerup", 900);
+    await pointer(atMax.handle, "pointerdown", 1000);
+    await pointer(window, "pointerup", 1000);
+    expect(atMax.calls.reset).toBe(0);
+    expect(atMax.calls.end).toEqual([]);
+  });
+
+  test("a release the page missed ends the drag at the next move", async () => {
+    const { calls, handle } = await draw();
+    await pointer(handle, "pointerdown", 1000);
+    await pointer(window, "pointermove", 900);
+    // No button held any more: the release happened outside the window.
+    await pointer(window, "pointermove", 880, 0);
+    expect(calls.end).toEqual([520]);
+    expect(cover()).toBeNull();
+    await pointer(window, "pointermove", 700);
+    expect(calls.end).toEqual([520]);
+  });
+
+  test("a cancelled pointer or the window losing focus keeps where the drag got to", async () => {
+    const { calls, handle } = await draw();
+    await pointer(handle, "pointerdown", 1000);
+    await pointer(window, "pointermove", 900);
+    await pointer(window, "pointercancel", 900);
+    expect(calls.end).toEqual([500]);
+    expect(cover()).toBeNull();
+    await pointer(handle, "pointerdown", 1000);
+    await pointer(window, "pointermove", 950);
+    await act(async () => void window.dispatchEvent(new Event("blur")));
+    expect(calls.end).toEqual([500, 450]);
+    expect(cover()).toBeNull();
+    expect(document.body.style.cursor).toBe("");
+  });
+
   test("unmounting mid-drag leaves no listeners or page styles behind", async () => {
     const { calls, handle } = await draw();
     await pointer(handle, "pointerdown", 1000);
     await act(async () => root.render(<div />));
+    expect(cover()).toBeNull();
     expect(document.body.style.cursor).toBe("");
     expect(document.body.style.userSelect).toBe("");
     await pointer(window, "pointermove", 900);

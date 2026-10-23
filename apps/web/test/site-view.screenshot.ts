@@ -2,7 +2,8 @@
 // SessionConversation: a Site row opens the Site with its newest conversation
 // beside it as a regular chat, a nested conversation opens the same view with
 // it selected, the panel resizes by drag and keyboard and hides, both
-// remembered after a reload, and the conversations stay nested after another
+// remembered after leaving the Site and coming back, choosing a conversation
+// shows a hidden panel, and the conversations stay nested after another
 // session is selected. Light and dark. Start the server first:
 //   bunx vite --config test/session-sidebar-preview.vite.config.ts --port 4292
 import { mkdir } from "node:fs/promises";
@@ -25,7 +26,7 @@ const browser = await chromium.launch({
 });
 const errors: string[] = [];
 const sidebar = (page: Page) => page.getByRole("complementary", { name: "Workspace sidebar" });
-const panel = (page: Page) => page.getByRole("complementary", { name: "Conversation" });
+const panel = (page: Page) => page.getByRole("complementary", { name: "Chat", exact: true });
 const handle = (page: Page) => page.getByRole("separator", { name: "Resize chat" });
 const siteRow = (page: Page, title: string) =>
   sidebar(page).getByRole("link", { name: new RegExp(`^Open ${title}\\. Site`) });
@@ -146,7 +147,10 @@ try {
     await handle(page).dblclick();
     check((await panelWidth(page)) === 400, "double-click did not restore the default width");
 
-    // A nested conversation in the sidebar opens the same view with it selected.
+    // A nested conversation in the sidebar opens the same view with it
+    // selected, and shows the chat if it was hidden.
+    await panel(page).getByRole("button", { name: "Hide chat" }).click();
+    await page.getByRole("button", { name: "Show chat" }).waitFor();
     await railConversation(page, "Export usage to CSV").click();
     await page.waitForURL(
       new RegExp(`/sites/${usageSite}\\?conversation=${conversationId(903)}`, "u"),
@@ -156,6 +160,13 @@ try {
     // New conversation: one action, the composer in the panel.
     await panel(page).getByRole("button", { name: "New" }).click();
     await panel(page).getByText("Ask about Opengeni usage").waitFor();
+    // The composer's headline says it; the header only names it for screen readers.
+    check(
+      (await panelTitle(page).evaluate(
+        (heading) => heading.childElementCount === 1 && heading.firstElementChild?.className,
+      )) === "sr-only",
+      "the header repeats the composer's headline",
+    );
     await capture(page, `site-view-new-${theme}`);
 
     // Selecting another session keeps the Site's conversations nested.

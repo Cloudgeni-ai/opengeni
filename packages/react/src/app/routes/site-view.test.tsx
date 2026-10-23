@@ -11,6 +11,7 @@ const otherSiteId = "44444444-4444-4444-8444-444444444444";
 const id = (n: number) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")}`;
 
 let permissions = ["sessions:create"];
+let subjectId = "me";
 let conversations: Session[] = [];
 let listPage: ((options: SessionListPageOptions) => object) | null = null;
 let fullSessions: Record<string, Session> = {};
@@ -46,7 +47,7 @@ const client = {
 mock.module("../app-context", () => ({
   useAppContext: () => ({
     client,
-    accessContext: { subjectId: "me", workspaceGrants: [{ workspaceId, permissions }] },
+    accessContext: { subjectId, workspaceGrants: [{ workspaceId, permissions }] },
   }),
 }));
 mock.module("../lib/app-api", () => ({
@@ -165,6 +166,7 @@ afterEach(() => {
   root = null;
   document.body.innerHTML = "";
   permissions = ["sessions:create"];
+  subjectId = "me";
   fullSessions = {};
   siteDetails = async () => ({
     artifact: { title: "Opengeni usage", status: "active", currentVersion: { id: "version-4" } },
@@ -218,7 +220,7 @@ async function render(selected?: string) {
 const openConversation = (container: HTMLElement) =>
   container.querySelector("[data-conversation]")?.getAttribute("data-conversation");
 const panel = (container: HTMLElement) =>
-  container.querySelector<HTMLElement>("aside[aria-label='Conversation']")!;
+  container.querySelector<HTMLElement>("aside[aria-label='Chat']")!;
 const heading = (container: HTMLElement) => panel(container).querySelector("h2")?.textContent;
 const separator = (container: HTMLElement) =>
   container.querySelector<HTMLElement>("[role='separator']")!;
@@ -357,7 +359,9 @@ test("a new conversation is created as the Site's own, then opened with its firs
   await rerender(undefined);
   const composer = container.querySelector<HTMLButtonElement>("[data-composer]")!;
   expect(composer.getAttribute("data-composer")).toBe("Ask about Opengeni usage");
-  expect(heading(container)).toBe("New conversation");
+  // The composer's headline says what to do; the header only names it for
+  // screen readers.
+  expect(panel(container).querySelector("h2 .sr-only")?.textContent).toBe("New conversation");
   // The regular composer with its model chip; a Site doesn't offer voice-first
   // chats, and its create request carries no files.
   expect(composerProps.at(-1)).toMatchObject({
@@ -516,4 +520,77 @@ test("the chat can be hidden and shown again, and stays as it was left", async (
   // Enter on the handle hides it too, as a window splitter collapses its pane.
   await press(separator(again.container), "Enter");
   expect(panel(again.container).hidden).toBe(true);
+});
+
+test("choosing a conversation shows a hidden chat; opening the page keeps it hidden", async () => {
+  conversations = [
+    conversation(1, "Time filters across all graphs", 2),
+    conversation(2, "Weekly active users by plan", 180),
+  ];
+  localStorage.setItem(storageKey, JSON.stringify({ width: 400, collapsed: true }));
+  const { container, rerender } = await render(id(1));
+  expect(panel(container).hidden).toBe(true);
+  // The sidebar is where conversations are chosen now.
+  await rerender(id(2));
+  expect(panel(container).hidden).toBe(false);
+  expect(openConversation(container)).toBe(id(2));
+  expect(JSON.parse(localStorage.getItem(storageKey)!).collapsed).toBe(false);
+  // Back to the Site itself: it stays as the person left it.
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  await rerender(undefined);
+  expect(panel(container).hidden).toBe(true);
+});
+
+test("the chat never takes the room the Site needs, unless the window is narrower still", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  localStorage.setItem(storageKey, JSON.stringify({ width: 720, collapsed: false }));
+  const measure = HTMLElement.prototype.getBoundingClientRect;
+  let frameWidth = 900;
+  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+    return { ...measure.call(this).toJSON(), width: frameWidth } as DOMRect;
+  };
+  try {
+    // 900px leaves 540 beside the Site's 360.
+    let view = await render();
+    expect(separator(view.container).getAttribute("aria-valuemax")).toBe("540");
+    expect(separator(view.container).getAttribute("aria-valuenow")).toBe("540");
+    expect(panel(view.container).style.getPropertyValue("--og-site-chat-width")).toBe("540px");
+    // The stored choice is kept for a wider window.
+    expect(JSON.parse(localStorage.getItem(storageKey)!).width).toBe(720);
+    act(() => root?.unmount());
+    // Narrower than both: the chat keeps its minimum.
+    frameWidth = 500;
+    view = await render();
+    expect(separator(view.container).getAttribute("aria-valuemax")).toBe("320");
+    act(() => root?.unmount());
+    // Not laid out yet: only the chat's own limit applies.
+    frameWidth = 0;
+    view = await render();
+    expect(separator(view.container).getAttribute("aria-valuemax")).toBe("720");
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = measure;
+  }
+});
+
+test("another person signing in on the page gets their own layout", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  localStorage.setItem(storageKey, JSON.stringify({ width: 512, collapsed: false }));
+  localStorage.setItem(
+    "og.site-view.chat:v1:someone",
+    JSON.stringify({ width: 336, collapsed: true }),
+  );
+  const { container, rerender } = await render();
+  expect(separator(container).getAttribute("aria-valuenow")).toBe("512");
+  subjectId = "someone";
+  await rerender(undefined);
+  expect(panel(container).hidden).toBe(true);
+  expect(separator(container).getAttribute("aria-valuenow")).toBe("336");
+  // And what they change is saved as theirs.
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("button[aria-label='Show chat']")!.click(),
+  );
+  expect(JSON.parse(localStorage.getItem("og.site-view.chat:v1:someone")!).collapsed).toBe(false);
+  expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({ width: 512, collapsed: false });
 });
