@@ -31384,8 +31384,21 @@ export async function getSessionAuthorityProjection(
   workspaceId: string,
   sessionId: string,
 ): Promise<SessionAuthorityProjection | null> {
+  return (
+    (await getSessionAuthorityProjections(db, workspaceId, [sessionId])).values().next().value ??
+    null
+  );
+}
+
+/** One live RLS read for a response window; absent and hidden rows stay absent. */
+export async function getSessionAuthorityProjections(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, SessionAuthorityProjection>> {
+  if (sessionIds.length === 0) return new Map();
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
+    const rows = await scopedDb
       .select({
         sessionId: schema.sessions.id,
         rootSessionId: schema.sessions.rootSessionId,
@@ -31401,23 +31414,31 @@ export async function getSessionAuthorityProjection(
         memoryScope: schema.sessions.memoryScope,
       })
       .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
-    if (!row) return null;
-    return {
-      sessionId: row.sessionId,
-      authorityEpoch: row.authorityEpoch,
-      rootSessionId: row.rootSessionId,
-      visibility: row.visibility as SessionAuthorityProjection["visibility"],
-      ownerSubjectId: row.ownerSubjectId ?? null,
-      siteId: row.siteId ?? null,
-      siteAccessRootId: row.siteAccessRootId ?? null,
-      siteViewerPrincipal: row.siteViewerPrincipal ?? null,
-      siteOwnerSubjectId: row.siteOwnerSubjectId ?? null,
-      agentAccess: sessionAgentAccessFromRow(row),
-      scopeSubjectId: sessionEndUserFromRow(row),
-      memoryScope: sessionMemoryScopeFromRow(row),
-    };
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          inArray(schema.sessions.id, [...new Set(sessionIds)]),
+        ),
+      );
+    return new Map(
+      rows.map((row) => [
+        row.sessionId,
+        {
+          sessionId: row.sessionId,
+          authorityEpoch: row.authorityEpoch,
+          rootSessionId: row.rootSessionId,
+          visibility: row.visibility as SessionAuthorityProjection["visibility"],
+          ownerSubjectId: row.ownerSubjectId ?? null,
+          siteId: row.siteId ?? null,
+          siteAccessRootId: row.siteAccessRootId ?? null,
+          siteViewerPrincipal: row.siteViewerPrincipal ?? null,
+          siteOwnerSubjectId: row.siteOwnerSubjectId ?? null,
+          agentAccess: sessionAgentAccessFromRow(row),
+          scopeSubjectId: sessionEndUserFromRow(row),
+          memoryScope: sessionMemoryScopeFromRow(row),
+        },
+      ]),
+    );
   });
 }
 
@@ -31493,10 +31514,33 @@ export async function getSessionAuthorizationFacts(
     caller?: { sessionId: string; attemptId: string } | undefined;
   },
 ): Promise<SessionAuthorizationFacts> {
+  const results = await getSessionAuthorizationFactsBatch(db, {
+    ...input,
+    sessionIds: [input.sessionId],
+  });
+  return results.get(input.sessionId)!;
+}
+
+/** Canonical authorization facts for one bounded response window, not an authority cache. */
+export async function getSessionAuthorizationFactsBatch(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionIds: readonly string[];
+    caller?: { sessionId: string; attemptId: string } | undefined;
+  },
+): Promise<Map<string, SessionAuthorizationFacts>> {
+  if (input.sessionIds.length === 0) return new Map();
+  // Parse UUIDs before the RLS relation join. Casting a text anchor in the
+  // join itself prevents keyed access under the security barrier. Ordinality
+  // preserves the caller's original spelling for the result map.
+  const requestedSessionIds = [...new Set(input.sessionIds)];
   const callerSessionId = input.caller?.sessionId ?? null;
   const attemptId = input.caller?.attemptId ?? null;
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const [row] = await rawRows<{
+    const rows = await rawRows<{
+      requested_session_index: number | string;
       target_id: string | null;
       target_account_id: string | null;
       target_root_session_id: string | null;
@@ -31529,6 +31573,7 @@ export async function getSessionAuthorizationFacts(
       scopedDb,
       sql`
         select
+          anchor.ordinality as requested_session_index,
           target.id as target_id,
           target.account_id as target_account_id,
           target.root_session_id as target_root_session_id,
@@ -31557,10 +31602,13 @@ export async function getSessionAuthorizationFacts(
           turn.initiator_context as turn_initiator_context,
           turn.initiating_human_subject_id as turn_initiating_human_subject_id,
           link.canonical_snapshot as turn_link_snapshot
-        from (select 1) as anchor
+        from unnest(array[${sql.join(
+          requestedSessionIds.map((id) => sql`${id}`),
+          sql`, `,
+        )}]::uuid[]) with ordinality as anchor(session_id, ordinality)
         left join ${schema.sessions} target
           on target.workspace_id = ${input.workspaceId}
-          and target.id = ${input.sessionId}
+          and target.id = anchor.session_id
         left join ${schema.slackInteractions} slack
           on slack.account_id = ${input.accountId}
           and slack.workspace_id = ${input.workspaceId}
@@ -31593,63 +31641,86 @@ export async function getSessionAuthorizationFacts(
           and link.turn_id = turn.id
       `,
     );
-    const target: SessionAuthorizationFacts["target"] =
-      row?.target_id && row.target_account_id && row.target_root_session_id
-        ? {
-            sessionId: row.target_id,
-            accountId: row.target_account_id,
-            authorityEpoch: Number(row.target_authority_epoch),
-            rootSessionId: row.target_root_session_id,
-            visibility: row.target_visibility as SessionAuthorityProjection["visibility"],
-            ownerSubjectId: row.target_owner_subject_id ?? null,
-            siteId: row.target_site_id ?? null,
-            siteAccessRootId: row.target_site_access_root_id ?? null,
-            siteViewerPrincipal: row.target_site_viewer_principal ?? null,
-            siteOwnerSubjectId: row.target_site_owner_subject_id ?? null,
-            agentAccess: sessionAgentAccessFromRow({ agentAccess: row.target_agent_access ?? "" }),
-            scopeSubjectId: sessionEndUserFromRow({ scopeSubjectId: row.target_scope_subject_id }),
-            memoryScope: sessionMemoryScopeFromRow({ memoryScope: row.target_memory_scope ?? "" }),
-            slackAccess:
-              row.slack_owning_subject_id && row.slack_visibility
-                ? { owningSubjectId: row.slack_owning_subject_id, visibility: row.slack_visibility }
-                : null,
-          }
-        : null;
-    if (!input.caller) return { target, caller: null };
-    const session: SessionAuthorizationCallerFacts["session"] =
-      row?.caller_account_id && row.caller_root_session_id
-        ? {
-            accountId: row.caller_account_id,
-            rootSessionId: row.caller_root_session_id,
-            parentSessionId: row.caller_parent_session_id ?? null,
-            agentAccess: sessionAgentAccessFromRow({ agentAccess: row.caller_agent_access ?? "" }),
-            scopeSubjectId: sessionEndUserFromRow({ scopeSubjectId: row.caller_scope_subject_id }),
-          }
-        : null;
-    let turn: SessionAuthorizationCallerFacts["turn"] = null;
-    if (
-      row?.turn_id &&
-      row.turn_execution_generation !== null &&
-      row.turn_initiator_kind !== null &&
-      row.turn_initiator_subject_id !== null &&
-      // A linked external turn keeps its authority only while the link is live.
-      (row.turn_link_snapshot === null ||
-        (await externalLinkWorkSnapshotIsLive(scopedDb, row.turn_link_snapshot)))
-    ) {
-      const initiatorContext = row.turn_initiator_context ?? {};
-      turn = {
-        id: row.turn_id,
-        executionGeneration: Number(row.turn_execution_generation),
-        initiator: initiatorFromStorage(
-          row.turn_initiator_kind,
-          row.turn_initiator_subject_id,
+    const results = new Map<string, SessionAuthorizationFacts>();
+    // Linked-identity checks may create savepoints on this same scoped handle.
+    // Never overlap them, and keep each check live rather than caching it.
+    for (const row of rows) {
+      const requestedSessionId = requestedSessionIds[Number(row.requested_session_index) - 1]!;
+      const target: SessionAuthorizationFacts["target"] =
+        row?.target_id && row.target_account_id && row.target_root_session_id
+          ? {
+              sessionId: row.target_id,
+              accountId: row.target_account_id,
+              authorityEpoch: Number(row.target_authority_epoch),
+              rootSessionId: row.target_root_session_id,
+              visibility: row.target_visibility as SessionAuthorityProjection["visibility"],
+              ownerSubjectId: row.target_owner_subject_id ?? null,
+              siteId: row.target_site_id ?? null,
+              siteAccessRootId: row.target_site_access_root_id ?? null,
+              siteViewerPrincipal: row.target_site_viewer_principal ?? null,
+              siteOwnerSubjectId: row.target_site_owner_subject_id ?? null,
+              agentAccess: sessionAgentAccessFromRow({
+                agentAccess: row.target_agent_access ?? "",
+              }),
+              scopeSubjectId: sessionEndUserFromRow({
+                scopeSubjectId: row.target_scope_subject_id,
+              }),
+              memoryScope: sessionMemoryScopeFromRow({
+                memoryScope: row.target_memory_scope ?? "",
+              }),
+              slackAccess:
+                row.slack_owning_subject_id && row.slack_visibility
+                  ? {
+                      owningSubjectId: row.slack_owning_subject_id,
+                      visibility: row.slack_visibility,
+                    }
+                  : null,
+            }
+          : null;
+      if (!input.caller) {
+        results.set(requestedSessionId, { target, caller: null });
+        continue;
+      }
+      const session: SessionAuthorizationCallerFacts["session"] =
+        row?.caller_account_id && row.caller_root_session_id
+          ? {
+              accountId: row.caller_account_id,
+              rootSessionId: row.caller_root_session_id,
+              parentSessionId: row.caller_parent_session_id ?? null,
+              agentAccess: sessionAgentAccessFromRow({
+                agentAccess: row.caller_agent_access ?? "",
+              }),
+              scopeSubjectId: sessionEndUserFromRow({
+                scopeSubjectId: row.caller_scope_subject_id,
+              }),
+            }
+          : null;
+      let turn: SessionAuthorizationCallerFacts["turn"] = null;
+      if (
+        row?.turn_id &&
+        row.turn_execution_generation !== null &&
+        row.turn_initiator_kind !== null &&
+        row.turn_initiator_subject_id !== null &&
+        // A linked external turn keeps its authority only while the link is live.
+        (row.turn_link_snapshot === null ||
+          (await externalLinkWorkSnapshotIsLive(scopedDb, row.turn_link_snapshot)))
+      ) {
+        const initiatorContext = row.turn_initiator_context ?? {};
+        turn = {
+          id: row.turn_id,
+          executionGeneration: Number(row.turn_execution_generation),
+          initiator: initiatorFromStorage(
+            row.turn_initiator_kind,
+            row.turn_initiator_subject_id,
+            initiatorContext,
+          ),
           initiatorContext,
-        ),
-        initiatorContext,
-        initiatingHumanSubjectId: row.turn_initiating_human_subject_id ?? null,
-      };
+          initiatingHumanSubjectId: row.turn_initiating_human_subject_id ?? null,
+        };
+      }
+      results.set(requestedSessionId, { target, caller: { session, turn } });
     }
-    return { target, caller: { session, turn } };
+    return results;
   });
 }
 
