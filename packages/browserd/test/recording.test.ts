@@ -131,6 +131,72 @@ test("exporting before stop is refused", async () => {
   }
 });
 
+test("a bundle uploads once per object: retries join it, failures and replace upload again", async () => {
+  const directory = await mkdtemp("/tmp/ogb-recording-");
+  try {
+    const fake = fakeSource();
+    const recording = await BrowserRecording.start({
+      directory,
+      targetId: "tab-a",
+      source: fake.source,
+      releasePresence: () => undefined,
+    });
+    fake.emit("tab-a", [1, 2, 3]);
+    expect(() => recording.transferTo("https://s/a", async () => undefined)).toThrow(
+      "stop the recording",
+    );
+    await recording.stop();
+
+    const uploads: string[] = [];
+    let finish!: () => void;
+    const slow = () =>
+      new Promise<void>((resolve) => {
+        uploads.push("slow");
+        finish = resolve;
+      });
+    const first = recording.transferTo("https://s/a", slow);
+    await Bun.sleep(0);
+    expect(first.state).toBe("uploading");
+    // A caller that gave up waiting and asks again joins the running upload.
+    expect(recording.transferTo("https://s/a", slow)).toBe(first);
+    expect(uploads).toEqual(["slow"]);
+    finish();
+    await first.done;
+    expect(first.state).toBe("uploaded");
+    // A finished upload to the same object is not repeated...
+    expect(recording.transferTo("https://s/a", slow)).toBe(first);
+    expect(uploads).toEqual(["slow"]);
+    // ...unless the caller found that object gone.
+    const replaced = recording.transferTo(
+      "https://s/a",
+      async () => {
+        uploads.push("replace");
+      },
+      true,
+    );
+    await replaced.done;
+    expect(replaced).not.toBe(first);
+    expect(uploads).toEqual(["slow", "replace"]);
+
+    const failing = recording.transferTo("https://s/b", async () => {
+      throw new Error("network down");
+    });
+    await expect(failing.done).rejects.toThrow("network down");
+    expect(failing.state).toBe("failed");
+    // A failed upload is replaced by the next request.
+    const retried = recording.transferTo("https://s/b", async () => {
+      uploads.push("retry");
+    });
+    expect(retried).not.toBe(failing);
+    await retried.done;
+    expect(retried.state).toBe("uploaded");
+    expect(uploads).toEqual(["slow", "replace", "retry"]);
+    await recording.discard();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 chromiumE2e(
   "records a changing background tab from Chromium's screencast",
   async () => {

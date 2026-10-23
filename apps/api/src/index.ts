@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
 import {
   dbSearchPath,
@@ -308,6 +309,24 @@ export async function createTemporalWorkflowClient(
       } catch (error) {
         // A lost start acknowledgement is indistinguishable from a retry. The
         // caller-owned workflow id makes both cases the same successful start.
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    scheduleTransientObjectDeletion: async ({ workspaceId, objectKeys, deleteAfter }) => {
+      const keys = [...new Set(objectKeys)].sort();
+      if (keys.length === 0) return;
+      const digest = createHash("sha256").update(JSON.stringify(keys)).digest("hex");
+      try {
+        await temporal.workflow.start("transientObjectDeletionWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // Keys already waiting keep their first deadline; once that run has
+          // finished, the same keys can be scheduled again.
+          workflowId: `transient-object-deletion-${workspaceId}-${digest}`,
+          startDelay: Math.max(0, deleteAfter.getTime() - Date.now()),
+          args: [{ workspaceId, objectKeys: keys }],
+        });
+      } catch (error) {
         if (isWorkflowAlreadyStarted(error)) return;
         throw error;
       }

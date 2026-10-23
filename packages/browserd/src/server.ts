@@ -17,6 +17,8 @@ import {
   BrowserRecordingExportRequest,
   BrowserRecordingStartRequest,
   BrowserRecordingSummary,
+  BrowserRecordingUploadRequest,
+  BrowserRecordingUploadStatus,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
   BrowserExternalAuthCommand,
@@ -748,6 +750,24 @@ export class BrowserControlServer {
         exported.data.upload,
       );
       return success(BrowserRecordingExportReceipt.parse({ recordingId, ...receipt }));
+    }
+    if (segments.length === 6 && segments[3] === "recordings" && segments[5] === "uploads") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const recordingId = requireUuid(segments[4], "recording id");
+      const uploading = BrowserRecordingUploadRequest.safeParse(await readJson(request));
+      if (!uploading.success || uploading.data.recordingId !== recordingId) {
+        throw new ProtocolError("invalid_action", "recording upload authority is invalid", 400);
+      }
+      const status = await this.supervisor.uploadRecording(
+        reference,
+        recordingId,
+        uploading.data.upload,
+        uploading.data.waitMs,
+        uploading.data.replace ?? false,
+      );
+      return success(BrowserRecordingUploadStatus.parse({ recordingId, ...status }));
     }
     if (segments.length === 5 && segments[3] === "downloads") {
       if (request.method !== "GET") {

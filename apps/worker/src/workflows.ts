@@ -1,6 +1,10 @@
 export { knowledgeIndexingWorkflow } from "./workflows/knowledge-indexing";
 export { documentIndexWorkflow, type DocumentIndexWorkflowInput } from "./workflows/document-index";
 export {
+  transientObjectDeletionWorkflow,
+  type TransientObjectDeletionWorkflowInput,
+} from "./workflows/transient-object-deletion";
+export {
   approvalDecision,
   codexCapacityChanged,
   sessionControl,
