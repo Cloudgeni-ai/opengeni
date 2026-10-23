@@ -124,6 +124,8 @@ const withheldMigrations = [
   "0836_cheaper_session_write_fences.sql",
   // Patches the receipt/context fences and compatibility readers withheld above.
   "0843_indexed_inbox_lineage.sql",
+  // Patches the inbox fence created by withheld 0608 (as 0843 rewrites it).
+  "0917_continue_waiting_work.sql",
   "0846_independent_session_titles.sql",
   // Usage history routines live in the subscription schema the withheld 0688
   // creates; the seed reads them. Replay both after it.
