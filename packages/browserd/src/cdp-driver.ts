@@ -98,6 +98,7 @@ import {
   type HeadlessSessionCookies,
 } from "./headless-session-cookies";
 import { BrowserWindowParking } from "./window-parking";
+import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 // Attached Chrome without file access receives upload bytes over its
@@ -490,9 +491,22 @@ export type AgentBrowserDriverOptions = {
    * creates page targets. Remote and non-Chromium CDP engines commonly scope
    * targets to the connection that created them, so they require `cdp`. */
   targetLifecycle?: "runner" | "cdp";
-  /** The browser belongs to the person (attached Chrome): an explicit end
-   * closes the tabs this session opened that are still blank. */
-  closeUnusedOwnedTabsOnEnd?: boolean;
+  /** The browser belongs to the person (attached Chrome). The driver tracks
+   * the tabs this session opens there, and closing the driver (however the
+   * session's runtime goes away) closes the ones still blank. A runtime that
+   * continues a session continues in the tab the earlier one was using. */
+  ownedTabs?: {
+    /** What an earlier runtime of this session left in the browser. */
+    previous?: OwnedTabsState | null;
+    /** Called whenever the tracked tabs change, before anything else can. */
+    onChange?: (tabs: OwnedTabsState) => void;
+    /** Called once the driver closed; `tabsSettled` is false when a blank
+     * tab it opened could not be closed (or is still in use elsewhere). */
+    onClosed?: (tabsSettled: boolean) => void | Promise<void>;
+    /** A blank tab this session opened that another session is using now
+     * stays open; whoever cleans up later closes it once it is free. */
+    inUseElsewhere?: (targetId: string) => boolean;
+  };
   tabControl?: boolean;
   /** Keep owned Chromium pages active without changing the foreground tab. */
   focusEmulation?: boolean;
@@ -587,10 +601,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private physicalGeneration: string;
   private readonly engine: "chromium" | "chrome" | "lightpanda";
   private readonly targetLifecycle: "runner" | "cdp";
-  private readonly closeUnusedOwnedTabsOnEnd: boolean;
+  private readonly ownedTabs: AgentBrowserDriverOptions["ownedTabs"] | null;
   private readonly navigationCommitTimeoutMs: number;
   /** Tabs this session created, in a browser it does not own. */
   private readonly createdTargetIds = new Set<string>();
+  /** Blank tabs this session closed itself, most recent last. */
+  private readonly closedBlankTargetIds = new Set<string>();
+  /** The tab an earlier runtime of this session was using; start continues
+   * in it rather than opening another. */
+  private rebindTargetId: string | null = null;
+  private reportedOwnedTabs = "";
   private readonly tabControl: boolean;
   /** Cleared once the browser refuses focus emulation, so later targets keep
    * working without it instead of each paying the refusal. */
@@ -692,7 +712,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ? validateHeadlessSessionCookies(options.headlessSessionCookies)
       : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
-    this.closeUnusedOwnedTabsOnEnd = options.closeUnusedOwnedTabsOnEnd ?? false;
+    this.ownedTabs = options.ownedTabs ?? null;
+    if (this.ownedTabs?.previous) {
+      for (const targetId of this.ownedTabs.previous.created) this.createdTargetIds.add(targetId);
+      for (const targetId of this.ownedTabs.previous.closedBlank)
+        this.closedBlankTargetIds.add(targetId);
+      this.rebindTargetId = this.ownedTabs.previous.selected;
+    }
     this.navigationCommitTimeoutMs =
       options.navigationCommitTimeoutMs ?? NAVIGATION_COMMIT_TIMEOUT_MS;
     this.tabControl = options.tabControl ?? true;
@@ -784,6 +810,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection = await this.ensureConnection();
       await this.windowParking?.presentNow();
       if (deferNavigation) connection.assertNavigable?.(url);
+      // A session continuing in the person's browser (after an idle release
+      // or a controller restart) carries on in the tab it was using.
+      const rebound = deferNavigation ? null : await this.rebindPreviousTarget(connection);
+      if (rebound) return rebound;
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
         { url: "about:blank", background: true, ...this.contextScope() },
@@ -792,13 +822,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (typeof created.targetId !== "string" || !created.targetId) {
         throw new Error("browser did not return its initial page target");
       }
-      if (this.closeUnusedOwnedTabsOnEnd) this.createdTargetIds.add(created.targetId);
+      this.recordCreatedTarget(created.targetId);
       // Attached Chrome's tab inventory may lag the creation receipt. Never
       // substitute another tab (even another blank tab) for the exact target
       // we created: the initial navigation would overwrite the user's page.
       try {
         target = await this.waitForCreatedTargetInfo(connection, created.targetId);
         this.selectedTargetId = target.targetId;
+        this.ownedTabsChanged();
         if (deferNavigation)
           await this.navigate(await this.ensureTargetState(target), url, options);
         this.windowParking?.arm();
@@ -927,12 +958,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       background: true,
     });
     if (typeof result.targetId !== "string") throw new Error("CDP did not return a target id");
-    if (this.closeUnusedOwnedTabsOnEnd) this.createdTargetIds.add(result.targetId);
+    this.recordCreatedTarget(result.targetId);
     const previousSelection = this.selectedTargetId;
     const createdTarget = await this.waitForCreatedTargetInfo(connection, result.targetId);
     const createdState = await this.ensureTargetState(createdTarget);
     await this.waitForCreatedTargetFrame(createdState);
     this.selectedTargetId = result.targetId;
+    this.ownedTabsChanged();
     if (deferNavigation) {
       try {
         await this.navigate(createdState, url, options);
@@ -944,6 +976,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (!isNavigationTimeout(error)) {
           await this.discardCreatedTarget(connection, result.targetId);
           if (this.selectedTargetId === result.targetId) this.selectedTargetId = previousSelection;
+          this.ownedTabsChanged();
         }
         throw error;
       }
@@ -956,14 +989,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
   ): Promise<void> {
     this.removeState(targetId);
-    this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     try {
       await this.closeTargetAndSettle(connection, targetId);
+      this.createdTargetIds.delete(targetId);
     } catch {
       // Best effort: the tab may already be gone, and the original failure
-      // is what the caller needs to see.
+      // is what the caller needs to see. A tab still open stays recorded, so
+      // the session's cleanup closes it while it is blank.
     }
+    this.ownedTabsChanged();
   }
 
   /** A managed Chrome opens its own new-tab page at launch beside the page
@@ -1003,6 +1038,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
     this.selectedTargetId = targetId;
+    this.ownedTabsChanged();
     return await this.observe(targetId);
   }
 
@@ -1019,30 +1055,128 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.removeState(targetId);
     this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
+    this.ownedTabsChanged();
     return await this.listTargets();
   }
 
   /** Close the tabs this session opened in the person's browser that are
-   * still blank, so ending the session does not leave empty tabs behind.
-   * Tabs that show a page stay: the person may still want what the agent
-   * left there. */
-  async closeUnusedOwnedTabs(): Promise<void> {
-    if (!this.closeUnusedOwnedTabsOnEnd || this.createdTargetIds.size === 0 || !this.connection)
-      return;
+   * still blank, so a session never leaves empty tabs behind, however its
+   * runtime goes away. Tabs that show a page stay: the person may still want
+   * what the agent left there. Never touches a tab the session did not open.
+   * Returns whether every such tab is closed. */
+  async closeUnusedOwnedTabs(): Promise<boolean> {
+    if (!this.ownedTabs || this.createdTargetIds.size === 0) return true;
     const connection = this.connection;
-    const infos = await this.targetInfos(connection);
-    for (const info of infos) {
-      if (!this.createdTargetIds.has(info.targetId) || !isBlankTabUrl(info.url)) continue;
-      try {
-        await this.closeTargetAndSettle(connection, info.targetId);
-      } catch {
-        // Best effort per tab; the session end itself still proceeds.
+    if (!connection) return false;
+    let infos: TargetInfo[];
+    try {
+      infos = await this.targetInfos(connection);
+    } catch {
+      return false;
+    }
+    let settled = true;
+    for (const targetId of [...this.createdTargetIds]) {
+      const info = infos.find((candidate) => candidate.targetId === targetId);
+      if (!info) {
+        // Already closed, by the person or by the browser.
+        this.createdTargetIds.delete(targetId);
+        continue;
       }
-      this.createdTargetIds.delete(info.targetId);
+      if (!isBlankTabUrl(info.url)) continue;
+      if (this.ownedTabs.inUseElsewhere?.(targetId)) {
+        settled = false;
+        continue;
+      }
+      try {
+        await this.closeTargetAndSettle(connection, targetId);
+        this.removeState(targetId);
+        this.createdTargetIds.delete(targetId);
+        this.closedBlankTargetIds.delete(targetId);
+        this.closedBlankTargetIds.add(targetId);
+      } catch {
+        // Kept, so a later cleanup closes it.
+        settled = false;
+      }
+    }
+    while (this.closedBlankTargetIds.size > MAX_CLOSED_BLANK_TABS) {
+      this.closedBlankTargetIds.delete(this.closedBlankTargetIds.values().next().value!);
+    }
+    this.ownedTabsChanged();
+    return settled;
+  }
+
+  /** Continue in the tab an earlier runtime of this session was using when
+   * it is still open; null when a new tab is needed instead. */
+  private async rebindPreviousTarget(
+    connection: BrowserCdpConnection,
+  ): Promise<BrowserObservationValue | null> {
+    const targetId = this.rebindTargetId;
+    this.rebindTargetId = null;
+    if (!targetId || this.closedBlankTargetIds.has(targetId)) return null;
+    let info: TargetInfo | undefined;
+    try {
+      info = (await this.targetInfos(connection)).find(
+        (candidate) => candidate.targetId === targetId,
+      );
+    } catch {
+      return null;
+    }
+    if (!info || !isVisibleTarget(info)) return null;
+    this.selectedTargetId = targetId;
+    try {
+      const observation = await this.observe(targetId);
+      this.windowParking?.arm();
+      this.ownedTabsChanged();
+      return observation;
+    } catch {
+      // A tab that cannot be read now (it closed meanwhile, or Chrome will
+      // no longer let the extension control it) is not worth failing the
+      // session for: open a new one, as a new session would.
+      this.removeState(targetId);
+      this.selectedTargetId = null;
+      return null;
+    }
+  }
+
+  private recordCreatedTarget(targetId: string): void {
+    if (!this.ownedTabs) return;
+    this.createdTargetIds.add(targetId);
+    this.ownedTabsChanged();
+  }
+
+  /** Report the tracked tabs to the owner's ledger when they changed. */
+  private ownedTabsChanged(): void {
+    const onChange = this.ownedTabs?.onChange;
+    if (!onChange) return;
+    const tabs: OwnedTabsState = {
+      created: [...this.createdTargetIds],
+      selected: this.selectedTargetId,
+      closedBlank: [...this.closedBlankTargetIds],
+    };
+    const serialized = JSON.stringify(tabs);
+    if (serialized === this.reportedOwnedTabs) return;
+    this.reportedOwnedTabs = serialized;
+    try {
+      onChange(tabs);
+    } catch {
+      // Recording is the owner's concern; it never fails browser work.
     }
   }
 
   async close(): Promise<void> {
+    // In the person's own browser, the empty tabs this session opened go
+    // with it, whatever ends the runtime. Best effort: closing never fails
+    // because a tab could not be closed.
+    const tabsSettled =
+      this.ownedTabs && this.started ? await this.closeUnusedOwnedTabs().catch(() => false) : true;
+    try {
+      await this.closeDriver();
+    } finally {
+      await this.ownedTabs?.onClosed?.(tabsSettled);
+    }
+  }
+
+  private async closeDriver(): Promise<void> {
     this.windowParking?.close();
     for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
@@ -1181,6 +1315,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const info = (await this.targetInfos(connection)).find(
       (candidate) => candidate.targetId === targetId,
     );
+    if (!info && this.closedBlankTargetIds.has(targetId))
+      throw this.closedBlankTargetError(targetId);
     if (!info || !isVisibleTarget(info)) return null;
     const state = await this.ensureTargetState(info);
     // A JavaScript dialog blocks ordinary page-domain inspection. Keep the
@@ -6628,9 +6764,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       (candidate) => candidate.targetId === targetId,
     );
     if (!info || !isVisibleTarget(info)) {
+      if (!info && this.closedBlankTargetIds.has(targetId))
+        throw this.closedBlankTargetError(targetId);
       throw new InteractionDefiniteDriverError("target_not_found", "browser target does not exist");
     }
     return info;
+  }
+
+  /** The session closed its own empty tab when it last let go of the
+   * person's browser: say so, and where to continue. */
+  private closedBlankTargetError(targetId: string): InteractionDefiniteDriverError {
+    const current = this.selectedTargetId;
+    return new InteractionDefiniteDriverError(
+      "target_not_found",
+      `browser target does not exist: this session closed this empty tab when it last released the browser${current && current !== targetId ? `; its current tab is ${current}` : ""}`,
+    );
   }
 
   /** Headed Chromium can acknowledge a background target before its first URL
@@ -6963,7 +7111,7 @@ function normalizeTargetInfo(value: unknown): TargetInfo {
 
 /** A tab with no page: the blank document a new tab starts on (attached
  * Chrome creates it as an empty data URL) or the browser's new-tab page. */
-function isBlankTabUrl(url: string): boolean {
+export function isBlankTabUrl(url: string): boolean {
   return (
     url === "" ||
     url === "about:blank" ||

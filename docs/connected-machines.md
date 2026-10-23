@@ -2074,6 +2074,22 @@ explicit placement, identity, revision, network route and linked desktop choices
 Debugger continuation pages are drained without treating a full page as lost
 history; actual sequence gaps still terminate the connection.
 
+An attached BrowserSession never leaves its empty tabs or Chrome's debugger
+behind. Whatever ends its controller runtime (an explicit end, a controller
+shutdown or restart, or an idle release after the same idle time as a managed
+browser) closes the tabs that session opened that are still blank, and releases
+Chrome's debugger on the tabs it attached, so Chrome stops showing that it is
+being debugged once no agent is using the profile. A tab the session did not
+open, a tab showing a page, and a tab another session on the same controller is
+using are left alone. The session's next request recovers it as it recovers a
+released managed browser, and it continues in the tab it was using; when that
+was an empty tab that has since been closed, it opens a new one, and a request
+naming the closed tab is told which tab is current. Each session records these
+tabs in an owner-only `attached-tabs.json` in its session directory. A
+controller that starts after another crashed finishes any cleanup left undone,
+for the same extension connection generation only: Chrome tab ids are not
+trusted to name the same tabs after the extension reconnects.
+
 An attached tab's debugger disconnect invalidates its cached target, document,
 frame and element authority without restarting Chrome or changing other tabs.
 A later read can reattach the same surviving tab with fresh fences. Chrome's
