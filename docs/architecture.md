@@ -3099,6 +3099,12 @@ Future suppliers must reuse native connections.
 
 ### Embeddable connection presentation
 
+MCP OAuth account matching uses one owner/resource policy in
+`apps/api/src/integrations/oauth-account-identity.ts`: verified repeats reuse an
+active account; providers without identity proof permit one live account per
+owner/resource. Explicit reconnect checks known identity and exact resource binding.
+See [connection presentation](connection-presentation.md#duplicate-oauth-accounts).
+
 Shared connection presentation and host boundaries: [embedding authority internals](embedding-authority-internals.md#connection-presentation).
 
 ### Public skill discovery

@@ -62,7 +62,19 @@ export function canRemoveConnectedAccount(
 export function connectedAccountSignInUnfinished(
   account: Pick<ConnectionMetadata, "status" | "metadata">,
 ): boolean {
-  return account.status !== "active" && connectionAccountIdentityLabel(account.metadata, "") === "";
+  // Successful MCP callbacks persist verification and OAuth server metadata even
+  // when the provider exposes no readable account name. Missing display text is
+  // not evidence that authorization never completed.
+  const completed =
+    account.metadata.mcpToolsVerification !== undefined ||
+    ["tokenEndpoint", "clientId", "authorizationServerIssuer", "slackUserId", "slackTeamId"].some(
+      (key) => typeof account.metadata[key] === "string" && account.metadata[key] !== "",
+    );
+  return (
+    account.status !== "active" &&
+    !completed &&
+    connectionAccountIdentityLabel(account.metadata, "") === ""
+  );
 }
 
 /** Displays accounts and, when management is supplied, per-account actions.
@@ -105,7 +117,6 @@ export function CatalogConnectedAccounts({
     connections ?? [],
     item.mcpUrl ?? item.endpointUrl,
   ).filter((account) => account.status !== "revoked");
-  const labels = accounts.map((account) => connectionSignInLabel(account, item.name));
   const busy = management?.busy === true;
   const addAction =
     management?.onAdd && management.canWrite && !accessDenied && !loadFailed && connections ? (
@@ -164,9 +175,8 @@ export function CatalogConnectedAccounts({
           aria-label={`${item.name} connected accounts`}
           className="m-0 list-none divide-y divide-border p-0"
         >
-          {accounts.map((account, index) => {
-            const label = labels[index]!;
-            const duplicate = labels.filter((other) => other === label).length > 1;
+          {accounts.map((account) => {
+            const label = connectionSignInLabel(account, item.name);
             const unfinished = connectedAccountSignInUnfinished(account);
             const reconnect =
               management?.onReconnect &&
@@ -185,11 +195,6 @@ export function CatalogConnectedAccounts({
                   <p className="m-0 break-words text-sm leading-5 font-medium text-fg">{label}</p>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <MetaChip>{account.subjectId === null ? "This workspace" : "Only me"}</MetaChip>
-                    {duplicate || unfinished ? (
-                      <span className="text-xs text-fg-muted">
-                        Account {account.id.slice(0, 8)}
-                      </span>
-                    ) : null}
                   </div>
                 </div>
                 {unfinished ? (
@@ -261,8 +266,5 @@ export function CatalogConnectedAccounts({
 
 function connectionSignInLabel(account: ConnectionMetadata, itemName: string): string {
   if (connectedAccountSignInUnfinished(account)) return `${itemName} account`;
-  return connectionAccountIdentityLabel(
-    account.metadata,
-    `${itemName} account ${account.id.slice(0, 8)}`,
-  );
+  return connectionAccountIdentityLabel(account.metadata, `${itemName} account`);
 }
