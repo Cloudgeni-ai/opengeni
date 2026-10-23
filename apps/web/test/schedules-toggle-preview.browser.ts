@@ -38,6 +38,19 @@ try {
       await expect(brief).not.toHaveAttribute("aria-busy", "true");
       expect(page.url()).toBe(url);
 
+      // Opening the just-switched row's menu keeps the row in place, even as
+      // the pointer moves into the menu (now active, it would sort higher).
+      const titles = () =>
+        page.locator("[role=switch]").evaluateAll((nodes) => nodes.map((node) => node.ariaLabel));
+      const order = await titles();
+      await page
+        .getByRole("button", { name: "More actions for Daily kitchen prevention brief" })
+        .click();
+      await page.getByRole("menuitem", { name: "Edit" }).hover();
+      await page.waitForTimeout(100);
+      expect(await titles()).toEqual(order);
+      await page.keyboard.press("Escape");
+
       // Space on the focused switch pauses it again; focus stays on it.
       await brief.focus();
       await page.keyboard.press("Space");
@@ -52,6 +65,7 @@ try {
         .click();
       await expect(page.getByRole("menuitem", { name: "Edit" })).toBeVisible();
       await expect(page.getByRole("menuitem", { name: /^(Pause|Resume)$/ })).toHaveCount(0);
+
       await page.keyboard.press("Escape");
 
       const axe = await new AxeBuilder({ page })

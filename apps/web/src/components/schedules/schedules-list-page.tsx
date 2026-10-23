@@ -319,6 +319,8 @@ export function SchedulesListPage({
   const releaseOrder = () => {
     const node = listRef.current;
     if (!node || node.contains(document.activeElement)) return;
+    // A row's ⋯ menu renders outside the list; keep its row in place while open.
+    if (node.querySelector('[aria-expanded="true"]')) return;
     try {
       if (node.matches(":hover")) return;
     } catch {

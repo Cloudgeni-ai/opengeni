@@ -230,6 +230,20 @@ test("the list sorts again once the pointer leaves it", async () => {
   expect(rowTitles(container).at(-1)).toBe("Cost check");
 
   const row = switchFor(container, "Cost check").closest("li")!;
+  // While the row's menu is open the order holds.
+  const trigger = row.querySelector<HTMLButtonElement>(
+    '[aria-label="More actions for Cost check"]',
+  )!;
+  trigger.setAttribute("aria-expanded", "true");
+  await act(async () => {
+    row.dispatchEvent(
+      new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }),
+    );
+  });
+  await flush();
+  expect(rowTitles(container).at(-1)).toBe("Cost check");
+  trigger.setAttribute("aria-expanded", "false");
+
   await act(async () => {
     row.dispatchEvent(
       new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }),
