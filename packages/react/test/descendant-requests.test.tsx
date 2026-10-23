@@ -155,7 +155,11 @@ type Calls = {
 function fakeClient(state: {
   requests?: Record<string, SessionHumanInputRequest[]>;
   events?: Record<string, SessionEvent[]>;
+  /** Hold every later read open, as a slow network would. */
+  hold?: boolean;
 }) {
+  const pending = <T,>(value: () => T): Promise<T> =>
+    state.hold ? new Promise<T>(() => {}) : Promise.resolve(value());
   const calls: Calls = { submitted: [], decisions: [], reviews: [] };
   const client = {
     getSession: async () => {
@@ -164,8 +168,8 @@ function fakeClient(state: {
     streamEvents: () => {
       throw new Error("the card must not open a stream per sub-session");
     },
-    listHumanInputRequests: async (_workspaceId: string, sessionId: string) =>
-      state.requests?.[sessionId] ?? [],
+    listHumanInputRequests: (_workspaceId: string, sessionId: string) =>
+      pending(() => state.requests?.[sessionId] ?? []),
     submitHumanInputResponse: async (
       _workspaceId: string,
       sessionId: string,
@@ -177,9 +181,8 @@ function fakeClient(state: {
       state.requests = { ...state.requests, [sessionId]: [] };
       return { ...answered, status: "answered" };
     },
-    listEventPage: async (_workspaceId: string, sessionId: string) => ({
-      events: state.events?.[sessionId] ?? [],
-    }),
+    listEventPage: (_workspaceId: string, sessionId: string) =>
+      pending(() => ({ events: state.events?.[sessionId] ?? [] })),
     sendApprovalDecision: async (
       _workspaceId: string,
       sessionId: string,
@@ -603,6 +606,34 @@ describe("DescendantRequests", () => {
     expect(container().textContent).toContain("Release worker is asking");
     expect(container().textContent).toContain("Release worker needs approval");
     expect(answerField()).not.toBeNull();
+    expect(button("Approve action")).toBeDefined();
+  });
+
+  test("an item moving up the stack keeps what it shows, without reading again", async () => {
+    sequence = 0;
+    const first = summary("first", { title: "First worker" });
+    const second = summary("second", { title: "Deploy worker" });
+    const state: Parameters<typeof fakeClient>[0] = {
+      requests: { first: [request("first")] },
+      events: {
+        second: [
+          event("session.requiresAction", {
+            approvals: [{ id: "approval-1", name: "projects.update", arguments: {} }],
+          }),
+        ],
+      },
+    };
+    const { client } = fakeClient(state);
+    const props = { client, workspaceId: WORKSPACE, parentSessionId: PARENT };
+    await render({ ...props, waiting: [first, second] });
+    expect(container().textContent).toContain("Deploy worker needs approval");
+
+    // The first settles; the second becomes the lone item while reads hang.
+    state.hold = true;
+    await mounted!.rerender(createElement(DescendantRequests, { ...props, waiting: [second] }));
+    await flush(0);
+    await flush(0);
+    expect(container().textContent).toContain("Deploy worker needs approval");
     expect(button("Approve action")).toBeDefined();
   });
 

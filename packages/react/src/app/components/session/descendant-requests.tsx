@@ -10,7 +10,7 @@ import type {
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import { ChevronDownIcon, CornerDownRightIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import type { PendingApproval } from "../../../approvals";
 import type { HumanInputFormProps } from "../../../components/human-input-form";
@@ -91,6 +91,7 @@ export function DescendantRequests(props: DescendantRequestsProps) {
   // Read from the map on every render, so switching parents never shows the
   // previous parent's choice for a frame.
   const [, rerender] = useState(0);
+  const stackId = useId();
   const collapsed = collapsedStacks.get(stackKey) ?? false;
   const setCollapsed = (next: boolean) => {
     collapsedStacks.set(stackKey, next);
@@ -106,6 +107,7 @@ export function DescendantRequests(props: DescendantRequestsProps) {
         <button
           type="button"
           aria-expanded={!collapsed}
+          aria-controls={stackId}
           onClick={() => setCollapsed(!collapsed)}
           className="flex min-h-10 w-full items-center gap-2.5 rounded-lg border border-status-waiting/35 bg-status-waiting/5 px-3 text-left transition-colors duration-[120ms] hover:hover-layer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand/55 pointer-coarse:min-h-11"
           data-descendant-requests-toggle=""
@@ -123,26 +125,22 @@ export function DescendantRequests(props: DescendantRequestsProps) {
       ) : null}
       {stacked && collapsed ? null : (
         <div
+          id={stackId}
           className={cn(
             "flex flex-col gap-3",
             stacked && "max-h-[min(36rem,55dvh)] overflow-y-auto overscroll-contain",
           )}
           data-descendant-requests-stack=""
         >
-          {props.waiting.map((session, index) => {
-            // Later asks start as compact bars so every one is visible. The
-            // form reads that once, so a change remounts it (a lone item
-            // left after the others settle shows its request directly).
-            const compact = stacked && index > 0;
-            return (
-              <DescendantRequestItem
-                key={`${session.id}:${compact}`}
-                {...props}
-                session={session}
-                compact={compact}
-              />
-            );
-          })}
+          {props.waiting.map((session, index) => (
+            // Later asks start as compact bars so every one is visible.
+            <DescendantRequestItem
+              key={session.id}
+              {...props}
+              session={session}
+              compact={stacked && index > 0}
+            />
+          ))}
         </div>
       )}
     </section>
@@ -270,6 +268,11 @@ function DescendantRequestItem({
               }
             />
             <HumanInputSurface
+              // The form reads `defaultCollapsed` once: remount only the form
+              // when an item moves up the stack (a lone item left after the
+              // others settle shows its request directly). The item and its
+              // reads stay mounted.
+              key={compact ? "compact" : "full"}
               requests={requests}
               loadSkillReview={loadSkillReview}
               allowedSaveTo={allowedSaveTo}

@@ -150,6 +150,10 @@ test("only a running descendant makes unseen sessions worth a re-read", async ()
     await mounted.rerender(<Harness event={hint(["new-session"])} nodes={IDLE_TREE} />);
     await settle();
     expect(seen.refreshes).toBe(0);
+    // This session changing is not a new descendant.
+    await mounted.rerender(<Harness event={hint([PARENT])} nodes={RUNNING_TREE} />);
+    await settle();
+    expect(seen.refreshes).toBe(0);
     await mounted.rerender(<Harness event={hint(["new-grandchild"])} nodes={RUNNING_TREE} />);
     await settle();
     expect(seen.refreshes).toBe(1);
@@ -213,6 +217,33 @@ test("re-reads once this session's agent has answered a sub-session", async () =
     );
     await settle();
     expect(seen.refreshes).toBe(baseline + 1);
+    expect(seen.signal).toBe(1);
+  } finally {
+    await mounted.unmount();
+  }
+});
+
+test("answers already in the history the page opens with do not re-read", async () => {
+  const { seen, Harness } = harness();
+  const mounted = await renderComponent(<Harness event={null} events={NO_EVENTS} />);
+  try {
+    const history = [
+      toolCall(1, "call-answer", "opengeni__session_human_input_respond"),
+      toolOutput(2, "call-answer"),
+    ];
+    await mounted.rerender(<Harness event={null} events={history} />);
+    await settle();
+    expect(seen.refreshes).toBe(0);
+    expect(seen.signal).toBe(0);
+
+    const later = [
+      ...history,
+      toolCall(3, "call-steer", "session_steer"),
+      toolOutput(4, "call-steer"),
+    ];
+    await mounted.rerender(<Harness event={null} events={later} />);
+    await settle();
+    expect(seen.refreshes).toBe(1);
     expect(seen.signal).toBe(1);
   } finally {
     await mounted.unmount();

@@ -126,16 +126,30 @@ export function subSessionResponseCallId(event: SessionEvent): string | null {
   const name = typeof payload.name === "string" ? payload.name : payload.toolName;
   if (isResponseToolName(name)) return payload.id;
   if (typeof name === "string" && name.endsWith("tool_invoke")) {
-    return isResponseToolName(record(payload.arguments)?.name) ? payload.id : null;
+    const args = payload.arguments;
+    // `tool_invoke` arguments arrive as JSON text; parse only a likely match.
+    if (typeof args === "string" && !RESPONSE_TOOLS.some((tool) => args.includes(tool))) {
+      return null;
+    }
+    return isResponseToolName(record(args)?.name) ? payload.id : null;
   }
   return null;
 }
+
+// Events are immutable once delivered: scan each one once, however often the
+// feed is re-read.
+const responseCallIdCache = new WeakMap<SessionEvent, string | null>();
 
 /** Every call in a feed that answers or steers a sub-session, by call id. */
 export function subSessionResponseCallIds(events: readonly SessionEvent[]): Set<string> {
   const ids = new Set<string>();
   for (const event of events) {
-    const id = subSessionResponseCallId(event);
+    if (event.type !== "agent.toolCall.created") continue;
+    let id = responseCallIdCache.get(event);
+    if (id === undefined) {
+      id = subSessionResponseCallId(event);
+      responseCallIdCache.set(event, id);
+    }
     if (id) ids.add(id);
   }
   return ids;

@@ -102,9 +102,11 @@ export function useDescendantRequestsRefresh(options: {
     const current = treeRef.current;
     // This session's own spawns reach the tree through its feed; only a
     // running descendant can add a session the read has not seen yet.
-    const unseen = current.running && (hint.sessionIds ?? []).some((id) => !current.ids.has(id));
+    const unseen =
+      current.running &&
+      (hint.sessionIds ?? []).some((id) => id !== sessionId && !current.ids.has(id));
     if (hintTouchesTree(hint, current.ids) || unseen) refreshTreeSoon();
-  }, [refreshTreeSoon, workspaceId, workspaceSessionListEvent]);
+  }, [refreshTreeSoon, sessionId, workspaceId, workspaceSessionListEvent]);
 
   // An output carries only its call id: match it to the call that answered.
   const responseCallIds = useMemo(() => subSessionResponseCallIds(events), [events]);
@@ -112,7 +114,19 @@ export function useDescendantRequestsRefresh(options: {
     (event: SessionEvent) => isSubSessionResponseOutput(event, responseCallIds),
     [responseCallIds],
   );
+  // The tree is read when the page opens, so answers already in the first
+  // history page this session's feed loads are reflected; only later ones
+  // trigger a re-read.
+  const [history, setHistory] = useState<{ sessionId: string; through: number } | null>(null);
+  const newest = events.at(-1);
+  if (newest && newest.sessionId === sessionId && history?.sessionId !== sessionId) {
+    setHistory({ sessionId, through: newest.sequence });
+  }
+  const readThrough = history?.sessionId === sessionId ? history.through : "reading";
   const onResponse = useCallback(() => refreshAllSoon(), [refreshAllSoon]);
-  useSessionEventTrigger(client, workspaceId, sessionId, matchResponse, onResponse, { events });
+  useSessionEventTrigger(client, workspaceId, sessionId, matchResponse, onResponse, {
+    events,
+    readThrough,
+  });
   return signal;
 }
