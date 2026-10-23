@@ -26,7 +26,7 @@ import { TRUSTED_CLIENT_ADDRESS_HEADER } from "../http/request-source";
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
 import {
   createManagedAuthEmailThrottleHook,
-  MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+  MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES,
 } from "./managed-auth-rate-limits";
 import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
 import {
@@ -300,7 +300,7 @@ export function createManagedAuth(
       fields: {
         lastRequest: "last_request",
       },
-      customRules: MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+      customRules: MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES,
     },
     user: {
       modelName: "auth_users",

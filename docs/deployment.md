@@ -3959,6 +3959,12 @@ every limiter. A refused Better Auth request receives HTTP 429 with an
 `details.retryAfterSeconds`. Per-email counters are stored as keyed digests,
 never as email or client addresses.
 
+Session reads (`/v1/auth/get-session`) and sign-out are never limited per
+client address: they verify no credential, and every page load reads the
+session. Other Better Auth endpoints keep Better Auth's default of 100 requests
+per 10 seconds per address and path, a counter that resets only after 10
+seconds with no admitted request.
+
 Upgrading a managed deployment behind a proxy: earlier releases let Better Auth
 read a single-value `X-Forwarded-For` by default. It now ignores forwarding
 headers unless `OPENGENI_API_TRUSTED_PROXY_HOPS` is set, so without it every
