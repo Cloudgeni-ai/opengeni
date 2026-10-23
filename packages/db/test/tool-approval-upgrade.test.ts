@@ -119,6 +119,8 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     // name. Only stage the reader columns for seeding; the real migrations must
     // create them.
     await owner`alter table session_events add column usage_source_key text, add column tool_name text, add column tool_call_id text`;
+    // ...and 0917's nullable continue-waiting-work columns, read by the claim adapter.
+    await owner`alter table session_system_updates add column continued_by_subject_id text, add column continued_at timestamptz`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -250,6 +252,7 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     await dropConnectionAccountIntentColumns(owned.ownerUrl);
     await dropSiteSessionAudienceColumns(owned.ownerUrl);
     await owner`alter table session_events drop column usage_source_key, drop column tool_name, drop column tool_call_id`;
+    await owner`alter table session_system_updates drop column continued_by_subject_id, drop column continued_at`;
     expect(
       await owner`select column_name from information_schema.columns
       where table_schema=current_schema() and table_name='session_events'
