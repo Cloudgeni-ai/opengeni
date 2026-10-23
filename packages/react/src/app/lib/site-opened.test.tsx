@@ -114,6 +114,26 @@ test("pages the open Site view moves to belong to the same open", async () => {
   expect(opened()).toEqual([siteId]);
 });
 
+test("an open recorded after a conversation was chosen is remembered on the page shown then", async () => {
+  let finish = () => {};
+  const slow = {
+    recordSiteOpened: async (_workspace: string, site: string) => {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      opens.push(["slow", site]);
+      return { openedAt: new Date().toISOString() };
+    },
+  };
+  await show("a", { client: slow, siteId });
+  window.history.pushState({ __TSR_key: "b" }, "", `${sitePath}?conversation=x`);
+  await show("b", { client: slow, siteId });
+  await act(async () => finish());
+  await close();
+  await show("b");
+  expect(opened()).toEqual([siteId]);
+});
+
 test("without a router key every visit opens the Site", async () => {
   await show(null);
   await close();
