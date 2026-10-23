@@ -252,8 +252,12 @@ renders the ordinary answer form or approval card, naming the child and linking
 to it at the request's moment. Answers and decisions go to the child's own
 routes, so the server's permission checks and the draft store are the same as
 on the child page. Several waiting children stack under one collapsible line.
-Live session-list hints for the tree, and the parent agent calling
-`session_human_input_respond` or `session_steer`, re-read the tree at once.
+Live session-list hints that name a descendant (the server batches them, about
+every 15 seconds) and the output of the parent agent's own
+`session_human_input_respond` or `session_steer` call re-read the tree; the
+lineage poll covers pages without hints. The tree read stops at 200
+descendants and 5 levels, so the `Needs you` count can include a child the
+card does not show; the child's own page still has its request.
 Settlement wakes the child's frozen turn and returns the structured result to
 that original child tool call; the parent agent receives only the child's later
 ordinary terminal result, not a copy of the human answer.

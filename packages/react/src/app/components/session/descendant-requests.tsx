@@ -10,14 +10,18 @@ import type {
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import { ChevronDownIcon, CornerDownRightIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import type { PendingApproval } from "../../../approvals";
 import type { HumanInputFormProps } from "../../../components/human-input-form";
 import { usePolledValue } from "../../../hooks/internal";
 import { useHumanInputRequests } from "../../../hooks/use-human-input";
-import { ApprovalSurface, HumanInputSurface } from "../../../session-ui";
-import { Button } from "../../../ui/button";
+import {
+  ApprovalSurface,
+  HumanInputSurface,
+  type ToolReviewDetailsLoader,
+} from "../../../session-ui";
+import { buttonVariants } from "../../../ui/button";
 import { userErrorText } from "../../../ui/api-error";
 import {
   DESCENDANT_REQUEST_EVENT_LIMIT,
@@ -25,6 +29,7 @@ import {
   descendantRequestActivity,
   subSessionsNeedYouLabel,
 } from "../../lib/descendant-requests";
+import { Link } from "../../lib/navigation";
 import { sessionDisplayTitle } from "../../lib/session-rename";
 import { toast } from "../../lib/toast";
 import { cn } from "../../lib/utils";
@@ -49,15 +54,13 @@ export type DescendantRequestsProps = {
   parentSessionId: string;
   /** Descendants waiting on the person, longest-waiting first. */
   waiting: readonly SessionSummary[];
-  /** Open a sub-session, at the moment its request was raised when known. */
-  onOpenSession: (sessionId: string, at: number | null) => void;
   /** Something was answered or decided here: re-read the tree. */
   onResolved?: (() => void) | undefined;
-  /** Bumped when the parent learns a sub-session changed; every item re-reads. */
+  /** Bumped when this session's agent answered or steered a sub-session; every item re-reads. */
   refreshSignal?: number | undefined;
   loadSkillReview?: HumanInputFormProps["loadSkillReview"];
   allowedSaveTo?: HumanInputFormProps["allowedSaveTo"];
-  /** Safety-net re-read while waits are shown (live hints drive the rest). */
+  /** Safety-net re-read of questions while shown (live hints drive the rest). */
   pollIntervalMs?: number | undefined;
 };
 
@@ -65,6 +68,9 @@ export type DescendantRequestsProps = {
 // The parent's list hints and lineage reads drive refreshes instead.
 const NO_EVENTS: SessionEvent[] = [];
 const DEFAULT_POLL_MS = 15_000;
+// Approvals are rebuilt from an event page, a heavier read than the question
+// list; it is re-read on every change the tree sees, so its own poll is slow.
+const ACTIVITY_POLL_FACTOR = 3;
 
 // Whether a parent's stack was collapsed, for this tab: it stays collapsed
 // after opening a sub-session and coming back.
@@ -82,13 +88,13 @@ export function resetDescendantRequestsStateForTests(): void {
  */
 export function DescendantRequests(props: DescendantRequestsProps) {
   const stackKey = `${props.workspaceId}\u0000${props.parentSessionId}`;
-  const [collapsed, setCollapsedState] = useState(() => collapsedStacks.get(stackKey) ?? false);
-  useEffect(() => {
-    setCollapsedState(collapsedStacks.get(stackKey) ?? false);
-  }, [stackKey]);
+  // Read from the map on every render, so switching parents never shows the
+  // previous parent's choice for a frame.
+  const [, rerender] = useState(0);
+  const collapsed = collapsedStacks.get(stackKey) ?? false;
   const setCollapsed = (next: boolean) => {
     collapsedStacks.set(stackKey, next);
-    setCollapsedState(next);
+    rerender((value) => value + 1);
   };
   const count = props.waiting.length;
   if (count === 0) return null;
@@ -123,15 +129,20 @@ export function DescendantRequests(props: DescendantRequestsProps) {
           )}
           data-descendant-requests-stack=""
         >
-          {props.waiting.map((session, index) => (
-            <DescendantRequestItem
-              key={session.id}
-              {...props}
-              session={session}
-              // Later asks start as compact bars so every one is visible.
-              compact={stacked && index > 0}
-            />
-          ))}
+          {props.waiting.map((session, index) => {
+            // Later asks start as compact bars so every one is visible. The
+            // form reads that once, so a change remounts it (a lone item
+            // left after the others settle shows its request directly).
+            const compact = stacked && index > 0;
+            return (
+              <DescendantRequestItem
+                key={`${session.id}:${compact}`}
+                {...props}
+                session={session}
+                compact={compact}
+              />
+            );
+          })}
         </div>
       )}
     </section>
@@ -145,7 +156,6 @@ function DescendantRequestItem({
   workspaceId,
   session,
   compact,
-  onOpenSession,
   onResolved,
   refreshSignal = 0,
   loadSkillReview,
@@ -159,6 +169,8 @@ function DescendantRequestItem({
     events: NO_EVENTS,
     pollIntervalMs,
   });
+  // The SDK's event page read takes no abort signal; an unmounted item's
+  // last read finishes and is dropped.
   const loadActivity = useCallback(async () => {
     const page = await client.listEventPage(workspaceId, sessionId, {
       includeTypes: DESCENDANT_REQUEST_EVENT_TYPES,
@@ -168,10 +180,12 @@ function DescendantRequestItem({
     });
     return descendantRequestActivity(page.events);
   }, [client, sessionId, workspaceId]);
-  const activity = usePolledValue(loadActivity, { pollIntervalMs });
+  const activity = usePolledValue(loadActivity, {
+    pollIntervalMs: pollIntervalMs * ACTIVITY_POLL_FACTOR,
+  });
 
   // Re-read when the sub-session moved on (a new request, or one settled
-  // elsewhere) or the parent saw a change. The first render already reads.
+  // elsewhere) or this session's agent answered one. The first render reads.
   const refreshHumanInput = humanInput.refresh;
   const refreshActivity = activity.refresh;
   const seen = useRef({ lastSequence: session.lastSequence, refreshSignal });
@@ -184,24 +198,41 @@ function DescendantRequestItem({
     void refreshActivity();
   }, [refreshActivity, refreshHumanInput, refreshSignal, session.lastSequence]);
 
-  // After this card settles a request, the tree still shows the sub-session
-  // waiting until it is re-read (its log can move on before its status does).
-  // Say nothing for that wait; a new wait has a new start time.
-  const waitKey = session.requiresActionSince ?? `sequence:${session.lastSequence}`;
-  const [settledWait, setSettledWait] = useState<string | null>(null);
-  const settled = () => {
-    setSettledWait(waitKey);
-    onResolved?.();
-  };
-
   const title = sessionDisplayTitle(session);
   const requests = humanInput.requests;
   const approvals = activity.data?.approvals ?? [];
   const requestSequences = activity.data?.requestSequences;
   const firstRequest = requests[0];
-  const openRequest = () =>
-    onOpenSession(sessionId, (firstRequest && requestSequences?.get(firstRequest.id)) ?? null);
-  const openApproval = () => onOpenSession(sessionId, activity.data?.approvalSequence ?? null);
+  const hasRequest = requests.length > 0 || approvals.length > 0;
+
+  // Once this wait showed a question or an approval, its end is the request
+  // settling (here, on the sub-session's page or by an agent). The tree still
+  // shows the sub-session waiting until it is re-read, so say nothing for the
+  // rest of that wait; a new wait has a new start time.
+  const waitKey = session.requiresActionSince ?? `sequence:${session.lastSequence}`;
+  const [handledWait, setHandledWait] = useState<string | null>(null);
+  useEffect(() => {
+    if (hasRequest) setHandledWait(waitKey);
+  }, [hasRequest, waitKey]);
+  const settled = () => {
+    setHandledWait(waitKey);
+    onResolved?.();
+  };
+
+  // Stable, so a re-render never reloads a review that is already shown.
+  const loadReview = useCallback(
+    (approval: PendingApproval) => client.getToolActionReview(workspaceId, sessionId, approval.id),
+    [client, sessionId, workspaceId],
+  );
+  const loadDetails = useCallback<ToolReviewDetailsLoader>(
+    (review, path, offset) =>
+      client.getToolReviewDetails(workspaceId, sessionId, review.id, {
+        actionDigest: review.actionDigest,
+        path,
+        offset,
+      }),
+    [client, sessionId, workspaceId],
+  );
 
   const decide = async (approval: PendingApproval, decision: "approve" | "reject") => {
     try {
@@ -217,57 +248,78 @@ function DescendantRequestItem({
     await refreshActivity();
   };
 
-  if (requests.length > 0) {
+  if (hasRequest) {
     return (
-      <div data-descendant-request={sessionId} data-descendant-request-kind="question">
-        <ItemSource title={title} verb="is asking" onOpen={openRequest} />
-        <HumanInputSurface
-          requests={requests}
-          loadSkillReview={loadSkillReview}
-          allowedSaveTo={allowedSaveTo}
-          respondingRequestId={humanInput.respondingRequestId}
-          error={humanInput.mutationError?.message}
-          // Never take the caret from the parent's composer.
-          autoFocus={false}
-          decisionButtons
-          defaultCollapsed={compact}
-          onSubmit={async (requestId, response: SubmitHumanInputResponseRequest) => {
-            // A failed send resolves null. Reject so the form keeps what was
-            // typed (and its draft) for a retry, as on the sub-session's page.
-            if (!(await humanInput.respond(requestId, response))) {
-              throw new Error("Your answer wasn't sent. Try again.");
-            }
-            settled();
-          }}
-        />
-      </div>
-    );
-  }
-  if (approvals.length > 0) {
-    return (
-      <div data-descendant-request={sessionId} data-descendant-request-kind="approval">
-        <ItemSource title={title} verb="needs approval" onOpen={openApproval} />
-        <ApprovalSurface
-          className="py-0"
-          approvals={approvals}
-          loadReview={(approval) => client.getToolActionReview(workspaceId, sessionId, approval.id)}
-          loadDetails={(review, path, offset) =>
-            client.getToolReviewDetails(workspaceId, sessionId, review.id, {
-              actionDigest: review.actionDigest,
-              path,
-              offset,
-            })
-          }
-          onApprove={(approval) => decide(approval, "approve")}
-          onReject={(approval) => decide(approval, "reject")}
-        />
+      <div
+        data-descendant-request={sessionId}
+        data-descendant-request-kind={requests.length > 0 ? "question" : "approval"}
+        className="flex flex-col gap-2"
+      >
+        {requests.length > 0 ? (
+          <div>
+            <ItemSource
+              title={title}
+              verb="is asking"
+              link={
+                <SubSessionLink
+                  workspaceId={workspaceId}
+                  sessionId={sessionId}
+                  title={title}
+                  at={(firstRequest && requestSequences?.get(firstRequest.id)) ?? null}
+                />
+              }
+            />
+            <HumanInputSurface
+              requests={requests}
+              loadSkillReview={loadSkillReview}
+              allowedSaveTo={allowedSaveTo}
+              respondingRequestId={humanInput.respondingRequestId}
+              error={humanInput.mutationError?.message}
+              // Never take the caret from the parent's composer.
+              autoFocus={false}
+              defaultCollapsed={compact}
+              onSubmit={async (requestId, response: SubmitHumanInputResponseRequest) => {
+                // A failed send resolves null. Reject so the form keeps what was
+                // typed (and its draft) for a retry, as on the sub-session's page.
+                if (!(await humanInput.respond(requestId, response))) {
+                  throw new Error("Your answer wasn't sent. Try again.");
+                }
+                settled();
+              }}
+            />
+          </div>
+        ) : null}
+        {approvals.length > 0 ? (
+          <div data-descendant-request-approvals="">
+            <ItemSource
+              title={title}
+              verb="needs approval"
+              link={
+                <SubSessionLink
+                  workspaceId={workspaceId}
+                  sessionId={sessionId}
+                  title={title}
+                  at={activity.data?.approvalSequence ?? null}
+                />
+              }
+            />
+            <ApprovalSurface
+              className="py-0"
+              approvals={approvals}
+              loadReview={loadReview}
+              loadDetails={loadDetails}
+              onApprove={(approval) => decide(approval, "approve")}
+              onReject={(approval) => decide(approval, "reject")}
+            />
+          </div>
+        ) : null}
       </div>
     );
   }
   // Waiting on something only its own page can take (a reconnect, a sign-in):
   // say so once both reads are in, and point there.
   const loaded = !humanInput.loading && (activity.data !== null || activity.error !== null);
-  if (!loaded || settledWait === waitKey) return null;
+  if (!loaded || handledWait === waitKey) return null;
   return (
     <div
       data-descendant-request={sessionId}
@@ -278,29 +330,57 @@ function DescendantRequestItem({
       <p className="m-0 min-w-0 flex-1 truncate text-sm text-fg-muted">
         <span className="font-medium text-fg">{title}</span> needs you
       </p>
-      <Button size="sm" variant="outline" onClick={() => onOpenSession(sessionId, null)}>
-        Open sub-session
-      </Button>
+      <SubSessionLink
+        workspaceId={workspaceId}
+        sessionId={sessionId}
+        title={title}
+        at={null}
+        className={cn(buttonVariants({ variant: "outline", size: "sm" }), "shrink-0")}
+      />
     </div>
   );
 }
 
 /** Which sub-session is asking, and the way to it. */
-function ItemSource({ title, verb, onOpen }: { title: string; verb: string; onOpen: () => void }) {
+function ItemSource({ title, verb, link }: { title: string; verb: string; link: ReactNode }) {
   return (
     <div className="flex min-w-0 items-center gap-1.5 px-1 pb-1.5 text-xs leading-[18px]">
       <CornerDownRightIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-subtle" />
       <p className="m-0 min-w-0 truncate text-fg-muted">
         <span className="font-medium text-fg">{title}</span> {verb}
       </p>
-      <button
-        type="button"
-        onClick={onOpen}
-        aria-label={`Open sub-session: ${title}`}
-        className="og-link ml-auto shrink-0 rounded-sm text-xs text-fg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand/55 pointer-coarse:min-h-11"
-      >
-        Open sub-session
-      </button>
+      {link}
     </div>
+  );
+}
+
+/** Opens the sub-session, scrolled to where it asked when that is known. */
+function SubSessionLink({
+  workspaceId,
+  sessionId,
+  title,
+  at,
+  className,
+}: {
+  workspaceId: string;
+  sessionId: string;
+  title: string;
+  at: number | null;
+  className?: string | undefined;
+}) {
+  return (
+    <Link
+      to="/workspaces/$workspaceId/sessions/$sessionId"
+      params={{ workspaceId, sessionId }}
+      search={at !== null ? { at } : {}}
+      aria-label={`Open sub-session: ${title}`}
+      data-descendant-request-link=""
+      className={
+        className ??
+        "og-link ml-auto inline-flex min-h-8 shrink-0 items-center rounded-sm text-xs text-fg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand/55 pointer-coarse:min-h-11"
+      }
+    >
+      Open sub-session
+    </Link>
   );
 }

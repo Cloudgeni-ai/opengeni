@@ -12,6 +12,7 @@ import type {
 } from "@opengeni/sdk";
 import { projectPendingApprovals, type PendingApproval } from "../../approvals";
 import { humanInputRequestFromEvent } from "../../human-input";
+import { awaitsPerson } from "./needs-you";
 
 /**
  * Every event that opens or closes a question or an approval. A sub-session's
@@ -30,20 +31,16 @@ export const DESCENDANT_REQUEST_EVENT_TYPES: SessionEventType[] = [
 ];
 
 /** Newest request events read per waiting sub-session. */
-export const DESCENDANT_REQUEST_EVENT_LIMIT = 50;
+export const DESCENDANT_REQUEST_EVENT_LIMIT = 20;
 
 /**
  * A sub-session that waits on a person: blocked on a question, an approval or
- * another human step. Matches the server's `attentionDescendants` count (and
- * the rail's `awaitsPerson`): a session the runtime could not start is Stuck,
- * not waiting on the person.
+ * another human step. The rail's `awaitsPerson` (a session the runtime could
+ * not start is Stuck, not waiting on the person), minus archived sessions,
+ * which the parent page does not offer to act on.
  */
 export function awaitsPersonInTree(session: SessionSummary): boolean {
-  return (
-    session.status === "requires_action" &&
-    session.archived !== true &&
-    (session.admissionBlock === undefined || session.admissionBlock === null)
-  );
+  return session.archived !== true && awaitsPerson(session);
 }
 
 /** Every descendant that waits on the person, the longest-waiting first. */
@@ -76,9 +73,16 @@ export function lineageSessionIds(nodes: readonly LineageNode[]): Set<string> {
   return ids;
 }
 
+/** Whether a descendant is running, and so may spawn or start waiting. */
+export function descendantsRunning(nodes: readonly LineageNode[]): boolean {
+  return nodes.some(
+    (node) => node.session.status === "running" || descendantsRunning(node.children),
+  );
+}
+
 /**
  * Whether a workspace session-list hint can change what this tree waits on:
- * a full reconciliation, or a change to the parent or one of its descendants.
+ * a full reconciliation, or a change to one of the descendants (`ids`).
  */
 export function hintTouchesTree(
   hint: Pick<WorkspaceSessionListEvent, "sessionIds" | "available"> | null | undefined,
@@ -89,22 +93,66 @@ export function hintTouchesTree(
   return hint.sessionIds.some((id) => ids.has(id));
 }
 
-function toolName(event: SessionEvent): string {
-  const payload = event.payload as { name?: unknown; toolName?: unknown } | null | undefined;
-  if (typeof payload?.name === "string") return payload.name;
-  if (typeof payload?.toolName === "string") return payload.toolName;
-  return "";
+type ToolCallPayload = { id?: unknown; name?: unknown; toolName?: unknown; arguments?: unknown };
+
+function record(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "string") {
+    try {
+      return record(JSON.parse(value));
+    } catch {
+      return null;
+    }
+  }
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+const RESPONSE_TOOLS = ["session_human_input_respond", "session_steer"];
+
+function isResponseToolName(name: unknown): boolean {
+  return typeof name === "string" && RESPONSE_TOOLS.some((tool) => name.endsWith(tool));
 }
 
 /**
- * The parent's own agent answered a sub-session (`session_human_input_respond`)
- * or steered it onto new work, which closes its open waits: the card must
- * re-read what still waits instead of waiting for the next list hint.
+ * The call id of a tool call this session's agent made to answer a
+ * sub-session (`session_human_input_respond`) or steer it onto new work
+ * (`session_steer`), directly or through `tool_invoke`. Null otherwise.
  */
-export function isSubSessionResponseEvent(event: SessionEvent): boolean {
+export function subSessionResponseCallId(event: SessionEvent): string | null {
+  if (event.type !== "agent.toolCall.created") return null;
+  const payload = record(event.payload) as ToolCallPayload | null;
+  if (typeof payload?.id !== "string") return null;
+  const name = typeof payload.name === "string" ? payload.name : payload.toolName;
+  if (isResponseToolName(name)) return payload.id;
+  if (typeof name === "string" && name.endsWith("tool_invoke")) {
+    return isResponseToolName(record(payload.arguments)?.name) ? payload.id : null;
+  }
+  return null;
+}
+
+/** Every call in a feed that answers or steers a sub-session, by call id. */
+export function subSessionResponseCallIds(events: readonly SessionEvent[]): Set<string> {
+  const ids = new Set<string>();
+  for (const event of events) {
+    const id = subSessionResponseCallId(event);
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+/**
+ * The output of one of those calls: the call has run, so the sub-session's
+ * open waits may have closed and the card must re-read what still waits.
+ * Outputs carry only the call id, so they are matched to their created event.
+ */
+export function isSubSessionResponseOutput(
+  event: SessionEvent,
+  callIds: ReadonlySet<string>,
+): boolean {
   if (event.type !== "agent.toolCall.output") return false;
-  const name = toolName(event);
-  return name.endsWith("session_human_input_respond") || name.endsWith("session_steer");
+  const id = record(event.payload)?.id;
+  return typeof id === "string" && callIds.has(id);
 }
 
 export type DescendantRequestActivity = {

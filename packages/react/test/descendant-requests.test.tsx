@@ -7,18 +7,47 @@ import type {
   SessionSummary,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { act, createElement } from "react";
+import { act, createElement, type ReactNode } from "react";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
 registerDom();
 
 const { HumanInputForm } = await import("../src");
+const { configurePageAppHost } = await import("../src/app/lib/app-host");
+// The app's router renders links as anchors; render the same href here.
+configurePageAppHost({
+  navigation: {
+    Link: ({
+      to,
+      params,
+      search,
+      children,
+      ...rest
+    }: {
+      to?: string;
+      params?: Record<string, string>;
+      search?: Record<string, unknown>;
+      children?: ReactNode;
+    }) => {
+      const path = Object.entries(params ?? {}).reduce(
+        (href, [key, value]) => href.replace(`$${key}`, value),
+        to ?? "",
+      );
+      const query = new URLSearchParams(
+        Object.entries(search ?? {}).map(([key, value]) => [key, String(value)]),
+      ).toString();
+      return createElement("a", { ...rest, href: query ? `${path}?${query}` : path }, children);
+    },
+  } as never,
+});
 const { resetHumanInputDraftMemoryForTests } = await import("../src/human-input-draft-store");
 const {
   descendantRequestActivity,
+  descendantsRunning,
   hintTouchesTree,
-  isSubSessionResponseEvent,
+  isSubSessionResponseOutput,
   lineageSessionIds,
+  subSessionResponseCallIds,
   subSessionsNeedYouLabel,
   waitingDescendants,
 } = await import("../src/app/lib/descendant-requests");
@@ -195,7 +224,6 @@ async function render(
     createElement(DescendantRequests, {
       workspaceId: WORKSPACE,
       parentSessionId: PARENT,
-      onOpenSession: () => undefined,
       ...props,
     }),
   );
@@ -230,6 +258,12 @@ async function click(element: HTMLElement): Promise<void> {
     await Promise.resolve();
   });
   await flush(0);
+}
+
+function link(label: string): HTMLAnchorElement | undefined {
+  return [...container().querySelectorAll("a")].find(
+    (candidate) => candidate.getAttribute("aria-label") === label,
+  );
 }
 
 function answerField(root: HTMLElement = container()): HTMLTextAreaElement | null {
@@ -283,15 +317,41 @@ describe("descendant request model", () => {
     expect(closed.approvalSequence).toBeNull();
   });
 
-  test("notices the parent agent answering or steering a sub-session", () => {
-    const output = (name: string) => event("agent.toolCall.output", { name });
-    expect(isSubSessionResponseEvent(output("session_human_input_respond"))).toBe(true);
-    expect(isSubSessionResponseEvent(output("opengeni__session_human_input_respond"))).toBe(true);
-    expect(isSubSessionResponseEvent(output("opengeni__session_steer"))).toBe(true);
-    expect(isSubSessionResponseEvent(output("session_create"))).toBe(false);
+  test("notices the parent agent's answer or steer once its call has run", () => {
+    // The runtime's shapes: the created event names the tool, its output
+    // carries only the call id (packages/runtime/src/run-events.ts).
+    const created = (id: string, name: string, args: unknown = {}) =>
+      event("agent.toolCall.created", { id, name, arguments: args, raw: {} });
+    const output = (id: string) => event("agent.toolCall.output", { id, output: "ok" });
+    const feed = [
+      created("call-answer", "opengeni__session_human_input_respond"),
+      created("call-steer", "session_steer"),
+      created(
+        "call-invoke",
+        "tool_invoke",
+        JSON.stringify({ name: "opengeni__session_human_input_respond", arguments: {} }),
+      ),
+      created("call-spawn", "opengeni__session_create"),
+      created("call-other-invoke", "tool_invoke", { name: "read_file" }),
+    ];
+    const ids = subSessionResponseCallIds(feed);
+    expect([...ids].sort()).toEqual(["call-answer", "call-invoke", "call-steer"]);
+    expect(isSubSessionResponseOutput(output("call-answer"), ids)).toBe(true);
+    expect(isSubSessionResponseOutput(output("call-steer"), ids)).toBe(true);
+    expect(isSubSessionResponseOutput(output("call-invoke"), ids)).toBe(true);
+    expect(isSubSessionResponseOutput(output("call-spawn"), ids)).toBe(false);
+    expect(isSubSessionResponseOutput(output("call-other-invoke"), ids)).toBe(false);
+    // The call itself has not run yet.
+    expect(isSubSessionResponseOutput(feed[0]!, ids)).toBe(false);
+  });
+
+  test("knows whether a descendant runs", () => {
+    expect(descendantsRunning([node(summary("a", { status: "idle" }))])).toBe(false);
     expect(
-      isSubSessionResponseEvent(event("agent.toolCall.created", { name: "session_steer" })),
-    ).toBe(false);
+      descendantsRunning([
+        node(summary("a", { status: "idle" }), [node(summary("a1", { status: "running" }))]),
+      ]),
+    ).toBe(true);
   });
 
   test("counts sub-sessions in the collapsed line", () => {
@@ -336,7 +396,6 @@ describe("DescendantRequests", () => {
         client,
         workspaceId: WORKSPACE,
         parentSessionId: PARENT,
-        onOpenSession: () => undefined,
         waiting: [{ ...child, lastSequence: child.lastSequence + 1 }],
       }),
     );
@@ -402,28 +461,20 @@ describe("DescendantRequests", () => {
       requests: { child: [request("child")] },
       events: { child: [asked] },
     });
-    const opened: Array<[string, number | null]> = [];
-    await render({
-      client,
-      waiting: [child],
-      onOpenSession: (sessionId, at) => opened.push([sessionId, at]),
-    });
-    await click(button("Open sub-session: Review PR #4418")!);
-    expect(opened).toEqual([["child", 42]]);
+    await render({ client, waiting: [child] });
+    expect(link("Open sub-session: Review PR #4418")?.getAttribute("href")).toBe(
+      `/workspaces/${WORKSPACE}/sessions/child?at=42`,
+    );
   });
 
   test("points to the sub-session when it waits on something only its page can take", async () => {
     const child = summary("child", { title: "Sign-in worker" });
     const { client } = fakeClient({});
-    const opened: Array<[string, number | null]> = [];
-    await render({
-      client,
-      waiting: [child],
-      onOpenSession: (sessionId, at) => opened.push([sessionId, at]),
-    });
+    await render({ client, waiting: [child] });
     expect(container().textContent).toContain("Sign-in worker needs you");
-    await click(button("Open sub-session")!);
-    expect(opened).toEqual([["child", null]]);
+    expect(link("Open sub-session: Sign-in worker")?.getAttribute("href")).toBe(
+      `/workspaces/${WORKSPACE}/sessions/child`,
+    );
   });
 
   test("stacks several waiting sub-sessions under one line that collapses", async () => {
@@ -466,7 +517,6 @@ describe("DescendantRequests", () => {
       client,
       workspaceId: WORKSPACE,
       parentSessionId: PARENT,
-      onOpenSession: () => undefined,
     };
     await render({ ...props, waiting: [child] });
     expect(container().querySelector("[data-descendant-request]")).not.toBeNull();
@@ -490,7 +540,6 @@ describe("DescendantRequests", () => {
       client,
       workspaceId: WORKSPACE,
       parentSessionId: PARENT,
-      onOpenSession: () => undefined,
       waiting: [child],
     };
     await render(props);
@@ -501,6 +550,101 @@ describe("DescendantRequests", () => {
     await flush(0);
     await flush(0);
     expect(answerField()).toBeNull();
+    // Settled elsewhere: the wait it showed is over, not "needs you" until
+    // the tree catches up.
+    expect(container().textContent).not.toContain("needs you");
+    expect(container().querySelector("[data-descendant-request]")).toBeNull();
+  });
+
+  test("an approval settled elsewhere leaves no needs-you line either", async () => {
+    sequence = 0;
+    const child = summary("child", { title: "Deploy worker" });
+    const state: { events: Record<string, SessionEvent[]> } = {
+      events: {
+        child: [
+          event("session.requiresAction", {
+            approvals: [{ id: "approval-1", name: "projects.update", arguments: {} }],
+          }),
+        ],
+      },
+    };
+    const { client } = fakeClient(state);
+    const props = { client, workspaceId: WORKSPACE, parentSessionId: PARENT, waiting: [child] };
+    await render(props);
+    expect(container().textContent).toContain("Deploy worker needs approval");
+
+    state.events = { child: [] };
+    await mounted!.rerender(
+      createElement(DescendantRequests, {
+        ...props,
+        waiting: [{ ...child, lastSequence: child.lastSequence + 2 }],
+      }),
+    );
+    await flush(0);
+    await flush(0);
+    expect(container().textContent).not.toContain("needs you");
+    expect(container().querySelector("[data-descendant-request]")).toBeNull();
+  });
+
+  test("shows a sub-session's question and its approval together", async () => {
+    sequence = 0;
+    const child = summary("child", { title: "Release worker" });
+    const { client } = fakeClient({
+      requests: { child: [request("child")] },
+      events: {
+        child: [
+          event("session.requiresAction", {
+            approvals: [{ id: "approval-1", name: "projects.update", arguments: {} }],
+          }),
+        ],
+      },
+    });
+    await render({ client, waiting: [child] });
+    expect(container().textContent).toContain("Release worker is asking");
+    expect(container().textContent).toContain("Release worker needs approval");
+    expect(answerField()).not.toBeNull();
+    expect(button("Approve action")).toBeDefined();
+  });
+
+  test("a lone sub-session left in the stack shows its request directly", async () => {
+    const first = summary("first", { title: "First worker" });
+    const second = summary("second", { title: "Second worker" });
+    const { client } = fakeClient({
+      requests: { first: [request("first")], second: [request("second")] },
+    });
+    const props = { client, workspaceId: WORKSPACE, parentSessionId: PARENT };
+    await render({ ...props, waiting: [first, second] });
+    const item = (id: string) =>
+      container().querySelector<HTMLElement>(`[data-descendant-request="${id}"]`)!;
+    expect(answerField(item("second"))).toBeNull();
+
+    await mounted!.rerender(createElement(DescendantRequests, { ...props, waiting: [second] }));
+    await flush(0);
+    await flush(0);
+    expect(container().querySelector("[data-descendant-requests-toggle]")).toBeNull();
+    expect(answerField(item("second"))).not.toBeNull();
+  });
+
+  test("uses the sub-session page's form, with the same actions", async () => {
+    const child = summary("child");
+    const { client } = fakeClient({ requests: { child: [request("child")] } });
+    await render({ client, waiting: [child] });
+    const surface = container().querySelector<HTMLElement>("[data-descendant-request]")!;
+    const parentButtons = [...surface.querySelectorAll("button")]
+      .map((candidate) => candidate.textContent?.trim())
+      .filter(Boolean);
+    await mounted!.unmount();
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: request("child"),
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    const childButtons = [...container().querySelectorAll("button")]
+      .map((candidate) => candidate.textContent?.trim())
+      .filter(Boolean);
+    expect(parentButtons).toEqual(childButtons);
   });
 });
 

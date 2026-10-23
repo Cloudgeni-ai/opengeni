@@ -1182,21 +1182,22 @@ export function SessionRoute({
   // pill's "running" count doesn't go stale on CHILD-side status changes that
   // emit no event on this parent's feed. Must sit above the loading/error
   // early-returns — it's a hook, so it has to run unconditionally on every render.
-  const lineagePollIntervalMs = useLineagePollInterval(workspaceId);
+  const lineagePoll = useLineagePollInterval(workspaceId);
   const lineage = useSessionLineage(sessionId, {
     events,
-    pollIntervalMs: lineagePollIntervalMs,
+    pollIntervalMs: lineagePoll.pollIntervalMs,
   });
-  const agentNodes = lineage.lineage?.children ?? [];
-  // Sub-sessions waiting on the person surface on this page: list hints and
-  // this agent answering one re-read the tree at once.
+  const agentNodes = useMemo(() => lineage.lineage?.children ?? [], [lineage.lineage]);
+  const observeLineageTree = lineagePoll.observeTree;
+  useEffect(() => observeLineageTree(agentNodes), [agentNodes, observeLineageTree]);
+  // Sub-sessions waiting on the person surface on this page: list hints that
+  // name one, and this agent answering one, re-read the tree.
   const descendantRefreshSignal = useDescendantRequestsRefresh({
     client: context.client,
     workspaceId,
     sessionId,
     events,
     nodes: agentNodes,
-    sessionRunning: session?.status === "running",
     refreshLineage: lineage.refresh,
   });
   // The same lineage read names the agents the timeline spawns, messages, and
@@ -1361,13 +1362,6 @@ export function SessionRoute({
         void navigate({
           to: "/workspaces/$workspaceId/sessions/$sessionId",
           params: { workspaceId, sessionId: nextSessionId },
-        })
-      }
-      onOpenSessionAt={(nextSessionId, at) =>
-        void navigate({
-          to: "/workspaces/$workspaceId/sessions/$sessionId",
-          params: { workspaceId, sessionId: nextSessionId },
-          search: at !== null ? { at } : {},
         })
       }
       onMemoryClick={(memoryId) =>
@@ -1984,8 +1978,6 @@ function SessionChatPane(props: {
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
-  /** Open a sub-session at one moment of its timeline (where it asked), when known. */
-  onOpenSessionAt: (sessionId: string, at: number | null) => void;
   /** Current titles for the agents this session spawns, messages, and hears from. */
   resolveSessionTitle: (sessionId: string) => string | null;
   /** Deep-link a timeline memory step to its first-class workspace Memory record. */
@@ -3797,7 +3789,6 @@ function SessionChatPane(props: {
                     workspaceId={props.session.workspaceId}
                     parentSessionId={props.session.id}
                     waiting={waitingSubSessions}
-                    onOpenSession={props.onOpenSessionAt}
                     onResolved={props.onDescendantResolved}
                     refreshSignal={props.descendantRefreshSignal}
                     loadSkillReview={loadSkillReview}

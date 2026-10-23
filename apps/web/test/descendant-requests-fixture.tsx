@@ -5,14 +5,16 @@
 // page. `?scenario=question|approval|stack|other`, `?light` for the light theme.
 import { ChatComposer, MessageTimeline, SessionChrome } from "@opengeni/react";
 import type { LineageNode, SessionEvent, SessionHumanInputRequest } from "@opengeni/sdk";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { DescendantRequests } from "@opengeni/react/app/components/session/descendant-requests";
+import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 import { Toaster } from "@opengeni/react/app/components/toaster";
 import { t } from "@opengeni/react/app/lib/console-text";
 import { sessionAgentsSignal } from "@opengeni/react/session-agents-model";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+// A relative import: the package's `./app/*` export maps only `.tsx` modules.
 import { waitingDescendants } from "../../../packages/react/src/app/lib/descendant-requests";
 import {
   emptyAttachments,
@@ -33,6 +35,45 @@ const scenario = (params.get("scenario") ?? "question") as
   | "other";
 
 const workspaceId = GALLERY_WORKSPACE_ID;
+
+// The app's router renders links as anchors; the fixture logs instead of leaving.
+configurePageAppHost({
+  navigation: {
+    Link: ({
+      to,
+      params: routeParams,
+      search,
+      children,
+      ...rest
+    }: {
+      to?: string;
+      params?: Record<string, string>;
+      search?: Record<string, unknown>;
+      children?: ReactNode;
+    }) => {
+      const path = Object.entries(routeParams ?? {}).reduce(
+        (href, [key, value]) => href.replace(`$${key}`, value),
+        to ?? "",
+      );
+      const query = new URLSearchParams(
+        Object.entries(search ?? {}).map(([key, value]) => [key, String(value)]),
+      ).toString();
+      const href = query ? `${path}?${query}` : path;
+      return (
+        <a
+          {...rest}
+          href={href}
+          onClick={(event) => {
+            event.preventDefault();
+            console.info("open sub-session", href);
+          }}
+        >
+          {children}
+        </a>
+      );
+    },
+  } as never,
+});
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 
 function child(index: number, title: string, status: "requires_action" | "running", since = 4) {
@@ -259,9 +300,6 @@ function Page() {
               workspaceId={workspaceId}
               parentSessionId={GALLERY_SESSION_ID}
               waiting={waiting}
-              onOpenSession={(sessionId, at) =>
-                console.info("open sub-session", sessionId, at ?? "latest")
-              }
             />
             <SessionChrome
               sessionStatus="running"
