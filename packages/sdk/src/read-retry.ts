@@ -1,4 +1,4 @@
-import { OpenGeniApiError } from "./errors";
+import { isMaintenanceError, OpenGeniApiError } from "./errors";
 
 /**
  * Bounded retry for safe reads (`GET` and `HEAD`) that failed transiently:
@@ -126,13 +126,14 @@ const NETWORK_FAILURE_MESSAGE =
 /**
  * A failure a later identical safe read can plausibly succeed after: a
  * transport error (`fetch` or the response body rejected with a `TypeError`)
- * or a retryable 502, 503 or 504. Auth, permission, not-found, validation,
- * rate limits, aborts, other server errors, a success response the client
- * could not accept, and `TypeError`s from application code are definitive and
- * are not transient.
+ * or a retryable 502, 503 or 504, including the maintenance marker. Auth,
+ * permission, not-found, validation, rate limits, aborts, other server
+ * errors, a success response the client could not accept, and `TypeError`s
+ * from application code are definitive and are not transient.
  */
 export function isTransientRequestError(error: unknown): boolean {
   if (error instanceof OpenGeniApiError) {
+    if (isMaintenanceError(error)) return true;
     return (
       !invalidResponses.has(error) && isTransientGatewayStatus(error.status) && error.retryable
     );

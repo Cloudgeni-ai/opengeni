@@ -6,10 +6,17 @@
    (401/403/404, other statuses) stay exactly as visible as before.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import { OpenGeniApiError, type Session, type SessionEvent } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type Session,
+  type SessionEvent,
+  type SessionQueueSnapshot,
+  type SessionTurn,
+} from "@opengeni/sdk";
 
 import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
-import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useSession } from "../src/hooks/use-session";
 import { useSessionEvents } from "../src/hooks/use-session-events";
 import { DEFAULT_TRANSIENT_READ_RETRY, usePolledValue } from "../src/hooks/internal";
@@ -26,6 +33,31 @@ const session = {
 } as Session;
 
 const unavailable = () => new OpenGeniApiError(503, "", { mutation: false });
+const parked = () =>
+  new OpenGeniApiError(503, JSON.stringify({ error: "maintenance" }), { mutation: false });
+
+function queueSnapshot(items: SessionTurn[]): SessionQueueSnapshot {
+  return {
+    version: 1,
+    effectiveControl: {
+      state: "active",
+      controlVersion: 1,
+      controlEtag: "control-1",
+      directState: "active",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+      blockers: [],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    },
+    stoppingPreviousAttempt: false,
+    items,
+    pendingInputs: [],
+    pendingInputAttachment: null,
+    activePersonalConnections: [],
+  } as SessionQueueSnapshot;
+}
 
 function event(sequence: number): SessionEvent {
   return {
@@ -414,5 +446,147 @@ describe("useSessionEvents transient retry", () => {
     } finally {
       await rendered.unmount();
     }
+  });
+});
+
+describe("maintenance marker", () => {
+  test("a session read stays quiet for as long as the update lasts, then recovers", async () => {
+    let parkedReads = true;
+    let calls = 0;
+    const client = fakeClient({
+      getSession: async () => {
+        calls += 1;
+        if (parkedReads) throw parked();
+        return session;
+      },
+    });
+    const hook = await renderHook(
+      () => useSession(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [] }),
+      undefined,
+    );
+    // Far past the quiet window: still loading, no error, still checking
+    // at least every few seconds.
+    await flush(10 * 60_000);
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.session).toBeNull();
+    expect(calls).toBeGreaterThan((10 * 60_000) / 10_000);
+    parkedReads = false;
+    await flush(10_000);
+    expect(hook.result.current.session?.title).toBe("Deploy-safe");
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("the event stream keeps reconnecting quietly through an update", async () => {
+    let parkedReads = true;
+    const client = fakeClient({
+      listEvents: async () => {
+        if (parkedReads) throw parked();
+        return [event(1)];
+      },
+      streamEvents: (_workspaceId, _sessionId, options = {}) =>
+        (async function* () {
+          await new Promise<void>((resolve) =>
+            options.signal?.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          yield* [];
+        })(),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(10 * 60_000);
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.connectionState).not.toBe("error");
+    parkedReads = false;
+    await flush(10_000);
+    expect(hook.result.current.events.map((row) => row.sequence)).toEqual([1]);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+});
+
+describe("useTurnQueue transient retry", () => {
+  const queued = fakeTurn({ id: "queued-turn", prompt: "queued prompt" });
+
+  test("keeps the last queue through an update, without an error, and recovers", async () => {
+    let failing: (() => Error) | null = null;
+    let reads = 0;
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        if (failing) throw failing();
+        return queueSnapshot([queued]);
+      },
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [] }),
+      undefined,
+    );
+    await flush(10);
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["queued-turn"]);
+
+    failing = parked;
+    await actRun(() => hook.result.current.refresh());
+    const readsAtPark = reads;
+    await flush(10 * 60_000);
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["queued-turn"]);
+    expect(reads).toBeGreaterThan(readsAtPark + 10);
+
+    failing = null;
+    await flush(10_000);
+    const settled = reads;
+    expect(hook.result.current.error).toBeNull();
+    await flush(60_000);
+    // Recovered: the background retry loop stopped.
+    expect(reads).toBe(settled);
+    await hook.unmount();
+  });
+
+  test("a lasting gateway failure surfaces once after the quiet window", async () => {
+    let failing = true;
+    const client = fakeClient({
+      getQueue: async () => {
+        if (failing) throw unavailable();
+        return queueSnapshot([queued]);
+      },
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [] }),
+      undefined,
+    );
+    await flush(DEFAULT_TRANSIENT_READ_RETRY.quietWindowMs - 3_000);
+    expect(hook.result.current.error).toBeNull();
+    await flush(8_000);
+    const surfaced = hook.result.current.error;
+    expect(surfaced).toBeInstanceOf(OpenGeniApiError);
+    await flush(DEFAULT_TRANSIENT_READ_RETRY.backgroundDelayMs * 1.3);
+    expect(hook.result.current.error).toBe(surfaced);
+    failing = false;
+    await flush(DEFAULT_TRANSIENT_READ_RETRY.backgroundDelayMs * 1.3);
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["queued-turn"]);
+    await hook.unmount();
+  });
+
+  test("a definitive queue failure surfaces at once and is not retried", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        throw new OpenGeniApiError(403, "", { mutation: false });
+      },
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [] }),
+      undefined,
+    );
+    await flush(10);
+    expect(hook.result.current.error).toBeInstanceOf(OpenGeniApiError);
+    await flush(60_000);
+    expect(reads).toBe(1);
+    await hook.unmount();
   });
 });

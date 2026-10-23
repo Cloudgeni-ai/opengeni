@@ -1,4 +1,4 @@
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { isMaintenanceError, OpenGeniApiError } from "@opengeni/sdk";
 import { type OpenGeniText } from "../messages/runtime";
 
 /*
@@ -28,6 +28,7 @@ const NETWORK_FAILURE =
  */
 export function isTransientServiceFailure(error: unknown): boolean {
   if (isAbort(error)) return false;
+  if (isMaintenanceError(error)) return true;
   if (error instanceof OpenGeniApiError) {
     if (error.status === 502 || error.status === 503 || error.status === 504) return true;
     if (error.status === 500) return error.retryable;
@@ -35,6 +36,28 @@ export function isTransientServiceFailure(error: unknown): boolean {
     return error.status === 0 && error.code === "network_error";
   }
   return error instanceof TypeError && NETWORK_FAILURE.test(error.message);
+}
+
+/**
+ * How long an ordinary transient failure stays calm (shown as "updating"
+ * rather than as an error). A normal deploy or failover ends well inside it;
+ * a failure that outlasts it is reported as the error it is. The maintenance
+ * marker is a planned update and stays calm for as long as it lasts.
+ */
+export const SERVICE_UPDATING_CALM_WINDOW_MS = 120_000;
+
+/**
+ * True when `error` should read as "updating, reconnecting" rather than as a
+ * failure: the maintenance marker, or a transient failure first seen at
+ * `since` and not yet past the calm window at `now`.
+ */
+export function isCalmServiceFailure(
+  error: unknown,
+  since: number,
+  now: number = Date.now(),
+): boolean {
+  if (isMaintenanceError(error)) return true;
+  return isTransientServiceFailure(error) && now - since < SERVICE_UPDATING_CALM_WINDOW_MS;
 }
 
 export type RetryTransientOptions = {
