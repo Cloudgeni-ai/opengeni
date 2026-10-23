@@ -1,5 +1,14 @@
 # @opengeni/codemode
 
+## 5.1.2
+
+### Patch Changes
+
+- Updated dependencies [5d377a7]
+  - @opengeni/sdk@5.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/tool-gateway@5.1.0
+
 ## 5.0.2
 
 ### Patch Changes

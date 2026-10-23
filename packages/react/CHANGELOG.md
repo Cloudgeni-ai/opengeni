@@ -1,5 +1,18 @@
 # @opengeni/react
 
+## 5.1.2
+
+### Minor Changes
+
+- 9c72069: `SessionApp` takes `onSessionState`: it is called with the open chat's status and the events the chat holds (`SessionViewState`) each time they change, read from the stream the chat already uses. A host can show that the agent is working, or refresh what a turn changed, without opening a second stream for the same chat.
+
+### Patch Changes
+
+- Updated dependencies [5d377a7]
+  - @opengeni/sdk@5.1.0
+  - @opengeni/connect@5.1.0
+  - @opengeni/contracts@5.1.0
+
 ## 5.0.2
 
 ### Minor Changes
