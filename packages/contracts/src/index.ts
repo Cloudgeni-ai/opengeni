@@ -1362,7 +1362,7 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 
 /**
  * Tools a session has only while it has admin access: the organization's
- * actions, run as the owner or admin who gave it. Admin access, not the
+ * actions, run as the person who gave it, with exactly their access. Admin access, not the
  * session's tool selection, decides whether they are there.
  */
 export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
@@ -2834,7 +2834,7 @@ export function workspaceModelCompactionThreshold(
 }
 
 /**
- * Whether owners and admins may give an agent session admin access. Off by
+ * Whether members may give a session they started their own access. Off by
  * default; turning it off ends every session's admin access.
  */
 export const OrganizationAgentAdminAccess = /* @__PURE__ */ defineSchema(() =>
@@ -2854,8 +2854,8 @@ export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
 
 /**
  * A session's admin access as the viewer sees it. While `active`, the agent
- * in this session can do what `grantedBy` can manage across the
- * organization, checked live on every action.
+ * in this session can do what `grantedBy` can do, checked live on every
+ * action.
  */
 export const SessionAdminAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -2868,7 +2868,7 @@ export const SessionAdminAccess = /* @__PURE__ */ defineSchema(() =>
     allowed: z.boolean(),
     /**
      * The viewer may turn it on, or choose a new time limit while it is on: an
-     * owner or admin, in person, on their own session.
+     * member, in person, on a session they started.
      */
     canGrant: z.boolean(),
     /** The viewer may turn it off. */
@@ -17306,17 +17306,20 @@ type InboxAccessContextShape = {
 };
 
 /**
- * Who has an inbox: a signed-in person (`user:`), or the one human of a local
- * install. API keys, services, configured or development subjects and agents
- * act through sessions and have none. This is the shape the web uses to show
- * the Inbox; the API also checks verified managed-human or local-bootstrap
- * provenance (see `inboxSubjectForContext` in `@opengeni/core`).
+ * Who has an inbox: a signed-in person (`user:`), a product's external user
+ * (`external_user:`, signed in to the product, which relays as them), or the
+ * one human of a local install. API keys, services, configured or development
+ * subjects and agents act through sessions and have none. This is the shape
+ * the web uses to show the Inbox; the API also checks verified managed-human,
+ * external-actor or local-bootstrap provenance (see `inboxSubjectForContext`
+ * in `@opengeni/core`).
  */
 export function accessContextHasInbox(
   context: InboxAccessContextShape | null | undefined,
 ): boolean {
   if (!context || context.credential) return false;
-  if (context.subjectId.startsWith("user:")) return true;
+  if (context.subjectId.startsWith("user:") || context.subjectId.startsWith("external_user:"))
+    return true;
   const grants = context.workspaceGrants ?? [];
   return (
     context.mode === "local" &&

@@ -2517,31 +2517,24 @@ async function projectManagedOrganizationAccess(
   }
 
   const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
-  // An organization that turned Personal workspaces off lands people in a
-  // shared workspace instead of their hidden Personal one (0918).
+  const finalAccountId = activeOrganizationMemberships.at(-1)!.organizationId;
+  // The authority tables below are non-RLS: every join is explicitly limited to
+  // the subject and the active organization ids just returned by the canonical
+  // membership helper. The default organization's account-scoped privacy row
+  // (0918: Personal workspaces off lands people in a shared workspace) rides
+  // in the same read under that organization's scope.
   await setRlsContext(db, { accountId: defaultAccountId, workspaceId: null });
-  const [defaultOrganizationPrivacy] = await db
-    .select({
-      personalWorkspacesEnabled: schema.organizationPrivacyPreferences.personalWorkspacesEnabled,
-    })
-    .from(schema.organizationPrivacyPreferences)
-    .where(eq(schema.organizationPrivacyPreferences.accountId, defaultAccountId))
-    .limit(1);
-  const defaultPersonalWorkspacesEnabled =
-    defaultOrganizationPrivacy?.personalWorkspacesEnabled ?? true;
-  // Preserve the final scope of the old per-organization loop. These authority
-  // tables are non-RLS: every join is explicitly limited to the subject and the
-  // active organization ids just returned by the canonical membership helper.
-  await setRlsContext(db, {
-    accountId: activeOrganizationMemberships.at(-1)!.organizationId,
-    workspaceId: null,
-  });
   const rows = await db
     .select({
       accountId: schema.managedAccounts.id,
       accountName: schema.managedAccounts.name,
       workspaceId: schema.workspaces.id,
       permissions: schema.workspaceMemberships.permissions,
+      defaultPersonalWorkspacesEnabled: sql<boolean | null>`(
+        select privacy.personal_workspaces_enabled
+        from ${schema.organizationPrivacyPreferences} privacy
+        where privacy.account_id = ${defaultAccountId}::uuid
+      )`,
       preferredDefaultWorkspaceId: sql<string | null>`(
         select legacy.id from ${schema.workspaces} legacy
         join ${schema.managedAccounts} fallback on fallback.id = legacy.account_id
@@ -2575,6 +2568,11 @@ async function projectManagedOrganizationAccess(
       ),
     )
     .orderBy(desc(schema.workspaces.createdAt));
+  // Preserve the final scope of the old per-organization loop.
+  if (finalAccountId !== defaultAccountId) {
+    await setRlsContext(db, { accountId: finalAccountId, workspaceId: null });
+  }
+  const defaultPersonalWorkspacesEnabled = rows[0]?.defaultPersonalWorkspacesEnabled ?? true;
   const workspaceGrants: AccessGrant[] = [];
   for (const organizationMembership of activeOrganizationMemberships) {
     workspaceGrants.push(
@@ -3065,9 +3063,11 @@ export async function getWorkspace(db: Database, workspaceId: string): Promise<W
   if (!row) return null;
   // Bootstrap metadata is not RLS-protected. It does not by itself establish
   // that the complete workspace is readable in the caller's database scope.
-  const control = await findWorkspaceControlProjection(db, row.id);
-  if (!control) return null;
-  return mapWorkspace(row, control, await workspaceKindProjection(db, row));
+  return await withWorkspaceRls(db, row.id, async (scopedDb) => {
+    const control = await readWorkspaceControlProjection(scopedDb, row.id);
+    if (!control) return null;
+    return mapWorkspace(row, control, await readWorkspaceKindProjection(scopedDb, row));
+  });
 }
 
 /**
@@ -3984,6 +3984,7 @@ export async function deleteWorkspace(db: Database, workspaceId: string): Promis
     await tx.execute(
       sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
     );
+    await tx.execute(sql`select opengeni_private.defer_workspace_cascade_foreign_keys()`);
     await tx.delete(schema.workspaces).where(eq(schema.workspaces.id, workspaceId));
   });
 }
@@ -4597,19 +4598,11 @@ export async function deleteWorkspaceIfQuiescent(
           });
           const cascadeStartedAt = performance.now();
           // The activity gate flushes deferred checks with ALL IMMEDIATE.
-          // Workspace deletion owns both ends of these Skill history links;
-          // check them at commit after the complete cascade, not between rows.
-          // Keep all unrelated activity and retention constraints immediate.
-          await tx.execute(sql`
-            SET CONSTRAINTS
-              preference_registry_preferences_superseded_by_fk,
-              preference_registry_events_related_fk,
-              preference_registry_revisions_corrects_revision_id_fkey,
-              preference_registry_preferences_active_revision_fk,
-              preference_registry_events_old_revision_fk,
-              preference_registry_events_new_revision_fk
-            DEFERRED
-          `);
+          // The cascade removes both ends of every reference between the
+          // workspace's own tables; check those at commit, after the complete
+          // cascade, not between rows. Activity and retention constraint
+          // triggers stay immediate.
+          await tx.execute(sql`select opengeni_private.defer_workspace_cascade_foreign_keys()`);
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -89493,50 +89486,62 @@ async function findWorkspaceControlProjection(
   db: Database,
   workspaceId: string,
 ): Promise<Workspace["inferenceControl"] | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [control] = await scopedDb
-      .select()
-      .from(schema.workspaceInferenceControls)
-      .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId))
-      .limit(1);
-    if (!control) return null;
-    return {
-      timer: control.timerId
-        ? {
-            id: control.timerId,
-            action: control.timerAction as "pause" | "resume",
-            dueAt: control.timerDueAt!.toISOString(),
-            pauseForSeconds: control.timerPauseForSeconds,
-          }
-        : null,
-      serverTime: new Date().toISOString(),
-      state: control.workspaceState as "active" | "paused",
-      revision: Number(control.revision),
-      reason: control.reason,
-      changedBy: control.changedBy,
-      changedAt: control.changedAt?.toISOString() ?? null,
-    };
-  });
+  return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    readWorkspaceControlProjection(scopedDb, workspaceId),
+  );
+}
+
+/** The caller owns the workspace scope and its tenancy fence. */
+async function readWorkspaceControlProjection(
+  db: Database,
+  workspaceId: string,
+): Promise<Workspace["inferenceControl"] | null> {
+  const [control] = await db
+    .select()
+    .from(schema.workspaceInferenceControls)
+    .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId))
+    .limit(1);
+  if (!control) return null;
+  return {
+    timer: control.timerId
+      ? {
+          id: control.timerId,
+          action: control.timerAction as "pause" | "resume",
+          dueAt: control.timerDueAt!.toISOString(),
+          pauseForSeconds: control.timerPauseForSeconds,
+        }
+      : null,
+    serverTime: new Date().toISOString(),
+    state: control.workspaceState as "active" | "paused",
+    revision: Number(control.revision),
+    reason: control.reason,
+    changedBy: control.changedBy,
+    changedAt: control.changedAt?.toISOString() ?? null,
+  };
 }
 
 async function workspaceKindProjection(
   db: Database,
   row: Pick<typeof schema.workspaces.$inferSelect, "id" | "accountId">,
 ): Promise<Workspace["kind"]> {
-  return await withRlsContext(
-    db,
-    { accountId: row.accountId, workspaceId: row.id },
-    async (scopedDb) => {
-      const [kind] = await rawRows<{ kind: string }>(
-        scopedDb,
-        sql`select get_workspace_kind(${row.accountId}::uuid, ${row.id}::uuid) as kind`,
-      );
-      if (kind?.kind !== "personal" && kind?.kind !== "shared") {
-        throw new Error(`Workspace ${row.id} has no canonical kind`);
-      }
-      return kind.kind;
-    },
+  return await withRlsContext(db, { accountId: row.accountId, workspaceId: row.id }, (scopedDb) =>
+    readWorkspaceKindProjection(scopedDb, row),
   );
+}
+
+/** The caller owns the workspace scope and its tenancy fence. */
+async function readWorkspaceKindProjection(
+  db: Database,
+  row: Pick<typeof schema.workspaces.$inferSelect, "id" | "accountId">,
+): Promise<Workspace["kind"]> {
+  const [kind] = await rawRows<{ kind: string }>(
+    db,
+    sql`select get_workspace_kind(${row.accountId}::uuid, ${row.id}::uuid) as kind`,
+  );
+  if (kind?.kind !== "personal" && kind?.kind !== "shared") {
+    throw new Error(`Workspace ${row.id} has no canonical kind`);
+  }
+  return kind.kind;
 }
 
 function mapWorkspace(

@@ -1,5 +1,24 @@
 # @opengeni/browserd
 
+## 0.4.7
+
+### Patch Changes
+
+- 442354f: A `computer_act` batch on macOS and in Linux sandboxes can now cross a page or form change. A later action whose role, label or text locator names an element the batch's observation does not show yet is sent to CUA by role and name; CUA finds it when that step runs, after waiting up to 10 seconds for it to appear and enable. Element-targeted actions after it are found by name too (an exact name for a ref), since CUA's lookup retires the observation's tokens. CUA is pinned to a revision whose lookups and checks accept `exact`. The tool description tells agents to do each record of a repeated procedure in one batch.
+  - @opengeni/contracts@5.1.0
+  - @opengeni/interaction@5.1.0
+
+## 0.4.6
+
+### Patch Changes
+
+- Updated dependencies [487bd43]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/contracts@5.0.0
+  - @opengeni/interaction@5.0.0
+
 ## 0.4.5
 
 ### Patch Changes

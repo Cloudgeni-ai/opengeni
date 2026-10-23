@@ -72,4 +72,37 @@ describe("streamWorkspaceControlEvents", () => {
     expect((await pending).value?.sequence).toBe(2);
     expect(states).toEqual(["connecting", "live"]);
   });
+
+  test("a cursor-only frame moves the cursor past events this reader cannot see", async () => {
+    const openedAfter: number[] = [];
+    const values: WorkspaceControlEvent[] = [];
+    const generator = streamWorkspaceControlEvents(
+      {
+        openStream: async (after) => {
+          openedAfter.push(after);
+          const frame =
+            after === 0
+              ? `event: workspace.control.cursor\ndata: ${JSON.stringify({
+                  type: "workspace.control.cursor",
+                  workspaceId: "00000000-0000-4000-8000-000000000002",
+                  sequence: 9,
+                })}\n\n`
+              : `id: 10\nevent: workspace.control.changed\ndata: ${JSON.stringify(event(10))}\n\n`;
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(frame));
+              controller.close();
+            },
+          });
+        },
+      },
+      { after: 0, reconnectDelayMs: 0 },
+    );
+    for await (const value of generator) {
+      values.push(value);
+      break;
+    }
+    expect(openedAfter).toEqual([0, 9]);
+    expect(values.map((value) => value.sequence)).toEqual([10]);
+  });
 });

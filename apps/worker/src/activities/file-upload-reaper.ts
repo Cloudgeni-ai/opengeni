@@ -233,5 +233,27 @@ export function createFileUploadReaperActivities(
     return { claimed: claims.length, started, failed };
   }
 
-  return { reapExpiredFileUploads, recoverVideoGenerationWorkflows, recoverSessionTitleWorkflows };
+  /** Deletes staged transient objects once their deferred deadline arrives.
+   * Deleting an object that is already gone succeeds, so a request that
+   * finished and removed its own objects early makes this a no-op. */
+  async function deleteTransientObjects(input: {
+    workspaceId: string;
+    objectKeys: string[];
+  }): Promise<{ deleted: number }> {
+    const { objectStorage } = await services();
+    if (!objectStorage) return { deleted: 0 };
+    const prefix = `workspaces/${input.workspaceId}/`;
+    const keys = input.objectKeys.filter((key) => key.startsWith(prefix));
+    for (const key of keys) {
+      await deleteObject(objectStorage, key);
+    }
+    return { deleted: keys.length };
+  }
+
+  return {
+    reapExpiredFileUploads,
+    recoverVideoGenerationWorkflows,
+    recoverSessionTitleWorkflows,
+    deleteTransientObjects,
+  };
 }

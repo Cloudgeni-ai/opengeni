@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Opengeni self-hosted agent installer — Windows (PowerShell 5.1+ / 7+).
+  Opengeni Runner installer — Windows (PowerShell 5.1+ / 7+).
 
 .DESCRIPTION
   irm https://app.opengeni.ai/install.ps1 | iex
@@ -571,7 +571,7 @@ function Start-BackgroundAgent($bin) {
     }
   } catch { }
   Log "could not install a background service on this host; connection is saved"
-  Log "start the foreground agent with: $bin run"
+  Log "run Opengeni Runner in the foreground with: $bin run"
 }
 
 function Complete-Install($bin) {
@@ -600,7 +600,7 @@ function Complete-Install($bin) {
   # paths/origins containing PowerShell's single-quote character.
   $quotedBin = ([string]$bin).Replace("'", "''")
   $quotedApiUrl = ([string]$script:ApiUrl).Replace("'", "''")
-  Write-Host "opengeni-agent installed at: $bin"
+  Write-Host "Opengeni Runner installed at: $bin"
   Write-Host ""
   Write-Host "Next: & '$quotedBin' --api-url '$quotedApiUrl' connect; if (`$?) { & '$quotedBin' start }"
   Write-Host "Use '$bin run' only when you explicitly want foreground mode."

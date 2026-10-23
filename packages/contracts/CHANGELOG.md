@@ -1,5 +1,19 @@
 # @opengeni/contracts
 
+## 5.1.2
+
+## 5.0.2
+
+### Minor Changes
+
+- 487bd43: External users have an inbox. A product's own users (external actors resolved through its organization key) now receive their sessions' questions, approvals, paused goals and agent notifications in an Opengeni inbox, as members do, and `notify_user` delivers to them instead of reporting `no_human_recipient`. `createSessionProxyHandler` relays the user's own inbox: `GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` limited to the resolved workspace, and `GET`/`PUT /v1/inbox/settings`, so the stock app shows it behind a product's sign-in. `PATCH /v1/inbox/items/{id}` accepts `workspaceId` to act only on an item in that workspace. Phone pushes still need an Opengeni native-app sign-in.
+- 217ed52: Shared chats on a member's personal machine now show one clear notice when another member's messages or worker results are waiting, naming whose work waits and why. The machine owner can continue with that work in one click; other members see that it waits for the owner before they send.
+
+### Patch Changes
+
+- a9d20b3: Pause chat work atomically before personal archiving, require confirmation for active shared work, and retain explicit hide-only behavior for read-only and embedded proxy clients. Restore does not resume work. Keep sidebar survivors stable across archive completion and overlap independent session response reads without changing transaction or authorization boundaries.
+- 6d29c01: Voice calls on WebSocket voice models (Eleven Realtime, SuperGrok and AI Gateway) now start knowing the chat's earlier conversation: it is part of the voice session's instructions, as for hosted GPT Live, instead of messages sent once the socket opens, which Eleven Realtime kept unread. Progress from the agent is sent to the voice model as one update when the person starts speaking or before a requested reply, instead of one message per streamed fragment, so Eleven Realtime no longer rejects it. The connect response's `initialItems` is now always empty and deprecated.
+
 ## 4.8.0
 
 ### Patch Changes

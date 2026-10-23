@@ -31,10 +31,11 @@ UI's decision.
 | Layer | Owner | Mechanism |
 | --- | --- | --- |
 | Identity | Product | `resolve(request)` returns the user (and tenant or workspace); every call runs through `asUser(user, { source })`, never the key's own authority. |
-| Scope | Relay | One workspace per request. Inside `/v1/workspaces/{ws}` every route and method is forwarded; a path naming another workspace is a 403. Outside it only the bootstrap reads answer, scoped to `{ws}`: `GET /v1/workspaces`, `GET /v1/access/me` (the user's effective grant there), `GET /v1/config/client`. |
+| Scope | Relay | One workspace per request. Inside `/v1/workspaces/{ws}` every route and method is forwarded; a path naming another workspace is a 403. Outside it only the bootstrap reads answer, scoped to `{ws}`: `GET /v1/workspaces`, `GET /v1/access/me` (the user's effective grant there), `GET /v1/config/client`; and the user's own inbox: `GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` with `workspaceId={ws}`, `GET`/`PUT /v1/inbox/settings`. |
 | Authority | Opengeni | An `asUser` request holds only the permissions both the organization key and the user's membership hold. Products narrow it with the key's permissions and workspace scope, and per member with `addExternalWorkspaceMember` / `updateExternalWorkspaceMember`. |
-| Server-owned choices | Product | `createSession` (the chat's agent, tools, MCP servers, Skills, instructions and model policy; the relay then refuses the routes that would change them later), `beforeForwardMessage` (model context and MCP credentials per message), `toolServer`, `modelSelection`, `visitorUploads`, `chats` defaults. |
-| Explicit closures | Product | `refuse(route, context)` keeps routes closed that Opengeni would allow; `authorizeSession` adds a product check for every chat a request names, by path or `x-opengeni-session-id`. |
+| Server-owned choices | Product | `createSession` (the chat's agent, tools, MCP servers, Skills, instructions and model policy; the relay then refuses the routes that would change them later), `beforeForwardMessage` (admission, model context and MCP credentials for every action that starts model work), `toolServer`, `modelSelection`, `visitorUploads`, `chats` defaults. |
+| Explicit closures | Product | `refuse(route, context)` keeps routes closed that Opengeni would allow; `authorizeSession` adds a product check for every chat a request names, by path or `x-opengeni-session-id`. Both see the route (`context.route`). |
+| Product records | Product | `afterForward(route, response, context)` sees Opengeni's answer to every forwarded request before the browser does, to record what the product keeps beside Opengeni (who owns an uploaded file, a new chat's id, a chat's last activity), and may answer the browser instead. |
 | Presentation | Product UI | Component props (`newChat`, `listProps`, `attachments`, `voiceInput`, `realtimeVoice`, `modelPicker`, `renderInteractiveBlock`) and `SessionApp` presets and `features` choose surfaces and branding. Stock components also hide controls the user's grant does not allow. |
 
 The same requests the Opengeni web app makes therefore work through the relay,
@@ -42,6 +43,43 @@ so any client built on `@opengeni/sdk` and `@opengeni/react` (web, desktop,
 Office, mobile) works behind a product's sign-in without relay changes. New
 Opengeni features reach embedded users when the permission model admits them,
 not when the relay learns a route.
+
+## Admitting work
+
+`beforeForwardMessage` is the one place a product admits model work (billing,
+rate limits, its own entitlement checks) and adds per-message context, so it
+runs for every browser action that starts the agent working:
+
+| `delivery` | Route | Carries |
+| --- | --- | --- |
+| `create` | `POST sessions` | the first message, unless `startMode: "realtime"` |
+| `send` | `POST sessions/{id}/events` (`user.message`) | a message |
+| `steer` | `POST sessions/{id}/steer` | a message |
+| `submit` | `POST sessions/{id}/composer-draft/submit` | the saved draft, sent or steered |
+| `approval` | `POST sessions/{id}/events` (`user.approvalDecision`) | a decision on a tool call |
+| `answer` | `POST sessions/{id}/events` (`user.humanInputResponse`) | a reply to the agent's question |
+| `resume` | `POST sessions/{id}/control` with `action: "resume"` | nothing |
+| `retry` | `POST sessions/{id}/retry` | nothing (the failed turn runs again) |
+| `queue-steer` | `POST sessions/{id}/queue/{turnId}/steer` | nothing (a queued message joins the running turn) |
+| `realtime` | voice call start and transcript saves | spoken messages |
+
+The input names the browser's action key (`clientEventId`, or
+`idempotencyKey` on create). Opengeni accepts an action once per key, so the
+product's own bookkeeping keyed the same way stays correct when the browser,
+or the relay, sends the action again. `modelContext` applies to the actions
+that carry a message; MCP credential rotations ride in the message body, or
+for actions without one are applied to the chat just before forwarding.
+
+The browser may attach its own `modelContext` to a message or a voice entry
+(the page, record or selection it was sent from). The hook receives it as
+`browserContext`, an unverified claim, and decides what the model gets: the
+claim as sent (by returning nothing for it), a replacement such as the
+validated form the product accepts, nothing (`null`), or a refusal of the
+action. Live voice calls the hook once for each finalized transcript or spoken
+request, keyed by the entry's `operationId`, because each entry becomes its
+own message and may come from a different page.
+Pausing, cancelling and other changes start no work and are not admitted
+here; `authorizeSession` and `refuse` cover them.
 
 ## Why not the alternatives
 
@@ -64,8 +102,14 @@ not when the relay learns a route.
   separator (`/`, `\`) and control-character segments are refused, and a chat
   id must be an opaque token before `authorizeSession` sees it.
 - Methods: GET, HEAD, POST, PUT, PATCH, DELETE. Request bodies stream through;
-  routes the relay rewrites (chat create, messages, composer draft, realtime
-  begin and sync) are read up to `maxBodyBytes` and re-serialized.
+  routes the relay reads (chat create, messages, approvals and answers,
+  composer draft, control, retry, queue steer, realtime begin and sync) are
+  read up to `maxBodyBytes` and re-serialized.
+- Unknown outcomes: when a body the relay re-serialized carries an action key
+  and the hop to Opengeni fails (the connection drops, or Opengeni answers 408
+  or 5xx), the relay sends it once more. Opengeni answers a repeated key with
+  the first outcome, so the action is neither lost nor doubled. Streamed
+  bodies and actions without a key are never resent.
 - Request headers forwarded: `Accept`, `Content-Type`, `Range`,
   `Last-Event-ID`, conditional headers, `x-opengeni-session-id`,
   `x-opengeni-correlation-id` and the chunked-upload headers. Nothing else
@@ -118,10 +162,18 @@ The permission set automatic membership grants (workspace read, session
 create, read and control, file upload and read, MCP attachment) therefore
 becomes the default product surface, and its review matters more than before.
 
+External users have an inbox. Opengeni's person rule (owner, else who started
+the session, else the schedule's owner) counts an `external_user:` subject as a
+person, so their questions, approvals, paused goals and agent notifications
+reach their inbox, and `notify_user` delivers to them instead of recording
+`undeliveredReason: "no_human_recipient"`. The API serves that inbox only to
+the external actor the organization key resolved (not to a linked native
+identity, whose person reads it by signing in to Opengeni), and the relay
+limits list and item updates to `{ws}`. Phone pushes need a native-app
+sign-in, so they do not reach external users.
+
 ## Follow-ups
 
-- Inbox and notifications for external users: the inbox routes have no
-  subject for an external actor today, so products build their own.
 - Agent setup stored as Opengeni data (workspace agent profiles) instead of
   recomputed by `createSession` on every create.
 - Role presets for product members, so a product picks a role instead of

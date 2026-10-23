@@ -208,6 +208,7 @@ import {
   type BrowserDownloadListResponse,
   type BrowserDownloadSaveRequest,
   type BrowserDownloadSaveResponse,
+  type BrowserRecordingSaveProgress,
   type BrowserRecordingSaveRequest,
   type BrowserRecordingSaveResponse,
   type BrowserRecordingSummary,
@@ -4706,7 +4707,10 @@ export class OpenGeniClient {
   }
 
   /** Stops a recording and saves it as an MP4 plus an action log in the
-   * browser's source session workspace; the MP4 is also a retained artifact. */
+   * browser's source session workspace; the MP4 is also a retained artifact.
+   * While the recording is still moving off a slow browser host, the request
+   * is repeated with the same operationId until the save completes or
+   * `options.signal` aborts. */
   async saveBrowserRecording(
     workspaceId: string,
     browserSessionId: string,
@@ -4714,13 +4718,19 @@ export class OpenGeniClient {
     request: BrowserRecordingSaveRequest,
     options: OpenGeniRequestOptions = {},
   ): Promise<BrowserRecordingSaveResponse> {
-    return await this.requestJson<BrowserRecordingSaveResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/recordings/${encodeURIComponent(recordingId)}/save`,
-      request,
-      {},
-      options,
-    );
+    for (;;) {
+      const response = await this.requestJson<
+        BrowserRecordingSaveResponse | BrowserRecordingSaveProgress
+      >(
+        "POST",
+        `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/recordings/${encodeURIComponent(recordingId)}/save`,
+        request,
+        {},
+        options,
+      );
+      if (!("state" in response)) return response;
+      await abortableReadRetryDelay(response.retryAfterMs, options.signal);
+    }
   }
 
   async createBrowserSession(

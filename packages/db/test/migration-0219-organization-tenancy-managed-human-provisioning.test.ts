@@ -451,13 +451,13 @@ describe("migration 0219 managed-human organization provisioning", () => {
     } finally {
       driver.options.debug = previousDebug;
     }
-    // Personal-workspace policy adds one default-org scope statement and one
-    // privacy read. Neither it nor the grant projection scales with org count.
-    expect(singleOrganizationQueries).toHaveLength(8);
-    expect(queries).toHaveLength(singleOrganizationQueries.length);
+    // Personal-workspace policy is part of the bounded projection read.
+    // Only the final organization scope switch adds a statement.
+    expect(singleOrganizationQueries).toHaveLength(6);
+    expect(queries).toHaveLength(singleOrganizationQueries.length + 1);
     for (const statements of [singleOrganizationQueries, queries]) {
       expect(
-        statements.filter((query) => query.includes('from "organization_privacy_preferences"')),
+        statements.filter((query) => query.includes("organization_privacy_preferences")),
       ).toHaveLength(1);
       expect(
         statements.filter((query) => query.includes('left join "workspace_memberships"')),

@@ -45,13 +45,22 @@ export type WorkspaceIdResolverOptions = {
   /** Workspace display name; receives the tenant id, or the user id for a per-user workspace. */
   workspaceName?: ((tenant: string) => string) | undefined;
   /**
-   * Per-user workspaces only (user isolation): permissions for the one member
-   * this resolver adds explicitly, its owner. Replaces the defaults: workspace
-   * read, session create/read/control (including sending messages), file
-   * upload/read, and attaching the host's per-session MCP servers. No admin
-   * permissions are granted by default. Tenant workspaces rely on the API,
-   * which adds a missing member with those defaults on their first request.
-   * Existing grants are never changed here; change them with
+   * The permissions of the members this resolver adds, so the product chooses
+   * its users' role instead of patching grants afterwards.
+   *
+   * A per-user workspace (user isolation) always gets its one owner from this
+   * resolver, with these permissions or the defaults: workspace read, session
+   * create/read/control (including sending messages), file upload/read, and
+   * attaching the host's per-session MCP servers. No admin permissions are
+   * granted by default.
+   *
+   * A tenant workspace's users are added here only when this is set: a tenant
+   * resolution that names a user adds that user with exactly these
+   * permissions before their first request. Without it, the API adds a
+   * missing member with the defaults on their first request.
+   *
+   * Existing grants are never changed here, including members the API added
+   * earlier with the defaults; change them with
    * `updateExternalWorkspaceMember`. The organization API key must also allow
    * the selected permissions.
    */
@@ -62,20 +71,57 @@ export type WorkspaceIdResolverOptions = {
  * Server-only workspace resolution using external workspace provisioning.
  * Workspaces are created on first use and cached. A tenant workspace's members
  * are added by the API on their first `asUser` request (the organization key
- * needs `members:manage`). A per-user workspace stays single-user: the API
- * never auto-admits anyone there, and this resolver adds its owner with a
- * stable onboarding key, so retries never restore a revoked grant.
+ * needs `members:manage`), or by this resolver with `memberPermissions` when
+ * that is set. A per-user workspace stays single-user: the API never
+ * auto-admits anyone there, and this resolver adds its owner. Every explicit
+ * grant uses a stable onboarding key, so retries never restore a revoked
+ * grant.
  */
 export function createWorkspaceIdResolver(
   client: Pick<OpenGeniEmbeddingClient, "ensureWorkspace" | "addExternalWorkspaceMember">,
   options: WorkspaceIdResolverOptions,
 ): (target: WorkspaceIdTarget, resolution: WorkspaceIdOptions) => Promise<string> {
   const memberPermissions = [...(options.memberPermissions ?? CONVERSATION_PERMISSIONS)];
+  const tenantMembers = options.memberPermissions !== undefined;
   const cache = new Map<string, Promise<string>>();
+  const members = new Map<string, Promise<void>>();
   const organizationId = async () =>
     typeof options.organizationId === "function"
       ? await options.organizationId()
       : options.organizationId;
+  const remember = <T>(map: Map<string, Promise<T>>, key: string, pending: Promise<T>) => {
+    pending.catch(() => {
+      if (map.get(key) === pending) map.delete(key);
+    });
+    if (map.size >= 1_000) map.delete(map.keys().next().value!);
+    map.set(key, pending);
+    return pending;
+  };
+  const addMember = async (workspaceId: string, source: string, user: string) => {
+    try {
+      await client.addExternalWorkspaceMember(workspaceId, {
+        identity: { source, externalId: user },
+        permissions: [...memberPermissions],
+        operationId: await uuidV5(
+          JSON.stringify(["member", workspaceId, source, user]),
+          ISOLATION_NAMESPACE,
+        ),
+      });
+    } catch (error) {
+      // The member may exist already (added by the API on an earlier first
+      // request, or by this key with other permissions), or the grant may have
+      // been cancelled. A definitive conflict must never mint a new key or
+      // update access. Return only the address: every asUser operation still
+      // checks the live membership, including reduced or withdrawn permissions.
+      if (
+        !(error instanceof OpenGeniApiError) ||
+        error.status !== 409 ||
+        error.code !== "conflict" ||
+        error.outcomeUnknown
+      )
+        throw error;
+    }
+  };
   return async (target, resolution) => {
     const isolated = resolution.isolation === "user";
     if (!isolated && !target.tenant) throw new TypeError("workspaceIdFor requires a tenant.");
@@ -94,55 +140,33 @@ export function createWorkspaceIdResolver(
           isolated ? target.user : null,
         ])
       : JSON.stringify(["user", options.source, source, target.user]);
-    let pending = cache.get(key);
-    if (!pending) {
-      pending = (async () => {
-        const productSource = options.source.trim();
-        const isolatedSource = `opengeni-sdk:user-isolation:${await uuidV5(productSource, ISOLATION_NAMESPACE)}`;
-        const label = target.tenant ?? target.user!;
-        const { workspace } = await client.ensureWorkspace({
-          accountId: await organizationId(),
-          externalSource: isolated
-            ? isolatedSource === productSource
-              ? `${isolatedSource}:user`
-              : isolatedSource
-            : options.source,
-          externalId: isolated ? await uuidV5(key, ISOLATION_NAMESPACE) : target.tenant!,
-          name: options.workspaceName?.(label) ?? label,
-        });
-        if (isolated) {
-          try {
-            await client.addExternalWorkspaceMember(workspace.id, {
-              identity: { source, externalId: target.user! },
-              permissions: [...memberPermissions],
-              operationId: await uuidV5(
-                JSON.stringify(["member", workspace.id, source, target.user]),
-                ISOLATION_NAMESPACE,
-              ),
-            });
-          } catch (error) {
-            // Defaults/custom permissions may have changed since this stable
-            // onboarding key committed, or the grant may have been cancelled.
-            // A definitive conflict must never mint a new key or update access.
-            // Return only the address: every asUser operation still checks the
-            // live membership, including reduced or withdrawn permissions.
-            if (
-              !(error instanceof OpenGeniApiError) ||
-              error.status !== 409 ||
-              error.code !== "conflict" ||
-              error.outcomeUnknown
-            )
-              throw error;
-          }
-        }
-        return workspace.id;
-      })();
-      pending.catch(() => {
-        if (cache.get(key) === pending) cache.delete(key);
-      });
-      if (cache.size >= 1_000) cache.delete(cache.keys().next().value!);
-      cache.set(key, pending);
+    const workspaceId = await (cache.get(key) ??
+      remember(
+        cache,
+        key,
+        (async () => {
+          const productSource = options.source.trim();
+          const isolatedSource = `opengeni-sdk:user-isolation:${await uuidV5(productSource, ISOLATION_NAMESPACE)}`;
+          const label = target.tenant ?? target.user!;
+          const { workspace } = await client.ensureWorkspace({
+            accountId: await organizationId(),
+            externalSource: isolated
+              ? isolatedSource === productSource
+                ? `${isolatedSource}:user`
+                : isolatedSource
+              : options.source,
+            externalId: isolated ? await uuidV5(key, ISOLATION_NAMESPACE) : target.tenant!,
+            name: options.workspaceName?.(label) ?? label,
+          });
+          if (isolated) await addMember(workspace.id, source, target.user!);
+          return workspace.id;
+        })(),
+      ));
+    if (!isolated && tenantMembers && target.user) {
+      const memberKey = JSON.stringify([workspaceId, source, target.user]);
+      await (members.get(memberKey) ??
+        remember(members, memberKey, addMember(workspaceId, source, target.user)));
     }
-    return await pending;
+    return workspaceId;
   };
 }

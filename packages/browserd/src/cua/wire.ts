@@ -106,6 +106,9 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // Background keys refused before any was sent: another window of the app
   // (a sheet, a dialog) has the keyboard focus.
   window_not_key: "invalid_action",
+  // A value write the control did not apply: it holds what it held before
+  // (macOS set_value, effect not_applied).
+  write_not_applied: "driver_failed",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can
@@ -315,7 +318,8 @@ export async function callDesktop(
     effect === "partial" ||
     effect === "suspected_noop"
   ) {
-    const refused = effect === "refused";
+    // A write CUA reports as not applied changed nothing, like a refusal.
+    const refused = effect === "refused" || effect === "not_applied";
     const code = refusal.success
       ? refusal.data.code
       : error.success

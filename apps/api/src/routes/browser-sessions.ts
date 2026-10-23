@@ -28,6 +28,7 @@ import {
   BrowserDownload,
   BrowserDownloadSaveRequest,
   BrowserDownloadSaveResponse,
+  BrowserRecordingSaveProgress,
   BrowserRecordingSaveRequest,
   BrowserRecordingSaveResponse,
   BrowserRecordingStartRequest,
@@ -270,6 +271,11 @@ import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandb
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import { BrowserRecordingVideoError, encodeBrowserRecording } from "../browser-recording-video";
 import {
+  BROWSER_RECORDING_SAVE_RETRY_AFTER_MS,
+  stageBrowserRecordingBundle,
+} from "../browser-recording-save";
+import {
+  recordSourcePlacementMove,
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
@@ -300,6 +306,9 @@ type BrowserPlacement = {
   session: BrowserControlPlacementSession;
   lease: LeaseSnapshot | null;
   transport: PlacementBrowserTransport;
+  /** Where an attached device's Chrome profile is stored: its machine's
+   *  enrollment workspace, which can be another workspace. */
+  attachedDeviceWorkspaceId?: string;
 };
 
 export function registerBrowserSessionRoutes(
@@ -463,6 +472,7 @@ export function registerBrowserSessionRoutes(
           sourceSession,
           grant,
           existing?.session.placement ?? request.placement ?? null,
+          existing?.deviceWorkspaceId ?? null,
           existing?.session.controller?.placementInstanceId ?? null,
           "browser.create",
           context.req.raw.signal,
@@ -472,7 +482,13 @@ export function registerBrowserSessionRoutes(
             if (!prepared) {
               prepared = await prepareBrowserSessionCreate(
                 deps.db,
-                browserCreateInput(grant, workspaceId, request, placement.placement),
+                browserCreateInput(
+                  grant,
+                  workspaceId,
+                  request,
+                  placement.placement,
+                  placement.attachedDeviceWorkspaceId,
+                ),
               );
             }
             stages.mark("prepare");
@@ -1259,7 +1275,9 @@ export function registerBrowserSessionRoutes(
   /** Stops a recording and saves it in the source session's workspace as an
    * MP4 plus its action log, then publishes the MP4 so it plays in the chat.
    * The browser host only uploads its frame bundle; the video is encoded here,
-   * so no browser host needs a video encoder. */
+   * so no browser host needs a video encoder. A bundle still uploading over a
+   * slow link answers 202 with `retryAfterMs`; repeating the request with the
+   * same operationId joins that upload instead of starting another. */
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId/save",
     async (context) => {
@@ -1273,63 +1291,57 @@ export function registerBrowserSessionRoutes(
       if (!objectStorage) {
         throw new HTTPException(503, { message: "object storage is not configured" });
       }
-      const prefix = `workspaces/${workspaceId}/browser-recordings/${recordingId}/${request.operationId}`;
-      const bundleKey = `${prefix}/bundle`;
-      const temporaryKeys = [bundleKey];
+      const recordingPrefix = `workspaces/${workspaceId}/browser-recordings/${recordingId}`;
+      // One bundle object per recording: every save attempt uploads to it, so
+      // a retry joins the upload already running instead of starting over.
+      const bundleKey = `${recordingPrefix}/bundle`;
+      const prefix = `${recordingPrefix}/${request.operationId}`;
+      const outputNames = ["video.mp4", "actions.json"] as const;
+      const temporaryKeys = outputNames.map((name) => `${prefix}/${name}`);
+      // Staged objects are deleted on a durable deadline even if no request
+      // finishes; without that, the save waits for the whole upload instead.
+      const scheduleDeletion = deps.workflowClient.scheduleTransientObjectDeletion;
+      let keepBundle = scheduleDeletion !== undefined;
       try {
-        const { recording, sourceSessionId } = await withActiveBrowserController(
+        const staged = await withActiveBrowserController(
           context,
           grant,
           workspaceId,
           browserSessionId,
           "session.control",
           "browser.control",
-          async ({ sessionClient, record }) => {
-            const stopped = await sessionClient.stopRecording(recordingId);
-            if (!stopped.bundle) {
-              throw new InteractionResourceStateError("The recording has nothing to save");
-            }
-            if (stopped.bundle.sizeBytes > objectStorage.maxSinglePutSizeBytes) {
-              throw new HTTPException(413, {
-                message: `browser recording exceeds single PUT limit of ${objectStorage.maxSinglePutSizeBytes} bytes`,
-              });
-            }
-            const put = await objectStorage.createPutUrl({
-              key: bundleKey,
-              contentType: "application/octet-stream",
-              sha256: stopped.bundle.sha256,
-              expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
-              audience: signedUrlAudienceForPlacement(record.session.placement),
-            });
-            const receipt = await sessionClient.exportRecording({
+          async ({ sessionClient, record }) => ({
+            sourceSessionId: record.sourceSessionId,
+            ...(await stageBrowserRecordingBundle({
+              sessionClient,
+              objectStorage,
               recordingId,
-              upload: {
-                url: put.url,
-                requiredHeaders: put.requiredHeaders,
-                expiresAt: put.expiresAt.toISOString(),
-              },
-            });
-            if (
-              receipt.sizeBytes !== stopped.bundle.sizeBytes ||
-              receipt.sha256 !== stopped.bundle.sha256
-            ) {
-              throw new BrowserControlProtocolError(
-                "browser controller returned another recording export",
-              );
-            }
-            return { recording: stopped, sourceSessionId: record.sourceSessionId };
-          },
+              bundleKey,
+              stagedKeys: temporaryKeys,
+              audience: signedUrlAudienceForPlacement(record.session.placement),
+              uploadTtlSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+              scheduleDeletion:
+                scheduleDeletion &&
+                (async (objectKeys, deleteAfter) =>
+                  await scheduleDeletion({ workspaceId, objectKeys, deleteAfter })),
+            })),
+          }),
         );
+        const { recording, sourceSessionId } = staged;
+        if (!staged.bundle) {
+          return context.json(
+            BrowserRecordingSaveProgress.parse({
+              state: "uploading",
+              recording,
+              retryAfterMs: BROWSER_RECORDING_SAVE_RETRY_AFTER_MS,
+            }),
+            202,
+          );
+        }
         await authorizeSourceSession(deps, grant, sourceSessionId, "session.control");
         const sourceSession = await requireSourceSession(deps, workspaceId, sourceSessionId);
-        const bundle = await retryWhileMissing(
-          async () => await objectStorage.getObjectBytes(bundleKey),
-        );
-        if (!bundle) {
-          throw new HTTPException(503, { message: "browser recording bundle is not available" });
-        }
         const encoded = await encodeBrowserRecording({
-          bundle: bundle.bytes,
+          bundle: staged.bundle,
           ffmpegPath: deps.settings.voiceInputFfmpegPath,
           signal: context.req.raw.signal,
         });
@@ -1356,7 +1368,6 @@ export function registerBrowserSessionRoutes(
           quantity: outputs.reduce((total, output) => total + output.bytes.byteLength, 0),
         });
         for (const output of outputs) {
-          temporaryKeys.push(output.key);
           await objectStorage.putObject({
             key: output.key,
             contentType: output.contentType,
@@ -1408,6 +1419,9 @@ export function registerBrowserSessionRoutes(
           path: videoPath,
           signal: context.req.raw.signal,
         });
+        // Saved: the bundle has no further use. Until then it stays for a
+        // retry, and its scheduled deletion removes it if none comes.
+        keepBundle = false;
         return context.json(
           BrowserRecordingSaveResponse.parse({
             recording,
@@ -1433,7 +1447,11 @@ export function registerBrowserSessionRoutes(
         }
         throw browserRouteError(error);
       } finally {
-        await Promise.allSettled(temporaryKeys.map((key) => objectStorage.deleteObject(key)));
+        await Promise.allSettled(
+          [...temporaryKeys, ...(keepBundle ? [] : [bundleKey])].map((key) =>
+            objectStorage.deleteObject(key),
+          ),
+        );
       }
     },
   );
@@ -2673,6 +2691,7 @@ export function registerBrowserSessionRoutes(
             sourceSession,
             grant,
             prepared.session.placement,
+            before.deviceWorkspaceId,
             null,
             "browser.resume",
             context.req.raw.signal,
@@ -3026,6 +3045,7 @@ export function registerBrowserSessionRoutes(
       sourceSession,
       grant,
       record.session.placement,
+      record.deviceWorkspaceId,
       retained?.placementInstanceId ?? null,
       "browser.control",
       context.req.raw.signal,
@@ -3241,6 +3261,24 @@ export function registerBrowserSessionRoutes(
           browserSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        // Still live on a machine its task has since moved away from: record
+        // the move now, so the retirement below ends it there in this call.
+        if (
+          before.session.lifecycle !== "lost" &&
+          before.session.controller &&
+          before.session.placement?.kind === "connected_machine" &&
+          (await recordSourcePlacementMove(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            connectedSandboxId: before.session.placement.sandboxId,
+          }))
+        ) {
+          before = await getBrowserSessionControlRecord(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+          });
+        }
         if (
           before.session.lifecycle === "lost" &&
           before.session.failureCode === "source_placement_changed" &&
@@ -3264,6 +3302,13 @@ export function registerBrowserSessionRoutes(
               "This browser still runs on the Connected Machine its task moved away from, and that machine could not stop it now. Try again when the machine is online.",
             );
           }
+          // The machine is reachable again: end anything else this task left
+          // on it too, without making this request wait.
+          void retireSourceFormerPlacements(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            origin: null,
+          });
           before = await getBrowserSessionControlRecord(deps.db, {
             accountId: grant.accountId,
             workspaceId,
@@ -3316,7 +3361,13 @@ export function registerBrowserSessionRoutes(
         // completing under the bound generation fences that controller off.
         if (
           !binding ||
-          (await browserControllerGone(grant, workspaceId, record.session.placement))
+          (await browserControllerGone(
+            grant,
+            workspaceId,
+            record.session.placement,
+            record.deviceWorkspaceId,
+            binding.placementInstanceId,
+          ))
         ) {
           const completed = await completeBrowserSessionEnd(deps.db, {
             accountId: grant.accountId,
@@ -3342,6 +3393,7 @@ export function registerBrowserSessionRoutes(
           sourceSession,
           grant,
           record.session.placement,
+          record.deviceWorkspaceId,
           binding.placementInstanceId,
           "browser.end",
           context.req.raw.signal,
@@ -3637,6 +3689,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         "browser.suspend",
         context.req.raw.signal,
@@ -3818,6 +3871,9 @@ export function registerBrowserSessionRoutes(
     sourceSession: Session,
     grant: AccessGrant,
     expectedPlacement: InteractionPlacement | null,
+    /** An existing session's attached profile workspace, which pins the
+     *  profile copy its controller check uses. */
+    expectedDeviceWorkspaceId: string | null,
     expectedPlacementInstanceId: string | null,
     operation: ChannelAOperation,
     waitSignal: AbortSignal,
@@ -3831,6 +3887,7 @@ export function registerBrowserSessionRoutes(
       const device = await getAttachedBrowserDevice(deps.db, {
         ...viewer,
         deviceId: expectedPlacement.deviceId,
+        deviceWorkspaceId: expectedDeviceWorkspaceId,
       });
       if (device.state !== "connected") {
         recordAttachedBrowserUnavailable(deps.observability, "disconnected");
@@ -3907,6 +3964,7 @@ export function registerBrowserSessionRoutes(
           browserName: device.browserName,
           browserVersion: device.browserVersion,
         },
+        attachedDeviceWorkspaceId: device.workspaceId,
       });
     }
     const runWithChannelA =
@@ -4499,6 +4557,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         channelOperation,
         context.req.raw.signal,
@@ -4583,12 +4642,15 @@ export function registerBrowserSessionRoutes(
     );
   }
 
-  /** See `interactionControllerGone`: a removed machine or a disconnected
-   * Chrome device; a managed browser on a machine that is only offline waits. */
+  /** See `interactionControllerGone`: a removed machine, or a Chrome profile
+   * that is disconnected, restarted, gone or no longer reachable here; a
+   * managed browser on a machine that is only offline waits. */
   async function browserControllerGone(
     grant: AccessGrant,
     workspaceId: string,
     placement: InteractionPlacement | null,
+    deviceWorkspaceId: string | null,
+    placementInstanceId: string | null,
   ): Promise<boolean> {
     if (placement?.kind !== "connected_machine" && placement?.kind !== "attached_device") {
       return false;
@@ -4596,7 +4658,9 @@ export function registerBrowserSessionRoutes(
     return await interactionControllerGone(
       deps.db,
       await attachedBrowserViewer(deps, grant, workspaceId),
-      placement,
+      placement.kind === "attached_device"
+        ? { ...placement, deviceWorkspaceId, placementInstanceId }
+        : placement,
     );
   }
 
@@ -4815,6 +4879,7 @@ export function registerBrowserSessionRoutes(
       sourceSession,
       grant,
       record.session.placement,
+      record.deviceWorkspaceId,
       retained?.placementInstanceId ?? null,
       "browser.resume",
       context.req.raw.signal,
@@ -4997,6 +5062,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         "browser.resume",
         context.req.raw.signal,
@@ -5055,6 +5121,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         "browser.suspend",
         context.req.raw.signal,
@@ -5106,6 +5173,7 @@ export function browserCreateInput(
   workspaceId: string,
   request: CreateBrowserSessionRequestValue,
   placement: InteractionPlacement,
+  attachedDeviceWorkspaceId?: string,
 ) {
   if (request.storageMode === "ephemeral_context" && placement.kind !== "sandbox_group") {
     throw new BrowserControlUnsupportedError(
@@ -5159,6 +5227,7 @@ export function browserCreateInput(
         : engine === "lightpanda"
           ? { capabilities: LIGHTPANDA_BROWSER_SESSION_CAPABILITIES }
           : {}),
+    attachedDeviceWorkspaceId: attached ? (attachedDeviceWorkspaceId ?? null) : null,
   };
 }
 

@@ -36,9 +36,9 @@ export function ConnectionAccountPicker(props: ConnectionAccountPickerProps) {
         {props.presentation !== "menu" ? (
           <p className="text-xs text-fg-muted">{group.name} accounts</p>
         ) : null}
-        {group.accounts.map((account, index) => {
+        {group.accounts.map((account) => {
           const checked = chosen.includes(account.id);
-          const label = connectionAccountLabel(account, `${group.name} account ${index + 1}`);
+          const label = connectionAccountLabel(account, `${group.name} account`);
           const ownership = account.subjectId === null ? "This workspace" : "Only me";
           const onToggle = () =>
             props.onChoose(

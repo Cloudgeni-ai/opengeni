@@ -346,6 +346,24 @@ test("a web date field Chrome left without a value reads what its parts read", (
   expect(read(["1", "11", "1996"])).toBe("1996-11-01");
   // A part still showing its placeholder: the field reads what Chrome says.
   expect(read(["1", "mm", "1996"])).toBe("");
+  // Chrome keeps the value the page gave the field first after typing
+  // changed its parts; the parts read what it holds.
+  const typedOver = (parts: string[]) =>
+    projectElements(
+      webDateField("AXDateField", "Start", ["Day", "Month", "Year"], "2026-01-02").map((element) =>
+        element.role === "AXIncrementor"
+          ? { ...element, value: parts[[3, 5, 7].indexOf(element.element_index)] }
+          : element,
+      ),
+      "macos",
+    ).find((node) => node.ref === "s1:2")!.value;
+  expect(typedOver(["7", "3", "2027"])).toBe("2027-03-07");
+  expect(typedOver(["dd", "mm", "yyyy"])).toBe("2026-01-02");
+  // Parts that are no calendar date do not stand for the field.
+  expect(typedOver(["31", "2", "2027"])).toBe("2026-01-02");
+  expect(typedOver(["29", "2", "2027"])).toBe("2026-01-02");
+  expect(typedOver(["29", "2", "2028"])).toBe("2028-02-29");
+  expect(typedOver(["31", "4", "2027"])).toBe("2026-01-02");
   expect(dateFieldValueFromParts(["hours", "minutes", "meridiem"], ["2", "05", "PM"])).toBe(
     "14:05",
   );

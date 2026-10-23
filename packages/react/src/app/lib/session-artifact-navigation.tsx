@@ -1,4 +1,16 @@
 import { openGeniConsolePath, type OpenGeniLinkTarget } from "@opengeni/sdk";
+import { useMemo } from "react";
+
+import {
+  chainLinkResolvers,
+  useOpenGeniLinkResolver,
+  type OpenGeniLinkResolver,
+} from "../../components/open-geni-links";
+// The host's page, read from the app host rather than `./navigation`, which
+// many tests replace with a partial module mock.
+import { useAppHost } from "./app-host";
+import { useSessionUiFeature } from "./session-ui-features";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const EDITABLE_ID = /^[0-9a-f]{32}$/iu;
 
@@ -39,4 +51,29 @@ export function consoleLinkResolver(target: OpenGeniLinkTarget): { href: string 
   if (target.kind === "sandbox-file" || target.workspaceId === null) return null;
   const href = openGeniConsolePath(target, target.workspaceId);
   return href ? { href } : null;
+}
+
+/**
+ * The app's resolver for object links in agent Markdown: the host's own
+ * resolver (an `OpenGeniLinkProvider` around an embed) first, then the web
+ * app's page for the object. In an embed that page is on the web app's
+ * origin, not the host page's: with the dock on, the link carries the
+ * absolute URL so the dock still intercepts it; with the dock off, it opens
+ * that page beside the host through the embed's `openUrl`.
+ */
+export function useAppLinkResolver(): OpenGeniLinkResolver {
+  const host = useOpenGeniLinkResolver();
+  const page = useAppHost().navigation?.page;
+  const dock = useSessionUiFeature("dock");
+  return useMemo(() => {
+    const console: OpenGeniLinkResolver = !page?.opensBeside
+      ? consoleLinkResolver
+      : (target) => {
+          const resolved = consoleLinkResolver(target);
+          if (!resolved) return null;
+          if (dock) return { href: new URL(resolved.href, page.origin()).toString() };
+          return { open: () => page.open(resolved.href) };
+        };
+    return chainLinkResolvers(host, console) ?? console;
+  }, [dock, host, page]);
 }

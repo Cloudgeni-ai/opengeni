@@ -14,6 +14,11 @@ import {
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 
 import { OpenGeniProvider } from "../../provider";
+import {
+  OpenGeniLinkProvider,
+  type OpenGeniLinkRenderer,
+  type OpenGeniLinkResolver,
+} from "../../components/open-geni-links";
 import { SecretsUiProvider } from "../../secrets-ui";
 import { Button } from "../../ui/button";
 import { PortalContainerProvider } from "../../ui/portal-container";
@@ -27,7 +32,7 @@ import { CreditRequiredGate } from "../components/credit-required-gate";
 import { Toaster } from "../components/toaster";
 import { WorkspaceTenantBoundary } from "../components/workspace-tenant-boundary";
 import { apiErrorFromResponseBody, type AppApiHost } from "../lib/app-api";
-import { AppHostProvider, type AppHost } from "../lib/app-host";
+import { AppHostProvider, type AppHost, type SessionViewState } from "../lib/app-host";
 import type { EditableArtifactSurfaceProps, PdfPreviewProps } from "../lib/app-surfaces";
 import { AppearanceProvider, useAppearance } from "../lib/appearance";
 import { parseComposerLaunchSearch } from "../lib/composer-launch";
@@ -83,6 +88,13 @@ export type SessionAppProps = Readonly<{
   /** Called when the person opens another chat (null: the new-chat page). */
   onSessionChange?: ((sessionId: string | null) => void) | undefined;
   /**
+   * Called with the open chat's status and loaded events each time they
+   * change, from the stream the chat already reads, so the host can follow its
+   * progress (show that the agent is working, refresh what a turn changed)
+   * without opening a second one.
+   */
+  onSessionState?: ((state: SessionViewState) => void) | undefined;
+  /**
    * Which features show. `embed` (default) is the chat list, chats and
    * composer; `companion` (first-party side panes) adds the session panel and
    * Opengeni's brand; `app` is the web app. `features` switches single ones.
@@ -114,6 +126,18 @@ export type SessionAppProps = Readonly<{
    * and shows nothing. Context for the model, never instructions.
    */
   messageContext?: MessageContextInput;
+  /**
+   * Opens Opengeni object links in agent messages (files, Sites, editable
+   * artifacts) the host's way, such as its own page for an artifact. Return
+   * null for a link the app should handle: the session dock when it is on,
+   * otherwise the web app's page for the object through `openUrl`.
+   */
+  resolveLink?: OpenGeniLinkResolver | undefined;
+  /**
+   * Draws the host's own links in agent messages (its scheme, in-app paths,
+   * web URLs). Return undefined to keep the default link.
+   */
+  renderLink?: OpenGeniLinkRenderer | undefined;
 }>;
 
 function trimSlash(url: string): string {
@@ -489,21 +513,24 @@ function SessionAppForWorkspace(props: SessionAppProps) {
         ...(editableArtifact ? { editableArtifact } : {}),
       },
       messageContext,
+      onSessionState: (state) => latest.current.onSessionState?.(state),
     }),
     [api, editableArtifact, messageContext, navigation, pdfPreview],
   );
   return (
     <AppearanceProvider hostTheme={props.theme} scope="local">
       <AppHostProvider host={host}>
-        <SessionUiFeaturesProvider preset={props.preset ?? "embed"} features={props.features}>
-          <SessionAppRoot className={props.className}>
-            <SessionAppGates
-              stateHost={stateHost}
-              workspaceId={props.workspaceId}
-              slots={props.slots}
-            />
-          </SessionAppRoot>
-        </SessionUiFeaturesProvider>
+        <OpenGeniLinkProvider resolveLink={props.resolveLink} renderLink={props.renderLink}>
+          <SessionUiFeaturesProvider preset={props.preset ?? "embed"} features={props.features}>
+            <SessionAppRoot className={props.className}>
+              <SessionAppGates
+                stateHost={stateHost}
+                workspaceId={props.workspaceId}
+                slots={props.slots}
+              />
+            </SessionAppRoot>
+          </SessionUiFeaturesProvider>
+        </OpenGeniLinkProvider>
       </AppHostProvider>
     </AppearanceProvider>
   );

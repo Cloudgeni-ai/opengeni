@@ -94,6 +94,9 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   "packages/db/drizzle/0855_session_fork_agent_parity.sql",
   // Gives the fork row its own workflow identity; same fork bodies and locks.
   "packages/db/drizzle/0856_session_fork_workflow_identity.sql",
+  // Weakens only the membership fence in the visibility transition and fork
+  // bodies from FOR UPDATE to FOR NO KEY UPDATE; same boundary otherwise.
+  "packages/db/drizzle/0925_membership_fences_allow_key_checks.sql",
   "packages/db/src/session-tenancy.ts",
   // Reads the owner-only foreign-authority counts for the preview and consent.
   "packages/db/src/session-visibility-work.ts",

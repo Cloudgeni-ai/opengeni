@@ -1,5 +1,28 @@
 # @opengeni/events
 
+## 5.1.2
+
+### Patch Changes
+
+- Updated dependencies [4e1a73f]
+  - @opengeni/db@5.1.0
+  - @opengeni/contracts@5.1.0
+
+## 5.0.2
+
+### Patch Changes
+
+- ca3f931: Workspace control events now reach a reader only for chats that reader can see; a cursor-only frame keeps hidden events from stalling the reader. Session start notices accept machinesEnabled so viewers without machine access never request the machine list.
+- Updated dependencies [93bd89d]
+- Updated dependencies [487bd43]
+- Updated dependencies [3f6fd05]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [2ffad67]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/db@5.0.0
+  - @opengeni/contracts@5.0.0
+
 ## 4.8.0
 
 ### Patch Changes

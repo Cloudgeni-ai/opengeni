@@ -157,7 +157,7 @@ import {
   SessionMachineAccessNotice,
 } from "../components/session/session-machine-access-notice";
 import { LoadingPanel, ProblemPanel } from "../components/common";
-import { useHostMessageContext } from "../lib/app-host";
+import { useHostMessageContext, useReportSessionState } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { useSessionOpening } from "../lib/session-opening";
 import { creationHandoffReconciled } from "../lib/session-creation-handoff";
@@ -250,7 +250,7 @@ import {
   sessionDockLayoutStorageId,
   updateSessionDockNavigation,
 } from "../lib/session-dock-preferences";
-import { consoleLinkResolver } from "../lib/session-artifact-navigation";
+import { useAppLinkResolver } from "../lib/session-artifact-navigation";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
@@ -442,6 +442,8 @@ export function SessionRoute({
   // Consented funnel telemetry: a session this page started reached its first
   // completed turn. Only event types are inspected.
   useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
+  // The embedding host follows the open chat from this stream.
+  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading });
   const sessionDetailReadOwner = useRef<object>({});
   const beginSessionDetailRead = useCallback(
     () =>
@@ -2005,6 +2007,7 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
+  const resolveLink = useAppLinkResolver();
   const hostMessageContext = useHostMessageContext();
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
@@ -3582,7 +3585,7 @@ function SessionChatPane(props: {
                       onViewDetails={viewToolReviewDetails}
                     >
                       <MessageTimeline
-                        resolveLink={consoleLinkResolver}
+                        resolveLink={resolveLink}
                         renderMessageSender={renderMessageSender}
                         allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                         trailingState={

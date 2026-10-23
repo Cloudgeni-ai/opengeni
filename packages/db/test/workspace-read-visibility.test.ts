@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import { withRlsContext, type Database } from "../src/database";
+import * as schema from "../src/schema";
 import {
   createDb,
   createWorkspace,
@@ -90,4 +95,75 @@ test("real SQL failures in the control lookup are never converted into missing w
     await shared.admin`alter table unavailable_workspace_controls rename to workspace_inference_controls`;
   }
   expect(await getWorkspace(client.db, workspace.id)).toMatchObject({ id: workspace.id });
+}, 60_000);
+
+test("complete workspace reads use one scope and restore a nested caller on success and failure", async () => {
+  if (!shared) return;
+  const workspace = await fixture();
+  const parent = await fixture();
+  const statements: string[] = [];
+  const traced = postgres(shared.appUrl, {
+    max: 1,
+    prepare: false,
+    debug: (_connection, query) => statements.push(query.trim().toLowerCase()),
+  });
+  const db = drizzle(traced, { schema }) as unknown as Database;
+  try {
+    await traced`select 1`;
+    statements.length = 0;
+    expect(await getWorkspace(db, workspace.id)).toMatchObject({ id: workspace.id });
+    const readStatements = [...statements];
+    expect(readStatements.filter((query) => query === "begin")).toHaveLength(1);
+    expect(readStatements.filter((query) => query === "commit")).toHaveLength(1);
+    expect(readStatements).toHaveLength(6);
+    expect(readStatements.filter((query) => query.includes("get_workspace_kind"))).toHaveLength(1);
+
+    await withRlsContext(
+      db,
+      { accountId: parent.accountId, workspaceId: parent.id },
+      async (tx) => {
+        const settings = async () =>
+          await tx.execute(sql`select
+        current_setting('opengeni.account_id', true) as account,
+        current_setting('opengeni.workspace_id', true) as workspace,
+        current_setting('opengeni.subject_id', true) as subject`);
+        await tx.execute(
+          sql`select set_config('opengeni.subject_id', 'workspace-read-parent', true)`,
+        );
+        const before = await settings();
+        expect(await getWorkspace(tx, workspace.id)).toMatchObject({ id: workspace.id });
+        expect(await settings()).toEqual(before);
+      },
+    );
+    await shared.admin`alter table workspace_inference_controls rename to unavailable_workspace_controls`;
+    try {
+      await withRlsContext(
+        db,
+        { accountId: parent.accountId, workspaceId: parent.id },
+        async (tx) => {
+          const settings = async () =>
+            await tx.execute(sql`select
+          current_setting('opengeni.account_id', true) as account,
+          current_setting('opengeni.workspace_id', true) as workspace,
+          current_setting('opengeni.subject_id', true) as subject`);
+          await tx.execute(
+            sql`select set_config('opengeni.subject_id', 'workspace-read-parent', true)`,
+          );
+          const before = await settings();
+          let failure: unknown;
+          try {
+            await getWorkspace(tx, workspace.id);
+          } catch (error) {
+            failure = error;
+          }
+          expect(nestedPostgresSqlState(failure)).toBe("42P01");
+          expect(await settings()).toEqual(before);
+        },
+      );
+    } finally {
+      await shared.admin`alter table unavailable_workspace_controls rename to workspace_inference_controls`;
+    }
+  } finally {
+    await traced.end();
+  }
 }, 60_000);

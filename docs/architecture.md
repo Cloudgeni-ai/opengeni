@@ -672,6 +672,13 @@ Canonical: `packages/core/src/access/index.ts`,
 [`agent-session-authority.md`](agent-session-authority.md), and
 [`credentials.md`](credentials.md).
 
+Complete workspace reads resolve bootstrap metadata first, then read visible
+control state and canonical kind in one fresh workspace scope. A hidden or
+missing control row still makes the workspace unreadable. The shared tenancy
+fence spans both reads; nested calls restore their caller's tenant and actor
+settings. This is ordinary READ COMMITTED, not a cached or single-snapshot
+workspace view.
+
 ### 3.7 Contracts and configuration are code-owned
 
 `@opengeni/contracts` owns cross-boundary schemas, enums, permissions, event shapes,
@@ -3099,6 +3106,12 @@ Historical replay guards grant no access. Cleanup and verification are tracked i
 Future suppliers must reuse native connections.
 
 ### Embeddable connection presentation
+
+MCP OAuth account matching uses one owner/resource policy in
+`apps/api/src/integrations/oauth-account-identity.ts`: verified repeats reuse an
+active account; providers without identity proof permit one live account per
+owner/resource. Explicit reconnect checks known identity and exact resource binding.
+See [connection presentation](connection-presentation.md#duplicate-oauth-accounts).
 
 Shared connection presentation and host boundaries: [embedding authority internals](embedding-authority-internals.md#connection-presentation).
 

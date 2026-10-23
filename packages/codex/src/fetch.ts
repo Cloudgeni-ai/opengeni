@@ -398,6 +398,32 @@ function terminalOutcomeForPhase(
   return null;
 }
 
+function requestFailureCause(
+  kind: NonNullable<CodexModelRequestEvent["failureCause"]>["kind"],
+  error?: unknown,
+  abortReason?: unknown,
+): NonNullable<CodexModelRequestEvent["failureCause"]> {
+  const field = (value: unknown, key: "name" | "code"): string | undefined => {
+    try {
+      if (!value || typeof value !== "object") return undefined;
+      const text = (value as Record<string, unknown>)[key];
+      return typeof text === "string" && text.length > 0 ? text.slice(0, 64) : undefined;
+    } catch {
+      // Diagnostics must not replace the original failure, even for throwing getters.
+      return undefined;
+    }
+  };
+  const errorName = field(error, "name");
+  const errorCode = field(error, "code");
+  const abortReasonName = kind === "caller_abort" ? field(abortReason, "name") : undefined;
+  return {
+    kind,
+    ...(errorName ? { errorName } : {}),
+    ...(errorCode ? { errorCode } : {}),
+    ...(abortReasonName ? { abortReasonName } : {}),
+  };
+}
+
 function requestEventFor(
   audit: RequestAudit,
   event: Omit<
@@ -405,13 +431,19 @@ function requestEventFor(
     "requestId" | "transportAttempt" | "model" | "durationMs" | "timeoutPolicy"
   >,
 ): CodexModelRequestEvent {
+  const { failureCause, ...details } = event;
   return {
     requestId: audit.requestId,
     transportAttempt: audit.transportAttempt,
     ...(audit.model ? { model: audit.model } : {}),
     durationMs: Math.max(0, performance.now() - audit.attemptStartedAtMonotonic),
     timeoutPolicy: audit.policy,
-    ...event,
+    ...details,
+    // HTTP/provider refusals need no body-derived metadata. More specific
+    // transport paths supply their cause at the point where it is known.
+    ...(event.phase === "failed"
+      ? { failureCause: failureCause ?? requestFailureCause("transport_error") }
+      : {}),
     ...(audit.dispatchDelayMs === undefined ? {} : { dispatchDelayMs: audit.dispatchDelayMs }),
     // The transport fills timing as provider events arrive. Snapshot per receipt
     // so later frames never mutate an already delivered diagnostic event.
@@ -606,6 +638,7 @@ async function observedResponse(
     if (semanticTerminal) markSemanticTerminal(semanticTerminal, "failed");
     await emitRequestEvent(audit, {
       phase: semanticTerminal?.phase ?? (res.ok ? "completed" : "failed"),
+      failureCause: requestFailureCause(res.ok ? "stream_reset" : "transport_error"),
       ...semanticCompletionEvidence(semanticTerminal),
       responseObserved: true,
       status: res.status,
@@ -672,6 +705,7 @@ async function observedResponse(
         void reader.cancel(reason).catch(() => undefined);
         void emitRequestEvent(audit, {
           phase: semanticTerminal?.phase ?? "failed",
+          failureCause: requestFailureCause("caller_abort", reason, reason),
           ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           status: res.status,
@@ -745,6 +779,7 @@ async function observedResponse(
         }
         await emitRequestEvent(audit, {
           phase: semanticPhase ?? "failed",
+          failureCause: requestFailureCause("stream_reset", error),
           ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           status: res.status,
@@ -770,6 +805,7 @@ async function observedResponse(
         }
         await emitRequestEvent(audit, {
           phase: semanticTerminal?.phase ?? "failed",
+          failureCause: requestFailureCause("consumer_cancel", reason),
           ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           status: res.status,
@@ -1011,6 +1047,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         if (nextInit.signal?.aborted) {
           await emitRequestEvent(audit, {
             phase: "failed",
+            failureCause: requestFailureCause("caller_abort", error, nextInit.signal.reason),
             responseObserved: false,
           }).catch(() => undefined);
           throw error;
@@ -1019,6 +1056,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         if (!klass) {
           await emitRequestEvent(audit, {
             phase: "failed",
+            failureCause: requestFailureCause("transport_error", error),
             responseObserved: false,
           });
           throw error;
@@ -1098,10 +1136,17 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
             if (phase === "completed") void settleProviderRequest(audit, "response_received");
             else if (refused) void settleProviderRequest(audit, "refused");
           },
-          async () => {
+          async (error) => {
             const upstreamRequestId = providerRequestId(res.headers);
             await emitRequestEvent(audit, {
               phase: semanticTerminal.phase ?? "failed",
+              failureCause: requestFailureCause(
+                error instanceof CodexStreamingTerminalError &&
+                  error.code === "invalid_sse_terminal"
+                  ? "stream_reset"
+                  : "transport_error",
+                error,
+              ),
               ...semanticCompletionEvidence(semanticTerminal),
               responseObserved: true,
               status: res.status,
@@ -1347,6 +1392,7 @@ async function sseToJsonResponse(
     markSemanticTerminal(semanticTerminal, "failed");
     await emitRequestEvent(audit, {
       phase: "failed",
+      failureCause: requestFailureCause("stream_reset"),
       responseObserved: true,
       status: res.status,
       ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
@@ -1675,7 +1721,7 @@ function validateCodexStream(
     meaningfulOutput?: boolean,
     refused?: boolean,
   ) => void,
-  onParsedEof?: () => Promise<void>,
+  onParsedEof?: (error?: unknown) => Promise<void>,
 ): Response {
   if (!res.body) {
     onSemanticTerminal?.("failed");
@@ -1741,7 +1787,7 @@ function validateCodexStream(
         // recovery while the refusal/unknown receipt is still being written.
         // Audit or settlement failure must preserve the provider diagnostic;
         // an unsuccessful custody write keeps the request's replay fence.
-        await onParsedEof?.().catch(() => undefined);
+        await onParsedEof?.(error).catch(() => undefined);
         throw error;
       }
     },
@@ -1772,7 +1818,7 @@ function validateCodexStream(
         // A final buffered failure has the same diagnostic and custody rules
         // as a failure parsed from a complete chunk. Finalization must not
         // replace that failure with an audit or settlement rejection.
-        await onParsedEof?.().catch(() => undefined);
+        await onParsedEof?.(error).catch(() => undefined);
         throw error;
       }
       // Raw transport EOF can precede parsing a final block without a blank

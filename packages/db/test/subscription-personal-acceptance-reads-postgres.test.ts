@@ -748,7 +748,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
-      // 0924 adds the Teams conversation tables to both posture inventories.
+      // 0929 adds the Teams conversation tables to both posture inventories.
       "teams_bot_inbox",
       "teams_bot_installations",
       "teams_bot_links",

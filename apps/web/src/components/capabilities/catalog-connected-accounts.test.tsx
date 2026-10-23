@@ -161,7 +161,22 @@ describe("catalog connected accounts", () => {
       expect(text).toContain(label);
     expect(text).not.toContain("removed@example.test");
     expect(text).not.toContain("Not connected");
-    expect(text).toContain(`Account ${accounts[0]!.id.slice(0, 8)}`);
+    for (const connection of accounts) {
+      expect(text).not.toContain(connection.id);
+      expect(text).not.toContain(connection.id.slice(0, 8));
+    }
+    await view.unmount();
+  });
+
+  test("accounts without a readable identity show the connector name without internal IDs", async () => {
+    const unnamed = account({
+      metadata: { resource: item.mcpUrl, slackUserId: "U_INTERNAL", slackTeamId: "T_INTERNAL" },
+    });
+    const view = await render(<CatalogConnectedAccounts item={item} connections={[unnamed]} />);
+    expect(view.container.textContent).toContain("Slack account");
+    expect(view.container.textContent).toContain("Connected");
+    for (const internal of [unnamed.id, unnamed.id.slice(0, 8), "U_INTERNAL", "T_INTERNAL"])
+      expect(view.container.textContent).not.toContain(internal);
     await view.unmount();
   });
 
@@ -409,6 +424,27 @@ describe("catalog connected accounts", () => {
       await signedOut.unmount();
     });
 
+    test("an opaque account that completed OAuth truthfully needs reconnect", async () => {
+      const opaque = account({
+        status: "needs_reauth",
+        metadata: {
+          resource: item.mcpUrl,
+          tokenEndpoint: "https://provider.example.test/token",
+          clientId: "internal-client",
+          authorizationServerIssuer: "https://provider.example.test",
+          mcpToolsVerification: { status: "verified" },
+        },
+      });
+      const view = await render(
+        <CatalogConnectedAccounts item={item} connections={[opaque]} management={management()} />,
+      );
+      expect(view.container.textContent).toContain("Needs reconnect");
+      expect(view.container.textContent).not.toContain("Sign-in not finished");
+      expect(view.container.textContent).not.toContain(opaque.id.slice(0, 8));
+      expect(buttons(view.container)).toContain("Reconnect Slack account");
+      await view.unmount();
+    });
+
     test("an account whose sign-in never finished says so and can be removed", async () => {
       const unfinished = account({
         status: "needs_reauth",
@@ -422,7 +458,7 @@ describe("catalog connected accounts", () => {
         />,
       );
       expect(view.container.textContent).toContain("Sign-in not finished");
-      expect(view.container.textContent).toContain(`Account ${unfinished.id.slice(0, 8)}`);
+      expect(view.container.textContent).not.toContain(unfinished.id.slice(0, 8));
       expect(buttons(view.container)).toContain("Remove Slack account");
       await view.unmount();
     });

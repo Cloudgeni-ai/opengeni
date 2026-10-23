@@ -135,6 +135,7 @@ export const checkpointIdleSandboxLease = defaultControlActivities.checkpointIdl
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const deleteTransientObjects = defaultControlActivities.deleteTransientObjects;
 export const maintainSessionStorage = defaultControlActivities.maintainSessionStorage;
 export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
 export const recoverVideoGenerationWorkflows =

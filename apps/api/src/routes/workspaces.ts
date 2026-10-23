@@ -133,6 +133,7 @@ import {
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireWorkspaceMemberManagementAuthority,
   requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
@@ -158,6 +159,7 @@ import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
 import { projectWorkspaceModelCatalog } from "../model-catalog";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
+import { workspaceControlEventVisibility } from "../workspace-control-visibility";
 import {
   AI_GATEWAY_REALTIME_MODELS,
   ELEVENLABS_REALTIME_MODELS,
@@ -1488,24 +1490,43 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/control-events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
     const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
     const limit = boundedLimit(c.req.query("limit"));
     const fetched = await listWorkspaceControlEvents(deps.db, workspaceId, after, limit + 1);
     const countHasMore = fetched.length > limit;
-    const page = boundWorkspaceControlHttpPage(fetched.slice(0, limit));
+    const scanned = fetched.slice(0, limit);
+    const visible = await workspaceControlEventVisibility(
+      deps,
+      workspaceId,
+      authorization,
+    )(scanned);
+    const page = boundWorkspaceControlHttpPage(visible);
     const truncated = countHasMore || page.truncated;
+    // Events this reader cannot see still advance its cursor, so a page made
+    // only of another person's private-chat events never stalls paging.
+    const nextSequence = page.truncated ? page.nextSequence : (scanned.at(-1)?.sequence ?? null);
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
     c.header("X-OpenGeni-Page-Truncated", String(truncated));
-    if (page.nextSequence !== null) {
-      c.header("X-OpenGeni-Next-After", String(page.nextSequence));
+    if (nextSequence !== null) {
+      c.header("X-OpenGeni-Next-After", String(nextSequence));
     }
     return c.json(page.events);
   });
 
   app.get("/v1/workspaces/:workspaceId/control-events/stream", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
     const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
     return await sseWorkspaceControlStream(
       deps.db,
@@ -1517,6 +1538,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
+        visibleControlEvents: workspaceControlEventVisibility(deps, workspaceId, authorization),
         reauthorize: async () => {
           await requireFreshAccessGrant(c, deps, workspaceId, "workspace:read");
         },

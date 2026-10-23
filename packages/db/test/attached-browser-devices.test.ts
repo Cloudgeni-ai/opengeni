@@ -1101,7 +1101,7 @@ describe("attached browser endpoint registry", () => {
     ).toBe(true);
   });
 
-  test("rejects a controller heartbeat whose placement generation is already stale", async () => {
+  test("a controller heartbeat on a stale placement generation is rejected and ends its sessions", async () => {
     if (!available) return;
     const scope = await fixture();
     const deviceId = crypto.randomUUID();
@@ -1136,10 +1136,7 @@ describe("attached browser endpoint registry", () => {
         workspaceId: scope.workspaceId,
         browserSessionId: browser.browserSessionId,
       }),
-    ).toMatchObject({
-      lifecycle: "active",
-      controller: { placementInstanceId: "extension-1" },
-    });
+    ).toMatchObject({ lifecycle: "lost", failureCode: "controller_transition_expired" });
     expect(
       (
         await getComputerSessionControlRecord(client.db, {
@@ -1148,9 +1145,6 @@ describe("attached browser endpoint registry", () => {
           computerSessionId: computer.computerSessionId,
         })
       ).session,
-    ).toMatchObject({
-      lifecycle: "active",
-      controller: { placementInstanceId: "extension-1" },
-    });
+    ).toMatchObject({ lifecycle: "lost", failureCode: "controller_transition_expired" });
   });
 });

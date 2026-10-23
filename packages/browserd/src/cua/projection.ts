@@ -126,6 +126,18 @@ export function opensOnInvoke(element: { readonly actions: readonly string[] }):
 }
 
 /**
+ * Whether a macOS element is a number field that takes a value: an
+ * AXIncrementor (Chrome's `<input type=number>`, a native stepper) that is
+ * not one part of a date or time field. A part takes neither the focus nor
+ * a value on its own (see dateFields).
+ */
+function isNumberField(element: CuaElement, byIndex: ReadonlyMap<number, CuaElement>): boolean {
+  if (element.role !== "AXIncrementor") return false;
+  const parent = element.parent_index === undefined ? undefined : byIndex.get(element.parent_index);
+  return parent?.role !== "AXDateField" && parent?.role !== "AXTimeField";
+}
+
+/**
  * The macOS elements that belong to web content, by element_index: an
  * AXWebArea and everything CUA lists under it. WebKit and Chromium report
  * AXShowMenu on every element of a page; it opens the page's context menu,
@@ -275,9 +287,9 @@ export function dateFieldFormat(segments: readonly DateSegment[]): string {
 /**
  * The ISO value a date or time field's parts read, in the parts' order, or
  * null when a part reads no number (an empty part reads its placeholder,
- * "dd" or "--") or the date reads zero. Chrome on macOS does not always
- * give the field itself a value: it may update only the parts (or only the
- * field) after typing.
+ * "dd" or "--") or the date reads zero. Chrome on macOS does not keep the
+ * field's own value current: after typing it still reads the value the page
+ * gave it first, or none, while its parts read what was typed.
  */
 export function dateFieldValueFromParts(
   segments: readonly DateSegment[],
@@ -370,6 +382,13 @@ export function parseDateValue(value: string): DateParts | null {
     const [low, high] = ranges[key];
     if (part < low || part > high) return null;
   }
+  // A real calendar date: the 31st of February is not one.
+  if (parts.day !== undefined && parts.month !== undefined) {
+    const year = parts.year;
+    const leap = year === undefined || (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0));
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][parts.month - 1]!;
+    if (parts.day > days) return null;
+  }
   return parts;
 }
 
@@ -427,6 +446,7 @@ export function projectElements(
   // returned node without inventing ancestry or dropping orphaned children.
   return elements.map((element) => {
     const protectedReason = protectionFor(element.role, platform);
+    const numberField = platform === "macos" && isNumberField(element, byIndex);
     const opaqueWindowsEdit = protectedReason === "policy";
     // The SDK uses value as its label fallback when the native name is absent.
     const valueLabel =
@@ -462,6 +482,7 @@ export function projectElements(
                   "AXSlider",
                   "AXPopUpButton",
                 ].includes(element.role)) ||
+              numberField ||
               typedFields.has(element.element_index)
       )
         actions.push("set_value");
@@ -480,22 +501,23 @@ export function projectElements(
       (text) => text !== label && text !== String(element.value ?? ""),
     );
     const containedText = contained.length > 0 ? contained.join(" | ").slice(0, 8_192) : undefined;
-    // A web date or time field Chrome left without a value reads what its
-    // parts read.
+    // A web date or time field reads what its parts read whenever they read
+    // a whole value: Chrome keeps the field's own value at the one the page
+    // gave it first (or none) while typing changes the parts.
     const typed = typedFields.get(element.element_index);
     const value =
-      typed && (element.value === undefined || String(element.value).trim() === "")
-        ? (dateFieldValueFromParts(
-            typed.segments,
-            typed.parts.map((part) => byIndex.get(part)?.value),
-          ) ?? element.value)
-        : element.value;
+      (typed &&
+        dateFieldValueFromParts(
+          typed.segments,
+          typed.parts.map((part) => byIndex.get(part)?.value),
+        )) ??
+      element.value;
     return {
       ref: element.element_token ?? `read-only:${element.element_index}`,
       // Desktop labels and values can be whole documents (an editor's text
       // area). Clip to the semantic-node contract so one element cannot make
       // the entire observation invalid.
-      role: (roles[element.role] ?? element.role).slice(0, 256),
+      role: (numberField ? "spinbutton" : (roles[element.role] ?? element.role)).slice(0, 256),
       ...(label
         ? { name: label.slice(0, 8_192) }
         : containedText && !protectedReason

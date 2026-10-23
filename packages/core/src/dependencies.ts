@@ -101,6 +101,17 @@ export type SessionWorkflowClient = {
     versionId?: string;
     workflowId?: string;
   }) => Promise<void>;
+  /**
+   * Durably deletes objects a request staged in storage once `deleteAfter`
+   * passes, whether or not the request ever finishes. Repeating the same keys
+   * is a no-op. Optional for embedded clients; callers without it must clean
+   * up within the request.
+   */
+  scheduleTransientObjectDeletion?: (input: {
+    workspaceId: string;
+    objectKeys: string[];
+    deleteAfter: Date;
+  }) => Promise<void>;
   check?: () => Promise<void>;
 };
 

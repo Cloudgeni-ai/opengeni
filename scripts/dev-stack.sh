@@ -1013,6 +1013,18 @@ if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ] &&
   fi
 fi
 
+# The API signs viewer tokens with streamTokenSecret or delegationSecret. The
+# Rust relay has no delegation-secret setting, so pass the same effective key.
+# Keep its producer key independent when an explicit relay key is configured.
+if [ "$start_local_relay" = "1" ]; then
+  OPENGENI_STREAM_TOKEN_SECRET="${OPENGENI_STREAM_TOKEN_SECRET:-${OPENGENI_DELEGATION_SECRET:-}}"
+  if [ -z "$OPENGENI_STREAM_TOKEN_SECRET" ]; then
+    echo "Connected-machine local relay requires OPENGENI_STREAM_TOKEN_SECRET or OPENGENI_DELEGATION_SECRET for viewers." >&2
+    exit 1
+  fi
+  export OPENGENI_STREAM_TOKEN_SECRET
+fi
+
 # A clean checkout must establish the canonical workspace package links before
 # the generated facade is verified. The facade never searches alternate roots.
 echo "Opengeni setup: installing pinned JavaScript dependencies."

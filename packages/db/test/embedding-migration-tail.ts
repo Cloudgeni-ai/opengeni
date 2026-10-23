@@ -1,5 +1,6 @@
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { workspaceDeletionMigrationTail } from "./workspace-deletion-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
@@ -385,4 +386,12 @@ export const embeddingMigrationTail = [
   // Patches the inbox fence created by withheld 0608 (as 0843 rewrites it) and
   // replaces the machine-access reader; replay after both.
   "0917_continue_waiting_work.sql",
+  // Redefines 0718's inbox recipient and 0677's person resolver, which read
+  // scheduled_tasks.owner_subject_id from withheld 0478; replay after them.
+  "0923_external_user_inbox.sql",
+  // Patches ensure_external_identity, transition_session_visibility and both
+  // fork_session_content bodies by exact anchors; replay after all of them.
+  "0925_membership_fences_allow_key_checks.sql",
+  // Rewrites keys on the withheld Knowledge tables by name; replay last.
+  ...workspaceDeletionMigrationTail,
 ];

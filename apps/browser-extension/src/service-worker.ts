@@ -572,7 +572,7 @@ async function setBadge(connected: boolean): Promise<void> {
   await chrome.action.setBadgeText({ text: connected ? "" : "!" });
   if (!connected) await chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
   await chrome.action.setTitle({
-    title: `${BRAND.name} · ${connected ? "Connected" : "Agent unavailable"}`,
+    title: `${BRAND.name} · ${connected ? "Connected" : "Runner unavailable"}`,
   });
 }
 

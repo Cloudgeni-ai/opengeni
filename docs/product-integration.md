@@ -132,7 +132,15 @@ there with the same requests the Opengeni web app makes, and Opengeni's
 permission checks decide each one. A path naming another workspace is a 403.
 Outside the workspace only the bootstrap reads answer, scoped to the resolved
 workspace: `GET /v1/workspaces`, `GET /v1/access/me` (the user's effective
-grant there) and `GET /v1/config/client`; everything else is a 404.
+grant there) and `GET /v1/config/client`. The user's own inbox also passes:
+`GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` limited to the resolved
+workspace's items, and `GET`/`PUT /v1/inbox/settings` (keep settings
+read-only with `authorizeMutation` if your product owns them). Everything
+else is a 404. An external user has an inbox like an Opengeni member: their
+sessions' questions, approvals, paused goals and agent notifications land
+there, and the stock app shows it, so a product needs no notification
+pipeline of its own. Phone pushes need the Opengeni native app and do not
+reach external users.
 
 The product narrows that surface in three places, from coarse to fine:
 
@@ -145,7 +153,8 @@ The product narrows that surface in three places, from coarse to fine:
 3. **`refuse(route, context)`.** Routes Opengeni would allow but the product
    keeps closed: return `true` for a 404, or a `Response`. `route` is
    `{ method, segments, sessionId }`, with the path segments after
-   `/v1/workspaces/{workspaceId}`.
+   `/v1/workspaces/{workspaceId}`; every hook also finds it in
+   `context.route`.
 
 `authorizeSession(sessionId, context)` adds a product-level check to every
 `sessions/{id}/...` route and every request that names a chat in
@@ -153,9 +162,22 @@ The product narrows that surface in three places, from coarse to fine:
 that would change server-owned chat setup (a chat's agent, tool policy, Skills,
 variable sets, usage limit, visibility, active sandbox and Codex account,
 forks, and `chat/completions`); browser MCP credential rotation is always
-refused. Messages (send, steer, draft submit, realtime) pass through
-`beforeForwardMessage`; bodies are bounded (`maxBodyBytes`, default 1 MiB) and
-`modelSelection: false` removes per-message model choices. Without
+refused. Every action that starts model work passes through
+`beforeForwardMessage` with its `delivery` and the browser's action key
+(`clientEventId`): messages (`create`, `send`, `steer`, `submit`), the
+person's `approval` and `answer`, `resume`, `retry`, `queue-steer` and
+`realtime` voice. It is where a product admits work (billing, rate limits)
+and adds per-message context. It also sees the context the browser attached
+(`browserContext`, an unverified claim; for voice, once per entry) and can
+keep, replace or drop it; return a `Response` to refuse. Bodies are
+bounded (`maxBodyBytes`, default 1 MiB) and `modelSelection: false` removes
+per-message and retry model choices. `afterForward(route, response, context)`
+sees Opengeni's answer to every forwarded request before the browser does,
+so the product can record what it keeps beside Opengeni (an uploaded file's
+owner, a new chat's id, activity) or answer differently. When the hop to
+Opengeni fails or answers 408 or 5xx for a keyed action the relay read, it
+sends the action once more; Opengeni answers a repeated key with the first
+outcome. Without
 `authorizeMutation`, cross-site mutations (by `Sec-Fetch-Site`) and the content
 types a cross-site form can send are refused, so cookie-authenticated products
 should pass their CSRF check.
@@ -279,13 +301,18 @@ anyone else to it. Legacy `"isolated"` needs the `Opengeni` facade as the proxy
 target; with `{ tenant, user }` it does the same per tenant user (standalone:
 `createWorkspaceIdResolver` from `@opengeni/sdk/tenant-workspaces`).
 `memberPermissions` replaces that first owner grant's permissions; a
-retry never restores a revoked owner grant. A `resolve` that returns a
+retry never restores a revoked owner grant. Set `memberPermissions` on the
+facade for tenant workspaces too when your users need a role other than the
+defaults (for example `artifacts:read` or `documents:search`): the SDK then
+adds each signed-in user the relay or facade resolves with exactly those
+permissions before their first request, with the same stable onboarding key. A `resolve` that returns a
 `tenant` or `workspaceId` key with an empty or undefined value is refused
 rather than falling back to the per-user workspace.
 
-Automatically added users receive workspace read, session create/read/control
-(including Send), file upload/read, and `mcp_servers:attach` for the host's
-per-session servers, never admin permissions. The organization key remains a
+Without `memberPermissions`, automatically added users (and anonymous
+visitors) receive workspace read, session create/read/control (including
+Send), file upload/read, and `mcp_servers:attach` for the host's per-session
+servers, never admin permissions. The organization key remains a
 permission ceiling on every request. Change an existing member's permissions
 with `updateExternalWorkspaceMember`; Opengeni never overwrites them. Supply
 MCP URLs and credentials only in the server's `createSession` hook, not

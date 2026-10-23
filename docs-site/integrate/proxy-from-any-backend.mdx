@@ -18,6 +18,8 @@ Forward `/api/opengeni/v1/<path>` to `/v1/<path>` upstream, with the query strin
 | `GET config/client`                                       | Add `workspaceId={ws}`. In the response, add `workspaceId`, set `apiContractRevision` to the browser's `x-opengeni-api-contract`, drop `artifacts` (unless you serve the artifact viewer) and `sessionUsageLimits`, set `fileUploads.enabled: false` when you refuse uploads (for example for anonymous visitors), and set `modelSelection: false` if you fix the model. |
 | `GET workspaces`                                          | Read `GET /v1/workspaces/{ws}` as the user and return it as a one-item list (an empty list on 403 or 404).                                                                                                                                                                                                                                                               |
 | `GET access/me`                                           | Forward, then replace `workspaceGrants` with the user's grant for `{ws}` from `GET /v1/workspaces/{ws}/access/grant`, and drop `credential`.                                                                                                                                                                                                                             |
+| `GET inbox`, `PATCH inbox/items/{id}`                     | Forward as the user with `workspaceId={ws}` (replacing any the browser sent), so only this workspace's items are listed or changed.                                                                                                                                                                                                                                      |
+| `GET inbox/settings`, `PUT inbox/settings`                | Forward as the user, or refuse `PUT` if your product owns these settings.                                                                                                                                                                                                                                                                                                |
 | Anything else                                             | 404.                                                                                                                                                                                                                                                                                                                                                                     |
 
 Narrow the surface with the organization key's permissions and each member's permissions first: a request made as a user holds only the permissions both hold. Refuse any further routes your product keeps closed with a 404.
@@ -27,7 +29,9 @@ Narrow the surface with the organization key's permissions and each member's per
 - accept only `initialMessage`, `idempotencyKey`, file `resources`, and (unless you fix the model) `model`, `reasoningEffort`, `latencyMode` on `POST workspaces/{ws}/sessions`, and build the rest of the request on the server with your [privacy settings](/integrate/users-and-tenants#choose-who-shares-chats);
 - refuse `PUT sessions/{sid}/{agent|tool-policy|skills|variable-sets|usage-limit|visibility}`, `POST sessions/{sid}/{active-sandbox|codex-account|forks}`, and `POST workspaces/{ws}/chat/completions`.
 
-**Message rules** for `POST sessions/{sid}/events` (`user.message`), `steer` and `composer-draft/submit`: reject `mcpCredentialUpdates`, and always refuse `POST sessions/{sid}/mcp-credentials/rotate` and `session-imports` (imported history is stored as genuine transcript, so only your server may write it). If you fix the model, overwrite `model`, `reasoningEffort`, and `latencyMode` with your values rather than dropping them. Your server may add `modelContext` and `mcpCredentialUpdates` itself.
+**Message rules** for `POST sessions/{sid}/events` (`user.message`), `steer` and `composer-draft/submit`: reject `mcpCredentialUpdates`, and always refuse `POST sessions/{sid}/mcp-credentials/rotate` and `session-imports` (imported history is stored as genuine transcript, so only your server may write it). If you fix the model, overwrite `model`, `reasoningEffort`, and `latencyMode` with your values rather than dropping them. Your server may add `modelContext` and `mcpCredentialUpdates` itself. The `modelContext` the browser sends on these bodies, and on each entry of `POST sessions/{sid}/realtime/{rid}/sync`, is the browser's unverified claim: validate, replace or drop it before forwarding if your product relies on it.
+
+**Admitting work.** If your product bills, rate-limits or otherwise admits agent work, check every request that starts it: the messages above, approval decisions and human-input answers (`user.approvalDecision`, `user.humanInputResponse` on `events`), `POST sessions/{sid}/control` with `action: "resume"`, `POST sessions/{sid}/retry` (also drop its `model`, `reasoningEffort` and `latencyMode` if you fix the model), and `POST sessions/{sid}/queue/{turnId}/steer`. Key your own bookkeeping on the request's `clientEventId` (`idempotencyKey` on create): Opengeni accepts an action once per key and answers a repeat with the first outcome, so when the upstream call fails or answers 408 or 5xx you can safely send the same body once more.
 
 ## Headers
 
@@ -103,14 +107,18 @@ def opengeni_proxy(request, rest):
         inner = "/".join(segments[2:])
         if any(re.fullmatch(pattern, inner) for pattern in REFUSED):
             return JsonResponse({"error": {"code": "route_not_allowed"}}, status=404)
-    elif not (request.method == "GET" and path in ("config/client", "workspaces", "access/me")):
+    elif not (
+        (request.method == "GET" and path in ("config/client", "workspaces", "access/me", "inbox"))
+        or (request.method in ("GET", "PUT") and path == "inbox/settings")
+        or (request.method == "PATCH" and re.fullmatch(r"inbox/items/[A-Za-z0-9-]+", path))
+    ):
         return JsonResponse({"error": {"code": "route_not_allowed"}}, status=404)
     body = request.body if request.method not in ("GET", "HEAD") else None
     # Apply the message rules here; if your server owns chat setup, build the
     # full request for POST .../sessions. Scope workspaces and access/me to ws.
     headers = upstream_headers(request, str(user.id))
     url = f"{API}/v1/" + "/".join(urllib.parse.quote(s, safe="") for s in segments)
-    if path == "config/client":
+    if path in ("config/client", "inbox") or path.startswith("inbox/items/"):
         params = {**request.GET.dict(), "workspaceId": ws}
     else:
         params = request.GET

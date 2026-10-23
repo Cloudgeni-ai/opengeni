@@ -724,6 +724,14 @@ describe("0433 owner-only Skill backfill", () => {
           condeferred: false,
         },
       ]);
+      // The deletion adapter defers in-closure references through 0927's
+      // function. At 0433 the only such links are the Skill history references
+      // above, which are already INITIALLY DEFERRED, so the stand-in is a no-op.
+      await owner.unsafe(`
+        CREATE SCHEMA IF NOT EXISTS opengeni_private;
+        CREATE FUNCTION opengeni_private.defer_workspace_cascade_foreign_keys()
+        RETURNS void LANGUAGE plpgsql AS $$ BEGIN END $$;
+      `);
       const deletionClient = createDb(ownerUrl, { max: 1 });
       try {
         await withWorkspaceRls(deletionClient.db, installedOnly.workspaceId, (tx) =>

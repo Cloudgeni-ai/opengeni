@@ -1,5 +1,9 @@
 # @opengeni/subscriptions
 
+## 5.1.2
+
+## 5.0.2
+
 ## 4.8.0
 
 ## 4.7.2

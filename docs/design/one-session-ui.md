@@ -81,7 +81,7 @@ person's permissions, exactly as in the web app. A switch only hides.
 
 | Feature (`SessionUiFeatures`) | `app` (web, desktop) | `companion` (Excel and other first-party side panes) | `embed` (customer page) |
 | --- | --- | --- | --- |
-| `chatList` (search, filters, projects, pins, archive, subagent rows) | on | on (a drawer when narrow) | on |
+| `chatList` (search, filters, projects, pins, archive, subagent rows; the new-chat page's project picker and recent chats) | on | on (a drawer when narrow) | on |
 | `dock` (files, terminal, desktop, browser, artifacts, inspector; lazy) | on | on | off |
 | `adminAccess` (workspace-admin access indicator and grant) | on | off | off |
 | `keyboardShortcuts` (⌘K menu, shortcut keys, ⌘/ sheet; `newChatShortcut` is a deprecated alias) | on | off | off |
@@ -125,9 +125,13 @@ embed.
   slots: `switcher`, `primaryNav`, `mobileWorkspacePanel`, `railFooter`,
   `canvasBanners`. The web app's `RailShell` is only its slot composition.
 - **`SessionApp`** (`@opengeni/react/session-app`): `apiBaseUrl`, `headers`,
-  `consoleUrl`, `workspaceId`, `sessionId` and `onSessionChange`, `preset`,
+  `consoleUrl`, `workspaceId`, `sessionId` and `onSessionChange`,
+  `onSessionState` (the open chat's status and held events, from the session
+  route's own stream, through `AppHost.onSessionState`), `preset`,
   `features`, `slots`, `surfaces` (PDF preview, editable artifacts), `theme`,
-  `messageContext`, `openUrl`, `onUnauthorized`. It renders its own `og-root`
+  `messageContext`, `openUrl`, `onUnauthorized`, `resolveLink` and
+  `renderLink` (the host's handling of links in agent messages, asked before
+  the app's own: the dock, else the web app page through `openUrl`). It renders its own `og-root`
   with `data-og-theme`, never touching the host page's `<html>`. A 401 from
   either the SDK client or a raw app request calls `onUnauthorized`.
 - **Styles.** The web app's design system (token bridge, base rules, motion)

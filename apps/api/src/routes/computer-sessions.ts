@@ -49,6 +49,7 @@ import {
   getComputerSessionControlRecord,
   getLiveEnrollmentConnection,
   getSession,
+  interactionControllerGone,
   listComputerSessions,
   prepareComputerSessionCreate,
   prepareComputerSessionEnd,
@@ -106,6 +107,7 @@ import {
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
 import {
+  recordSourcePlacementMove,
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
@@ -162,6 +164,9 @@ type ComputerPlacement = {
   lease: LeaseSnapshot | null;
   /** Current placement consent, separate from passive viewing authority. */
   screenControlAllowed?: boolean;
+  /** Where an attached device's Chrome profile is stored: its machine's
+   *  enrollment workspace, which can be another workspace. */
+  attachedDeviceWorkspaceId?: string;
 };
 
 type ActiveComputerControllerCallback<T> = (input: {
@@ -356,6 +361,7 @@ export function registerComputerSessionRoutes(
         sourceSession,
         grant,
         existing?.session.placement ?? request.placement ?? null,
+        existing?.deviceWorkspaceId ?? null,
         existing?.session.controller?.placementInstanceId ?? null,
         "computer.create",
         context.req.raw.signal,
@@ -363,7 +369,13 @@ export function registerComputerSessionRoutes(
           if (!prepared) {
             prepared = await prepareComputerSessionCreate(
               deps.db,
-              computerCreateInput(grant, workspaceId, request, placement.placement),
+              computerCreateInput(
+                grant,
+                workspaceId,
+                request,
+                placement.placement,
+                placement.attachedDeviceWorkspaceId,
+              ),
             );
           }
           if (isTerminalOperation(prepared.operation.state)) return prepared;
@@ -1056,12 +1068,30 @@ export function registerComputerSessionRoutes(
       const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings);
       try {
-        const before = await getComputerSessionControlRecord(deps.db, {
+        let before = await getComputerSessionControlRecord(deps.db, {
           accountId: grant.accountId,
           workspaceId,
           computerSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        // Still live on a machine its task has since moved away from: record
+        // the move now, so the retirement below ends it there in this call.
+        if (
+          before.session.lifecycle !== "lost" &&
+          before.session.controller &&
+          before.session.placement.kind === "connected_machine" &&
+          (await recordSourcePlacementMove(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            connectedSandboxId: before.session.placement.sandboxId,
+          }))
+        ) {
+          before = await getComputerSessionControlRecord(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            computerSessionId,
+          });
+        }
         if (
           before.session.lifecycle === "lost" &&
           before.session.failureCode === "source_placement_changed" &&
@@ -1085,6 +1115,13 @@ export function registerComputerSessionRoutes(
               "This computer session still runs on the Connected Machine its task moved away from, and that machine could not stop it now. Try again when the machine is online.",
             );
           }
+          // The machine is reachable again: end anything else this task left
+          // on it too, without making this request wait.
+          void retireSourceFormerPlacements(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            origin: null,
+          });
         }
         if (before.session.controller) controllerAuthorityRoot(deps);
         const prepared = await prepareComputerSessionEnd(deps.db, {
@@ -1115,13 +1152,28 @@ export function registerComputerSessionRoutes(
           operationId: request.operationId,
         });
         const binding = record.session.controller;
-        if (!binding) {
+        // A computer with no controller, or in a Chrome profile that can never
+        // be reached again, ends here; completing under the bound generation
+        // fences that controller off.
+        if (
+          !binding ||
+          (record.session.placement?.kind === "attached_device" &&
+            (await interactionControllerGone(
+              deps.db,
+              await attachedBrowserViewer(deps, grant, workspaceId),
+              {
+                ...record.session.placement,
+                deviceWorkspaceId: record.deviceWorkspaceId,
+                placementInstanceId: binding.placementInstanceId,
+              },
+            )))
+        ) {
           const completed = await completeComputerSessionEnd(deps.db, {
             accountId: grant.accountId,
             workspaceId,
             operationId: request.operationId,
             computerSessionId,
-            expectedControllerGeneration: null,
+            expectedControllerGeneration: binding?.controllerGeneration ?? null,
           });
           await releaseInteractionHolder(
             grant,
@@ -1139,6 +1191,7 @@ export function registerComputerSessionRoutes(
           sourceSession,
           grant,
           record.session.placement,
+          record.deviceWorkspaceId,
           binding.placementInstanceId,
           "computer.end",
           context.req.raw.signal,
@@ -1245,6 +1298,9 @@ export function registerComputerSessionRoutes(
     sourceSession: Session,
     grant: AccessGrant,
     expectedPlacement: InteractionPlacement | null,
+    /** An existing session's attached profile workspace, which pins the
+     *  profile copy its controller check uses. */
+    expectedDeviceWorkspaceId: string | null,
     expectedPlacementInstanceId: string | null,
     operation: ChannelAOperation,
     waitSignal: AbortSignal,
@@ -1262,6 +1318,7 @@ export function registerComputerSessionRoutes(
       const device = await getAttachedBrowserDevice(deps.db, {
         ...viewer,
         deviceId: expectedPlacement.deviceId,
+        deviceWorkspaceId: expectedDeviceWorkspaceId,
       });
       if (device.state !== "connected") {
         throw new ComputerSessionStateError("Attached browser machine is disconnected");
@@ -1328,6 +1385,7 @@ export function registerComputerSessionRoutes(
         session: built.session as unknown as BrowserControlPlacementSession,
         lease: null,
         screenControlAllowed: enrollment.allowScreenControl === true,
+        attachedDeviceWorkspaceId: device.workspaceId,
       });
     }
     const runWithChannelA =
@@ -1759,6 +1817,7 @@ export function registerComputerSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         channelOperation,
         context.req.raw.signal,
@@ -2009,6 +2068,7 @@ function computerCreateInput(
   workspaceId: string,
   request: CreateComputerSessionRequestValue,
   placement: InteractionPlacement,
+  attachedDeviceWorkspaceId?: string,
 ) {
   return {
     accountId: grant.accountId,
@@ -2018,6 +2078,7 @@ function computerCreateInput(
     actorSubjectId: grant.subjectId,
     name: request.name ?? "Computer",
     placement,
+    attachedDeviceWorkspaceId: attachedDeviceWorkspaceId ?? null,
   };
 }
 

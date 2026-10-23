@@ -39,6 +39,7 @@ const API = "https://api.example.test";
 const RESPONSE_EVENTS = [
   {
     label: "approval",
+    delivery: "approval",
     event: {
       type: "user.approvalDecision",
       clientEventId: "approval-retry",
@@ -47,6 +48,7 @@ const RESPONSE_EVENTS = [
   },
   {
     label: "human-input",
+    delivery: "answer",
     event: {
       type: "user.humanInputResponse",
       clientEventId: "human-input-retry",
@@ -61,6 +63,7 @@ const RESPONSE_EVENTS = [
   },
 ] satisfies Array<{
   label: string;
+  delivery: SessionProxyMessageInput["delivery"];
   event: ClientSessionEventInput;
 }>;
 
@@ -539,7 +542,9 @@ describe("createSessionProxyHandler", () => {
     expect(inputs).toEqual([
       { initialMessage: "", startMode: "realtime", idempotencyKey: "voice-create" },
     ]);
-    expect(admissions).toEqual([{ delivery: "create", startMode: "realtime" }]);
+    expect(admissions).toEqual([
+      { delivery: "create", startMode: "realtime", clientEventId: "voice-create" },
+    ]);
     expect(upstream.requests[0]!.body).toMatchObject({
       startMode: "realtime",
       idempotencyKey: "voice-create",
@@ -1231,9 +1236,9 @@ describe("createSessionProxyHandler", () => {
       modelContext: "Page: /reports · TZ: Europe/Oslo · 2026-09-29\n\nWorkspace plan",
     });
     expect(inputs).toEqual([
-      { sessionId: SESSION_ID, delivery: "send", user: "u_42" },
+      { sessionId: SESSION_ID, delivery: "send", browserContext: "Row 7", user: "u_42" },
       { sessionId: SESSION_ID, delivery: "steer", user: "u_42" },
-      { sessionId: SESSION_ID, delivery: "submit", user: "u_42" },
+      { sessionId: SESSION_ID, delivery: "submit", clientEventId: "c1", user: "u_42" },
       { delivery: "create", user: "u_42" },
     ]);
     // The browser still cannot rotate credentials itself.
@@ -1254,15 +1259,15 @@ describe("createSessionProxyHandler", () => {
     expect(upstream.requests).toHaveLength(0);
   });
 
-  for (const { label, event } of RESPONSE_EVENTS) {
-    test(`existing send-only hook refreshes ${label} credentials without changing the response`, async () => {
+  for (const { label, delivery, event } of RESPONSE_EVENTS) {
+    test(`beforeForwardMessage refreshes ${label} credentials without changing the response`, async () => {
       const inputs: SessionProxyMessageInput[] = [];
       const updates = [{ id: "crm", headers: { Authorization: "test-rotation" } }];
       const { upstream, browser } = setup({
         modelSelection: false,
         beforeForwardMessage: async (input, context) => {
           inputs.push(input);
-          if (input.delivery !== "send") return;
+          if (input.delivery !== delivery) return;
           expect(context.workspaceId).toBe(WORKSPACE_ID);
           expect(context.user).toBe("u_42");
           expect(context.source).toBe("northwind");
@@ -1277,7 +1282,9 @@ describe("createSessionProxyHandler", () => {
         },
       });
       const response = await browser.sendEvent(WORKSPACE_ID, SESSION_ID, event);
-      expect(inputs).toEqual([{ sessionId: SESSION_ID, delivery: "send" }]);
+      expect(inputs).toEqual([
+        { sessionId: SESSION_ID, delivery, clientEventId: event.clientEventId },
+      ]);
       expect(upstream.requests).toHaveLength(1);
       expect(upstream.requests[0]!.method).toBe("POST");
       expect(upstream.requests[0]!.url.pathname).toBe(
@@ -1378,13 +1385,13 @@ describe("createSessionProxyHandler", () => {
     });
   }
 
-  test("SDK approval rejection and human-input skip use the same credential hook", async () => {
+  test("SDK approval rejection and human-input skip reach the hook as approval and answer", async () => {
     const inputs: SessionProxyMessageInput[] = [];
     const updates = [{ id: "crm", headers: { Authorization: "test-rotation" } }];
     const { upstream, browser } = setup({
       beforeForwardMessage: (input) => {
         inputs.push(input);
-        if (input.delivery !== "send") return;
+        if (input.delivery !== "approval" && input.delivery !== "answer") return;
         return { mcpCredentialUpdates: updates };
       },
     });
@@ -1401,8 +1408,8 @@ describe("createSessionProxyHandler", () => {
       { clientEventId: "skip-retry" },
     );
     expect(inputs).toEqual([
-      { sessionId: SESSION_ID, delivery: "send" },
-      { sessionId: SESSION_ID, delivery: "send" },
+      { sessionId: SESSION_ID, delivery: "approval", clientEventId: "reject-retry" },
+      { sessionId: SESSION_ID, delivery: "answer", clientEventId: "skip-retry" },
     ]);
     expect(upstream.requests.map((request) => request.body)).toEqual([
       {
@@ -1863,6 +1870,53 @@ describe("createSessionProxyHandler pass-through", () => {
       expect(response.status).toBe(404);
     }
     expect(upstream.requests).toHaveLength(0);
+  });
+
+  test("the user's own inbox passes through as the user, pinned to the workspace", async () => {
+    const { handler, upstream } = setup();
+    const item = "33333333-3333-4333-8333-333333333333";
+    const json = { headers: { "Content-Type": "application/json" }, body: "{}" };
+    for (const [path, method] of [
+      [`/inbox?workspaceId=${OTHER_WORKSPACE_ID}&extra=1`, "GET"],
+      [`/inbox/items/${item}`, "PATCH"],
+      ["/inbox/settings", "GET"],
+      ["/inbox/settings", "PUT"],
+    ] as const) {
+      const response = await send(handler, `${mount}${path}`, {
+        method,
+        ...(method === "GET" ? {} : json),
+      });
+      expect(response.status).toBe(200);
+    }
+    expect(
+      upstream.requests.map(
+        (request) => `${request.method} ${request.url.pathname}${request.url.search}`,
+      ),
+    ).toEqual([
+      `GET /v1/inbox?workspaceId=${WORKSPACE_ID}`,
+      `PATCH /v1/inbox/items/${item}?workspaceId=${WORKSPACE_ID}`,
+      "GET /v1/inbox/settings",
+      "PUT /v1/inbox/settings",
+    ]);
+    for (const request of upstream.requests) {
+      expect(request.headers.get("x-opengeni-external-actor")).not.toBeNull();
+    }
+    for (const [path, method] of [
+      ["/inbox", "POST"],
+      ["/inbox/items", "GET"],
+      [`/inbox/items/${item}`, "GET"],
+      [`/inbox/items/${item}`, "DELETE"],
+      [`/inbox/items/${encodeURIComponent("not:an-id")}`, "PATCH"],
+      ["/inbox/settings", "PATCH"],
+      ["/inbox/other", "GET"],
+    ] as const) {
+      const response = await send(handler, `${mount}${path}`, {
+        method,
+        ...(method === "GET" || method === "DELETE" ? {} : json),
+      });
+      expect(response.status).toBe(404);
+    }
+    expect(upstream.requests).toHaveLength(4);
   });
 
   test("relays keys and subject ids in paths re-encoded, and refuses unsafe segments", async () => {

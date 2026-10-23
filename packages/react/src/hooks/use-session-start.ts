@@ -26,6 +26,12 @@ export type UseSessionStartOptions = EmbeddedSessionClientOverride & {
    * host proxy without them still gets the explanation, without choices.
    */
   machinesClient?: MachinesClientLike | undefined;
+  /**
+   * Whether this viewer may read the workspace machines (`GET /machines`,
+   * permission `enrollments:read`). Defaults to true. Pass false for a viewer
+   * without it: nothing is requested and the notice offers no machine choice.
+   */
+  machinesEnabled?: boolean | undefined;
 };
 
 export type UseSessionStartResult = {
@@ -66,6 +72,7 @@ export function useSessionStart({
   session,
   onSessionChanged,
   machinesClient,
+  machinesEnabled = true,
   ...override
 }: UseSessionStartOptions): UseSessionStartResult {
   const t = useOpenGeniText();
@@ -81,7 +88,7 @@ export function useSessionStart({
     workspaceId,
     ...(machines ? { machinesClient: machines } : {}),
     sessionId: session.id,
-    enabled: machines !== undefined && session.activeSandboxId != null,
+    enabled: machinesEnabled && machines !== undefined && session.activeSandboxId != null,
     pollIntervalMs: reason ? BLOCKED_MACHINE_POLL_MS : undefined,
   });
   const machineAccess = currentSessionMachineAccess(

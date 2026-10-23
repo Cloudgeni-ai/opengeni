@@ -109,21 +109,25 @@ Full access; SDK
 `listOrganizationMcpConnections`, `updateOrganizationMcpConnection`,
 `deleteOrganizationMcpConnection`). Migration `0601` is rolling.
 
-### Admin access for agent sessions
+### Full access for agent sessions
 
-An owner or admin can let one of their own Opengeni sessions reach the same
-organization actions, without connecting an outside client:
+Any member can let a session they started reach the same organization
+actions as themselves, without connecting an outside client. The API calls it
+admin access; the app calls it full access. The agent can do exactly what
+that person can do in the app: a member's workspaces and their settings, or
+everything an owner or admin manages.
 
 - The organization allows it first: Organization settings > Security & data >
-  Agents, "Admin access for agent sessions" (off by default;
+  Agents, "Full access for agent sessions" (off by default;
   `GET`/`PATCH /v1/organizations/:id/agent-admin-access`, owners and admins).
   Turning it off removes every session's access at once, and turning it on
   again restores none.
-- Then, in the session's header menu, "Give admin access…" (`PUT
+- Then, in the session's header menu, "Give full access…" (`PUT
   /v1/workspaces/:ws/sessions/:id/admin-access`, body `{ durationHours }`:
-  one hour by default, up to 720, or `null` for no time limit). Only an owner
-  or admin, on a session they started themselves, or an agent acting as them
-  with Full access (such as one with admin access). API keys and limited
+  one hour by default, up to 720, or `null` for no time limit). Only someone
+  who belongs to the session's workspace (or an owner or admin), on a session
+  they started themselves, or an agent acting as them with Full access (such
+  as one with full access). API keys and limited
   agents can never give access, to their own session or another.
   The granter or any owner or admin can turn it off from the shield beside
   the title or the same menu (`DELETE`; `GET` returns the state and what the
@@ -132,11 +136,12 @@ organization actions, without connecting an outside client:
   `admin_action_describe` and `admin_action_call`. They are never part of a
   tool selection or default: the session's Opengeni MCP server lists them only
   while access is in effect, and every call checks again, so turning it off,
-  the organization turning it off, or the granter losing their owner or admin
-  role applies to the very next call.
+  the organization turning it off, or the granter leaving the session's
+  workspace (or losing the owner or admin role that gave them access to it)
+  applies to the very next call.
 - They cover exactly the organization MCP server's catalog and run each
-  action in process as the granter with Full access over all workspaces,
-  under the same rules (`browserOnly` actions and browser-bound provider OAuth
+  action in process as the granter, capped by the granter's own live access
+  (a member's 403s stay 403s), under the same rules (`browserOnly` actions and browser-bound provider OAuth
   stay with the person). Nothing of the agent's own workspace scope carries
   into the action.
 

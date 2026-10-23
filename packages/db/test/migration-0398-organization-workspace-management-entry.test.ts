@@ -162,6 +162,22 @@ test("preserves legacy create outcomes and custom runtime-role access across mig
         ALTER CONSTRAINT preference_registry_events_new_revision_fk DEFERRABLE INITIALLY DEFERRED;
       -- The deletion adapter ends a workspace's compute groups (0861's column).
       ALTER TABLE sandbox_leases ADD COLUMN group_end_requested_at timestamptz;
+      -- The deletion adapter defers in-closure references through 0927's
+      -- function; this fixture only needs the Skill history links it holds.
+      CREATE SCHEMA IF NOT EXISTS opengeni_private;
+      CREATE FUNCTION opengeni_private.defer_workspace_cascade_foreign_keys()
+      RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+        SET CONSTRAINTS
+          preference_registry_preferences_superseded_by_fk,
+          preference_registry_events_related_fk,
+          preference_registry_revisions_corrects_revision_id_fkey,
+          preference_registry_preferences_active_revision_fk,
+          preference_registry_events_old_revision_fk,
+          preference_registry_events_new_revision_fk
+        DEFERRED;
+      END $$;
+      GRANT USAGE ON SCHEMA opengeni_private TO "${customRole}";
+      GRANT EXECUTE ON FUNCTION opengeni_private.defer_workspace_cascade_foreign_keys() TO "${customRole}";
     `);
     expect(
       await deleteWorkspaceIfQuiescent(client.db, {

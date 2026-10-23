@@ -100,10 +100,9 @@ export type OAuthProviderProfile = {
   defaultOwnership?: ConnectionOwnership;
   /** Built-in-only ownership restriction, including old reconnect/callback state. */
   requiredOwnership?: { ownership: ConnectionOwnership; message: string };
-  /** Bind reconnect/dedupe to the exact mcpUrl, not just the provider domain. */
-  exactMcpBinding: boolean;
-  /** How an existing connection is chosen for reconnect coalescing. */
-  connectionSelection: "canonical_personal" | "first_active";
+  /** Verified metadata tuple identifying an account, including tenant when applicable.
+   * Produced only by the authenticated verification adapter, never display names. */
+  accountIdentityMetadataKeys?: readonly string[];
   /** Post-discovery authorization-server origin pins. */
   authorizationServer?: AuthorizationServerPins;
   /**
@@ -154,13 +153,12 @@ export type OAuthProviderProfile = {
 export const DEFAULT_OAUTH_PROFILE: OAuthProviderProfile = {
   key: "default",
   match: {},
-  exactMcpBinding: false,
-  connectionSelection: "first_active",
   sendResourceParameter: true,
 };
 
 const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
   key: "hosted-slack-mcp",
+  accountIdentityMetadataKeys: ["slackTeamId", "slackUserId"],
   match: { mcpUrls: [OFFICIAL_SLACK_MCP_URL], providerDomains: ["slack.com"] },
   canonicalProviderDomain: "slack.com",
   rejectCallerOAuthClient: {
@@ -178,8 +176,6 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
     key: "slack",
     message: "Slack MCP OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
   },
-  exactMcpBinding: true,
-  connectionSelection: "canonical_personal",
   authorizationServer: {
     issuerOrigins: [SLACK_OAUTH_ORIGIN, SLACK_MCP_ORIGIN],
     authorizationEndpointOrigins: [SLACK_OAUTH_ORIGIN],
@@ -226,6 +222,7 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
 
 const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   key: "official-gmail",
+  accountIdentityMetadataKeys: ["gmailEmail"],
   match: { mcpUrls: [OFFICIAL_GMAIL_MCP_URL] },
   requireExactMcpUrl: {
     url: OFFICIAL_GMAIL_MCP_URL,
@@ -233,8 +230,6 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   },
   defaultOwnership: "personal",
   requiredOwnership: { ownership: "personal", message: "Gmail connections must be personal-owned" },
-  exactMcpBinding: true,
-  connectionSelection: "first_active",
   authorizationServer: {
     issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
     authorizationEndpointOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
@@ -306,8 +301,6 @@ const OFFICIAL_DRIVE_PROFILE: OAuthProviderProfile = {
     ownership: "personal",
     message: "Google Drive connections must be personal-owned",
   },
-  exactMcpBinding: true,
-  connectionSelection: "first_active",
   authorizationServer: {
     issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
     authorizationEndpointOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
@@ -582,7 +575,6 @@ export function oauthProfileFromCatalog(mcpUrl: string, raw: unknown): OAuthProv
     key: `catalog:${mcpUrl}`,
     match: { mcpUrls: [mcpUrl] },
     ...(data.defaultOwnership ? { defaultOwnership: data.defaultOwnership } : {}),
-    exactMcpBinding: Boolean(data.exactMcpUrl),
     ...(data.exactMcpUrl
       ? {
           requireExactMcpUrl: {
@@ -591,7 +583,6 @@ export function oauthProfileFromCatalog(mcpUrl: string, raw: unknown): OAuthProv
           },
         }
       : {}),
-    connectionSelection: "first_active",
     ...(pins ? { authorizationServer: pins } : {}),
     ...(data.clientSource ? { clientSource: data.clientSource } : {}),
     sendResourceParameter: data.sendResourceParameter ?? true,
