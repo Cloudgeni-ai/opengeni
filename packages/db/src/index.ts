@@ -42890,7 +42890,7 @@ export async function insertRecording(
   );
 }
 
-export async function updateRecording(
+export async function updateSessionRecording(
   db: Database,
   input: {
     accountId: string;
@@ -43052,7 +43052,7 @@ export async function abandonRecordingForTurnAttempt(
   );
 }
 
-export async function getRecording(
+export async function getSessionRecording(
   db: Database,
   workspaceId: string,
   recordingId: string,
@@ -43072,7 +43072,7 @@ export async function getRecording(
   });
 }
 
-export async function listRecordings(
+export async function listSessionRecordings(
   db: Database,
   workspaceId: string,
   sessionId: string,

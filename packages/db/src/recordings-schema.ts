@@ -18,7 +18,13 @@ import {
 
 // Migration 0930. Visibility mirrors chats: "user_private" is Only me.
 export const recordingVisibilityValues = ["user_private", "workspace_shared"] as const;
-export const recordingStateValues = ["capturing", "processing", "ready", "failed"] as const;
+export const recordingStateValues = [
+  "capturing",
+  "processing",
+  "ready",
+  "failed",
+  "deleting",
+] as const;
 export const recordingTrackSourceValues = ["microphone", "system", "mixed", "upload"] as const;
 export const recordingChunkStateValues = ["pending", "uploaded"] as const;
 export const recordingTranscriptVersionStateValues = [
@@ -145,7 +151,6 @@ export const recordingTranscriptVersions = pgTable(
     attemptCount: integer("attempt_count").notNull().default(0),
     processingOwner: uuid("processing_owner"),
     processingStartedAt: timestamp("processing_started_at", { withTimezone: true }),
-    recoveryAfter: timestamp("recovery_after", { withTimezone: true }).notNull().defaultNow(),
     errorCode: text("error_code"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp("completed_at", { withTimezone: true }),

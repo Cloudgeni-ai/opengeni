@@ -24,7 +24,10 @@ CREATE TABLE recordings (
   CONSTRAINT recordings_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT recordings_visibility_chk CHECK (visibility IN ('user_private', 'workspace_shared')),
-  CONSTRAINT recordings_state_chk CHECK (state IN ('capturing', 'processing', 'ready', 'failed')),
+  -- `deleting`: hidden from every read while a workflow removes its media,
+  -- then its rows.
+  CONSTRAINT recordings_state_chk
+    CHECK (state IN ('capturing', 'processing', 'ready', 'failed', 'deleting')),
   CONSTRAINT recordings_values_chk CHECK (
     octet_length(owner_subject_id) BETWEEN 1 AND 1024
     AND char_length(title) BETWEEN 1 AND 300
@@ -126,8 +129,6 @@ CREATE TABLE recording_transcript_versions (
   attempt_count integer NOT NULL DEFAULT 0,
   processing_owner uuid,
   processing_started_at timestamptz,
-  -- When the recovery sweep may next (re)start this version's workflow.
-  recovery_after timestamptz NOT NULL DEFAULT clock_timestamp() + interval '2 minutes',
   error_code text,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   completed_at timestamptz,
@@ -156,8 +157,6 @@ CREATE TABLE recording_transcript_versions (
 );
 CREATE UNIQUE INDEX recording_transcript_versions_current_uq
   ON recording_transcript_versions (recording_id) WHERE is_current;
-CREATE INDEX recording_transcript_versions_pending_idx
-  ON recording_transcript_versions (recovery_after, id) WHERE state IN ('queued', 'processing');
 
 -- A stretch of speech in one version. `speaker_label` is the anonymous label
 -- the model or the track produced inside this version.
@@ -304,205 +303,133 @@ CREATE TABLE recording_events (
 CREATE INDEX recording_events_workspace_idx ON recording_events (workspace_id, occurred_at, id);
 CREATE INDEX recording_events_recording_idx ON recording_events (workspace_id, recording_id);
 
--- Removed media. A chunk row's deletion (with its recording or its
--- workspace) leaves its object key here, outside every tenant cascade, so the
--- worker deletes the bytes even after the workspace itself is gone.
-CREATE TABLE opengeni_private.recording_object_tombstones (
-  object_key text PRIMARY KEY,
-  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  claim_id uuid,
-  claim_until timestamptz,
-  attempts integer NOT NULL DEFAULT 0,
-  CONSTRAINT recording_object_tombstones_values_chk CHECK (
-    octet_length(object_key) BETWEEN 1 AND 1024
-    AND attempts >= 0
-    AND (claim_id IS NULL) = (claim_until IS NULL)
-  )
-);
-REVOKE ALL ON opengeni_private.recording_object_tombstones FROM PUBLIC;
-
-CREATE FUNCTION opengeni_private.tombstone_recording_chunk_objects_v1()
+-- Recording events fan out to workspace webhooks as the inserting role, like
+-- session events. The payload carries ids and states only, never a title,
+-- audio or transcript text.
+CREATE FUNCTION opengeni_private.enqueue_recording_event_workspace_webhooks_v1()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path FROM CURRENT
-AS $tombstone_recording_chunk_objects$
-BEGIN
-  INSERT INTO opengeni_private.recording_object_tombstones (object_key)
-  SELECT removed.object_key FROM removed_chunks removed
-  ON CONFLICT (object_key) DO NOTHING;
-  RETURN NULL;
-END
-$tombstone_recording_chunk_objects$;
-REVOKE ALL ON FUNCTION opengeni_private.tombstone_recording_chunk_objects_v1() FROM PUBLIC;
-
-CREATE TRIGGER recording_chunks_tombstone_objects_v1
-AFTER DELETE ON recording_chunks
-REFERENCING OLD TABLE AS removed_chunks
-FOR EACH STATEMENT
-EXECUTE FUNCTION opengeni_private.tombstone_recording_chunk_objects_v1();
-
--- The cleanup loop is cross-tenant; it reaches tombstones only through these
--- owner-run functions.
-CREATE FUNCTION opengeni_private.claim_recording_object_tombstones_v1(
-  p_claim_id uuid,
-  p_limit integer,
-  p_claim_seconds integer
-)
-RETURNS TABLE (object_key text, attempts integer)
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path FROM CURRENT
-AS $claim_recording_object_tombstones$
-BEGIN
-  IF p_claim_id IS NULL OR p_limit NOT BETWEEN 1 AND 1000 OR p_claim_seconds NOT BETWEEN 1 AND 3600 THEN
-    RAISE EXCEPTION 'invalid recording object tombstone claim' USING ERRCODE = '22023';
-  END IF;
-  RETURN QUERY
-  WITH candidates AS MATERIALIZED (
-    SELECT tombstone.object_key
-    FROM opengeni_private.recording_object_tombstones tombstone
-    WHERE tombstone.claim_until IS NULL OR tombstone.claim_until < clock_timestamp()
-    ORDER BY tombstone.created_at, tombstone.object_key
-    LIMIT p_limit
-    FOR UPDATE SKIP LOCKED
-  )
-  UPDATE opengeni_private.recording_object_tombstones tombstone
-  SET claim_id = p_claim_id,
-    claim_until = clock_timestamp() + make_interval(secs => p_claim_seconds),
-    attempts = tombstone.attempts + 1
-  FROM candidates
-  WHERE tombstone.object_key = candidates.object_key
-  RETURNING tombstone.object_key, tombstone.attempts;
-END
-$claim_recording_object_tombstones$;
-REVOKE ALL ON FUNCTION opengeni_private.claim_recording_object_tombstones_v1(uuid, integer, integer)
-  FROM PUBLIC;
-
-CREATE FUNCTION opengeni_private.settle_recording_object_tombstone_v1(
-  p_claim_id uuid,
-  p_object_key text
-)
-RETURNS boolean
-LANGUAGE sql
-SECURITY DEFINER
-SET search_path FROM CURRENT
-AS $settle_recording_object_tombstone$
-  WITH settled AS (
-    DELETE FROM opengeni_private.recording_object_tombstones tombstone
-    WHERE tombstone.object_key = p_object_key AND tombstone.claim_id = p_claim_id
-    RETURNING 1
-  )
-  SELECT EXISTS (SELECT 1 FROM settled);
-$settle_recording_object_tombstone$;
-REVOKE ALL ON FUNCTION opengeni_private.settle_recording_object_tombstone_v1(uuid, text) FROM PUBLIC;
-
--- Transcript versions are processed by a workflow started when the version
--- is created. The recovery sweep restarts the workflow of any version still
--- unfinished after `recovery_after` (a lost start, or a dead workflow); the
--- workflow start is idempotent by version id.
-CREATE FUNCTION opengeni_private.claim_recording_transcript_recovery_v1(
-  p_limit integer,
-  p_retry_seconds integer
-)
-RETURNS TABLE (
-  version_id uuid,
-  recording_id uuid,
-  account_id uuid,
-  workspace_id uuid,
-  owner_subject_id text
-)
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path FROM CURRENT
-AS $claim_recording_transcript_recovery$
-BEGIN
-  IF p_limit NOT BETWEEN 1 AND 1000 OR p_retry_seconds NOT BETWEEN 30 AND 86400 THEN
-    RAISE EXCEPTION 'invalid recording transcript recovery claim' USING ERRCODE = '22023';
-  END IF;
-  RETURN QUERY
-  WITH candidates AS MATERIALIZED (
-    SELECT version.id
-    FROM recording_transcript_versions version
-    WHERE version.state IN ('queued', 'processing')
-      AND version.recovery_after <= clock_timestamp()
-    ORDER BY version.recovery_after, version.id
-    LIMIT p_limit
-    FOR UPDATE SKIP LOCKED
-  )
-  UPDATE recording_transcript_versions version
-  SET recovery_after = clock_timestamp() + make_interval(secs => p_retry_seconds)
-  FROM candidates, recordings recording
-  WHERE version.id = candidates.id
-    AND recording.workspace_id = version.workspace_id
-    AND recording.id = version.recording_id
-  RETURNING version.id, version.recording_id, version.account_id, version.workspace_id,
-    recording.owner_subject_id;
-END
-$claim_recording_transcript_recovery$;
-REVOKE ALL ON FUNCTION opengeni_private.claim_recording_transcript_recovery_v1(integer, integer)
-  FROM PUBLIC;
-
--- Recording events fan out to the workspace's and the organization's
--- webhooks, shaped like the other workspace-lane webhook payloads.
-CREATE FUNCTION opengeni_private.enqueue_recording_event_webhooks_v1()
-RETURNS trigger
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path FROM CURRENT
-AS $enqueue_recording_event_webhooks$
-DECLARE
-  workspace_value jsonb;
-  payload_data jsonb;
+AS $enqueue_recording_event_workspace_webhooks$
 BEGIN
   BEGIN
-    SELECT jsonb_build_object('id', w.id, 'externalSource', w.external_source, 'externalId', w.external_id)
-    INTO workspace_value
-    FROM workspaces w WHERE w.id = NEW.workspace_id AND w.account_id = NEW.account_id;
-    IF workspace_value IS NULL THEN RETURN NULL; END IF;
-    payload_data := NEW.data || jsonb_build_object(
-      'recordingId', NEW.recording_id,
-      'ownerSubjectId', NEW.owner_subject_id,
-      'visibility', CASE WHEN NEW.visibility = 'user_private' THEN 'private' ELSE 'workspace' END
-    );
     INSERT INTO workspace_webhook_deliveries (account_id, workspace_id, webhook_id, event_id, event_type, payload)
-    SELECT NEW.account_id, NEW.workspace_id, webhook.id, NEW.id, NEW.type,
-      jsonb_build_object('id', NEW.id, 'type', NEW.type, 'workspaceId', NEW.workspace_id,
-        'lane', 'workspace', 'workspace', workspace_value,
-        'occurredAt', NEW.occurred_at, 'data', payload_data)
+    SELECT webhook.account_id, webhook.workspace_id, webhook.id, NEW.id, NEW.type,
+      jsonb_build_object(
+        'id', NEW.id, 'type', NEW.type, 'lane', 'workspace', 'workspaceId', NEW.workspace_id,
+        'workspace', jsonb_build_object('id', workspace.id, 'externalSource', workspace.external_source,
+          'externalId', workspace.external_id),
+        'occurredAt', to_char(NEW.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'data', NEW.data
+      )
     FROM workspace_webhooks webhook
-    WHERE webhook.workspace_id = NEW.workspace_id AND webhook.enabled
-      AND NEW.type = ANY(webhook.event_types)
-    ON CONFLICT DO NOTHING;
-    INSERT INTO organization_webhook_deliveries (account_id, workspace_id, webhook_id, event_id, event_type, payload)
-    SELECT webhook.account_id, NEW.workspace_id, webhook.id, NEW.id, NEW.type,
-      jsonb_build_object('id', NEW.id, 'type', NEW.type, 'workspaceId', NEW.workspace_id,
-        'lane', 'organization', 'workspace', workspace_value,
-        'occurredAt', NEW.occurred_at, 'data', payload_data)
-    FROM (
-      SELECT registration.* FROM organization_webhooks registration
-      WHERE registration.account_id = NEW.account_id AND registration.enabled
-        AND NEW.type = ANY(registration.event_types)
-      ORDER BY registration.created_at, registration.id LIMIT 10
-    ) webhook
-    -- The organization lane never sees personal workspaces, like its
-    -- session events.
-    WHERE get_workspace_kind(NEW.account_id, NEW.workspace_id) = 'shared'
-      AND (webhook.workspace_filter IS NULL
-        OR webhook.workspace_filter ->> 'externalSource' = workspace_value ->> 'externalSource')
-    ON CONFLICT DO NOTHING;
+    JOIN workspaces workspace ON workspace.id = NEW.workspace_id AND workspace.account_id = NEW.account_id
+    WHERE webhook.account_id = NEW.account_id AND webhook.workspace_id = NEW.workspace_id
+      AND webhook.enabled AND NEW.type = ANY(webhook.event_types)
+    ON CONFLICT (webhook_id, event_id) DO NOTHING;
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'recording webhook enqueue skipped for event %: %', NEW.id, SQLSTATE;
   END;
   RETURN NULL;
 END
-$enqueue_recording_event_webhooks$;
-REVOKE ALL ON FUNCTION opengeni_private.enqueue_recording_event_webhooks_v1() FROM PUBLIC;
+$enqueue_recording_event_workspace_webhooks$;
+REVOKE ALL ON FUNCTION opengeni_private.enqueue_recording_event_workspace_webhooks_v1() FROM PUBLIC;
 
-CREATE TRIGGER recording_events_webhook_enqueue_v1
+CREATE TRIGGER recording_events_workspace_webhook_enqueue_v1
 AFTER INSERT ON recording_events
 FOR EACH ROW
-EXECUTE FUNCTION opengeni_private.enqueue_recording_event_webhooks_v1();
+EXECUTE FUNCTION opengeni_private.enqueue_recording_event_workspace_webhooks_v1();
+
+-- The organization lane cannot be read from a workspace transaction, so it
+-- keeps its one owner-run fan-out. Its body gains a branch for recording
+-- events; the session-event branch is unchanged from 0546.
+CREATE OR REPLACE FUNCTION opengeni_private.enqueue_organization_webhook_deliveries_v1()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT
+AS $enqueue$
+DECLARE previous_marker text := current_setting('opengeni.organization_tenancy_lifecycle', true);
+BEGIN
+  BEGIN
+    IF NEW.account_id IS NULL OR NEW.workspace_id IS NULL
+      OR NEW.account_id IS DISTINCT FROM opengeni_private.current_account_id()
+      OR NEW.workspace_id IS DISTINCT FROM opengeni_private.current_workspace_id()
+      OR NOT EXISTS (SELECT 1 FROM workspaces WHERE id = NEW.workspace_id AND account_id = NEW.account_id)
+      OR get_workspace_kind(NEW.account_id, NEW.workspace_id) <> 'shared'
+    THEN RETURN NULL; END IF;
+    PERFORM set_config('opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true);
+    IF EXISTS (SELECT 1 FROM organization_memberships
+      WHERE account_id = NEW.account_id AND personal_workspace_id = NEW.workspace_id)
+    THEN
+      PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker, ''), true);
+      RETURN NULL;
+    END IF;
+    PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker, ''), true);
+    IF TG_TABLE_NAME = 'recording_events' THEN
+      INSERT INTO organization_webhook_deliveries(account_id, workspace_id, webhook_id, event_id, event_type, payload)
+        SELECT webhook.account_id, NEW.workspace_id, webhook.id, NEW.id, NEW.type,
+          jsonb_build_object(
+            'id', NEW.id, 'type', NEW.type, 'lane', 'organization', 'workspaceId', NEW.workspace_id,
+            'workspace', jsonb_build_object('id', workspace.id, 'externalSource', workspace.external_source,
+              'externalId', workspace.external_id),
+            'occurredAt', to_char(NEW.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'data', NEW.data
+          )
+        FROM (
+          SELECT registration.* FROM organization_webhooks registration
+          WHERE registration.account_id = NEW.account_id AND registration.enabled
+            AND NEW.type = ANY(registration.event_types)
+          ORDER BY registration.created_at, registration.id LIMIT 10
+        ) webhook
+        JOIN workspaces workspace ON workspace.id = NEW.workspace_id AND workspace.account_id = webhook.account_id
+        WHERE webhook.workspace_filter IS NULL
+          OR webhook.workspace_filter ->> 'externalSource' = workspace.external_source
+        ON CONFLICT(webhook_id, event_id) DO NOTHING;
+      RETURN NULL;
+    END IF;
+    INSERT INTO organization_webhook_deliveries(account_id, workspace_id, webhook_id, event_id, event_type, payload)
+      SELECT webhook.account_id, NEW.workspace_id, webhook.id, NEW.id, NEW.type,
+        opengeni_private.integration_webhook_payload_v1(
+          NEW.account_id, NEW.workspace_id, NEW.id, NEW.type, NEW.session_id,
+          NEW.turn_id, NEW.sequence, NEW.occurred_at, NEW.payload, 'organization')
+      FROM (
+        SELECT registration.* FROM organization_webhooks registration
+        WHERE registration.account_id = NEW.account_id AND registration.enabled
+          AND NEW.type = ANY(registration.event_types)
+        ORDER BY registration.created_at, registration.id LIMIT 10
+      ) webhook
+      JOIN workspaces workspace ON workspace.id = NEW.workspace_id AND workspace.account_id = webhook.account_id
+      WHERE webhook.account_id = NEW.account_id AND webhook.enabled AND NEW.type = ANY(webhook.event_types)
+        AND (webhook.workspace_filter IS NULL
+          OR webhook.workspace_filter ->> 'externalSource' = workspace.external_source)
+      ON CONFLICT(webhook_id, event_id) DO NOTHING;
+  EXCEPTION WHEN OTHERS THEN
+    PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker, ''), true);
+    RAISE WARNING 'organization webhook enqueue skipped for event %: %', NEW.id, SQLSTATE;
+  END;
+  RETURN NULL;
+END $enqueue$;
+
+CREATE TRIGGER recording_events_organization_webhook_enqueue_v1
+AFTER INSERT ON recording_events
+FOR EACH ROW
+EXECUTE FUNCTION opengeni_private.enqueue_organization_webhook_deliveries_v1();
+
+-- CREATE OR REPLACE resets SET clauses; pin both search paths as 0546 did.
+DO $recording_webhook_search_paths$
+DECLARE
+  target_schema text := current_schema();
+  signature text;
+BEGIN
+  FOREACH signature IN ARRAY ARRAY[
+    'enqueue_recording_event_workspace_webhooks_v1()',
+    'enqueue_organization_webhook_deliveries_v1()'
+  ] LOOP
+    EXECUTE format(
+      'ALTER FUNCTION opengeni_private.%s SET search_path = pg_catalog, %I, pg_temp',
+      signature, target_schema
+    );
+  END LOOP;
+END $recording_webhook_search_paths$;
 
 ALTER TABLE workspace_webhooks DROP CONSTRAINT workspace_webhooks_event_types_chk;
 ALTER TABLE workspace_webhooks ADD CONSTRAINT workspace_webhooks_event_types_chk CHECK (
@@ -600,11 +527,6 @@ BEGIN
       recording_segment_speaker_overrides
     TO opengeni_app;
     GRANT SELECT, INSERT ON recording_events TO opengeni_app;
-    GRANT EXECUTE ON FUNCTION
-      opengeni_private.claim_recording_object_tombstones_v1(uuid, integer, integer),
-      opengeni_private.settle_recording_object_tombstone_v1(uuid, text),
-      opengeni_private.claim_recording_transcript_recovery_v1(integer, integer)
-    TO opengeni_app;
   END IF;
 END
 $recording_grants$;

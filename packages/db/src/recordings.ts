@@ -9,8 +9,8 @@ import type {
   RecordingTranscriptVersion,
   RecordingVisibility,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, gt, inArray, isNotNull, lt, or, sql } from "drizzle-orm";
-import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
+import { and, asc, desc, eq, gt, inArray, isNotNull, lt, ne, or, sql } from "drizzle-orm";
+import { withWorkspaceSubjectRls, type Database } from "./database";
 import * as schema from "./schema";
 import type { RecordingWordTiming } from "./recordings-schema";
 
@@ -100,7 +100,8 @@ function recordingView(
     ownerSubjectId: row.ownerSubjectId,
     visibility: fromVisibility(row.visibility),
     title: row.title,
-    state: row.state,
+    // Reads never return a recording being deleted; keep the type honest.
+    state: row.state === "deleting" ? "failed" : row.state,
     startedAt: row.startedAt.toISOString(),
     captureEndedAt: row.captureEndedAt?.toISOString() ?? null,
     durationMilliseconds: row.durationMilliseconds,
@@ -142,7 +143,8 @@ async function lockRecording(
     .from(schema.recordings)
     .where(and(eq(schema.recordings.workspaceId, workspaceId), eq(schema.recordings.id, recordingId)))
     .for("update");
-  if (!row) throw new RecordingNotFoundError();
+  // A recording being deleted is gone for every caller but its deletion.
+  if (!row || row.state === "deleting") throw new RecordingNotFoundError();
   return row;
 }
 
@@ -195,7 +197,14 @@ async function insertEvent(
     ownerSubjectId: recording.ownerSubjectId,
     visibility: recording.visibility,
     type,
-    data,
+    // Webhooks deliver `data` as is: ids and states, never titles or text.
+    data: {
+      recordingId: recording.id,
+      ownerSubjectId: recording.ownerSubjectId,
+      visibility: fromVisibility(recording.visibility),
+      externalRef: recording.externalRef,
+      ...data,
+    },
   });
 }
 
@@ -261,7 +270,7 @@ export async function createRecording(
         ),
       );
     // A reused id that belongs to another workspace or person is invisible here.
-    if (!row || row.ownerSubjectId !== input.subjectId) {
+    if (!row || row.ownerSubjectId !== input.subjectId || row.state === "deleting") {
       throw new RecordingConflictError("This recording id is already used", "recording_id_taken");
     }
     const [recording] = await loadViews(tx, input.workspaceId, [row]);
@@ -281,6 +290,7 @@ export async function getRecording(
         and(
           eq(schema.recordings.workspaceId, input.workspaceId),
           eq(schema.recordings.id, input.recordingId),
+          ne(schema.recordings.state, "deleting"),
         ),
       );
     if (!row) throw new RecordingNotFoundError();
@@ -305,7 +315,10 @@ export async function listRecordings(
 ): Promise<{ recordings: Recording[]; nextBefore: { startedAt: string; id: string } | null }> {
   const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
-    const conditions = [eq(schema.recordings.workspaceId, input.workspaceId)];
+    const conditions = [
+      eq(schema.recordings.workspaceId, input.workspaceId),
+      ne(schema.recordings.state, "deleting"),
+    ];
     if (input.externalRef) conditions.push(eq(schema.recordings.externalRef, input.externalRef));
     if (input.before) {
       conditions.push(
@@ -391,25 +404,95 @@ export async function updateRecording(db: Database, input: UpdateRecordingInput)
 }
 
 /**
- * Delete a recording and everything recorded under it. Its media objects are
- * tombstoned by the database and removed by the cleanup sweep.
+ * Start deleting a recording: it disappears from every read at once, and the
+ * deletion workflow then removes its media objects and its rows. Only the
+ * person who recorded it may delete it. Repeating it is harmless.
  */
-export async function deleteRecording(
+export async function markRecordingDeleting(
   db: Database,
   input: RecordingActor & { recordingId: string },
-): Promise<void> {
-  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
-    const row = await lockRecording(tx, input.workspaceId, input.recordingId);
+): Promise<{ ownerSubjectId: string }> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      )
+      .for("update");
+    if (!row) throw new RecordingNotFoundError();
     if (row.ownerSubjectId !== input.subjectId) throw new RecordingForbiddenError();
+    if (row.state === "deleting") return { ownerSubjectId: row.ownerSubjectId };
     await tx
-      .delete(schema.recordings)
+      .update(schema.recordings)
+      .set({
+        state: "deleting",
+        captureEndedAt: row.captureEndedAt ?? sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
+      })
       .where(
         and(
           eq(schema.recordings.workspaceId, input.workspaceId),
           eq(schema.recordings.id, input.recordingId),
         ),
       );
-    await insertEvent(tx, row, "recording.deleted", { title: row.title });
+    await insertEvent(tx, row, "recording.deleted", {});
+    return { ownerSubjectId: row.ownerSubjectId };
+  });
+}
+
+/**
+ * The media objects of a recording being deleted, for its deletion workflow.
+ * Null when the recording is not being deleted (nothing to do).
+ */
+export async function listDeletingRecordingObjectKeys(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<string[] | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await tx
+      .select({ state: schema.recordings.state })
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      );
+    if (row?.state !== "deleting") return null;
+    const chunks = await tx
+      .select({ objectKey: schema.recordingChunks.objectKey })
+      .from(schema.recordingChunks)
+      .where(
+        and(
+          eq(schema.recordingChunks.workspaceId, input.workspaceId),
+          eq(schema.recordingChunks.recordingId, input.recordingId),
+        ),
+      );
+    return chunks.map((chunk) => chunk.objectKey);
+  });
+}
+
+/** Remove a deleted recording's rows once its media is gone. */
+export async function purgeDeletingRecording(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const removed = await tx
+      .delete(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+          eq(schema.recordings.state, "deleting"),
+        ),
+      )
+      .returning({ id: schema.recordings.id });
+    return removed.length > 0;
   });
 }
 
@@ -731,9 +814,8 @@ export async function finalizeRecording(
       })
       .returning();
     await insertEvent(tx, finalized!, "recording.finished", {
-      title: finalized!.title,
       durationMilliseconds: recordingDuration,
-      externalRef: finalized!.externalRef,
+      versionId: version!.id,
     });
     const [view] = await loadViews(tx, input.workspaceId, [finalized!]);
     return { recording: view!, version: recordingTranscriptVersionView(version!), finalized: true };
@@ -823,6 +905,7 @@ export async function listRecordingTranscriptVersions(
         and(
           eq(schema.recordings.workspaceId, input.workspaceId),
           eq(schema.recordings.id, input.recordingId),
+          ne(schema.recordings.state, "deleting"),
         ),
       );
     if (!recording) throw new RecordingNotFoundError();
@@ -893,7 +976,7 @@ export async function claimRecordingTranscriptVersion(
           eq(schema.recordings.id, claimed.recordingId),
         ),
       );
-    if (!row) return null;
+    if (!row || row.state === "deleting") return null;
     const [recording] = await loadViews(tx, input.workspaceId, [row]);
     const chunks = await tx
       .select()
@@ -1109,7 +1192,6 @@ export async function completeRecordingTranscriptVersion(
       model: version.model,
       segmentCount: ordered.length,
       languages: [...input.languages],
-      externalRef: ready!.externalRef,
     });
     return recordingTranscriptVersionView(completed!);
   });
@@ -1171,7 +1253,6 @@ export async function failRecordingTranscriptVersion(
       providerId: failed.providerId,
       model: failed.model,
       errorCode: failed.errorCode,
-      externalRef: eventRecording.externalRef,
     });
     return recordingTranscriptVersionView(failed);
   });
@@ -1186,7 +1267,13 @@ async function resolveVersion(
   const [recording] = await tx
     .select({ id: schema.recordings.id })
     .from(schema.recordings)
-    .where(and(eq(schema.recordings.workspaceId, workspaceId), eq(schema.recordings.id, recordingId)));
+    .where(
+      and(
+        eq(schema.recordings.workspaceId, workspaceId),
+        eq(schema.recordings.id, recordingId),
+        ne(schema.recordings.state, "deleting"),
+      ),
+    );
   if (!recording) throw new RecordingNotFoundError();
   const conditions = [
     eq(schema.recordingTranscriptVersions.workspaceId, workspaceId),
@@ -1513,59 +1600,4 @@ export async function createRecordingPerson(
     }
     return { person: personView(existing), created: false };
   });
-}
-
-/** Unfinished versions whose workflow may need (re)starting. Cross-tenant. */
-export async function claimRecordingTranscriptRecovery(
-  db: Database,
-  input: { limit: number; retrySeconds: number },
-): Promise<
-  Array<{
-    versionId: string;
-    recordingId: string;
-    accountId: string;
-    workspaceId: string;
-    ownerSubjectId: string;
-  }>
-> {
-  const rows = await rawRows<{
-    version_id: string;
-    recording_id: string;
-    account_id: string;
-    workspace_id: string;
-    owner_subject_id: string;
-  }>(
-    db,
-    sql`select * from opengeni_private.claim_recording_transcript_recovery_v1(${input.limit}, ${input.retrySeconds})`,
-  );
-  return rows.map((row) => ({
-    versionId: row.version_id,
-    recordingId: row.recording_id,
-    accountId: row.account_id,
-    workspaceId: row.workspace_id,
-    ownerSubjectId: row.owner_subject_id,
-  }));
-}
-
-/** Media objects of deleted recordings, claimed for removal from storage. Cross-tenant. */
-export async function claimRecordingObjectTombstones(
-  db: Database,
-  input: { claimId: string; limit: number; claimSeconds: number },
-): Promise<Array<{ objectKey: string; attempts: number }>> {
-  const rows = await rawRows<{ object_key: string; attempts: number }>(
-    db,
-    sql`select * from opengeni_private.claim_recording_object_tombstones_v1(${input.claimId}::uuid, ${input.limit}, ${input.claimSeconds})`,
-  );
-  return rows.map((row) => ({ objectKey: row.object_key, attempts: Number(row.attempts) }));
-}
-
-export async function settleRecordingObjectTombstone(
-  db: Database,
-  input: { claimId: string; objectKey: string },
-): Promise<boolean> {
-  const rows = await rawRows<{ settled: boolean }>(
-    db,
-    sql`select opengeni_private.settle_recording_object_tombstone_v1(${input.claimId}::uuid, ${input.objectKey}) as settled`,
-  );
-  return rows[0]?.settled === true;
 }
