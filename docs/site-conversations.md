@@ -63,6 +63,9 @@
   one rule: a Site is a top-level row in the project of the chat that created
   it (the session tree of its first version), and new Site conversations are
   filed in that project too, so the Site and its conversations stay together.
+  A create that names no project (omitted or `null`) files the conversation
+  with its Site; only a named project overrides that. Starting or moving
+  conversations never takes a Site out of its own project.
   It is a row of its own rather than a child of that chat because a chat's
   children in the sidebar are the work it spawned, and a Site outlives and is
   used apart from its chat. The row is listed when the viewer lists that chat
@@ -86,8 +89,8 @@
   conversation, belong to the same open. Without a router history key, every
   visit counts. Without
   conversations a row has no count and nothing to disclose; it opens the
-  Site view. Conversations someone moved to another project still nest under
-  the Site's row in that project.
+  Site view. Conversations someone moved to another project nest under a row
+  for the Site in that project, and the Site keeps its row in its own one.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.

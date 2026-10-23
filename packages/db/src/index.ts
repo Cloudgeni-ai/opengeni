@@ -30003,7 +30003,8 @@ function wellFormedDriverText(value: unknown): unknown {
  * A new Site conversation is filed in the project of the chat that created the
  * Site (the tree of its first version's session), so the Site's sidebar row and
  * its conversations sit together. Without a Site origin, or a creating chat,
- * the session stays unfiled.
+ * the session stays unfiled. Callers pass "no project" as null or omit it, so
+ * both mean "file it with its Site"; only a named project overrides that.
  */
 async function siteHomeChannelId(
   tx: Database,
@@ -30320,7 +30321,7 @@ async function createSessionInTransaction(
     parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
   );
   const channelId =
-    input.channelId === undefined && !input.parentSessionId
+    input.channelId == null && !input.parentSessionId
       ? await siteHomeChannelId(tx as unknown as Database, input.workspaceId, sessionMetadata)
       : (input.channelId ?? null);
   try {
@@ -33371,10 +33372,11 @@ async function sessionListTotalsInScope(
     ), site_home as (
       -- A Site sits in the project of the chat that created it (the tree of
       -- its first version's session), as far as this viewer can see that
-      -- chat; new Site conversations are filed there too. A Site without
-      -- conversations here is listed when this viewer lists its creating
-      -- chat, or opened it. Candidates are the live Sites in this viewer's
-      -- audience (one row each); revision 1 is a unique-index lookup.
+      -- chat; new Site conversations are filed there too. Conversations in
+      -- other projects never take the Site out of its own: a Site without
+      -- conversations here is still listed here when this viewer lists its
+      -- creating chat, or opened it. Candidates are the live Sites in this
+      -- viewer's audience (one row each); revision 1 is a unique-index lookup.
       select artifact.id as site_id, creator.channel_id
       from ${schema.workspaceArtifacts} artifact
       join lateral (
@@ -33391,7 +33393,10 @@ async function sessionListTotalsInScope(
         and artifact.workspace_id = ${workspaceId} and artifact.status = 'active'
         and (artifact.visibility = 'workspace_shared'
           or artifact.owner_subject_id = ${options.subjectId})
-        and artifact.id not in (select site_id from site_conv)
+        and not exists (
+          select 1 from site_conv_totals filed
+          where filed.site_id = artifact.id
+            and filed.channel_id is not distinct from creator.channel_id)
         and (exists (select 1 from roots listed where listed.id = creator.id)
           ${
             withOpenedSites

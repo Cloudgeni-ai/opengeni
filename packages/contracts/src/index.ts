@@ -19582,7 +19582,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // An id that does not name a rig in the workspace is a 422.
       rigId: z.string().uuid().nullable().optional(),
       // The workspace channel to file this session under (rail organization only).
-      // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
+      // Omitted/null ⇒ unfiled (inbox), except that a Site conversation is filed
+      // in its Site's project. An id that does not name a channel in the
       // workspace is a 422.
       channelId: z.string().uuid().nullable().optional(),
       goal: GoalSpec.optional(),

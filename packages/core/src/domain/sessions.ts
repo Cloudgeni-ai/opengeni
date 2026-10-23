@@ -3345,7 +3345,8 @@ async function createSessionForRequestInFileScope(
     },
   );
   // CHANNEL FILING. Pure rail organization: a UUID files the session into that
-  // workspace channel, omission/null leaves it unfiled (inbox). Resolved
+  // workspace channel, omission/null leaves it unfiled (inbox), or files a Site
+  // conversation in its Site's project (the database decides). Resolved
   // workspace-scoped so a foreign channel id can never attach; an explicit
   // unknown channelId is a caller error → 422.
   let channelId: string | null = null;
