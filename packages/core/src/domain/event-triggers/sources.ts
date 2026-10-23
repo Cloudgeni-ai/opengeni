@@ -1,10 +1,9 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import type {
   ParsedCreateEventSourceRequest,
   CreateEventSourceResponse,
   EventDelivery,
-  EventDeliveryStatus,
   EventSource,
   EventTypeDescriptor,
   ParsedSendTestEventRequest,
@@ -28,19 +27,24 @@ import {
   updateEventSource,
   type Database,
   type EventSourceRecord,
-  type StoredEventInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { scheduledTaskAccess, type ScheduledTaskViewer } from "../scheduled-task-audience";
+import {
+  readDelivery,
+  retainedSourceHeaders,
+  sha256Hex,
+  type DeliveryOutcome,
+} from "./delivery-intake";
 import { webhookEventTypeCatalog } from "./event-type-catalog";
+import {
+  createGitHubEventSource,
+  githubSourceEventTypes,
+  type GitHubAppWebhookPort,
+} from "./github-source";
 import { eventMatchesTrigger } from "./matching";
 import { boundEvent, type NormalizedEventInput } from "./normalize";
-import {
-  retainedWebhookHeaders,
-  webhookAdapter,
-  WebhookBodyError,
-  type WebhookAdapterReading,
-} from "./webhook-adapters";
+import { webhookAdapter } from "./webhook-adapters";
 import {
   withMcpEventSourceClient,
   McpEventSourceUnavailableError,
@@ -165,10 +169,15 @@ export async function createEventSourceForViewer(
     viewer: EventSourceViewer;
     request: ParsedCreateEventSourceRequest;
     baseUrl: string;
-  } & McpEventSourceNetwork,
+  } & McpEventSourceNetwork &
+    GitHubEventSourceAccess,
 ): Promise<CreateEventSourceResponse> {
   const request = input.request;
   if (request.kind === "mcp") return await createMcpEventSource(input, request);
+  if (request.kind === "github") {
+    const source = await createGitHubEventSource({ ...input, name: request.name });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
   if (request.kind !== "webhook") {
     throw new HTTPException(422, {
       message: `${request.kind} event sources are not available on this deployment yet`,
@@ -203,6 +212,12 @@ export async function createEventSourceForViewer(
 
 /** Network access for MCP sources; tests replace the transport. */
 export type McpEventSourceNetwork = { fetch?: McpEventsFetch };
+
+/**
+ * The deployment's GitHub App webhook settings, for GitHub sources. Null when
+ * the App's host manages its webhook itself.
+ */
+export type GitHubEventSourceAccess = { githubApp?: GitHubAppWebhookPort | null };
 
 /**
  * Turn a failure to reach an MCP source's server into the answer a person
@@ -356,65 +371,6 @@ export async function deleteEventSourceForViewer(input: {
   }
 }
 
-function sha256Hex(body: Uint8Array | string): string {
-  return createHash("sha256").update(body).digest("hex");
-}
-
-function storedEvents(
-  reading: Extract<WebhookAdapterReading, { kind: "events" }>,
-  receivedAt: Date,
-  options: { refire: boolean },
-): StoredEventInput[] {
-  return reading.events.map((event) => {
-    const bounded = boundEvent(event, receivedAt);
-    // A replay re-fires its events on purpose, so they skip event deduplication.
-    return options.refire ? { ...bounded, externalId: null } : bounded;
-  });
-}
-
-type DeliveryOutcome = {
-  status: EventDeliveryStatus;
-  reason: string | null;
-  events: StoredEventInput[];
-};
-
-function readDelivery(
-  source: EventSourceRecord,
-  headers: Headers,
-  body: Uint8Array,
-  receivedAt: Date,
-  options: { refire: boolean },
-): DeliveryOutcome {
-  if (source.status !== "active") {
-    return {
-      status: "ignored",
-      reason:
-        source.status === "disabled"
-          ? "The source is turned off"
-          : (source.statusReason ?? "The source is blocked"),
-      events: [],
-    };
-  }
-  let reading: WebhookAdapterReading;
-  try {
-    reading = webhookAdapter(source.adapter ?? "standard").read({
-      headers,
-      body,
-      receivedAt,
-    });
-  } catch (error) {
-    if (error instanceof WebhookBodyError)
-      return { status: "failed", reason: error.message, events: [] };
-    throw error;
-  }
-  if (reading.kind === "ignored") return { status: "ignored", reason: reading.reason, events: [] };
-  return {
-    status: "accepted",
-    reason: null,
-    events: storedEvents(reading, receivedAt, options),
-  };
-}
-
 /**
  * `gone` and `challenge` answer MCP servers: a delivery for a subscription
  * that ended (410, do not retry) and a webhook verification handshake.
@@ -489,7 +445,12 @@ export async function receiveEventWebhook(input: {
     });
     return { outcome: "rejected", reason: verification.reason };
   }
-  const outcome = readDelivery(source, input.headers, input.body, receivedAt, {
+  const outcome = readDelivery({
+    source,
+    settings: input.settings,
+    headers: input.headers,
+    body: input.body,
+    receivedAt,
     refire: false,
   });
   const recorded = await recordEventDelivery(input.db, {
@@ -497,7 +458,7 @@ export async function receiveEventWebhook(input: {
     ...outcome,
     dedupeKey: verification.deliveryKey ?? `sha256:${bodySha256}`,
     body: input.body,
-    headers: retainedWebhookHeaders(source.adapter, input.headers),
+    headers: retainedSourceHeaders(source, input.headers),
   });
   return {
     outcome: "stored",
@@ -506,9 +467,17 @@ export async function receiveEventWebhook(input: {
   };
 }
 
+/** Sources whose stored deliveries can be read again. */
+const REPLAYABLE_SOURCE_KINDS: ReadonlySet<EventSourceRecord["kind"]> = new Set([
+  "webhook",
+  "mcp",
+  "github",
+]);
+
 /** Run a stored delivery through intake again; its events fire again even if seen before. */
 export async function replayEventDelivery(input: {
   db: Database;
+  settings: Settings;
   source: EventSourceRecord;
   deliveryId: string;
 }): Promise<EventDelivery> {
@@ -520,7 +489,7 @@ export async function replayEventDelivery(input: {
     input.deliveryId,
   );
   if (!stored) throw new HTTPException(404, { message: "event delivery not found" });
-  if (!stored.body || (source.kind !== "webhook" && source.kind !== "mcp")) {
+  if (!stored.body || !REPLAYABLE_SOURCE_KINDS.has(source.kind)) {
     throw new HTTPException(409, {
       message:
         stored.delivery.status === "rejected"
@@ -542,7 +511,12 @@ export async function replayEventDelivery(input: {
     }
     outcome = { status: "accepted", reason: null, events };
   } else {
-    outcome = readDelivery(source, new Headers(stored.headers), stored.body, receivedAt, {
+    outcome = readDelivery({
+      source,
+      settings: input.settings,
+      headers: new Headers(stored.headers),
+      body: stored.body,
+      receivedAt,
       refire: true,
     });
   }
@@ -636,7 +610,8 @@ export async function listEventSourceTypes(
     db: Database;
     settings: Settings;
     source: EventSourceRecord;
-  } & McpEventSourceNetwork,
+  } & McpEventSourceNetwork &
+    GitHubEventSourceAccess,
 ): Promise<EventTypeDescriptor[]> {
   if (input.source.kind === "mcp") {
     const webhookAvailable = mcpWebhookBaseUrl(input.settings) !== null;
@@ -656,6 +631,9 @@ export async function listEventSourceTypes(
     }
   }
   const recent = await listRecentEventTypes(input.db, input.source.workspaceId, input.source.id);
+  if (input.source.kind === "github") {
+    return await githubSourceEventTypes(recent, input.githubApp ?? null);
+  }
   if (input.source.kind === "webhook") {
     return webhookEventTypeCatalog(input.source.adapter ?? "standard", recent);
   }

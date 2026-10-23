@@ -18,11 +18,37 @@ import {
 } from "@opengeni/db";
 import {
   GitHubAppApiError,
+  getGitHubAppWebhookSetup,
   listGitHubAppInstallationSummaries,
   listGitHubAppRepositories,
   listGitHubAppRepositoryBranches,
+  setGitHubAppWebhookUrl,
 } from "@opengeni/github";
-import type { ApiRouteDeps } from "@opengeni/core";
+import type { ApiRouteDeps, GitHubAppWebhookPort } from "@opengeni/core";
+
+/**
+ * The GitHub App's webhook settings for GitHub event sources: the host's App
+ * when it provides one (null if the host manages the webhook itself), else
+ * this deployment's own App when it is configured.
+ */
+export function githubAppWebhookPort(
+  deps: Pick<ApiRouteDeps, "githubAppApi" | "settings">,
+): GitHubAppWebhookPort | null {
+  const host = deps.githubAppApi;
+  if (host) {
+    const { getWebhookSetup, setWebhookUrl } = host;
+    return getWebhookSetup && setWebhookUrl ? { getWebhookSetup, setWebhookUrl } : null;
+  }
+  const { settings } = deps;
+  const secret = settings.githubWebhookSecret?.trim();
+  if (!settings.githubAppId?.trim() || !settings.githubAppPrivateKey?.trim() || !secret) {
+    return null;
+  }
+  return {
+    getWebhookSetup: async () => await getGitHubAppWebhookSetup(settings),
+    setWebhookUrl: async ({ url }) => await setGitHubAppWebhookUrl(settings, { url, secret }),
+  };
+}
 
 export type GitHubRepositoryBranchAuthorityErrorCode = "changed" | "not_authorized";
 

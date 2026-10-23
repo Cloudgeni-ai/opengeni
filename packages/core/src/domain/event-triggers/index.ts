@@ -1,5 +1,7 @@
 export * from "./automation-events";
 export * from "./event-type-catalog";
+export * from "./github-events";
+export * from "./github-source";
 export * from "./matching";
 export * from "./mcp-event-source-client";
 export * from "./mcp-event-subscriptions";

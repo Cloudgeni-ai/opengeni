@@ -28,6 +28,16 @@ no event runs start; stored deliveries and events still expire on schedule
 (delivery bodies after 7 days, events after 30). See
 [automations and events](design/automations-and-events.md).
 
+GitHub event sources also need the platform GitHub App's webhook secret,
+`OPENGENI_GITHUB_WEBHOOK_SECRET`, and a public `OPENGENI_PUBLIC_BASE_URL`. The
+App sends its webhooks to `/v1/webhooks/github`; adding a workspace's GitHub
+source points an App without a webhook URL there automatically. An App whose
+webhook already points elsewhere is left alone, and the person adding the
+source is told what to change. The events a trigger can use are the ones the
+App subscribes to under its Permissions & events settings: issues, issue
+comments, pull requests, reviews, review comments, pushes and releases, plus
+check runs, check suites and workflow runs for CI.
+
 Allowance accounting tables are in `opengeni_private`, with FORCE RLS and
 EXECUTE-only lifecycle access. This preserves older binaries' exact data-schema
 inventory during a rolling upgrade; no maintenance drain is required for these

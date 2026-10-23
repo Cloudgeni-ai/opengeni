@@ -6257,6 +6257,18 @@ export type GitHubAppApiPort = {
     page: number;
     limit: number;
   }) => Promise<GitHubAppRepositoryBranchPage>;
+  /**
+   * Where the App sends its webhooks (null when it has no webhook URL) and the
+   * webhook events it is subscribed to. Read when a workspace adds a GitHub
+   * event source and when a trigger lists the event types it can use.
+   */
+  getWebhookSetup?: () => Promise<{ webhookUrl: string | null; events: string[] }>;
+  /**
+   * Point the App's webhook at Opengeni's GitHub receiver, signed with the
+   * webhook secret the deployment verifies (`OPENGENI_GITHUB_WEBHOOK_SECRET`).
+   * Only called when the App has no webhook URL yet.
+   */
+  setWebhookUrl?: (input: { url: string }) => Promise<void>;
 };
 
 export const PromotionalCreditScope = /* @__PURE__ */ defineSchema(() =>

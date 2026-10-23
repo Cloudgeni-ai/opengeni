@@ -183,7 +183,9 @@ export async function createEventSource(
         return { source: mapSource(existing, null), created: false };
       }
       let routeId: string | null = null;
-      if (input.kind !== "mcp") {
+      if (input.kind === "github") {
+        await syncGitHubEventRoutes(tx, inserted.workspaceId);
+      } else if (input.kind !== "mcp") {
         const [route] = await tx
           .insert(schema.eventIngressRoutes)
           .values({
@@ -199,6 +201,66 @@ export async function createEventSource(
       return { source: mapSource(inserted, routeId), created: true };
     }),
   );
+}
+
+/** The route key of one GitHub App installation's deliveries. */
+export function githubInstallationRouteKey(installationId: number): string {
+  return `installation:${installationId}`;
+}
+
+/**
+ * A workspace's GitHub source receives the deliveries of every GitHub App
+ * installation bound to the workspace. Its routes are recomputed from the
+ * bindings whenever a binding or the source changes, inside the writer's
+ * workspace scope. Intake still checks each delivery's repository against the
+ * workspace's current binding, so a route is only ever a candidate.
+ */
+export async function syncGitHubEventRoutes(scoped: Database, workspaceId: string): Promise<void> {
+  const sources = await scoped
+    .select({ id: schema.eventSources.id, accountId: schema.eventSources.accountId })
+    .from(schema.eventSources)
+    .where(
+      and(eq(schema.eventSources.workspaceId, workspaceId), eq(schema.eventSources.kind, "github")),
+    );
+  if (sources.length === 0) return;
+  const installations = await scoped
+    .select({ installationId: schema.githubInstallations.installationId })
+    .from(schema.githubInstallations)
+    .where(eq(schema.githubInstallations.workspaceId, workspaceId));
+  const wanted = new Set(
+    installations.map((row) => githubInstallationRouteKey(row.installationId)),
+  );
+  for (const source of sources) {
+    const routes = await scoped
+      .select({
+        routeId: schema.eventIngressRoutes.routeId,
+        externalKey: schema.eventIngressRoutes.externalKey,
+      })
+      .from(schema.eventIngressRoutes)
+      .where(eq(schema.eventIngressRoutes.sourceId, source.id));
+    const stale = routes.filter((route) => !wanted.has(route.externalKey ?? ""));
+    if (stale.length > 0) {
+      await scoped.delete(schema.eventIngressRoutes).where(
+        inArray(
+          schema.eventIngressRoutes.routeId,
+          stale.map((route) => route.routeId),
+        ),
+      );
+    }
+    const present = new Set(routes.map((route) => route.externalKey));
+    const missing = [...wanted].filter((key) => !present.has(key));
+    if (missing.length > 0) {
+      await scoped.insert(schema.eventIngressRoutes).values(
+        missing.map((externalKey) => ({
+          accountId: source.accountId,
+          workspaceId,
+          sourceId: source.id,
+          kind: "github",
+          externalKey,
+        })),
+      );
+    }
+  }
 }
 
 /** Sources a person can see: shared ones, workspace app sources and their own. */
