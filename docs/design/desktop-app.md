@@ -172,7 +172,8 @@ On macOS the app then moves that agent into the app (`hostServiceAgent`), so
 one set of permissions, the app's, covers app-shots and computer use. It moves
 it only when that loses nothing: on its own (once per launch, in the
 background) when a check run by the app shows the app already holds every
-screen permission the service has, and otherwise as the first step of asking
+screen permission the service has and its own access to the protected
+folders, and otherwise as the first step of asking
 for a missing permission, so macOS gives that grant to Opengeni.app instead of
 "Opengeni Agent". A move turns the service off (kept installed, also off at
 login) and starts the same binary as the app's helper with the same config
@@ -187,10 +188,16 @@ The computer never has two agents or none:
   try again in that launch.
 - Quitting the app hands the agent back to its service (Off stays off), so the
   computer stays available while the app is closed and quitting doesn't ask.
-  When the app ends without asking (log out, restart), it starts the service
-  as it goes; the next launch finds the service running and leaves it there.
+  When the app ends without asking (log out, restart), it turns the service
+  back on as it goes; the next launch finds the service enabled and leaves the
+  agent there. While permissions are being asked for, quitting doesn't hand
+  back: macOS quits and reopens the app to apply a grant, and the reopened app
+  takes the agent straight back and goes on asking.
 - At launch, a moved agent starts as the helper again; if its program is gone
   or the helper doesn't stay up, the service runs it again.
+
+Each move and hand-back restarts the agent, so work an agent is doing on this
+computer at that moment is interrupted, as with any agent restart.
 
 Hosting was chosen over keeping the service because the app can keep its
 helper running: it opens hidden at login while this computer is in use and
@@ -241,7 +248,12 @@ token and runs `connect --non-interactive` again (the agent replaces that
 deployment/workspace connection in place and a running service reloads it). A
 failed read keeps its own meaning (offline, signed out, or the server's error)
 and is never shown as a network failure when the server answered. A just-made
-enrollment the server doesn't list yet is still turning on, not removed. The
+enrollment the server doesn't list yet is still turning on, not removed. Only
+the view of the account that owns the enrollment (the one that made it, or the
+first whose view listed it) can say it was removed: enrollments are the
+person's own, so another account signed in to the same workspace doesn't see
+it. A removed enrollment's agent keeps running without access until turning on
+enrolls the computer again. The
 setup dialog shows one state at a time and follows the computer's own status, so
 "You're all set" only stands while it is ready. Inside the app, **Connect a
 machine** shows the same computer-use switch for this computer instead of

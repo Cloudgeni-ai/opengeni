@@ -259,6 +259,13 @@ interface ComputerState {
   hostedService: string | null;
   /** When permissions were last asked for (ms), so only a recent ask continues after a relaunch. */
   askedAt: number;
+  /**
+   * The account each enrollment belongs to, as far as known: the one that
+   * made it, or the first whose Machines view listed it. Another account's
+   * view may not list it (enrollments are the person's own), so only its
+   * owner's view can say it was removed.
+   */
+  owners: Record<string, string>;
 }
 
 /** What the agent reports and asks for itself: screen control. */
@@ -318,7 +325,9 @@ type ListedMachine = NonNullable<Awaited<ReturnType<NonNullable<ThisComputerDeps
 type MachineReading =
   | { kind: "listed"; machine: ListedMachine }
   | { kind: "missing" }
-  | { kind: "unread"; failure: ThisComputerError };
+  | { kind: "unread"; failure: ThisComputerError }
+  /** Another account's view didn't list it: that decides nothing. */
+  | { kind: "unknown" };
 
 /**
  * Right after connecting, the server may not list the new enrollment yet;
@@ -509,15 +518,32 @@ export class ThisComputer {
         clearTimeout(timer);
       }
     };
-    let value = await readIn(connection.workspaceId);
+    let value: MachineReading = await readIn(connection.workspaceId);
     if (value.kind !== "listed" && connection.workspaceId !== workspaceId) {
       const here = await readIn(workspaceId);
       // Removed only when every server answer says so; a failed read decides nothing.
       if (here.kind === "listed" || value.kind === "missing") value = here;
     }
-    if (value.kind === "listed") this.removed.delete(connection.agentId);
+    if (value.kind === "listed") {
+      this.removed.delete(connection.agentId);
+      if (!this.state.owners[connection.agentId]) this.own(connection.agentId, accountId);
+    }
+    if (value.kind === "missing" && !this.ownedBy(connection.agentId, accountId)) {
+      // Another account's view: not listing it there says nothing.
+      value = { kind: "unknown" };
+    }
     this.machineCache = { at: Date.now(), key, value };
     return value;
+  }
+
+  private own(agentId: string, accountId: string): void {
+    this.saveState({ owners: { ...this.state.owners, [agentId]: accountId } });
+  }
+
+  /** Whether this account's view decides about the enrollment (its owner, or nobody known). */
+  private ownedBy(agentId: string, accountId: string): boolean {
+    const owner = this.state.owners[agentId];
+    return owner === undefined || owner === accountId;
   }
 
   /**
@@ -615,7 +641,7 @@ export class ThisComputer {
     if (!binary || !existsSync(binary)) return await back();
     // The app ended without asking and the service took the agent back
     // (see `shutdownNow`): it keeps it, so there's never a second one.
-    if ((await this.serviceStatus().catch(() => null))?.running) {
+    if ((await this.serviceStatus().catch(() => null))?.enabled) {
       this.saveState({ hostedService: null, management: "service", paused: false });
       this.serviceCache = null;
       return;
@@ -715,13 +741,9 @@ export class ThisComputer {
     const reading = accountId
       ? await this.reportedMachine(accountId, baseUrl, workspaceId, connection)
       : null;
-    if (this.removedOnServer(reading, connection)) {
-      // An agent left serving only removed connections has nothing to do.
-      if (this.live(connections).length === 0 && this.agent.state !== "stopped") {
-        void this.agent.stop().catch(() => undefined);
-      }
-      return removed();
-    }
+    // The agent keeps running: a removed enrollment gives it no access, and
+    // turning on again restarts it with the new one.
+    if (this.removedOnServer(reading, connection)) return removed();
     const permissions = await this.permissionList();
     const missing = permissions?.some((permission) => !permission.granted) ?? false;
     return {
@@ -734,9 +756,7 @@ export class ThisComputer {
             systemNames: macSystemNames(this.deps.systemLanguages?.() ?? [], this.deps.systemNames),
           }
         : {}),
-      ...(missing && this.state.setupPending && Date.now() - this.state.askedAt < ASKING_RESUME_MS
-        ? { setupPending: true }
-        : {}),
+      ...(missing && this.askingRecently ? { setupPending: true } : {}),
       ...(permissions ? { requestedPermissions: [...this.state.requested] } : {}),
       ...(!this.state.paused && this.agent.state !== "running" ? { reconnecting: true } : {}),
     };
@@ -791,7 +811,7 @@ export class ThisComputer {
       reconnecting: !this.state.paused && connections.length > 0 && this.agent.state !== "running",
       needsPermissions: missingPermissions.length > 0,
       missingPermissions,
-      ...(this.state.hostedService !== null ? { handsBackOnQuit: true } : {}),
+      ...(this.handsBackOnQuit ? { handsBackOnQuit: true } : {}),
     };
   }
 
@@ -854,6 +874,7 @@ export class ThisComputer {
       }
       this.enrolledAt.set(connection.agentId, Date.now());
       this.removed.delete(connection.agentId);
+      this.own(connection.agentId, accountId);
       await this.deps.allowAgents(accountId, workspaceId, connection.agentId).catch((caught) => {
         throw serverFailure(caught, "Couldn't let agents use this computer");
       });
@@ -1095,6 +1116,8 @@ export class ThisComputer {
     const own = result.code === 0 ? parsePermissions(result.output) : null;
     if (!own) return false;
     if (!own.required) return true;
+    // The protected folders too: the app has to have asked for them itself.
+    if (!(await this.foldersAllowed())) return false;
     const service = machine?.permissions ?? null;
     return SCREEN_PERMISSIONS.every(
       (id) => own.granted[id] || (service !== null && service[id] !== true),
@@ -1216,6 +1239,8 @@ export class ThisComputer {
         !this.hostingFailed &&
         (await this.runHosting(() => this.moveServiceIntoApp(null, true)))
       ) {
+        // Turned off (or another action began) meanwhile: nothing to ask for now.
+        if (this.state.paused || this.busy) return;
         return await this.requestPermission(id);
       }
       // A child of the desktop asks for the desktop's grants, not the service's.
@@ -1365,12 +1390,25 @@ export class ThisComputer {
     this.deps.onGuidePermission?.(id, granted);
   }
 
+  /**
+   * A service agent the app runs goes back to its service when the app ends,
+   * except while permissions are being asked for: macOS quits and reopens the
+   * app to apply a grant, and the app takes the agent straight back then.
+   */
+  private get handsBackOnQuit(): boolean {
+    return this.state.hostedService !== null && !this.askingRecently;
+  }
+
+  private get askingRecently(): boolean {
+    return this.state.setupPending && Date.now() - this.state.askedAt < ASKING_RESUME_MS;
+  }
+
   /** Stops the agent with the app. It starts again when the app next opens. */
   async shutdown(): Promise<void> {
     this.stopWatchingForGrants();
     for (const check of this.folderChecks) check.kill("SIGKILL");
     if (this.hosting) await this.hosting.catch(() => undefined);
-    if (this.state.hostedService !== null) {
+    if (this.handsBackOnQuit) {
       // Quitting the app keeps this computer available: the service runs the
       // agent until the app is back (and Off stays off).
       await this.handBack().catch(() => this.agent.stop());
@@ -1389,7 +1427,9 @@ export class ThisComputer {
     const pid = this.childPid;
     if (pid !== null) killTree(pid, this.deps.platform, false, true);
     const binary = this.state.hostedService;
-    if (binary === null || this.state.paused || !existsSync(binary)) return;
+    if (!this.handsBackOnQuit || binary === null || this.state.paused || !existsSync(binary)) {
+      return;
+    }
     // Ended without asking (logout, restart): the service runs the agent again,
     // as `shutdown` would, so this computer stays available. The saved state
     // still says the app runs it: the next launch finds the service holding the
@@ -1718,6 +1758,7 @@ export class ThisComputer {
       turnedOff: [],
       hostedService: null,
       askedAt: 0,
+      owners: {},
     };
     try {
       const saved = JSON.parse(readFileSync(this.statePath, "utf8")) as Partial<ComputerState>;
@@ -1748,6 +1789,14 @@ export class ThisComputer {
             ? saved.hostedService
             : null,
         askedAt: typeof saved.askedAt === "number" ? saved.askedAt : 0,
+        owners:
+          saved.owners && typeof saved.owners === "object" && !Array.isArray(saved.owners)
+            ? Object.fromEntries(
+                Object.entries(saved.owners).filter(
+                  (entry): entry is [string, string] => typeof entry[1] === "string",
+                ),
+              )
+            : {},
       };
     } catch {
       return fallback;

@@ -27,8 +27,11 @@ function fixture(
     inspectionFailure?: boolean;
     /** How the agent behaves when the app runs it as its helper. */
     hosted?: "runs" | "exits";
-    /** The app's own screen grants (what a check run by the app reports). */
-    appGrants?: "all" | "some";
+    /**
+     * The app's own grants: "all" (screen, and it asked for the protected
+     * folders), "screen" (screen only), or "some" (the default).
+     */
+    appGrants?: "all" | "screen" | "some";
   } = {},
 ) {
   const home = mkdtempSync(join(tmpdir(), "og-service-host-"));
@@ -50,7 +53,7 @@ function fixture(
       `  'service stop') touch "${paused}" ;;`,
       `  'service start') rm -f "${paused}" ;;`,
       `  --version) echo 'opengeni-agent 0.1.109' ;;`,
-      `  permissions) echo '{"required":true,"screenRecording":true,"accessibility":${options.appGrants === "all"},"inputMonitoring":${options.appGrants === "all"}}' ;;`,
+      `  permissions) echo '{"required":true,"screenRecording":true,"accessibility":${options.appGrants === "all" || options.appGrants === "screen"},"inputMonitoring":${options.appGrants === "all" || options.appGrants === "screen"}}' ;;`,
       `  *' run') ${options.hosted === "exits" ? "exit 1" : `if [ -f "${home}/crash" ]; then exit 1; fi; echo "$$" > "${home}/hosted.pid"; exec sleep 30`} ;;`,
       "  *) exit 99 ;;",
       "esac",
@@ -58,6 +61,11 @@ function fixture(
   );
   chmodSync(binary, 0o755);
   symlinkSync(binary, link);
+  // The app asked for the protected folders before (e.g. for app-shots); with
+  // no such folders here, that is access to all of them.
+  if (options.appGrants === "all") {
+    writeFileSync(join(home, "this-computer.json"), JSON.stringify({ requested: ["files"] }));
+  }
   const original = readFileSync(binary);
   const serverCalls: string[] = [];
   const settings: string[] = [];
@@ -325,6 +333,50 @@ describe.skipIf(process.platform === "win32")("a service agent moved into the ap
     expect(existsSync(f.paused)).toBe(true);
     // Quitting doesn't take this computer away: it goes back to the service.
     expect((await app.summary()).handsBackOnQuit).toBe(true);
+  });
+
+  test("doesn't move on its own when the app lacks the protected folders", async () => {
+    const f = fixture({ hosted: "runs", appGrants: "screen" });
+    const app = f.create();
+    await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
+    await app.status("https://server.example", "w1", "signed-in-account");
+    await new Promise((r) => setTimeout(r, 300));
+    expect(f.commands()).not.toContain("service stop");
+    expect(state(f.home).hostedService).toBeNull();
+  });
+
+  test("turning off while asking moves it asks nothing", async () => {
+    const f = fixture({ hosted: "runs" });
+    const app = f.create();
+    await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
+    const asking = app.requestPermission("accessibility");
+    await until(() => f.commands().includes("service stop"));
+    await app.pause();
+    await asking;
+    expect(f.commands().some((command) => command.startsWith("permissions --request"))).toBe(false);
+    expect(f.settings).toEqual([]);
+    expect(state(f.home)).toMatchObject({ management: "app", paused: true });
+  });
+
+  test("quitting while asking keeps the agent for the reopened app", async () => {
+    const f = fixture({ hosted: "runs" });
+    const app = f.create();
+    await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
+    await app.requestPermission("screenRecording");
+    expect((await app.summary()).handsBackOnQuit).toBeUndefined();
+    // macOS quits the app to apply the grant: the service stays off.
+    await app.shutdown();
+    expect(state(f.home).hostedService).not.toBeNull();
+    expect(existsSync(f.paused)).toBe(true);
+    // Reopened: the app runs it again, and asking goes on.
+    rmSync(join(f.home, "hosted.pid"), { force: true });
+    const reopened = f.create();
+    await reopened.boot();
+    await until(() => existsSync(join(f.home, "hosted.pid")));
+    expect(existsSync(f.paused)).toBe(true);
+    expect(
+      (await reopened.status("https://server.example", "w1", "signed-in-account")).setupPending,
+    ).toBe(true);
   });
 
   test("turning off during a move applies after it and stays off", async () => {

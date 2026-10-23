@@ -359,7 +359,7 @@ export function useThisComputer(
 /** A focus this soon after asking is the system's own prompt closing, not the person coming back. */
 const RETURN_GRACE_MS = 1_500;
 /** Asking for a permission with the app still in front this long: no system window came up. */
-const ASK_QUIET_MS = 4_000;
+const ASK_QUIET_MS = 8_000;
 /** Asking stops after this long regardless (the host stops watching for grants then too). */
 const ASK_LIMIT_MS = 10 * 60_000;
 

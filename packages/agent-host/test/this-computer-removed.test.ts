@@ -30,7 +30,7 @@ type Reading = { online: boolean } | null | Error | { status: number; message: s
  * `service`: an existing standalone agent with its own background service
  * (macOS); otherwise the app's own agent (Linux).
  */
-function computer(options: { service: boolean; adopted?: boolean }) {
+function computer(options: { service: boolean; adopted?: boolean; ownerOnly?: boolean }) {
   const home = mkdtempSync(join(tmpdir(), "og-removed-"));
   const list = join(home, "connections.txt");
   const calls = join(home, "calls");
@@ -96,7 +96,9 @@ function computer(options: { service: boolean; adopted?: boolean }) {
         throw new Error("This computer isn't listed as yours yet. Try again.");
       allowed.push(enrollmentId);
     },
-    readMachine: async (_account, _baseUrl, _workspaceId, enrollmentId) => {
+    readMachine: async (account, _baseUrl, _workspaceId, enrollmentId) => {
+      // Enrollments are the person's own: another account's view doesn't list them.
+      if (options.ownerOnly && account !== "me") return null;
       const reading = readings[enrollmentId] ?? null;
       if (reading instanceof Error) throw reading;
       if (reading && "status" in reading) throw reading;
@@ -274,6 +276,31 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
 });
 
 describe("why the server's machine list couldn't be read", () => {
+  test("another account's view never takes this computer away from its owner", async () => {
+    for (const service of [true, false]) {
+      const c = computer({ service, ownerOnly: true });
+      const app = c.create();
+      // Its owner's view lists it: on.
+      expect(await app.status(SERVER, "w1", "me")).toMatchObject({ state: "connected" });
+      // Someone else signed in to the same workspace: not listed there, not removed.
+      const other = await app.status(SERVER, "w1", "someone-else");
+      expect(other.errorCode).not.toBe("removed");
+      expect(other.state).not.toBe("not_connected");
+      // The owner still has it, with nothing stopped or flagged.
+      const mine = await app.status(SERVER, "w1", "me");
+      expect(mine.state).toBe("connected");
+      expect(mine.errorCode).toBeUndefined();
+      expect(c.commands().filter((command) => command === "service stop")).toEqual([]);
+      // Its owner's view decides: removed there, it is off.
+      c.readings.a1 = null;
+      app.invalidate();
+      expect(await app.status(SERVER, "w1", "me")).toMatchObject({
+        state: "not_connected",
+        errorCode: "removed",
+      });
+    }
+  });
+
   test("each failure keeps its own meaning", () => {
     expect(machineReadFailure(new TypeError("fetch failed")).code).toBe("offline");
     expect(machineReadFailure(new Error("net::ERR_INTERNET_DISCONNECTED")).code).toBe("offline");
