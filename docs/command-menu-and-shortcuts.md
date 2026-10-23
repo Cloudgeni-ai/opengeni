@@ -65,7 +65,7 @@ character typed, so ⌘/ works on layouts where "/" needs Shift.
 
 | Action | Mac | Windows and Linux | Notes |
 | --- | --- | --- | --- |
-| Command menu | ⌘K | Ctrl+K | Chats and actions in one list |
+| Command menu | ⌘K | Ctrl+K | Chats, Sites and actions in one list |
 | New chat | ⌘N on desktop, ⇧⌘O everywhere | Ctrl+N on desktop, Ctrl+Shift+O everywhere | Browsers reserve ⌘N |
 | Copy chat link | ⇧⌘, | Ctrl+Shift+, | Linear's key for copying an issue URL |
 | Pin or unpin chat | ⌥⌘P | Ctrl+Alt+P | Clear of the common browser shortcuts |
@@ -119,7 +119,10 @@ Opening it is instant: no request is made before it appears.
   pin, rename, fork, mark unread, archive) with their keys, then general
   actions (new chat, find, inbox, search messages, switch workspace, sidebar,
   shortcuts). Recent chats include other workspaces, tagged with their
-  workspace.
+  workspace. Between recent chats and the chat's actions, "Recent Sites"
+  lists at most three of this workspace's Sites, most recent activity first
+  (conversations, a new version, or the person opening it), from the Site
+  rows the sidebar has loaded; the Site on screen is left out.
 - **Typing:** results update on every keystroke from chats already loaded in
   the sidebar and recent list, ranked by how well the title matches. The server
   title search runs alongside and merges in chats the sidebar has not loaded,
@@ -128,6 +131,17 @@ Opening it is instant: no request is made before it appears.
   workspaces rank just below equal matches here and are tagged with their
   workspace; opening one switches workspace. Actions that match appear in
   their own group with their keys, and workspaces whose name matches in theirs.
+- **Sites:** this workspace's Sites whose title matches appear in a "Sites"
+  group (at most five), ranked like chat titles. The Site rows the sidebar has
+  loaded answer instantly; the artifact catalog's Site title search
+  (`GET /v1/workspaces/:workspaceId/artifact-catalog?kind=site&q=…`, active
+  Sites only) merges the rest as it answers, with the catalog's access checks,
+  so another person's Only me Site never shows. Hostnames are not matched:
+  reading a Site's publication needs Site manager access. A failed Site search
+  leaves the rest of the menu as it is; a workspace that refuses access is not
+  asked again until the menu opens next. Enter opens the Site in the app's Site
+  view, as its sidebar row does (the desktop app too); ⌘Enter on the web opens
+  it in a new tab.
 - **Fork chat:** forks the chat on screen from its latest message, the same as
   the fork button under a message, and opens the same confirmation.
 - **Ranking:** whole-title prefix, then a word in the title starting with the

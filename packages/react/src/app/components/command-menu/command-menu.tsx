@@ -1,9 +1,10 @@
 /**
- * The ⌘K menu: find a chat by its title, or run any action, from one field.
+ * The ⌘K menu: find a chat or a Site by its title, or run any action, from
+ * one field.
  *
- * It opens instantly from what the app already knows (chats the sidebar has
- * loaded and the chats opened recently) and merges the server's title search as
- * it arrives. Chats in the person's other workspaces show too, tagged with
+ * It opens instantly from what the app already knows (chats and Sites the
+ * sidebar has loaded and the chats opened recently) and merges the server's
+ * title searches as they arrive. Chats in the person's other workspaces show too, tagged with
  * their workspace, and so do workspaces to switch to. Tab on a chat shows that
  * chat's actions; the chords of chat actions work on the highlighted chat
  * while the menu is open.
@@ -28,6 +29,7 @@ import {
   CornerDownLeftIcon,
   LockIcon,
   MessageSquareIcon,
+  PanelsTopLeftIcon,
   PinIcon,
   SearchIcon,
   TextSearchIcon,
@@ -42,6 +44,14 @@ import {
   type ChatRecord,
 } from "../../lib/actions/chat-directory";
 import { matchesChord, type Chord } from "../../lib/actions/chords";
+import {
+  rankSites,
+  readSidebarSites,
+  recentSites,
+  siteRecords,
+  useSiteDirectoryVersion,
+  type SiteRecord,
+} from "../../lib/actions/site-directory";
 import { useAppActions } from "../../lib/actions/actions-provider";
 import {
   foldForSearch,
@@ -92,6 +102,11 @@ const RECENT_LIMIT = 6;
 const CHAT_RESULT_LIMIT = 8;
 const ACTION_RESULT_LIMIT = 6;
 const WORKSPACE_RESULT_LIMIT = 4;
+const SITE_RESULT_LIMIT = 5;
+/** Sites before anything is typed: a few recent ones, never the whole list. */
+const RECENT_SITE_LIMIT = 3;
+/** Sites the server title search returns per query. */
+const SERVER_SITE_LIMIT = 10;
 const SERVER_DEBOUNCE_MS = 120;
 /** Other workspaces whose titles the server searches too, most used first. */
 const OTHER_WORKSPACES_SEARCHED = 9;
@@ -252,6 +267,88 @@ function useServerTitleSearch(
   return state;
 }
 
+function isAccessFailure(error: unknown): boolean {
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? (error as { status: unknown }).status
+      : null;
+  return status === 401 || status === 403;
+}
+
+/**
+ * The server's Site title search in this workspace: the artifact catalog's
+ * Sites, with its access checks (Only me Sites of other people never show).
+ * A failure leaves the rest of the menu as it is; a workspace that refuses
+ * access is not asked again until the menu opens next.
+ */
+function useServerSiteSearch(workspaceId: string, query: string, open: boolean) {
+  const { client } = useAppContext();
+  const [state, setState] = useState<{ key: string; sites: SiteRecord[]; loading: boolean }>({
+    key: "",
+    sites: [],
+    loading: false,
+  });
+  const denied = useRef<string | null>(null);
+  useEffect(() => {
+    if (!open) denied.current = null;
+  }, [open]);
+  const trimmed = query.trim();
+  const key = JSON.stringify([workspaceId, trimmed]);
+  useEffect(() => {
+    if (
+      !open ||
+      !trimmed ||
+      !workspaceId ||
+      denied.current === workspaceId ||
+      typeof client.listArtifactCatalog !== "function"
+    ) {
+      setState({ key: "", sites: [], loading: false });
+      return;
+    }
+    setState((current) => ({ ...current, loading: true }));
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      Promise.resolve()
+        .then(() =>
+          client.listArtifactCatalog(workspaceId, {
+            kind: "site",
+            q: trimmed,
+            status: "active",
+            sort: "updated",
+            limit: SERVER_SITE_LIMIT,
+            signal: controller.signal,
+          }),
+        )
+        .then((page) => {
+          if (controller.signal.aborted) return;
+          const items = Array.isArray(page?.items) ? page.items : [];
+          setState({
+            key,
+            sites: siteRecords(
+              workspaceId,
+              items.filter((item) => item?.kind === "site"),
+            ),
+            loading: false,
+          });
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) return;
+          if (isAccessFailure(error)) denied.current = workspaceId;
+          // Chats and actions still show; Sites are an addition.
+          setState({ key, sites: [], loading: false });
+        });
+    }, SERVER_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [client, workspaceId, trimmed, key, open]);
+  return {
+    sites: state.key === key ? state.sites : [],
+    loading: state.loading,
+  };
+}
+
 export default function CommandMenu(props: {
   open: boolean;
   /** Opens listing workspaces to switch to. */
@@ -284,6 +381,7 @@ function CommandMenuDialog(props: {
   const { env, run, chordsFor, onOpenChange } = props;
   const { workspaceId, subjectId, platform, surface, workspaces } = env;
   const directoryVersion = useChatDirectoryVersion(subjectId);
+  const siteDirectoryVersion = useSiteDirectoryVersion(subjectId);
   const [query, setQuery] = useState("");
   const [focusChat, setFocusChat] = useState<ChatRecord | null>(null);
   const [pickingWorkspace, setPickingWorkspace] = useState(props.pickWorkspace);
@@ -321,6 +419,11 @@ function CommandMenuDialog(props: {
   const server = useServerTitleSearch(
     searchWorkspaceIds,
     subjectId,
+    focusChat || pickingWorkspace ? "" : query,
+    props.open,
+  );
+  const serverSites = useServerSiteSearch(
+    workspaceId,
     focusChat || pickingWorkspace ? "" : query,
     props.open,
   );
@@ -365,6 +468,19 @@ function CommandMenuDialog(props: {
     [close, env, surface],
   );
 
+  const openSite = useCallback(
+    (site: SiteRecord, newTab: boolean) => {
+      ranAction.current = true;
+      close();
+      if (newTab && surface === "web") {
+        window.open(env.siteLink(site.id), "_blank", "noopener");
+        return;
+      }
+      env.openSite(site.id);
+    },
+    [close, env, surface],
+  );
+
   const openWorkspace = useCallback(
     (id: string) => {
       ranAction.current = true;
@@ -398,8 +514,10 @@ function CommandMenuDialog(props: {
 
   const groups = useMemo<Group[]>(() => {
     void directoryVersion;
+    void siteDirectoryVersion;
     const now = Date.now();
     const directory = readChatDirectory(subjectId, workspaceId);
+    const knownSites = readSidebarSites(subjectId, workspaceId);
     const current = env.currentChat;
     const sidebarIds = new Set([...directory.sidebarOrder, ...directory.pinnedOrder]);
 
@@ -415,6 +533,21 @@ function CommandMenuDialog(props: {
       chat: record,
       status: currentChatStatus(record, sidebarIds, now),
       run: ({ newTab }) => openChat(record, newTab),
+    });
+
+    const siteItem = (site: SiteRecord, group: string, highlight?: string): Item => ({
+      key: `site:${site.id}`,
+      group,
+      icon: PanelsTopLeftIcon,
+      title: site.title,
+      highlight,
+      meta:
+        env.currentSiteId === site.id
+          ? "Open now"
+          : site.updatedAt
+            ? formatRelativeTime(site.updatedAt, { now })
+            : undefined,
+      run: ({ newTab }) => openSite(site, newTab),
     });
 
     const workspaceItem = (choice: WorkspaceChoice, group: string, highlight?: string): Item => ({
@@ -536,6 +669,14 @@ function CommandMenuDialog(props: {
           best: 0,
         });
       }
+      const sites = recentSites(knownSites, env.currentSiteId, RECENT_SITE_LIMIT);
+      if (sites.length > 0) {
+        result.push({
+          label: "Recent Sites",
+          items: sites.map((site) => siteItem(site, "Recent Sites")),
+          best: 0,
+        });
+      }
       if (current) {
         const chatActions = appActions().filter(
           (action) =>
@@ -613,16 +754,21 @@ function CommandMenuDialog(props: {
         item: workspaceItem(choice, "Workspaces", trimmed),
       });
     }
+    const siteScores = rankSites(knownSites, serverSites.sites, trimmed);
     // Letters-in-order guesses only help when nothing really matches; next to
     // real matches they are noise ("pin" → "Postgres … investigation").
     const hasRealMatch =
       scored.some((entry) => !entry.loose) ||
+      siteScores.some((entry) => !entry.loose) ||
       actionScores.some((entry) => !entry.loose) ||
       workspaceScores.some((entry) => !entry.loose);
     const chats = scored
       .filter((entry) => !hasRealMatch || !entry.loose)
       .sort((a, b) => b.rank - a.rank || b.record.updatedAt - a.record.updatedAt)
       .slice(0, CHAT_RESULT_LIMIT);
+    const sitesFound = siteScores
+      .filter((entry) => !hasRealMatch || !entry.loose)
+      .slice(0, SITE_RESULT_LIMIT);
     const actionsFound = actionScores
       .filter((entry) => !hasRealMatch || !entry.loose)
       .sort((a, b) => b.rank - a.rank)
@@ -638,6 +784,14 @@ function CommandMenuDialog(props: {
         label: "Chats",
         items: chats.map((entry) => chatItem(entry.record, "Chats", trimmed)),
         best: chats[0]!.rank,
+      });
+    }
+    if (sitesFound.length > 0) {
+      result.push({
+        label: "Sites",
+        items: sitesFound.map((entry) => siteItem(entry.site, "Sites", trimmed)),
+        // After chats on a tie (the sort keeps this order).
+        best: sitesFound[0]!.rank,
       });
     }
     if (actionsFound.length > 0) {
@@ -681,12 +835,15 @@ function CommandMenuDialog(props: {
     env,
     focusChat,
     openChat,
+    openSite,
     openWorkspace,
     pickingWorkspace,
     query,
     reachable,
     server.query,
     server.rows,
+    serverSites.sites,
+    siteDirectoryVersion,
     subjectId,
     surface,
     workspaceId,
@@ -702,7 +859,11 @@ function CommandMenuDialog(props: {
   useChatStatusRefresh({ subjectId, workspaceId, ids: listedChatIds, active: props.open });
   const activeIndex = items.length === 0 ? -1 : Math.min(active, items.length - 1);
   const activeItem = activeIndex >= 0 ? items[activeIndex] : undefined;
-  const searching = Boolean(query.trim()) && !focusChat && !pickingWorkspace && server.loading;
+  const searching =
+    Boolean(query.trim()) &&
+    !focusChat &&
+    !pickingWorkspace &&
+    (server.loading || serverSites.loading);
 
   // Typing starts at the best match; the workspace list starts at the current workspace's neighbour.
   useEffect(() => {
@@ -829,7 +990,7 @@ function CommandMenuDialog(props: {
     ? "Search actions…"
     : pickingWorkspace
       ? "Switch to workspace…"
-      : "Search chats or run an action…";
+      : "Search chats and Sites, or run an action…";
   const optionId = (item: Item) => `${listId}-${item.key.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 
   return (
@@ -912,7 +1073,7 @@ function CommandMenuDialog(props: {
                   ? `Actions for ${focusChat.title}`
                   : pickingWorkspace
                     ? "Search workspaces"
-                    : "Search chats and actions"
+                    : "Search chats, Sites and actions"
               }
               autoComplete="off"
               autoCorrect="off"

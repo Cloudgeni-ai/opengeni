@@ -54,6 +54,8 @@ export type ActionEnv = {
   platform: ChordPlatform;
   /** The chat on screen, if any. */
   currentChat: SessionListRow | null;
+  /** The Site on screen, if any. */
+  currentSiteId: string | null;
   ops: ChatOperations;
   /** Whether the sidebar's chat list is part of this surface. */
   chatList: boolean;
@@ -66,6 +68,10 @@ export type ActionEnv = {
   newChat(): void;
   /** Opens a chat; one in another workspace switches to that workspace. */
   openChat(chatId: string, workspaceId?: string): void;
+  /** Opens one of this workspace's Sites in the app, as its sidebar row does. */
+  openSite(siteId: string): void;
+  /** A Site's address, for opening it in a new browser tab. */
+  siteLink(siteId: string): string;
   openWorkspace(workspaceId: string): void;
   /** The ⌘K menu, listing workspaces to switch to. */
   openWorkspacePicker(): void;
