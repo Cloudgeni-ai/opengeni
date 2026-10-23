@@ -237,7 +237,7 @@ spec:
     {{- end }}
     {{- /* Only a shorter web route is refined; an explicit asset route is left as is. */}}
     {{- if and (eq (toString $winner.service) "web") (lt $winnerLength (len $assetPath)) }}
-      {{- $assetPaths = append $assetPaths (dict "path" $assetPath "portName" ($winner.portName | default "http")) }}
+      {{- $assetPaths = append $assetPaths (dict "path" $assetPath) }}
     {{- end }}
   {{- end }}
   {{- if $assetPaths }}
@@ -258,16 +258,41 @@ spec:
 {{- end }}
 {{- $_ := set $webAssetAnnotations "nginx.ingress.kubernetes.io/proxy-next-upstream" "error timeout http_404" }}
 {{- $_ := set $webAssetAnnotations "nginx.ingress.kubernetes.io/proxy-next-upstream-tries" (toString (int ($webAssets.nextUpstreamTries | default 3))) }}
+{{- /* Round-robin can hand a retry the pod that just answered 404; EWMA skips endpoints this request already tried. */}}
+{{- $_ := set $webAssetAnnotations "nginx.ingress.kubernetes.io/load-balance" "ewma" }}
 {{- range $key, $value := $webAssets.annotations | default dict }}
   {{- $_ := set $webAssetAnnotations $key $value }}
 {{- end }}
+---
+# The asset Ingress's own backend. ingress-nginx keeps one balancer per Service
+# port, shared by every Ingress that routes to it, so the asset paths need a
+# Service of their own for their balancer setting to apply to them alone. It
+# selects the same web pods as the web Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" . }}-web-assets
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.web.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: web
 ---
 # During a web rollout, pods of the old and the new build serve side by side and
 # ingress-nginx balances every request separately, so a page from one build can
 # ask a pod of the other build for a content-hashed asset it does not have. This
 # Ingress takes over only the hashed asset paths that the primary Ingress already
 # sends to the web service, with the same class, TLS and most annotations, and retries
-# a 404 on another web pod. Non-asset paths keep their primary routing.
+# a 404 on a web pod this request has not tried yet. Non-asset paths keep their
+# primary routing.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -296,9 +321,9 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "opengeni.fullname" $ }}-web
+                name: {{ include "opengeni.fullname" $ }}-web-assets
                 port:
-                  name: {{ .portName }}
+                  name: http
           {{- end }}
     {{- end }}
 {{- end }}

@@ -390,6 +390,12 @@ function ingress(manifests: Manifest[], name: string): Manifest | undefined {
   );
 }
 
+function service(manifests: Manifest[], name: string): Manifest | undefined {
+  return manifests.find(
+    (manifest) => manifest.kind === "Service" && manifest.metadata.name === name,
+  );
+}
+
 function rulePaths(manifest: Manifest | undefined): Record<string, string[]> {
   return Object.fromEntries(
     (manifest?.spec.rules ?? []).map((rule: any) => [
@@ -412,14 +418,15 @@ describe.skipIf(!helm)("web asset ingress", () => {
       "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
       "nginx.ingress.kubernetes.io/proxy-next-upstream": "error timeout http_404",
       "nginx.ingress.kubernetes.io/proxy-next-upstream-tries": "3",
+      "nginx.ingress.kubernetes.io/load-balance": "ewma",
     });
     expect(assets?.spec.ingressClassName).toBe("nginx");
     expect(assets?.spec.tls).toEqual([{ hosts: ["app.example.test"], secretName: "app-tls" }]);
     expect(rulePaths(assets)).toEqual({
       "app.example.test": [
-        "/assets Prefix skew-opengeni-web:http",
-        "/office/assets Prefix skew-opengeni-web:http",
-        "/react-demo/assets Prefix skew-opengeni-web:http",
+        "/assets Prefix skew-opengeni-web-assets:http",
+        "/office/assets Prefix skew-opengeni-web-assets:http",
+        "/react-demo/assets Prefix skew-opengeni-web-assets:http",
       ],
     });
   });
@@ -432,6 +439,31 @@ describe.skipIf(!helm)("web asset ingress", () => {
     expect(
       withAssets.filter((manifest) => manifest.metadata.name !== "skew-opengeni-web-assets"),
     ).toEqual(without);
+  });
+
+  test("balances asset retries through a Service of its own that selects the web pods", async () => {
+    // ingress-nginx shares one balancer per Service port across Ingresses, so
+    // the EWMA setting reaches only the asset paths through a separate Service.
+    const manifests = await render(ingressValues({}));
+    const web = service(manifests, "skew-opengeni-web");
+    const assets = service(manifests, "skew-opengeni-web-assets");
+    expect(assets?.spec).toEqual({
+      type: "ClusterIP",
+      ports: [{ port: 3000, targetPort: "http", protocol: "TCP", name: "http" }],
+      selector: web?.spec.selector,
+    });
+    expect(web?.spec.selector).toMatchObject({ "app.kubernetes.io/component": "web" });
+    expect(ingress(manifests, "skew-opengeni")?.metadata.annotations).not.toHaveProperty(
+      "nginx.ingress.kubernetes.io/load-balance",
+    );
+    const custom = await render({
+      ...ingressValues({}),
+      web: { service: { type: "NodePort", port: 8080, nodePort: 30080 } },
+    });
+    expect(service(custom, "skew-opengeni-web-assets")?.spec).toMatchObject({
+      type: "ClusterIP",
+      ports: [{ port: 8080, targetPort: "http", protocol: "TCP", name: "http" }],
+    });
   });
 
   test("covers only asset paths that the primary Ingress already sends to web", async () => {
@@ -467,11 +499,11 @@ describe.skipIf(!helm)("web asset ingress", () => {
       "skew-opengeni-web-assets",
     );
     expect(rulePaths(assets)).toEqual({
-      "app.example.test": ["/react-demo/assets Prefix skew-opengeni-web:web-http"],
+      "app.example.test": ["/react-demo/assets Prefix skew-opengeni-web-assets:http"],
       "legacy.example.test": [
-        "/assets Prefix skew-opengeni-web:http",
-        "/office/assets Prefix skew-opengeni-web:http",
-        "/react-demo/assets Prefix skew-opengeni-web:http",
+        "/assets Prefix skew-opengeni-web-assets:http",
+        "/office/assets Prefix skew-opengeni-web-assets:http",
+        "/react-demo/assets Prefix skew-opengeni-web-assets:http",
       ],
     });
   });
@@ -504,13 +536,13 @@ describe.skipIf(!helm)("web asset ingress", () => {
     );
     expect(rulePaths(assets)).toEqual({
       "app.example.test": [
-        "/office/assets Prefix skew-opengeni-web:http",
-        "/react-demo/assets Prefix skew-opengeni-web:http",
+        "/office/assets Prefix skew-opengeni-web-assets:http",
+        "/react-demo/assets Prefix skew-opengeni-web-assets:http",
       ],
       "split.example.test": [
-        "/assets Prefix skew-opengeni-web:http",
-        "/office/assets Prefix skew-opengeni-web:http",
-        "/react-demo/assets Prefix skew-opengeni-web:http",
+        "/assets Prefix skew-opengeni-web-assets:http",
+        "/office/assets Prefix skew-opengeni-web-assets:http",
+        "/react-demo/assets Prefix skew-opengeni-web-assets:http",
       ],
     });
     expect(assets?.spec.rules).toHaveLength(2);
@@ -566,6 +598,7 @@ describe.skipIf(!helm)("web asset ingress", () => {
       "nginx.ingress.kubernetes.io/whitelist-source-range": "10.0.0.0/8",
       "nginx.ingress.kubernetes.io/proxy-next-upstream": "error timeout http_404",
       "nginx.ingress.kubernetes.io/proxy-next-upstream-tries": "3",
+      "nginx.ingress.kubernetes.io/load-balance": "ewma",
     });
   });
 
@@ -610,7 +643,9 @@ describe.skipIf(!helm)("web asset ingress", () => {
         ],
       }),
     ]) {
-      expect(ingress(await render(values), "skew-opengeni-web-assets")).toBeUndefined();
+      const manifests = await render(values);
+      expect(ingress(manifests, "skew-opengeni-web-assets")).toBeUndefined();
+      expect(service(manifests, "skew-opengeni-web-assets")).toBeUndefined();
     }
     expect(
       ingress(
@@ -625,7 +660,10 @@ describe.skipIf(!helm)("web asset ingress", () => {
           webAssetsIngress: {
             requireNginxClassName: false,
             nextUpstreamTries: 4,
-            annotations: { "nginx.ingress.kubernetes.io/proxy-next-upstream-timeout": "10" },
+            annotations: {
+              "nginx.ingress.kubernetes.io/proxy-next-upstream-timeout": "10",
+              "nginx.ingress.kubernetes.io/load-balance": "round_robin",
+            },
           },
         }),
       ),
@@ -635,6 +673,7 @@ describe.skipIf(!helm)("web asset ingress", () => {
     expect(custom?.metadata.annotations).toMatchObject({
       "nginx.ingress.kubernetes.io/proxy-next-upstream-tries": "4",
       "nginx.ingress.kubernetes.io/proxy-next-upstream-timeout": "10",
+      "nginx.ingress.kubernetes.io/load-balance": "round_robin",
     });
   });
 });
