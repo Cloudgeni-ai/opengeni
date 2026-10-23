@@ -90,8 +90,8 @@ function fixture(
         // The consolidated authorization read returns target facts even when
         // no caller attempt is present. Missing/RLS-hidden targets stay absent;
         // missing caller/turn facts must not grant an agent live authority.
-        return requested.map((id) => ({
-          requested_session_id: id,
+        return requested.map((id, index) => ({
+          requested_session_index: index + 1,
           target_id: options.absentSession ? null : id,
           target_account_id: accountId,
           target_root_session_id: id,

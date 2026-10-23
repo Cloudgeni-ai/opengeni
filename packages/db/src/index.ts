@@ -31532,11 +31532,15 @@ export async function getSessionAuthorizationFactsBatch(
   },
 ): Promise<Map<string, SessionAuthorizationFacts>> {
   if (input.sessionIds.length === 0) return new Map();
+  // Parse UUIDs before the RLS relation join. Casting a text anchor in the
+  // join itself prevents keyed access under the security barrier. Ordinality
+  // preserves the caller's original spelling for the result map.
+  const requestedSessionIds = [...new Set(input.sessionIds)];
   const callerSessionId = input.caller?.sessionId ?? null;
   const attemptId = input.caller?.attemptId ?? null;
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const rows = await rawRows<{
-      requested_session_id: string;
+      requested_session_index: number | string;
       target_id: string | null;
       target_account_id: string | null;
       target_root_session_id: string | null;
@@ -31569,7 +31573,7 @@ export async function getSessionAuthorizationFactsBatch(
       scopedDb,
       sql`
         select
-          anchor.session_id as requested_session_id,
+          anchor.ordinality as requested_session_index,
           target.id as target_id,
           target.account_id as target_account_id,
           target.root_session_id as target_root_session_id,
@@ -31599,12 +31603,12 @@ export async function getSessionAuthorizationFactsBatch(
           turn.initiating_human_subject_id as turn_initiating_human_subject_id,
           link.canonical_snapshot as turn_link_snapshot
         from unnest(array[${sql.join(
-          [...new Set(input.sessionIds)].map((id) => sql`${id}`),
+          requestedSessionIds.map((id) => sql`${id}`),
           sql`, `,
-        )}]::text[]) as anchor(session_id)
+        )}]::uuid[]) with ordinality as anchor(session_id, ordinality)
         left join ${schema.sessions} target
           on target.workspace_id = ${input.workspaceId}
-          and target.id = anchor.session_id::uuid
+          and target.id = anchor.session_id
         left join ${schema.slackInteractions} slack
           on slack.account_id = ${input.accountId}
           and slack.workspace_id = ${input.workspaceId}
@@ -31641,6 +31645,7 @@ export async function getSessionAuthorizationFactsBatch(
     // Linked-identity checks may create savepoints on this same scoped handle.
     // Never overlap them, and keep each check live rather than caching it.
     for (const row of rows) {
+      const requestedSessionId = requestedSessionIds[Number(row.requested_session_index) - 1]!;
       const target: SessionAuthorizationFacts["target"] =
         row?.target_id && row.target_account_id && row.target_root_session_id
           ? {
@@ -31673,7 +31678,7 @@ export async function getSessionAuthorizationFactsBatch(
             }
           : null;
       if (!input.caller) {
-        results.set(row.requested_session_id, { target, caller: null });
+        results.set(requestedSessionId, { target, caller: null });
         continue;
       }
       const session: SessionAuthorizationCallerFacts["session"] =
@@ -31713,7 +31718,7 @@ export async function getSessionAuthorizationFactsBatch(
           initiatingHumanSubjectId: row.turn_initiating_human_subject_id ?? null,
         };
       }
-      results.set(row.requested_session_id, { target, caller: { session, turn } });
+      results.set(requestedSessionId, { target, caller: { session, turn } });
     }
     return results;
   });

@@ -234,7 +234,7 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
           id,
           batch.then(({ decisions, visible }) => {
             const decision = decisions[index]!;
-            if (decision.status === "fulfilled") return visible.has(id);
+            if (decision.status === "fulfilled") return visible.has(id.toLowerCase());
             const error = decision.reason;
             if (error instanceof SessionAuthorizationDeniedError) return false;
             if (error instanceof SessionAuthorizationUnavailableError)

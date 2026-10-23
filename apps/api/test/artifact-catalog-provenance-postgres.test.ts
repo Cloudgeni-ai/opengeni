@@ -152,6 +152,13 @@ postgresTest(
       expect((await sharedPage.json()).items.map((item: { id: string }) => item.id)).toEqual([
         sharedFile,
       ]);
+      const uppercaseSourcePage = await request(
+        `kind=image&sourceSessionId=${sharedSource.id.toUpperCase()}`,
+      );
+      expect(uppercaseSourcePage.status, await uppercaseSourcePage.clone().text()).toBe(200);
+      expect(
+        (await uppercaseSourcePage.json()).items.map((item: { id: string }) => item.id),
+      ).toEqual([sharedFile]);
       expect(
         (await (await request("kind=file")).json()).items.map((item: { id: string }) => item.id),
       ).toEqual([unsupportedImage]);
