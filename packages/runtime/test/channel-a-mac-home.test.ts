@@ -124,15 +124,45 @@ describe("repository discovery from a Mac's home folder", () => {
       ].sort(),
     );
   });
+});
 
-  test("a fast discovery never loses its results to its watchdog", async () => {
-    // A watchdog stopped before it reset the traps it inherited once ran the
+describe("the watchdog in a discovery or search script", () => {
+  /** The script a call sends, without running it. */
+  async function scriptOf(call: (svc: SandboxChannelAService) => Promise<unknown>) {
+    let script = "";
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => {
+          script ||= args.cmd;
+          return { stdout: "", stderr: "", exitCode: 1 };
+        },
+      },
+    });
+    await call(svc).catch(() => undefined);
+    return script;
+  }
+
+  test("never inherits the script's traps", async () => {
+    // A watchdog stopped before it reset the traps it inherited ran the
     // script's cleanup and deleted the results: a complete, empty answer.
-    const root = tempDir("mac-home-fast-");
-    mkdirSync(join(root, "app", ".git"), { recursive: true });
-    const svc = new SandboxChannelAService({ session: hostShellSession(root, "Darwin", root) });
-    for (let run = 0; run < 60; run++) {
-      expect((await svc.detectReposDetailed()).repos).toEqual(["app"]);
+    for (const script of [
+      await scriptOf((svc) => svc.detectReposDetailed()),
+      await scriptOf((svc) =>
+        svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 1024 }),
+      ),
+    ]) {
+      const watchdog = script.indexOf("(sleeper_pid=;");
+      expect(watchdog).toBeGreaterThan(0);
+      const before = script.slice(0, watchdog);
+      const after = script.slice(watchdog);
+      // Cleared right before the fork, and armed again right after it.
+      expect(before.lastIndexOf("trap - EXIT HUP INT TERM")).toBeGreaterThan(
+        before.lastIndexOf("trap cleanup EXIT"),
+      );
+      const forked = after.indexOf("watchdog_pid=$!");
+      expect(forked).toBeGreaterThan(0);
+      expect(after.indexOf("trap cleanup EXIT")).toBeGreaterThan(forked);
+      expect(after.indexOf("trap abort HUP INT TERM")).toBeGreaterThan(forked);
     }
-  }, 60_000);
+  });
 });
