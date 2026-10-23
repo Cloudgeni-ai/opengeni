@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 const raw = readFileSync(".github/workflows/batch-ci.yml", "utf8");
 const workflow = Bun.YAML.parse(raw) as any;
 
@@ -67,3 +70,86 @@ test("batch source preserves the complete existing fast contract inventory", () 
     expect(source).toContain(check);
   expect(source).toMatch(/"--exclude",\s*"publish-closure"/);
 });
+
+test("required source job runs the actual pinned previous-binary database check on the batch tip", () => {
+  const source = workflow.jobs.source;
+  const step = source.steps.find((s: any) => s.name === "Previous-binary database readiness");
+  expect(source.if).toBeUndefined();
+  expect(step.if).toBeUndefined();
+  expect(step["continue-on-error"]).toBeUndefined();
+  expect(source.services.postgres.image).toBe("pgvector/pgvector:pg17");
+  expect(step.env.BASE_SHA).toBe("${{ needs.plan.outputs.base_sha }}");
+  expect(step.env.OPENGENI_REQUIRE_REAL_DB).toBe("1");
+  expect(step.run).toContain('bun scripts/runtime-posture-baseline.ts "$BASE_SHA"');
+  expect(step.run).toContain("readRuntimePostureBaseline");
+  expect(step.run).toContain("PRE_COMPATIBILITY_PRODUCTION_SOURCE");
+  expect(step.run).toContain('fetch --no-tags origin "$pin"');
+  expect(step.run).toContain('fetch --no-tags origin "$old"');
+  expect(step.run).toContain(
+    "bun test --max-concurrency=1 packages/db/test/runtime-posture-compatibility-postgres.test.ts",
+  );
+  expect(step.run).toContain(
+    'batch-result.ts run --job source --output "$RUNNER_TEMP/receipt-source.json"',
+  );
+  expect(source.steps.indexOf(step)).toBeGreaterThan(
+    source.steps.findIndex((s: any) => s.run?.includes("batch-source.ts")),
+  );
+  expect(workflow.jobs.ready.needs).toContain("source");
+  expect(workflow.jobs.ready.env.SOURCE_RESULT).toBe("${{ needs.source.result }}");
+});
+
+test.each([0, 1])(
+  "readiness exit %i propagates through the real receipt wrapper (transport stub only)",
+  (exitCode) => {
+    const directory = mkdtempSync(join(tmpdir(), "batch-posture-"));
+    const step = workflow.jobs.source.steps.find(
+      (s: any) => s.name === "Previous-binary database readiness",
+    );
+    try {
+      const result = spawnSync(
+        "bash",
+        [
+          "-c",
+          `
+      bun() {
+        case "$1" in
+          scripts/ci/batch-result.ts) "$REAL_BUN" "$@" ;;
+          -e) printf '%040d\\n' 0 ;;
+          *) if [[ "$*" == *runtime-posture-compatibility-postgres.test.ts* ]]; then return "$READINESS_EXIT"; fi ;;
+        esac
+      }
+      git() { return 0; }
+      export -f bun git
+      ${step.run}
+    `,
+        ],
+        {
+          env: {
+            ...process.env,
+            REAL_BUN: process.execPath,
+            READINESS_EXIT: String(exitCode),
+            RUNNER_TEMP: directory,
+            BASE_SHA: "b".repeat(40),
+            BATCH_ID: "batch-posture",
+            GITHUB_SHA: "a".repeat(40),
+            GITHUB_RUN_ID: "123",
+            GITHUB_RUN_ATTEMPT: "1",
+          },
+          encoding: "utf8",
+        },
+      );
+      expect(result.status).toBe(exitCode);
+      const receipt = JSON.parse(readFileSync(join(directory, "receipt-source.json"), "utf8"));
+      expect(receipt).toMatchObject({
+        job: "source",
+        headSha: "a".repeat(40),
+        runAttempt: 1,
+        exitCode,
+        outcome: exitCode ? "code_failure" : "success",
+      });
+      if (exitCode) expect(receipt.retryable).toBe(true);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);

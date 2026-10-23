@@ -74,7 +74,19 @@ jobs:
     name: Batch source contracts
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: x
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       BATCH_ID: ${{ needs.plan.outputs.batch_id }}
     steps:
@@ -101,6 +113,26 @@ jobs:
         run: >-
           bun scripts/ci/batch-result.ts run --job source --output "$RUNNER_TEMP/receipt-source.json" --
           bun scripts/ci/batch-source.ts "$RUNNER_TEMP/batch-plan/impact-plan.json"
+      # This must run on the merged candidate, including migration-only batches.
+      # Reuse the actual previous-binary check, not only its source/unit contracts.
+      # A failure replaces the source receipt and takes the existing one-retry/split path.
+      - name: Previous-binary database readiness
+        env:
+          BASE_SHA: ${{ needs.plan.outputs.base_sha }}
+          GH_TOKEN: ${{ github.token }}
+          OPENGENI_REQUIRE_REAL_DB: "1"
+          OPENGENI_TEST_PG_URL: postgres://postgres:x@127.0.0.1:5432/postgres
+        run: |
+          bun scripts/ci/batch-result.ts run --job source --output "$RUNNER_TEMP/receipt-source.json" -- bash -euo pipefail <<'CHECK'
+          bun scripts/runtime-posture-baseline.ts "$BASE_SHA"
+          pin="$(bun -e 'import {readRuntimePostureBaseline} from "./scripts/runtime-posture-baseline"; console.log((await readRuntimePostureBaseline(process.cwd())).sourceCommit)')"
+          git -c credential.helper='!gh auth git-credential' fetch --no-tags origin "$pin"
+          old="$(bun -e 'import {PRE_COMPATIBILITY_PRODUCTION_SOURCE} from "./scripts/runtime-posture-baseline"; console.log(PRE_COMPATIBILITY_PRODUCTION_SOURCE)')"
+          git -c credential.helper='!gh auth git-credential' fetch --no-tags origin "$old"
+          bun test --max-concurrency=2 packages/db/test/runtime-posture.test.ts scripts/runtime-posture-baseline.test.ts
+          bun run --cwd packages/db typecheck
+          bun test --max-concurrency=1 packages/db/test/runtime-posture-compatibility-postgres.test.ts
+          CHECK
       - uses: actions/upload-artifact@v7.0.1
         if: ${{ always() }}
         with:
