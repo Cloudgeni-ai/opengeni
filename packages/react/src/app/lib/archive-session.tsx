@@ -111,8 +111,8 @@ export async function requestSessionArchive(
       archived,
       clientEventId,
       expectedVersion: chat.archiveVersion ?? 0,
-      mode: pause ? "pause_and_archive" : "hide_for_me",
-      confirmPause,
+      // Restore never pauses or resumes, so it names no archive mode.
+      ...(archived ? { mode: pause ? "pause_and_archive" : "hide_for_me", confirmPause } : {}),
     });
   };
   try {

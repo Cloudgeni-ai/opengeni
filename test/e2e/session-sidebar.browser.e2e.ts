@@ -352,6 +352,7 @@ test("Archived filter opens only the archive folder; restore retains the origina
       workspaceId,
       sessionId: "00000000-0000-4000-9000-000000000401",
       archived: false,
+      clientEventId: expect.any(String),
       expectedVersion: 1,
       previousChannelId: redesignId,
       returnedChannelId: redesignId,
