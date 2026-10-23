@@ -106,6 +106,7 @@ import {
   getSessionGoal,
   getSessionMcpMonitoringSummary,
   getSessionQueueSnapshot,
+  getSessionQueueMonitoringSummary,
   getSessionTurn,
   getSessionTurnMcpAccountBindings,
   getOrCreatePreferenceRegistrySnapshot,
@@ -5486,7 +5487,9 @@ function registerWorkspaceOrchestrationTools(
         if (!session) {
           throw new Error("session not found");
         }
-        const queue = await getSessionQueueSnapshot(deps.db, grant.workspaceId, sessionId);
+        const queue = await (
+          detail === "full" ? getSessionQueueSnapshot : getSessionQueueMonitoringSummary
+        )(deps.db, grant.workspaceId, sessionId);
         const projected = projectSessionForRelatedAccess(
           {
             ...session,

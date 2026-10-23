@@ -809,6 +809,7 @@ import type {
   SessionToolPolicy,
   SessionTurn,
   SessionQueueSnapshot,
+  SessionMcpQueueSummary,
   SessionSystemUpdate,
   SessionSystemUpdateKind,
   SessionSystemUpdateState,
@@ -83762,6 +83763,85 @@ export async function listPendingSessionTurns(
   });
 }
 
+/** Compact MCP monitoring never needs prompt bodies or inbox attachment planning.
+ * Keep the same control lock and stopping proof as the full queue projection. */
+export async function getSessionQueueMonitoringSummary(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<(SessionMcpQueueSummary & Pick<SessionQueueSnapshot, "effectiveControl">) | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
+      lock: "share",
+    });
+    const [session] = await scopedDb
+      .select({ id: schema.sessions.id })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!session) return null;
+    const rows = await scopedDb
+      .select({
+        promptRouting: schema.sessionTurns.promptRouting,
+        metadata: schema.sessionTurns.metadata,
+      })
+      .from(schema.sessionTurns)
+      .where(sessionQueueTurnsPredicate(workspaceId, sessionId));
+    const [pending] = await scopedDb
+      .select({ count: sql<string>`count(*)` })
+      .from(schema.sessionSystemUpdates)
+      .where(sessionQueuePendingInputsPredicate(workspaceId, sessionId));
+    return {
+      effectiveControl: serializeEffectiveSessionControl(effectiveControl),
+      queuedTurns: rows.filter(
+        (row) => row.promptRouting === null || row.promptRouting === "queued_for_execution",
+      ).length,
+      pendingInputs: Number(pending!.count),
+      stoppingPreviousAttempt: await sessionQueueStoppingPreviousAttempt(
+        scopedDb,
+        workspaceId,
+        sessionId,
+        rows.map((row) => row.metadata),
+      ),
+    };
+  });
+}
+
+function sessionQueueTurnsPredicate(workspaceId: string, sessionId: string) {
+  return and(
+    eq(schema.sessionTurns.workspaceId, workspaceId),
+    eq(schema.sessionTurns.sessionId, sessionId),
+    eq(schema.sessionTurns.status, "queued"),
+    inArray(schema.sessionTurns.source, ["user", "api"]),
+  );
+}
+
+function sessionQueuePendingInputsPredicate(workspaceId: string, sessionId: string) {
+  return and(
+    eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+    eq(schema.sessionSystemUpdates.sessionId, sessionId),
+    eq(schema.sessionSystemUpdates.state, "pending"),
+  );
+}
+
+async function sessionQueueStoppingPreviousAttempt(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  queuedMetadata: Record<string, unknown>[],
+): Promise<boolean> {
+  const latestInterruption = await latestSessionAttemptInterruption(db, workspaceId, sessionId);
+  const predecessorIds = queuedMetadata
+    .map(queuedSteerReplacementAttemptId)
+    .filter((attemptId): attemptId is string => attemptId !== null);
+  return (
+    (latestInterruption !== null &&
+      latestInterruption.interruptionState !== "rejected_stale" &&
+      latestInterruption.quiescedAt === null) ||
+    (await queuedSteerHasUnquiescedPredecessor(db, workspaceId, sessionId, predecessorIds))
+  );
+}
+
 export async function getSessionQueueSnapshot(
   db: Database,
   workspaceId: string,
@@ -83790,25 +83870,12 @@ export async function getSessionQueueSnapshot(
     const rows = await scopedDb
       .select()
       .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.status, "queued"),
-          inArray(schema.sessionTurns.source, ["user", "api"]),
-        ),
-      )
+      .where(sessionQueueTurnsPredicate(workspaceId, sessionId))
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
     const pendingInputs = await scopedDb
       .select()
       .from(schema.sessionSystemUpdates)
-      .where(
-        and(
-          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-          eq(schema.sessionSystemUpdates.sessionId, sessionId),
-          eq(schema.sessionSystemUpdates.state, "pending"),
-        ),
-      )
+      .where(sessionQueuePendingInputsPredicate(workspaceId, sessionId))
       .orderBy(
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 0 else 1 end`,
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.createdAt} end desc`,
@@ -83825,24 +83892,12 @@ export async function getSessionQueueSnapshot(
     const items = rows
       .filter((row) => row.promptRouting === null || row.promptRouting === "queued_for_execution")
       .map(mapSessionTurn);
-    const latestInterruption = await latestSessionAttemptInterruption(
+    const stoppingPreviousAttempt = await sessionQueueStoppingPreviousAttempt(
       scopedDb,
       workspaceId,
       sessionId,
+      physicalItems.map((turn) => turn.metadata),
     );
-    const queuedSteerPredecessorIds = physicalItems
-      .map((turn) => queuedSteerReplacementAttemptId(turn.metadata))
-      .filter((attemptId): attemptId is string => attemptId !== null);
-    const stoppingPreviousAttempt =
-      (latestInterruption !== null &&
-        latestInterruption.interruptionState !== "rejected_stale" &&
-        latestInterruption.quiescedAt === null) ||
-      (await queuedSteerHasUnquiescedPredecessor(
-        scopedDb,
-        workspaceId,
-        sessionId,
-        queuedSteerPredecessorIds,
-      ));
 
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",

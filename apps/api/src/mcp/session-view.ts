@@ -19,6 +19,7 @@ import type {
   SessionEventReadMode,
   SessionMcpMonitoringSource,
   SessionQueueSnapshot,
+  SessionMcpQueueSummary,
 } from "@opengeni/contracts";
 import {
   boundSessionEventPayload,
@@ -535,7 +536,7 @@ function projectEffectiveToolPolicy(value: Session["effectiveToolPolicy"]): {
 export function boundSessionCompactDetailMcp(
   session: Session,
   monitoring: SessionMcpMonitoringSource,
-  queue: SessionQueueSnapshot | null,
+  queue: SessionQueueSnapshot | SessionMcpQueueSummary | null,
   maxBytes = SESSION_DETAIL_MCP_MAX_BYTES,
 ) {
   const result = compactSessionMcpDetail(session, monitoring, queue);

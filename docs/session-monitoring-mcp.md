@@ -301,3 +301,11 @@ in `packages/contracts/src/session-mcp-projections.ts`. The API's
 preserve the legacy full serializers. `getSessionMcpMonitoringSummary` and
 `listSessionDiscoverySummaries` in `packages/db/src/index.ts` own the bounded
 storage reads. These helpers are presentation boundaries, never authorization.
+
+Compact `session_get` uses `getSessionQueueMonitoringSummary` to read queue
+routing/Steer metadata and a pending-input count
+rather than hydrating queued prompt bodies or planning an inbox attachment preview.
+It uses the same workspace control lock, queue filters, interruption ledger and
+quiescence proof as the full queue reader. This is request-local projection work
+avoidance, not caching or a change to admission. REST/UI queue previews and
+`session_get detail=full` retain the full queue path.

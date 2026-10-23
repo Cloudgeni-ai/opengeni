@@ -21,6 +21,7 @@ import {
   listSessions,
   listFloorSessions,
   getSessionQueueSnapshot,
+  getSessionQueueMonitoringSummary,
   listSessionTurns,
   markSessionAttemptQuiesced,
   moveQueuedTurnInTransaction,
@@ -57,6 +58,23 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 60_000);
+
+// Exercise both readers across the existing edit/delete/Steer/interruption cases.
+async function readQueueWithMonitoringParity(...args: Parameters<typeof getSessionQueueSnapshot>) {
+  const full = await getSessionQueueSnapshot(...args);
+  const summary = await getSessionQueueMonitoringSummary(...args);
+  expect(summary).toEqual(
+    full
+      ? {
+          effectiveControl: full.effectiveControl,
+          queuedTurns: full.items.length,
+          pendingInputs: full.pendingInputs.length,
+          stoppingPreviousAttempt: full.stoppingPreviousAttempt,
+        }
+      : null,
+  );
+  return full;
+}
 
 async function fixture(count = 3) {
   const suffix = crypto.randomUUID();
@@ -643,14 +661,15 @@ describe("canonical queue commands", () => {
       ),
     ).toEqual([{ promptRouting: "accepted_for_execution" }]);
     expect(
-      (await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id))?.items,
+      (await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id))
+        ?.items,
     ).toEqual([]);
 
     const waiting = await submit("run second", "send");
     expect(waiting.routing).toBe("queued_for_execution");
     expect(
       (
-        await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id)
+        await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id)
       )?.items.map((turn) => turn.id),
     ).toEqual([waiting.turnId]);
 
@@ -658,7 +677,7 @@ describe("canonical queue commands", () => {
     expect(steer.routing).toBe("accepted_for_steering");
     expect(
       (
-        await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id)
+        await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id)
       )?.items.map((turn) => turn.id),
     ).toEqual([waiting.turnId]);
   });
@@ -934,7 +953,7 @@ describe("canonical queue commands", () => {
     expect(publicTurns.find((turn) => turn.id === submitted.turnId)).not.toHaveProperty(
       "modelContext",
     );
-    const queue = await getSessionQueueSnapshot(
+    const queue = await readQueueWithMonitoringParity(
       client.db,
       value.grant.workspaceId!,
       value.session.id,
@@ -1190,7 +1209,7 @@ describe("canonical queue commands", () => {
       },
     });
     expect(
-      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+      await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id),
     ).toMatchObject({
       stoppingPreviousAttempt: false,
     });
@@ -1233,14 +1252,14 @@ describe("canonical queue commands", () => {
       replacedAttemptId: crypto.randomUUID(),
     });
     expect(
-      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+      await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id),
     ).toMatchObject({ stoppingPreviousAttempt: true });
     await setTargetMetadata({
       ...validSteerMetadata,
       interruptionCount: 0,
     });
     expect(
-      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+      await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id),
     ).toMatchObject({ stoppingPreviousAttempt: true });
     await setTargetMetadata(validSteerMetadata);
     const [superseded, interruption, session] = await withWorkspaceRls(
@@ -1334,7 +1353,7 @@ describe("canonical queue commands", () => {
         .where(eq(schema.sessionTurns.id, target.id));
     });
     expect(
-      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+      await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id),
     ).toMatchObject({ stoppingPreviousAttempt: true });
     const claimAfterReplacementRemoval = await claimSessionWorkForAttempt(
       client.db,
