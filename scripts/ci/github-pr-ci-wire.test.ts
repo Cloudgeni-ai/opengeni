@@ -306,7 +306,8 @@ test("malformed priority response is not converted to an empty admission snapsho
     runPrCiCommand(
       "priority",
       { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture" },
-      (async () => Response.json({ total_count: 0, workflow_runs: null })) as typeof fetch,
+      (async () =>
+        Response.json({ total_count: 0, workflow_runs: null })) as unknown as typeof fetch,
       "pr",
       {
         now: () => 0,
