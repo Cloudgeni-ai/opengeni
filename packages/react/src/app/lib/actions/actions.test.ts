@@ -9,7 +9,13 @@ import {
   type Chord,
 } from "./chords";
 import type { ChatRecord } from "./chat-directory";
-import { isSwitcherKey, openChatSwitcher, stepChatSwitcher, SWITCHER_LIMIT } from "./chat-switcher";
+import {
+  extendChatSwitcher,
+  isSwitcherKey,
+  openChatSwitcher,
+  stepChatSwitcher,
+  SWITCHER_LIMIT,
+} from "./chat-switcher";
 import { LOOSE_MATCH_BELOW, rankLabel, rankWithKeywords } from "./rank";
 import { appActions, stepWorkspace } from "./registry";
 
@@ -296,9 +302,58 @@ describe("chat switcher", () => {
     expect(state.ids[state.index]).toBe("b");
   });
 
-  test("the list stops at ten chats", () => {
-    const ids = Array.from({ length: 15 }, (_, index) => `c${index}`);
-    expect(openChatSwitcher(directory(ids), "c0", false)!.ids).toHaveLength(SWITCHER_LIMIT);
+  test("past the opened chats it carries on through other chats by latest activity", () => {
+    const rows = [
+      record("a", { updatedAt: 1 }),
+      record("b", { updatedAt: 2 }),
+      record("older", { updatedAt: 5 }),
+      record("newer", { updatedAt: 9, workspaceId: "other" }),
+      record("gone", { updatedAt: 8, archived: true }),
+      record("child", { updatedAt: 7, row: { parentSessionId: "a" } as ChatRecord["row"] }),
+    ];
+    const state = openChatSwitcher(directory(["a", "b"], rows), "a", false)!;
+    expect(state.ids).toEqual(["a", "b", "newer", "older"]);
+    expect(state.viewed).toBe(2);
+    // Tab keeps going into the older chats before it wraps.
+    let stepped = stepChatSwitcher(state, 1);
+    stepped = stepChatSwitcher(stepped, 1);
+    expect(stepped.ids[stepped.index]).toBe("older");
+  });
+
+  test("with no opened chats yet, the most recently active chat is the target", () => {
+    const rows = [record("a", { updatedAt: 1 }), record("b", { updatedAt: 2 })];
+    const state = openChatSwitcher(directory([], rows), null, false)!;
+    expect(state.ids).toEqual(["b", "a"]);
+    expect(state.viewed).toBe(0);
+    expect(state.ids[state.index]).toBe("b");
+  });
+
+  test("chats that load while it is open join at the end, and nothing else moves", () => {
+    const start = directory(["a", "b"], [record("a"), record("b"), record("c", { updatedAt: 3 })]);
+    const state = stepChatSwitcher(openChatSwitcher(start, "a", false)!, 1);
+    expect(extendChatSwitcher(state, start)).toBe(state);
+    const later = directory(
+      ["a", "b"],
+      [record("a"), record("b"), record("c", { updatedAt: 3 }), record("d", { updatedAt: 9 })],
+    );
+    const grown = extendChatSwitcher(state, later);
+    expect(grown.ids).toEqual(["a", "b", "c", "d"]);
+    expect(grown.index).toBe(state.index);
+    expect(grown.viewed).toBe(2);
+  });
+
+  test("the list stops at its limit", () => {
+    const ids = Array.from({ length: SWITCHER_LIMIT + 20 }, (_, index) => `c${index}`);
+    const rows = Array.from({ length: 30 }, (_, index) =>
+      record(`x${index}`, { updatedAt: index }),
+    );
+    const state = openChatSwitcher(
+      directory(ids, [...ids.map((id) => record(id)), ...rows]),
+      "c0",
+      false,
+    )!;
+    expect(state.ids).toHaveLength(SWITCHER_LIMIT);
+    expect(extendChatSwitcher(state, directory(ids, rows))).toBe(state);
   });
 
   test("only Control+Tab opens it", () => {

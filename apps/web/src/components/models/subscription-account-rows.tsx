@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { ListRowSkeleton } from "@opengeni/react/ui/list-row";
@@ -10,8 +10,9 @@ import {
   splitSubscriptionPool,
   type SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
+import { AccountGroupRows, groupEntry } from "./account-fold";
 
-type Account = SubscriptionPoolAccount & { status: string };
+type Account = SubscriptionPoolAccount & { status: string; allocatorEnabled?: boolean };
 export type SubscriptionRowsPool<T extends Account> = {
   accounts: T[];
   loading: boolean;
@@ -78,33 +79,40 @@ export function SubscriptionAccountPoolRows<T extends Account>({
     organization && !organization.pool.loading && !organization.pool.loadError
       ? new Map(organization.pool.accounts.map((account) => [account.id, account]))
       : null;
+  const entries = [
+    ...shared.map((account) => {
+      const organizationAccount = listed?.get(account.id);
+      const scopeLabel = !organization ? undefined : organizationAccount?.reach ? (
+        accountReachLabel(places.scope, organizationAccount.reach, organization.workspaceName)
+      ) : organization.pool.loading ? (
+        <ModelSettingsPlaceholder />
+      ) : undefined;
+      return groupEntry(
+        account.id,
+        account,
+        renderRow(
+          account,
+          () =>
+            organization && organizationAccount
+              ? organization.openAccount(account.id)
+              : places.openAccount(account.id),
+          scopeLabel,
+        ),
+      );
+    }),
+    ...own.map((account) =>
+      groupEntry(
+        account.id,
+        account,
+        renderRow(account, () => places.openAccount(account.id)),
+      ),
+    ),
+  ];
+  // In use first; ones turned off fold away once there are several, as on the
+  // organization's list.
   return (
     <>
-      {shared.map((account) => {
-        const organizationAccount = listed?.get(account.id);
-        const scopeLabel = !organization ? undefined : organizationAccount?.reach ? (
-          accountReachLabel(places.scope, organizationAccount.reach, organization.workspaceName)
-        ) : organization.pool.loading ? (
-          <ModelSettingsPlaceholder />
-        ) : undefined;
-        return (
-          <Fragment key={account.id}>
-            {renderRow(
-              account,
-              () =>
-                organization && organizationAccount
-                  ? organization.openAccount(account.id)
-                  : places.openAccount(account.id),
-              scopeLabel,
-            )}
-          </Fragment>
-        );
-      })}
-      {own.map((account) => (
-        <Fragment key={account.id}>
-          {renderRow(account, () => places.openAccount(account.id))}
-        </Fragment>
-      ))}
+      <AccountGroupRows title={providerName} entries={entries} />
       {pendingRow}
     </>
   );

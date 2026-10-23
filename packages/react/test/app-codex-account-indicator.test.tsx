@@ -12,12 +12,12 @@ import { fakeClient, WORKSPACE_ID } from "./fake-client";
   ).IS_REACT_ACT_ENVIRONMENT = true;
 }
 const { OpenGeniProvider } = await import("../src");
-const { CodexAccountIndicator } =
-  await import("../src/app/components/session/codex-account-indicator");
+const { SubscriptionAccountIndicator } =
+  await import("../src/app/components/session/subscription-account-indicator");
 const { retainSharedQueries } = await import("../src/app/lib/shared-query");
 afterAll(() => GlobalRegistrator.unregister());
 
-test("shared menu hides cached quotas when the Codex adapter reports no live data", async () => {
+test("hides cached quotas when the live Codex check reports no data", async () => {
   const account = {
     id: "unavailable",
     label: "Team Codex",
@@ -50,10 +50,11 @@ test("shared menu hides cached quotas when the Codex adapter reports no live dat
     await act(async () =>
       root.render(
         <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
-          <CodexAccountIndicator
+          <SubscriptionAccountIndicator
             workspaceId={WORKSPACE_ID}
             sessionId="no-data"
-            model="codex/gpt-6-astra"
+            organizationId={null}
+            provider="codex"
             events={[]}
           />
         </OpenGeniProvider>,
@@ -67,7 +68,7 @@ test("shared menu hides cached quotas when the Codex adapter reports no live dat
     expect(document.body.textContent).toContain("Usage unavailable");
     expect(document.body.textContent).toContain("Team Codex");
     expect(document.body.textContent).toContain("Pro");
-    expect(document.body.textContent).not.toContain("% remaining");
+    expect(document.body.textContent).not.toContain("% used");
     expect(document.querySelector('[role="progressbar"]')).toBeNull();
     expect(
       container.querySelector('[data-testid="billing-class-icon-codex_subscription"]'),
@@ -104,18 +105,19 @@ test("running accepted account remains labeled while the switcher offers only th
     await act(async () =>
       root.render(
         <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
-          <CodexAccountIndicator
+          <SubscriptionAccountIndicator
             workspaceId={WORKSPACE_ID}
             sessionId="running"
-            model="codex/gpt-5.6-sol"
+            organizationId={null}
+            provider="codex"
             events={[]}
           />
         </OpenGeniProvider>,
       ),
     );
     const trigger = container.querySelector("button")!;
-    expect(trigger.getAttribute("aria-label")).toContain(
-      "Current account · Accepted organization account",
+    expect(trigger.getAttribute("aria-label")).toBe(
+      "Codex account · Accepted organization account",
     );
     await act(async () =>
       trigger.dispatchEvent(
@@ -127,6 +129,7 @@ test("running accepted account remains labeled while the switcher offers only th
     );
     expect(choices.some((choice) => choice?.includes("New workspace account"))).toBe(true);
     expect(choices.some((choice) => choice?.includes("Accepted organization account"))).toBe(false);
+    expect(document.body.textContent).toContain("Current account");
     expect(document.body.textContent).toContain("Use for next turn");
   } finally {
     await act(async () => root.unmount());
@@ -213,17 +216,20 @@ test("shows the blocked account instead of a healthy default and permits repeati
     await act(async () =>
       root.render(
         <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
-          <CodexAccountIndicator
+          <SubscriptionAccountIndicator
             workspaceId={WORKSPACE_ID}
             sessionId="session"
-            model="codex/gpt-5.6-sol"
+            organizationId={null}
+            provider="codex"
             events={[]}
           />
         </OpenGeniProvider>,
       ),
     );
     const trigger = container.querySelector("button")!;
-    expect(trigger.getAttribute("aria-label")).toContain("Limit reached · Blocked account");
+    expect(trigger.getAttribute("aria-label")).toBe(
+      "Codex account · Blocked account · Limit reached",
+    );
     await act(async () =>
       trigger.dispatchEvent(
         new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
@@ -232,17 +238,17 @@ test("shows the blocked account instead of a healthy default and permits repeati
     expect(document.body.textContent).toContain("Retry with");
     const bars = document.querySelectorAll<HTMLElement>('[role="progressbar"]');
     expect(bars.length).toBe(2);
-    expect(bars[0]!.getAttribute("aria-valuetext")).toBe("0% remaining");
-    expect(bars[1]!.getAttribute("aria-valuetext")).toBe("90% remaining");
-    expect((bars[1]!.firstElementChild as HTMLElement).style.width).toBe("90%");
+    expect(bars[0]!.getAttribute("aria-valuetext")).toBe("100% used");
+    expect(bars[1]!.getAttribute("aria-valuetext")).toBe("10% used");
+    expect((bars[1]!.firstElementChild as HTMLElement).style.width).toBe("10%");
     const blockedOption = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
       (el) => el.textContent?.includes("Blocked account"),
     );
     // The selected account's quota is already shown in the summary above.
     expect(blockedOption).toBeDefined();
-    expect(blockedOption?.textContent).not.toContain("remaining");
+    expect(blockedOption?.textContent).not.toContain("used");
     const auto = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) =>
-      el.textContent?.includes("Auto"),
+      el.textContent?.includes("Automatic"),
     );
     expect(auto).toBeDefined();
     await act(async () => auto!.click());
@@ -318,10 +324,11 @@ test("weekly-only live usage replaces a mislabeled cached 5-hour reading", async
     await act(async () =>
       root.render(
         <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
-          <CodexAccountIndicator
+          <SubscriptionAccountIndicator
             workspaceId={WORKSPACE_ID}
             sessionId="weekly"
-            model="codex/gpt-5.6-sol"
+            organizationId={null}
+            provider="codex"
             events={[]}
           />
         </OpenGeniProvider>,
@@ -334,10 +341,10 @@ test("weekly-only live usage replaces a mislabeled cached 5-hour reading", async
     );
     const bars = document.querySelectorAll<HTMLElement>('[role="progressbar"]');
     expect(bars).toHaveLength(1);
-    expect(bars[0]!.getAttribute("aria-label")).toBe("Week remaining");
-    expect(bars[0]!.getAttribute("aria-valuetext")).toBe("34% remaining");
+    expect(bars[0]!.getAttribute("aria-label")).toBe("Week used");
+    expect(bars[0]!.getAttribute("aria-valuetext")).toBe("66% used");
     expect(document.body.textContent).not.toContain("5h");
-    expect(document.body.textContent).not.toContain("100% remaining");
+    expect(document.body.textContent).not.toContain(" 0% used");
     expect(document.body.textContent).toContain("Weekly-only account");
   } finally {
     await act(async () => root.unmount());
@@ -406,10 +413,11 @@ test("navigating back and reopening keeps the last account and live usage on scr
   });
   const indicator = (
     <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
-      <CodexAccountIndicator
+      <SubscriptionAccountIndicator
         workspaceId={WORKSPACE_ID}
         sessionId="cached"
-        model="codex/gpt-5.6-sol"
+        organizationId={null}
+        provider="codex"
         events={[]}
       />
     </OpenGeniProvider>
@@ -425,7 +433,7 @@ test("navigating back and reopening keeps the last account and live usage on scr
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
     );
   const weeklyBar = () =>
-    document.querySelector<HTMLElement>('[role="progressbar"][aria-label="Week remaining"]');
+    document.querySelector<HTMLElement>('[role="progressbar"][aria-label="Week used"]');
 
   // The console retains reads for its client above the routed pages, so
   // leaving the session page (and its provider subtree) keeps them.
@@ -435,7 +443,7 @@ test("navigating back and reopening keeps the last account and live usage on scr
   const firstRoot = createRoot(first);
   await act(async () => firstRoot.render(indicator));
   await open(first);
-  expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("72% remaining");
+  expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("28% used");
   await close();
   // Let the post-check account re-read settle before leaving.
   await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
@@ -456,7 +464,7 @@ test("navigating back and reopening keeps the last account and live usage on scr
     await act(async () => undefined);
     expect(skeletonOnFirstFrame).toBe(false);
     expect(second.querySelector("button")?.getAttribute("aria-label")).toContain(
-      "Current account · Team account",
+      "Codex account · Team account",
     );
     expect(listReads).toBe(readsBeforeLeaving);
 
@@ -464,7 +472,7 @@ test("navigating back and reopening keeps the last account and live usage on scr
     // and does not ask the provider again.
     await open(second);
     expect(document.body.textContent).not.toContain("Checking usage");
-    expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("72% remaining");
+    expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("28% used");
     expect(usageReads).toBe(1);
     await close();
 
@@ -476,13 +484,13 @@ test("navigating back and reopening keeps the last account and live usage on scr
       await open(second);
       expect(usageReads).toBe(2);
       expect(document.body.textContent).not.toContain("Checking usage");
-      expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("72% remaining");
+      expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("28% used");
     } finally {
       Date.now = realNow;
     }
     await act(async () => releaseUsage?.());
     await act(async () => undefined);
-    expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("55% remaining");
+    expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("45% used");
   } finally {
     await act(async () => secondRoot.unmount());
     second.remove();

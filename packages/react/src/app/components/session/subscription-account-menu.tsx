@@ -1,5 +1,6 @@
-// Shared presentation extracted from the Codex subscription-account dropdown.
-// Adapters own loading, authorization, usage freshness, and selection semantics.
+// The subscription-account dropdown every provider shares. Its content comes
+// from `subscriptionAccountMenuContent`; data sources own loading,
+// authorization, usage freshness and selection.
 import { ChevronDownIcon, Loader2Icon } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -24,25 +25,29 @@ export type SubscriptionAccountMenuRow = {
   detail?: string;
   personal?: boolean;
   disabled?: boolean;
-  /** Only supplied when the adapter has a trustworthy quota reading. */
-  remaining?: number | null;
-  /** Cached window readings, not an aggregate capacity/eligibility estimate. */
+  /** Per-window readings, not an aggregate capacity/eligibility estimate. */
   usageSummary?: string | undefined;
 };
 
 export type SubscriptionAccountUsageWindow = {
   label: string;
-  remaining?: number;
-  usedPercent?: number | null;
+  /** Null means unknown; values over 100 can represent overage. */
+  usedPercent: number | null;
   detail?: string;
 };
 
-function UsageRow({ label, remaining, usedPercent, detail }: SubscriptionAccountUsageWindow) {
-  const value = remaining ?? usedPercent;
-  const known = typeof value === "number" && Number.isFinite(value);
-  const pct = known ? Math.min(100, Math.max(0, value)) : 0;
-  const measure = remaining !== undefined ? "remaining" : "used";
-  const text = known ? `${Math.round(value)}% ${measure}` : "Unknown";
+export type SubscriptionAccountMenuUsage = {
+  checking?: boolean | undefined;
+  unavailable?: boolean | undefined;
+  message?: string | undefined;
+  note?: string | undefined;
+  windows?: SubscriptionAccountUsageWindow[] | undefined;
+};
+
+function UsageRow({ label, usedPercent, detail }: SubscriptionAccountUsageWindow) {
+  const known = typeof usedPercent === "number" && Number.isFinite(usedPercent);
+  const pct = known ? Math.min(100, Math.max(0, usedPercent)) : 0;
+  const text = known ? `${Math.round(usedPercent)}% used` : "Unknown";
   return (
     <div className="space-y-0.5 text-2xs text-fg-subtle">
       <div className="flex items-center gap-2">
@@ -53,7 +58,7 @@ function UsageRow({ label, remaining, usedPercent, detail }: SubscriptionAccount
           <span
             className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-2"
             role="progressbar"
-            aria-label={`${label} ${measure}`}
+            aria-label={`${label} used`}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={pct}
@@ -62,9 +67,7 @@ function UsageRow({ label, remaining, usedPercent, detail }: SubscriptionAccount
             <span
               className={cn(
                 "block h-full rounded-full",
-                (measure === "remaining" ? pct <= 10 : pct >= 90)
-                  ? "bg-status-waiting"
-                  : "bg-brand",
+                pct >= 90 ? "bg-status-waiting" : "bg-brand",
               )}
               style={{ width: `${pct}%` }}
             />
@@ -76,24 +79,6 @@ function UsageRow({ label, remaining, usedPercent, detail }: SubscriptionAccount
       </div>
       {detail ? <p>{detail}</p> : null}
     </div>
-  );
-}
-
-function MiniBar({ remaining }: { remaining: number }) {
-  const pct = Math.min(100, Math.max(0, remaining));
-  return (
-    <span
-      className="inline-flex shrink-0 items-center gap-1.5 text-2xs text-fg-subtle"
-      title={`${Math.round(pct)}% remaining in the tighter usage window`}
-    >
-      <span className="h-1 w-8 overflow-hidden rounded-full bg-surface-2" aria-hidden="true">
-        <span
-          className={cn("block h-full rounded-full", pct <= 10 ? "bg-status-waiting" : "bg-brand")}
-          style={{ width: `${pct}%` }}
-        />
-      </span>
-      <span className="whitespace-nowrap tabular-nums">{Math.round(pct)}% remaining</span>
-    </span>
   );
 }
 
@@ -128,13 +113,7 @@ export function SubscriptionAccountMenu({
   metadata: string;
   identity?: string | null | undefined;
   tone?: "ok" | "warn" | "bad" | undefined;
-  usage: {
-    checking?: boolean | undefined;
-    unavailable?: boolean | undefined;
-    message?: string | undefined;
-    note?: string | undefined;
-    windows?: SubscriptionAccountUsageWindow[] | undefined;
-  };
+  usage: SubscriptionAccountMenuUsage;
   accounts: SubscriptionAccountMenuRow[];
   selectedId: string | null;
   automaticSelected: boolean;
@@ -168,7 +147,6 @@ export function SubscriptionAccountMenu({
         ) : null}
       </span>
       {account.plan ? <DropdownMenuMeta>{account.plan}</DropdownMenuMeta> : null}
-      {account.remaining != null ? <MiniBar remaining={account.remaining} /> : null}
       {account.status ? (
         <span className="shrink-0 text-xs text-status-waiting">{account.status}</span>
       ) : null}

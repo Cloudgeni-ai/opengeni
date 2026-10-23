@@ -13,6 +13,24 @@ import {
 export type ManagedAuthClientRateLimitRule = { window: number; max: number };
 
 /**
+ * Better Auth endpoints that are never limited per client address. A limit is
+ * kept only where a request verifies a credential or sends mail; these only
+ * read or end the caller's own session, so a per-address limit adds no
+ * protection and, behind a shared address, makes ordinary page loads fail.
+ *
+ * `/get-session` resolves the session cookie; guessing a session token is not
+ * feasible, and every other authenticated API route serves the same lookup
+ * without a client-address limit. Without this exemption it falls under Better
+ * Auth's default (100 per 10 s), and that counter resets only after 10 s with
+ * no admitted request. Any steady traffic from one address (an office or
+ * carrier NAT, an edge that does not forward client addresses, a browser test
+ * runner) never pauses for 10 s, so after its 100th session read every page
+ * load from that address fails with 429 until the traffic stops. `/sign-out`
+ * ends the caller's own session and must succeed even after that.
+ */
+export const MANAGED_AUTH_UNLIMITED_PATHS = ["/get-session", "/sign-out"] as const;
+
+/**
  * Better Auth's per-client-address limits, keyed by endpoint path relative to
  * `/v1/auth`. The client address is the trusted source address stamped by the
  * API (see `TRUSTED_CLIENT_ADDRESS_HEADER`), never a caller-supplied header.
@@ -43,6 +61,16 @@ export const MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES = {
   "/reset-password": { window: 60, max: 10 },
   "/reset-password/*": { window: 60, max: 20 },
 } as const satisfies Record<string, ManagedAuthClientRateLimitRule>;
+
+/** The rules handed to Better Auth: the limits above, plus `false` for each
+ * path in {@link MANAGED_AUTH_UNLIMITED_PATHS}, which skips its limiter. */
+export const MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES: Record<
+  string,
+  ManagedAuthClientRateLimitRule | false
+> = {
+  ...MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+  ...Object.fromEntries(MANAGED_AUTH_UNLIMITED_PATHS.map((path) => [path, false as const])),
+};
 
 export type ManagedAuthEmailThrottle = {
   purpose: "sign_in" | "sign_up" | "password_reset" | "verification_email";

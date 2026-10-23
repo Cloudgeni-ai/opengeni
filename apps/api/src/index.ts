@@ -18,6 +18,7 @@ import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
+  databasePoolOptions,
   defaultDatabasePreparedStatements,
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
@@ -358,9 +359,7 @@ export async function startApi(
         : {}),
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
-    ...(settings.databasePreparedStatements === undefined
-      ? {}
-      : { preparedStatements: settings.databasePreparedStatements }),
+    ...databasePoolOptions(settings),
   });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;

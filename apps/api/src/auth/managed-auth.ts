@@ -26,7 +26,7 @@ import { TRUSTED_CLIENT_ADDRESS_HEADER } from "../http/request-source";
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
 import {
   createManagedAuthEmailThrottleHook,
-  MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+  MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES,
 } from "./managed-auth-rate-limits";
 import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
 import {
@@ -162,8 +162,10 @@ function logBetterAuthMessage(
 /**
  * Bounded pool settings for Better Auth's dedicated `pg` pool. A connection
  * attempt fails after 10 s instead of queueing requests indefinitely while the
- * database is unreachable, and connections recycle like the main postgres-js
- * pool so a pooler- or failover-replaced backend is not held forever.
+ * database is unreachable, and connections close when idle and recycle within
+ * 30 minutes so a pooler- or failover-replaced backend is not held forever.
+ * This pool runs only Better Auth's few unnamed statements, so its backends stay
+ * small; the application pools' OPENGENI_DATABASE_POOL_* settings do not apply.
  */
 export const MANAGED_AUTH_DATABASE_POOL_OPTIONS = {
   max: 10,
@@ -298,7 +300,7 @@ export function createManagedAuth(
       fields: {
         lastRequest: "last_request",
       },
-      customRules: MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+      customRules: MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES,
     },
     user: {
       modelName: "auth_users",

@@ -37,6 +37,8 @@ const Cursor = z
 type Position = z.infer<typeof Position>;
 type CandidateRow = {
   visited: number;
+  lastSessionId: string | null;
+  lastSequence: number | null;
   rank: number | null;
   sessionId: string | null;
   eventId: string | null;
@@ -48,6 +50,10 @@ type CandidateRow = {
   codec: number | null;
   smallText: unknown;
 };
+
+/** Eligible messages one search statement reads, in key order. Small enough
+ * that a cold window stays far below the request's statement timeout. */
+export const SESSION_MESSAGE_SEARCH_WINDOW = 2_000;
 
 export class SessionMessageSearchCursorError extends Error {
   constructor() {
@@ -206,21 +212,40 @@ export async function scanSessionMessages(
   const matches: SessionMessageSearchMatch[] = [];
   let exhausted = false;
   const e = schema.sessionEvents;
-  // One bounded batch for ordinary complete messages. Large scalar continuations
-  // alone use the existing lossless slice reader. There is no per-message SQL
-  // round trip for the common small-message/no-hit path.
-  {
+  const c = schema.sessionMessageSearchTexts;
+  // Candidates come from session_message_search_texts. Under row-level
+  // security PostgreSQL only uses an index for a leakproof qualifier or one
+  // that belongs to the row-security policy, and no text pattern operator is
+  // leakproof, so the pattern is that table's restrictive policy: set here,
+  // transaction-locally, it lets the trigram index find exactly the messages
+  // whose text can contain the literal (plus losslessly encoded text, which
+  // only the decoding reader can test). A query PostgreSQL text cannot hold
+  // (NUL or a lone surrogate) leaves the pattern empty: only encoded text.
+  await db.execute(
+    sql`select pg_catalog.set_config('opengeni.session_message_search_pattern', ${
+      sessionMessagePostgresPattern(request.query) ?? ""
+    }, true)`,
+  );
+  // Bounded candidate windows in key order. Each statement reads at most
+  // SESSION_MESSAGE_SEARCH_WINDOW eligible candidates, each joined to its
+  // canonical event under that table's own policies and the list filters;
+  // later windows run while the request budget lasts. Large scalar
+  // continuations alone use the lossless slice reader.
+  const limit = request.limit ?? 20;
+  const budgetStarted = performance.now();
+  let slots = 0;
+  for (;;) {
+    signal?.throwIfAborted();
     const boundary = position
       ? position.skipSession
-        ? sql`${e.sessionId} > ${position.sessionId}::uuid`
-        : sql`(${e.sessionId} > ${position.sessionId}::uuid or (${e.sessionId} = ${position.sessionId}::uuid and ${position.done ? sql`${e.sequence} > ${position.sequence}` : sql`${e.sequence} >= ${position.sequence}`}))`
+        ? sql`${c.sessionId} > ${position.sessionId}::uuid`
+        : sql`(${c.sessionId}, ${c.sequence}) ${position.done ? sql`>` : sql`>=`} (${position.sessionId}::uuid, ${position.sequence}::int)`
       : sql`true`;
-    // One statement checks every remaining message's text in PostgreSQL and
-    // returns only the first candidates that contain the literal. The cheap
+    // One statement checks the next window's text in PostgreSQL and returns
+    // only the first candidates that contain the literal. The cheap
     // list/visibility predicates and the text test run once per message; the
     // correlated canonical-copy and unclaimed-prompt checks run only for
-    // candidates, lazily in key order, until the batch is full. A no-hit scan
-    // finishes in one request instead of one request per 33 messages.
+    // candidates, lazily in key order, until the batch is full.
     //
     // Correlate the exact durable message identity, not turn status or latest
     // model context. The latest full completion for a provider message wins,
@@ -235,24 +260,35 @@ export async function scanSessionMessages(
       with eligible as materialized (
         select ${e.id} as id, ${e.sessionId} as session_id, ${e.sequence} as sequence,
           ${textMatch.matched} as matched, ${textMatch.encoded} as encoded
-        from ${e}
+        from ${c}
+        inner join ${e} on ${e.workspaceId} = ${c.workspaceId}
+          and ${e.sessionId} = ${c.sessionId} and ${e.sequence} = ${c.sequence}
         inner join ${schema.sessions}
           on ${schema.sessions.workspaceId} = ${e.workspaceId} and ${schema.sessions.id} = ${e.sessionId}
         where ${and(
+          eq(c.workspaceId, workspaceId),
           eq(e.workspaceId, workspaceId),
           ...filters,
           boundary,
-          request.sessionId ? eq(e.sessionId, request.sessionId) : sql`true`,
+          request.sessionId ? eq(c.sessionId, request.sessionId) : sql`true`,
           sql`${e.type} in ('user.message', 'agent.message.completed')`,
           sql`(${e.turnAssociation} is null or ${e.turnAssociation} = 'current')`,
           sql`${e.duplicateOfEventId} is null`,
           sql`jsonb_typeof(${e.payload}->'text') = 'string'`,
         )}
+        order by ${c.sessionId}, ${c.sequence}
+        limit ${sql.raw(String(SESSION_MESSAGE_SEARCH_WINDOW))}
       ), visited as (
         select count(*)::int as visited from eligible
+      ), last_visited as (
+        select eligible.session_id as "lastSessionId", eligible.sequence as "lastSequence"
+        from eligible
+        order by eligible.session_id desc, eligible.sequence desc
+        limit 1
       )
-      select visited.visited, candidate.*
+      select visited.visited, last_visited.*, candidate.*
       from visited
+      left join last_visited on true
       left join lateral (
         select * from (
           select valid.*${
@@ -311,6 +347,8 @@ export async function scanSessionMessages(
       order by candidate.rank
     `);
     const visited = rows[0]?.visited ?? 0;
+    const lastSessionId = rows[0]?.lastSessionId ?? null;
+    const lastSequence = rows[0]?.lastSequence ?? null;
     const identities = rows.flatMap((row: CandidateRow) =>
       row.rank === null ||
       row.sessionId === null ||
@@ -332,18 +370,16 @@ export async function scanSessionMessages(
     // The cursor's message being resumed mid-text is the first visited row
     // again; it was already counted by the request that started it.
     const visitedBefore = scanned - (position && !position.done ? 1 : 0);
-    const budgetStarted = performance.now();
     let identityIndex = 0;
-    for (let window = 0; window < 32 && matches.length < (request.limit ?? 20); window++) {
+    let interrupted = false;
+    for (; matches.length < limit; slots++) {
       signal?.throwIfAborted();
-      if (window > 0 && performance.now() - budgetStarted >= 1_500) break;
-      const identity = identities[identityIndex];
-      if (!identity) {
-        // Grouping can drain a full candidate batch in fewer than 32 windows.
-        // A full batch is not proof that later sessions do not exist.
-        exhausted = identities.length < 33;
+      if (slots >= 32 || (slots > 0 && performance.now() - budgetStarted >= 1_500)) {
+        interrupted = true;
         break;
       }
+      const identity = identities[identityIndex];
+      if (!identity) break;
       const continuing =
         position &&
         !position.done &&
@@ -367,7 +403,7 @@ export async function scanSessionMessages(
       // Amortize full-source detoasting/codec validation over adjacent windows,
       // not a larger request budget. A four-window read consumes four of the
       // original 32 slots, even if a match/short source ends it early.
-      const scalarWindows = typeof smallText === "string" ? 1 : Math.min(4, 32 - window);
+      const scalarWindows = typeof smallText === "string" ? 1 : Math.min(4, 32 - slots);
       const slice =
         typeof smallText === "string"
           ? {
@@ -392,7 +428,7 @@ export async function scanSessionMessages(
               offset,
               scalarWindows,
             );
-      window += scalarWindows - 1;
+      slots += scalarWindows - 1;
       if (!slice || slice.omitted) {
         // Deletion/visibility changes never turn into a fabricated message.
         position = { ...position!, done: true };
@@ -402,7 +438,7 @@ export async function scanSessionMessages(
       pattern.lastIndex = Math.max(0, position!.minimumMatchOffset - utf16Offset);
       let found: RegExpExecArray | null;
       const messageId = fromPostgresLosslessJson(identity.messageId, identity.codec);
-      while (matches.length < (request.limit ?? 20) && (found = pattern.exec(slice.text))) {
+      while (matches.length < limit && (found = pattern.exec(slice.text))) {
         matches.push({
           sessionId: identity.sessionId,
           sessionTitle: identity.sessionTitle,
@@ -436,7 +472,7 @@ export async function scanSessionMessages(
         continue;
       }
       const units = slice.unit === "utf16" ? slice.text.length : Array.from(slice.text).length;
-      if (matches.length >= (request.limit ?? 20)) {
+      if (matches.length >= limit) {
         if (
           offset + units >= slice.total &&
           position!.minimumMatchOffset >= utf16Offset + slice.text.length
@@ -472,8 +508,32 @@ export async function scanSessionMessages(
         done: false,
       };
     }
-    if (identityIndex >= identities.length && identities.length < 33) exhausted = true;
-    if (exhausted) scanned = visitedBefore + visited;
+    // Every candidate of a short final window is done: the search is complete.
+    const drained = identityIndex >= identities.length && identities.length < 33;
+    if (drained && (visited < SESSION_MESSAGE_SEARCH_WINDOW || lastSessionId === null)) {
+      scanned = visitedBefore + visited;
+      exhausted = true;
+      break;
+    }
+    if (matches.length >= limit || interrupted) break;
+    // The buffered candidates are done. A full candidate batch may leave later
+    // candidates in this window: the next statement resumes after the last.
+    if (drained && lastSessionId !== null && lastSequence !== null) {
+      scanned = visitedBefore + visited;
+      // Nothing else in this window contains the literal: resume after it.
+      // A session that already gave its grouped hit stays skipped.
+      if (!(position?.skipSession && position.sessionId === lastSessionId))
+        position = {
+          sessionId: lastSessionId,
+          sequence: lastSequence,
+          offset: 0,
+          utf16Offset: 0,
+          minimumMatchOffset: 0,
+          matched: false,
+          done: true,
+        };
+    }
+    if (performance.now() - budgetStarted >= 1_500) break;
   }
   signal?.throwIfAborted();
   return {

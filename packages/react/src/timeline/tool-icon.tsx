@@ -3,7 +3,6 @@ import {
   AppWindowIcon,
   ArchiveIcon,
   BellIcon,
-  BookOpenIcon,
   BotIcon,
   BoxIcon,
   BrainCircuitIcon,
@@ -20,6 +19,7 @@ import {
   FolderGitIcon,
   FolderIcon,
   GlobeIcon,
+  GraduationCapIcon,
   HandIcon,
   HourglassIcon,
   ImageIcon,
@@ -129,8 +129,8 @@ export function toolIcon(kind: ToolIconKind): LucideIcon {
       return FolderIcon;
     case "site":
       return AppWindowIcon;
-    case "guide":
-      return BookOpenIcon;
+    case "skill":
+      return GraduationCapIcon;
     case "settings":
       return SettingsIcon;
     case "bell":

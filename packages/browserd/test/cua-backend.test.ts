@@ -2547,6 +2547,211 @@ describe("CUA desktop boundary", () => {
       }
     });
 
+    describe("a web date field is filled by typing each of its parts", () => {
+      /** A page with one datetime-local field (day, month, year, hours,
+       * minutes), which reads `afterRun` once run_steps ran. */
+      class DateFixture extends BatchFixture {
+        value: string | undefined = undefined;
+        afterRun = "2027-03-07T14:05";
+        async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const response = await super.callTool(name, argumentsJson);
+          if (name === "run_steps" && !this.reply) this.value = this.afterRun;
+          const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+          if (name !== "get_window_state" || !args.include_accessibility_tree) return response;
+          const data = JSON.parse(response.structuredJson!);
+          const s = data.snapshot_id as string;
+          const parts = ["Day", "Month", "Year", "Hours", "Minutes"];
+          data.elements = [
+            { element_index: 0, role: "AXWebArea", label: "Page", actions: [] },
+            {
+              element_index: 1,
+              element_token: `${s}:1`,
+              parent_index: 0,
+              role: "AXDateField",
+              label: "Meeting",
+              ...(this.value === undefined ? {} : { value: this.value }),
+              actions: ["AXPress"],
+            },
+            ...parts.map((part, index) => ({
+              element_index: 2 + index,
+              element_token: `${s}:${2 + index}`,
+              parent_index: 1,
+              role: "AXIncrementor",
+              label: `${part} Meeting`,
+              value: "--",
+              actions: ["AXIncrement", "AXDecrement"],
+            })),
+          ];
+          response.structuredJson = JSON.stringify(data);
+          return response;
+        }
+      }
+      const setDate = (
+        observation: ComputerBackendObservation,
+        ref: string,
+        value: string,
+      ): ComputerBackendActionCommand => ({
+        ...command(observation),
+        action: { type: "semantic", locator: { kind: "ref", ref }, action: "set_value", value },
+      });
+      const field = (observation: ComputerBackendObservation) =>
+        observation.roots.find((node) => node.role === "AXDateField")!;
+
+      test("set_value presses the field, then reaches and types each part, as one run_steps", async () => {
+        const fixture = new DateFixture();
+        const { backend, observation } = await open(fixture);
+        try {
+          expect(field(observation).actions).toContain("set_value");
+          const after = await backend.dispatch(
+            setDate(observation, field(observation).ref, "2027-03-07T14:05"),
+          );
+          expect(field(after!).value).toBe("2027-03-07T14:05");
+          const calls = fixture.calls.filter((call) => call.name === "run_steps");
+          expect(calls).toHaveLength(1);
+          expect(mutations(fixture)).toHaveLength(0);
+          const steps = calls[0]!.args.steps as { tool: string; args: Record<string, unknown> }[];
+          const s = observation.observationId.split(":").pop();
+          expect(steps[0]).toMatchObject({
+            tool: "click",
+            args: { element_token: `${s}:1`, delivery_mode: "background" },
+          });
+          // Each part is reached from the first: four Lefts, then Rights.
+          const compact = steps
+            .slice(1)
+            .map((step) =>
+              step.tool === "type_text" ? String(step.args.text) : String(step.args.key)[0],
+            )
+            .join(" ");
+          expect(compact).toBe(
+            [
+              "l l l l 07",
+              "l l l l r 03",
+              "l l l l r r 2027",
+              "l l l l r r r 14",
+              "l l l l r r r r 05",
+            ].join(" "),
+          );
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a value in another form is refused before any key is sent", async () => {
+        const fixture = new DateFixture();
+        const { backend, observation } = await open(fixture);
+        try {
+          const failure = await backend
+            .dispatch(setDate(observation, field(observation).ref, "03/07/2027 2:05 PM"))
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({
+            code: "invalid_action",
+            dispatched: false,
+            message: "This date or time field takes its whole value in the form YYYY-MM-DDTHH:MM",
+          });
+          expect(fixture.ran).toBe(false);
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a part of the field points to the field", async () => {
+        const fixture = new DateFixture();
+        const { backend, observation } = await open(fixture);
+        try {
+          const day = observation.roots.find((node) => node.name === "Day Meeting")!;
+          for (const action of ["set_value", "focus"] as const) {
+            const failure = await backend
+              .dispatch({
+                ...setDate(observation, day.ref, "07"),
+                action: {
+                  type: "semantic",
+                  locator: { kind: "ref", ref: day.ref },
+                  action,
+                  value: "07",
+                },
+              })
+              .catch((error: unknown) => error);
+            expect(failure).toMatchObject({
+              code: "unsupported",
+              dispatched: false,
+              message: `This is one part of the date or time field ${field(observation).ref} ("Meeting"), which is filled as a whole: set_value on ${field(observation).ref} with its value in the form YYYY-MM-DDTHH:MM`,
+            });
+          }
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a field that reads another value afterwards says so", async () => {
+        const fixture = new DateFixture();
+        fixture.afterRun = "0012-03-07T14:05";
+        const { backend, observation } = await open(fixture);
+        try {
+          const failure = await backend
+            .dispatch(setDate(observation, field(observation).ref, "2027-03-07T14:05"))
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({
+            code: "driver_failed",
+            dispatched: true,
+            message: `The keys were typed, but the date field ${field(observation).ref} reads "0012-03-07T14:05" instead of the value it was given; observe it and set its value again`,
+          });
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a batch longer than one run_steps call runs in several, and reports by action", async () => {
+        const fixture = new DateFixture();
+        const { backend, observation } = await open(fixture);
+        try {
+          const one = setDate(observation, field(observation).ref, "2027-03-07T14:05").action;
+          const many: ComputerBackendActionCommand = {
+            ...command(observation),
+            action: { type: "batch", actions: [one, one, one] as never },
+          };
+          await backend.dispatch(many);
+          const calls = fixture.calls.filter((call) => call.name === "run_steps");
+          expect(calls.map((call) => (call.args.steps as unknown[]).length)).toEqual([64, 44]);
+          // Stopped inside the second action's input: it ran in part.
+          const stopping = new DateFixture();
+          stopping.reply = {
+            ok: true,
+            total: 64,
+            executed: 41,
+            failed_step: 40,
+            steps: [
+              ...Array.from({ length: 40 }, (_, index) => ({ index, ok: true, message: "ok" })),
+              {
+                index: 40,
+                ok: false,
+                phase: "action",
+                code: "stale_element_token",
+                message: "stale",
+              },
+            ],
+          };
+          const second = await open(stopping);
+          try {
+            const failure = await second.backend
+              .dispatch({ ...many, ...command(second.observation), action: many.action })
+              .catch((error: unknown) => error);
+            expect(failure).toMatchObject({
+              code: "outcome_unknown",
+              dispatched: true,
+              details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+            });
+            expect(String((failure as Error).message)).toStartWith(
+              "CUA stopped the batch at action 2: ",
+            );
+          } finally {
+            await second.backend.close();
+          }
+        } finally {
+          await backend.close();
+        }
+      });
+    });
+
     test("a stopped batch's message does not show a typed secret CUA clipped", async () => {
       const secret = `synthetic-${"0123456789".repeat(44)}`;
       // CUA keeps the first 300 characters of a step's text, marks the cut

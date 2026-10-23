@@ -96,6 +96,8 @@ export type ModelPolicyPickerProps = {
   allowModelOptions?: boolean | undefined;
   /** Settings → Models. Shown when the catalog has no model that can run. */
   connectModelsHref?: string | undefined;
+  /** The deployment offers Claude subscriptions; the connect panel lists Claude too. */
+  claudeSubscriptionAvailable?: boolean | undefined;
   /** Classes for the portalled menu surface. Prefer --og-* tokens for theming. */
   contentClassName?: string | undefined;
   /** Inline styles for the portalled menu, applied after inherited --og-* tokens. */
@@ -447,10 +449,20 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         ) : (
           <SelectedModelMark props={props} selected={selected} />
         )}
-        <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
+        <span
+          className={cn(
+            "og-model-policy-label-full min-w-0 truncate font-medium max-sm:hidden @max-[20rem]/model-controls:hidden",
+            !needsModel && "text-og-fg",
+          )}
+        >
           {needsModel ? messages.connectTitle : (selected?.label ?? fallbackName(props))}
         </span>
-        <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden @max-[20rem]/model-controls:block @max-[8rem]/model-controls:hidden">
+        <span
+          className={cn(
+            "og-model-policy-label-short min-w-0 truncate font-medium sm:hidden @max-[20rem]/model-controls:block @max-[8rem]/model-controls:hidden",
+            !needsModel && "text-og-fg",
+          )}
+        >
           {needsModel
             ? messages.connectTitle
             : (selected?.shortLabel ?? selected?.label ?? fallbackName(props))}

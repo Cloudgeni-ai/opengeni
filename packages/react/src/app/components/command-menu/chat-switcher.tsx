@@ -5,7 +5,7 @@
  * Control (and the chat being switched to) behaves exactly as without it.
  */
 import { MessageSquareIcon, PinIcon, type LucideIcon } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { Fragment, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { ChatRecord } from "../../lib/actions/chat-directory";
 import { readChatDirectory, useChatDirectoryVersion } from "../../lib/actions/chat-directory";
@@ -31,11 +31,13 @@ export default function ChatSwitcher(props: {
   currentChatId: string | null;
   platform: ChordPlatform;
   onHover(index: number): void;
+  /** The app learned about more chats; the list may grow at its end. */
+  onDirectoryChange(): void;
   onPick(index: number): void;
   onDismiss(): void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
-  const { index, visible } = props.state;
+  const { index, visible, viewed } = props.state;
   // Read statuses as soon as Control+Tab is pressed, before the list shows.
   useChatStatusRefresh({
     subjectId: props.subjectId,
@@ -43,7 +45,12 @@ export default function ChatSwitcher(props: {
     ids: props.state.ids,
     active: true,
   });
-  useChatDirectoryVersion(props.subjectId);
+  const version = useChatDirectoryVersion(props.subjectId);
+  const onDirectoryChange = useRef(props.onDirectoryChange);
+  onDirectoryChange.current = props.onDirectoryChange;
+  useEffect(() => {
+    onDirectoryChange.current();
+  }, [version]);
   useEffect(() => {
     if (!visible) return;
     listRef.current
@@ -100,7 +107,7 @@ export default function ChatSwitcher(props: {
               record && record.workspaceId !== props.workspaceId
                 ? (workspaceNames.get(record.workspaceId) ?? null)
                 : null;
-            return (
+            const row = (
               <div
                 key={id}
                 id={`og-chat-switcher-${position}`}
@@ -134,6 +141,20 @@ export default function ChatSwitcher(props: {
                   <span className="shrink-0 text-xs text-fg-muted tabular-nums">{meta}</span>
                 ) : null}
               </div>
+            );
+            // Past the chats the person opened, the list goes on by activity.
+            return position === viewed && viewed > 0 ? (
+              <Fragment key={id}>
+                <div
+                  role="presentation"
+                  className="mt-1 border-t border-border px-2.5 pt-2.5 pb-1 text-xs leading-4.5 font-medium text-fg-muted"
+                >
+                  Recently active
+                </div>
+                {row}
+              </Fragment>
+            ) : (
+              row
             );
           })}
         </div>

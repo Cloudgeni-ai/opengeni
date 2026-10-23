@@ -1,5 +1,19 @@
 # @opengeni/react
 
+## 4.7.0
+
+### Patch Changes
+
+- f6d388d: Tool steps from connectors whose server lives on another host than the provider (Linear's mcp.linear.app) show the connector's logo again instead of the generic wrench. `connectorLogoIndex` and `connectorLogo` in `@opengeni/react/timeline-model` index each catalog entry under its provider domain, its connection's domain and its MCP server's host, so web, native and embedded surfaces resolve logos the same way.
+- 28a7a33: Control+Tab in the desktop app now reaches further back. The list keeps every chat you opened recently (it used to stop at ten), then carries on through your other recently active chats in all your workspaces under a "Recently active" heading, so holding Control and pressing Tab keeps scrolling back in time. Chats that load while the list is open join at the end without moving anything.
+- c09c85e: A list row's one-line meta no longer leaves a separator dot with nothing after it on narrow screens. A fact without room for a few letters now drops out whole, and later facts still give way before earlier ones. A Claude account that needs reconnecting no longer shows an empty usage fact (which rendered as a stray leading dot).
+- 0b378e8: Keep the "Connect a model" composer pill label readable: the label no longer forces the normal foreground colour onto the primary-coloured pill, which made the text invisible.
+- a0a7916: Skill tool rows now say "Read skill" and name the skill, with a distinct skill icon.
+- Updated dependencies [31095f1]
+  - @opengeni/contracts@4.7.0
+  - @opengeni/sdk@4.7.0
+  - @opengeni/connect@4.7.0
+
 ## 4.6.1
 
 ### Minor Changes

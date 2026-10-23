@@ -1,5 +1,33 @@
 # @opengeni/runtime
 
+## 4.7.0
+
+### Minor Changes
+
+- 31095f1: Add a single personal Google Drive MCP connection with reviewed file-management extensions and ordinary agent scheduling. Retire native Drive source-sync and publishing setup while preserving historical connections, imported documents and run history. Keep Drive MCP setup disabled by default until provider prerequisites and OAuth verification are complete.
+
+### Patch Changes
+
+- bf88717: Native CUA tools are easier to find and batch. Disclosing any `interaction__cua_*` tool now also discloses `interaction__cua_get_window_state` and `interaction__cua_run_steps`, so an agent that found `cua_click` can send a whole form as one batch instead of one call per field. Their descriptions say how the CUA tools they mention are named (`interaction__cua_<name>`, `interaction.cua.<name>` in Code Mode, plain names inside `run_steps` steps), and their Code Mode path moves from `computer.<name>` to `interaction.cua.<name>`. A computer observation whose accessibility tree has only hidden or unlabeled elements now says so instead of claiming the tree has no readable elements.
+- 0e9e59e: Reuse the JSON already serialized for model-context inspector byte accounting when estimating its tokens. This avoids repeated schema and provider-body traversals without changing model requests, captured bodies, token estimates or persistence.
+- Updated dependencies [31ef5b7]
+- Updated dependencies [31095f1]
+- Updated dependencies [7308de5]
+  - @opengeni/config@4.7.0
+  - @opengeni/contracts@4.7.0
+  - @opengeni/capabilities@4.7.0
+  - @opengeni/codemode@4.7.0
+  - @opengeni/codex@4.7.0
+  - @opengeni/interaction@4.7.0
+  - @opengeni/observability@4.7.0
+  - @opengeni/sdk@4.7.0
+  - @opengeni/tool-gateway@4.7.0
+  - @opengeni/vaults@4.7.0
+  - @opengeni/agent-proto@4.7.0
+  - @opengeni/decisions@4.7.0
+  - @opengeni/network@4.7.0
+  - @opengeni/xai-subscription@4.7.0
+
 ## 4.6.1
 
 ### Patch Changes

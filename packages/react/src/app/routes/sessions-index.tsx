@@ -2228,6 +2228,7 @@ function SessionModelControl({
       error={modelCatalog.error ?? policyError}
       menuSide="bottom"
       connectModelsHref={`/workspaces/${encodeURIComponent(workspaceId)}/settings?section=models`}
+      claudeSubscriptionAvailable={context.clientConfig.claudeSubscriptionEnabled === true}
       onModelChange={(model) => {
         onPolicyChosen();
         context.setModel(model);

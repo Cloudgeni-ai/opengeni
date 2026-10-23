@@ -124,14 +124,27 @@ function interactionToolName(name: string): string | null {
   return name.startsWith(prefix) ? name.slice(prefix.length) : null;
 }
 
+/**
+ * Native CUA tools (`cua_<name>`) come with the two an agent needs to use any
+ * of them well: the window read and the batch tool. Without the batch tool in
+ * hand, an agent that found `cua_click` sends every field as its own call.
+ */
+const CUA_TOOL_PREFIX = "cua_";
+const CUA_WORKING_SET: readonly string[] = ["cua_get_window_state", "cua_run_steps"];
+
 /** The other members of every family a disclosed tool belongs to, in family order. */
 function familyCompanions<T extends Tool & { name: string }>(disclosed: T[], pool: T[]): T[] {
   const disclosedShort = new Set(
     disclosed.map((tool) => interactionToolName(tool.name)).filter((name) => name !== null),
   );
-  const wanted = INTERACTION_TOOL_FAMILIES.filter((family) =>
-    family.some((member) => disclosedShort.has(member)),
-  ).flat();
+  const wanted = [
+    ...INTERACTION_TOOL_FAMILIES.filter((family) =>
+      family.some((member) => disclosedShort.has(member)),
+    ).flat(),
+    ...([...disclosedShort].some((name) => name.startsWith(CUA_TOOL_PREFIX))
+      ? CUA_WORKING_SET
+      : []),
+  ];
   const companions: T[] = [];
   for (const member of wanted) {
     if (disclosedShort.has(member)) continue;

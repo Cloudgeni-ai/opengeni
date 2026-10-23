@@ -3022,34 +3022,48 @@ describe("release approval provenance", () => {
     },
   );
 
-  test.each(["moving-main-squash", "moving-main-merge"] as const)(
-    "accepts %s when the provider PR base has advanced to the landing parent",
-    async (mergeMethod) => {
+  // Acceptance with the landed commit's complete full-green evidence is proven
+  // against real Git history in scripts/release/descendant-release-admission.test.ts.
+  test.each([
+    [
+      "moving-main-squash without landed full-green evidence",
+      { mergeMethod: "moving-main-squash" as const },
+      `${RELEASE_AUTOMATION_CONTRACT.checks.fullGreenJobs[0]} check run is missing on ${mergeSha}`,
+    ],
+    [
+      "moving-main-merge of a multi-commit head",
+      { mergeMethod: "moving-main-merge" as const },
+      "advanced-provider-base release head is not one generated commit on its patch base",
+    ],
+    [
+      "a non-automation pull request",
+      {
+        mergeMethod: "moving-main-squash" as const,
+        author: { login: "contributor", id: 5150, type: "User" },
+      },
+      "Version provenance pull-request author numeric identity changed",
+    ],
+  ] as const)(
+    "rejects %s when the provider PR base has advanced to the landing parent",
+    async (_label, options, message) => {
       const fixture = approvalFixture({
-        mergeMethod,
         reviewedBaseSha: movingMainParentSha,
         controllerSha: movingMainParentSha,
         controllerTreeSha: movingMainParentTreeSha,
+        ...options,
       });
-      const result = await verifyApprovedMerge({
-        env: approvalEnv({
-          GITHUB_REF: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${movingMainParentSha}`,
-          GITHUB_SHA: movingMainParentSha,
-          GITHUB_WORKFLOW_SHA: movingMainParentSha,
-          RELEASE_CONTROLLER_SHA: movingMainParentSha,
+      await expect(
+        verifyApprovedMerge({
+          env: approvalEnv({
+            GITHUB_REF: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${movingMainParentSha}`,
+            GITHUB_SHA: movingMainParentSha,
+            GITHUB_WORKFLOW_SHA: movingMainParentSha,
+            RELEASE_CONTROLLER_SHA: movingMainParentSha,
+          }),
+          fetchImpl: fixture.fetchImpl,
+          logger: { log() {} },
         }),
-        fetchImpl: fixture.fetchImpl,
-        logger: { log() {} },
-      });
-      expect(result).toMatchObject({
-        reviewedBaseSha: movingMainParentSha,
-        reviewedBaseTreeSha: movingMainParentTreeSha,
-        sourceComposition: {
-          patchBaseSha: baseSha,
-          integrationBaseSha: movingMainParentSha,
-          pathCount: 1,
-        },
-      });
+      ).rejects.toThrow(message);
       expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
     },
   );
@@ -3787,6 +3801,7 @@ describe("workflow contracts", () => {
       },
       "automation-admission": { result: "skipped" },
       "artifact-runtime": { result: "success" },
+      "release-image-validation": { result: "success" },
     };
     for (const [name, job] of Object.entries(ci.jobs) as [string, { if: string }][]) {
       if (
@@ -3806,7 +3821,7 @@ describe("workflow contracts", () => {
         "cancelled",
         `return (${expression});`,
       ) as (
-        github: { event_name: string },
+        github: { event_name: string; ref?: string },
         needs: object,
         always: () => boolean,
         cancelled: () => boolean,
@@ -3816,7 +3831,7 @@ describe("workflow contracts", () => {
           event === "workflow_dispatch" ? "success" : "skipped";
         expect(
           select(
-            { event_name: event },
+            { event_name: event, ref: event === "push" ? "refs/heads/main" : "refs/heads/feature" },
             needs,
             () => true,
             () => false,
@@ -3825,7 +3840,7 @@ describe("workflow contracts", () => {
         ).toBe(true);
         expect(
           select(
-            { event_name: event },
+            { event_name: event, ref: event === "push" ? "refs/heads/main" : "refs/heads/feature" },
             needs,
             () => true,
             () => true,
@@ -3844,6 +3859,123 @@ describe("workflow contracts", () => {
         `${name}/admission`,
       ).toBe(false);
     }
+  });
+
+  test("a main push requests release-image approval only after every non-image lane passed", () => {
+    const gate = ci.jobs["release-image-validation"];
+    const api = ci.jobs["api-image"];
+    // Pre-image validation depends on every non-image lane the final aggregate
+    // checks, and on nothing that depends on an image (no cycle through the
+    // final aggregates).
+    const nonImageLanes = (ci.jobs.test.needs as string[]).filter((need) => need !== "images");
+    expect(gate.needs).toEqual(["automation-admission", ...nonImageLanes]);
+    const dependsOnImage = (job: string, seen = new Set<string>()): boolean => {
+      if (seen.has(job)) return false;
+      seen.add(job);
+      const needs = [ci.jobs[job].needs ?? []].flat() as string[];
+      return needs.some(
+        (need) => need === "images" || need.endsWith("-image") || dependsOnImage(need, seen),
+      );
+    };
+    expect(dependsOnImage("release-image-validation")).toBe(false);
+    expect(api.needs).toEqual([
+      "automation-admission",
+      "plan",
+      "artifact-runtime",
+      "release-image-validation",
+    ]);
+    // Only the API image has a protected environment, and the protected
+    // public-release lane is exactly the main push.
+    expect(api.environment).toBe(
+      "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'public-release' || 'ci-build' }}",
+    );
+    const lane = gate.steps.find((step: any) => step.name === "Require every non-image CI lane");
+    expect(lane.run).toContain("--argjson preImage true");
+    expect(lane.run).toContain("-f scripts/ci/required-results.jq");
+    expect(lane.env.RESULTS).toBe("${{ toJSON(needs) }}");
+    expect(
+      ci.jobs.test.steps.find((step: any) => step.name === "Require every split CI lane").run,
+    ).toContain("--argjson preImage false");
+    // The five direct full-green prerequisites are unchanged.
+    expect(ci.jobs["full-green"].needs).toEqual([
+      "plan",
+      "test",
+      "deployment",
+      "images",
+      "merge-content",
+    ]);
+
+    const evaluate = (
+      expression: string,
+      github: { event_name: string; ref: string },
+      needs: Record<string, unknown>,
+      cancelled = false,
+    ) =>
+      (
+        new Function(
+          "github",
+          "needs",
+          "always",
+          "cancelled",
+          `return (${expression
+            .slice(3, -2)
+            .replace(/needs\.([a-z-]+)/g, (_m, key: string) => `needs[${JSON.stringify(key)}]`)});`,
+        ) as (...args: unknown[]) => boolean
+      )(
+        github,
+        needs,
+        () => true,
+        () => cancelled,
+      );
+    const plan = {
+      result: "success",
+      outputs: { bake_images: "true", mode: "full" },
+    };
+    const needsWith = (event: string, gateResult: string) => ({
+      plan,
+      "automation-admission": { result: event === "workflow_dispatch" ? "success" : "skipped" },
+      "artifact-runtime": { result: "success" },
+      "release-image-validation": { result: gateResult },
+    });
+    const mainPush = { event_name: "push", ref: "refs/heads/main" };
+    expect(evaluate(api.if, mainPush, needsWith("push", "success"))).toBe(true);
+    for (const gateResult of ["failure", "cancelled", "skipped"]) {
+      expect(evaluate(api.if, mainPush, needsWith("push", gateResult)), gateResult).toBe(false);
+    }
+    expect(evaluate(api.if, mainPush, needsWith("push", "success"), true)).toBe(false);
+    // Credential-free builds keep building after validation settles, so their
+    // run still reports image build health exactly as before.
+    for (const github of [
+      { event_name: "push", ref: "refs/heads/production" },
+      { event_name: "pull_request", ref: "refs/pull/1/merge" },
+      { event_name: "schedule", ref: "refs/heads/main" },
+      { event_name: "workflow_dispatch", ref: "refs/heads/main" },
+    ]) {
+      for (const gateResult of ["success", "failure", "skipped"]) {
+        expect(
+          evaluate(api.if, github, needsWith(github.event_name, gateResult)),
+          `${github.event_name}/${github.ref}/${gateResult}`,
+        ).toBe(true);
+      }
+    }
+    // The gate itself runs after failed or skipped lanes so it can fail
+    // closed, but never in a cancelled run or after failed admission.
+    const gateNeeds = { plan, "automation-admission": { result: "skipped" } };
+    expect(evaluate(gate.if, mainPush, gateNeeds)).toBe(true);
+    expect(evaluate(gate.if, mainPush, gateNeeds, true)).toBe(false);
+    expect(
+      evaluate(gate.if, mainPush, {
+        ...gateNeeds,
+        plan: { ...plan, outputs: { ...plan.outputs, bake_images: "false" } },
+      }),
+    ).toBe(false);
+    expect(
+      evaluate(
+        gate.if,
+        { event_name: "workflow_dispatch", ref: "refs/heads/main" },
+        { plan, "automation-admission": { result: "failure" } },
+      ),
+    ).toBe(false);
   });
 
   test("cancellation preserves bounded final reports and diagnostic cleanup", () => {

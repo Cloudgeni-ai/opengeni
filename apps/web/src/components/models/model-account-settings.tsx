@@ -33,7 +33,7 @@ import { FallbackOrderControl } from "./model-account-policy-controls";
 import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 
 /* ----------------------------------------------------------------------------
-   Sharing subscriptions: the default rules for the organization's model
+   Using subscriptions: the default rules for the organization's model
    subscriptions. The Defaults scope sets each rule; a shared workspace can
    change a rule for itself unless the organization keeps it the same
    everywhere ("What workspaces can change"). Every value is resolved by the
@@ -71,9 +71,8 @@ export const ACCOUNT_RULES: readonly AccountRule[] = [
 
 const RULES: Record<AccountRule, { label: string; description: string }> = {
   rotation: {
-    label: "Share work between subscriptions",
-    description:
-      "Spread new chats across a provider’s subscriptions, or keep them on its primary one.",
+    label: "Spread work across accounts",
+    description: "Spread new chats across a provider’s accounts, or start them on its primary one.",
   },
   personalConnectionsAllowed: {
     label: "Personal subscriptions",
@@ -115,14 +114,14 @@ function rotationProviders(rotation: ModelAccountSettingValues["rotation"]): str
   );
 }
 
-/** Sharing is on unless the provider keeps new chats on its primary subscription. */
-const sharing = (mode: ModelAccountRotationMode | undefined) => mode !== "primary_first";
+/** Work is spread unless the provider starts new chats on its primary account. */
+const spreads = (mode: ModelAccountRotationMode | undefined) => mode !== "primary_first";
 
-/** "3 connected. New chats are shared evenly across subscriptions that can serve them." */
+/** "3 connected. New chats are spread evenly across accounts that can serve them." */
 function rotationDescription(mode: ModelAccountRotationMode, count: number | undefined): string {
-  const outcome = sharing(mode)
-    ? "New chats are shared evenly across subscriptions that can serve them."
-    : "New chats start on the primary subscription and use another when it can't serve them.";
+  const outcome = spreads(mode)
+    ? "New chats are spread evenly across accounts that can serve them."
+    : "New chats start on the primary account and use another when it can’t serve them.";
   return count === undefined ? outcome : `${count} connected. ${outcome}`;
 }
 
@@ -134,7 +133,7 @@ function ruleValue(
   rule: AccountRule,
   provider?: string,
 ): string | null {
-  if (rule === "rotation") return onOff(sharing(values.rotation[provider ?? ""]?.mode));
+  if (rule === "rotation") return onOff(spreads(values.rotation[provider ?? ""]?.mode));
   if (rule === "fallbackOrder") return null;
   return onOff(values[rule]);
 }
@@ -252,13 +251,13 @@ function AccountRuleRows({
         return (
           <SettingRow
             key={key}
-            label={`Share work between ${providerName(provider)} subscriptions`}
+            label={`Spread work across ${providerName(provider)} accounts`}
             description={rotationDescription(mode, accountCounts?.[provider])}
             hint={provider in providerHints ? providerHints[provider] : hints.rotation}
             controlWidth="compact"
             control={
               <Switch
-                checked={sharing(mode)}
+                checked={spreads(mode)}
                 pending={saving === key}
                 disabled={rotationBlocked !== undefined || (saving !== null && saving !== key)}
                 disabledReason={rotationBlocked}
@@ -441,10 +440,7 @@ export function OrganizationAccountRulesSection({
     return reach ? <QuietHint>{reach}</QuietHint> : null;
   };
   return (
-    <Section
-      title="Sharing subscriptions"
-      description="How chats use the subscriptions you connect."
-    >
+    <Section title="Using subscriptions" description="How chats use the subscriptions you connect.">
       {state.error && !organization ? (
         <ErrorMessage
           title={`Couldn’t load how ${organizationName} shares its subscriptions.`}
@@ -453,7 +449,7 @@ export function OrganizationAccountRulesSection({
           Nothing was changed.
         </ErrorMessage>
       ) : !organization ? (
-        <RowList label="Sharing subscriptions" flush>
+        <RowList label="Using subscriptions" flush>
           <ListRowSkeleton count={3} />
         </RowList>
       ) : (
@@ -655,7 +651,7 @@ export function useWorkspaceModelAccountSettings(
 
 /**
  * What a workspace set for itself instead of following the organization, in
- * words: "Claude sharing: Off", "Switch models: On", "Own fallback order".
+ * words: "Spread Claude work: Off", "Switch models: On", "Own fallback order".
  * A locked rule is the organization's, so it is never a change.
  */
 export function accountRuleChanges(
@@ -669,7 +665,7 @@ export function accountRuleChanges(
           .filter((provider) => settings.entrySources.rotation[provider] === "workspace")
           .map(
             (provider) =>
-              `${providerName(provider)} sharing: ${onOff(sharing(values.rotation[provider]?.mode))}`,
+              `Spread ${providerName(provider)} work: ${onOff(spreads(values.rotation[provider]?.mode))}`,
           )
       : []),
     ...(own("personalConnectionsAllowed")
@@ -711,7 +707,7 @@ export function WorkspaceAccountRulesSection({
   const settings = state.settings;
   if (!settings) {
     return state.error ? (
-      <Section title="Sharing subscriptions">
+      <Section title="Using subscriptions">
         <ErrorMessage
           title={`Couldn’t load how ${workspaceName} shares subscriptions.`}
           action={<RowButton onClick={() => void state.reload()}>Try again</RowButton>}
@@ -762,7 +758,7 @@ export function WorkspaceAccountRulesSection({
   };
   return (
     <Section
-      title="Sharing subscriptions"
+      title="Using subscriptions"
       description={workspaceRulesSummary(accountRuleChanges(settings).length, workspaceName)}
     >
       <SettingRowGroup>

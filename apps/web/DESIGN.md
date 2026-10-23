@@ -369,8 +369,8 @@ Learned on Settings > Models, 27 Sep 2026.
 - **One flat list per kind of thing.** Connected accounts of every provider are one divided list.
   No group headers inside a list, no pool-wide controls between rows, no ⋯ menu floating above
   them.
-- **Settings of a group get their own section, as setting rows.** "Sharing work between
-  accounts", "Keep Codex chats portable": each row has exactly one control. A destructive action
+- **Settings of a group get their own section, as setting rows.** "Spreading work
+  across accounts", "Keep Codex chats portable": each row has exactly one control. A destructive action
   for the group ("Turn off Codex") is the last row, as quiet danger text (`SettingDangerRow`) that
   confirms in a dialog. Show them directly; don't fold two or three rows under an "Advanced".
 - **No control for what the system decides.** When the product picks something automatically
@@ -414,9 +414,9 @@ Learned on Settings > Models, 27 Sep 2026.
   "Selected workspaces" or "Design preview only", each workspace's own tagged "Belongs to Design
   preview", and a person's own "Only you"; the description says how many need reconnecting; the
   action is "Connect provider"; rows keep their type: "ChatGPT Pro", "API key"), **New chats**
-  (Default model, Allowed models, Context & compaction), **Sharing subscriptions** (one switch per
-  provider with two or more subscriptions, "Share work between Codex subscriptions", on spreads
-  new chats, off keeps them on the primary; Personal subscriptions with its fallback nested under
+  (Default model, Allowed models, Context & compaction), **Using subscriptions** (one switch per
+  provider with two or more subscriptions, "Spread work across Codex accounts", on spreads
+  new chats, off starts them on the primary; Personal subscriptions with its fallback nested under
   it; Switch models when subscriptions run out with the fallback order nested under it; and a
   "What workspaces can change" row opening its own page of checkboxes, never a lock link on each
   rule). On the Defaults each rule says who uses it: "Used by every workspace" or "Used by 2 of 3
@@ -425,10 +425,10 @@ Learned on Settings > Models, 27 Sep 2026.
   where its value comes from, with the value: "Uses the default (On)", or "Changed for Design ·
   Use the default (On)" (one step back). Owners and admins then see **Workspaces with their own
   settings** (only workspaces that change something, each saying what in words: "3 models
-  allowed", "Claude sharing: Off", more than two sharing rules counted), or "Every workspace uses
+  allowed", "Spread Claude work: Off", more than two rule changes counted), or "Every workspace uses
   the defaults."; others see every workspace they can open. Never show a table of every
   workspace's rules or raw setting keys. A workspace's settings are edited directly on its scope;
-  its Codex and SuperGrok settings and the Codex Apps row follow the sharing rules. Pages opened
+  its Codex and SuperGrok settings and the Codex Apps row follow the subscription rules. Pages opened
   from a workspace go back to it, named ("← Design preview").
 - **Connect is for the organization.** Connect provider makes an organization account and asks
   which workspaces use it: all (new ones too) or selected ones, which is its "Available in". An

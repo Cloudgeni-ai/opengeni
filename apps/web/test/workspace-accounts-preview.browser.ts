@@ -112,7 +112,7 @@ try {
     await page.getByRole("combobox", { name: "Models for" }).click();
     await page.getByRole("option", { name: /Your Personal workspace/ }).waitFor();
     await page.keyboard.press("Escape");
-    await page.getByText("Share work between Codex subscriptions", { exact: true }).waitFor();
+    await page.getByText("Spread work across Codex accounts", { exact: true }).waitFor();
     await noOverflow();
     await shot("1-list");
 
@@ -182,7 +182,7 @@ try {
     await open("reach=people");
     await page.getByText("Selected people").waitFor();
     await page.getByText("Design only").waitFor();
-    await page.getByText("Share work between Codex subscriptions", { exact: true }).waitFor();
+    await page.getByText("Spread work across Codex accounts", { exact: true }).waitFor();
     await shot("6-list-after-people");
     await open(`reach=people&account=${ACME_PRO}`);
     await page.getByText("2 people").waitFor();

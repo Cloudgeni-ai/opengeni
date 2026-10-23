@@ -580,3 +580,45 @@ describe("tool_search tool wiring", () => {
     );
   });
 });
+
+describe("searchToolPool native CUA working set", () => {
+  function cuaTool(name: string): Tool {
+    return {
+      type: "function",
+      name: `interaction__cua_${name}`,
+      description: `Native CUA ${name}`,
+      isEnabled: async () => true,
+      parameters: { type: "object", properties: {} },
+    } as unknown as Tool;
+  }
+  const CUA_POOL = ["click", "type_text", "get_window_state", "run_steps", "zoom"].map(cuaTool);
+  const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
+
+  test("any CUA tool brings the window read and the batch tool", () => {
+    expect(
+      names(searchToolPool(CUA_POOL, { query: "", names: ["interaction__cua_click"] })),
+    ).toEqual([
+      "interaction__cua_click",
+      "interaction__cua_get_window_state",
+      "interaction__cua_run_steps",
+    ]);
+  });
+
+  test("other tools bring no CUA tools", () => {
+    const other = {
+      type: "function",
+      name: "interaction__computer_targets",
+      description: "List computer targets",
+      isEnabled: async () => true,
+      parameters: { type: "object", properties: {} },
+    } as unknown as Tool;
+    expect(
+      names(
+        searchToolPool([other, ...CUA_POOL], {
+          query: "",
+          names: ["interaction__computer_targets"],
+        }),
+      ),
+    ).toEqual(["interaction__computer_targets"]);
+  });
+});

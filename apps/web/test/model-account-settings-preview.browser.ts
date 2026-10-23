@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { chromium, type Page } from "playwright";
 
-// Sharing subscriptions: the default rules, which of them workspaces
+// Using subscriptions: the default rules, which of them workspaces
 // can change, and one workspace's rules, rendered with real components
 // against a synthetic client.
 const base = process.env.OPENGENI_SETTINGS_PREVIEW_URL ?? "http://127.0.0.1:4195";
@@ -68,20 +68,20 @@ try {
     // The organization: its rules, one row per provider, and which of them
     // workspaces can change on its own page.
     await open("view=organization");
-    await page.getByText("Sharing subscriptions", { exact: true }).waitFor();
+    await page.getByText("Using subscriptions", { exact: true }).waitFor();
     await page.getByText("Claude Opus 5.5 → Claude Sonnet 5.5 → GPT-6.1 Sol").waitFor();
     await page.getByText("Used by every workspace. Workspaces can’t change it.").first().waitFor();
-    await page.getByRole("switch", { name: "Share work between Codex subscriptions" }).waitFor();
+    await page.getByRole("switch", { name: "Spread work across Codex accounts" }).waitFor();
     await noOverflow();
     await shot("organization");
 
     // Keeping rotation the same everywhere clears Research's own rotation.
     await page.getByRole("button", { name: /What workspaces can change/ }).click();
-    await page.getByRole("checkbox", { name: "Share work between subscriptions" }).uncheck();
+    await page.getByRole("checkbox", { name: "Spread work across accounts" }).uncheck();
     await noOverflow();
     await shot("organization-locks");
     await page.getByRole("button", { name: "Save", exact: true }).click();
-    await page.getByText("Sharing subscriptions", { exact: true }).waitFor();
+    await page.getByText("Using subscriptions", { exact: true }).waitFor();
     assert(
       (await receipts(page)).includes('"locked":["rotation","personalFallbackAllowed"]'),
       `lock not saved: ${await receipts(page)}`,
@@ -104,7 +104,7 @@ try {
     // A workspace: its own value with a one-step return, and a locked rule
     // that shows once the rule it depends on is on again.
     await open("view=workspace&workspace=design");
-    await page.getByText("Sharing subscriptions", { exact: true }).waitFor();
+    await page.getByText("Using subscriptions", { exact: true }).waitFor();
     const fallback = page.getByRole("switch", { name: "Fall back to personal subscriptions" });
     assert((await fallback.count()) === 0, "dependent rule shown while its rule is off");
     await noOverflow();
@@ -122,7 +122,7 @@ try {
     await open("view=workspace&workspace=research&readonly=1");
     assert(
       (await page
-        .getByRole("switch", { name: "Share work between Codex subscriptions" })
+        .getByRole("switch", { name: "Spread work across Codex accounts" })
         .getAttribute("aria-checked")) === "false",
       "wrong rotation value",
     );

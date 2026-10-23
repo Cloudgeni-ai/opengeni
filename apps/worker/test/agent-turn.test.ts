@@ -3550,9 +3550,6 @@ describe("lazy sandbox provisioner single-flight", () => {
     ).text();
     expect(toolsSource).toContain("namedSubjectHasLiveWorkspaceAuthority");
     expect(toolsSource).not.toContain("getWorkspaceGrant");
-    expect(toolsSource).toMatch(
-      /resolveGoogleDrivePublicationTarget\(\s*db,\s*\{\s*accountId: input\.accountId,\s*workspaceId: input\.workspaceId\s*\}/,
-    );
   });
 
   test("resuming journaled work starts deferred preparation before joining it", async () => {

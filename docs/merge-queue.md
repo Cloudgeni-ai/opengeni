@@ -50,11 +50,21 @@ The draft's 45-minute queue response timeout includes runner waiting and plannin
 at the worst-case job envelope it may expire before a retry finishes. Do not treat
 the retry as guaranteed under saturation; timeout remains failure, not a waiver.
 
-`ci.yml` uses a **full** plan on every admitted main push. Its existing
-`ci-main-push` concurrency group does not cancel the running build; GitHub keeps
-only the latest pending build. Weekly service/drift runs use a separate lane and
-cannot replace a pending push.
-Exact Version-PR merge and explicit rerun exceptions retain their existing lanes.
+`ci.yml` uses a **full** plan on every admitted main push. Every main push,
+Version-PR merge commit, production push, scheduled run and re-run attempt has
+its own concurrency group (`ci-<run id>-<attempt>`) and is never cancelled or
+replaced, so each exact SHA keeps its own run and receipt. A shared main-push
+group used to hold one running build and one pending push: a red run whose API
+image then waited for `public-release` approval never finished and stalled
+every later main push. Available runner capacity, not workflow concurrency,
+now decides how many main runs execute at once.
+The API image is the only job behind a protected environment. Its
+`release-image-validation` prerequisite runs the same required-results check as
+the final aggregate over every non-image lane, so a main push requests that
+approval only after tests, contracts and deployment artifacts all passed; a red
+run completes red without an approval wait. Pull-request, Version-PR and
+scheduled runs build the credential-free API image after validation settles,
+whatever its result.
 The full lane uses twelve unit shards after eight-shard run 39580448753 exhausted
 its unchanged 1200-second deadline with passing tests. This splits the same
 inventory; it does not raise budgets or suppress slow files.

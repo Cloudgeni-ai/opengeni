@@ -523,6 +523,7 @@
         "delete_permission"
       ],
       "defaultConnectionOwnership": "personal",
+      "logoSourceUrl": null,
       "documentationUrl": "https://developers.google.com/workspace/drive/api/reference/mcp",
       "notes": [
         "Google remote tools/list verified 2026-10-22. Official server remains Developer Preview; supplemental REST tools share the same personal grant. Disabled by deployment until preview, API enablement and OAuth verification are complete."

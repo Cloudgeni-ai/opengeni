@@ -97,6 +97,12 @@ export async function createProductionEditableArtifactOutboxService(
     ...(options.settings.databasePreparedStatements === undefined
       ? {}
       : { databasePreparedStatements: options.settings.databasePreparedStatements }),
+    ...(options.settings.databasePoolIdleTimeoutSeconds === undefined
+      ? {}
+      : { databaseIdleTimeoutSeconds: options.settings.databasePoolIdleTimeoutSeconds }),
+    ...(options.settings.databasePoolMaxLifetimeSeconds === undefined
+      ? {}
+      : { databaseMaxLifetimeSeconds: options.settings.databasePoolMaxLifetimeSeconds }),
     natsUrl: options.natsUrl,
     natsAuth: options.natsAuth,
     owner: options.owner,

@@ -118,7 +118,7 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     // The current event adapter projects 0810's nullable key and 0889's tool
     // name. Only stage the reader columns for seeding; the real migrations must
     // create them.
-    await owner`alter table session_events add column usage_source_key text, add column tool_name text`;
+    await owner`alter table session_events add column usage_source_key text, add column tool_name text, add column tool_call_id text`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -249,7 +249,7 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     await owner`alter table scheduled_tasks drop column vault_policy`;
     await dropConnectionAccountIntentColumns(owned.ownerUrl);
     await dropSiteSessionAudienceColumns(owned.ownerUrl);
-    await owner`alter table session_events drop column usage_source_key, drop column tool_name`;
+    await owner`alter table session_events drop column usage_source_key, drop column tool_name, drop column tool_call_id`;
     expect(
       await owner`select column_name from information_schema.columns
       where table_schema=current_schema() and table_name='session_events'

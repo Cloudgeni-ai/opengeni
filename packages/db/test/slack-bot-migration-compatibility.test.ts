@@ -236,8 +236,9 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ) and acl.grantee = 0 and acl.privilege_type = 'EXECUTE'`;
     expect(publicAccess).toEqual({ grants: 0 });
     // At the historical 0864 boundary, the current runtime still needs the
-    // withheld usage-history routines, the later 0890 reconciliation tables and
-    // the Site opens table. The previous runtime remains ready.
+    // withheld usage-history routines, the later 0890 reconciliation tables,
+    // the 0909 message search text table and the Site opens table. The previous
+    // runtime remains ready.
     expect(
       evaluateRuntimeDatabasePosture(
         await inspectRuntimeDatabasePosture(client.db, options),
@@ -245,8 +246,8 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ),
     ).toEqual([
       ...ABSENT_USAGE_HISTORY_POSTURE,
-      "runtime privilege tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, site_opens",
-      "protected tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, site_opens",
+      "runtime privilege tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, session_message_search_texts, site_opens",
+      "protected tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, session_message_search_texts, site_opens",
     ]);
     expect(
       previous.evaluateRuntimeDatabasePosture(
@@ -277,9 +278,10 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
         options,
       ),
     ).toEqual([
-      "RLS tables are absent from the declared contract: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, site_opens",
+      "RLS tables are absent from the declared contract: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, session_message_search_texts, site_opens",
       "table model_call_fact_reconciliation_candidates grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table model_call_fact_reconciliation_progress grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table session_message_search_texts grants excess runtime privileges: SELECT, INSERT",
       "table site_opens grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
     ]);
   } finally {

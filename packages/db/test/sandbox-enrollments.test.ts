@@ -267,6 +267,174 @@ describe("sandbox enrollments", () => {
     ).toEqual({ opened: false, code: "unknown_agent" });
   });
 
+  test("renewal batches the locked decision, database clock and write", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const box = await sandboxEnrollment(ws);
+    const link = {
+      workspaceId: ws.workspaceId,
+      agentId: box.id,
+      epoch: 1,
+      connectionInstanceId: crypto.randomUUID(),
+      leaseMs: LEASE_MS,
+    };
+    await openSandboxAgentLink(db, link);
+    const statements: string[] = [];
+    const measured = createDb(shared!.appUrl, { max: 1 });
+    const driver = (measured.db as unknown as { $client: postgres.Sql }).$client;
+    driver.options.debug = (_connection, query) => {
+      statements.push(query);
+    };
+    try {
+      expect(await renewSandboxAgentLink(measured.db, link)).toEqual({ renewed: true });
+      expect(statements.filter((query) => /from enrollments/i.test(query))).toHaveLength(1);
+      expect(statements.filter((query) => /clock_timestamp\(\)/i.test(query))).toHaveLength(1);
+      expect(statements.some((query) => /^select clock_timestamp/i.test(query))).toBe(false);
+    } finally {
+      await measured.close();
+    }
+  });
+
+  test("renewal preserves long heartbeat leases and exact refusal precedence", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const box = await sandboxEnrollment(ws);
+    const link = {
+      workspaceId: ws.workspaceId,
+      agentId: box.id,
+      epoch: 1,
+      connectionInstanceId: crypto.randomUUID(),
+      leaseMs: LEASE_MS,
+    };
+    await openSandboxAgentLink(db, link);
+    const [future] = await admin`update enrollments set
+      connection_lease_expires_at = date_trunc('milliseconds',clock_timestamp()) + interval '1 hour'
+      where id=${box.id} returning connection_lease_expires_at`;
+    expect(await renewSandboxAgentLink(db, link)).toEqual({ renewed: true });
+    const [current] =
+      await admin`select connection_lease_expires_at from enrollments where id=${box.id}`;
+    expect(current!.connection_lease_expires_at).toEqual(future!.connection_lease_expires_at);
+    // Native SQL admits infinity and dates beyond Date's upper bound. The former
+    // Date comparison did not preserve these as longer leases.
+    for (const expiry of [
+      "infinity",
+      "-infinity",
+      "280000-01-01 00:00:00+00",
+      "275760-09-13 00:00:00.001+00",
+    ]) {
+      await admin`update enrollments set connection_lease_expires_at=${expiry}::text::timestamptz
+        where id=${box.id}`;
+      expect(await renewSandboxAgentLink(db, link)).toEqual({ renewed: true });
+      const [finite] = await admin`select isfinite(connection_lease_expires_at) as finite,
+        extract(epoch from connection_lease_expires_at-updated_at)*1000 as duration_ms
+        from enrollments where id=${box.id}`;
+      expect(finite!.finite).toBe(true);
+      expect(Number(finite!.duration_ms)).toBe(LEASE_MS);
+    }
+    await admin`update enrollments set connection_lease_expires_at='275760-09-13 00:00:00.000999+00'::timestamptz
+      where id=${box.id}`;
+    expect(await renewSandboxAgentLink(db, link)).toEqual({ renewed: true });
+    const [lastDate] =
+      await admin`select connection_lease_expires_at = '275760-09-13 00:00:00+00'::timestamptz as kept
+      from enrollments where id=${box.id}`;
+    expect(lastDate!.kept).toBe(true);
+    // A null recorded epoch and a higher offered epoch retain the old semantics.
+    await admin`update enrollments set link_epoch=null where id=${box.id}`;
+    expect(await renewSandboxAgentLink(db, link)).toEqual({ renewed: true });
+    await admin`update enrollments set link_epoch=1 where id=${box.id}`;
+    expect(await renewSandboxAgentLink(db, { ...link, epoch: 2 })).toEqual({ renewed: true });
+    expect(
+      await renewSandboxAgentLink(db, { ...link, connectionInstanceId: crypto.randomUUID() }),
+    ).toEqual({ renewed: false, code: "lost" });
+    await admin`update enrollments set link_epoch=2 where id=${box.id}`;
+    expect(
+      await renewSandboxAgentLink(db, { ...link, connectionInstanceId: crypto.randomUUID() }),
+    ).toEqual({ renewed: false, code: "superseded" });
+    await admin`update enrollments set status='revoked' where id=${box.id}`;
+    expect(await renewSandboxAgentLink(db, link)).toEqual({ renewed: false, code: "revoked" });
+    expect(await renewSandboxAgentLink(db, { ...link, agentId: crypto.randomUUID() })).toEqual({
+      renewed: false,
+      code: "revoked",
+    });
+    const other = await freshWorkspace();
+    expect(await renewSandboxAgentLink(db, { ...link, workspaceId: other.workspaceId })).toEqual({
+      renewed: false,
+      code: "revoked",
+    });
+  });
+
+  test("renewal samples the clock after locking and sees committed ownership changes", async () => {
+    if (!available) return;
+    for (const change of ["clock", "superseded", "revoked", "lost"] as const) {
+      const ws = await freshWorkspace();
+      const box = await sandboxEnrollment(ws);
+      const link = {
+        workspaceId: ws.workspaceId,
+        agentId: box.id,
+        epoch: 1,
+        connectionInstanceId: crypto.randomUUID(),
+        leaseMs: LEASE_MS,
+      };
+      await openSandboxAgentLink(db, link);
+      let unlock!: () => void;
+      let signalLocked!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        unlock = resolve;
+      });
+      const locked = new Promise<void>((resolve) => {
+        signalLocked = resolve;
+      });
+      let releasedAt: Date | undefined;
+      const holder = admin.begin(async (tx) => {
+        await tx`select id from enrollments where id=${box.id} for update`;
+        if (change === "superseded")
+          await tx`update enrollments set link_epoch=2 where id=${box.id}`;
+        if (change === "revoked")
+          await tx`update enrollments set status='revoked' where id=${box.id}`;
+        if (change === "lost")
+          await tx`update enrollments set connection_instance_id=${crypto.randomUUID()} where id=${box.id}`;
+        signalLocked();
+        await gate;
+        const [clock] = await tx`select clock_timestamp() as now`;
+        releasedAt = clock!.now;
+      });
+      await locked;
+      const renewal = renewSandboxAgentLink(db, link);
+      try {
+        let waiting = false;
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline) {
+          const [row] = await admin`select exists(select 1 from pg_stat_activity
+            where datname=current_database() and usename='opengeni_app' and wait_event_type='Lock'
+              and query ilike '%enrollments%') as waiting`;
+          if (row!.waiting) {
+            waiting = true;
+            break;
+          }
+          await Bun.sleep(10);
+        }
+        expect(waiting).toBe(true);
+        // Make a pre-lock clock observably too early rather than relying on timing noise.
+        await Bun.sleep(50);
+      } finally {
+        unlock();
+      }
+      await holder;
+      const outcome = await renewal;
+      if (change !== "clock") {
+        expect(outcome).toEqual({ renewed: false, code: change });
+      } else {
+        expect(outcome).toEqual({ renewed: true });
+        const [row] =
+          await admin`select updated_at,connection_lease_expires_at from enrollments where id=${box.id}`;
+        expect(row!.updated_at.getTime()).toBeGreaterThanOrEqual(releasedAt!.getTime());
+        expect(row!.connection_lease_expires_at.getTime() - row!.updated_at.getTime()).toBe(
+          LEASE_MS,
+        );
+      }
+    }
+  }, 15_000);
+
   test("revoking a sandbox enrollment ends its link and never touches a machine", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

@@ -435,8 +435,13 @@ async function withProductionDatabaseLimiter<T>(
     "../../../apps/api/src/auth/managed-auth-rate-limits.ts",
     import.meta.url,
   );
-  const { MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES: customRules } = (await import(rulesUrl.href)) as {
-    MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES: Record<string, { window: number; max: number }>;
+  const { MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES: customRules } = (await import(
+    rulesUrl.href
+  )) as {
+    MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES: Record<
+      string,
+      { window: number; max: number } | false
+    >;
   };
   const matches = (row: RateRow, where: RateWhere[]) =>
     where.every(({ field, operator, value }) => {

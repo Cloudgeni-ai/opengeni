@@ -640,6 +640,34 @@ function rowsNamed(container: HTMLElement, name: string): HTMLElement[] {
   );
 }
 
+test("a workspace lists its accounts in use first and folds the ones turned off away", async () => {
+  accounts = {
+    ...accounts,
+    accounts: Array.from({ length: 6 }, (_, index) =>
+      codexAccount({
+        id: `acct-${index}`,
+        label: `Plan ${index}`,
+        // Turned off accounts come first from the server; they still list last.
+        allocatorEnabled: index >= 3,
+      }),
+    ),
+  };
+  const view = await render();
+  try {
+    expect(rowsNamed(view.container, "Plan 4")).toHaveLength(1);
+    expect(rowsNamed(view.container, "Plan 0")).toHaveLength(0);
+    const show = button(view.container, "Show 3 turned off")!;
+    expect(show.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => show.click());
+    const names = [...view.container.querySelectorAll("[data-slot=list-row]")]
+      .map((row) => row.textContent?.match(/Plan \d/)?.[0])
+      .filter(Boolean);
+    expect(names).toEqual(["Plan 3", "Plan 4", "Plan 5", "Plan 0", "Plan 1", "Plan 2"]);
+  } finally {
+    await cleanup(view);
+  }
+});
+
 test("workspace Models exposes a reloadable compaction page to admins and readers", async () => {
   for (const canManage of [true, false]) {
     const view = await render(canManage);
@@ -1143,13 +1171,13 @@ describe("Codex pool controls", () => {
     });
     const view = await render();
     try {
-      // One Codex sharing switch in Sharing subscriptions, and no legacy pool control.
+      // One Codex sharing switch in Using subscriptions, and no legacy pool control.
       const switches = [...view.container.querySelectorAll("[role='switch']")].filter((control) =>
         (control.getAttribute("aria-labelledby") ?? "")
           .split(" ")
           .some(
             (id) =>
-              document.getElementById(id)?.textContent === "Share work between Codex subscriptions",
+              document.getElementById(id)?.textContent === "Spread work across Codex accounts",
           ),
       );
       expect(switches).toHaveLength(1);

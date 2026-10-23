@@ -659,7 +659,7 @@ resource "azurerm_postgresql_flexible_server_configuration" "pgvector" {
   count     = var.postgres.mode == "managed" ? 1 : 0
   name      = "azure.extensions"
   server_id = azurerm_postgresql_flexible_server.this[0].id
-  value     = "PGCRYPTO,VECTOR,BTREE_GIN"
+  value     = "PGCRYPTO,VECTOR,BTREE_GIN,PG_TRGM"
 }
 
 # max_connections is a static parameter. The azurerm provider restarts the

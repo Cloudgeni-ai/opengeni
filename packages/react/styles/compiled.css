@@ -2177,6 +2177,9 @@
 :where(.og-root).max-w-lg,:where(.og-root) .max-w-lg {
     max-width: var(--container-lg);
   }
+:where(.og-root).max-w-max,:where(.og-root) .max-w-max {
+    max-width: max-content;
+  }
 :where(.og-root).max-w-md,:where(.og-root) .max-w-md {
     max-width: var(--container-md);
   }
@@ -2580,6 +2583,9 @@
   }
 :where(.og-root).content-center,:where(.og-root) .content-center {
     align-content: center;
+  }
+:where(.og-root).content-start,:where(.og-root) .content-start {
+    align-content: flex-start;
   }
 :where(.og-root).items-baseline,:where(.og-root) .items-baseline {
     align-items: baseline;
@@ -6587,6 +6593,13 @@
 :where(.og-root).last\:pb-0,:where(.og-root) .last\:pb-0 {
     &:last-child {
       padding-bottom: calc(var(--spacing) * 0);
+    }
+  }
+:where(.og-root).odd\:last\:col-span-2,:where(.og-root) .odd\:last\:col-span-2 {
+    &:nth-child(odd) {
+      &:last-child {
+        grid-column: span 2 / span 2;
+      }
     }
   }
 :where(.og-root).open\:basis-full,:where(.og-root) .open\:basis-full {

@@ -124,6 +124,49 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test.each([true, false])(
+    "the connect panel lists Claude beside Codex when the deployment offers it (%s)",
+    async (claudeSubscriptionAvailable) => {
+      const container = await mount(
+        <ModelPolicyPickerMenu
+          models={[]}
+          model="codex/gpt-5.6-sol"
+          effort="medium"
+          latencyMode="standard"
+          connectModelsHref="/settings?section=models"
+          claudeSubscriptionAvailable={claudeSubscriptionAvailable}
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />,
+      );
+      const panel = container.querySelector('[data-testid="model-picker-connect"]')!;
+      const marks = [...panel.querySelectorAll("[data-testid^='billing-class-icon-']")].map(
+        (mark) => mark.getAttribute("data-testid"),
+      );
+      expect(marks.slice(0, claudeSubscriptionAvailable ? 3 : 2)).toEqual([
+        "billing-class-icon-codex_subscription",
+        ...(claudeSubscriptionAvailable ? ["billing-class-icon-claude_subscription"] : []),
+        "billing-class-icon-supergrok_subscription",
+      ]);
+    },
+  );
+
+  test("subscription groups are named by their provider alone", () => {
+    const rows = projectClientModelRows(englishText, [
+      MODELS[0]!,
+      {
+        ...MODELS[0]!,
+        id: "organization-claude-subscription/claude-opus-5-5",
+        label: "Claude Opus 5.5",
+        provider: "organization-claude-subscription",
+        providerLabel: "Claude subscription",
+        credentialSource: { kind: "connected_subscription", provider: "claude" },
+      } as ClientModel,
+    ]);
+    expect(rows.map((row) => row.billingClassLabel)).toEqual(["Codex", "Claude"]);
+  });
+
   test("model-identity policies omit unsaved effort and latency controls", async () => {
     const container = await mount(
       <ModelPolicyPickerMenu
@@ -396,6 +439,31 @@ describe("ModelPolicyPicker", () => {
     );
     expect(container.querySelector('[role="img"][aria-label="Acme models"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="trigger-host-icon"]')).not.toBeNull();
+  });
+
+  test("the connect-a-model pill keeps its label on the primary wash", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        models={[]}
+        connectModelsHref="/settings"
+        model={MODELS[0]!.id}
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const trigger = container.querySelector<HTMLButtonElement>(".og-model-policy-trigger")!;
+    expect(trigger.className).toContain("text-og-primary-fg");
+    const labels = trigger.querySelectorAll(
+      ".og-model-policy-label-full, .og-model-policy-label-short",
+    );
+    expect(labels.length).toBe(2);
+    for (const label of labels) {
+      expect(label.textContent).toBe("Connect a model");
+      expect(label.className).not.toContain("text-og-fg");
+    }
   });
 
   test("explicit null hides group icons and descriptions", async () => {

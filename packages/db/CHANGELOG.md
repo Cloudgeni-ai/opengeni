@@ -1,5 +1,26 @@
 # @opengeni/db
 
+## 4.7.0
+
+### Patch Changes
+
+- 31ef5b7: Database pools close idle connections after 30 seconds again, instead of five minutes, and recycle every connection after at most ten minutes (450 to 600 seconds, jittered per connection). Each PostgreSQL backend keeps its catalog cache and prepared plans until its connection closes, so long-lived idle and busy connections grew to 65-95 MB each and ran a 32 GiB staging server out of memory. Set `OPENGENI_DATABASE_POOL_IDLE_TIMEOUT_SECONDS` and `OPENGENI_DATABASE_POOL_MAX_LIFETIME_SECONDS` to tune this for the API, worker and editable-artifact service pools; `0` turns a timer off, and values above 2,147,483 seconds are rejected. `createDb` takes the same values as `idleTimeoutSeconds` and `maxLifetimeSeconds`.
+- 5e3fb3c: Avoid reading skipped tool arguments and outputs during exact call-ID event filtering. A rolling migration extends the existing tool metadata trigger; historical rows retain the payload fallback, with unchanged authorization, codec handling, and pagination.
+- afb32f5: Session message search no longer fails on large histories. One database statement used to check every remaining message, so on a large real workspace it ran past the request's 5 second statement timeout and the search failed. Each statement now reads at most 2,000 messages in order, and a request keeps reading further windows for up to about 1.5 seconds before returning a cursor. Measured on a production workspace with about 240,000 messages, one window takes about 25 ms. A search with no hits still covers the whole history across a few requests, and common terms return at once. Matching, ordering, offsets, snippets, grouping and cursors are unchanged.
+- 1ea2039: Session message search now uses a trigram index, so a search reads only the messages that can contain the text instead of walking the whole history. Row-level security used to stop PostgreSQL from using any text index for this search. Message text now also lives in a separate table whose row-security policy is the search pattern, which lets the index serve it under the same workspace and visibility rules. A trigger fills it for new messages with the writer's own rights (no new SECURITY DEFINER routine, so the previous release keeps passing its database posture check during a rolling deploy), and a batched migration copies existing history. On a copy of a 234,000-message workspace, one window takes about 2 ms for a rare word and 15 to 50 ms for common ones. `scannedMessages` now counts only the candidate messages read. Migrations install the `pg_trgm` and `btree_gin` extensions; managed PostgreSQL services with an extension allowlist (such as Azure's `azure.extensions`) must allow them first.
+- b8452ee: Listing workspaces inside an existing transaction no longer fails when the caller has several workspaces. Each workspace's details are read in its own row-security scope, and inside a transaction those scopes were opened concurrently on one connection, where they overwrote each other's tenant settings. External actors calling `GET /v1/workspaces` hit this as a 500 with `SAVEPOINT can only be used in transaction blocks` in the database log. The scopes now run one after another inside a transaction and stay concurrent otherwise.
+- Updated dependencies [31ef5b7]
+- Updated dependencies [31095f1]
+- Updated dependencies [7308de5]
+  - @opengeni/config@4.7.0
+  - @opengeni/contracts@4.7.0
+  - @opengeni/codemode@4.7.0
+  - @opengeni/codex@4.7.0
+  - @opengeni/observability@4.7.0
+  - @opengeni/network@4.7.0
+  - @opengeni/subscriptions@4.7.0
+  - @opengeni/xai-subscription@4.7.0
+
 ## 4.6.1
 
 ### Patch Changes

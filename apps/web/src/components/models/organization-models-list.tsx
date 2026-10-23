@@ -1,4 +1,5 @@
 import { possessive } from "./possessive";
+import { AccountGroupRows, groupEntry, type GroupEntry } from "./account-fold";
 import { OrganizationElevenLabsVoiceConnection } from "./elevenlabs-voice-connection";
 import { OrganizationRealtimeVoiceSettingsRows } from "./realtime-voice-settings";
 import {
@@ -586,15 +587,16 @@ export function OrganizationModelsList({
             primary={account.active}
             meta={[account.scope === "user" ? yours : tag, claudePlan(account)]}
             cells={{
-              usage: (
-                <ClaudeAccountUsageReadout
-                  client={client}
-                  scope="workspace"
-                  scopeId={workspace.id}
-                  account={account}
-                  canManage={workspace.canManage && account.scope !== "organization"}
-                />
-              ),
+              usage:
+                account.status === "active" ? (
+                  <ClaudeAccountUsageReadout
+                    client={client}
+                    scope="workspace"
+                    scopeId={workspace.id}
+                    account={account}
+                    canManage={workspace.canManage && account.scope !== "organization"}
+                  />
+                ) : null,
             }}
             indicator={
               account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
@@ -908,8 +910,8 @@ export function OrganizationModelsList({
         <Section title="Codex">
           <SettingRowGroup>
             <SettingRow
-              label="Sharing work between accounts"
-              description={`Spread work shares new chats evenly across accounts that can serve them, in every workspace that uses ${possessive(organizationName)} Codex accounts. Primary first starts new chats on the primary account and uses another account when it can't serve them.`}
+              label="Spreading work across accounts"
+              description={`Spread work starts new chats evenly across accounts that can serve them, in every workspace that uses ${possessive(organizationName)} Codex accounts. Primary first starts new chats on the primary account and uses another account when it can't serve them.`}
               controlWidth="auto"
               control={
                 <SegmentedControl<"spread" | "primary">
@@ -935,7 +937,7 @@ export function OrganizationModelsList({
       ) : null}
       {!accountRules && administrator && superGrokSectionVisible(orgGrok) ? (
         <Section title="SuperGrok">
-          <SuperGrokSettingRows grok={orgGrok} label="Sharing work between accounts" />
+          <SuperGrokSettingRows grok={orgGrok} label="Spreading work across accounts" />
         </Section>
       ) : null}
     </SectionStack>
@@ -1021,27 +1023,6 @@ function cachedCodexUsage(account: CodexAccount): ReactNode {
 
 type AccountGroupId = "codex" | "claude" | "supergrok";
 
-/** One account row in a provider group, with what the group's heading counts. */
-interface GroupEntry {
-  key: string;
-  node: ReactNode;
-  /** Turned on and working. */
-  on: boolean;
-  /** Signed out or failing: needs reconnecting. */
-  attention: boolean;
-}
-
-function groupEntry(
-  key: string,
-  account: { allocatorEnabled?: boolean; status: string },
-  node: ReactNode,
-  /** Not in use where it's listed, whatever the account says. */
-  off = false,
-): GroupEntry {
-  const attention = account.status !== "active";
-  return { key, node, on: !off && !attention && account.allocatorEnabled !== false, attention };
-}
-
 /** "12 accounts", "9 on", "1 needs reconnecting". */
 function groupFacts(entries: readonly GroupEntry[]): (string | null)[] {
   const on = entries.filter((entry) => entry.on).length;
@@ -1055,44 +1036,6 @@ function groupFacts(entries: readonly GroupEntry[]): (string | null)[] {
         ? "1 needs reconnecting"
         : `${attention} need reconnecting`,
   ];
-}
-
-/** A group shows its accounts in use first; ones turned off fold away once there are several. */
-const FOLD_OFF_AFTER = 4;
-
-function AccountGroupRows({
-  title,
-  entries,
-  showOff,
-  onShowOff,
-}: {
-  title: string;
-  entries: readonly GroupEntry[];
-  showOff: boolean;
-  onShowOff: (value: boolean) => void;
-}) {
-  const first = entries.filter((entry) => entry.on || entry.attention);
-  const off = entries.filter((entry) => !entry.on && !entry.attention);
-  const fold = entries.length > FOLD_OFF_AFTER && off.length > 0;
-  const shown = fold && !showOff ? first : [...first, ...off];
-  return (
-    <>
-      {shown.map((entry) => (
-        <Fragment key={entry.key}>{entry.node}</Fragment>
-      ))}
-      {fold ? (
-        <li className="col-span-full list-none px-3 py-2">
-          <RowButton
-            aria-expanded={showOff}
-            aria-label={`${showOff ? "Hide" : "Show"} ${off.length} ${title} ${off.length === 1 ? "account" : "accounts"} turned off`}
-            onClick={() => onShowOff(!showOff)}
-          >
-            {showOff ? "Hide turned off" : `Show ${off.length} turned off`}
-          </RowButton>
-        </li>
-      ) : null}
-    </>
-  );
 }
 
 /**
@@ -1312,7 +1255,7 @@ function WorkspaceRow({
 
 /**
  * "Default: GPT-6 Astra · Codex", "3 models allowed", what it changed in its
- * sharing rules ("Claude sharing: Off"), or "Uses the defaults".
+ * subscription rules ("Spread Claude work: Off"), or "Uses the defaults".
  */
 function workspaceDifferences(snapshot: WorkspaceModelsSnapshot) {
   const facts = [
@@ -1322,6 +1265,6 @@ function workspaceDifferences(snapshot: WorkspaceModelsSnapshot) {
   ].filter((fact): fact is string => fact !== null);
   const rules = snapshot.own.accountRules;
   // Two changes read at a glance; more would crowd the row, so they're counted.
-  facts.push(...(rules.length > 2 ? [`${rules.length} sharing rules changed`] : rules));
+  facts.push(...(rules.length > 2 ? [`${rules.length} rules changed`] : rules));
   return facts.length > 0 ? facts : ["Uses the defaults"];
 }

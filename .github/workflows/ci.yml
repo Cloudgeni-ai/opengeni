@@ -47,16 +47,15 @@ concurrency:
   # only waste capacity. Movement on main alone does not invalidate an admitted
   # Version PR head or cancel its CI.
   # Pull-request heads are mutable in the same way: only the newest head can be
-  # merged. Main pushes share one queue without cancelling: the running build
-  # finishes (its images stay usable), and only the newest waiting push runs
-  # next, so rapid merges cannot pile up dozens of queued runs.
-  # Version-PR merge commits keep their own run: stable releases require a
-  # successful CI run for that exact SHA.
-  # Only a push's first attempt joins the main queue. A group holds one pending
-  # run, so a manual re-run of an older main run would otherwise enter as the
-  # pending run and cancel the newest push waiting behind the running build.
-  # A re-run is an explicit request for that exact SHA and runs on its own.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'version packages') == false && contains(github.event.head_commit.message, 'changeset-release/main') == false && github.run_attempt == '1' && 'ci-main-push' || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
+  # merged.
+  # Every push (main, Version-PR merge commit, production), scheduled run and
+  # re-run attempt has its own group and is never cancelled or replaced: each
+  # exact SHA, run and attempt keeps its own receipt. A shared main-push group
+  # held one running build and one pending push, so a single run that never
+  # finished (for example a red build left waiting for release approval)
+  # stalled every later main push behind it. Available runner capacity, not
+  # workflow concurrency, decides how many main runs execute at once.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
 
 permissions:
@@ -1714,6 +1713,7 @@ jobs:
             --argjson artifactRuntime "$ARTIFACT_RUNTIME_REQUIRED" \
             --argjson bakeImages "$BAKE_IMAGES" \
             --argjson build "$BUILD_COUNT" \
+            --argjson preImage false \
             -f scripts/ci/required-results.jq \
             <<<"$RESULTS"
 
@@ -1966,13 +1966,72 @@ jobs:
     with:
       source_sha: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
+  release-image-validation:
+    name: Validation before release image
+    # The API image is the one job behind a protected approval environment on
+    # a main push. It waits for every non-image lane so that approval is only
+    # requested for a build whose tests, contracts and deployment artifacts all
+    # passed; a red build completes red instead of holding an approval wait.
+    # The same required-results topology as the final aggregate applies, minus
+    # the image results that do not exist yet: a failed, cancelled or wrongly
+    # skipped lane fails this job.
+    needs: [automation-admission, plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact aggregate source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Require every non-image CI lane
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          UNIT_COUNT: ${{ needs.plan.outputs.unit_count }}
+          INTEGRATION_COUNT: ${{ needs.plan.outputs.integration_count }}
+          E2E_COUNT: ${{ needs.plan.outputs.e2e_count }}
+          BROWSER_LANE_COUNT: ${{ needs.plan.outputs.browser_lane_count }}
+          BROWSERD_REAL_E2E: ${{ needs.plan.outputs.browserd_real_e2e }}
+          ARTIFACT_RUNTIME_REQUIRED: ${{ needs.plan.outputs.artifact_runtime_required }}
+          BAKE_IMAGES: ${{ needs.plan.outputs.bake_images }}
+          BUILD_COUNT: ${{ needs.plan.outputs.build_count }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request|push|workflow_dispatch|schedule) ;;
+            *) echo "::error::unsupported CI event $EVENT_NAME"; exit 1 ;;
+          esac
+          jq . <<<"$RESULTS"
+          jq -e \
+            --arg event "$EVENT_NAME" \
+            --arg mode "$MODE" \
+            --argjson unit "$UNIT_COUNT" \
+            --argjson integration "$INTEGRATION_COUNT" \
+            --argjson e2e "$E2E_COUNT" \
+            --argjson browser "$BROWSER_LANE_COUNT" \
+            --argjson browserdRealE2e "$BROWSERD_REAL_E2E" \
+            --argjson artifactRuntime "$ARTIFACT_RUNTIME_REQUIRED" \
+            --argjson bakeImages "$BAKE_IMAGES" \
+            --argjson build "$BUILD_COUNT" \
+            --argjson preImage true \
+            -f scripts/ci/required-results.jq \
+            <<<"$RESULTS"
+
   api-image:
     name: Build API workload image
     # Only exact-main push builds sign an agent. PR, scheduled, and automation
     # builds use a credential-free environment and never wait for release approval.
+    # A main push requests that approval only after release-image-validation
+    # succeeded; other events still build the image after validation settles.
     environment: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'public-release' || 'ci-build' }}
-    needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    needs: [automation-admission, plan, artifact-runtime, release-image-validation]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && (github.event_name != 'push' || github.ref != 'refs/heads/main' || needs.release-image-validation.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:

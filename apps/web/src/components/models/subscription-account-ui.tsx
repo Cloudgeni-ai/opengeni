@@ -81,7 +81,7 @@ export function SubscriptionRotationSettingRows({
     <SettingRowGroup>
       <SettingRow
         label={label}
-        description="Spread work shares new chats evenly across accounts that can serve them. Primary first starts new chats on the primary account and uses another account when it can't serve them."
+        description="Spread work starts new chats evenly across accounts that can serve them. Primary first starts new chats on the primary account and uses another account when it can't serve them."
         controlWidth="auto"
         control={
           <SegmentedControl<"spread" | "primary">

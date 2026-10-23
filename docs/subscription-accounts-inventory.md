@@ -699,7 +699,8 @@ Background facts:
 - Portable vs remote_v2 Codex chats: `CodexProviderSwitchRow` (`models/codex-provider-switch-row.tsx:22`), workspace setting `codexCompactionDefault`.
 
 ##### EP-S29 — Web: session account indicator / switcher
-- `CodexAccountIndicator` (`packages/react/src/app/components/session/codex-account-indicator.tsx:101`) rendered only when the session's model is a Codex product model (`apps/web/src/components/rail/rail-shell.tsx:589`, `isCodexProductModel`; component also checks the `codex/` prefix at `:115`). Shows current/waiting account, usage bars, "Retry with" / "Use for next turn" pin menu (`:263-272`).
+- Current: one `SubscriptionAccountIndicator` (`packages/react/src/app/components/session/subscription-account-indicator.tsx`) serves every subscription rail (Codex, Claude, SuperGrok) with the same chip, menu and copy; `subscription-account.ts` holds the shared data shape. The entries below describe the earlier Codex-only control.
+- `CodexAccountIndicator` (removed in #5607) rendered only when the session's model is a Codex product model (`apps/web/src/components/rail/rail-shell.tsx:589`, `isCodexProductModel`; the component also checked the `codex/` prefix). It showed the current/waiting account, usage bars and a "Retry with" / "Use for next turn" pin menu.
 - **Codex-only.** No indicator, switcher or waiting account display for Claude or SuperGrok sessions.
 
 ##### EP-S30 — Web: organization connection access ("Available in")

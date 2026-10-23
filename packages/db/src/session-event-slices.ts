@@ -135,7 +135,9 @@ async function listSessionEventSlicesInternal(
     );
   if (options.callId !== undefined && toPostgresLosslessJson(options.callId) === options.callId)
     predicates.push(
-      sql`coalesce(${schema.sessionEvents.payload}->>'callId', ${schema.sessionEvents.payload}->>'call_id', ${schema.sessionEvents.payload}->>'id') = ${options.callId}`,
+      // As for tool names, the projection is only a payload-read optimization.
+      // Legacy rows and other event kinds retain the original identity expression.
+      sql`coalesce(${schema.sessionEvents.toolCallId}, ${schema.sessionEvents.payload}->>'callId', ${schema.sessionEvents.payload}->>'call_id', ${schema.sessionEvents.payload}->>'id') = ${options.callId}`,
     );
   // Unlike audit `none` mode, this identity query does not compute a payload
   // projection merely to report its size. Only the selected scalar is extracted.

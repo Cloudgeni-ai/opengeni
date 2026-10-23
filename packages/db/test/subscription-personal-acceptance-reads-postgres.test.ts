@@ -509,7 +509,7 @@ beforeAll(async () => {
     await stageSiteSessionAudienceColumns(database.ownerUrl);
     // Current event readers also project 0810's nullable usage source key and
     // 0889's nullable tool name.
-    await staging`alter table session_events add column usage_source_key text, add column tool_name text`;
+    await staging`alter table session_events add column usage_source_key text, add column tool_name text, add column tool_call_id text`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -711,6 +711,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
+      // 0909 message search text.
+      "session_message_search_texts",
       "session_title_operations",
       "site_abuse_reports",
       "site_auth_codes",

@@ -1,5 +1,5 @@
 import { dbSearchPath, getSettings } from "@opengeni/config";
-import { createDb } from "@opengeni/db";
+import { createDb, databasePoolOptions } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
@@ -28,6 +28,7 @@ const searchPath = dbSearchPath(settings);
 const dbClient = createDb(settings.databaseUrl, {
   ...(searchPath ? { searchPath } : {}),
   rlsStrategy: settings.rlsStrategy,
+  ...databasePoolOptions(settings),
 });
 const bus = await createNatsEventBus(settings.natsUrl);
 const model = scriptedModelForScenario(process.env.OPENGENI_TEST_SCENARIO ?? "default");

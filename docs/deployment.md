@@ -1027,6 +1027,12 @@ or changed initial preamble fails before initial migration DDL; other migrations
 and the default path remain unchanged. Do not set this flag merely to hide an
 extension permission error without independently confirming installation.
 
+Migrations also install the `pg_trgm` and `btree_gin` extensions, which back
+indexed conversation message search. Both are trusted extensions that the
+database owner may create, but a managed service with an extension allowlist
+(Azure Database for PostgreSQL's `azure.extensions`, for example) must allow
+them before the migration that installs them runs.
+
 The ordinary SQL migration runner applies a transaction-local 5-second
 `lock_timeout` before each migration body. This bounds lock acquisition in
 migrations without a later timeout override, including 0510. Migration-specific
@@ -2032,6 +2038,15 @@ a later GitHub `APPROVE` or structured PASS body on the exact head:
 
 - the source SHA must be that PR's `merge_commit_sha`;
 - reviewed base/head are the provider-retained `pull.base.sha` / `pull.head.sha`;
+- GitHub rewrites a merged PR's `pull.base.sha` to the merge-time `main` tip,
+  so the reviewed delta starts at the provider compare's merge base (the
+  recorded `patchBaseSha`) and must equal the landed delta path for path. When
+  that patch base differs from `pull.base.sha`, no exact-head Version CI ran
+  against the landed base: admission then also requires a `changeset-release/main`
+  PR from the GitHub Actions bot whose head is one commit on the patch base, and
+  the landed commit's own complete fully green `push` run, `Full CI` status and
+  current-attempt receipts as required for tested descendants below. The
+  provider identity fields and review digest still use `pull.base.sha`;
 - trees, merge provenance, `opengeni-release-head-<head>` retention, and the
   required main CI jobs remain fail-closed;
 - GitHub branch protection may still require a review to merge into `main`;
@@ -3000,6 +3015,56 @@ Pools are lazy; observed idle/active counts are not the rollout upper bound.
 Set server capacity against that budget and measured backend memory rather
 than shrinking application pools to fit an accidental server default.
 
+Budget PostgreSQL memory per connection too. Each backend keeps its catalog
+cache and the plans of every statement it has prepared until its connection
+closes, and an idle connection keeps all of it. Replaying the 908 distinct
+statements a staging deployment ran, on the migrated schema as the FORCE-RLS
+runtime role, one backend grew from about 2 MB to:
+
+| Statements run                       | Prepared statements off | On (default for direct URLs) |
+| ------------------------------------ | ----------------------- | ---------------------------- |
+| Each once                            | 45 MB                   | 126 MB                       |
+| Each six times (generic plans cached) | 50 MB                   | 223 MB                       |
+
+Prepared statements save a round trip and a re-plan per query, and cost about
+80 MB, up to 170 MB, more per backend that has run everything; a superuser
+bypasses row-level security and measures far less (72 and 94 MB), so measure
+as the runtime role. Most backends run only part of the set. Size the server so
+that `max_connections` × per-backend memory fits beside `shared_buffers` and the
+operating system: a 32 GiB server with 8 GiB of `shared_buffers` has roughly
+20 GiB for backends, about 400 backends at 50 MB but about 90 at 220 MB. To
+estimate per-backend memory for your own workload, divide the server's used
+memory minus its idle baseline by the connection count.
+
+The application pools (API runtime, worker, readiness and editable-artifact
+service pools) bound how long a backend can accumulate. The API's managed-auth
+pool keeps its own fixed settings.
+
+- `OPENGENI_DATABASE_POOL_IDLE_TIMEOUT_SECONDS` (default 30) closes idle
+  connections, so the backend count follows actual concurrency. A longer
+  timeout saves bursty work a reconnect (tens of milliseconds) but keeps every
+  idle backend's memory: at five minutes, staging's backends averaged about
+  65 MB and its 32 GiB server ran out of memory at about 340 connections.
+- `OPENGENI_DATABASE_POOL_MAX_LIFETIME_SECONDS` (default 600) bounds each
+  connection's age. Each connection slot draws its lifetime once from the top
+  quarter below the bound (450-600 s by default) and keeps it for the life of
+  the process, so pools opened together do not reconnect together. A pool reuses its most recently idle connection first, so
+  a busy one never reaches the idle timeout; the lifetime stops it collecting
+  new statements, generic plans and every arity of statements whose text varies
+  with a list's length. A replacement backend spends well under a second of
+  extra query time re-warming. An expiring connection finishes its current
+  query or transaction first.
+- `0` turns either timer off; use it rather than a very large number. Values
+  above 2,147,483 s (about 24.8 days, the longest timer the runtime can arm)
+  are rejected.
+- If backends still do not fit, add memory, reduce pool sizes or replicas, or
+  set `OPENGENI_DATABASE_PREPARED_STATEMENTS=false`. Most of the growth after
+  the first pass is generic plans, which the server's default
+  `plan_cache_mode=auto` caches once a statement has run five times. A role
+  setting of `force_custom_plan` held the replay above at 126 MB, but its warm
+  passes ran 25-40% slower, and it also re-plans every statement inside PL/pgSQL
+  routines and triggers, so Opengeni keeps `auto`.
+
 Scoped transactions retry transient connection acquisition up to eight times
 with exponential equal-jitter backoff (250 ms to 4 s, at most 15.75 s total
 sleep, plus driver connection time). This never replays a callback that has
@@ -3893,6 +3958,12 @@ every limiter. A refused Better Auth request receives HTTP 429 with an
 `login_transaction_rate_limited` with `Retry-After` and
 `details.retryAfterSeconds`. Per-email counters are stored as keyed digests,
 never as email or client addresses.
+
+Session reads (`/v1/auth/get-session`) and sign-out are never limited per
+client address: they verify no credential, and every page load reads the
+session. Other Better Auth endpoints keep Better Auth's default of 100 requests
+per 10 seconds per address and path, a counter that resets only after 10
+seconds with no admitted request.
 
 Upgrading a managed deployment behind a proxy: earlier releases let Better Auth
 read a single-value `X-Forwarded-For` by default. It now ignores forwarding

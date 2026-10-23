@@ -12,6 +12,7 @@ import {
   canonical,
   digest,
   emptyLedger,
+  requireInitializedState,
   type Candidate,
   type Config,
   type Ledger,
@@ -68,6 +69,7 @@ export class LiveReader implements Reader {
     const baseSha = refs.get(`refs/heads/${this.config.baseBranch}`);
     if (!baseSha) throw new Error("Base ref missing");
     const stateSha = refs.get(this.config.stateRef) ?? null;
+    if (this.config.mode === "active" && !stateSha) requireInitializedState(null, emptyLedger());
     const observationWarnings: string[] = [];
     const queue = [...refs]
       .filter(([ref]) => ref.startsWith(`refs/heads/${this.config.branchPrefix}`))
@@ -90,6 +92,7 @@ export class LiveReader implements Reader {
         admission.ready.map((p) => p.headSha),
       );
     const ledger = stateSha ? await this.git.readLedger(stateSha) : emptyLedger();
+    if (this.config.mode === "active") requireInitializedState(stateSha, ledger);
     // A new head on an already-landed PR is admitted only when it retains that
     // landed ancestry. merge-tree then composes only its remaining delta.
     const eligible: Pull[] = [];
