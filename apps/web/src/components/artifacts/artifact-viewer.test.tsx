@@ -319,6 +319,16 @@ test("the arrow keys keep working after the clicked button reaches the end and t
   // Focus that fell to the page still steps the viewer.
   await press("ArrowLeft", document.body);
   expect(position()).toBe("3 of 5");
+  // Not while a confirmation is open over the viewer, though: its keys are its own.
+  const confirmation = document.createElement("div");
+  confirmation.setAttribute("role", "alertdialog");
+  document.body.append(confirmation);
+  try {
+    await press("ArrowLeft", document.body);
+    expect(position()).toBe("3 of 5");
+  } finally {
+    confirmation.remove();
+  }
 });
 
 test("the viewer closes when the artifact on screen leaves the list", async () => {
@@ -357,13 +367,14 @@ test("a one-finger swipe steps, but a two-finger pinch never does", async () => 
   app.client = fakeClient().client;
   const container = await render(() => <Library />);
   await openFromList(container, "shot-1.png");
-  const touch = async (type: string, pointerId: number, x: number) => {
+  const touch = async (type: string, pointerId: number, x: number, isPrimary = false) => {
     const body = viewer()!.querySelector("[data-artifact-viewer-body]")!;
     await act(async () => {
       body.dispatchEvent(
         new PointerEvent(type, {
           bubbles: true,
           pointerId,
+          isPrimary,
           pointerType: "touch",
           clientX: x,
           clientY: 300,
@@ -382,6 +393,12 @@ test("a one-finger swipe steps, but a two-finger pinch never does", async () => 
   await touch("pointerup", 3, 400);
   await settle();
   expect(position()).toBe("2 of 5");
+  // A finger whose lift was never seen does not turn swiping off for good.
+  await touch("pointerdown", 4, 600);
+  await touch("pointerdown", 5, 600, true);
+  await touch("pointerup", 5, 400, true);
+  await settle();
+  expect(position()).toBe("3 of 5");
 });
 
 test("Left and Right arrow keys step, never from inside a document, and Escape closes", async () => {

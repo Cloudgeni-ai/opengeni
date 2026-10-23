@@ -55,6 +55,17 @@ const PRELOAD_NEIGHBOURS = 1;
 /** A horizontal touch drag at least this long steps to the neighbouring artifact. */
 const SWIPE_DISTANCE = 48;
 
+/** True while another dialog or menu (a share confirmation, a ⋯ menu) is open over the viewer. */
+function layerAbove(viewer: HTMLElement | null): boolean {
+  if (!viewer) return false;
+  for (const layer of document.querySelectorAll(
+    '[role="dialog"], [role="alertdialog"], [role="menu"]',
+  )) {
+    if (layer !== viewer && !viewer.contains(layer) && !layer.contains(viewer)) return true;
+  }
+  return false;
+}
+
 type AppClient = ReturnType<typeof useAppContext>["client"];
 type ImageSources = ReturnType<typeof imageSources>;
 
@@ -163,8 +174,11 @@ export function ArtifactViewer({
       const target = event.target;
       // Keys in another dialog (a share confirmation), a field or a menu stay
       // there, and so do keys inside a document or Site being worked on. Focus
-      // that fell to the page (its button became disabled) still belongs here.
-      const onPage = target === document.body || target === document.documentElement;
+      // that fell to the page (its button became disabled) still belongs here,
+      // unless another dialog or menu is open on top of the viewer.
+      const onPage =
+        (target === document.body || target === document.documentElement) &&
+        !layerAbove(content.current);
       if (!onPage && (!(target instanceof Node) || !content.current?.contains(target))) return;
       if (ownsArrowKeys(target)) return;
       if (!isImage && target instanceof Node && body.current?.contains(target)) return;
@@ -215,6 +229,8 @@ export function ArtifactViewer({
   const touches = useRef(new Set<number>());
   const onPointerDown = (event: PointerEvent) => {
     if (event.pointerType !== "touch") return;
+    // A first finger starts afresh: a lift missed while a document was shown is forgotten.
+    if (event.isPrimary) touches.current.clear();
     touches.current.add(event.pointerId);
     // A zoomed image pans under the finger instead.
     swipe.current =
