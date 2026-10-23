@@ -26,7 +26,7 @@ import { requestSessionComposerFocus } from "../session-focus";
 import { useSessionUiFeature } from "../session-ui-features";
 import { useUiEventTarget } from "../ui-events";
 import { t } from "../console-text";
-import { isPersonalWorkspace } from "../managed-self-context";
+import { isPersonalWorkspace, navigableWorkspaces } from "../managed-self-context";
 import { workspacesByOrganization } from "../org";
 import { hasWorkspacePermission } from "../permissions";
 import { readChatDirectory, recordChatVisit } from "./chat-directory";
@@ -170,10 +170,15 @@ export function ActionsProvider(props: { children: ReactNode }) {
       ? app.session
       : null;
 
-  // Every workspace open to the person, in the workspace picker's order.
+  // Every workspace open to the person, in the workspace picker's order (so
+  // not a Personal one the organization turned off, unless the person is in it).
   const workspaces = useMemo<WorkspaceChoice[]>(
     () =>
-      workspacesByOrganization(t, app.accessContext, app.workspaces).flatMap((group) =>
+      workspacesByOrganization(
+        t,
+        app.accessContext,
+        navigableWorkspaces(app.workspaces, app.managedSelfContext, workspaceId),
+      ).flatMap((group) =>
         group.workspaces.map((workspace) => ({
           id: workspace.id,
           name: workspace.name,
@@ -181,7 +186,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
           personal: isPersonalWorkspace(workspace, app.managedSelfContext),
         })),
       ),
-    [app.accessContext, app.workspaces, app.managedSelfContext],
+    [app.accessContext, app.workspaces, app.managedSelfContext, workspaceId],
   );
   // The same rule as the fork button under a message.
   const canForkCurrentChat =

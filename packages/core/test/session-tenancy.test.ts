@@ -39,6 +39,8 @@ import {
 import {
   getOrganizationPrivacySettings,
   OrganizationPrivacyLockedError,
+  PersonalWorkspacesOffError,
+  requirePersonalWorkspaceOpenToNewWork,
   updateOrganizationPrivacySettings,
 } from "../src/application/organization-privacy";
 import {
@@ -396,6 +398,50 @@ describe("managed-human session tenancy application service", () => {
     expect(await getOrganizationPrivacySettings(deps(), grant.accountId)).toMatchObject({
       defaultVisibility: "private",
     });
+  }, 180_000);
+
+  test("with Personal workspaces off, nobody starts new chats or schedules in one", async () => {
+    if (!shared || !client) return;
+    const userId = `core-personal-off-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Personal off",
+    });
+    const accountId = access.defaultAccountId!;
+    const sharedWorkspaceId = access.defaultWorkspaceId!;
+    const personalWorkspaceId = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== sharedWorkspaceId,
+    )!.workspaceId;
+    const deps = { db: client.db, settings: testSettings() };
+    const open = (workspaceId: string) =>
+      requirePersonalWorkspaceOpenToNewWork(deps, { accountId, workspaceId });
+
+    expect(await getOrganizationPrivacySettings(deps, accountId)).toMatchObject({
+      personalWorkspaces: true,
+    });
+    await expect(open(personalWorkspaceId)).resolves.toBeUndefined();
+
+    expect(
+      await updateOrganizationPrivacySettings(deps, {
+        organizationId: accountId,
+        actorSubjectId: subjectId,
+        request: { personalWorkspaces: false },
+      }),
+    ).toMatchObject({ personalWorkspaces: false, defaultVisibility: "workspace" });
+    const refused = await open(personalWorkspaceId).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(PersonalWorkspacesOffError);
+    expect((refused as PersonalWorkspacesOffError).code).toBe("personal_workspaces_off");
+    // Shared workspaces are where the work goes now.
+    await expect(open(sharedWorkspaceId)).resolves.toBeUndefined();
+
+    await updateOrganizationPrivacySettings(deps, {
+      organizationId: accountId,
+      actorSubjectId: subjectId,
+      request: { personalWorkspaces: true },
+    });
+    await expect(open(personalWorkspaceId)).resolves.toBeUndefined();
   }, 180_000);
 
   test("serves personal-resource discovery for a receipt-less organization; unknown authorities deny", async () => {

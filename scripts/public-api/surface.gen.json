@@ -19535,6 +19535,7 @@
         "$.id": "string!",
         "$.organizationId": "string!",
         "$.personalWorkspaceId": "string!",
+        "$.personalWorkspacesEnabled": "boolean?",
         "$.status": "const!=[\"\\\"active\\\"\"]"
       }
     },
@@ -20956,6 +20957,7 @@
         "$.limits.defaultVisibilityLocked": "boolean!",
         "$.limits.onlyMeAllowed": "boolean!",
         "$.organizationId": "string!",
+        "$.personalWorkspaces": "boolean!",
         "$.updatedAt": "string! null"
       }
     },
@@ -27922,7 +27924,8 @@
       "shape": {
         "$": "object",
         "$.adminsSeePrivateSchedules": "boolean?",
-        "$.defaultVisibility": "ref(SessionVisibility)?"
+        "$.defaultVisibility": "ref(SessionVisibility)?",
+        "$.personalWorkspaces": "boolean?"
       }
     },
     "UpdateOrganizationPrivateSessionSettingsRequest": {

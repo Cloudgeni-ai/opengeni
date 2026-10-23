@@ -51,7 +51,8 @@ import { useOrganizationDirectory } from "./organization-directory";
 
 export function OrganizationSecurityPage() {
   const directory = useOrganizationDirectory();
-  const client = useAppContext().client;
+  const appContext = useAppContext();
+  const client = appContext.client;
   const managedPeople = directory.managedSession && !directory.singleUser;
   // Members see only Recovery: they may be recovery contacts.
   const administrator = directory.canAdminister;
@@ -59,7 +60,11 @@ export function OrganizationSecurityPage() {
     <SectionStack>
       {managedPeople && administrator ? (
         <Section title="Chats and schedules">
-          <PrivateChatsRow client={client} identity={directory.identity} />
+          <PrivateChatsRow
+            client={client}
+            identity={directory.identity}
+            onAccessChanged={appContext.revalidatePrincipalAccess}
+          />
         </Section>
       ) : null}
       {administrator ? (
@@ -178,7 +183,10 @@ function RowLoadFailure({
 /* ----------------------------------------------- Only me chats and schedules */
 
 type PrivacyChoice = Partial<
-  Pick<OrganizationPrivacySettings, "defaultVisibility" | "adminsSeePrivateSchedules">
+  Pick<
+    OrganizationPrivacySettings,
+    "defaultVisibility" | "adminsSeePrivateSchedules" | "personalWorkspaces"
+  >
 >;
 
 /** What a row says when this app fixes the choice for every organization. */
@@ -187,9 +195,12 @@ const LOCKED_FOR_APP = "This is set for everyone using this app.";
 export function PrivateChatsRow({
   client,
   identity,
+  onAccessChanged,
 }: {
   client: OpenGeniBrowserClient;
   identity: OrganizationAdminIdentity;
+  /** Reloads which workspaces the person can see after Personal workspaces change. */
+  onAccessChanged?: () => void;
 }) {
   const { claim, owns } = useOwnedOperations(identity, "private-sessions");
   const { claim: claimPrivacy, owns: ownsPrivacy } = useOwnedOperations(identity, "privacy");
@@ -232,6 +243,8 @@ export function PrivateChatsRow({
         if (!ownsPrivacy(operation)) return;
         setPrivacy(value);
         toast.success(success);
+        // The workspace switcher and landing follow the new Personal choice.
+        if (change.personalWorkspaces !== undefined) onAccessChanged?.();
       } catch (saveError) {
         if (!ownsPrivacy(operation)) return;
         toast.error("Couldn't change this setting", { description: userErrorText(saveError) });
@@ -239,7 +252,7 @@ export function PrivateChatsRow({
         if (ownsPrivacy(operation)) setPrivacyPending(null);
       }
     },
-    [claimPrivacy, client, identity.organizationId, ownsPrivacy],
+    [claimPrivacy, client, identity.organizationId, ownsPrivacy, onAccessChanged],
   );
 
   if (error && (!settings || !privacy)) {
@@ -257,14 +270,38 @@ export function PrivateChatsRow({
   const enabled = available && (pending ?? settings.enabled);
   const defaultVisibility = privacyPending?.defaultVisibility ?? privacy.defaultVisibility;
   const adminsSee = privacyPending?.adminsSeePrivateSchedules ?? privacy.adminsSeePrivateSchedules;
+  const personalWorkspaces = privacyPending?.personalWorkspaces ?? privacy.personalWorkspaces;
 
   return (
     <SettingRowGroup>
       <SettingRow
+        label="Personal workspaces"
+        description={
+          personalWorkspaces
+            ? "Everyone has a private workspace of their own, next to the shared ones."
+            : "Hidden for everyone. People work in shared workspaces, where their own machines, browsers and vaults keep working. Chats already in a Personal workspace stay reachable from a link."
+        }
+        control={
+          <Switch
+            aria-label="Personal workspaces"
+            checked={personalWorkspaces}
+            pending={privacyPending?.personalWorkspaces !== undefined}
+            onCheckedChange={(next) =>
+              void savePrivacy(
+                { personalWorkspaces: next },
+                next ? "Personal workspaces are back" : "Personal workspaces are hidden",
+              )
+            }
+          />
+        }
+      />
+      <SettingRow
         label="Only me chats and schedules"
         description={
           available
-            ? "Lets people start chats and schedules only they can see in shared workspaces. Personal workspaces are always private."
+            ? personalWorkspaces
+              ? "Lets people start chats and schedules only they can see in shared workspaces. Personal workspaces are always private."
+              : "Lets people start chats and schedules only they can see in shared workspaces."
             : `Only me is off. ${LOCKED_FOR_APP}`
         }
         control={

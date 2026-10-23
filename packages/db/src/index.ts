@@ -2517,6 +2517,18 @@ async function projectManagedOrganizationAccess(
   }
 
   const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+  // An organization that turned Personal workspaces off lands people in a
+  // shared workspace instead of their hidden Personal one (0918).
+  await setRlsContext(db, { accountId: defaultAccountId, workspaceId: null });
+  const [defaultOrganizationPrivacy] = await db
+    .select({
+      personalWorkspacesEnabled: schema.organizationPrivacyPreferences.personalWorkspacesEnabled,
+    })
+    .from(schema.organizationPrivacyPreferences)
+    .where(eq(schema.organizationPrivacyPreferences.accountId, defaultAccountId))
+    .limit(1);
+  const defaultPersonalWorkspacesEnabled =
+    defaultOrganizationPrivacy?.personalWorkspacesEnabled ?? true;
   // Preserve the final scope of the old per-organization loop. These authority
   // tables are non-RLS: every join is explicitly limited to the subject and the
   // active organization ids just returned by the canonical membership helper.
@@ -2599,12 +2611,24 @@ async function projectManagedOrganizationAccess(
   }
   const organizationNameById = new Map(rows.map((row) => [row.accountId, row.accountName]));
   const defaultPersonalWorkspaceId = activeOrganizationMemberships[0]!.personalWorkspaceId;
+  // Rows are newest first, so the last shared grant is the organization's oldest.
+  const defaultSharedWorkspaceId = defaultPersonalWorkspacesEnabled
+    ? undefined
+    : [...workspaceGrants]
+        .reverse()
+        .find(
+          (grant) =>
+            grant.accountId === defaultAccountId &&
+            grant.workspaceId !== defaultPersonalWorkspaceId,
+        )?.workspaceId;
   const defaultWorkspaceId =
     workspaceGrants.find(
       (grant) =>
         grant.accountId === defaultAccountId &&
         grant.workspaceId === rows[0]?.preferredDefaultWorkspaceId,
-    )?.workspaceId ?? defaultPersonalWorkspaceId;
+    )?.workspaceId ??
+    defaultSharedWorkspaceId ??
+    defaultPersonalWorkspaceId;
   return {
     accessContext: {
       mode: "managed",

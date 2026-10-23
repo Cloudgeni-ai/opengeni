@@ -4833,6 +4833,7 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
     .notNull()
     .default("workspace_shared"),
   adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
+  personalWorkspacesEnabled: boolean("personal_workspaces_enabled").notNull().default(true),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

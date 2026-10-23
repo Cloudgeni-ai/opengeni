@@ -99,3 +99,37 @@ export function isPersonalWorkspace(
 ): boolean {
   return workspace?.kind === "personal";
 }
+
+/**
+ * Personal workspaces the person's organization turned off. They still exist,
+ * anchor the person's own machines, browsers and vaults, and keep their
+ * existing chats reachable by link, but nobody browses to or lands in them.
+ */
+export function hiddenPersonalWorkspaceIds(
+  selfContext: ManagedSelfContext | null,
+): ReadonlySet<string> {
+  return new Set(
+    (selfContext?.memberships ?? [])
+      .filter(
+        (membership) =>
+          membership.status === "active" && membership.personalWorkspacesEnabled === false,
+      )
+      .map((membership) => membership.personalWorkspaceId),
+  );
+}
+
+/**
+ * The workspaces to offer in pickers and landing: every workspace except a
+ * hidden Personal one, unless it is the workspace the person is already in.
+ */
+export function navigableWorkspaces<T extends Pick<Workspace, "id">>(
+  workspaces: readonly T[],
+  selfContext: ManagedSelfContext | null,
+  currentWorkspaceId?: string | null,
+): T[] {
+  const hidden = hiddenPersonalWorkspaceIds(selfContext);
+  if (hidden.size === 0) return [...workspaces];
+  return workspaces.filter(
+    (workspace) => workspace.id === currentWorkspaceId || !hidden.has(workspace.id),
+  );
+}
