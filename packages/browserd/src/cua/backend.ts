@@ -2105,9 +2105,9 @@ async function readPermissions(
  * its parts, a text field that still reads what it did before set_value, a
  * number field that reads its old value or nothing instead of the number it
  * was given.
- * The input ran either way, so these are not refusals. A date field Chrome
- * left without a value reads what its parts read (see projectElements). A
- * field the reading no longer shows is left to the caller's own look. */
+ * The input ran either way, so these are not refusals. A date field reads
+ * what its parts read (see projectElements). A field the reading no longer
+ * shows is left to the caller's own look. */
 function inputFailures(
   observation: ComputerBackendObservation,
   steps: readonly Operation[],

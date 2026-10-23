@@ -287,9 +287,9 @@ export function dateFieldFormat(segments: readonly DateSegment[]): string {
 /**
  * The ISO value a date or time field's parts read, in the parts' order, or
  * null when a part reads no number (an empty part reads its placeholder,
- * "dd" or "--") or the date reads zero. Chrome on macOS does not always
- * give the field itself a value: it may update only the parts (or only the
- * field) after typing.
+ * "dd" or "--") or the date reads zero. Chrome on macOS does not keep the
+ * field's own value current: after typing it still reads the value the page
+ * gave it first, or none, while its parts read what was typed.
  */
 export function dateFieldValueFromParts(
   segments: readonly DateSegment[],
@@ -494,16 +494,17 @@ export function projectElements(
       (text) => text !== label && text !== String(element.value ?? ""),
     );
     const containedText = contained.length > 0 ? contained.join(" | ").slice(0, 8_192) : undefined;
-    // A web date or time field Chrome left without a value reads what its
-    // parts read.
+    // A web date or time field reads what its parts read whenever they read
+    // a whole value: Chrome keeps the field's own value at the one the page
+    // gave it first (or none) while typing changes the parts.
     const typed = typedFields.get(element.element_index);
     const value =
-      typed && (element.value === undefined || String(element.value).trim() === "")
-        ? (dateFieldValueFromParts(
-            typed.segments,
-            typed.parts.map((part) => byIndex.get(part)?.value),
-          ) ?? element.value)
-        : element.value;
+      (typed &&
+        dateFieldValueFromParts(
+          typed.segments,
+          typed.parts.map((part) => byIndex.get(part)?.value),
+        )) ??
+      element.value;
     return {
       ref: element.element_token ?? `read-only:${element.element_index}`,
       // Desktop labels and values can be whole documents (an editor's text
