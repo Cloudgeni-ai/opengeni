@@ -2,9 +2,10 @@ import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { DEFAULT_SITE_LIMITS, type SitePublication } from "@opengeni/contracts";
+import type { SitePublicationLink } from "@opengeni/contracts";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 
-import type { SitePublicationLoad } from "../../lib/site-publishing";
+import type { SitePublicationLinkLoad } from "./site-public-link";
 
 // The router isn't mounted here: a Link is a plain anchor with its target.
 mock.module("../../lib/navigation", () => ({
@@ -51,31 +52,16 @@ afterAll(async () => {
   else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
 });
 
-const now = "2026-10-23T10:00:00.000Z";
-const publication = (patch: Partial<SitePublication> = {}): SitePublication => ({
+const publicationLink = (patch: Partial<SitePublicationLink> = {}): SitePublicationLink => ({
   siteId: "site",
-  workspaceId: "ws",
-  label: "newsletter-4k9x",
   hostname: "newsletter-4k9x.sites.example",
   url: "https://newsletter-4k9x.sites.example/",
-  access: "members",
   status: "active",
-  noindex: true,
-  agent: { enabled: false, model: null, instructions: null, tools: null, guestTools: false },
-  limitProfile: { kind: "standard", overrides: null },
-  effectiveLimits: { ...DEFAULT_SITE_LIMITS },
-  invitedEmails: [],
-  moderation: { openReports: 0, suspendedAt: null, suspendedBy: null, suspendedReason: null },
-  usage: { agentMicrosThisMonth: 0, agentMicrosToday: 0, conversationsToday: 0 },
-  warnings: [],
-  outsideAgentModel: null,
-  createdAt: now,
-  updatedAt: now,
   ...patch,
 });
-const ready = (patch: Partial<SitePublication> = {}): SitePublicationLoad => ({
+const ready = (patch: Partial<SitePublicationLink> = {}): SitePublicationLinkLoad => ({
   state: "ready",
-  publication: publication(patch),
+  link: publicationLink(patch),
 });
 
 let mounted: { root: Root; host: HTMLElement } | null = null;
@@ -88,7 +74,7 @@ afterEach(async () => {
 });
 
 async function render(
-  load: SitePublicationLoad,
+  load: SitePublicationLinkLoad,
   props: { canPublish?: boolean; openExternal?: (url: string) => boolean } = {},
 ) {
   const host = document.createElement("div");
@@ -172,10 +158,8 @@ test("copying the link confirms with Copied, then settles back", async () => {
 
 test("a custom hostname uses the primary URL the publication API reports", async () => {
   const load = ready({
-    label: "newsletter",
     hostname: "newsletter.sites.example",
     url: "https://news.acme.example/",
-    access: "invited",
   });
   expect(module.publishedSiteLink(load)).toEqual({
     url: "https://news.acme.example/",
@@ -229,4 +213,51 @@ test("in the desktop app Live opens the default browser through the shell", asyn
   // A modified click keeps the browser's own behaviour.
   expect(await clickPrevented(openLink(host)!, { metaKey: true })).toBe(false);
   expect(opened).toHaveLength(2);
+});
+
+test("someone who can open the Site but not publish still gets open and copy", async () => {
+  const host = await render(ready(), { canPublish: false, openExternal: () => false });
+  expect(openLink(host)!.getAttribute("href")).toBe("https://newsletter-4k9x.sites.example/");
+  expect(copyButton(host)).not.toBeNull();
+  expect(host.querySelector("a[data-to]")).toBeNull();
+  expect(host.textContent).toBe("Live");
+});
+
+test("the header reads the Site's address with the viewer's own read, not the publisher API", async () => {
+  const calls: string[] = [];
+  const answers: Array<() => Promise<SitePublicationLink>> = [
+    async () => publicationLink(),
+    async () => {
+      throw new OpenGeniApiError(404, JSON.stringify({ error: { code: "site_not_published" } }));
+    },
+    async () => {
+      throw new OpenGeniApiError(
+        404,
+        JSON.stringify({ error: { code: "sites_publishing_disabled" } }),
+      );
+    },
+  ];
+  const client = {
+    getSitePublicationLink: (workspaceId: string, siteId: string) => {
+      calls.push(`${workspaceId}/${siteId}`);
+      return answers.shift()!();
+    },
+  };
+  const seen: SitePublicationLinkLoad[] = [];
+  function Probe({ siteId }: { siteId: string }) {
+    const load = module.useSitePublicationLink({ client, workspaceId: "ws", siteId });
+    seen.push(load);
+    return null;
+  }
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  mounted = { root, host };
+  for (const siteId of ["a", "b", "c"]) {
+    await act(async () => root.render(<Probe siteId={siteId} />));
+    await act(async () => await Promise.resolve());
+  }
+  expect(calls).toEqual(["ws/a", "ws/b", "ws/c"]);
+  const settled = seen.filter((load) => load.state !== "loading").map((load) => load.state);
+  expect(settled).toEqual(["ready", "none", "unavailable"]);
 });

@@ -1,4 +1,5 @@
-import type { SitePublication } from "@opengeni/contracts";
+import type { SitePublicationLink } from "@opengeni/contracts";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { DesktopBridge } from "@opengeni/sdk/desktop-bridge";
 import { ArrowUpRightIcon, CheckIcon, CopyIcon } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent } from "react";
@@ -7,30 +8,70 @@ import { copyTextToClipboard } from "../../../lib/clipboard";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../../ui/tooltip";
 import { desktopCapability } from "../../lib/desktop";
 import { Link } from "../../lib/navigation";
-import type { SitePublicationLoad } from "../../lib/site-publishing";
+import { sitePublicationLoadFromError } from "../../lib/site-publishing";
 import { cn } from "../../lib/utils";
 
 /* ----------------------------------------------------------------------------
    The Site view's way to the published Site: "Live ↗" opens the address the
    publication API reports (the Site's primary public URL), and a small copy
-   button copies it. An unpublished Site says so instead, with Publish beside
-   it for people who can publish. Access never changes the link.
+   button copies it. Anyone who can open the Site gets both; an unpublished
+   Site says so instead, with Publish beside it for people who can publish.
+   Access never changes the link.
    -------------------------------------------------------------------------- */
+
+/** Where the Site's published address stands, from the API's answer. */
+export type SitePublicationLinkLoad =
+  | { state: "loading" }
+  | { state: "unavailable" }
+  | { state: "forbidden" }
+  | { state: "none" }
+  | { state: "error"; error: unknown }
+  | { state: "ready"; link: SitePublicationLink };
+
+/** The Site's published address, for anyone who can open the Site. */
+export function useSitePublicationLink({
+  client,
+  workspaceId,
+  siteId,
+}: {
+  client: Pick<OpenGeniBrowserClient, "getSitePublicationLink">;
+  workspaceId: string;
+  siteId: string;
+}): SitePublicationLinkLoad {
+  // Keyed by Site, so moving to another Site never shows the last one's link.
+  const key = `${workspaceId}/${siteId}`;
+  const [answer, setAnswer] = useState<{ key: string; load: SitePublicationLinkLoad } | null>(null);
+  useEffect(() => {
+    const abort = new AbortController();
+    client
+      .getSitePublicationLink(workspaceId, siteId, { signal: abort.signal })
+      .then((link) => {
+        if (!abort.signal.aborted) setAnswer({ key, load: { state: "ready", link } });
+      })
+      .catch((error: unknown) => {
+        if (abort.signal.aborted) return;
+        const failed = sitePublicationLoadFromError(error);
+        setAnswer({ key, load: failed.state === "ready" ? { state: "error", error } : failed });
+      });
+    return () => abort.abort();
+  }, [client, key, siteId, workspaceId]);
+  return answer?.key === key ? answer.load : { state: "loading" };
+}
 
 /** The published address when the Site is on the web now, else null. */
 export function publishedSiteLink(
-  load: SitePublicationLoad,
+  load: SitePublicationLinkLoad,
 ): { url: string; hostname: string } | null {
-  if (load.state !== "ready" || load.publication.status !== "active") return null;
-  return { url: load.publication.url, hostname: publishedHostname(load.publication) };
+  if (load.state !== "ready" || load.link.status !== "active") return null;
+  return { url: load.link.url, hostname: publishedHostname(load.link) };
 }
 
 /** The hostname people see: the one in the URL the API reports, which wins. */
-function publishedHostname(publication: Pick<SitePublication, "url" | "hostname">): string {
+function publishedHostname(link: Pick<SitePublicationLink, "url" | "hostname">): string {
   try {
-    return new URL(publication.url).hostname || publication.hostname;
+    return new URL(link.url).hostname || link.hostname;
   } catch {
-    return publication.hostname;
+    return link.hostname;
   }
 }
 
@@ -60,7 +101,7 @@ export function SitePublicLink({
   canPublish,
   openExternal = openPublishedSite,
 }: {
-  load: SitePublicationLoad;
+  load: SitePublicationLinkLoad;
   workspaceId: string;
   siteId: string;
   /** Offer Publish on an unpublished Site. */
@@ -70,10 +111,7 @@ export function SitePublicLink({
 }) {
   const link = publishedSiteLink(load);
   if (link) return <PublishedLink {...link} openExternal={openExternal} />;
-  if (
-    load.state === "none" ||
-    (load.state === "ready" && load.publication.status === "unpublished")
-  )
+  if (load.state === "none" || (load.state === "ready" && load.link.status === "unpublished"))
     return (
       <span className="mr-1 hidden items-center gap-2 sm:inline-flex">
         <span className="inline-flex items-center gap-1.5 text-2xs font-medium text-fg-subtle">
@@ -92,7 +130,7 @@ export function SitePublicLink({
         ) : null}
       </span>
     );
-  if (load.state === "ready" && load.publication.status === "suspended")
+  if (load.state === "ready" && load.link.status === "suspended")
     return (
       <span className="mr-1 hidden items-center gap-1.5 text-2xs font-medium text-fg-subtle sm:inline-flex">
         <span aria-hidden="true" className="size-1.5 rounded-full bg-status-failed" />

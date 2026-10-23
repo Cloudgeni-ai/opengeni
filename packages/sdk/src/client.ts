@@ -85,6 +85,7 @@ import type {
   SiteLimitProfile,
   SitePlatformUsage,
   SitePublication,
+  SitePublicationLink,
   SitePublishWarningFix,
   SiteTakedownRequest,
   UpsertSitePublicationRequest,
@@ -9237,6 +9238,26 @@ export class OpenGeniClient {
     return await this.requestJson<SitePublication>(
       "GET",
       sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Where a Site is published: its primary public URL, hostname and status.
+   * Anyone who can open the Site reads it; the publication's settings need
+   * `getSitePublication`. 404 when the Site was never published; 503
+   * `sites_publishing_disabled` when the deployment has no Sites domain.
+   */
+  async getSitePublicationLink(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublicationLink> {
+    return await this.requestJson<SitePublicationLink>(
+      "GET",
+      `${sitePublicationPath(workspaceId, siteId)}/link`,
       undefined,
       undefined,
       options,
