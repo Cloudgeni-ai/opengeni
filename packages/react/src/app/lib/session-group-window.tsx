@@ -119,13 +119,14 @@ export function sessionGroupWindowNodes(
   nodes: readonly SessionTreeNode[],
   visibleCount: number,
   selectedSessionId: string | null,
+  minimum = SESSION_GROUP_VISIBLE_STEP,
 ): SessionTreeNode[] {
-  const limit = Math.max(SESSION_GROUP_VISIBLE_STEP, visibleCount);
+  const limit = Math.max(minimum, visibleCount);
   const visible = nodes.slice(0, limit);
   if (!selectedSessionId || visible.some((node) => containsSession(node, selectedSessionId))) {
     return visible;
   }
   const selected = nodes.slice(limit).find((node) => containsSession(node, selectedSessionId));
-  if (selected) visible[visible.length - 1] = selected;
+  if (selected && visible.length > 0) visible[visible.length - 1] = selected;
   return visible;
 }

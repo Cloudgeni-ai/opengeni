@@ -40,29 +40,39 @@
   nested under it, collapsed by default, whichever session is open. A Site's
   title in its row refreshes with the next list read.
 - A Site row opens the console's Site view
-  (`/workspaces/:workspaceId/sites/:siteId`): the Site fills the page and its
-  conversations sit beside it, the newest open unless `?conversation=<id>`
-  chooses one. The conversation open without a choice is fixed when the Site
-  opens, so activity in another conversation never swaps it out. A
-  `?conversation=` that isn't one of this Site's own top-level, unarchived
-  conversations falls back to the Site. A nested row, and a session's Site
-  origin link, open that view with the conversation selected; opening one also
-  opens its Site row once per visit to the Site, and closing the row again is
-  respected. **New** starts a conversation the way the Site's own chat does,
-  sending the Site and its current version (`x-opengeni-site-id`,
-  `x-opengeni-site-version`) with only the fields a Site may set, so it is
-  private to the viewer and listed under the Site. It doesn't offer voice-first
-  start. Once open, New stays open until a conversation is chosen (choosing the
-  Site's own row again does not close it). The panel follows `siteSessionIds`
-  hints, so conversations started in the Site beside it appear, and a refresh
-  re-reads as many conversations as are loaded. The panel's menu opens the
-  conversation as a full chat or the Site's details (`/artifacts/:id`, with
-  settings, sharing and its Conversations tab). `/artifacts/:id` (with its tabs)
-  and `/sessions/:id` keep working.
+  (`/workspaces/:workspaceId/sites/:siteId`): the Site fills the page and a
+  chat panel sits beside it with one conversation open, the newest unless
+  `?conversation=<id>` chooses one. The panel doesn't list conversations (the
+  Site's sidebar row does); it shows the open one as a regular chat with the
+  model picker, narrower, titled in its header. It resizes from its left edge
+  (drag, or the arrow keys, Home and End on the focused handle; double-click
+  resets) between 320 and 720 px, leaving the Site at least 360 px where there
+  is room, and hides to a strip (Enter on the handle, or its button). Width
+  and hidden state are remembered per person in this browser; choosing a
+  conversation shows a hidden panel again. The conversation open without a
+  choice is fixed when the Site opens, so activity in another conversation
+  never swaps it out. A `?conversation=` that isn't one of this Site's own
+  top-level, unarchived conversations falls back to the Site. A nested row,
+  and a session's Site origin link, open that view with the conversation
+  selected; opening one also opens its Site row once per visit to the Site,
+  and closing the row again is respected. **New** starts a conversation the
+  way the Site's own chat does, sending the Site and its current version
+  (`x-opengeni-site-id`, `x-opengeni-site-version`) with only the fields a
+  Site may set, so it is private to the viewer and listed under the Site. It
+  doesn't offer voice-first start. Once open, New stays open until a
+  conversation is chosen (choosing the Site's own row again does not close
+  it). The panel follows `siteSessionIds` hints, so a conversation started in
+  the Site beside it becomes the newest when the Site is next opened. The
+  panel's menu opens the conversation as a full chat or the Site's details
+  (`/artifacts/:id`, with settings, sharing and its Conversations tab).
+  `/artifacts/:id` (with its tabs) and `/sessions/:id` keep working.
 - A Site is a sidebar row even before anyone asks it anything. Placement has
   one rule: a Site is a top-level row in the project of the chat that created
   it (the session tree of its first version), and new Site conversations are
   filed in that project too, so the Site and its conversations stay together.
+  A create that names no project (omitted or `null`) files the conversation
+  with its Site; only a named project overrides that. Starting or moving
+  conversations never takes a Site out of its own project.
   It is a row of its own rather than a child of that chat because a chat's
   children in the sidebar are the work it spawned, and a Site outlives and is
   used apart from its chat. The row is listed when the viewer lists that chat
@@ -72,13 +82,22 @@
   console (`POST
   /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`,
   `recordSiteOpened` in the SDK, `artifacts:read`) records this person's
-  latest open. A row's activity is the latest of its conversations, the
-  Site's own changes and that open, so Sites in use rise and untouched ones
-  sort down like old sessions, without being hidden. Opens are personal and
-  never visible to anyone else; a Site page cannot record one. Without
+  latest open. A row's activity is the latest of its conversations, its
+  newest published version (creation is the first) and that open, so Sites
+  in use rise and untouched ones sort down like old sessions, without being
+  hidden. Archiving, restoring, rolling back or any other write to the Site's
+  record is not activity. Opens are personal and never visible to anyone
+  else; a Site page cannot record one. The console records one open per page
+  (router history entry) that shows the Site view: not again when its client
+  is replaced, only once a page that loaded hidden is shown, and not again
+  when a reload, a restored tab or going Back shows a page where this tab
+  already recorded it (remembered in `sessionStorage` after the write
+  succeeds). Pages the open Site view moves to, such as choosing a
+  conversation, belong to the same open. Without a router history key, every
+  visit counts. Without
   conversations a row has no count and nothing to disclose; it opens the
-  Site view. Conversations someone moved to another project still nest under
-  the Site's row in that project.
+  Site view. Conversations someone moved to another project nest under a row
+  for the Site in that project, and the Site keeps its row in its own one.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.

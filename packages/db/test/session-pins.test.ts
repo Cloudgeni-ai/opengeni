@@ -31,6 +31,9 @@ import {
   setSessionPin,
   listVisibleSessionInvalidationHints,
   recordSiteOpened,
+  publishWorkspaceArtifactVersion,
+  rollbackWorkspaceArtifact,
+  setWorkspaceArtifactStatus,
   WorkspaceArtifactNotFoundError,
   SITE_CONVERSATION_GROUP_LIMIT,
   withWorkspaceSessionActivityRls,
@@ -2115,6 +2118,233 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     // An archived Site keeps only rows that still have conversations.
     await admin`update workspace_artifacts set status = 'archived' where id = ${direct}`;
     expect((await rows()).map(([siteId]) => siteId)).toEqual([fromChat]);
+  }, 60_000);
+
+  test("orders Site rows by publishes and this person's opens, not by changes to the Site's record", async () => {
+    if (!available) return;
+    const { workspace, subjectId } = await siteViewerWorkspace();
+    const other = `user:site-order-other-${crypto.randomUUID()}`;
+    await grantWorkspaceAccess(db, {
+      ...workspace,
+      subjectId: other,
+      permissions: ["workspace:read", "sessions:read", "artifacts:read"],
+    });
+    const chat = await session({ ...workspace, message: "Build two reports" });
+    // A Site its chat published at `publishedAt`, record untouched since.
+    const publishAt = async (title: string, publishedAt: string) => {
+      const siteId = crypto.randomUUID();
+      const versionId = crypto.randomUUID();
+      const turnId = crypto.randomUUID();
+      await admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`
+          insert into session_turns (id, account_id, workspace_id, session_id, trigger_event_id,
+            temporal_workflow_id, status, position, prompt, model, reasoning_effort,
+            sandbox_backend, initiator_kind, initiator_subject_id)
+          values (${turnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${chat.id},
+            ${crypto.randomUUID()}, ${`wf-${turnId}`}, 'completed', 1000, 'Build a page',
+            'test-model', 'medium', 'none', 'subject', ${subjectId})`;
+        await tx`
+          insert into workspace_artifacts (id, account_id, workspace_id, slug, title,
+            current_version_id, created_by_subject_id, visibility, created_at, updated_at)
+          values (${siteId}, ${workspace.accountId}, ${workspace.workspaceId},
+            ${`site-${siteId.slice(0, 8)}`}, ${title}, ${versionId}, ${subjectId},
+            'workspace_shared', ${publishedAt}, ${publishedAt})`;
+        await tx`
+          insert into workspace_artifact_versions (id, account_id, workspace_id, artifact_id,
+            revision, content_key, content_sha256, size_bytes, operation_key, source_session_id,
+            source_turn_id, source_attempt_id, source_execution_generation, created_by_subject_id,
+            created_at)
+          values (${versionId}, ${workspace.accountId}, ${workspace.workspaceId}, ${siteId}, 1,
+            ${`blob-${siteId}`}, ${"a".repeat(64)}, 10, ${`op-${siteId}`}, ${chat.id},
+            ${turnId}, ${crypto.randomUUID()}, 1, ${subjectId}, ${publishedAt})`;
+      });
+      return { siteId, versionId };
+    };
+    const older = await publishAt("Older report", "2026-01-01T00:00:00.000Z");
+    const newer = await publishAt("Newer report", "2026-02-01T00:00:00.000Z");
+    const sites = async (viewer = subjectId) =>
+      (
+        (
+          await listSessionEntriesForSubject(db, workspace.workspaceId, {
+            subjectId: viewer,
+            parentSessionId: null,
+            siteConversations: "group",
+            includePinned: false,
+            limit: 10,
+          })
+        ).siteGroups ?? []
+      ).map((group) => [group.siteId, group.updatedAt]);
+    const untouched = [
+      [newer.siteId, "2026-02-01T00:00:00.000Z"],
+      [older.siteId, "2026-01-01T00:00:00.000Z"],
+    ];
+    expect(await sites()).toEqual(untouched);
+    const change = {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      artifactId: older.siteId,
+      viewer: { subjectId },
+      actorSubjectId: subjectId,
+      sourceSessionId: null,
+      sourceTurnId: null,
+      sourceAttemptId: null,
+      sourceExecutionGeneration: null,
+      sourceToolName: null,
+    };
+
+    // Archiving and restoring the Site, or any other write to its record, is
+    // not activity: it would lift the Site for everyone.
+    for (const status of ["archived", "active"] as const)
+      await setWorkspaceArtifactStatus(db, {
+        ...change,
+        status,
+        expectedCurrentVersionId: older.versionId,
+        reason: "Tidy up",
+        operationKey: crypto.randomUUID(),
+      });
+    await admin`update workspace_artifacts set updated_at = now() where id = ${older.siteId}`;
+    expect(await sites()).toEqual(untouched);
+
+    // Another person opening it moves it only for them.
+    await recordSiteOpened(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: other,
+      viewer: { subjectId: other },
+      siteId: older.siteId,
+    });
+    expect(await sites()).toEqual(untouched);
+    expect((await sites(other))[0]?.[0]).toBe(older.siteId);
+
+    // A new version is activity for everyone; rolling back to the old one is not.
+    const published = await publishWorkspaceArtifactVersion(db, {
+      ...change,
+      expectedCurrentVersionId: older.versionId,
+      contentKey: `blob-${crypto.randomUUID()}`,
+      contentSha256: "b".repeat(64),
+      sizeBytes: 12,
+      sourceKey: null,
+      sourceSha256: null,
+      sourceSizeBytes: null,
+      requestedTools: [],
+      operationKey: crypto.randomUUID(),
+      persistContent: async () => undefined,
+      discardContent: async () => undefined,
+    });
+    const afterPublish = await sites();
+    expect(afterPublish[0]).toEqual([older.siteId, published.version.createdAt]);
+    await rollbackWorkspaceArtifact(db, {
+      ...change,
+      versionId: older.versionId,
+      expectedCurrentVersionId: published.version.id,
+      reason: "Back to the first draft",
+      operationKey: crypto.randomUUID(),
+    });
+    expect(await sites()).toEqual(afterPublish);
+
+    // Opening it yourself still moves it up for you.
+    await recordSiteOpened(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      viewer: { subjectId },
+      siteId: newer.siteId,
+    });
+    expect((await sites())[0]?.[0]).toBe(newer.siteId);
+  }, 60_000);
+
+  test("a Site stays in its chat's project when people start or move conversations on it", async () => {
+    if (!available) return;
+    const { workspace, subjectId } = await siteViewerWorkspace();
+    const project = await createChannel(db, { ...workspace, name: "UI/UX" });
+    const elsewhere = await createChannel(db, { ...workspace, name: "Bugfixes" });
+    const chat = await session({ ...workspace, message: "Audit it", channelId: project.id });
+    const siteId = crypto.randomUUID();
+    const versionId = crypto.randomUUID();
+    const turnId = crypto.randomUUID();
+    await admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        insert into session_turns (id, account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, position, prompt, model, reasoning_effort,
+          sandbox_backend, initiator_kind, initiator_subject_id)
+        values (${turnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${chat.id},
+          ${crypto.randomUUID()}, ${`wf-${turnId}`}, 'completed', 1000, 'Build a page',
+          'test-model', 'medium', 'none', 'subject', ${subjectId})`;
+      await tx`
+        insert into workspace_artifacts (id, account_id, workspace_id, slug, title,
+          current_version_id, created_by_subject_id, visibility)
+        values (${siteId}, ${workspace.accountId}, ${workspace.workspaceId},
+          ${`site-${siteId.slice(0, 8)}`}, 'Audit', ${versionId}, ${subjectId}, 'workspace_shared')`;
+      await tx`
+        insert into workspace_artifact_versions (id, account_id, workspace_id, artifact_id,
+          revision, content_key, content_sha256, size_bytes, operation_key, source_session_id,
+          source_turn_id, source_attempt_id, source_execution_generation, created_by_subject_id)
+        values (${versionId}, ${workspace.accountId}, ${workspace.workspaceId}, ${siteId}, 1,
+          ${`blob-${siteId}`}, ${"a".repeat(64)}, 10, ${`op-${siteId}`}, ${chat.id},
+          ${turnId}, ${crypto.randomUUID()}, 1, ${subjectId})`;
+    });
+    const rows = async () =>
+      (
+        (
+          await listSessionEntriesForSubject(db, workspace.workspaceId, {
+            subjectId,
+            parentSessionId: null,
+            siteConversations: "group",
+            includePinned: false,
+            limit: 10,
+          })
+        ).siteGroups ?? []
+      )
+        .map((group) => [group.channelId, group.conversations])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    const ask = (message: string) =>
+      session({
+        ...workspace,
+        message,
+        // The API passes "no project" on as null, never omitted.
+        channelId: null,
+        metadata: { _opengeniSiteOrigin: { siteId, title: "Audit" } },
+        privateOwnerSubjectId: subjectId,
+        createdBy: { kind: "subject", subjectId },
+      });
+    expect(await rows()).toEqual([[project.id, 0]]);
+
+    // A new conversation is filed with its Site, so the Site keeps its place.
+    const first = await ask("Hello test");
+    expect(first.channelId).toBe(project.id);
+    expect(await rows()).toEqual([[project.id, 1]]);
+
+    // A conversation someone moves elsewhere nests there, and the Site stays
+    // in its own project, with or without conversations left in it.
+    await setSessionChannel(db, {
+      workspaceId: workspace.workspaceId,
+      sessionId: first.id,
+      channelId: elsewhere.id,
+    });
+    expect(await rows()).toEqual(
+      [
+        [project.id, 0],
+        [elsewhere.id, 1],
+      ].sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    );
+    await setSessionChannel(db, {
+      workspaceId: workspace.workspaceId,
+      sessionId: first.id,
+      channelId: null,
+    });
+    expect(await rows()).toEqual(
+      [
+        [project.id, 0],
+        [null, 1],
+      ].sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    );
+    await ask("Another question");
+    expect(await rows()).toEqual(
+      [
+        [project.id, 1],
+        [null, 1],
+      ].sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    );
   }, 60_000);
 
   test("bounds Site rows and reports the omission", async () => {

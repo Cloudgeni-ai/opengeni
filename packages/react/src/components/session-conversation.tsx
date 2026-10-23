@@ -53,6 +53,7 @@ import {
 } from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { cn } from "../lib/cn";
+import { useComposerWithStreamState } from "../lib/use-calm-service-failure";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { useErrorMessage } from "../lib/error-message";
 import {
@@ -68,7 +69,7 @@ export type SessionConversationLabels = {
   retry: string;
   /** Action when the conversation could not load at all. */
   tryAgain: string;
-  /** Shown in place of a Site preview when the session proxy does not serve Sites. */
+  /** Shown in place of a Site preview when the client config reports `artifacts: false`. */
   sitePreviewUnavailable: string;
 };
 
@@ -120,8 +121,8 @@ export type SessionConversationProps = ClientOverride &
     resolveSessionTitle?: ((sessionId: string) => string | null | undefined) | undefined;
     /**
      * Inline previews for assistant `opengeni-site` / `opengeni-html` fences.
-     * Defaults to the Opengeni preview. Behind a session proxy without its
-     * `artifacts` option, Sites show as unavailable without a request; `false`
+     * Defaults to the Opengeni preview. When the client config reports
+     * `artifacts: false`, Sites show as unavailable without a request; `false`
      * shows the fence as code.
      */
     renderInteractiveBlock?: MessageTimelineProps["renderInteractiveBlock"] | false;
@@ -144,23 +145,21 @@ export type SessionConversationProps = ClientOverride &
     /**
      * File attachments in the composer. Defaults to true; the attach control
      * appears only when the deployment's client config enables file uploads.
-     * A session proxy reports them off when `files` is false and for anonymous
-     * visitors (`visitor: true` from `resolve`) unless it sets `visitorUploads`.
+     * A session proxy reports them off for anonymous visitors (`visitor: true`
+     * from `resolve`) unless it sets `visitorUploads`.
      */
     attachments?: boolean | undefined;
     /**
      * Composer microphone (dictation into the draft). Defaults to true; it
-     * appears only when the client config reports voice input available
-     * (`createSessionProxyHandler({ voiceInput: false })` turns it off).
+     * appears only when the client config reports voice input available.
      */
     voiceInput?: boolean | undefined;
     /**
      * Live speech-to-speech voice in the composer. Opt-in: a call spends the
      * workspace's credits and asks for the microphone, so it is off unless this
-     * is `true` or the client config reports `realtimeVoice: true`
-     * (`createSessionProxyHandler({ realtimeVoice: true })`). The button then
-     * appears only when the workspace offers an available voice model and the
-     * proxy has not turned voice off (`realtimeVoice: false`).
+     * is `true` (or an older session proxy reports `realtimeVoice: true`). The
+     * button then appears only when the workspace offers an available voice
+     * model and the config has not turned voice off (`realtimeVoice: false`).
      */
     realtimeVoice?: boolean | undefined;
     /** Optional connection/voice handoff; the stock control owns call lifecycle and admission. */
@@ -399,6 +398,13 @@ function ConversationView({
     loadFailed,
   } = conversation;
   const context = conversation;
+  // A dropped event stream (an update or brief outage) reads as "updating" in
+  // the composer while it reconnects.
+  const composerView = useComposerWithStreamState(
+    composer,
+    feed.connectionState,
+    feed.initialLoading,
+  );
   const formatError = useErrorMessage();
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
@@ -710,7 +716,7 @@ function ConversationView({
                   )
                 }
                 transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
-                composer={composer}
+                composer={composerView}
                 attachments={uploadsEnabled ? files : undefined}
                 // Nothing can be written (typed, dictated or chosen) into a
                 // session the host is still creating.
@@ -880,8 +886,9 @@ type RetainedLoaderClient = Partial<
 
 /**
  * Generated images, published files, screenshots and generated video, read
- * through this conversation's session scope (a session proxy only serves
- * media that session produced). Clients without the SDK reads get none.
+ * through this conversation's session scope (`x-opengeni-session-id`, which
+ * a session proxy's `authorizeSession` checks). Clients without the SDK reads
+ * get none.
  */
 function useRetainedLoaders(
   client: unknown,

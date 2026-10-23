@@ -3,6 +3,14 @@ import {
   type ParsedSessionUsageLimitReachedRefusal,
 } from "@opengeni/contracts/session-usage-limit-refusal";
 
+/**
+ * Stable `OpenGeniApiError.code` for a deployment parked for maintenance or an
+ * update. The parked API answers every request with `{"error":"maintenance"}`
+ * (normally HTTP 503) before any application code runs, so nothing was
+ * accepted: the error is retryable and never outcome-unknown.
+ */
+export const OPENGENI_MAINTENANCE_ERROR_CODE = "maintenance";
+
 /** Error for a non-2xx Opengeni API response. */
 export class OpenGeniApiError extends Error {
   readonly status: number;
@@ -30,13 +38,22 @@ export class OpenGeniApiError extends Error {
     const correlationId = decoded?.requestId ?? boundedCorrelationId(options.correlationId);
     const gatewayFailure = status >= 502 && status <= 504;
     const fromResponse = options.mutation !== undefined;
+    const maintenance = decoded?.code === OPENGENI_MAINTENANCE_ERROR_CODE;
     const message = decoded?.message ?? (fromResponse ? "Request failed." : body || "(empty body)");
     const displayMessage =
       options.displayMessage ??
-      (gatewayFailure && fromResponse
-        ? (decoded?.message ?? "The workspace is temporarily unavailable — retry.")
-        : `API ${status}: ${message}`);
-    super(correlationId ? `${displayMessage} Reference: ${correlationId}.` : displayMessage);
+      (maintenance && fromResponse
+        ? "The service is updating. Try again in a moment."
+        : gatewayFailure && fromResponse
+          ? (decoded?.message ?? "The workspace is temporarily unavailable — retry.")
+          : `API ${status}: ${message}`);
+    // A maintenance answer comes from the parked responder, not the request
+    // handler, so a reference would point nowhere useful.
+    super(
+      correlationId && !(maintenance && fromResponse)
+        ? `${displayMessage} Reference: ${correlationId}.`
+        : displayMessage,
+    );
     this.name = "OpenGeniApiError";
     this.status = status;
     this.code =
@@ -271,6 +288,21 @@ export class OpenGeniSecureContextRequiredError extends Error {
   }
 }
 
+/**
+ * True when the API answered with the maintenance marker: the deployment is
+ * being updated and will answer again on its own. Retry later; do not show it
+ * as a failure of the request itself.
+ */
+export function isMaintenanceError(error: unknown): boolean {
+  if (error instanceof OpenGeniApiError) return error.code === OPENGENI_MAINTENANCE_ERROR_CODE;
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    typeof (error as { status?: unknown }).status === "number" &&
+    (error as { code?: unknown }).code === OPENGENI_MAINTENANCE_ERROR_CODE
+  );
+}
+
 function decodeApiErrorBody(body: string): {
   code: string | undefined;
   message: string | undefined;
@@ -284,6 +316,22 @@ function decodeApiErrorBody(body: string): {
     const decoded: unknown = JSON.parse(body);
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return null;
     const record = decoded as Record<string, unknown>;
+    // The parked maintenance server answers `{"error":"maintenance"}`: a bare
+    // marker string instead of the error envelope. Nothing ran, so it is
+    // retryable and the outcome of a mutation is known (not accepted).
+    if (
+      typeof record.error === "string" &&
+      record.error.trim().toLowerCase() === OPENGENI_MAINTENANCE_ERROR_CODE
+    ) {
+      return {
+        code: OPENGENI_MAINTENANCE_ERROR_CODE,
+        message: undefined,
+        requestId: undefined,
+        retryable: true,
+        outcomeUnknown: false,
+        details: undefined,
+      };
+    }
     const nested =
       record.error && typeof record.error === "object" && !Array.isArray(record.error)
         ? (record.error as Record<string, unknown>)
@@ -396,6 +444,10 @@ export function formatErrorMessage(
     let message: string;
     if (error.outcomeUnknown) {
       message = "The request could not be confirmed. Check its status before retrying.";
+    } else if (error.code === OPENGENI_MAINTENANCE_ERROR_CODE) {
+      // A planned update, not a failure: the reference would only name the
+      // maintenance responder, so it is omitted.
+      return "The service is updating. Try again in a moment.";
     } else if (
       error instanceof OpenGeniSetupError ||
       error.code === "OPENGENI_SETUP_REQUIRED" ||

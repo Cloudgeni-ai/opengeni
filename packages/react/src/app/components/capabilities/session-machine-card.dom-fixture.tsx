@@ -827,6 +827,52 @@ describe("Connected Machine conversation card", () => {
     }
   });
 
+  test("a chat already on another machine still offers to allow the one the agent asked for", async () => {
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", { scope: "user" }),
+      machine("pc", "Build box", { scope: "workspace", active: true }),
+    ];
+    const h = await render(
+      () => ({
+        blocked: null,
+        awaitingHuman: false,
+        personalMachineIntent: {
+          mode: "session",
+          expectedAuthorityEpoch: 3,
+          workspaceSharedAcknowledged: true,
+          sharedOutputWarningVersion: 1,
+        },
+        extras: {},
+      }),
+      { ...notice, requestedSandboxId: "mac" } as AuthNeededItem,
+    );
+    try {
+      expect(h.container.querySelector("h3")?.textContent).toBe("Studio Mac");
+      expect(h.text()).not.toContain("This chat runs on Build box");
+      expect(h.text()).toContain("The agent asked to use this machine.");
+      await click(h.button("Allow"));
+      expect(attach).toHaveBeenCalledWith("mac");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("once the chat runs on the requested machine, the card is done", async () => {
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", { scope: "user", active: true }),
+      machine("pc", "Build box", { scope: "workspace" }),
+    ];
+    const h = await render(undefined, { ...notice, requestedSandboxId: "mac" } as AuthNeededItem);
+    try {
+      expect(h.text()).toContain("This chat runs on Studio Mac");
+      expect(h.button("Allow")).toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
   test("a requested machine that is offline says to turn it on", async () => {
     fleet.machines = [
       sessionBox,

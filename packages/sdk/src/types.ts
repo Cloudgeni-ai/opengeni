@@ -166,6 +166,10 @@ export type SessionRealtimeWebsocketResponse = {
   connectionEpoch: number;
   startupFenceSequence: number;
   modeVersion: number;
+  /**
+   * @deprecated Always empty: the prior conversation travels in the
+   * provider's session instructions. Kept for clients of earlier releases.
+   */
   initialItems: SessionRealtimeWebsocketInitialItem[];
   instructions: string;
   /**
@@ -2058,7 +2062,7 @@ export type SiteConversationGroup = {
   title: string;
   /** Root conversations in the group; 0 for a Site with none yet. */
   conversations: number;
-  /** Latest activity: its conversations, its own changes, or the viewer opening it. */
+  /** Latest activity: its conversations, its newest published version, or the viewer opening it. */
   updatedAt: string;
   /** Creation time of the group's newest conversation, else of the Site. */
   createdAt: string;
@@ -2242,6 +2246,9 @@ export type UpdateSessionRetentionRequest = {
 
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
+  clientEventId?: string;
+  mode?: "pause_and_archive" | "hide_for_me";
+  confirmPause?: boolean;
   expectedVersion?: number;
 };
 
@@ -6628,10 +6635,13 @@ export type InboxSettings = {
 /**
  * The signed-in person's mute on one session. Muted replies neither reach the
  * inbox nor alert the phone; the agent's notifications, questions and
- * approvals still do.
+ * approvals still do. `scope` is "schedule" when the session is a run of a
+ * schedule that starts a new session per run: the mute then covers every run
+ * of that schedule. Older servers omit it.
  */
 export type SessionInboxMute = {
   repliesMuted: boolean;
+  scope?: "session" | "schedule";
 };
 
 /**
@@ -10423,6 +10433,24 @@ export type SessionMachineAccess = {
   ownerName: string | null;
   isOwner: boolean;
   queuedTurnBlocked: boolean;
+  /** Results from other people's work (their workers' results and agent
+   *  messages) waiting because only the machine's owner may start work on it,
+   *  grouped by whose work it is. Older servers omit it. */
+  waitingWork?: SessionWaitingWork[] | undefined;
+};
+
+export type SessionWaitingWork = {
+  /** The person's display name, when known. */
+  name: string | null;
+  /** The waiting results come from the caller's own work. */
+  isYou: boolean;
+  results: number;
+};
+
+/** POST /v1/workspaces/:ws/sessions/:id/waiting-work/continue */
+export type ContinueSessionWaitingWorkResponse = {
+  /** How many waiting results the agent now continues with under your authority. */
+  continued: number;
 };
 
 export type MachinesResponse = {

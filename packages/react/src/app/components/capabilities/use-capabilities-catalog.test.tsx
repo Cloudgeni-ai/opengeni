@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, jest, mock, test } from "bun:test";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useEffect } from "react";
@@ -36,7 +37,8 @@ const context: { client: OpenGeniBrowserClient; accessContext: AccessContext | n
 };
 
 mock.module("../../app-context", () => ({ useAppContext: () => context }));
-mock.module("sonner", () => ({ toast: { error: () => {}, success: () => {} } }));
+const toastError = mock((_message: string, _data?: unknown) => {});
+mock.module("sonner", () => ({ toast: { error: toastError, success: () => {} } }));
 
 const { useCapabilitiesCatalog } = await import("./use-capabilities-catalog");
 
@@ -1064,4 +1066,121 @@ test("setup readiness failure is distinct from an empty catalog and retries inde
   expect(latest.nativeConnectCatalog).toEqual({ status: "ready", providers: [] });
   expect(latest.loadError?.message).toBe("Capability list failed");
   await act(async () => root.unmount());
+});
+
+describe("catalog reads while Opengeni is updating", () => {
+  async function mounted() {
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    return {
+      latest: () => latest!,
+      unmount: async () => {
+        await act(async () => root.unmount());
+        container.remove();
+      },
+    };
+  }
+
+  test("a brief update is retried quietly and loads the catalog without a toast", async () => {
+    jest.useFakeTimers();
+    toastError.mockClear();
+    context.accessContext = readGrant;
+    let reads = 0;
+    const item = { id: "mail", name: "Mail" } as CapabilityCatalogItem;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listCapabilities: async () => {
+        reads += 1;
+        if (reads <= 2) {
+          throw new OpenGeniApiError(503, JSON.stringify({ error: "maintenance" }), {
+            mutation: false,
+          });
+        }
+        return { items: [item] };
+      },
+    } as unknown as OpenGeniBrowserClient;
+    const view = await mounted();
+    try {
+      const progress = { done: false };
+      await act(async () => {
+        void view
+          .latest()
+          .refresh()
+          .then(() => (progress.done = true));
+      });
+      for (let i = 0; i < 10 && !progress.done; i++) {
+        await act(async () => {
+          jest.advanceTimersByTime(1_000);
+          await Promise.resolve();
+        });
+      }
+      expect(progress.done).toBe(true);
+      expect(reads).toBe(3);
+      expect(view.latest().items).toEqual([item]);
+      expect(view.latest().loadError).toBeNull();
+      expect(toastError).not.toHaveBeenCalled();
+    } finally {
+      await view.unmount();
+      jest.useRealTimers();
+    }
+  });
+
+  test("a lasting update leaves a load error for the surface but raises no toast", async () => {
+    jest.useFakeTimers();
+    toastError.mockClear();
+    context.accessContext = readGrant;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listCapabilities: async () => {
+        throw new OpenGeniApiError(503, "", { mutation: false, correlationId: "edge-1" });
+      },
+    } as unknown as OpenGeniBrowserClient;
+    const view = await mounted();
+    try {
+      const progress = { done: false };
+      await act(async () => {
+        void view
+          .latest()
+          .refresh()
+          .then(() => (progress.done = true));
+      });
+      for (let i = 0; i < 20 && !progress.done; i++) {
+        await act(async () => {
+          jest.advanceTimersByTime(1_000);
+          await Promise.resolve();
+        });
+      }
+      expect(progress.done).toBe(true);
+      expect(view.latest().loadError).toBeInstanceOf(OpenGeniApiError);
+      expect(toastError).not.toHaveBeenCalled();
+    } finally {
+      await view.unmount();
+      jest.useRealTimers();
+    }
+  });
+
+  test("a definitive failure still toasts", async () => {
+    toastError.mockClear();
+    context.accessContext = readGrant;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listCapabilities: async () => {
+        throw new OpenGeniApiError(403, "", { mutation: false });
+      },
+    } as unknown as OpenGeniBrowserClient;
+    const view = await mounted();
+    try {
+      await act(async () => await view.latest().refresh());
+      expect(toastError.mock.calls.map(([message]) => message)).toEqual(["Couldn't load plugins"]);
+    } finally {
+      await view.unmount();
+    }
+  });
 });

@@ -28,7 +28,7 @@ import type {
   TimelineItem,
   ToolCallItem,
 } from "@opengeni/react/session";
-import type { SessionDisplayStatus } from "@opengeni/react/timeline-model";
+import { isAgentWorkHumanInput, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import type { OpenGeniNativeSessionController } from "./use-native-session";
 import type { NativeFileAttachmentsResult } from "./attachments";
 import { useOpenNativeLink } from "./links";
@@ -739,7 +739,9 @@ function TimelineRow({
 
   const title = timelineTitle(item, labels);
   const detail = timelineSummary(item, labels);
-  if (compactActivity) {
+  // A question an agent or the system answered is agent work: a quiet step,
+  // never a conversation card.
+  if (compactActivity || isAgentWorkHumanInput(item)) {
     return (
       <View
         accessible

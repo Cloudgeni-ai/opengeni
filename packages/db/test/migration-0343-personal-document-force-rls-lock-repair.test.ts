@@ -133,6 +133,11 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`alter table session_turns add column execution_context_turn_id uuid`;
     await admin`alter table session_system_updates add column mcp_account_bindings jsonb`;
     await admin`alter table session_system_update_outbox add column mcp_account_bindings jsonb`;
+    // The current claim adapter reads 0917's continue-waiting-work columns;
+    // removed before 0917 runs.
+    await admin`alter table session_system_updates
+      add column continued_by_subject_id text,
+      add column continued_at timestamptz`;
     // Current claim adapters read 0562 lease authority. Remove this temporary
     // projection bridge before replay so the real migration owns its defaults.
     await admin`alter table session_realtime_modes
@@ -418,6 +423,9 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`alter table session_turns drop column execution_context_turn_id`;
     await admin`alter table session_system_updates drop column mcp_account_bindings`;
     await admin`alter table session_system_update_outbox drop column mcp_account_bindings`;
+    await admin`alter table session_system_updates
+      drop column continued_by_subject_id,
+      drop column continued_at`;
     await dropConnectionAccountIntentColumns(ownerUrl);
     await admin`alter table session_realtime_modes
       drop column personal_connection_delegations,

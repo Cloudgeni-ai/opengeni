@@ -98,7 +98,12 @@ export function SessionUnavailableRoute(props: { workspaceId: string; sessionId:
           attempts: 0,
           surfaced: false,
         });
-        const step = transientReadRetryStep(streak, now, DEFAULT_TRANSIENT_READ_RETRY);
+        const step = transientReadRetryStep(
+          streak,
+          now,
+          DEFAULT_TRANSIENT_READ_RETRY,
+          resolution.error,
+        );
         if (!step.quiet) setState("transient");
         retryTimer = setTimeout(() => {
           retryTimer = null;

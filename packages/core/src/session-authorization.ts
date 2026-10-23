@@ -16,6 +16,8 @@ import {
   currentSessionRlsActorIdentityKey,
   currentSiteViewerRlsContext,
   getSessionAuthorizationFacts,
+  getSessionAuthorizationFactsBatch,
+  isTransactionHandle,
   withSessionRlsActorContext,
   type Database,
   type SessionAuthorizationFacts,
@@ -283,13 +285,65 @@ export async function requireSessionAuthorization(
   },
 ): Promise<ResolvedSessionAuthorization | null> {
   const reads = claimSessionAuthorizationReads();
-  const port = deps.sessionAuthorization;
-  const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
   const claims = agentAttemptClaims(grant);
   // One scoped read returns the target's authority, its Slack ownership and,
   // for an agent attempt, the caller session and its live turn. Every check
   // below decides from these facts; none of them reads again.
   const facts = await readSessionAuthorizationFacts(deps.db, grant, input.sessionId, claims, reads);
+  return await authorizeSessionFromFacts(deps, grant, input, claims, facts);
+}
+
+/**
+ * One fresh fact read for a response window, followed by the same per-target
+ * checks and host callbacks as single-session authorization. No facts supplied
+ * by callers and no reuse across windows or subsequent visibility checks.
+ */
+export async function requireSessionAuthorizations(
+  deps: SessionAuthorizationDependencies,
+  grant: AccessGrant,
+  input: {
+    sessionIds: readonly string[];
+    operation: SessionAuthorizationOperation;
+    surface: SessionAuthorizationSurface;
+  },
+): Promise<PromiseSettledResult<ResolvedSessionAuthorization | null>[]> {
+  const claims = agentAttemptClaims(grant);
+  const facts = await getSessionAuthorizationFactsBatch(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionIds: input.sessionIds,
+    caller: claims ? { sessionId: claims.callerSessionId, attemptId: claims.attemptId } : undefined,
+  });
+  const authorize = (sessionId: string) =>
+    authorizeSessionFromFacts(deps, grant, { ...input, sessionId }, claims, facts.get(sessionId)!);
+  if (!isTransactionHandle(deps.db))
+    return await Promise.allSettled(input.sessionIds.map(authorize));
+  // Site and host callbacks can establish nested scopes. An already pinned
+  // transaction must not overlap their savepoints or scope restoration.
+  const decisions: PromiseSettledResult<ResolvedSessionAuthorization | null>[] = [];
+  for (const sessionId of input.sessionIds) {
+    try {
+      decisions.push({ status: "fulfilled", value: await authorize(sessionId) });
+    } catch (reason) {
+      decisions.push({ status: "rejected", reason });
+    }
+  }
+  return decisions;
+}
+
+async function authorizeSessionFromFacts(
+  deps: SessionAuthorizationDependencies,
+  grant: AccessGrant,
+  input: {
+    sessionId: string;
+    operation: SessionAuthorizationOperation;
+    surface: SessionAuthorizationSurface;
+  },
+  claims: AgentAttemptClaims | null,
+  facts: SessionAuthorizationFacts,
+): Promise<ResolvedSessionAuthorization | null> {
+  const port = deps.sessionAuthorization;
+  const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
   const authority = facts.target;
   const slackAccess = authority?.slackAccess ?? null;
 

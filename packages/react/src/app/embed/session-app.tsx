@@ -1,3 +1,4 @@
+import { ArchiveConfirmationProvider } from "../lib/archive-session";
 // The Opengeni session app for an embedding page that already holds an
 // authenticated API client (a first-party side pane such as the Excel add-in,
 // the desktop app, a playground). It renders the web app's own session shell,
@@ -18,7 +19,7 @@ import { Button } from "../../ui/button";
 import { PortalContainerProvider } from "../../ui/portal-container";
 import { AppContext, useAppContext } from "../app-context";
 import { createSlackLinkPrepareController, useAppState, type AppStateHost } from "../app-state";
-import { LoadingPanel, ProblemPanel } from "../components/common";
+import { LoadingPanel, ProblemPanel, WaitingPanel } from "../components/common";
 import { RailProvider } from "../components/rail/rail-context";
 import { ActionsProvider } from "../lib/actions/actions-provider";
 import { SessionShell, type SessionShellSlots } from "../components/rail/session-shell";
@@ -350,13 +351,38 @@ function SessionAppGates({
   const state = useAppState(stateHost, { bootstrapSuspended: false });
   let content: ReactNode;
   if (!state.clientConfig && !state.configError) content = <LoadingPanel />;
-  else if (state.configError) {
+  else if (state.configError?.recovering) {
+    // An update or dropped connection: the embed continues by itself.
+    content = (
+      <WaitingPanel
+        title={state.configError.title}
+        description={state.configError.description}
+        action={
+          <Button type="button" variant="ghost" size="sm" onClick={state.retryClientConfig}>
+            Try again
+          </Button>
+        }
+      />
+    );
+  } else if (state.configError) {
     content = (
       <ProblemPanel
         title={state.configError.title}
         description={state.configError.description}
         action={
           <Button type="button" variant="outline" onClick={state.retryClientConfig}>
+            Try again
+          </Button>
+        }
+      />
+    );
+  } else if (state.accessError?.recovering) {
+    content = (
+      <WaitingPanel
+        title={state.accessError.title}
+        description={state.accessError.description}
+        action={
+          <Button type="button" variant="ghost" size="sm" onClick={state.retryAccess}>
             Try again
           </Button>
         }
@@ -379,12 +405,14 @@ function SessionAppGates({
     const context = state.appContext;
     content = (
       <AppContext.Provider value={context}>
-        <SessionAppWorkspace workspaceId={workspaceId} slots={slots} />
-        <CreditRequiredGate
-          creditRequired={state.creditRequired}
-          setCreditRequired={state.setCreditRequired}
-          accessContext={state.accessContext}
-        />
+        <ArchiveConfirmationProvider>
+          <SessionAppWorkspace workspaceId={workspaceId} slots={slots} />
+          <CreditRequiredGate
+            creditRequired={state.creditRequired}
+            setCreditRequired={state.setCreditRequired}
+            accessContext={state.accessContext}
+          />
+        </ArchiveConfirmationProvider>
       </AppContext.Provider>
     );
   }

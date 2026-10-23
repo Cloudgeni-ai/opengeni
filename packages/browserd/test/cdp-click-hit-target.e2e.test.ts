@@ -41,7 +41,12 @@ async function openFixture(html: string) {
         { sessionId: attached.sessionId },
       )
     ).result.value;
-  const click = (observation: BrowserObservation, name: string) => {
+  const click = (
+    observation: BrowserObservation,
+    name: string,
+    type: "click" | "double_click" = "click",
+    selector?: string,
+  ) => {
     const command: BrowserActionCommand = {
       protocolVersion: 1,
       operationId: randomUUID(),
@@ -53,7 +58,12 @@ async function openFixture(html: string) {
       expectedFrameId: observation.frameId!,
       actor: { kind: "human", subjectId: "click-hit-target-fixture" },
       observationMode: "none",
-      action: { type: "click", locator: { kind: "role", role: "button", name, exact: true } },
+      action: {
+        type,
+        locator: selector
+          ? { kind: "css", selector }
+          : { kind: "role", role: "button", name, exact: true },
+      },
     };
     return controller.run(command);
   };
@@ -119,6 +129,116 @@ e2e(
       expect(await fixture.evaluate("[clicks.confirm, clicks.card]")).toEqual([0, 0]);
     } finally {
       await fixture.close();
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a target the page re-renders as the pointer arrives still takes the click",
+  async () => {
+    // Moving the pointer onto "Confirm" re-renders it: the page swaps in an
+    // identical copy, as a framework that re-renders on hover does.
+    const fixture = await openFixture(
+      '<!doctype html><title>Re-render</title><style>body{margin:0}</style><div id="row" style="padding:30px"><button id="target">Confirm</button></div><script>globalThis.clicks=0;let swapped=false;document.addEventListener("click",(event)=>{if(event.target.id==="target")clicks++});row.addEventListener("pointerover",()=>{if(swapped)return;swapped=true;row.innerHTML=row.innerHTML});</script>',
+    );
+    try {
+      const accepted = await fixture.click(fixture.initial, "Confirm");
+      expect(accepted.error ?? null).toBeNull();
+      expect(accepted.state).toBe("completed");
+      expect(await fixture.evaluate("[swapped, clicks]")).toEqual([true, 1]);
+    } finally {
+      await fixture.close();
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a double-click whose first click turns its row into an editor still double-clicks",
+  async () => {
+    // The first click replaces the "Edit" button with a text field, as a
+    // "double-click to edit" row does; the second press lands on the field.
+    const fixture = await openFixture(
+      '<!doctype html><title>Edit row</title><style>body{margin:0}input,button{width:120px;height:30px}</style><div id="row" style="padding:30px"><button id="target">Edit</button></div><script>globalThis.events=[];document.addEventListener("click",(event)=>{events.push("click:"+event.target.tagName);if(event.target.id==="target")row.innerHTML="<input id=editor>"});document.addEventListener("dblclick",(event)=>events.push("dblclick:"+event.target.tagName));</script>',
+    );
+    try {
+      const accepted = await fixture.click(fixture.initial, "Edit", "double_click");
+      expect(accepted.error ?? null).toBeNull();
+      expect(accepted.state).toBe("completed");
+      expect(await fixture.evaluate("events")).toEqual([
+        "click:BUTTON",
+        "click:INPUT",
+        "dblclick:INPUT",
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a lookalike that takes the target's place is not the target",
+  async () => {
+    // Three rows with identical "Delete" buttons. Row 1 is removed as the
+    // pointer arrives, so row 2's button moves under the pointer.
+    const rows = await openFixture(
+      '<!doctype html><title>Rows</title><style>body{margin:0}.row{height:40px}</style><div id="list"><div class="row" id="r1"><button id="d1">Delete</button></div><div class="row" id="r2"><button id="d2">Delete</button></div><div class="row" id="r3"><button id="d3">Delete</button></div></div><script>globalThis.deleted=[];document.addEventListener("click",(event)=>{if(event.target.tagName==="BUTTON")deleted.push(event.target.id)});d1.addEventListener("pointerover",()=>r1.remove());</script>',
+    );
+    try {
+      const refused = await rows.click(rows.initial, "Delete", "click", "#d1");
+      expect(refused.state).not.toBe("completed");
+      expect(await rows.evaluate("deleted")).toEqual([]);
+    } finally {
+      await rows.close();
+    }
+    // Hovering an unlabelled toolbar re-renders it with "Delete" where
+    // "Archive" was.
+    const toolbar = await openFixture(
+      '<!doctype html><title>Toolbar</title><style>body{margin:0}button{width:120px;height:30px}</style><div role="toolbar" id="bar" style="padding:30px"><button id="archive">Archive</button></div><script>globalThis.clicked=[];document.addEventListener("click",(event)=>{if(event.target.tagName==="BUTTON")clicked.push(event.target.textContent)});bar.addEventListener("pointerover",()=>{if(bar.dataset.swapped)return;bar.dataset.swapped="1";bar.innerHTML="<button id=delete>Delete</button>"});</script>',
+    );
+    try {
+      const refused = await toolbar.click(toolbar.initial, "Archive");
+      expect(refused.state).not.toBe("completed");
+      expect(await toolbar.evaluate("clicked")).toEqual([]);
+    } finally {
+      await toolbar.close();
+    }
+    // The list stays, but its items are rebuilt without item 1, so item 2's
+    // identical button takes item 1's place.
+    const list = await openFixture(
+      '<!doctype html><title>List</title><style>body{margin:0}button{display:block;width:120px;height:30px}</style><div id="list"><button data-id="1">Delete</button><button data-id="2">Delete</button></div><script>globalThis.deleted=[];document.addEventListener("click",(event)=>{if(event.target.tagName==="BUTTON")deleted.push(event.target.dataset.id)});list.firstElementChild.addEventListener("pointerover",()=>{list.innerHTML="<button data-id=2>Delete</button>"});</script>',
+    );
+    try {
+      const refused = await list.click(list.initial, "Delete", "click", '[data-id="1"]');
+      expect(refused.state).not.toBe("completed");
+      expect(await list.evaluate("deleted")).toEqual([]);
+    } finally {
+      await list.close();
+    }
+    // Index-keyed rows: row 1 stays and is rebuilt to show invoice 2.
+    const invoices = await openFixture(
+      '<!doctype html><title>Invoices</title><style>body{margin:0}.row{height:40px}</style><div class="row" id="r1"><span>Invoice 1</span><button>Delete</button></div><div class="row" id="r2"><span>Invoice 2</span><button>Delete</button></div><script>globalThis.deleted=[];document.addEventListener("click",(event)=>{if(event.target.tagName==="BUTTON")deleted.push(event.target.previousElementSibling.textContent)});r1.querySelector("button").addEventListener("pointerover",()=>{r1.innerHTML="<span>Invoice 2</span><button>Delete</button>";r2.remove()});</script>',
+    );
+    try {
+      const refused = await invoices.click(invoices.initial, "Delete", "click", "#r1 button");
+      expect(refused.state).not.toBe("completed");
+      expect(await invoices.evaluate("deleted")).toEqual([]);
+    } finally {
+      await invoices.close();
+    }
+    // The same far into a long list, past where a capped text comparison
+    // would look.
+    const long = await openFixture(
+      '<!doctype html><title>Long list</title><style>body{margin:0}button{display:block;width:120px;height:20px}</style><div id="list"></div><script>for(let i=0;i<1500;i++){const b=document.createElement("button");b.textContent="Delete";b.dataset.id=String(i);list.append(b)}globalThis.deleted=[];document.addEventListener("click",(event)=>{if(event.target.tagName==="BUTTON")deleted.push(event.target.dataset.id)});const target=list.children[1450];target.addEventListener("pointerover",()=>{target.remove()});for(const b of list.children)b.removeAttribute("data-id");</script>',
+    );
+    try {
+      const refused = await long.click(long.initial, "Delete", "click", "#list > :nth-child(1451)");
+      expect(refused.state).not.toBe("completed");
+      expect(await long.evaluate("deleted")).toEqual([]);
+    } finally {
+      await long.close();
     }
   },
   60_000,

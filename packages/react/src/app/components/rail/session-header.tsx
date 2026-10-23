@@ -1,3 +1,5 @@
+import { useOptionalAppContext } from "../../app-context";
+import { archiveActionLabel } from "../../lib/archive-session";
 // The session header bar — the slim canvas top strip's contents on a session
 // route. Split out of the session shell as a PURE, presentational component: it takes
 // plain session data + callbacks and renders the two-line identity block
@@ -81,7 +83,7 @@ import {
   type InlineRename,
 } from "../../lib/session-rename";
 import { pinLiveAnnouncement } from "../../lib/pin-live-announcement";
-import type { SessionRepliesMute } from "../../lib/inbox";
+import { repliesMuteLabel, type SessionRepliesMute } from "../../lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "../../lib/session-tools";
 import type { LatencyMode, Session } from "../../types";
 import { usePage } from "../../lib/navigation";
@@ -230,6 +232,7 @@ export function SessionHeader({
   ].filter((bit): bit is string => Boolean(bit));
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
+  const context = useOptionalAppContext();
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
   const [grantAdminOpen, setGrantAdminOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
@@ -520,7 +523,7 @@ export function SessionHeader({
             {repliesMute ? (
               <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
                 {repliesMute.muted ? <BellIcon /> : <BellOffIcon />}
-                {repliesMute.muted ? "Unmute replies" : "Mute replies"}
+                {repliesMuteLabel(repliesMute)}
               </DropdownMenuItem>
             ) : null}
             {onOpenUsageLimit ? (
@@ -557,7 +560,11 @@ export function SessionHeader({
                   onSelect={() => void onArchive?.(session, !session.archived)}
                 >
                   {session.archived ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
-                  {session.archived ? "Restore" : "Archive"}
+                  {context
+                    ? archiveActionLabel(context, session)
+                    : session.archived
+                      ? "Restore"
+                      : "Archive"}
                   {session.archived ? (
                     <DropdownMenuMeta>Archived</DropdownMenuMeta>
                   ) : archiveKeys ? (

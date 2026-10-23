@@ -152,6 +152,13 @@ postgresTest(
       expect((await sharedPage.json()).items.map((item: { id: string }) => item.id)).toEqual([
         sharedFile,
       ]);
+      const uppercaseSourcePage = await request(
+        `kind=image&sourceSessionId=${sharedSource.id.toUpperCase()}`,
+      );
+      expect(uppercaseSourcePage.status, await uppercaseSourcePage.clone().text()).toBe(200);
+      expect(
+        (await uppercaseSourcePage.json()).items.map((item: { id: string }) => item.id),
+      ).toEqual([sharedFile]);
       expect(
         (await (await request("kind=file")).json()).items.map((item: { id: string }) => item.id),
       ).toEqual([unsupportedImage]);
@@ -283,6 +290,44 @@ postgresTest(
       await owned.admin`UPDATE session_turn_attempts SET state='closed',outcome='completed',closed_at=now() WHERE workspace_id=${workspaceId} AND id=${attemptId}`;
       for (const kind of ["site", ...Object.keys(editableIds)])
         expect((await agentRequest(`kind=${kind}`)).status).toBe(404);
+
+      // The host can commit a visibility change after the initial fact read.
+      // The batch must still prove source visibility after that callback, not
+      // reuse its pre-host authorization facts as provenance authority.
+      let hostCalls = 0;
+      const revokingApp = new Hono();
+      registerArtifactCatalogRoutes(revokingApp, {
+        db: client.db,
+        settings: testSettings({ productAccessMode: "managed", delegationSecret: secret }),
+        managedAuth: null,
+        sessionAuthorization: {
+          authorizeSession: async () => {
+            hostCalls++;
+            await owned.admin.begin(async (tx) => {
+              await tx`SET LOCAL session_replication_role = replica`;
+              await tx`UPDATE sessions SET visibility='user_private',owner_subject_id=${ownerSubject},owner_organization_membership_id=${membershipId} WHERE id=${sharedSource.id}`;
+            });
+            return { allowed: true };
+          },
+        },
+      } as never);
+      const revokedPage = await revokingApp.request(
+        `/v1/workspaces/${workspaceId}/artifact-catalog?kind=image`,
+        {
+          headers: { authorization },
+        },
+      );
+      expect(revokedPage.status, await revokedPage.clone().text()).toBe(200);
+      const revokedBody = await revokedPage.json();
+      expect(hostCalls).toBe(1);
+      expect(revokedBody.items.map((item: { id: string }) => item.id).sort()).toEqual(
+        [privateFile, sharedFile].sort(),
+      );
+      expect(
+        revokedBody.items.every(
+          (item: { sourceSessionId?: string }) => item.sourceSessionId === undefined,
+        ),
+      ).toBe(true);
     } finally {
       await client?.close();
       await owned.release();

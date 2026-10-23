@@ -58,6 +58,12 @@ import {
   type ResponsiveBasis,
 } from "../lib/composer-responsive-context";
 import { composerSubmissionErrorMessage } from "../lib/format";
+import {
+  isActionFailure,
+  OPENGENI_UPDATING_ACTION_NOTICE,
+  OPENGENI_UPDATING_NOTICE,
+} from "../lib/transient-retry";
+import { useCalmServiceFailure } from "../lib/use-calm-service-failure";
 import { defaultChatComposerMessages, type ChatComposerMessages } from "../composer-messages";
 import { singleSendText } from "../messages/single-send";
 import type { PickerModelRow } from "../model-policy";
@@ -97,6 +103,7 @@ export type ComposerDelivery = Pick<
   | "canSend"
   | "error"
   | "clearError"
+  | "reconnecting"
   | "annotations"
   | "requestAnnotationReview"
 >;
@@ -591,19 +598,29 @@ export function useChatComposerController({
       }),
     [commandContext, commands],
   );
+  // While Opengeni is updating (or briefly unreachable) the composer shows
+  // one calm line and keeps retrying; the error itself only surfaces if it
+  // outlasts a normal update. An explicit action (Stop, Resume, Steer) is not
+  // retried for the person, so it says calmly that it did not go through.
+  const calmServiceFailure = useCalmServiceFailure(delivery.error);
+  const calmActionFailure = calmServiceFailure && isActionFailure(delivery.error);
+  const serviceUpdating =
+    (calmServiceFailure && !calmActionFailure) || delivery.reconnecting === true;
   const activeNotice =
     notice ??
-    (delivery.error
-      ? {
-          tone: "error" as const,
-          message: /control changed|paused while/i.test(delivery.error.message)
-            ? messages.controlChangedError
-            : formatError(
-                delivery.error,
-                composerSubmissionErrorMessage(t, delivery.error) || messages.sendFailedError,
-              ),
-        }
-      : null);
+    (calmActionFailure
+      ? { tone: "ok" as const, message: OPENGENI_UPDATING_ACTION_NOTICE(t) }
+      : delivery.error && !calmServiceFailure
+        ? {
+            tone: "error" as const,
+            message: /control changed|paused while/i.test(delivery.error.message)
+              ? messages.controlChangedError
+              : formatError(
+                  delivery.error,
+                  composerSubmissionErrorMessage(t, delivery.error) || messages.sendFailedError,
+                ),
+          }
+        : null);
   useEffect(() => {
     if (notice?.tone !== "ok") return;
     const timer = window.setTimeout(
@@ -708,6 +725,9 @@ export function useChatComposerController({
     setHelpOpen,
     helpCommands,
     activeNotice,
+    /** Opengeni is updating: show the calm reconnecting line, not an error. */
+    serviceUpdating,
+    serviceUpdatingMessage: OPENGENI_UPDATING_NOTICE(t),
     canSubmit,
     submitBlocker,
     submit,
@@ -1525,6 +1545,7 @@ export function Status() {
       <AnimatePresence>
         {controller.activeNotice ? (
           <motion.p
+            key="notice"
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
@@ -1534,6 +1555,21 @@ export function Status() {
             )}
           >
             {controller.activeNotice.message}
+          </motion.p>
+        ) : controller.serviceUpdating ? (
+          <motion.p
+            key="service-updating"
+            data-og-composer-status="updating"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="flex items-center gap-1.5 overflow-hidden px-1 pt-1.5 text-og-control text-og-fg-muted"
+          >
+            <LoaderCircleIcon
+              aria-hidden="true"
+              className="size-3.5 shrink-0 animate-og-spin motion-reduce:animate-none"
+            />
+            <span>{controller.serviceUpdatingMessage}</span>
           </motion.p>
         ) : null}
       </AnimatePresence>
@@ -1568,6 +1604,8 @@ function ComposerAnnouncements() {
         <p role={controller.activeNotice.tone === "error" ? "alert" : "status"}>
           {controller.activeNotice.message}
         </p>
+      ) : controller.serviceUpdating ? (
+        <p role="status">{controller.serviceUpdatingMessage}</p>
       ) : null}
       {controller.draftConflict ? <p role="alert">{controller.messages.draftConflict}</p> : null}
     </div>

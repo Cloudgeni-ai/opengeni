@@ -15,11 +15,13 @@ import {
   type UserMessageItem,
 } from "@opengeni/react/session";
 import {
+  agentWorkHumanInputSummary,
   compactedLandmarkCount,
   durationBetween,
   flattenActivityItems,
   formatClockTime,
   formatRelativeTime,
+  isAgentWorkHumanInput,
   isPreparingWork,
   noticeDisplayText,
   noticeTone,
@@ -60,7 +62,7 @@ import {
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./activity";
 import { Icon } from "./icon";
-import { ReleaseFollowProvider, withAlpha } from "./primitives";
+import { ActivityDisclosure, ReleaseFollowProvider, withAlpha } from "./primitives";
 import { humanInputAnswerLines } from "./secret-field-model";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import {
@@ -876,6 +878,13 @@ function TimelineGroupView({
   }
 }
 
+/** Rows in a turn's work details that stack like tool steps, without a gap. */
+function isWorkRow(group: TimelineGroup | undefined): boolean {
+  return (
+    group?.kind === "activity" || (group?.kind === "item" && isAgentWorkHumanInput(group.item))
+  );
+}
+
 function FoldedGroups({
   groups,
   context,
@@ -889,7 +898,7 @@ function FoldedGroups({
         <View
           key={groupKey(child)}
           style={
-            index > 0 && (child.kind !== "activity" || groups[index - 1]?.kind !== "activity")
+            index > 0 && !(isWorkRow(child) && isWorkRow(groups[index - 1]))
               ? { marginTop: 12 }
               : undefined
           }
@@ -910,7 +919,11 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
     case "agent-message":
       return <AgentMessageRow item={item} context={context} />;
     case "human-input":
-      return <HumanInputRow item={item} onCopy={context.onCopy} />;
+      return isAgentWorkHumanInput(item) ? (
+        <AgentWorkHumanInputRow item={item} />
+      ) : (
+        <HumanInputRow item={item} onCopy={context.onCopy} />
+      );
     case "session-status": {
       const meta = SESSION_STATUS_PRESENTATION(t)[item.blocked ? "blocked" : item.status];
       return (
@@ -1384,6 +1397,73 @@ function AgentMessageRow({ item, context }: { item: AgentMessageItem; context: G
         />
       )}
     </Animated.View>
+  );
+}
+
+/**
+ * A question an agent (such as a sub-session's parent) answered or skipped: one
+ * quiet work row that opens to the full question and answer, as on web.
+ */
+function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const multiple = Math.max(item.questions.length, item.answers.length) > 1;
+  const skipped = item.response.outcome === "skipped";
+  // Host overrides of the outcome copy (`timelineMessages`) still apply here.
+  const byLine = skipped
+    ? (m.humanInputOutcome.agentSkipped ?? m.humanInputOutcome.skipped)
+    : (m.humanInputOutcome.agentAnswered ?? m.humanInputOutcome.answered);
+  const summary = agentWorkHumanInputSummary(item, {
+    answered: t("messageTimeline.answered"),
+    skipped: t("messageTimeline.skipped"),
+    secretSaved: (secret) => m.humanInputSecretSaved(secret.vaultName, secret.itemName),
+  });
+  const answers = humanInputAnswerLines(
+    item.answers,
+    item.response,
+    m.humanInputSecretSaved,
+    multiple,
+  );
+  const text = (color: string, size = theme.size.sm, weight?: 500) => ({
+    ...fontStyle(theme, weight),
+    fontSize: size,
+    lineHeight: size === theme.size.xs ? 16 : 20,
+    color,
+  });
+  return (
+    <ActivityDisclosure
+      icon="message-circle-question"
+      title={t("messageTimeline.asked")}
+      preview={summary}
+      // Screen readers would announce the arrow; speak a plain separator instead.
+      accessibilityLabel={`${t("messageTimeline.asked")}: ${summary.split(" → ").join(": ")}`}
+    >
+      <View style={{ gap: 12 }}>
+        {item.questions.map((question, index) => (
+          <View key={question.id}>
+            {question.label ? (
+              <Text style={text(theme.colors.fg, theme.size.sm, 500)}>
+                {multiple ? `${index + 1}. ` : ""}
+                {question.label}
+              </Text>
+            ) : null}
+            <Text selectable style={text(theme.colors["fg-muted"])}>
+              {!question.label && multiple ? `${index + 1}. ` : ""}
+              {question.prompt}
+            </Text>
+          </View>
+        ))}
+        <View>
+          <Text style={text(theme.colors["fg-subtle"], theme.size.xs, 500)}>{byLine}</Text>
+          {answers.map((line) => (
+            <Text key={line.questionId} selectable style={text(theme.colors.fg)}>
+              {line.text || t("messageTimeline.answered")}
+            </Text>
+          ))}
+        </View>
+      </View>
+    </ActivityDisclosure>
   );
 }
 

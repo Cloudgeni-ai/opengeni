@@ -343,7 +343,9 @@ export {
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
   formatErrorMessage,
+  isMaintenanceError,
   isRetryableStreamError,
+  OPENGENI_MAINTENANCE_ERROR_CODE,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export { isTransientRequestError } from "./read-retry";
@@ -397,6 +399,7 @@ export type {
   SessionProxyMessageInput,
   SessionProxyResolution,
   SessionProxyResolve,
+  SessionProxyRoute,
   SessionProxyToolServer,
 } from "./session-proxy";
 export { ToolRequestError, verifyToolRequest } from "./tool-auth";

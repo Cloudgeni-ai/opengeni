@@ -1,5 +1,32 @@
 # @opengeni/sdk
 
+## 4.8.0
+
+### Minor Changes
+
+- 3089aaf: Stay calm while Opengeni is updating. The SDK now decodes the parked maintenance answer (`{"error":"maintenance"}`) into an `OpenGeniApiError` with `code: "maintenance"`, `retryable: true` and `outcomeUnknown: false`, without a support reference. `isMaintenanceError` and `OPENGENI_MAINTENANCE_ERROR_CODE` are exported, and `isTransientRequestError` treats the marker as transient.
+
+  In the console and embedded chat, an update or brief outage no longer shows red errors, References, a "Queue needs attention" chip or error toasts. The composer shows one line, "Opengeni is updating. We'll reconnect automatically.", keeps a message sent meanwhile in place with the same idempotency key and delivers it once the API answers, and clears on its own. Reads keep retrying for as long as the maintenance marker lasts. Other transient failures stay calm for two minutes; after that, and for any definitive error, the existing error copy appears. At startup, the web, desktop and embedded apps show "Updating" or "Reconnecting" and continue by themselves when the API is back, with Try again as a secondary action.
+
+### Patch Changes
+
+- e2a641c: Muting replies on a run of a schedule that starts a new chat each time now mutes the whole schedule, so later runs stay quiet. The session menu says "Mute this schedule's replies" there, and `SessionInboxMute` carries an optional `scope`.
+- Updated dependencies [85fb89e]
+  - @opengeni/contracts@4.8.0
+  - @opengeni/connect@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- c6499fc: An agent asked to use the person's own Chrome without naming a profile now opens a connected profile on the computer the agent's session runs on, when there is one, instead of the most recently active profile on any computer. The opened profile and the other connected profiles now say which computer each is on, and mark the one the session runs on, so an agent can tell when it landed on another machine and pick a different profile. Discovering attached Chrome profiles shows the same. The attached-browser list gives each bridge's `sandboxId` and `machineName`.
+- a6a1dac: Once an agent uses the native `cua_*` computer tools in a session, `computer_act` and `computer_observe` stop reading elements themselves so the native element tokens stay valid. Their results used to say "The accessibility tree has no readable elements; use the screenshot", which sent agents to pixel clicks on windows full of controls. They now say the session reads elements with `interaction__cua_get_window_state` and to call it, and two such readings are no longer reported as "no element changed". Semantic snapshots carry this as `readByNativeTools: true`.
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+  - @opengeni/contracts@4.7.2
+  - @opengeni/connect@4.7.2
+
 ## 4.7.1
 
 ### Patch Changes

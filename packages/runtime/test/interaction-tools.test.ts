@@ -567,6 +567,121 @@ describe("interaction attempt tools", () => {
     ).toHaveLength(8);
   });
 
+  test("attached Chrome discovery names each profile's and bridge's computer", async () => {
+    const thisMachine = randomUUID();
+    const bridge = (sandboxId: string, machineName: string, connectedProfileCount: number) => ({
+      enrollmentId: randomUUID(),
+      sandboxId,
+      machineName,
+      state: "online" as const,
+      bridgeGeneration: "bridge-1",
+      inventoryRevision: 1,
+      connectedProfileCount,
+      lastSeenAt: now,
+    });
+    const here = bridge(thisMachine, "Mac mini", 1);
+    const there = bridge(randomUUID(), "Laptop", 1);
+    const device = (name: string, enrollmentId: string) => ({
+      id: randomUUID(),
+      accountId,
+      workspaceId,
+      enrollmentId,
+      name,
+      profileLabel: null,
+      browserName: "Google Chrome",
+      browserVersion: "150.0.0.0",
+      extensionVersion: "0.1.4",
+      platform: "macos" as const,
+      architecture: "arm64" as const,
+      state: "connected" as const,
+      connectionGeneration: "connection-1",
+      inventoryRevision: 3,
+      tabCount: 2,
+      capabilities: {
+        tabInventory: true,
+        debuggerAttachment: true,
+        semanticObservation: true,
+        screenshots: true,
+        liveFrames: true,
+        humanInput: true,
+        diagnostics: true,
+        rawCdp: true,
+        linkedComputer: true,
+      },
+      lastSeenAt: now,
+      disconnectedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const discover = async (
+      inventory: { bridges: ReturnType<typeof bridge>[]; devices: ReturnType<typeof device>[] },
+      scope: "attached_browsers" | "workspace",
+    ) => {
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+            listComputerSessions: async () => ({ revision: 1, sessions: [] }),
+            listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+            listAttachedBrowsers: async () => ({ revision: 1, ...inventory }),
+          }),
+          getSession: async () =>
+            ({
+              id: sessionId,
+              sandboxGroupId: randomUUID(),
+              activeSandboxId: thisMachine,
+            }) as never,
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["interaction_discover"],
+        permissions: ["sessions:read"],
+      });
+      return (
+        await definitions[0]!.execute(
+          { scope },
+          { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+        )
+      ).structuredContent;
+    };
+    const mine = device("Personal", here.enrollmentId);
+    const theirs = device("Work", there.enrollmentId);
+    for (const scope of ["attached_browsers", "workspace"] as const) {
+      expect(
+        await discover({ bridges: [here, there], devices: [mine, theirs] }, scope),
+      ).toMatchObject({
+        attachedBrowserBridges: [],
+        attachedBrowsers: [
+          { id: mine.id, name: "Personal", machine: "Mac mini", onThisMachine: true },
+          { id: theirs.id, name: "Work", machine: "Laptop" },
+        ],
+      });
+    }
+    const listed = (await discover(
+      { bridges: [here, there], devices: [mine, theirs] },
+      "attached_browsers",
+    )) as {
+      attachedBrowsers: object[];
+    };
+    expect(listed.attachedBrowsers[1]).not.toHaveProperty("onThisMachine");
+    // A machine ready for the extension says which computer it is.
+    expect(
+      await discover(
+        { bridges: [{ ...here, connectedProfileCount: 0 }], devices: [] },
+        "attached_browsers",
+      ),
+    ).toMatchObject({
+      attachedBrowserBridges: [
+        {
+          enrollmentId: here.enrollmentId,
+          machine: "Mac mini",
+          onThisMachine: true,
+          connectedProfileCount: 0,
+        },
+      ],
+    });
+  });
+
   test("browser_open, computer_open and discovery narrow inventories in the query", async () => {
     const requests: Array<{ kind: string; options: unknown }> = [];
     const record = (kind: string) => async (_workspace: string, options?: unknown) => {
@@ -1736,17 +1851,44 @@ describe("interaction attempt tools", () => {
     const open = async (
       devices: ReturnType<typeof profile>[],
       postSetupCard?: UserSetupCardPoster,
+      machines: {
+        bridges?: Array<{ enrollmentId: string; sandboxId: string | null; machineName: string }>;
+        activeSandboxId?: string | null;
+      } = {},
     ) => {
       let createRequest: Record<string, unknown> | null = null;
       const definitions = createInteractionAttemptToolDefinitions({
-        transport: partialTransport({
-          listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
-          listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices }),
-          createBrowserSession: async (_workspaceId, request) => {
-            createRequest = request as unknown as Record<string, unknown>;
-            return { session: discoveredBrowserSession(randomUUID(), sessionId) } as never;
-          },
-        }),
+        transport: {
+          ...partialTransport({
+            listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+            listAttachedBrowsers: async () => ({
+              revision: 1,
+              bridges: (machines.bridges ?? []).map((bridge) => ({
+                ...bridge,
+                state: "online" as const,
+                bridgeGeneration: "bridge-1",
+                inventoryRevision: 1,
+                connectedProfileCount: 1,
+                lastSeenAt: now,
+              })),
+              devices,
+            }),
+            createBrowserSession: async (_workspaceId, request) => {
+              createRequest = request as unknown as Record<string, unknown>;
+              return { session: discoveredBrowserSession(randomUUID(), sessionId) } as never;
+            },
+          }),
+          ...(machines.activeSandboxId !== undefined
+            ? {
+                getSession: async () =>
+                  ({
+                    id: sessionId,
+                    sandboxGroupId: randomUUID(),
+                    activeSandboxId: machines.activeSandboxId,
+                  }) as never,
+              }
+            : {}),
+        },
         workspaceId,
         sessionId,
         selectedTools: ["browser_open"],
@@ -1785,6 +1927,68 @@ describe("interaction attempt tools", () => {
         attachedProfile: { id: newer.id, name: "Personal" },
         otherAttachedProfiles: [{ id: older.id, name: "Work" }],
       });
+    });
+
+    test("prefers a profile on the computer this session runs on, and says where each is", async () => {
+      const thisMachine = randomUUID();
+      const here = profile("Here", "2026-10-15T09:00:00.000Z");
+      const elsewhere = profile("Elsewhere", "2026-10-15T10:00:00.000Z");
+      const bridges = [
+        { enrollmentId: here.enrollmentId, sandboxId: thisMachine, machineName: "Mac mini" },
+        { enrollmentId: elsewhere.enrollmentId, sandboxId: randomUUID(), machineName: "Laptop" },
+      ];
+      const { result, createRequest } = await open([elsewhere, here], undefined, {
+        bridges,
+        activeSandboxId: thisMachine,
+      });
+      // The other computer's profile is newer, but this computer's comes first.
+      expect(createRequest).toMatchObject({
+        placement: { kind: "attached_device", deviceId: here.id },
+      });
+      expect(result.structuredContent).toMatchObject({
+        attachedProfile: { id: here.id, machine: "Mac mini", onThisMachine: true },
+        otherAttachedProfiles: [{ id: elsewhere.id, machine: "Laptop" }],
+      });
+      expect(
+        (result.structuredContent as { otherAttachedProfiles: object[] }).otherAttachedProfiles[0],
+      ).not.toHaveProperty("onThisMachine");
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain(
+        `Attached Chrome profile: "Here" on "Mac mini" (this session's machine) deviceId ${here.id}`,
+      );
+      expect(text).toContain(
+        `Other attached profiles: "Elsewhere" on "Laptop" deviceId ${elsewhere.id}`,
+      );
+    });
+
+    test("without a profile on this computer, opens the most recent one and names its computer", async () => {
+      const older = profile("Work", "2026-10-15T09:00:00.000Z");
+      const newer = profile("Personal", "2026-10-15T10:00:00.000Z");
+      const bridges = [
+        { enrollmentId: older.enrollmentId, sandboxId: randomUUID(), machineName: "Desktop" },
+        { enrollmentId: newer.enrollmentId, sandboxId: randomUUID(), machineName: "Laptop" },
+      ];
+      // A managed sandbox (no active Connected Machine) and a machine with no
+      // connected profile both fall back to recency.
+      for (const activeSandboxId of [null, randomUUID()]) {
+        const { result, createRequest } = await open([older, newer], undefined, {
+          bridges,
+          activeSandboxId,
+        });
+        expect(createRequest).toMatchObject({
+          placement: { kind: "attached_device", deviceId: newer.id },
+        });
+        expect(result.structuredContent).toMatchObject({
+          attachedProfile: { id: newer.id, machine: "Laptop" },
+          otherAttachedProfiles: [{ id: older.id, machine: "Desktop" }],
+        });
+        expect(
+          (result.structuredContent as { attachedProfile: object }).attachedProfile,
+        ).not.toHaveProperty("onThisMachine");
+        expect((result.content[0] as { text: string }).text).toContain(
+          `Attached Chrome profile: "Personal" on "Laptop" deviceId ${newer.id}`,
+        );
+      }
     });
 
     test("explains how to connect Chrome when no profile is connected", async () => {

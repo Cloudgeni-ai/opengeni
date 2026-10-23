@@ -4377,6 +4377,13 @@ export const StreamTokenPayload = /* @__PURE__ */ defineSchema(() =>
     // can still attach to a fresh channel. Real revocation is the mint refusing
     // to issue new tokens plus the 120 s TTL bounding the old ones.
     authorityEpoch: z.number().int().positive().optional(),
+    // A Connected Machine relay stream binds the token to its exact channel:
+    // the machine (agent) and the stream instance. `workspaceId` is then the
+    // workspace the machine is enrolled in, which is the relay's routing
+    // namespace and can differ from the chat's workspace. Optional for rolling
+    // compatibility: older relays ignore them, provider tunnels omit them.
+    agentId: z.string().min(1).max(256).optional(),
+    channelId: z.string().min(1).max(512).optional(),
   }),
 );
 export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;
@@ -8434,6 +8441,12 @@ export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       archived: z.boolean(),
+      /** Stable for retries of one intent; use a fresh ID for a later intentional archive. */
+      clientEventId: z.string().min(1).max(200).optional(),
+      /** Hiding alone never changes shared execution. Ordinary archive pauses first. */
+      mode: z.enum(["pause_and_archive", "hide_for_me"]).optional(),
+      /** Required when the locked chat tree has active work. Restore never resumes. */
+      confirmPause: z.boolean().optional(),
       expectedVersion: z.number().int().nonnegative().optional(),
     })
     .strict(),
@@ -8724,6 +8737,10 @@ export const SessionRealtimeWebsocketResponse = /* @__PURE__ */ defineSchema(() 
       connectionEpoch: z.number().int().positive(),
       startupFenceSequence: z.number().int().nonnegative(),
       modeVersion: z.number().int().positive(),
+      /**
+       * @deprecated Always empty: the prior conversation travels in the
+       * provider's session instructions. Kept for clients of earlier releases.
+       */
       initialItems: z.array(SessionRealtimeWebsocketInitialItem).max(128),
       instructions: z.string().min(1).max(32_768),
       /**
@@ -10167,6 +10184,8 @@ export function childPausedClassification(
 export const CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES = 8 * 1024;
 /** Bounded first-question preview inside a child_requires_action notice. */
 export const CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES = 512;
+/** Bounded option label inside a child_requires_action question. */
+export const CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES = 128;
 export const CHILD_REQUIRES_ACTION_MAX_REQUESTS = 20;
 export const CHILD_PAUSED_REASON_MAX_BYTES = 2 * 1024;
 export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
@@ -10175,6 +10194,32 @@ const boundedUtf8String = (maxBytes: number) =>
   z.string().refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
     message: `must be at most ${maxBytes} UTF-8 bytes`,
   });
+
+/**
+ * Compact copy of one question of a child's blocking request: enough for the
+ * parent agent to build a valid `session_human_input_respond` answer (question
+ * and option ids) without reading the child's history. Never carries secret
+ * specs, help text, or option descriptions.
+ */
+export const ChildRequiresActionQuestion = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1).max(64),
+    kind: z.string().min(1).max(32),
+    prompt: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
+    required: z.boolean(),
+    options: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(64),
+          label: boundedUtf8String(CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES),
+        }),
+      )
+      .max(20),
+    /** Only a person can answer it (a Skill review); an agent's answer is refused. */
+    humanOnly: z.literal(true).optional(),
+  }),
+);
+export type ChildRequiresActionQuestion = z.infer<typeof ChildRequiresActionQuestion>;
 
 export const ChildRequiresActionRequest = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
@@ -10185,6 +10230,12 @@ export const ChildRequiresActionRequest = /* @__PURE__ */ defineSchema(() =>
       firstQuestion: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
       allowSkip: z.boolean(),
       expiresAt: z.string().nullable(),
+      /**
+       * Every question, compact. Absent on older rows and when the whole
+       * notice would exceed its byte bound; the parent then reads the
+       * child's request itself.
+       */
+      questions: z.array(ChildRequiresActionQuestion).max(20).optional(),
     }),
     z.object({
       kind: z.literal("approval"),
@@ -16261,7 +16312,7 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     title: z.string(),
     /** Root conversations in the group; 0 for a Site with none yet. */
     conversations: z.number().int().nonnegative(),
-    /** Latest activity: its conversations, its own changes, or the viewer opening it. */
+    /** Latest activity: its conversations, its newest published version, or the viewer opening it. */
     updatedAt: z.string().datetime(),
     /** Creation time of the group's newest conversation, else of the Site. */
     createdAt: z.string().datetime(),
@@ -17278,11 +17329,14 @@ export function accessContextHasInbox(
 /**
  * The signed-in person's mute on one session. Muted replies neither reach the
  * inbox nor alert the phone; the agent's notifications, questions and
- * approvals still do.
+ * approvals still do. `scope` is "schedule" when the session is a run of a
+ * schedule that starts a new session per run: the mute then covers every run
+ * of that schedule. Older servers omit it.
  */
 export const SessionInboxMute = /* @__PURE__ */ defineSchema(() =>
   z.object({
     repliesMuted: z.boolean(),
+    scope: z.enum(["session", "schedule"]).optional(),
   }),
 );
 export type SessionInboxMute = z.infer<typeof SessionInboxMute>;
@@ -19538,7 +19592,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // An id that does not name a rig in the workspace is a 422.
       rigId: z.string().uuid().nullable().optional(),
       // The workspace channel to file this session under (rail organization only).
-      // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
+      // Omitted/null ⇒ unfiled (inbox), except that a Site conversation is filed
+      // in its Site's project. An id that does not name a channel in the
       // workspace is a 422.
       channelId: z.string().uuid().nullable().optional(),
       goal: GoalSpec.optional(),
@@ -21427,9 +21482,34 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
     ownerName: z.string().nullable(),
     isOwner: z.boolean(),
     queuedTurnBlocked: z.boolean(),
+    /**
+     * Results from other people's work (their workers' results and agent
+     * messages) waiting because only the machine's owner may start work on
+     * it, grouped by whose work it is. Older servers omit it.
+     */
+    waitingWork: z
+      .array(
+        z.object({
+          /** The person's display name, when known. */
+          name: z.string().nullable(),
+          /** The waiting results come from the caller's own work. */
+          isYou: z.boolean(),
+          results: z.number().int().positive(),
+        }),
+      )
+      .optional(),
   }),
 );
 export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
+
+/** POST /v1/workspaces/:ws/sessions/:id/waiting-work/continue */
+export const ContinueSessionWaitingWorkResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** How many waiting results the agent now continues with under the caller's authority. */
+    continued: z.number().int().nonnegative(),
+  }),
+);
+export type ContinueSessionWaitingWorkResponse = z.infer<typeof ContinueSessionWaitingWorkResponse>;
 
 /** GET /v1/workspaces/:ws/machines; active pointer fields are session-scoped. */
 export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>

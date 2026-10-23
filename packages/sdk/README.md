@@ -91,7 +91,6 @@ export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
     if (!me) return new Response("Unauthorized", { status: 401 });
     return { user: me.id, tenant: me.orgId }; // or { user: me.id }
   },
-  createSession: (input) => input, // let the browser start chats
 });
 ```
 
@@ -192,46 +191,39 @@ The Next adapter passes the full URL, including any `basePath`; the Node
 middleware rebuilds it from `originalUrl`, streams bodies and SSE, and aborts
 the request when the client disconnects.
 
-The chat list (`SessionList` / `OpenGeniChat`) uses `listSessionPage`. By
-default (`sessionList: "mine"`) the proxy adds a creator filter for the
-resolved user server-side, so each user sees only the chats they started;
-`sessionList: "visible"` lists every chat Opengeni lets the user read in the
-workspace, and `false` disables listing. Archive and restore go through
-`updateSessionArchive` unless `archive: false`. That personal archive only hides
-a chat from one member's list. The deployment's idle-session archive is separate:
-it makes long-idle sessions read-only and is reported on `session.retention`.
-Pass `keepLive: true` to `createSession`, or call
+The proxy is a relay: it passes Opengeni's own routes through as the resolved
+user, so the browser can use everything Opengeni lets that user do in that
+workspace (chats and their history, queue, goals, approvals and human input,
+files, artifacts and Sites, voice, schedules, Knowledge) with the same
+requests the Opengeni web app makes. What the user can do is decided by
+Opengeni's permissions, not by a list in the proxy; what the user sees is
+decided by your UI (component props and presets). The chat list
+(`SessionList` / `OpenGeniChat`) shows every root chat Opengeni lets the user
+read; `listProps={{ mineOnly: true }}` narrows it to the user's own chats.
+`listProps={{ archive: false }}` and `newChat={false}` hide "Hide for me" and
+"New chat". That personal archive only hides a chat from one member's list.
+The deployment's idle-session archive is separate: it makes long-idle sessions
+read-only and is reported on `session.retention`. Pass `keepLive: true` to
+`createSession`, or call
 `updateSessionRetention(workspaceId, sessionId, { keepLive: true })`, to keep a
-persistent agent's session out of it. A "New chat" in `OpenGeniChat`
-sends `{ initialMessage, idempotencyKey }` plus any attached file `resources`
-and, unless `modelSelection: false`, the user's explicit model choices, so it
-needs the `createSession` hook. The hook sees them as input; the proxy adds the
-files and applies those choices to the request the hook returns. Voice input
-(`POST .../transcriptions`) is forwarded as the resolved user unless
-`voiceInput: false`. The client config the proxy serves reports what it can do:
-`sessionCreation` (a `createSession` hook exists), `archive`, and `artifacts`
-(`false` unless `artifacts: true`). The stock UI hides "New chat" and
-"Archive" when they are off, shows Site previews as unavailable without a
-request, and shows the composer microphone only when `voiceInput.available`.
+persistent agent's session out of it.
 
 Composer uploads are refused for anonymous visitors: return `visitor: true`
 from `resolve` for a user your product has not signed in (for example a
 website visitor keyed by a cookie), and the proxy reports file uploads off and
 refuses the upload routes unless `visitorUploads: true`. Agent-produced media
-still loads under `files`.
+still loads.
 
-Live voice (speech-to-speech) is forwarded the same way unless
-`realtimeVoice: false`. The stock conversation shows its voice button only when
-you opt in, with `realtimeVoice: true` here (reported in the client config) or
-the component's `realtimeVoice` prop. The proxy forwards the workspace's voice model catalog and the call routes
-under `.../sessions/{id}/realtime` (start, provider connect, heartbeat,
-activate, transcript sync, end). Opengeni still checks the user's
-`sessions:control` permission, binds the call to that user and browser, runs
-spoken requests as steers of the same chat, and meters deployment-funded voice
-against your credits. `authorizeSession` runs on every call route, and
-`beforeForwardMessage` sees `delivery: "realtime"` when a call starts (refuse
-it, or return `mcpCredentialUpdates`; the proxy also refreshes the `toolServer`
-token) and before transcripts and spoken requests are saved (refuse them, or add
+Live voice (speech-to-speech) and voice input are Opengeni routes like any
+other. The stock conversation shows its voice button only when you opt in with
+the component's `realtimeVoice` prop, and its microphone unless `voiceInput` is
+`false`. Opengeni still checks the user's `sessions:control` permission, binds
+a call to that user and browser, runs spoken requests as steers of the same
+chat, and meters deployment-funded voice against your credits.
+`authorizeSession` runs on every call route, and `beforeForwardMessage` sees
+`delivery: "realtime"` when a call starts (refuse it, or return
+`mcpCredentialUpdates`; the proxy also refreshes the `toolServer` token) and
+before transcripts and spoken requests are saved (refuse them, or add
 `modelContext`, which must be the same when a request is retried).
 
 `listSessionPage` includes personal pinned details by default. A caller with a
@@ -250,33 +242,56 @@ explicitly rather than returning an unfiltered result.
 
 Every request calls `resolve`, then runs through `asUser(user, { source })`
 (there is no service-authority fallback) against exactly the resolved
-workspace. Only the native routes `OpenGeniProvider` and the conversation use
-are served: client config; workspace read, model catalog, live control stream,
-and workspace Resume; session read/rename, events (list and SSE with
-`Last-Event-ID` resume), send/steer/approval/human-input, queue, composer
-draft, pause/resume, and the session goal (read; pause/resume, forwarding only
-`{ status: "paused" | "active" }`; and clear, the proxy's only `DELETE`); and, unless `files: false`, attachment upload and download
-URLs plus the media the session produced (generated images and video,
-published files, and browser or computer screenshots). Workspace-level
-artifact reads (`artifacts/:id/content` with `Range`, `artifacts/:id/playback-source`)
-must name their session in `x-opengeni-session-id`; the proxy runs
-`authorizeSession` and forwards only an artifact Opengeni proves that session
-produced. Every other route or method is a 404 (cancel and workspace Pause are
-refused); unknown query parameters on served reads pass through. Browser session creation is disabled
-unless you supply `createSession`; the browser may then send only
-`initialMessage` and `idempotencyKey`, and your hook returns the full request
-(tools, MCP servers, Skills, instructions, model policy). Message bodies are
-capped by `maxBodyBytes` (1 MiB), cannot rotate MCP credentials or attach
-anything but files, and `modelSelection: false` strips per-message model
-choices. `authorizeSession(sessionId, context)` adds a product-level session
-check on top of Opengeni's own membership and visibility checks. Without
-`authorizeMutation`, only cross-site (`Sec-Fetch-Site`) mutations are refused,
-so cookie-authenticated hosts should pass their CSRF check.
+workspace:
+
+- **Inside the workspace** (`/v1/workspaces/{workspaceId}/...`), every route
+  and method is forwarded as the user, with its query string, streaming body,
+  and the request headers Opengeni reads (`Accept`, `Content-Type`, `Range`,
+  `Last-Event-ID`, conditional headers, `x-opengeni-session-id`, correlation
+  and chunked-upload headers). Responses keep Opengeni's status, error
+  envelope, and content headers; SSE streams get heartbeats. A path naming
+  another workspace is a 403.
+- **Outside it**, only the bootstrap reads answer, for this workspace alone:
+  `GET /v1/workspaces` (just the resolved workspace), `GET /v1/access/me` (the
+  user's effective grant here, never their other workspaces or the key's
+  authority), and `GET /v1/config/client`. Everything else is a 404.
+- **What narrows it:** an `asUser` request holds only the permissions both the
+  organization key and the user's membership hold, so a key or member role
+  without `files:write`, `schedules:*` or `sessions:control` cannot upload,
+  schedule or pause. `refuse(route, context)` keeps routes closed that
+  Opengeni would allow (return `true` for a 404 or your own `Response`;
+  `route` is `{ method, segments, sessionId }` with the segments after
+  `/v1/workspaces/{workspaceId}`). `authorizeSession(sessionId, context)` adds
+  a product-level check for every `sessions/{id}/...` route and every request
+  naming a chat in `x-opengeni-session-id`.
+- **Server-owned chat setup:** with `createSession`, the browser may send only
+  `initialMessage`, `idempotencyKey`, attached files, explicit model choices,
+  and a few UI fields; your hook returns the full request (tools, MCP servers,
+  Skills, instructions, model policy), and the proxy refuses the routes that
+  would change that setup afterwards (a chat's agent, tool policy, Skills,
+  variable sets, usage limit, visibility, active sandbox and Codex account,
+  forks, and `chat/completions`). Without the hook, the browser creates chats
+  with Opengeni's own request, limited by the user's permissions, with `chats`
+  defaults filling what it leaves out. MCP credential rotation and archived
+  history import (`session-imports`) from the browser are always refused.
+- **Messages** (send, steer, draft submit, realtime) pass through
+  `beforeForwardMessage`; `modelSelection: false` strips per-message model
+  choices, and bodies are capped by `maxBodyBytes` (1 MiB).
+- **Mutations:** without `authorizeMutation`, cross-site (`Sec-Fetch-Site`)
+  requests and the content types a cross-site form can send (`text/plain`,
+  `application/x-www-form-urlencoded`) are refused, so cookie-authenticated
+  hosts should pass their CSRF check.
+
+The client config the proxy serves is Opengeni's for this workspace and user,
+plus the resolved `workspaceId`, the SDK's own `apiContractRevision`, the
+artifact viewer's `artifacts` capability (the editor's live socket and this
+user's cache partition), file uploads off for visitors, and `modelSelection`
+when you set it. Task usage limits stay server-side.
 
 ### Your own tools, as the signed-in user
 
-`toolServer` attaches your product's MCP endpoint to every session the
-`createSession` hook creates, with a short-lived token for the user `resolve`
+`toolServer` attaches your product's MCP endpoint to every session created
+through the proxy, with a short-lived token for the user `resolve`
 authenticated. The proxy refreshes it on every send, steer, submit, approval,
 and human-input answer. Your endpoint, built with any MCP library, verifies it:
 
@@ -1358,6 +1373,26 @@ const client = new OpenGeniClient({
 
 `isTransientRequestError(error)` reports whether an error is this kind of
 transient failure, for callers that keep their own longer retry loop.
+
+While a deployment is parked for an update, the API answers every request with
+`{"error":"maintenance"}` (normally HTTP 503). The client decodes it into an
+`OpenGeniApiError` with `code: "maintenance"` (`OPENGENI_MAINTENANCE_ERROR_CODE`),
+`retryable: true` and `outcomeUnknown: false`: nothing ran, so a mutation can be
+retried with the same idempotency key. Its message carries no support
+reference. `isMaintenanceError(error)` detects it, and `isTransientRequestError`
+treats it as transient. A park can last minutes, so keep retrying it at a calm
+pace rather than reporting a failure.
+
+```ts
+import { isMaintenanceError } from "@opengeni/sdk";
+
+try {
+  await client.sendMessage(workspaceId, sessionId, { text, clientEventId });
+} catch (error) {
+  if (isMaintenanceError(error)) showUpdating(); // retry later with the same clientEventId
+  else throw error;
+}
+```
 
 ## Streaming guarantees
 

@@ -17,7 +17,16 @@ export interface NativeTimelineMessages {
   showLess: string;
   loadingEarlier: string;
   messageNotSent: string;
-  humanInputOutcome: { answered: string; skipped: string; expired: string; cancelled: string };
+  humanInputOutcome: {
+    answered: string;
+    /** An agent answered (for example the parent of a sub-session); defaults to `answered`. */
+    agentAnswered?: string;
+    /** An agent skipped the question; defaults to `skipped`. */
+    agentSkipped?: string;
+    skipped: string;
+    expired: string;
+    cancelled: string;
+  };
   /** An answered secret question: where the value was saved, never the value. */
   humanInputSecretSaved: (vaultName: string, itemName: string) => string;
   working: string;
@@ -110,6 +119,8 @@ export const defaultNativeTimelineMessages = (t: OpenGeniText): NativeTimelineMe
   messageNotSent: t("native.timeline.messages.messageNotSent"),
   humanInputOutcome: {
     answered: t("native.timeline.messages.youAnswered"),
+    agentAnswered: t("native.timeline.messages.agentAnswered"),
+    agentSkipped: t("native.timeline.messages.agentSkipped"),
     skipped: t("native.timeline.messages.skipped"),
     expired: t("native.timeline.messages.expired"),
     cancelled: t("native.timeline.messages.cancelled"),

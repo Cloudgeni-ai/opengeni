@@ -284,7 +284,12 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
     const response = await send(app, f);
     expect(response.status).toBe(202);
     const event = (await response.json()) as SessionEvent;
-    expect(event.payload).toEqual(f.event.payload);
+    // A person's human-input answer records who answered it.
+    expect(event.payload).toEqual(
+      type === "user.humanInputResponse"
+        ? { ...f.event.payload, respondedByKind: "human" }
+        : f.event.payload,
+    );
     expect(signals).toEqual([2]);
     const server = await stored(f);
     expect(server).toMatchObject({

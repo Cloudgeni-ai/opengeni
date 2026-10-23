@@ -67,12 +67,22 @@ type Operation = {
   args: Record<string, unknown>;
   /** The value a date field must read once this step's input has run. */
   expectDate?: { ref: string; value: string; segments: readonly DateSegment[] };
+  /** A text field's value before set_value wrote this one: a field that
+   * still reads it afterwards did not take the write. */
+  expectText?: { ref: string; value: string; before: string };
+  /** This step only fills a field (a part of a date field's input), so it
+   * cannot submit or clear another field. */
+  fillsField?: true;
 };
 
 /** Every CUA action waits for the agent cursor to reach its target, and the
  * default timing makes each move take at least 600 ms. Keep the cursor visible
  * but quick, without a pause after each click. */
 const CURSOR_MOTION = { timing: "fixed", glide_duration_ms: 150, dwell_after_click_ms: 0 };
+
+/** How long a field check waits before reading a window again, when the
+ * reading straight after the input does not show it yet. */
+const INPUT_REREAD_MS = 150;
 
 /** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
@@ -356,8 +366,33 @@ export class CuaComputerBackend implements ComputerBackend {
           throw error;
         }
       }
-      return await this.observeAfter(command.targetId, acted, known, report);
+      const after = await this.observeAfter(command.targetId, acted, known, report);
+      if (after?.target.id !== command.targetId) return after;
+      const confirmed = await this.confirmInput(after, operations);
+      if (confirmed.failures.length)
+        throw new ComputerBackendError(
+          "driver_failed",
+          `The value was written, but ${confirmed.failures.join("; ")}`,
+          false,
+          true,
+        );
+      return confirmed.after;
     });
+  }
+
+  /** The checks of `steps` a reading after their input fails, read once more
+   * a moment later before any counts: an app's accessibility tree can show a
+   * write a little after it took. */
+  private async confirmInput(
+    after: ComputerBackendObservation,
+    steps: readonly Operation[],
+  ): Promise<{ after: ComputerBackendObservation; failures: string[] }> {
+    const failures = inputFailures(after, steps);
+    if (!failures.length) return { after, failures };
+    await new Promise((resolve) => setTimeout(resolve, INPUT_REREAD_MS));
+    const again = await this.observeTarget(after.target.id).catch(() => null);
+    if (again?.target.id !== after.target.id) return { after, failures };
+    return { after: again, failures: inputFailures(again, steps) };
   }
 
   /** The window an action left in front: the one CUA reports it opened, or
@@ -501,10 +536,26 @@ export class CuaComputerBackend implements ComputerBackend {
     }
     if (!stopped) {
       const after = await this.observeAfter(command.targetId, acted, known, report);
-      if (after?.target.id === command.targetId)
-        for (const step of steps)
-          if (step.expectDate) checkDateField(after, step.expectDate, single);
-      return after;
+      if (after?.target.id !== command.targetId) return after;
+      const { after: confirmed, failures } = await this.confirmInput(after, steps);
+      if (failures.length) {
+        const count = command.action.type === "batch" ? command.action.actions.length : 1;
+        const failure = new ComputerBackendError(
+          "driver_failed",
+          `${single ? "The keys were typed" : `All ${count} actions of the batch ran`}, but ${failures.join("; ")}`,
+          false,
+          true,
+        );
+        // Every action ran: the batch reports its last one as the one
+        // whose outcome is unknown, never later actions as not run.
+        if (!single && count > 1)
+          failure.details = {
+            batchActionsCompleted: count - 1,
+            batchStoppedActionState: "outcome_unknown",
+          };
+        throw failure;
+      }
+      return confirmed;
     }
     const { step, outcome } = stopped;
     const action = actionOf[step]!;
@@ -1110,18 +1161,20 @@ export class CuaComputerBackend implements ComputerBackend {
     const key = (name: "left" | "right"): Operation => ({
       name: "press_key",
       args: { ...args, key: name, modifiers: [], delivery_mode },
+      fillsField: true,
     });
     const input: Operation[] = [
       {
         name: "click",
         args: { ...args, element_token: token, button: "left", delivery_mode: "background" },
+        fillsField: true,
       },
     ];
     texts.forEach((text, index) => {
       if (texts.length > 1)
         for (let step = 0; step < texts.length - 1; step++) input.push(key("left"));
       for (let step = 0; step < index; step++) input.push(key("right"));
-      input.push({ name: "type_text", args: { ...args, text, delivery_mode } });
+      input.push({ name: "type_text", args: { ...args, text, delivery_mode }, fillsField: true });
     });
     return input;
   }
@@ -1445,6 +1498,16 @@ export class CuaComputerBackend implements ComputerBackend {
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
+            ...(node.role === "textbox" &&
+            (node.value === undefined || typeof node.value === "string")
+              ? {
+                  expectText: {
+                    ref: node.ref,
+                    value: String(action.value),
+                    before: node.value ?? "",
+                  },
+                }
+              : {}),
           },
         ];
       }
@@ -1881,39 +1944,72 @@ async function readPermissions(
   };
 }
 
-/** A date field filled by typing its parts reads the value it was given, or
- * the failure says what it reads instead. The input ran either way, so the
- * failure is not a refusal. A field the reading no longer shows is left to
- * the caller's own look. */
-function checkDateField(
+/** What the input a set of steps sent did not do, read from the window
+ * afterwards: a date field that reads another value than the one typed into
+ * its parts, a text field that still reads what it did before set_value.
+ * The input ran either way, so these are not refusals. A date field Chrome
+ * left without a value reads what its parts read (see projectElements). A
+ * field the reading no longer shows is left to the caller's own look. */
+function inputFailures(
   observation: ComputerBackendObservation,
-  expected: { ref: string; value: string; segments: readonly DateSegment[] },
-  single: boolean,
-): void {
-  const node = observation.roots.find((candidate) => candidate.ref === expected.ref);
-  if (!node || (node.value !== undefined && typeof node.value !== "string")) return;
-  const reads = typeof node.value === "string" ? node.value : "";
-  const want = parseDateValue(expected.value);
-  const got = parseDateValue(reads);
-  const zeroed = (segment: DateSegment) => segment === "seconds" || segment === "milliseconds";
-  const same =
-    want !== null &&
-    got !== null &&
-    expected.segments.every(
-      (segment) =>
-        segment === "meridiem" ||
-        (want[segment] ?? (zeroed(segment) ? 0 : undefined)) ===
-          (got[segment] ?? (zeroed(segment) ? 0 : undefined)),
-    );
-  if (same) return;
-  throw new ComputerBackendError(
-    "driver_failed",
-    `${single ? "The keys were typed" : "The batch ran"}, but the date field ${expected.ref} reads ${
-      reads ? `"${reads.slice(0, 64)}"` : "empty"
-    } instead of the value it was given; observe it and set its value again`,
-    false,
-    true,
-  );
+  steps: readonly Operation[],
+): string[] {
+  const failures: string[] = [];
+  const read = (ref: string) => {
+    const node = observation.roots.find((candidate) => candidate.ref === ref);
+    return node && (node.value === undefined || typeof node.value === "string")
+      ? { found: true as const, value: node.value }
+      : { found: false as const };
+  };
+  for (const [index, step] of steps.entries()) {
+    if (step.expectDate) {
+      const expected = step.expectDate;
+      const reading = read(expected.ref);
+      if (!reading.found) continue;
+      const reads = reading.value ?? "";
+      const want = parseDateValue(expected.value);
+      const got = parseDateValue(reads);
+      const zeroed = (segment: DateSegment) => segment === "seconds" || segment === "milliseconds";
+      const same =
+        want !== null &&
+        got !== null &&
+        expected.segments.every(
+          (segment) =>
+            segment === "meridiem" ||
+            (want[segment] ?? (zeroed(segment) ? 0 : undefined)) ===
+              (got[segment] ?? (zeroed(segment) ? 0 : undefined)),
+        );
+      if (!same)
+        failures.push(
+          `the date field ${expected.ref} reads ${
+            reads ? `"${reads.slice(0, 64)}"` : "empty"
+          } instead of the value it was given; observe it and set its value again`,
+        );
+    }
+    if (step.expectText) {
+      const expected = step.expectText;
+      // A later step that may submit the form or clear the field (Enter in
+      // a message box, a click on Send) leaves its reading saying nothing
+      // about this write.
+      if (
+        steps
+          .slice(index + 1)
+          .some((later) => later.name !== "set_value" && later.fillsField !== true)
+      )
+        continue;
+      const reading = read(expected.ref);
+      if (!reading.found) continue;
+      const now = reading.value ?? "";
+      // The value is not repeated: it may be a secret typed at dispatch.
+      if (now === expected.before && now !== expected.value)
+        failures.push(
+          `the text field ${expected.ref} still reads ${
+            now ? `"${now.slice(0, 64)}"` : "empty"
+          }: the app did not take the value; invoke the field and type the text instead`,
+        );
+    }
+  }
+  return failures;
 }
 
 function unsupported(message: string): ComputerBackendError {

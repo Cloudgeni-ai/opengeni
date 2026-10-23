@@ -272,6 +272,60 @@ export function dateFieldFormat(segments: readonly DateSegment[]): string {
   return date && time ? `${date}T${time}` : date || time;
 }
 
+/**
+ * The ISO value a date or time field's parts read, in the parts' order, or
+ * null when a part reads no number (an empty part reads its placeholder,
+ * "dd" or "--") or the date reads zero. Chrome on macOS does not always
+ * give the field itself a value: it may update only the parts (or only the
+ * field) after typing.
+ */
+export function dateFieldValueFromParts(
+  segments: readonly DateSegment[],
+  values: readonly unknown[],
+): string | null {
+  if (values.length !== segments.length) return null;
+  const parts: DateParts = {};
+  let pm: boolean | null = null;
+  for (const [index, segment] of segments.entries()) {
+    const text = String(values[index] ?? "").trim();
+    if (segment === "meridiem") {
+      if (/^p/iu.test(text)) pm = true;
+      else if (/^a/iu.test(text)) pm = false;
+      else return null;
+      continue;
+    }
+    if (!/^\d{1,6}$/u.test(text)) return null;
+    parts[segment] = Number(text);
+  }
+  // A time of 00:00 is a time; a date of all zeros is not a date.
+  const dateParts = (["year", "month", "day", "week"] as const)
+    .filter((segment) => parts[segment] !== undefined)
+    .map((segment) => parts[segment]);
+  if (dateParts.length > 0 && dateParts.every((part) => part === 0)) return null;
+  if (pm !== null) {
+    if (parts.hours === undefined || parts.hours < 1 || parts.hours > 12) return null;
+    parts.hours = (parts.hours % 12) + (pm ? 12 : 0);
+  }
+  const pad = (part: number | undefined, width: number) => String(part).padStart(width, "0");
+  const has = (segment: DateSegment) => segments.includes(segment);
+  const date = has("week")
+    ? `${pad(parts.year, 4)}-W${pad(parts.week, 2)}`
+    : has("day")
+      ? `${pad(parts.year, 4)}-${pad(parts.month, 2)}-${pad(parts.day, 2)}`
+      : has("month")
+        ? `${pad(parts.year, 4)}-${pad(parts.month, 2)}`
+        : has("year")
+          ? pad(parts.year, 4)
+          : "";
+  const time = has("hours")
+    ? `${pad(parts.hours, 2)}:${pad(parts.minutes, 2)}${
+        has("seconds") ? `:${pad(parts.seconds, 2)}` : ""
+      }${has("milliseconds") ? `.${pad(parts.milliseconds, 3)}` : ""}`
+    : "";
+  const value = date && time ? `${date}T${time}` : date || time;
+  return value && !value.includes("undefined") && parseDateValue(value) ? value : null;
+}
+
 type DateParts = Partial<Record<Exclude<DateSegment, "meridiem">, number>>;
 
 /** The parts of an ISO date, time, month, week or local date-time, or null. */
@@ -366,7 +420,9 @@ export function projectElements(
       : allElements;
   const webContent = platform === "macos" ? webContentIndexes(allElements) : new Set<number>();
   const typedFields =
-    platform === "macos" ? dateFields(allElements, webContent) : new Map<number, unknown>();
+    platform === "macos"
+      ? dateFields(allElements, webContent)
+      : new Map<number, { segments: DateSegment[]; parts: number[] }>();
   // CUA may omit non-actionable parents. A flat, bounded forest preserves every
   // returned node without inventing ancestry or dropping orphaned children.
   return elements.map((element) => {
@@ -424,6 +480,16 @@ export function projectElements(
       (text) => text !== label && text !== String(element.value ?? ""),
     );
     const containedText = contained.length > 0 ? contained.join(" | ").slice(0, 8_192) : undefined;
+    // A web date or time field Chrome left without a value reads what its
+    // parts read.
+    const typed = typedFields.get(element.element_index);
+    const value =
+      typed && (element.value === undefined || String(element.value).trim() === "")
+        ? (dateFieldValueFromParts(
+            typed.segments,
+            typed.parts.map((part) => byIndex.get(part)?.value),
+          ) ?? element.value)
+        : element.value;
     return {
       ref: element.element_token ?? `read-only:${element.element_index}`,
       // Desktop labels and values can be whole documents (an editor's text
@@ -438,8 +504,8 @@ export function projectElements(
       ...(label && containedText && !protectedReason ? { description: containedText } : {}),
       ...(protectedReason
         ? { value: { redacted: true as const, reason: protectedReason } }
-        : element.value !== undefined
-          ? { value: String(element.value).slice(0, 32_768) }
+        : value !== undefined
+          ? { value: String(value).slice(0, 32_768) }
           : {}),
       states: [
         ...(element.enabled === false ? ["disabled"] : []),

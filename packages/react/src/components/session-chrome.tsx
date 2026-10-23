@@ -89,6 +89,7 @@ import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-c
 import { TimelineAnnotationsChip, type TimelineAnnotationLike } from "./timeline-annotations";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { useCalmServiceFailure } from "../lib/use-calm-service-failure";
 
 export type SessionChromeSignalId =
   | "incoming"
@@ -473,6 +474,11 @@ function SessionChromeView({
 }: SessionChromeProps) {
   const t = useOpenGeniText();
   const formatError = useErrorMessage();
+  // A queue read failing while Opengeni updates is not a queue problem: the
+  // hook keeps retrying and the last queue stays on screen. Only a failure
+  // that outlasts a normal update (or a definitive one) needs attention.
+  const queueLoadCalm = useCalmServiceFailure(queue.error);
+  const queueLoadError = queueLoadCalm ? null : queue.error;
   const [activityRequested, setActivityOpen] = useState(
     Boolean(defaultActive && ["incoming", "agents", "commands"].includes(defaultActive)),
   );
@@ -610,7 +616,7 @@ function SessionChromeView({
       });
     }
     const queuedCount = queuedTurns.length + optimisticQueued.length;
-    const queueProblem = queue.mutationError ?? queue.error;
+    const queueProblem = queue.mutationError ?? queueLoadError;
     if (queuedCount > 0 || queueProblem) {
       const presentations = queuedTurns.map((turn) => queuedTurnPresentation(t, turn));
       const first = presentations[0];
@@ -704,7 +710,7 @@ function SessionChromeView({
     goalState,
     incoming,
     optimisticQueued,
-    queue.error,
+    queueLoadError,
     queue.mutationError,
     queuedTurns,
     record,
@@ -832,7 +838,7 @@ function SessionChromeView({
   const latestOptimisticQueued = optimisticQueued[optimisticQueued.length - 1];
   const latestQueuedTurn = queuedTurns[queuedTurns.length - 1];
   const queuePeek: { text: string | null; turnId: string | null } | null =
-    queue.error || queue.mutationError
+    queueLoadError || queue.mutationError
       ? null
       : latestOptimisticQueued
         ? { text: latestOptimisticQueued.text.trim() || null, turnId: null }
@@ -860,7 +866,7 @@ function SessionChromeView({
       <QueuePanel
         turns={queuedTurns}
         optimistic={optimisticQueued}
-        loadError={queue.error}
+        loadError={queueLoadError}
         mutationError={queue.mutationError}
         onRefresh={queue.refresh}
         onClearMutationError={queue.clearMutationError}
@@ -1088,7 +1094,7 @@ function SessionChromeView({
                               ? t("sessionChrome.running")
                               : signal.label
                             : signal.id === "queue"
-                              ? queue.error || queue.mutationError
+                              ? queueLoadError || queue.mutationError
                                 ? signal.label
                                 : t("sessionChrome.queuedCount", {
                                     count: queuedTurns.length + optimisticQueued.length,

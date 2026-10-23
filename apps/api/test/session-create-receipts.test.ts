@@ -405,6 +405,85 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     expect((await durableCounts(grant.workspaceId, sessionId)).workspaceSessions).toBe(2);
   }, 60_000);
 
+  test("files a new Site conversation in the project of the chat that created the Site", async () => {
+    if (!available) return;
+    const userId = crypto.randomUUID();
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Site project owner",
+    });
+    const grant = {
+      ...access.workspaceGrants.find(
+        (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+      )!,
+      principalKind: "human_session" as const,
+    };
+    const workflow = new FakeWorkflowClient();
+    const settings = testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
+    const project = await createChannel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "UI/UX",
+    });
+    const other = await createChannel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "Bugfixes",
+    });
+    const context = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: grant.subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    };
+    const create = (payload: Record<string, unknown>) =>
+      createSessionForRequestWithOutcome(
+        buildDeps(workflow, settings),
+        grant,
+        grant.workspaceId,
+        {
+          model: "scripted-model",
+          sandboxBackend: "none",
+          idempotencyKey: crypto.randomUUID(),
+          ...payload,
+        } as Parameters<typeof createSessionForRequestWithOutcome>[3],
+        context,
+      );
+    const chat = await create({ initialMessage: "Build the audit", channelId: project.id });
+    expect(chat.session.channelId).toBe(project.id);
+    // The chat publishes the Site.
+    const [site] = await shared!.admin<{ id: string }[]>`
+      insert into workspace_artifacts (account_id, workspace_id, slug, title, created_by_subject_id)
+      values (${grant.accountId}, ${grant.workspaceId}, 'project-test', 'Audit', ${grant.subjectId}) returning id`;
+    const version = await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      const [row] = await tx<{ id: string }[]>`
+        insert into workspace_artifact_versions (account_id, workspace_id, artifact_id, revision,
+          content_key, size_bytes, operation_key, source_session_id, source_turn_id,
+          source_attempt_id, source_execution_generation, created_by_subject_id)
+        values (${grant.accountId}, ${grant.workspaceId}, ${site!.id}, 1, 'synthetic.html', 1,
+          ${crypto.randomUUID()}, ${chat.session.id}, ${crypto.randomUUID()},
+          ${crypto.randomUUID()}, 1, ${grant.subjectId}) returning id`;
+      return row!;
+    });
+    const origin = await resolveSiteSessionOrigin(client.db, grant, site!.id, version.id);
+    // The console's Site panel names no project.
+    const asked = await withSiteSessionOrigin(origin!, () =>
+      create({ initialMessage: "Hello test", visibility: "private" }),
+    );
+    expect(asked.session.channelId).toBe(project.id);
+    expect((await getSession(client.db, grant.workspaceId, asked.session.id))!.channelId).toBe(
+      project.id,
+    );
+    // A project the caller names still wins.
+    const filed = await withSiteSessionOrigin(origin!, () =>
+      create({ initialMessage: "File it here", visibility: "private", channelId: other.id }),
+    );
+    expect(filed.session.channelId).toBe(other.id);
+  }, 60_000);
+
   test("MCP project selection files a new session and survives keyed replay", async () => {
     if (!available) return;
     const grant = await freshGrant();

@@ -15,6 +15,7 @@ import {
   type TimelineAnnotation,
 } from "@opengeni/sdk";
 import fleetDecisionItem from "./fleet-decision-projection";
+import { isAgentWorkHumanInput } from "./agent-work-human-input";
 import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
 import { learningRefusalText } from "./learning-refusal-copy";
 import {
@@ -630,7 +631,8 @@ export function buildTimeline(
         // A structured answer resumes the frozen tool call rather than adding a
         // synthetic user.message to model history. Keep the original question
         // and the resolved human choice together as first-class chat history;
-        // neither belongs behind the generic activity fold.
+        // neither belongs behind the generic activity fold. An agent's answer
+        // is the exception: readable turns fold it into work.
         const item = humanInputItemFromResponse(event, payload, humanInputRequests);
         if (!item) break;
         closeStreamingTail();
@@ -2038,6 +2040,7 @@ function humanInputItemFromResponse(
     questions,
     response: normalizedResponse,
     answers,
+    answeredByAgent: payload.respondedByKind === "agent_attempt",
     occurredAt: event.occurredAt,
   };
 }
@@ -2586,6 +2589,10 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
       const group = turns.get(currentTurn);
       if (group?.work) group.work.details.push({ kind: "item", item });
       else groups.push({ kind: "item", item });
+    } else if (isAgentWorkHumanInput(item)) {
+      // A question an agent answered or skipped is agent work, like a tool
+      // call: it folds into its turn's work details, never the person's side.
+      workForTurn().work!.details.push({ kind: "item", item });
     } else {
       const current = turns.get(currentTurn)?.work;
       // A live approval wait is carried by the turn header ("Waiting for you")

@@ -32,6 +32,8 @@ const inboxTriggerTailMigrations = [
   "0677_local_human_inbox_recipient.sql",
   // Compiles SQL bodies against 0661's session person resolver.
   "0678_inbox_mute_session_replies.sql",
+  // Extends 0678's mute table and functions.
+  "0915_inbox_mute_scheduled_runs.sql",
 ];
 const withheldMigrations = [
   migration,
@@ -122,6 +124,8 @@ const withheldMigrations = [
   "0836_cheaper_session_write_fences.sql",
   // Patches the receipt/context fences and compatibility readers withheld above.
   "0843_indexed_inbox_lineage.sql",
+  // Patches the inbox fence created by withheld 0608 (as 0843 rewrites it).
+  "0917_continue_waiting_work.sql",
   "0846_independent_session_titles.sql",
   // Usage history routines live in the subscription schema the withheld 0688
   // creates; the seed reads them. Replay both after it.

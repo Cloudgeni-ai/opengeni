@@ -9163,6 +9163,11 @@ export const sessionSystemUpdates = pgTable(
     deliveredHistoryItemId: uuid("delivered_history_item_id"),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // The personal machine's owner let this informational update from someone
+    // else's work continue under the owner's receiving context (0916). Set
+    // only by continue_session_waiting_work; the producer receipt is unchanged.
+    continuedBySubjectId: text("continued_by_subject_id"),
+    continuedAt: timestamp("continued_at", { withTimezone: true }),
   },
   (table) => ({
     kindValid: check(
@@ -10082,6 +10087,9 @@ export const sessionHistoryItems = pgTable(
     // Receipt proofs page newest-first within one turn, not the whole session.
     turnPositionIdx: index("session_history_items_turn_position_idx")
       .on(table.turnId, table.position)
+      .where(sql`${table.turnId} IS NOT NULL`),
+    scopeTurnPositionIdx: index("session_history_items_scope_turn_position_idx")
+      .on(table.workspaceId, table.sessionId, table.turnId, table.position)
       .where(sql`${table.turnId} IS NOT NULL`),
   }),
 );

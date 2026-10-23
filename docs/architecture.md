@@ -738,7 +738,10 @@ machine-continuation anchor when needed, without changing canonical roles/conten
 exception text stays structural.
 
 Model admission overlaps pooled metadata, preserving authority;
-transaction handles stay serial. Enums remain additive within major releases;
+transaction handles stay serial. Public connection and custom-model metadata
+share a short scope through `packages/db/src/workspace-model-catalog-inputs.ts`;
+default selection and fresh admission still read independently, outside provider
+discovery and credential I/O. Enums remain additive within major releases;
 parity tests pin mirrors.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
@@ -2460,6 +2463,11 @@ Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
 entries. Browsing never executes Sites or wakes compute.
+Source provenance batches canonical session-authorization facts within each
+bounded projection window, retaining the same per-session host decisions. A
+separate live visibility read follows those decisions, so revocation during a
+host callback cannot expose the source ID. Both reads use the canonical scalar
+helpers' set-based implementations; no authority is cached across requests.
 Shared pins live in private discovery metadata, not content domains. The catalog
 and its bounded publication branch apply pin-first keysets globally; pin writes
 require publishing and target-domain read authority ([library](artifact-library.md)).
@@ -3154,3 +3162,11 @@ Deployment operator context is configured through
 `OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS` and composed by runtime persistent
 instruction inspection for both modular and legacy agents. Persona overrides
 do not remove it. See `docs/local-development.md`.
+
+Personal sidebar Archive is an atomic composition of native Pause and personal
+visibility in `archiveHumanSessionWorkstream` (`packages/core/src/application/session-commands.ts`).
+Its personal-state fence precedes the normal control/workspace/session locks;
+post-commit fanout uses the existing durable control outboxes. Shared-chat control
+authority is independent of creator identity. Restore never resumes, and explicit
+Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
+background-command semantics.

@@ -88,6 +88,7 @@ createRoot(document.getElementById("root")!).render(
   <OpenGeniProvider
     client={client}
     workspaceId={workspaceId}
+    productName={params.has("custom") ? "ACME Assistant" : undefined}
     formatError={
       params.has("custom") ? (_error, message) => `ACME Assistant: ${message}` : undefined
     }

@@ -1,5 +1,23 @@
 # @opengeni/ogtool
 
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [85fb89e]
+  - @opengeni/contracts@4.8.0
+  - @opengeni/codemode@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+  - @opengeni/contracts@4.7.2
+  - @opengeni/codemode@4.7.2
+
 ## 4.7.1
 
 ### Patch Changes

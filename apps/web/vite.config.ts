@@ -75,6 +75,15 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // The TOTP parser the answer form uses for secret questions
+              // pulls in hashing; the lazy sub-session request card would
+              // otherwise fold it into a chunk the entry loads.
+              name: "secret-totp",
+              test: /packages[\\/]contracts[\\/]src[\\/]secret-totp\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Workspace configs read shared provider metadata at module load.
               // Keep this pure data outside mutually importing settings routes.
               name: "model-provider-metadata",

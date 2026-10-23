@@ -513,11 +513,7 @@ describe("Claude web search replay", () => {
     // A later request keeps the same prefix.
     const first = buildAnthropicRequest(request(turn), "claude", provider, false);
     const later = buildAnthropicRequest(
-      request([
-        ...turn,
-        { role: "assistant", content: "Done" },
-        { role: "user", content: "Ok" },
-      ]),
+      request([...turn, { role: "assistant", content: "Done" }, { role: "user", content: "Ok" }]),
       "claude",
       provider,
       false,

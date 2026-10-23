@@ -9,6 +9,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createEnrollment,
+  createSandbox,
   createSession,
   disconnectAttachedBrowserDevices,
   dispatchBrowserSessionOperation,
@@ -246,6 +247,41 @@ async function activateAttachedBrowser(
 }
 
 describe("attached browser endpoint registry", () => {
+  test("each bridge names the Connected Machine it runs on", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    await reconcileAttachedBrowserInventory(client.db, {
+      ...scope,
+      snapshot: {
+        bridgeGeneration: "bridge-1",
+        revision: 1,
+        devices: [device(crypto.randomUUID(), "Primary Chrome")],
+      },
+    });
+    // Before the machine has its sandbox, it has the Machines list's fallback name.
+    expect((await listAttachedBrowserDevices(client.db, scope)).bridges).toEqual([
+      expect.objectContaining({
+        enrollmentId: scope.enrollmentId,
+        sandboxId: null,
+        machineName: "macos machine",
+      }),
+    ]);
+    const sandbox = await createSandbox(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      kind: "selfhosted",
+      name: "Ada's Mac mini",
+      enrollmentId: scope.enrollmentId,
+    });
+    expect((await listAttachedBrowserDevices(client.db, scope)).bridges).toEqual([
+      expect.objectContaining({
+        enrollmentId: scope.enrollmentId,
+        sandboxId: sandbox.id,
+        machineName: "Ada's Mac mini",
+      }),
+    ]);
+  });
+
   test("persists opaque generations beginning with base64url punctuation", async () => {
     if (!available) return;
     const scope = await fixture();

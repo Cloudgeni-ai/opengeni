@@ -65,6 +65,26 @@ describe("fresh model admission versus live discovery", () => {
             },
     );
     mocks = [
+      // Selection now composes these public families in one database scope.
+      // Keep this unit fixture at the same existing family-read boundaries;
+      // real scope/query/visibility behavior is covered by the PostgreSQL suite.
+      spyOn(opengeniDb, "loadWorkspaceModelCatalogInputs").mockImplementation(
+        async (targetDb, input) => ({
+          workspaceConnections: await opengeniDb.listConnectionsMetadata(
+            targetDb,
+            input.workspaceId,
+            null,
+          ),
+          workspaceCustomModels: await opengeniDb.listWorkspaceProviderCustomModelsByKind(
+            targetDb,
+            input,
+          ),
+          organizationProviders: await opengeniDb.getOrganizationModelProviderCatalogForWorkspace(
+            targetDb,
+            { ...input, providerKinds: input.organizationProviderKinds },
+          ),
+        }),
+      ),
       restrictions,
       policy,
       // No organization-wide model defaults: the live selections decide.

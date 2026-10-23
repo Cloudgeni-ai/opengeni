@@ -438,13 +438,16 @@ const DiscoveryInput = z
   })
   .strict();
 /** An attached Chrome profile as the model needs it to choose one: identity,
- * labels, state and any capability it lacks. Enrollment, generation and
- * timestamp bookkeeping stay out. */
+ * labels, the computer it is on (marked when it is the one this session runs
+ * on), state and any capability it lacks. Enrollment, generation and timestamp
+ * bookkeeping stay out. */
 const AgentAttachedBrowser = z
   .object({
     id: z.string().uuid(),
     name: z.string().max(200),
     profileLabel: z.string().max(200).optional(),
+    machine: z.string().optional(),
+    onThisMachine: z.literal(true).optional(),
     browserName: z.string().max(100),
     platform: z.enum(["linux", "macos", "windows"]),
     state: z.enum(["connected", "disconnected"]),
@@ -456,6 +459,8 @@ const AgentAttachedBrowser = z
 const AgentAttachedBrowserBridge = z
   .object({
     enrollmentId: z.string().uuid(),
+    machine: z.string().optional(),
+    onThisMachine: z.literal(true).optional(),
     connectedProfileCount: z.number().int().nonnegative(),
   })
   .strict();
@@ -479,12 +484,15 @@ const BrowserOpenPlacement = z.union([
   InteractionPlacement,
   z.object({ kind: z.literal("attached_device") }).strict(),
 ]);
-/** The Chrome profile browser_open chose when the request named none. */
+/** The Chrome profile browser_open chose when the request named none, with the
+ * computer it is on (marked when it is the one this session runs on). */
 const AgentAttachedProfile = z
   .object({
     id: z.string().uuid(),
     name: z.string(),
     profileLabel: z.string().optional(),
+    machine: z.string().optional(),
+    onThisMachine: z.literal(true).optional(),
   })
   .strict();
 
@@ -1468,9 +1476,12 @@ export function createInteractionAttemptToolDefinitions(
     execute: async (value) => {
       const scope = value.scope ?? "current_session";
       if (scope === "attached_browsers") {
-        const attached = await input.transport.listAttachedBrowsers(input.workspaceId, {
-          includeDisconnected: value.includeDisconnectedDevices ?? false,
-        });
+        const [attached, thisMachine] = await Promise.all([
+          input.transport.listAttachedBrowsers(input.workspaceId, {
+            includeDisconnected: value.includeDisconnectedDevices ?? false,
+          }),
+          readCurrentMachineSandboxId(input.transport, input.workspaceId, input.sessionId),
+        ]);
         // Each inventory uses the same workspace interaction revision. Empty arrays
         // here are outside this scope, not evidence that the workspace has no sessions.
         return {
@@ -1481,7 +1492,7 @@ export function createInteractionAttemptToolDefinitions(
           browsers: [],
           computers: [],
           identities: [],
-          ...agentAttachedInventory(attached),
+          ...agentAttachedInventory(attached, thisMachine),
         };
       }
       // Narrow in SQL: a workspace can retain thousands of ended sessions, and
@@ -1490,7 +1501,7 @@ export function createInteractionAttemptToolDefinitions(
         ...(scope === "current_session" ? { associatedSessionId: input.sessionId } : {}),
         ...((value.includeTerminal ?? false) ? {} : { includeTerminal: false }),
       };
-      const [browsers, computers, identities, attached] = await Promise.all([
+      const [browsers, computers, identities, attached, thisMachine] = await Promise.all([
         input.transport.listBrowserSessions(input.workspaceId, listFilter),
         input.transport.listComputerSessions(input.workspaceId, listFilter),
         input.transport.listBrowserIdentities(input.workspaceId, {
@@ -1499,6 +1510,9 @@ export function createInteractionAttemptToolDefinitions(
         input.transport.listAttachedBrowsers(input.workspaceId, {
           includeDisconnected: value.includeDisconnectedDevices ?? false,
         }),
+        scope === "workspace"
+          ? readCurrentMachineSandboxId(input.transport, input.workspaceId, input.sessionId)
+          : null,
       ]);
       return {
         browserRevision: browsers.revision,
@@ -1519,7 +1533,7 @@ export function createInteractionAttemptToolDefinitions(
         ),
         identities: scope === "workspace" ? identities.identities : [],
         ...(scope === "workspace"
-          ? agentAttachedInventory(attached)
+          ? agentAttachedInventory(attached, thisMachine)
           : { attachedBrowserBridges: [], attachedBrowsers: [] }),
       };
     },
@@ -3129,7 +3143,8 @@ async function openBrowser(
   } else {
     // placement={kind:'attached_device'} without a deviceId means "the person's
     // own Chrome". Read the profile inventory alongside the reuse lookup so the
-    // resolution adds no sequential round trip.
+    // resolution adds no sequential round trip. The chat's current machine is
+    // read too: a profile on the computer this session runs on comes first.
     const resolveProfile =
       value.placement?.kind === "attached_device" && !("deviceId" in value.placement);
     const [listed, attachedInventory, currentPlacement] = await Promise.all([
@@ -3142,9 +3157,14 @@ async function openBrowser(
       resolveProfile
         ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
         : null,
-      value.mode === "new" || value.placement
+      (value.mode === "new" || value.placement) && !resolveProfile
         ? null
-        : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
+        : resolveProfile
+          ? // Only a preference here: a failed read must not fail the open.
+            readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
+              () => null,
+            )
+          : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
     ]);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
@@ -3178,7 +3198,13 @@ async function openBrowser(
       session = reusable;
     } else {
       created = true;
-      if (attachedInventory) profileChoice = chooseAttachedProfile(attachedInventory, extensionUrl);
+      if (attachedInventory) {
+        profileChoice = chooseAttachedProfile(
+          attachedInventory,
+          currentPlacement?.kind === "connected_machine" ? currentPlacement.sandboxId : null,
+          extensionUrl,
+        );
+      }
       // Without a deviceId, chooseAttachedProfile has resolved one (or thrown).
       const placement = profileChoice
         ? { kind: "attached_device" as const, deviceId: profileChoice.chosen.id }
@@ -3221,9 +3247,13 @@ async function openBrowser(
   }
   const chosenProfile = profileChoice
     ? {
-        attachedProfile: agentAttachedProfile(profileChoice.chosen),
+        attachedProfile: agentAttachedProfile(profileChoice.chosen, profileChoice.machines),
         ...(profileChoice.others.length > 0
-          ? { otherAttachedProfiles: profileChoice.others.map(agentAttachedProfile) }
+          ? {
+              otherAttachedProfiles: profileChoice.others.map((device) =>
+                agentAttachedProfile(device, profileChoice!.machines),
+              ),
+            }
           : {}),
       }
     : {};
@@ -3289,19 +3319,64 @@ async function openBrowser(
 type AttachedProfileChoice = {
   chosen: z.infer<typeof AttachedBrowserDeviceListResponse>["devices"][number];
   others: z.infer<typeof AttachedBrowserDeviceListResponse>["devices"];
+  machines: AttachedProfileMachines;
 };
+
+/** Where each attached profile is: its computer's plain name, and whether that
+ * is the Connected Machine this session runs on now. */
+type AttachedProfileMachines = {
+  readonly thisMachine: string | null;
+  machineOf(device: { enrollmentId: string }): { sandboxId: string | null; name: string | null };
+};
+
+function attachedProfileMachines(
+  inventory: z.infer<typeof AttachedBrowserDeviceListResponse>,
+  thisMachine: string | null,
+): AttachedProfileMachines {
+  const bridges = new Map(inventory.bridges.map((bridge) => [bridge.enrollmentId, bridge]));
+  return {
+    thisMachine,
+    machineOf: (device) => {
+      const bridge = bridges.get(device.enrollmentId);
+      // An older API omits these fields; treat them as unknown.
+      return { sandboxId: bridge?.sandboxId ?? null, name: bridge?.machineName ?? null };
+    },
+  };
+}
+
+/** The machine fields the model sees for one profile or bridge. */
+function agentMachineFields(
+  machines: AttachedProfileMachines,
+  device: { enrollmentId: string },
+): { machine?: string; onThisMachine?: true } {
+  const machine = machines.machineOf(device);
+  return {
+    ...(machine.name ? { machine: machine.name } : {}),
+    ...(machines.thisMachine !== null && machine.sandboxId === machines.thisMachine
+      ? { onThisMachine: true as const }
+      : {}),
+  };
+}
 
 /** The person's own Chrome when browser_open names no profile: the only
  * connected profile, else the one whose tabs changed most recently (a device's
- * updatedAt moves with its tab inventory, not with heartbeats). */
+ * updatedAt moves with its tab inventory, not with heartbeats), preferring
+ * profiles on the Connected Machine this session runs on (`thisMachine`, its
+ * sandbox ID; null on a managed sandbox, which never hosts the person's
+ * Chrome). */
 function chooseAttachedProfile(
   inventory: z.infer<typeof AttachedBrowserDeviceListResponse>,
+  thisMachine: string | null,
   extensionUrl: string,
 ): AttachedProfileChoice {
+  const machines = attachedProfileMachines(inventory, thisMachine);
   const usable = inventory.devices
     .filter((device) => device.state === "connected" && device.capabilities.debuggerAttachment)
     .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
-  const [chosen, ...others] = usable;
+  const chosen =
+    (thisMachine !== null
+      ? usable.find((device) => machines.machineOf(device).sandboxId === thisMachine)
+      : undefined) ?? usable[0];
   if (!chosen) {
     throw new OpenGeniApiError(
       409,
@@ -3309,7 +3384,7 @@ function chooseAttachedProfile(
       { code: "attached_browser_unavailable", retryable: false },
     );
   }
-  return { chosen, others };
+  return { chosen, others: usable.filter((device) => device !== chosen), machines };
 }
 
 /**
@@ -3363,6 +3438,7 @@ async function withUserSetupCard(
 
 function agentAttachedProfile(
   device: AttachedProfileChoice["chosen"],
+  machines: AttachedProfileMachines,
 ): z.infer<typeof AgentAttachedProfile> {
   return {
     id: device.id,
@@ -3370,6 +3446,7 @@ function agentAttachedProfile(
     ...(device.profileLabel && device.profileLabel !== device.name
       ? { profileLabel: device.profileLabel }
       : {}),
+    ...agentMachineFields(machines, device),
   };
 }
 
@@ -3511,6 +3588,20 @@ function compatibleInteractionPlacement(
     return current === null || placementFieldsMatch(candidate, current);
   }
   return placementFieldsMatch(candidate, requested);
+}
+
+/** The Connected Machine this session runs on now (its sandbox ID), or null on
+ * a managed sandbox or when the transport cannot read the session. */
+async function readCurrentMachineSandboxId(
+  transport: InteractionPlacementTransport,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  // Only a preference: a failed read means no machine is preferred.
+  const placement = await readCurrentInteractionPlacement(transport, workspaceId, sessionId).catch(
+    () => null,
+  );
+  return placement?.kind === "connected_machine" ? placement.sandboxId : null;
 }
 
 function placementFieldsMatch(
@@ -3998,11 +4089,17 @@ function agentBrowserTarget(
 }
 
 /** Attached profiles are what the model selects. Bridges only explain why
- * none is available, so they are listed (online only) when no profile is. */
-function agentAttachedInventory(inventory: z.infer<typeof AttachedBrowserDeviceListResponse>): {
+ * none is available, so they are listed (online only) when no profile is.
+ * Both name their computer; `thisMachine` is the sandbox ID of the Connected
+ * Machine this session runs on, if any. */
+function agentAttachedInventory(
+  inventory: z.infer<typeof AttachedBrowserDeviceListResponse>,
+  thisMachine: string | null,
+): {
   attachedBrowserBridges: z.infer<typeof AgentAttachedBrowserBridge>[];
   attachedBrowsers: z.infer<typeof AgentAttachedBrowser>[];
 } {
+  const machines = attachedProfileMachines(inventory, thisMachine);
   const attachedBrowsers = inventory.devices.map((device) => {
     const unsupported = Object.entries(device.capabilities)
       .filter(([, supported]) => !supported)
@@ -4011,6 +4108,7 @@ function agentAttachedInventory(inventory: z.infer<typeof AttachedBrowserDeviceL
       id: device.id,
       name: device.name,
       ...(device.profileLabel ? { profileLabel: device.profileLabel } : {}),
+      ...agentMachineFields(machines, device),
       browserName: device.browserName,
       platform: device.platform,
       state: device.state,
@@ -4025,6 +4123,7 @@ function agentAttachedInventory(inventory: z.infer<typeof AttachedBrowserDeviceL
         .filter((bridge) => bridge.state === "online")
         .map((bridge) => ({
           enrollmentId: bridge.enrollmentId,
+          ...agentMachineFields(machines, bridge),
           connectedProfileCount: bridge.connectedProfileCount,
         }));
   return { attachedBrowserBridges, attachedBrowsers };

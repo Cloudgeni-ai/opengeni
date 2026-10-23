@@ -13,7 +13,9 @@ let client: ReturnType<typeof createDb>;
 
 beforeAll(async () => {
   const database = await acquireSharedTestDatabase("ordered-turn-history", {
-    withheldMigrations: [migration],
+    // Keep this historical before/after comparison free of the later scoped
+    // access path, which has its own actual-helper plan regression.
+    withheldMigrations: [migration, "0916_scoped_turn_history_pages.sql"],
   });
   if (!database) throw new Error("Real PostgreSQL required");
   shared = database;
