@@ -3,7 +3,15 @@
  * when trying again can work. Internal codes and provider text never show.
  */
 export type FailureView = {
-  kind: "limit" | "reconnect" | "declined" | "too_long" | "plan" | "temporary" | "unknown";
+  kind:
+    | "limit"
+    | "budget"
+    | "reconnect"
+    | "declined"
+    | "too_long"
+    | "plan"
+    | "temporary"
+    | "unknown";
   message: string;
   /** Trying the same thing again can work. */
   retry: boolean;
@@ -24,8 +32,17 @@ const RECONNECT_CODES = new Set([
   "subscription_account_refused",
   "anthropic_authentication_error",
 ]);
+const BUDGET_CODES = new Set([
+  "insufficient_credits",
+  "allowance_exhausted",
+  "monthly_model_cost_limit",
+  "monthly_agent_run_limit",
+  "session_usage_limit",
+  "provider_billing_error",
+]);
 const PLAN_CODES = new Set([
   "codex_plan_entitlement",
+  "codex_request_rejected",
   "model_not_available_on_plan",
   "model_not_entitled",
   "model_not_included_in_plan",
@@ -68,24 +85,35 @@ export function failureView(payload: unknown): FailureView {
         .join(" ")
         .toLowerCase();
 
-  if (LIMIT_CODES.has(code) || /usage limit|rate-limited|quota/.test(text)) {
-    // The worker names the reset window ("resets in about 2h 5m").
-    const reset = /(?:resets|returns) (in (?:about |under )?[^.]+)/i.exec(
+  // Provider wording is matched only where it names ChatGPT, so another
+  // service's 401 or a disk quota never reads as a ChatGPT problem.
+  const aboutChatGpt = /chatgpt|codex|openai/.test(text);
+  if (
+    LIMIT_CODES.has(code) ||
+    typeof record.quotaScope === "string" ||
+    (aboutChatGpt && /usage limit/.test(text))
+  ) {
+    // The worker names the reset window ("resets in about 2h 5m", "in 2.5 hours").
+    const reset = /(?:resets|returns) (in (?:about |under )?(?:\d+(?:\.\d+)?\s*[a-z]+\s*)+)/i.exec(
       typeof record.error === "string" ? record.error : "",
     )?.[1];
     return {
       kind: "limit",
       message: reset
-        ? `ChatGPT's usage limit is reached. It resets ${reset}.`
+        ? `ChatGPT's usage limit is reached. It resets ${reset.trim()}.`
         : "ChatGPT's usage limit is reached. Try again later.",
       retry: false,
     };
   }
+  if (BUDGET_CODES.has(code)) {
+    return { kind: "budget", message: "The usage allowance for this is used up.", retry: false };
+  }
   if (
     RECONNECT_CODES.has(code) ||
-    /\b401\b|unauthori[sz]ed|credentials? (?:expired|were revoked|rejected)|sign in again|reconnect/.test(
-      text,
-    )
+    (aboutChatGpt &&
+      /\b401\b|unauthori[sz]ed|credentials? (?:expired|were revoked|rejected)|sign in again|reconnect/.test(
+        text,
+      ))
   ) {
     return {
       kind: "reconnect",
@@ -117,9 +145,11 @@ export function failureView(payload: unknown): FailureView {
   ) {
     return { kind: "temporary", message: "ChatGPT didn't respond in time.", retry: true };
   }
-  // The worker marks failures that would fail again in the same way.
-  if (record.retryable === false) {
-    return { kind: "unknown", message: "This couldn't be done.", retry: false };
-  }
-  return { kind: "unknown", message: "Something went wrong.", retry: true };
+  // Anything else may well fail the same way, so no Retry button: a new
+  // message (maybe worded differently) is the honest next step.
+  return {
+    kind: "unknown",
+    message: "Something went wrong. Send a message to carry on.",
+    retry: false,
+  };
 }

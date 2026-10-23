@@ -5,7 +5,8 @@ const withStatus = (status: number) => Object.assign(new Error("raw server text"
 
 test("an expired sign-in asks to sign in again", () => {
   expect(startProblem(withStatus(401))).toMatchObject({ title: "Sign in again", signIn: true });
-  expect(startProblem(withStatus(403)).signIn).toBe(true);
+  // A refusal is not an expired sign-in: signing out would loop.
+  expect(startProblem(withStatus(403))).toMatchObject({ signIn: false, otherAccount: true });
 });
 
 test("a network failure says Opengeni can't be reached", () => {

@@ -287,12 +287,36 @@ function staticFile(pathname: string) {
 }
 
 const port = serveDist ? SIMPLE_WEB_PORT : SIMPLE_SERVER_PORT;
+const hostname = process.env.OPENGENI_SIMPLE_HOST ?? (serveDist ? "0.0.0.0" : "127.0.0.1");
+const loopbackHosts =
+  hostname === "127.0.0.1" || hostname === "localhost"
+    ? new Set([`127.0.0.1:${port}`, `localhost:${port}`])
+    : null;
+
+/**
+ * This server acts as the signed-in person, so only its own page may use it:
+ * on loopback the Host must be this port (no DNS rebinding), and a write must
+ * come from the same origin it is addressed to.
+ */
+function foreign(request: Request) {
+  const host = request.headers.get("host") ?? "";
+  if (loopbackHosts && !loopbackHosts.has(host)) return true;
+  const origin = request.headers.get("origin");
+  if (!origin || request.method === "GET" || request.method === "HEAD") return false;
+  try {
+    return new URL(origin).host !== host;
+  } catch {
+    return true;
+  }
+}
+
 Bun.serve({
   port,
-  hostname: process.env.OPENGENI_SIMPLE_HOST ?? (serveDist ? "0.0.0.0" : "127.0.0.1"),
+  hostname,
   idleTimeout: 0,
   async fetch(request) {
     const url = new URL(request.url);
+    if (foreign(request)) return json({ error: "Forbidden" }, 403);
     try {
       if (url.pathname.startsWith("/app/")) return await asCaller(request, () => route(request));
       if (serveDist && url.pathname.startsWith("/v1/")) return await proxyToApi(request, url);

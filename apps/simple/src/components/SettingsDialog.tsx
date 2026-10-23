@@ -377,13 +377,13 @@ function Schedules({
     client
       .listScheduledTasks(workspaceId, { limit: 100 })
       .then(setTasks)
-      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+      .catch(() => setError("Couldn't load your schedules. Try again in a moment."));
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per workspace
   }, [workspaceId]);
   const act = (action: () => Promise<unknown>) =>
-    void action().then(load, (cause: unknown) => setError(String(cause)));
+    void action().then(load, () => setError("That didn't work. Try again in a moment."));
   return (
     <Section
       title="Schedules"

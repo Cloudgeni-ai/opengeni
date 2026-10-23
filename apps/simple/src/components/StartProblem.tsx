@@ -6,6 +6,7 @@ export function StartProblem({ error, onRetry }: { error: unknown; onRetry: () =
   const problem = startProblem(error);
   // Outside the Mac app there is no sign-in window to go back to; reloading signs in again.
   const signIn = problem.signIn && appHost !== null;
+  const otherAccount = problem.otherAccount && appHost !== null;
   return (
     <div className="flex h-full items-center justify-center p-6 text-center">
       <div>
@@ -18,6 +19,15 @@ export function StartProblem({ error, onRetry }: { error: unknown; onRetry: () =
         >
           {signIn ? "Sign in" : "Try again"}
         </button>
+        {otherAccount ? (
+          <button
+            type="button"
+            className="mt-3 block w-full text-sm text-[var(--app-muted)] underline-offset-2 hover:underline"
+            onClick={() => appHost?.signInAgain()}
+          >
+            Use another account
+          </button>
+        ) : null}
       </div>
     </div>
   );

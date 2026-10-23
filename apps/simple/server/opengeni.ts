@@ -287,6 +287,9 @@ export async function refreshAgentInstructions(workspaceId: string, sessions: Se
         description: profile?.description ?? null,
         customInstructions,
         blank: Boolean(metadata?.blank) && !customInstructions,
+        // Without a profile here the name and description aren't known, so the
+        // agent keeps the identity it has.
+        keepIdentity: !profile,
       });
       upsertProfile(workspaceId, session.id, {
         instructionsVersion: INSTRUCTIONS_VERSION,
@@ -309,16 +312,22 @@ export async function applyAgentConfig(
     description: string | null;
     customInstructions: string | null;
     blank: boolean;
+    keepIdentity?: boolean;
   },
 ) {
   await api.updateSessionAgent(workspaceId, session.id, {
     expectedVersion: session.toolPolicyVersion,
     agent: {
-      identity: agentIdentity({
-        name: input.name,
-        role: input.role,
-        description: input.description,
-      }),
+      // An omitted identity keeps the current one.
+      ...(input.keepIdentity
+        ? {}
+        : {
+            identity: agentIdentity({
+              name: input.name,
+              role: input.role,
+              description: input.description,
+            }),
+          }),
       instructions: composeInstructions({
         role: input.role,
         customInstructions: input.customInstructions,

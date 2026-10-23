@@ -30,7 +30,13 @@ export function renderConnectionCard(
   const capability = item.capability;
   if (!capability) {
     if (item.authoritySource === "host") return undefined;
-    return <SettingsFallback title={`Reconnect ${item.providerDomain}`} rationale={null} />;
+    return (
+      <SettingsFallback
+        title={`Reconnect ${item.providerDomain}`}
+        rationale={null}
+        onDone={() => context.onReady(`I reconnected ${item.providerDomain}. Go ahead.`)}
+      />
+    );
   }
   if (capability.id === "api:connected-machine") {
     // The agent tried the person's own Chrome: that takes the computer and
@@ -287,21 +293,53 @@ function Shell({
   );
 }
 
-function SettingsFallback({ title, rationale }: { title: string; rationale: string | null }) {
+/**
+ * Reconnecting happens in Settings. Once the person has been there, the card
+ * offers to tell the agent to go on, since nothing else would.
+ */
+function SettingsFallback({
+  title,
+  rationale,
+  onDone,
+}: {
+  title: string;
+  rationale: string | null;
+  onDone?: () => void;
+}) {
   const events = useAppEvents();
+  const [opened, setOpened] = useState(false);
+  const [told, setTold] = useState(false);
+  const button =
+    "shrink-0 rounded-full bg-[var(--app-accent)] px-3 py-1.5 text-xs font-medium text-white";
   return (
     <Shell
       icon={<Plug size={18} />}
       title={title}
-      rationale={rationale}
+      rationale={opened && !told ? "Done in Settings? Tell the agent to go on." : rationale}
       action={
-        <button
-          type="button"
-          onClick={() => events.openSettings("connections")}
-          className="shrink-0 rounded-full bg-[var(--app-accent)] px-3 py-1.5 text-xs font-medium text-white"
-        >
-          Set up
-        </button>
+        told ? null : opened && onDone ? (
+          <button
+            type="button"
+            onClick={() => {
+              setTold(true);
+              onDone();
+            }}
+            className={button}
+          >
+            Go ahead
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setOpened(true);
+              events.openSettings("connections");
+            }}
+            className={button}
+          >
+            Set up
+          </button>
+        )
       }
     />
   );

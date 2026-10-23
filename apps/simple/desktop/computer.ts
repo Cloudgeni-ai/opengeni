@@ -296,6 +296,7 @@ export function createSimpleComputer(options: SimpleComputerOptions): SimpleComp
     const value = typeof count === "number" && Number.isFinite(count) ? Math.floor(count) : 0;
     app.dock?.setBadge(value > 0 ? String(value) : "");
   });
+  const shownNotifications = new Set<Notification>();
   handle(SIMPLE_IPC.notify, (_account, value) => {
     const text = (field: unknown, limit: number) =>
       typeof field === "string" ? field.slice(0, limit) : "";
@@ -307,7 +308,11 @@ export function createSimpleComputer(options: SimpleComputerOptions): SimpleComp
       title: text(notification?.title, 120) || options.productName,
       body: text(notification?.body, 300),
     });
+    // Electron stops delivering a click once the object is collected; hold it.
+    shownNotifications.add(shown);
+    shown.on("close", () => shownNotifications.delete(shown));
     shown.on("click", () => {
+      shownNotifications.delete(shown);
       options.reveal();
       const window = options.appWindow();
       if (window && !window.contents.isDestroyed())

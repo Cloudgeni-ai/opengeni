@@ -27,6 +27,7 @@ import { AppComputerProvider } from "./lib/this-computer";
 import { buildModelContext, type ReplyLength } from "./lib/context";
 import { Splash } from "./components/Splash";
 import { StartProblem } from "./components/StartProblem";
+import { startProblem } from "./lib/start-error";
 import { Welcome } from "./components/Welcome";
 
 const THEME_KEY = "simple:theme";
@@ -125,13 +126,15 @@ export function App({
     let loaded = false;
     const tick = () => {
       if (stopped) return;
-      // Later polls fail quietly; the first one must load, or the splash never ends.
+      // Later polls fail quietly, except an expired sign-in; the first must load, or the splash never ends.
       void refreshSessions().then(
         () => {
           loaded = true;
         },
         (error: unknown) => {
-          if (!loaded && !stopped) setBootError(error ?? new Error("Unknown"));
+          if (stopped) return;
+          // A sign-in that expires while the app runs must say so, not freeze the list.
+          if (!loaded || startProblem(error).signIn) setBootError(error ?? new Error("Unknown"));
         },
       );
     };
@@ -266,12 +269,12 @@ export function App({
       setPendingId(sessionId);
       select(sessionId);
       await Promise.all([refreshSessions(), refreshState()]).catch(() => {});
-    } catch (error) {
+    } catch {
       setDraft({
         ...current,
         text,
         sending: null,
-        error: error instanceof Error ? error.message : String(error),
+        error: "Couldn't start this agent. Try again in a moment.",
       });
     }
   };
@@ -430,7 +433,16 @@ function useNotifications(
     (agent) => agent.needsYou || (agent.unread && agent.id !== selectedId),
   ).length;
   useEffect(() => appHost?.setAttention(attention), [attention]);
-  useEffect(() => appHost?.onOpenAgent(select), [select]);
+  // Only agents still listed: an archived one would start an endless wait for it.
+  const listed = useRef(agents);
+  listed.current = agents;
+  useEffect(
+    () =>
+      appHost?.onOpenAgent((id) => {
+        if (listed.current.some((agent) => agent.id === id)) select(id);
+      }),
+    [select],
+  );
   const seen = useRef<Map<string, boolean> | null>(null);
   useEffect(() => {
     const previous = seen.current;

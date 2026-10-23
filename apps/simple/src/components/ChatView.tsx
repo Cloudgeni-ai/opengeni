@@ -115,7 +115,10 @@ export function ChatView(props: ChatViewProps) {
           sessionId: agent.id,
           catalog,
           fullAppUrl: props.fullAppUrl,
-          onReady: (text) => void send(text),
+          onReady: (text) =>
+            void send(text).catch(() =>
+              window.alert("Couldn't tell the agent to go on. Send it a message to carry on."),
+            ),
         }),
       // History streams in after mount; only a chat that never had a turn gets
       // the welcome, so an existing conversation never flashes it.
@@ -207,13 +210,7 @@ function Header({
   }, [menuOpen]);
   const run = (action: () => Promise<unknown>) => {
     setMenuOpen(false);
-    void action().then(onChanged, (error) =>
-      window.alert(
-        error instanceof Error && error.message.length < 120
-          ? error.message
-          : "That didn't work. Try again in a moment.",
-      ),
-    );
+    void action().then(onChanged, () => window.alert("That didn't work. Try again in a moment."));
   };
   return (
     <header className="flex shrink-0 items-center gap-3 border-b border-[var(--app-border)] px-3 py-2.5 md:px-5">
@@ -671,7 +668,11 @@ function FailureRow({
       })
       .then(
         () => undefined,
-        () => setRetryState("error"),
+        () => {
+          // Nothing was retried, so this failure stays retryable later.
+          retriedFailures.delete(sessionId);
+          setRetryState("error");
+        },
       );
   };
   return (

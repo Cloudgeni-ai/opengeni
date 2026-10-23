@@ -232,7 +232,10 @@ function closeWelcome() {
 }
 
 async function onWelcomeAction(action, value) {
-  if (action === "back") return closeWelcome();
+  if (action === "back") {
+    closeWelcome();
+    return mainWindow?.show();
+  }
   if (action === "restart") {
     cancelSignIn();
     return render({ view: "start", error: null });
@@ -409,9 +412,19 @@ async function startServer(token) {
   return origin;
 }
 
+/** Stops the local server; resolves once it has let go of its port. */
 function stopServer() {
-  server?.child.kill();
+  const child = server?.child;
   server = null;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 3_000);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.kill();
+  });
 }
 
 function openExternalSafely(url) {
@@ -540,9 +553,13 @@ function showApp(origin, { hidden = false } = {}) {
     // Closing the window hides it: the page keeps watching agents, so their
     // notifications and the Dock badge still arrive. Quitting really closes it.
     mainWindow.on("close", (event) => {
-      if (quitting) return;
+      if (quitting || !mainWindow) return;
       event.preventDefault();
-      mainWindow?.hide();
+      // Hiding a full-screen window leaves an empty black Space behind.
+      if (mainWindow.isFullScreen()) {
+        mainWindow.once("leave-full-screen", () => mainWindow?.hide());
+        mainWindow.setFullScreen(false);
+      } else mainWindow.hide();
     });
     mainWindow.on("closed", () => {
       mainWindow = null;
@@ -570,10 +587,12 @@ async function openWorkspace(url, token, { hidden = false } = {}) {
   activeToken = token;
   saveServerUrl(url);
   buildMenu();
-  stopServer();
+  const stopped = stopServer();
   mainWindow?.destroy();
   mainWindow = null;
   app.dock?.setBadge("");
+  // The old server must free the saved port, or the page gets a new origin.
+  await stopped;
   showApp(await startServer(token), { hidden });
   closeWelcome();
   computer?.reset();

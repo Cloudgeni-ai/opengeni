@@ -41,6 +41,7 @@ import {
   type ConnectedAccountView,
   type ConnectedServiceView,
 } from "../lib/connections";
+import { PlainError, plainMessage } from "../lib/plain-error";
 
 const GITHUB_TILE_ID = "api:github-app";
 const PAGE = 12;
@@ -453,8 +454,8 @@ function AccountActions({
     let reserved: ReturnType<typeof reserveBrowserConnectNavigation>;
     try {
       reserved = reserveBrowserConnectNavigation(window);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Couldn't open the sign-in window.");
+    } catch {
+      setMessage("Couldn't open the sign-in window.");
       return;
     }
     close();
@@ -479,7 +480,7 @@ function AccountActions({
             crypto.randomUUID(),
           );
         if (attempt.nextAction.type !== "authorize")
-          throw new Error("This one can't be reconnected from here.");
+          throw new PlainError("This one can't be reconnected from here.");
         const result = await authorizeConnectAttempt(
           controller.transport,
           attempt,
@@ -494,9 +495,7 @@ function AccountActions({
         setMessage(
           error instanceof ConnectPopupClosedError
             ? "Sign-in window was closed."
-            : error instanceof Error
-              ? error.message
-              : "Couldn't reconnect.",
+            : plainMessage(error, "Couldn't reconnect. Try again in a moment."),
         );
       } finally {
         reserved.close();
@@ -518,8 +517,8 @@ function AccountActions({
       );
       close();
       onChanged();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Couldn't disconnect.");
+    } catch {
+      setMessage("Couldn't disconnect. Try again in a moment.");
       close();
     } finally {
       setBusy(null);

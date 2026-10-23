@@ -45,12 +45,29 @@ test("temporary trouble can be retried", () => {
   });
 });
 
-test("an unknown failure the worker calls final is not retried", () => {
-  expect(failureView({ code: "something_new", retryable: false })).toMatchObject({
-    retry: false,
-  });
-  expect(failureView({ code: "something_new" }).retry).toBe(true);
-  expect(failureView(null).message).toBe("Something went wrong.");
+test("an unknown failure offers no retry button", () => {
+  expect(failureView({ code: "something_new" }).retry).toBe(false);
+  expect(failureView(null).message).toBe("Something went wrong. Send a message to carry on.");
+});
+
+test("a plan rejection, a used-up allowance or a quota scope never offer a retry", () => {
+  expect(failureView({ code: "codex_request_rejected" }).kind).toBe("plan");
+  expect(failureView({ code: "insufficient_credits" }).kind).toBe("budget");
+  expect(failureView({ code: "provider_error", quotaScope: "daily" }).kind).toBe("limit");
+});
+
+test("another service's 401 or a disk quota is not a ChatGPT problem", () => {
+  expect(failureView({ error: "GitHub MCP returned 401 Unauthorized" }).reconnect).toBeUndefined();
+  expect(failureView({ error: "disk quota exceeded" }).kind).toBe("unknown");
+});
+
+test("a fractional reset time is kept whole", () => {
+  expect(
+    failureView({
+      code: "codex_usage_limit_reached",
+      error: "Codex usage limit reached. It resets in 2.5 hours.",
+    }).message,
+  ).toBe("ChatGPT's usage limit is reached. It resets in 2.5 hours.");
 });
 
 test("no internal detail reaches the message", () => {
