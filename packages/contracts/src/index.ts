@@ -17312,11 +17312,14 @@ export function accessContextHasInbox(
 /**
  * The signed-in person's mute on one session. Muted replies neither reach the
  * inbox nor alert the phone; the agent's notifications, questions and
- * approvals still do.
+ * approvals still do. `scope` is "schedule" when the session is a run of a
+ * schedule that starts a new session per run: the mute then covers every run
+ * of that schedule. Older servers omit it.
  */
 export const SessionInboxMute = /* @__PURE__ */ defineSchema(() =>
   z.object({
     repliesMuted: z.boolean(),
+    scope: z.enum(["session", "schedule"]).optional(),
   }),
 );
 export type SessionInboxMute = z.infer<typeof SessionInboxMute>;

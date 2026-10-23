@@ -430,13 +430,17 @@ export async function getSessionRepliesMuted(
   input: { workspaceId: string; sessionId: string; subjectId: string },
 ): Promise<boolean | null> {
   if (!(await sessionAccount(db, input.workspaceId, input.sessionId))) return null;
-  const [row] = await rawRows<{ muted: boolean }>(
-    db,
-    sql`select opengeni_private.session_replies_muted_for_v1(
-      ${input.sessionId}::uuid, ${input.subjectId}::text
-    ) as muted`,
-  );
-  return row?.muted ?? false;
+  // In the workspace's scope: a mute can cover the schedule that started the
+  // session (0915), which is found through workspace-scoped rows.
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ muted: boolean }>(
+      scopedDb,
+      sql`select opengeni_private.session_replies_muted_for_v1(
+        ${input.sessionId}::uuid, ${input.subjectId}::text
+      ) as muted`,
+    );
+    return row?.muted ?? false;
+  });
 }
 
 /**
@@ -450,12 +454,43 @@ export async function setSessionRepliesMuted(
 ): Promise<boolean | null> {
   const accountId = await sessionAccount(db, input.workspaceId, input.sessionId);
   if (!accountId) return null;
-  const [row] = await rawRows<{ muted: boolean }>(
-    db,
-    sql`select opengeni_private.set_session_replies_muted_v1(
-      ${accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
-      ${input.subjectId}::text, ${input.muted}::boolean
-    ) as muted`,
-  );
-  return row?.muted ?? input.muted;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ muted: boolean }>(
+      scopedDb,
+      sql`select opengeni_private.set_session_replies_muted_v1(
+        ${accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
+        ${input.subjectId}::text, ${input.muted}::boolean
+      ) as muted`,
+    );
+    return row?.muted ?? input.muted;
+  });
+}
+
+/**
+ * What a mute on this session covers (0915): "schedule" when a schedule that
+ * starts a new session per run started it, so muting covers all its runs;
+ * otherwise "session".
+ */
+export async function getSessionReplyMuteScope(
+  db: Database,
+  input: { workspaceId: string; sessionId: string },
+): Promise<"session" | "schedule"> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ taskId: schema.scheduledTaskRuns.taskId })
+      .from(schema.scheduledTaskRuns)
+      .innerJoin(
+        schema.scheduledTasks,
+        eq(schema.scheduledTasks.id, schema.scheduledTaskRuns.taskId),
+      )
+      .where(
+        and(
+          eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+          eq(schema.scheduledTaskRuns.sessionId, input.sessionId),
+          eq(schema.scheduledTasks.runMode, "new_session_per_run"),
+        ),
+      )
+      .limit(1);
+    return row ? "schedule" : "session";
+  });
 }
