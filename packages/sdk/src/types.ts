@@ -166,6 +166,10 @@ export type SessionRealtimeWebsocketResponse = {
   connectionEpoch: number;
   startupFenceSequence: number;
   modeVersion: number;
+  /**
+   * @deprecated Always empty: the prior conversation travels in the
+   * provider's session instructions. Kept for clients of earlier releases.
+   */
   initialItems: SessionRealtimeWebsocketInitialItem[];
   instructions: string;
   /**

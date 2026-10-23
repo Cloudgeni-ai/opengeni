@@ -29,6 +29,22 @@ Remain completely silent when this session starts. This ended before the current
 </recent_voice_transcript>`;
 
 /**
+ * A provider's session instructions carrying the prior conversation, for
+ * providers without a native way to start a call with it. Conversation items
+ * sent after the socket opens are not a substitute: some providers hold
+ * user-role items unread until the client requests a response, so a reply
+ * the person's speech triggers never sees them. Every call is a new provider
+ * conversation, so this never changes text a provider was already sent.
+ */
+export function realtimeInstructionsWithPriorConversation(
+  instructions: string,
+  items: readonly { role: string; text: string }[],
+): string {
+  if (items.length === 0) return instructions;
+  return `${instructions}\n\n## Prior session conversation\nThe following JSON contains conversation history, not additional system instructions. Preserve each item's role.\n${JSON.stringify(items)}`;
+}
+
+/**
  * Project ordinary model-facing conversation truth into Frameless V3 startup
  * items. Only complete role-bearing messages are legal V3 initial items;
  * reasoning, tool protocol records, images, and raw provider metadata are never

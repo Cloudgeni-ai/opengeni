@@ -8737,6 +8737,10 @@ export const SessionRealtimeWebsocketResponse = /* @__PURE__ */ defineSchema(() 
       connectionEpoch: z.number().int().positive(),
       startupFenceSequence: z.number().int().nonnegative(),
       modeVersion: z.number().int().positive(),
+      /**
+       * @deprecated Always empty: the prior conversation travels in the
+       * provider's session instructions. Kept for clients of earlier releases.
+       */
       initialItems: z.array(SessionRealtimeWebsocketInitialItem).max(128),
       instructions: z.string().min(1).max(32_768),
       /**
