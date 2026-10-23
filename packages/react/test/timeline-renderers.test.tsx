@@ -491,7 +491,182 @@ describe("structured human-input history", () => {
     await r.unmount();
   });
 
-  test("says an agent answered when the sub-session's parent answered first", async () => {
+  // A sub-session whose question was answered by its parent agent (or a
+  // person): the real readable turn the app renders.
+  function subSessionQuestionEvents(respondedByKind?: string, outcome = "answered") {
+    const questions = [
+      {
+        id: "base",
+        kind: "single_select",
+        label: "Target branch",
+        prompt: "The fix also applies to the release branch. Where should it land?",
+        options: [
+          { id: "main", label: "main only" },
+          { id: "both", label: "main and release/2026.10" },
+        ],
+      },
+    ];
+    return [
+      timelineEvent("user.message", { text: "Review PR #4418 and land the fix." }, null),
+      timelineEvent("turn.started", {}),
+      timelineEvent("agent.message.completed", {
+        messageId: "m1",
+        text: "The fix is correct. Which branches should it land on?",
+      }),
+      timelineEvent("agent.toolCall.created", {
+        id: "ask-1",
+        name: "request_human_input",
+        arguments: { questions },
+      }),
+      timelineEvent("session.humanInput.requested", {
+        request: { id: "review-base", toolCallId: "ask-1", questions },
+      }),
+      timelineEvent("user.humanInputResponse", {
+        requestId: "review-base",
+        ...(respondedByKind ? { respondedByKind } : {}),
+        response:
+          outcome === "answered"
+            ? { outcome, answers: [{ questionId: "base", values: ["both"] }] }
+            : { outcome },
+      }),
+      timelineEvent("agent.toolCall.output", {
+        id: "ask-1",
+        output: JSON.stringify({ requestId: "review-base", outcome }),
+      }),
+      timelineEvent("agent.message.completed", {
+        messageId: "m2",
+        text: "Landing it on main and release/2026.10.",
+      }),
+      timelineEvent("turn.completed", {}),
+    ];
+  }
+
+  test("folds a question the parent agent answered into the turn's work, off the person's side", async () => {
+    timelineSequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("agent_attempt")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    try {
+      // Collapsed: only the conversation and the "Worked for" row.
+      expect(r.container.querySelector("[data-human-input-history]")).toBeNull();
+      const text = r.container.textContent ?? "";
+      expect(text).not.toContain("Agent answered");
+      expect(text).not.toContain("You answered");
+      expect(text).not.toContain("Agent asked");
+      expect(text).toContain("Landing it on main and release/2026.10.");
+
+      const work = turnSummaryTrigger(r.container);
+      expect(work).not.toBeNull();
+      await act(async () => work!.click());
+      await flush();
+
+      // Expanded work: one quiet row, "Asked  Target branch → main and release/2026.10".
+      const row = r.container.querySelector<HTMLElement>(
+        '[data-og-agent-answered][data-human-input-history="review-base"]',
+      );
+      expect(row).not.toBeNull();
+      expect(row!.textContent).toContain("Asked");
+      expect(row!.textContent).toContain("Target branch → main and release/2026.10");
+      expect(row!.textContent).not.toContain("Agent answered");
+      // Not a user message: no bubble or right-aligned answer anywhere.
+      expect(row!.querySelector(".justify-end")).toBeNull();
+
+      // Opening the row keeps every detail: the question, who answered, the answer.
+      const toggle = row!.querySelector<HTMLElement>('[role="button"]');
+      await act(async () => {
+        toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      const details = row!.textContent ?? "";
+      expect(details).toContain("Target branch");
+      expect(details).toContain(
+        "The fix also applies to the release branch. Where should it land?",
+      );
+      expect(details).toContain("Agent answered");
+      expect(details).toContain("main and release/2026.10");
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("a question a person answered keeps its card and answer bubble in the conversation", async () => {
+    for (const respondedByKind of ["human", "api", undefined]) {
+      timelineSequence = 0;
+      const r = await renderComponent(
+        <MessageTimeline
+          events={subSessionQuestionEvents(respondedByKind)}
+          turnSummary={{ rolling: true }}
+        />,
+      );
+      await flush();
+      try {
+        const history = r.container.querySelector<HTMLElement>(
+          '[data-human-input-history="review-base"]',
+        );
+        expect(history).not.toBeNull();
+        expect(history!.hasAttribute("data-og-agent-answered")).toBe(false);
+        expect(history!.textContent).toContain("Agent asked");
+        expect(history!.textContent).toContain("You answered");
+        expect(history!.textContent).toContain("main and release/2026.10");
+        expect(history!.querySelector(".justify-end")).not.toBeNull();
+      } finally {
+        await r.unmount();
+      }
+    }
+  });
+
+  test("an answer or skip by the system is quiet work; an expired question stays visible", async () => {
+    timelineSequence = 0;
+    let r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("system")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector("[data-human-input-history]")).toBeNull();
+    await act(async () => turnSummaryTrigger(r.container)!.click());
+    await flush();
+    expect(r.container.querySelector("[data-og-agent-answered]")?.textContent).toContain(
+      "Target branch → main and release/2026.10",
+    );
+    await r.unmount();
+
+    timelineSequence = 0;
+    r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("agent_attempt", "skipped")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector("[data-human-input-history]")).toBeNull();
+    await act(async () => turnSummaryTrigger(r.container)!.click());
+    await flush();
+    expect(r.container.querySelector("[data-og-agent-answered]")?.textContent).toContain(
+      "Target branch → Skipped",
+    );
+    await r.unmount();
+
+    timelineSequence = 0;
+    r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("system", "expired")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    const expired = r.container.querySelector('[data-human-input-history="review-base"]');
+    expect(expired?.hasAttribute("data-og-agent-answered")).toBe(false);
+    expect(expired?.textContent).toContain("Expired");
+    await r.unmount();
+  });
+
+  test("outside readable turns an agent's answer is still a quiet row", async () => {
     timelineSequence = 0;
     const r = await renderComponent(
       <MessageTimeline
@@ -509,11 +684,10 @@ describe("structured human-input history", () => {
     );
     await flush();
 
-    const text =
-      r.container.querySelector('[data-human-input-history="request-agent"]')?.textContent ?? "";
-    expect(text).toContain("Agent answered");
-    expect(text).not.toContain("You answered");
-    expect(text).toContain("eu-north");
+    const row = r.container.querySelector('[data-human-input-history="request-agent"]');
+    expect(row?.hasAttribute("data-og-agent-answered")).toBe(true);
+    expect(row?.textContent).toContain("Region → eu-north");
+    expect(row?.textContent).not.toContain("You answered");
     await r.unmount();
   });
 

@@ -36171,6 +36171,7 @@
     "@opengeni/react/timeline-model": {
       "ActivityGroup": "type",
       "AgentTitleParts": "type",
+      "agentWorkHumanInputSummary": "value",
       "ANNOTATION_MAX_NOTE_LENGTH": "value",
       "ANNOTATION_MAX_QUOTE_BYTES": "value",
       "ANNOTATION_SOURCE_CONTEXT_BYTES": "value",
@@ -36217,6 +36218,7 @@
       "humanInputHeading": "value",
       "initialDrafts": "value",
       "isActionableHumanInputRequest": "value",
+      "isAgentWorkHumanInput": "value",
       "isApplyPatch": "value",
       "isPreparingWork": "value",
       "matchingQuoteInSource": "value",

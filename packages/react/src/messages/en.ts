@@ -1680,7 +1680,10 @@ export const englishMessages = {
   "mcpConnectionStatus.reviewConnection": "Review connection",
   "messageTimeline.agentAnswered": "Agent answered",
   "messageTimeline.agentAsked": "Agent asked",
+  "messageTimeline.agentSkipped": "Agent skipped",
   "messageTimeline.answered": "Answered",
+  "messageTimeline.answeredAutomatically": "Answered automatically",
+  "messageTimeline.asked": "Asked",
   "messageTimeline.auto": "Auto",
   "messageTimeline.backToYourMessage": "Back to your message",
   "messageTimeline.cancelled": "Cancelled",
@@ -1753,6 +1756,7 @@ export const englishMessages = {
   "messageTimeline.review": "Review",
   "messageTimeline.setUpProvider": "Set up {provider}",
   "messageTimeline.skipped": "Skipped",
+  "messageTimeline.skippedAutomatically": "Skipped automatically",
   "messageTimeline.theAgentRequestedStructuredInput": "The agent requested structured input.",
   "messageTimeline.thisAutomationWasNotGranted":
     "This automation was not granted access to your personal connection.",

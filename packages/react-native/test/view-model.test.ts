@@ -455,6 +455,12 @@ describe("native session view-models", () => {
     ).toBe("Agent asked: Fag: Velg fag\nAgent answered: Fag: Rør");
     expect(
       timelineAccessibilityLabel(
+        { ...item, answeredBySystem: true },
+        DEFAULT_OPENGENI_NATIVE_LABELS,
+      ),
+    ).toBe("Agent asked: Fag: Velg fag\nAnswered automatically: Fag: Rør");
+    expect(
+      timelineAccessibilityLabel(
         { ...item, answeredByAgent: true },
         {
           ...labels,

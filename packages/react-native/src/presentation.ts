@@ -49,6 +49,8 @@ export interface OpenGeniNativeLabels {
     answered: string;
     /** An agent answered (for example the parent of a sub-session); defaults to `answered`. */
     agentAnswered?: string;
+    /** The system (a service or automation) answered; defaults to `answered`. */
+    systemAnswered?: string;
     skipped: string;
     expired: string;
     cancelled: string;
@@ -183,6 +185,7 @@ export const DEFAULT_OPENGENI_NATIVE_LABELS = (t: OpenGeniText) =>
     humanInputOutcome: {
       answered: t("native.presentation.youAnswered"),
       agentAnswered: t("native.presentation.agentAnswered"),
+      systemAnswered: t("messageTimeline.answeredAutomatically"),
       skipped: t("native.presentation.skipped"),
       expired: t("native.presentation.expired"),
       cancelled: t("native.presentation.cancelled"),
