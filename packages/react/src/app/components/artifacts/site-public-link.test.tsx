@@ -272,7 +272,7 @@ test("a late answer for the previous Site never shows on the next one", async ()
     getSitePublicationLink: (_workspaceId: string, siteId: string) =>
       new Promise<SitePublicationLink>((resolve) => pending.set(siteId, resolve)),
   };
-  let latest: SitePublicationLinkLoad = { state: "loading" };
+  let latest = { state: "loading" } as SitePublicationLinkLoad;
   function Probe({ siteId }: { siteId: string }) {
     latest = module.useSitePublicationLink({ client, workspaceId: "ws", siteId });
     return null;
