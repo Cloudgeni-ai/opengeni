@@ -15,6 +15,12 @@ export type MessageSegment =
   | { type: "text"; text: string; start: number }
   | { type: "block"; block: ActionBlock; start: number };
 
+/**
+ * Blocks written in the last few minutes apply on their own. Older ones are
+ * history (the app may have been reinstalled since), so they never fire again.
+ */
+export const AUTO_APPLY_WINDOW_MS = 10 * 60 * 1000;
+
 const FENCE = /```geni-(agent|profile)[^\n]*\n([\s\S]*?)(```|$)/g;
 
 export function splitActionBlocks(text: string): MessageSegment[] {

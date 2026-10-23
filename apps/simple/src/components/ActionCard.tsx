@@ -1,13 +1,10 @@
 import { ArrowRight, Check, Loader2, RotateCcw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { appApi, type AppliedBlock } from "../lib/app-api";
-import { blockKey, type ActionBlock } from "../lib/blocks";
+import { AUTO_APPLY_WINDOW_MS, blockKey, type ActionBlock } from "../lib/blocks";
 import type { Agent } from "../lib/agents";
 import { useAppEvents } from "../lib/app-events";
 import { AgentAvatar } from "./AgentAvatar";
-
-/** Blocks written in the last few minutes apply on their own; older ones wait for a click. */
-const AUTO_APPLY_WINDOW_MS = 10 * 60 * 1000;
 
 type State =
   | { phase: "checking" }
@@ -34,6 +31,19 @@ export function ActionCard({
   const [state, setState] = useState<State>({ phase: "checking" });
   const keyRef = useRef<string | null>(null);
   const events = useAppEvents();
+  const mounted = useRef(true);
+  useEffect(
+    () => () => {
+      mounted.current = false;
+    },
+    [],
+  );
+  // Asking to apply again is safe: it returns the result, joins a live
+  // attempt, or takes over one that stopped.
+  const applyLater = () =>
+    setTimeout(() => {
+      if (mounted.current) void apply();
+    }, 1500);
 
   const apply = async () => {
     if (!block.payload || !keyRef.current) return;
@@ -50,8 +60,8 @@ export function ActionCard({
         setState({ phase: "done", result });
         events.changed();
       } else if (result?.state === "applying") {
-        // Another tab is applying it; look again shortly.
-        setTimeout(() => void check(false), 1500);
+        // The server (or another window) is applying it; look again shortly.
+        applyLater();
       } else setState({ phase: "error", message: "That didn't work." });
     } catch (error) {
       setState({
@@ -66,7 +76,7 @@ export function ActionCard({
     keyRef.current ??= await blockKey(sourceSessionId, block);
     const existing = await appApi.getBlock(keyRef.current).catch(() => null);
     if (existing?.state === "applied") setState({ phase: "done", result: existing });
-    else if (existing?.state === "applying") setTimeout(() => void check(false), 1500);
+    else if (existing?.state === "applying") applyLater();
     else if (autoApply && Date.now() - Date.parse(occurredAt) < AUTO_APPLY_WINDOW_MS) await apply();
     else setState({ phase: "ready" });
   };
@@ -75,6 +85,24 @@ export function ActionCard({
     void check(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one check per complete block
   }, [block.complete, block.raw, sourceSessionId]);
+
+  // The server keeps retrying in the background; pick up its result.
+  useEffect(() => {
+    if (state.phase !== "error") return;
+    const timer = setInterval(() => {
+      if (!keyRef.current) return;
+      void appApi.getBlock(keyRef.current).then(
+        (existing) => {
+          if (existing?.state === "applied") {
+            setState({ phase: "done", result: existing });
+            events.changed();
+          }
+        },
+        () => {},
+      );
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [state.phase, events]);
 
   const payload = block.payload ?? {};
   const name = typeof payload.name === "string" ? payload.name : null;
@@ -91,11 +119,13 @@ export function ActionCard({
   if (!block.payload) return null;
 
   if (block.kind === "profile") {
+    // An old profile change that never applied is history, not a to-do.
+    if (state.phase === "ready") return null;
     return (
       <div className="card-in my-1.5 inline-flex items-center gap-1.5 rounded-full bg-[var(--app-accent-soft)] px-2.5 py-1 text-xs text-[var(--app-accent)]">
         {state.phase === "done" ? (
           <Check size={12} />
-        ) : (
+        ) : state.phase === "error" ? null : (
           <Loader2 size={12} className="animate-spin" />
         )}
         {state.phase === "done"
@@ -103,9 +133,9 @@ export function ActionCard({
           : state.phase === "error"
             ? "Couldn't update the profile"
             : "Updating profile…"}
-        {state.phase === "ready" || state.phase === "error" ? (
+        {state.phase === "error" ? (
           <button type="button" className="ml-1 underline" onClick={() => void apply()}>
-            Apply
+            Try again
           </button>
         ) : null}
       </div>

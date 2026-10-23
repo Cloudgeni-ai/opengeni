@@ -11,21 +11,37 @@ afterAll(() => rmSync(directory, { recursive: true, force: true }));
 
 describe("applied blocks", () => {
   test("a block is claimed exactly once", () => {
-    expect(store.claimBlock("agent:abc", "ws", "agent")).toBe(true);
-    expect(store.claimBlock("agent:abc", "ws", "agent")).toBe(false);
-    store.settleBlock("agent:abc", "applied", { sessionId: "s1", name: "Runner" });
+    const owner = store.claimBlock("agent:abc", "ws", "agent");
+    expect(owner).toBeString();
+    expect(store.claimBlock("agent:abc", "ws", "agent")).toBeNull();
+    store.settleBlock("agent:abc", owner!, { sessionId: "s1", name: "Runner" });
     expect(store.getAppliedBlock("agent:abc")).toEqual({
       key: "agent:abc",
       kind: "agent",
       state: "applied",
       result: { sessionId: "s1", name: "Runner" },
     });
+    expect(store.claimBlock("agent:abc", "ws", "agent")).toBeNull();
   });
 
   test("a released claim can be retried", () => {
-    expect(store.claimBlock("agent:retry", "ws", "agent")).toBe(true);
-    store.releaseBlock("agent:retry");
-    expect(store.claimBlock("agent:retry", "ws", "agent")).toBe(true);
+    const owner = store.claimBlock("agent:retry", "ws", "agent");
+    store.releaseBlock("agent:retry", owner!);
+    expect(store.claimBlock("agent:retry", "ws", "agent")).toBeString();
+  });
+
+  test("a stale claim is taken over, and its old owner can no longer touch it", () => {
+    const first = store.claimBlock("agent:stale", "ws", "agent")!;
+    expect(store.claimBlock("agent:stale", "ws", "agent")).toBeNull();
+    store.db
+      .query("UPDATE applied_blocks SET created_at = ? WHERE block_key = ?")
+      .run(new Date(Date.now() - 5 * 60 * 1000).toISOString(), "agent:stale");
+    const second = store.claimBlock("agent:stale", "ws", "agent")!;
+    expect(second).toBeString();
+    store.settleBlock("agent:stale", second, { sessionId: "s2", name: "Two" });
+    store.releaseBlock("agent:stale", first);
+    store.settleBlock("agent:stale", first, { sessionId: "s1", name: "One" });
+    expect(store.getAppliedBlock("agent:stale")?.result).toEqual({ sessionId: "s2", name: "Two" });
   });
 });
 

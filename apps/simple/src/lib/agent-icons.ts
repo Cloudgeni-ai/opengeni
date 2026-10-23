@@ -141,6 +141,13 @@ export function isAgentIcon(name: unknown): name is string {
   return typeof name === "string" && ICON_SET.has(name);
 }
 
+/** A known icon name from loose input ("Rocket ", "rocket"), or null. */
+export function normalizeAgentIcon(name: unknown): string | null {
+  if (typeof name !== "string") return null;
+  const icon = name.trim().toLowerCase();
+  return ICON_SET.has(icon) ? icon : null;
+}
+
 /**
  * The agent's own pick when it is a known icon, otherwise the icon whose
  * keywords best match its name and description. Name matches count double, so

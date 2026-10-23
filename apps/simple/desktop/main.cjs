@@ -406,9 +406,13 @@ function sameOrigin(url, origin) {
  * where providers such as Google allow it (they refuse embedded app windows).
  * So the blank window is accepted as a hidden placeholder and its first real
  * destination decides: this app's own pages show in an app window, anything
- * else opens in the browser and the placeholder closes. Every other link
+ * else opens in the browser while the placeholder stays hidden until the page
+ * closes it. Every other link
  * (downloads, docs) opens in the browser directly.
  */
+/** Connect attempts expire well within this; a placeholder never outlives it. */
+const PLACEHOLDER_LIFETIME_MS = 30 * 60 * 1000;
+
 function routeWindowOpen(contents, origin) {
   contents.setWindowOpenHandler(({ url }) => {
     if (isBlank(url)) {
@@ -445,12 +449,23 @@ function routeWindowOpen(contents, origin) {
       openExternalSafely(url);
       return { action: "deny" };
     });
-    // A placeholder the page never used goes with the page.
+    // A hidden placeholder goes with the page that opened it: when the page
+    // closes, reloads or crashes it can no longer close it itself. One the
+    // page forgets is closed after the longest a sign-in can take.
     const closeUnused = () => {
       if (!popup.isDestroyed() && !popup.isVisible()) popup.destroy();
     };
+    const expiry = setTimeout(closeUnused, PLACEHOLDER_LIFETIME_MS);
     contents.once("destroyed", closeUnused);
-    popup.once("closed", () => contents.removeListener("destroyed", closeUnused));
+    contents.on("did-navigate", closeUnused);
+    contents.on("render-process-gone", closeUnused);
+    popup.once("closed", () => {
+      clearTimeout(expiry);
+      if (contents.isDestroyed()) return;
+      contents.removeListener("destroyed", closeUnused);
+      contents.removeListener("did-navigate", closeUnused);
+      contents.removeListener("render-process-gone", closeUnused);
+    });
   });
 }
 
@@ -617,8 +632,8 @@ if (!app.requestSingleInstanceLock()) {
   });
   app.on("activate", () => reveal());
   app.on("window-all-closed", () => {
-    // Stay running in the dock like a normal Mac app: the server keeps avatars
-    // painting, and agents keep this computer while it is connected.
+    // Stay running in the dock like a normal Mac app: agents keep this
+    // computer while it is connected.
   });
   app.on("before-quit", (event) => {
     if (!quitConfirmed) {

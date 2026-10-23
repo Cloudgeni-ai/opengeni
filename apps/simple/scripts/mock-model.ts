@@ -130,10 +130,9 @@ function reply(messages: ChatMessage[]) {
       "```geni-profile",
       JSON.stringify({
         name,
-        emoji: "🧭",
+        icon: "compass",
         description: `Helps with ${topic.toLowerCase()}`,
         instructions: `You help the user with ${topic.toLowerCase()}. Be practical and brief.`,
-        avatarPrompt: `a friendly compass character for ${topic.toLowerCase()}`,
       }),
       "```",
     ].join("\n");
@@ -152,10 +151,9 @@ function reply(messages: ChatMessage[]) {
       "```geni-agent",
       JSON.stringify({
         name,
-        emoji: "🚀",
+        icon: "rocket",
         description: `Keeps track of ${topic.toLowerCase()}`,
         instructions: `You focus on ${topic.toLowerCase()}. Be concise and proactive.`,
-        avatarPrompt: `a small rocket mascot themed around ${topic.toLowerCase()}`,
         firstMessage: `Introduce yourself in one sentence and ask what to start with.`,
       }),
       "```",

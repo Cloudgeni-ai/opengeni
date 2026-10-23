@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { OpenGeniClient, type Session } from "@opengeni/sdk";
 import { opengeniApiKey, opengeniApiUrl } from "./config";
-import { isAgentIcon } from "../src/lib/agent-icons";
+import { normalizeAgentIcon } from "../src/lib/agent-icons";
 import { getProfile, getPrefs, listProfiles, upsertProfile, type AgentProfile } from "./db";
 import {
   agentIdentity,
@@ -32,6 +32,16 @@ export function callerHeaders(request: Request): Record<string, string> {
 /** Runs `work` (and everything it starts) as the person who made `request`. */
 export function asCaller<T>(request: Request, work: () => Promise<T>): Promise<T> {
   return caller.run(callerHeaders(request), work);
+}
+
+/** The credentials of the request being served, for work that outlives it. */
+export function currentCaller(): Record<string, string> | undefined {
+  return caller.getStore();
+}
+
+/** Runs background `work` with saved credentials. */
+export function asHeaders<T>(headers: Record<string, string>, work: () => Promise<T>): Promise<T> {
+  return caller.run(headers, work);
 }
 
 export const api = new OpenGeniClient({
@@ -343,13 +353,14 @@ export async function applyProfileUpdate(
   if (role !== "main" && name !== session.title) {
     await api.updateSession(workspaceId, sessionId, { title: name });
   }
+  const icon = normalizeAgentIcon(update.icon);
   return upsertProfile(workspaceId, sessionId, {
     name,
     role,
     description,
     customInstructions,
     instructionsVersion: INSTRUCTIONS_VERSION,
-    ...(isAgentIcon(update.icon) ? { icon: update.icon } : {}),
+    ...(icon ? { icon } : {}),
   });
 }
 

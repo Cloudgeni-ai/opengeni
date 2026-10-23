@@ -8,30 +8,33 @@ import {
   SIMPLE_WEB_PORT,
 } from "./config";
 import {
-  claimBlock,
+  applyBlock,
+  followNewAgent,
+  noteAgentSessions,
+  watchBlocks,
+  type BlockRequest,
+} from "./blocks";
+import {
   getAppliedBlock,
   getPrefs,
   listProfiles,
   recordUsage,
-  releaseBlock,
   setPrefs,
-  settleBlock,
   upsertProfile,
   usageSummary,
 } from "./db";
-import { isAgentIcon } from "../src/lib/agent-icons";
+import { normalizeAgentIcon } from "../src/lib/agent-icons";
 import { AVATAR_STYLES, DEFAULT_AVATAR_STYLE } from "../src/lib/avatar-styles";
 import {
   api,
-  applyProfileUpdate,
   asCaller,
   createAgent,
+  currentCaller,
   DEFAULT_EFFORT,
   EFFORT_LEVELS,
   ensureMainAgent,
   listAgentSessions,
   refreshAgentInstructions,
-  type ProfileUpdate,
 } from "./opengeni";
 
 const serveDist = process.argv.includes("--serve-dist");
@@ -120,6 +123,7 @@ async function bootstrap(workspaceId: string) {
       config: config(),
     };
   }
+  watchBlocks(workspaceId, currentCaller() ?? {});
   if (!bootstrapped.has(workspaceId)) {
     bootstrapped.add(workspaceId);
     void listAgentSessions(workspaceId)
@@ -142,54 +146,6 @@ function state(workspaceId: string) {
   };
 }
 
-type BlockRequest = {
-  workspaceId: string;
-  key: string;
-  kind: "agent" | "profile";
-  sourceSessionId: string;
-  payload: Record<string, unknown>;
-};
-
-async function applyBlock(input: BlockRequest) {
-  const existing = getAppliedBlock(input.key);
-  if (existing) return existing;
-  if (!claimBlock(input.key, input.workspaceId, input.kind)) return getAppliedBlock(input.key);
-  try {
-    if (input.kind === "agent") {
-      const payload = input.payload;
-      const name = requireString(payload.name, "name").slice(0, 40);
-      const session = await createAgent({
-        workspaceId: input.workspaceId,
-        role: "agent",
-        name,
-        icon: isAgentIcon(payload.icon) ? payload.icon : null,
-        description:
-          typeof payload.description === "string" ? payload.description.slice(0, 160) : null,
-        instructions:
-          typeof payload.instructions === "string" ? payload.instructions.slice(0, 8000) : null,
-        firstMessage:
-          typeof payload.firstMessage === "string" ? payload.firstMessage.slice(0, 8000) : null,
-        shared: payload.shared === true,
-        idempotencyKey: `simple-app:block:${input.key}`.slice(0, 200),
-      });
-      const result = { sessionId: session.id, name };
-      settleBlock(input.key, "applied", result);
-    } else {
-      const update = input.payload as ProfileUpdate;
-      const profile = await applyProfileUpdate(input.workspaceId, input.sourceSessionId, update);
-      settleBlock(input.key, "applied", {
-        sessionId: input.sourceSessionId,
-        name: profile.name,
-      });
-    }
-  } catch (error) {
-    console.warn("Applying a block failed", error);
-    releaseBlock(input.key);
-    throw new HttpError(502, error instanceof Error ? error.message : String(error));
-  }
-  return getAppliedBlock(input.key);
-}
-
 async function route(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -202,7 +158,11 @@ async function route(request: Request): Promise<Response> {
     return json(await bootstrap(requireString(workspaceParam, "workspaceId")));
   }
   if (path === "/app/agents" && method === "GET") {
-    return json(await listAgentSessions(requireString(workspaceParam, "workspaceId")));
+    const workspaceId = requireString(workspaceParam, "workspaceId");
+    const sessions = await listAgentSessions(workspaceId);
+    watchBlocks(workspaceId, currentCaller() ?? {});
+    noteAgentSessions(workspaceId, sessions);
+    return json(sessions);
   }
   if (path === "/app/state" && method === "GET") {
     return json(state(requireString(workspaceParam, "workspaceId")));
@@ -243,6 +203,8 @@ async function route(request: Request): Promise<Response> {
       modelContext: input.modelContext ?? null,
       idempotencyKey: `simple-app:new:${input.requestId ?? crypto.randomUUID()}`,
     });
+    watchBlocks(workspaceId, currentCaller() ?? {});
+    followNewAgent(workspaceId, session.id);
     return json({ sessionId: session.id });
   }
   if (path === "/app/blocks/apply" && method === "POST") {
@@ -252,7 +214,12 @@ async function route(request: Request): Promise<Response> {
     requireString(input.sourceSessionId, "sourceSessionId");
     if (input.kind !== "agent" && input.kind !== "profile")
       throw new HttpError(400, "Unknown block");
-    return json(await applyBlock(input));
+    try {
+      return json(await applyBlock(input));
+    } catch (error) {
+      console.warn("Applying a block failed", error);
+      throw new HttpError(502, error instanceof Error ? error.message : String(error));
+    }
   }
   const blockMatch = /^\/app\/blocks\/([^/]+)$/.exec(path);
   if (blockMatch && method === "GET") {
@@ -275,10 +242,12 @@ async function route(request: Request): Promise<Response> {
     if (input.effort !== undefined && input.effort !== null && !(input.effort in EFFORT_LEVELS)) {
       throw new HttpError(400, "Unknown effort");
     }
+    const icon = input.icon == null ? input.icon : normalizeAgentIcon(input.icon);
+    if (icon === null && input.icon != null) throw new HttpError(400, "Unknown icon");
     return json(
       upsertProfile(workspaceId, sessionId, {
         ...(input.effort !== undefined ? { effort: input.effort } : {}),
-        ...(input.icon === null || isAgentIcon(input.icon) ? { icon: input.icon } : {}),
+        ...(icon !== undefined ? { icon } : {}),
       }),
     );
   }

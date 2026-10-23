@@ -76,6 +76,11 @@ const profileColumns = db
   .map((column) => column.name);
 // Databases from before icons keep their old avatar columns unused.
 if (!profileColumns.includes("icon")) db.exec("ALTER TABLE agent_profiles ADD COLUMN icon TEXT");
+const blockColumns = db
+  .query<{ name: string }, []>("SELECT name FROM pragma_table_info('applied_blocks')")
+  .all()
+  .map((column) => column.name);
+if (!blockColumns.includes("owner")) db.exec("ALTER TABLE applied_blocks ADD COLUMN owner TEXT");
 
 type ProfileRow = {
   workspace_id: string;
@@ -208,27 +213,45 @@ export function getAppliedBlock(key: string): AppliedBlock | null {
     : null;
 }
 
-/** Claims a block once. Returns false when another request already claimed it. */
-export function claimBlock(key: string, workspaceId: string, kind: string): boolean {
+/** A claim this old belongs to a server that stopped mid-apply. */
+const STALE_CLAIM_MS = 2 * 60 * 1000;
+
+/**
+ * Claims a block once. Returns the claim's owner token, or null when someone
+ * else holds a live claim or the block is already applied.
+ */
+export function claimBlock(key: string, workspaceId: string, kind: string): string | null {
+  const now = new Date();
+  const owner = crypto.randomUUID();
   const result = db
     .query(
-      `INSERT INTO applied_blocks (block_key, workspace_id, kind, state, created_at)
-       VALUES (?, ?, ?, 'applying', ?) ON CONFLICT (block_key) DO NOTHING`,
+      `INSERT INTO applied_blocks (block_key, workspace_id, kind, state, created_at, owner)
+       VALUES (?, ?, ?, 'applying', ?, ?)
+       ON CONFLICT (block_key) DO UPDATE SET created_at = excluded.created_at, owner = excluded.owner
+       WHERE applied_blocks.state = 'applying' AND applied_blocks.created_at < ?`,
     )
-    .run(key, workspaceId, kind, new Date().toISOString());
-  return result.changes === 1;
+    .run(
+      key,
+      workspaceId,
+      kind,
+      now.toISOString(),
+      owner,
+      new Date(now.getTime() - STALE_CLAIM_MS).toISOString(),
+    );
+  return result.changes === 1 ? owner : null;
 }
 
-export function settleBlock(key: string, state: "applied" | "failed", result: unknown) {
-  db.query("UPDATE applied_blocks SET state = ?, result = ? WHERE block_key = ?").run(
-    state,
-    JSON.stringify(result ?? null),
-    key,
-  );
+/** Settles a claim; a claim taken over in the meantime is left alone. */
+export function settleBlock(key: string, owner: string, result: unknown) {
+  db.query(
+    "UPDATE applied_blocks SET state = 'applied', result = ? WHERE block_key = ? AND owner = ? AND state = 'applying'",
+  ).run(JSON.stringify(result ?? null), key, owner);
 }
 
-export function releaseBlock(key: string) {
-  db.query("DELETE FROM applied_blocks WHERE block_key = ?").run(key);
+export function releaseBlock(key: string, owner: string) {
+  db.query(
+    "DELETE FROM applied_blocks WHERE block_key = ? AND owner = ? AND state = 'applying'",
+  ).run(key, owner);
 }
 
 export function getPrefs(workspaceId: string): Record<string, string> {

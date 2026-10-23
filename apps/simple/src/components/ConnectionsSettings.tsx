@@ -29,6 +29,7 @@ import {
   type ReactNode,
 } from "react";
 import { client, connectReturnUrl } from "../lib/app-api";
+import { insideMacApp } from "../lib/this-computer";
 import { bundledLogo, GOOGLE_DRIVE_LOGO } from "../lib/brand-logos";
 import {
   accountSubtitle,
@@ -414,6 +415,9 @@ function AccountActions({
   const [busy, setBusy] = useState<"reconnect" | "disconnect" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const root = useRef<HTMLDivElement | null>(null);
+  // Cancels a sign-in still waiting in the browser, e.g. when Settings closes.
+  const pending = useRef<AbortController | null>(null);
+  useEffect(() => () => pending.current?.abort(), []);
   const name = account.label ? `${serviceName} (${account.label})` : serviceName;
 
   useEffect(() => {
@@ -455,6 +459,8 @@ function AccountActions({
     }
     close();
     setBusy("reconnect");
+    const abort = new AbortController();
+    pending.current = abort;
     void (async () => {
       try {
         let attempt = await controller.begin({
@@ -478,12 +484,13 @@ function AccountActions({
           controller.transport,
           attempt,
           reserved.navigation,
-          { mode: "popup" },
+          { mode: "popup", signal: abort.signal },
         );
         if (result?.state === "complete") onChanged();
         else if (result?.state === "cancelled") setMessage("Sign-in was cancelled.");
         else if (result) setMessage("Sign-in didn't finish. Try again.");
       } catch (error) {
+        if (abort.signal.aborted) return;
         setMessage(
           error instanceof ConnectPopupClosedError
             ? "Sign-in window was closed."
@@ -493,6 +500,7 @@ function AccountActions({
         );
       } finally {
         reserved.close();
+        if (pending.current === abort) pending.current = null;
         setBusy(null);
       }
     })();
@@ -525,7 +533,16 @@ function AccountActions({
           {message}
         </span>
       ) : null}
-      {busy ? (
+      {busy === "reconnect" ? (
+        <button
+          type="button"
+          onClick={() => pending.current?.abort()}
+          className="flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] text-[var(--app-muted)] hover:bg-[var(--app-hover)]"
+        >
+          <LoaderCircle size={13} className="animate-spin" />
+          Cancel
+        </button>
+      ) : busy ? (
         <LoaderCircle size={15} className="animate-spin text-[var(--app-muted)]" />
       ) : account.needsAttention ? (
         <button
@@ -708,7 +725,8 @@ function AddConnection({
   async function openGitHub() {
     setNotice(null);
     // Reserve the tab inside the click; the install URL arrives after a request.
-    const tab = window.open("about:blank", "_blank");
+    // The Mac app opens links in the browser without a reservation.
+    const tab = insideMacApp ? null : window.open("about:blank", "_blank");
     try {
       const info = await client.getGitHubApp(workspaceId, { returnPath: window.location.pathname });
       const url = info.installUrl ?? info.linkUrl;
@@ -725,7 +743,9 @@ function AddConnection({
         tab.opener = null;
         tab.location.replace(url);
       } else window.open(url, "_blank", "noopener");
-      setNotice("Finish installing GitHub in the new tab, then come back here.");
+      setNotice(
+        `Finish installing GitHub in ${insideMacApp ? "your browser" : "the new tab"}, then come back here.`,
+      );
     } catch {
       tab?.close();
       setNotice("Couldn't reach GitHub setup. Try again.");

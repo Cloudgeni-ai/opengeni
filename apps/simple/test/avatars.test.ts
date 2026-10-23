@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { AGENT_ICON_COMPONENTS } from "../src/components/agent-icon-components";
-import { AGENT_ICON_NAMES, agentIcon } from "../src/lib/agent-icons";
+import { AGENT_ICON_NAMES, agentIcon, normalizeAgentIcon } from "../src/lib/agent-icons";
 import { AVATAR_STYLES, avatarColors, avatarStyleId } from "../src/lib/avatar-styles";
 
 describe("agent icons", () => {
+  test("loose icon names normalize, unknown ones do not", () => {
+    expect(normalizeAgentIcon(" Rocket ")).toBe("rocket");
+    expect(normalizeAgentIcon("not-an-icon")).toBeNull();
+    expect(normalizeAgentIcon(42)).toBeNull();
+  });
+
   test("every icon name has a component", () => {
     expect(Object.keys(AGENT_ICON_COMPONENTS).sort()).toEqual([...AGENT_ICON_NAMES].sort());
   });

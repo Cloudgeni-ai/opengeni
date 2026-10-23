@@ -335,12 +335,22 @@ const MAIN_SUGGESTIONS = [
   "Every morning at 8, send me a short news digest",
 ];
 
+// A chat nobody has written in holds only its setup events (created, title,
+// agent settings); the first message adds a user message, a queued turn and
+// status changes. Token counts are no signal: compaction and failed turns
+// leave them empty.
+const SETUP_EVENTS = 4;
+
 function neverTalked(agent: Agent) {
   const session = agent.session as typeof agent.session & {
     initialMessage?: string | null;
-    lastInputTokens?: number | null;
+    lastSequence?: number | null;
   };
-  return !session.initialMessage && session.activeTurnId == null && session.lastInputTokens == null;
+  return (
+    !session.initialMessage &&
+    session.activeTurnId == null &&
+    (session.lastSequence ?? 0) <= SETUP_EVENTS
+  );
 }
 
 const BLANK_SUGGESTIONS = [
