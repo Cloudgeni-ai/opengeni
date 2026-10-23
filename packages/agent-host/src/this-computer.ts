@@ -807,7 +807,8 @@ export class ThisComputer {
     return {
       installed: existsSync(this.hostedPath),
       connected: connections.length > 0,
-      running: !this.state.paused && this.agent.state !== "stopped",
+      // Serving only removed connections, it gives agents nothing.
+      running: !this.state.paused && this.agent.state !== "stopped" && connections.length > 0,
       reconnecting: !this.state.paused && connections.length > 0 && this.agent.state !== "running",
       needsPermissions: missingPermissions.length > 0,
       missingPermissions,
