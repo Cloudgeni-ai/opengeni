@@ -109,7 +109,11 @@ describe("session control surface architecture", () => {
     // page gutter. Putting the gutter inside only SessionChrome makes it 48px
     // narrower than the composer at desktop widths.
     expect(route).not.toContain('className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"');
-    expect(route).toContain('className="mb-2 w-full shrink-0 px-4 sm:px-6"');
+    expect(route).toContain(
+      'className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6"',
+    );
+    // The wait status is a chip in SessionChrome, not a separate banner row.
+    expect(route).not.toContain("<LazySessionWaitStatus");
   });
 
   test("current model pacing is shown above the composer, never on an older history page", async () => {

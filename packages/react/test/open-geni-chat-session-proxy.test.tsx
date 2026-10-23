@@ -665,6 +665,8 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
   test("goal controls pause, resume and clear through the relay", async () => {
     const chat = await mountStockChat({}, {}, undefined, true);
     const goal = `/v1/workspaces/${WS}/sessions/${S}/goal`;
+    // Goal actions live in the goal chip's panel.
+    expect(await chat.click(/^Goal · /)).toBe(true);
     expect(await chat.click(/^Pause goal$/)).toBe(true);
     expect(chat.container.textContent).toContain("Goal");
     expect(await chat.click(/^Resume goal$/)).toBe(true);

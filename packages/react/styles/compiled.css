@@ -3912,12 +3912,6 @@
       background-color: color-mix(in oklab, var(--og-color-surface-2) 50%, transparent);
     }
   }
-:where(.og-root).bg-og-surface-2\/60,:where(.og-root) .bg-og-surface-2\/60 {
-    background-color: var(--og-color-surface-2);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--og-color-surface-2) 60%, transparent);
-    }
-  }
 :where(.og-root).bg-og-surface-2\/70,:where(.og-root) .bg-og-surface-2\/70 {
     background-color: var(--og-color-surface-2);
     @supports (color: color-mix(in lab, red, red)) {
@@ -4394,6 +4388,9 @@
   }
 :where(.og-root).py-\[var\(--og-model-picker-row-padding-y\)\],:where(.og-root) .py-\[var\(--og-model-picker-row-padding-y\)\] {
     padding-block: var(--og-model-picker-row-padding-y);
+  }
+:where(.og-root).py-\[var\(--og-session-chrome-rail-pad\)\],:where(.og-root) .py-\[var\(--og-session-chrome-rail-pad\)\] {
+    padding-block: var(--og-session-chrome-rail-pad);
   }
 :where(.og-root).py-px,:where(.og-root) .py-px {
     padding-block: 1px;
@@ -7019,6 +7016,16 @@
       }
     }
   }
+:where(.og-root).hover\:bg-og-surface-2\/70,:where(.og-root) .hover\:bg-og-surface-2\/70 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--og-color-surface-2);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--og-color-surface-2) 70%, transparent);
+        }
+      }
+    }
+  }
 :where(.og-root).hover\:bg-og-surface-2\/80,:where(.og-root) .hover\:bg-og-surface-2\/80 {
     &:hover {
       @media (hover: hover) {
@@ -7990,6 +7997,11 @@
       @supports (color: color-mix(in lab, red, red)) {
         outline-color: color-mix(in oklab, var(--color-brand) 55%, transparent);
       }
+    }
+  }
+:where(.og-root).has-\[\>div\:empty\]\:hidden,:where(.og-root) .has-\[\>div\:empty\]\:hidden {
+    &:has(>div:empty) {
+      display: none;
     }
   }
 :where(.og-root).has-\[\>svg\]\:px-1\.5,:where(.og-root) .has-\[\>svg\]\:px-1\.5 {
@@ -10507,6 +10519,11 @@
       min-height: calc(var(--spacing) * 0);
     }
   }
+:where(.og-root).pointer-coarse\:min-h-8,:where(.og-root) .pointer-coarse\:min-h-8 {
+    @media (pointer: coarse) {
+      min-height: calc(var(--spacing) * 8);
+    }
+  }
 :where(.og-root).pointer-coarse\:min-h-9,:where(.og-root) .pointer-coarse\:min-h-9 {
     @media (pointer: coarse) {
       min-height: calc(var(--spacing) * 9);
@@ -10557,6 +10574,11 @@
       min-width: 44px;
     }
   }
+:where(.og-root).pointer-coarse\:p-1\.5,:where(.og-root) .pointer-coarse\:p-1\.5 {
+    @media (pointer: coarse) {
+      padding: calc(var(--spacing) * 1.5);
+    }
+  }
 :where(.og-root).pointer-coarse\:px-1,:where(.og-root) .pointer-coarse\:px-1 {
     @media (pointer: coarse) {
       padding-inline: calc(var(--spacing) * 1);
@@ -10585,6 +10607,11 @@
 :where(.og-root).pointer-coarse\:py-1,:where(.og-root) .pointer-coarse\:py-1 {
     @media (pointer: coarse) {
       padding-block: calc(var(--spacing) * 1);
+    }
+  }
+:where(.og-root).pointer-coarse\:py-1\.5,:where(.og-root) .pointer-coarse\:py-1\.5 {
+    @media (pointer: coarse) {
+      padding-block: calc(var(--spacing) * 1.5);
     }
   }
 :where(.og-root).pointer-coarse\:py-2,:where(.og-root) .pointer-coarse\:py-2 {
@@ -10641,6 +10668,54 @@
       &::before {
         content: var(--tw-content);
         inset: calc(var(--spacing) * -1.5);
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:-inset-2\.5,:where(.og-root) .pointer-coarse\:before\:-inset-2\.5 {
+    @media (pointer: coarse) {
+      &::before {
+        content: var(--tw-content);
+        inset: calc(var(--spacing) * -2.5);
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:inset-x-0,:where(.og-root) .pointer-coarse\:before\:inset-x-0 {
+    @media (pointer: coarse) {
+      &::before {
+        content: var(--tw-content);
+        inset-inline: calc(var(--spacing) * 0);
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:-inset-y-1\.5,:where(.og-root) .pointer-coarse\:before\:-inset-y-1\.5 {
+    @media (pointer: coarse) {
+      &::before {
+        content: var(--tw-content);
+        inset-block: calc(var(--spacing) * -1.5);
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:-inset-y-2\.5,:where(.og-root) .pointer-coarse\:before\:-inset-y-2\.5 {
+    @media (pointer: coarse) {
+      &::before {
+        content: var(--tw-content);
+        inset-block: calc(var(--spacing) * -2.5);
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:-right-2\.5,:where(.og-root) .pointer-coarse\:before\:-right-2\.5 {
+    @media (pointer: coarse) {
+      &::before {
+        content: var(--tw-content);
+        right: calc(var(--spacing) * -2.5);
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:-left-2\.5,:where(.og-root) .pointer-coarse\:before\:-left-2\.5 {
+    @media (pointer: coarse) {
+      &::before {
+        content: var(--tw-content);
+        left: calc(var(--spacing) * -2.5);
       }
     }
   }

@@ -1,4 +1,4 @@
-import { SessionWaitStatus } from "@opengeni/react/app/components/session/session-wait-status";
+import { SessionChrome, type UseTurnQueueResult } from "@opengeni/react";
 import { SessionBrowseOrderControls } from "@opengeni/react/app/components/rail/session-browse-order-controls";
 import type {
   SessionBrowseGroupBy,
@@ -15,7 +15,7 @@ import { createRoot } from "react-dom/client";
 
 import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
-import { sessionStateLabel } from "@opengeni/react/app/lib/session-rail";
+import { sessionInputWait, sessionStateLabel } from "@opengeni/react/app/lib/session-rail";
 import { RowQuickActions } from "@opengeni/react/app/components/rail/session-list";
 import { SessionRowContent } from "@opengeni/react/app/components/rail/session-row-content";
 import { SessionRowHoverDetails } from "@opengeni/react/app/components/rail/session-row-hover-details";
@@ -25,6 +25,11 @@ import type { Session } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
+const emptyQueue = {
+  queue: [],
+  pendingInputs: [],
+  mutationFor: () => null,
+} as unknown as UseTurnQueueResult;
 
 // The header and rows only render inside the app shell, which always provides
 // the app context; their chat actions (copy link, pin) run through it. The
@@ -233,7 +238,12 @@ function SessionRailRowMetadataFixture() {
           onRename={async () => null}
           onPin={async () => null}
         />
-        <SessionWaitStatus session={waitSession} />
+        {/* The wait chip in the status row above the composer, as in the session route. */}
+        <SessionChrome
+          queue={emptyQueue}
+          sessionStatus={waitSession.status}
+          wait={sessionInputWait(waitSession)}
+        />
         <div data-testid="waiting-row" className="flex h-8 w-[244px] items-center px-3">
           <SessionRowContent
             title={waitSession.title!}

@@ -211,6 +211,7 @@ export type {
   SessionChromeProps,
   SessionChromeSignalId,
   SessionChromeSignalTone,
+  SessionChromeWait,
 } from "./components/session-chrome";
 export { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/tooltip";
 export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./workstream-control-event";

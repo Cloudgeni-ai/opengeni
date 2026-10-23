@@ -1995,7 +1995,7 @@ function AttachmentChips({
   }
 
   return (
-    <div className="flex flex-wrap gap-2 px-3 py-2">
+    <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-0.5">
       {attachments.map((attachment) => {
         const failed = attachment.status === "failed";
         const secureContextRequired = attachment.errorCode === "secure_context_required";
@@ -2030,13 +2030,18 @@ function AttachmentChips({
         // An app-shot reads as the window it shows: its title first, then the
         // app, with a wider thumbnail so the window is recognizable.
         const displayName = appShot ? appShot.title.trim() || appShot.app : attachment.name;
-        const thumbSize = appShot ? "h-10 w-16" : "size-8";
+        // A plain file reads on one line (thumbnail, name, size) so it costs the
+        // conversation as little height as possible; states that need words
+        // (failures, app-shots) keep their two-line layout.
+        const compact = !appShot && !failed && !previewFailed;
+        const thumbSize = appShot ? "h-10 w-16" : compact ? "size-6" : "size-8";
         return (
           <div
             key={attachment.id}
             data-app-shot={appShot ? "" : undefined}
             className={cn(
-              "flex min-w-0 items-center gap-2 rounded-og-md border px-2 py-1.5 text-og-sm",
+              "flex min-w-0 items-center gap-2 rounded-og-md border text-og-sm",
+              compact ? "py-1 pr-1 pl-1" : "px-2 py-1.5",
               // A captured window arrives from outside the page: let it settle in.
               appShot && "animate-og-enter",
               failed
@@ -2060,6 +2065,10 @@ function AttachmentChips({
                 className={cn(
                   thumbSize,
                   "shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
+                  // The slim chip's 24px preview keeps a 44px touch target; the
+                  // hit area grows over the name, never the remove button.
+                  compact &&
+                    "relative overflow-visible pointer-coarse:before:absolute pointer-coarse:before:-inset-y-2.5 pointer-coarse:before:-left-2.5 pointer-coarse:before:-right-2.5 pointer-coarse:before:content-['']",
                   appShot && "border border-og-border bg-og-surface-1",
                   !thumb && "flex items-center justify-center disabled:cursor-wait",
                 )}
@@ -2078,6 +2087,7 @@ function AttachmentChips({
                     className={cn(
                       "h-full w-full object-cover transition-opacity hover:opacity-80",
                       appShot && "object-top",
+                      compact && "rounded",
                     )}
                   />
                 ) : previewLoading ? (
@@ -2098,33 +2108,42 @@ function AttachmentChips({
             ) : (
               <FileIcon className="size-4 shrink-0 text-og-fg-muted" />
             )}
-            <div className="min-w-0 flex-1">
-              <div className="truncate font-medium text-og-fg">{displayName}</div>
-              {appShot && !failed && !previewFailed && attachment.status !== "uploading" ? (
-                <ComposerTip
-                  tip={
-                    appShot.text?.trim()
-                      ? t("composer.appShotTextIncluded")
-                      : t("composer.appShotNoText")
-                  }
-                >
-                  <div className="flex min-w-0 items-center gap-1 text-og-xs text-og-fg-subtle">
-                    <AppWindowIcon aria-hidden className="size-3 shrink-0" />
-                    <span className="truncate">{statusText}</span>
-                  </div>
-                </ComposerTip>
-              ) : secureContextRequired ? (
-                <div className="break-words text-og-xs leading-4 text-og-status-failed">
+            {compact ? (
+              <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span className="truncate font-medium text-og-fg">{displayName}</span>
+                <span className="shrink-0 text-og-xs text-og-fg-subtle tabular-nums">
                   {statusText}
-                </div>
-              ) : failed || previewFailed ? (
-                <ComposerTip tip={statusText}>
-                  <div className="truncate text-og-xs text-og-status-failed">{statusText}</div>
-                </ComposerTip>
-              ) : (
-                <div className="truncate text-og-xs text-og-fg-subtle">{statusText}</div>
-              )}
-            </div>
+                </span>
+              </div>
+            ) : (
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium text-og-fg">{displayName}</div>
+                {appShot && !failed && !previewFailed && attachment.status !== "uploading" ? (
+                  <ComposerTip
+                    tip={
+                      appShot.text?.trim()
+                        ? t("composer.appShotTextIncluded")
+                        : t("composer.appShotNoText")
+                    }
+                  >
+                    <div className="flex min-w-0 items-center gap-1 text-og-xs text-og-fg-subtle">
+                      <AppWindowIcon aria-hidden className="size-3 shrink-0" />
+                      <span className="truncate">{statusText}</span>
+                    </div>
+                  </ComposerTip>
+                ) : secureContextRequired ? (
+                  <div className="break-words text-og-xs leading-4 text-og-status-failed">
+                    {statusText}
+                  </div>
+                ) : failed || previewFailed ? (
+                  <ComposerTip tip={statusText}>
+                    <div className="truncate text-og-xs text-og-status-failed">{statusText}</div>
+                  </ComposerTip>
+                ) : (
+                  <div className="truncate text-og-xs text-og-fg-subtle">{statusText}</div>
+                )}
+              </div>
+            )}
             {attachment.status === "uploading" ? (
               <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" />
             ) : null}
@@ -2145,7 +2164,13 @@ function AttachmentChips({
               type="button"
               onClick={() => onRemove(attachment.id)}
               disabled={disabled}
-              className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
+              className={cn(
+                "shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50",
+                // The slim chip keeps a 44px touch target with an invisible hit area.
+                compact
+                  ? "relative pointer-coarse:p-1.5 pointer-coarse:before:absolute pointer-coarse:before:-inset-2.5 pointer-coarse:before:content-['']"
+                  : "pointer-coarse:size-10",
+              )}
               aria-label={messages.removeAttachment(displayName)}
             >
               <XIcon className="size-3.5" />

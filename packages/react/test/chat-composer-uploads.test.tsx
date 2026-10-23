@@ -232,6 +232,33 @@ describe("ChatComposer attachments", () => {
     expect(remove).toBeTruthy();
   });
 
+  test("a ready file chip reads on one line while a failure keeps its two-line card", async () => {
+    const attachments = makeAttachments({
+      attachments: [
+        readyChip("screenshot.png"),
+        { ...readyChip("broken.png"), status: "failed", error: "storage unavailable" },
+      ],
+    });
+    const container = await mount(
+      <ChatComposer composer={makeComposer()} attachments={attachments} />,
+    );
+    const remove = (name: string) =>
+      container.querySelector<HTMLButtonElement>(`[aria-label="Remove ${name}"]`)!;
+    const ready = remove("screenshot.png").parentElement!;
+    const name = [...ready.querySelectorAll("span")].find(
+      (node) => node.textContent === "screenshot.png",
+    )!;
+    // Name and size share one row.
+    expect(name.nextElementSibling?.textContent).toBe("2.0 KB");
+    expect(name.parentElement!.className).toContain("items-baseline");
+    // Its remove button keeps a 44px touch target through an invisible hit area.
+    expect(remove("screenshot.png").className).toContain("pointer-coarse:before:-inset-2");
+    const failed = remove("broken.png").parentElement!;
+    expect(failed.textContent).toContain("storage unavailable");
+    expect(failed.className).toContain("py-1.5");
+    expect(remove("broken.png").className).toContain("pointer-coarse:size-10");
+  });
+
   test("renders an image attachment as a shared-lightbox preview trigger", async () => {
     const attachment = readyPreviewChip("screenshot.png");
     const retained: string[] = [];
