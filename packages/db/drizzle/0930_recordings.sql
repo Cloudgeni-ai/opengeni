@@ -57,6 +57,10 @@ CREATE TABLE recording_tracks (
   chunk_count integer NOT NULL DEFAULT 0,
   total_bytes bigint NOT NULL DEFAULT 0,
   duration_milliseconds integer NOT NULL DEFAULT 0,
+  -- The worker's one seekable file for the whole track (chunk runs placed on
+  -- the recording's timeline), used for transcription and playback.
+  prepared_object_key text,
+  prepared_bytes bigint,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (recording_id, track_number),
   CONSTRAINT recording_tracks_workspace_uq UNIQUE (workspace_id, recording_id, track_number),
@@ -70,6 +74,9 @@ CREATE TABLE recording_tracks (
     AND chunk_count >= 0
     AND total_bytes >= 0
     AND duration_milliseconds >= 0
+    AND (prepared_object_key IS NULL) = (prepared_bytes IS NULL)
+    AND (prepared_object_key IS NULL OR octet_length(prepared_object_key) BETWEEN 1 AND 1024)
+    AND (prepared_bytes IS NULL OR prepared_bytes > 0)
   )
 );
 
@@ -123,8 +130,13 @@ CREATE TABLE recording_transcript_versions (
   is_current boolean NOT NULL DEFAULT false,
   languages text[] NOT NULL DEFAULT '{}',
   diarized boolean NOT NULL DEFAULT false,
+  -- Who told the speakers apart: the provider, our own diarizer, the tracks
+  -- alone (microphone versus system audio), or nobody.
+  diarization text,
   audio_milliseconds integer NOT NULL DEFAULT 0,
   segment_count integer NOT NULL DEFAULT 0,
+  -- Estimated provider cost at the adapter's list price, in micro-dollars.
+  cost_usd_micros bigint,
   requested_by_subject_id text NOT NULL,
   attempt_count integer NOT NULL DEFAULT 0,
   processing_owner uuid,
@@ -147,6 +159,8 @@ CREATE TABLE recording_transcript_versions (
     AND cardinality(languages) <= 16
     AND audio_milliseconds >= 0
     AND segment_count >= 0
+    AND (diarization IS NULL OR diarization IN ('provider', 'ours', 'tracks', 'none'))
+    AND (cost_usd_micros IS NULL OR cost_usd_micros >= 0)
     AND attempt_count >= 0
     AND octet_length(requested_by_subject_id) BETWEEN 1 AND 1024
     AND (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128)
@@ -253,24 +267,28 @@ CREATE TABLE recording_speaker_assignments (
 CREATE INDEX recording_speaker_assignments_person_idx
   ON recording_speaker_assignments (workspace_id, person_id) WHERE person_id IS NOT NULL;
 
--- A human moving one segment to another label (splitting a label that
--- covered two people). Layered on the immutable version.
-CREATE TABLE recording_segment_speaker_overrides (
+-- A human correction to one segment: its text, or moving it to another label
+-- (splitting a label that covered two people). Layered on the immutable
+-- version, so a re-run never silently loses the work.
+CREATE TABLE recording_segment_edits (
   account_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
   recording_id uuid NOT NULL,
   version_id uuid NOT NULL,
   segment_index integer NOT NULL,
-  speaker_label text NOT NULL,
-  assigned_by_subject_id text NOT NULL,
-  assigned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  speaker_label text,
+  text text,
+  edited_by_subject_id text NOT NULL,
+  edited_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (version_id, segment_index),
-  CONSTRAINT recording_segment_speaker_overrides_version_fk FOREIGN KEY (workspace_id, recording_id, version_id)
+  CONSTRAINT recording_segment_edits_version_fk FOREIGN KEY (workspace_id, recording_id, version_id)
     REFERENCES recording_transcript_versions(workspace_id, recording_id, id) ON DELETE CASCADE,
-  CONSTRAINT recording_segment_speaker_overrides_values_chk CHECK (
+  CONSTRAINT recording_segment_edits_values_chk CHECK (
     segment_index >= 0
-    AND octet_length(speaker_label) BETWEEN 1 AND 128
-    AND octet_length(assigned_by_subject_id) BETWEEN 1 AND 1024
+    AND (speaker_label IS NOT NULL OR text IS NOT NULL)
+    AND (speaker_label IS NULL OR octet_length(speaker_label) BETWEEN 1 AND 128)
+    AND (text IS NULL OR octet_length(text) <= 65536)
+    AND octet_length(edited_by_subject_id) BETWEEN 1 AND 1024
   )
 );
 
@@ -291,8 +309,9 @@ CREATE TABLE recording_events (
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT recording_events_visibility_chk CHECK (visibility IN ('user_private', 'workspace_shared')),
   CONSTRAINT recording_events_type_chk CHECK (type IN (
-    'recording.finished', 'recording.transcript.ready', 'recording.transcript.failed',
-    'recording.deleted'
+    'recording.started', 'recording.finished', 'recording.transcript.ready',
+    'recording.transcript.failed', 'recording.transcript.current_changed',
+    'recording.speakers.updated', 'recording.deleted'
   )),
   CONSTRAINT recording_events_values_chk CHECK (
     octet_length(owner_subject_id) BETWEEN 1 AND 1024
@@ -433,23 +452,25 @@ END $recording_webhook_search_paths$;
 
 ALTER TABLE workspace_webhooks DROP CONSTRAINT workspace_webhooks_event_types_chk;
 ALTER TABLE workspace_webhooks ADD CONSTRAINT workspace_webhooks_event_types_chk CHECK (
-  cardinality(event_types) BETWEEN 1 AND 16 AND event_types <@ ARRAY[
+  cardinality(event_types) BETWEEN 1 AND 32 AND event_types <@ ARRAY[
     'turn.completed','turn.failed','turn.cancelled','session.status.changed',
     'session.requiresAction','session.humanInput.requested',
     'session.notification.posted','session.notification.withdrawn',
     'usage.threshold_reached','usage.exhausted','usage.period_reset',
-    'recording.finished','recording.transcript.ready','recording.transcript.failed',
-    'recording.deleted'
+    'recording.started','recording.finished','recording.transcript.ready',
+    'recording.transcript.failed','recording.transcript.current_changed',
+    'recording.speakers.updated','recording.deleted'
   ]::text[]
 ) NOT VALID;
 ALTER TABLE organization_webhooks DROP CONSTRAINT organization_webhooks_event_types_chk;
 ALTER TABLE organization_webhooks ADD CONSTRAINT organization_webhooks_event_types_chk CHECK (
-  cardinality(event_types) BETWEEN 1 AND 16 AND event_types <@ ARRAY[
+  cardinality(event_types) BETWEEN 1 AND 32 AND event_types <@ ARRAY[
     'turn.completed', 'turn.failed', 'turn.cancelled', 'session.status.changed',
     'session.requiresAction', 'session.humanInput.requested',
     'session.notification.posted', 'session.notification.withdrawn',
-    'recording.finished','recording.transcript.ready','recording.transcript.failed',
-    'recording.deleted'
+    'recording.started','recording.finished','recording.transcript.ready',
+    'recording.transcript.failed','recording.transcript.current_changed',
+    'recording.speakers.updated','recording.deleted'
   ]::text[]
 ) NOT VALID;
 
@@ -475,7 +496,7 @@ BEGIN
   FOREACH child IN ARRAY ARRAY[
     'recording_tracks', 'recording_chunks', 'recording_transcript_versions',
     'recording_transcript_segments', 'recording_speaker_assignments',
-    'recording_segment_speaker_overrides'
+    'recording_segment_edits'
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', child);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', child);
@@ -524,7 +545,7 @@ BEGIN
     GRANT SELECT, INSERT, UPDATE, DELETE ON
       recordings, recording_tracks, recording_chunks, recording_transcript_versions,
       recording_transcript_segments, recording_people, recording_speaker_assignments,
-      recording_segment_speaker_overrides
+      recording_segment_edits
     TO opengeni_app;
     GRANT SELECT, INSERT ON recording_events TO opengeni_app;
   END IF;

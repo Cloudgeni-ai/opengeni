@@ -40,11 +40,15 @@ export const recordingSpeakerAssignmentSourceValues = [
   "track",
 ] as const;
 export const recordingEventTypeValues = [
+  "recording.started",
   "recording.finished",
   "recording.transcript.ready",
   "recording.transcript.failed",
+  "recording.transcript.current_changed",
+  "recording.speakers.updated",
   "recording.deleted",
 ] as const;
+export const recordingDiarizationValues = ["provider", "ours", "tracks", "none"] as const;
 
 const tsvector = customType<{ data: string }>({ dataType: () => "tsvector" });
 
@@ -93,6 +97,8 @@ export const recordingTracks = pgTable(
     chunkCount: integer("chunk_count").notNull().default(0),
     totalBytes: bigint("total_bytes", { mode: "number" }).notNull().default(0),
     durationMilliseconds: integer("duration_milliseconds").notNull().default(0),
+    preparedObjectKey: text("prepared_object_key"),
+    preparedBytes: bigint("prepared_bytes", { mode: "number" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -145,8 +151,10 @@ export const recordingTranscriptVersions = pgTable(
     isCurrent: boolean("is_current").notNull().default(false),
     languages: text("languages").array().notNull().default(sql`'{}'::text[]`),
     diarized: boolean("diarized").notNull().default(false),
+    diarization: text("diarization", { enum: recordingDiarizationValues }),
     audioMilliseconds: integer("audio_milliseconds").notNull().default(0),
     segmentCount: integer("segment_count").notNull().default(0),
+    costUsdMicros: bigint("cost_usd_micros", { mode: "number" }),
     requestedBySubjectId: text("requested_by_subject_id").notNull(),
     attemptCount: integer("attempt_count").notNull().default(0),
     processingOwner: uuid("processing_owner"),
@@ -222,17 +230,18 @@ export const recordingSpeakerAssignments = pgTable(
   (table) => [primaryKey({ columns: [table.versionId, table.speakerLabel] })],
 );
 
-export const recordingSegmentSpeakerOverrides = pgTable(
-  "recording_segment_speaker_overrides",
+export const recordingSegmentEdits = pgTable(
+  "recording_segment_edits",
   {
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     recordingId: uuid("recording_id").notNull(),
     versionId: uuid("version_id").notNull(),
     segmentIndex: integer("segment_index").notNull(),
-    speakerLabel: text("speaker_label").notNull(),
-    assignedBySubjectId: text("assigned_by_subject_id").notNull(),
-    assignedAt: timestamp("assigned_at", { withTimezone: true }).notNull().defaultNow(),
+    speakerLabel: text("speaker_label"),
+    text: text("text"),
+    editedBySubjectId: text("edited_by_subject_id").notNull(),
+    editedAt: timestamp("edited_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [primaryKey({ columns: [table.versionId, table.segmentIndex] })],
 );

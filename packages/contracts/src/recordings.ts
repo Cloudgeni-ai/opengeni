@@ -37,6 +37,15 @@ export const RecordingSpeakerSource = /* @__PURE__ */ defineSchema(() =>
 );
 export type RecordingSpeakerSource = z.infer<typeof RecordingSpeakerSource>;
 
+/**
+ * Who told the speakers apart in a version: the transcription provider, our
+ * own diarizer, the tracks alone (microphone versus system audio), or nobody.
+ */
+export const RecordingDiarization = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["provider", "ours", "tracks", "none"]),
+);
+export type RecordingDiarization = z.infer<typeof RecordingDiarization>;
+
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/u);
 const externalRef = z.string().trim().min(1).max(512);
 const jsonValue: z.ZodType<unknown> = z.lazy(() =>
@@ -250,6 +259,29 @@ export const UpdateRecordingSpeakersRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type UpdateRecordingSpeakersRequest = z.infer<typeof UpdateRecordingSpeakersRequest>;
 
+/**
+ * Correct the text of segments in one version. The version itself never
+ * changes; edits are a layer on top. `text: null` reverts to the original.
+ */
+export const UpdateRecordingSegmentsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      edits: z
+        .array(
+          z
+            .object({
+              segmentIndex: z.number().int().min(0),
+              text: z.string().max(65_536).nullable(),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(500),
+    })
+    .strict(),
+);
+export type UpdateRecordingSegmentsRequest = z.infer<typeof UpdateRecordingSegmentsRequest>;
+
 export const CreateRecordingPersonRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -270,6 +302,8 @@ export type RecordingTrack = {
   chunkCount: number;
   totalBytes: number;
   durationMilliseconds: number;
+  /** The worker has prepared one seekable file for this track. */
+  playable: boolean;
 };
 
 export type RecordingTranscriptVersion = {
@@ -283,8 +317,11 @@ export type RecordingTranscriptVersion = {
   isCurrent: boolean;
   languages: string[];
   diarized: boolean;
+  diarization: RecordingDiarization | null;
   audioMilliseconds: number;
   segmentCount: number;
+  /** Estimated provider cost at list price, in US dollars. */
+  costUsd: number | null;
   requestedBySubjectId: string;
   errorCode: string | null;
   createdAt: string;
@@ -334,9 +371,12 @@ export type RecordingTranscriptSegment = {
   startMilliseconds: number;
   endMilliseconds: number;
   trackNumber: number | null;
-  /** Effective label after segment overrides; null when the model gave none. */
+  /** Effective label after human edits; null when the model gave none. */
   speakerLabel: string | null;
+  /** Effective text after human edits. */
   text: string;
+  /** A person corrected this segment's text. */
+  edited: boolean;
 };
 
 export type RecordingTranscriptPage = {
@@ -362,18 +402,50 @@ export type RecordingTranscriptionCapabilities = {
   batch: boolean;
   live: boolean;
   diarization: boolean;
+  liveDiarization: boolean;
+  /** Transcribes several tracks in one call and keeps them apart. */
+  multichannel: boolean;
   maxSpeakers: number | null;
   wordTimestamps: boolean;
+  /** ISO 639 codes the model supports; empty means it does not say. */
+  languages: string[];
   languageDetection: boolean;
   keyterms: boolean;
+  /** Provider-side matching against registered voices. */
+  speakerLibrary: boolean;
   maxDurationSeconds: number | null;
   maxFileBytes: number | null;
 };
 
 export const RECORDING_EVENT_TYPES = [
+  "recording.started",
   "recording.finished",
   "recording.transcript.ready",
   "recording.transcript.failed",
+  "recording.transcript.current_changed",
+  "recording.speakers.updated",
   "recording.deleted",
 ] as const;
 export type RecordingEventType = (typeof RECORDING_EVENT_TYPES)[number];
+
+/**
+ * The `data` of a recording webhook event. Events carry ids, states and
+ * numbers only, never a title, audio or transcript text, so a receiver reads
+ * the recording through the API with its own authority.
+ */
+export type RecordingEventData = {
+  recordingId: string;
+  ownerSubjectId: string;
+  visibility: RecordingVisibility;
+  externalRef: string | null;
+  state: RecordingState;
+  durationMilliseconds?: number;
+  versionId?: string;
+  versionNumber?: number;
+  providerId?: string;
+  model?: string;
+  segmentCount?: number;
+  languages?: string[];
+  errorCode?: string | null;
+  previousVersionId?: string | null;
+};

@@ -24,6 +24,8 @@ import {
   RecordingForbiddenError,
   RecordingNotFoundError,
   reserveRecordingChunks,
+  setCurrentRecordingTranscriptVersion,
+  updateRecordingSegments,
   updateRecordingSpeakers,
   type DbClient,
 } from "../src";
@@ -245,6 +247,7 @@ describe("recordings", () => {
       processingOwner: owner,
       languages: ["en"],
       diarized: true,
+      diarization: "provider",
       audioMilliseconds: 10_000,
       segments: [
         { startMilliseconds: 0, endMilliseconds: 2_000, trackNumber: 0, speakerLabel: "track-0", text: "Hi all." },
@@ -276,6 +279,22 @@ describe("recordings", () => {
     const renamed = await getRecordingTranscriptPage(db, { ...recording.actor, recordingId: recording.recordingId });
     expect(renamed.segments[2]?.speakerLabel).toBe("speaker_0");
 
+    // Text corrections are a layer: the original comes back when cleared.
+    const corrected = await updateRecordingSegments(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      edits: [{ segmentIndex: 1, text: "Hello there." }],
+    });
+    expect(corrected[0]).toMatchObject({ text: "Hello there.", edited: true, speakerLabel: "speaker_0" });
+    await updateRecordingSegments(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      edits: [{ segmentIndex: 1, text: "Hello." }],
+    });
+    const reverted = await getRecordingTranscriptPage(db, { ...recording.actor, recordingId: recording.recordingId });
+    expect(reverted.segments[1]).toMatchObject({ text: "Hello.", edited: false });
+    expect(reverted.segments[2]?.speakerLabel).toBe("speaker_0");
+
     // A member of a shared recording may name speakers too, but only the owner deletes.
     await updateRecordingSpeakers(db, {
       workspaceId: scope.workspaceId,
@@ -291,7 +310,8 @@ describe("recordings", () => {
       }),
     ).rejects.toBeInstanceOf(RecordingForbiddenError);
 
-    // Version 2 on another model; the microphone owner's name carries over.
+    // Version 2 on another model: the microphone owner's name carries over by
+    // label, and Kari carries over to the new label that overlaps her speech.
     const version2 = await createRecordingTranscriptVersion(db, {
       ...recording.actor,
       recordingId: recording.recordingId,
@@ -312,14 +332,24 @@ describe("recordings", () => {
       processingOwner: owner2,
       languages: ["en"],
       diarized: true,
+      diarization: "provider",
       audioMilliseconds: 10_000,
       segments: [
         { startMilliseconds: 0, endMilliseconds: 2_000, trackNumber: 0, speakerLabel: "track-0", text: "Hi, all." },
+        { startMilliseconds: 2_000, endMilliseconds: 4_000, trackNumber: 1, speakerLabel: "speaker_9", text: "Hello." },
+        { startMilliseconds: 4_000, endMilliseconds: 6_100, trackNumber: 1, speakerLabel: "speaker_9", text: "Budget's fine." },
+        { startMilliseconds: 8_000, endMilliseconds: 9_000, trackNumber: 1, speakerLabel: "speaker_4", text: "New voice." },
       ],
     });
     const current = await getRecordingTranscriptPage(db, { ...recording.actor, recordingId: recording.recordingId });
     expect(current.version.versionNumber).toBe(2);
     expect(current.speakers.find((speaker) => speaker.label === "track-0")?.name).toBe("Recording owner");
+    expect(current.speakers.find((speaker) => speaker.label === "speaker_9")).toMatchObject({
+      name: "Kari",
+      personId: person.id,
+      source: "carried_over",
+    });
+    expect(current.speakers.find((speaker) => speaker.label === "speaker_4")?.personId).toBeNull();
     const first = await getRecordingTranscriptPage(db, {
       ...recording.actor,
       recordingId: recording.recordingId,
@@ -327,6 +357,16 @@ describe("recordings", () => {
     });
     expect(first.version.isCurrent).toBe(false);
     expect(first.segments).toHaveLength(3);
+
+    // Switching back makes version 1 current again.
+    const switched = await setCurrentRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      versionId: recording.versionId,
+    });
+    expect(switched.isCurrent).toBe(true);
+    const after = await getRecordingTranscriptPage(db, { ...recording.actor, recordingId: recording.recordingId });
+    expect(after.version.versionNumber).toBe(1);
   });
 
   test("a failed first version fails the recording and records the event", async () => {
@@ -352,7 +392,11 @@ describe("recordings", () => {
     expect(view.state).toBe("failed");
     const events = await shared.admin<{ type: string }[]>`
       select type from recording_events where recording_id = ${recording.recordingId} order by occurred_at`;
-    expect(events.map((event) => event.type)).toEqual(["recording.finished", "recording.transcript.failed"]);
+    expect(events.map((event) => event.type)).toEqual([
+      "recording.started",
+      "recording.finished",
+      "recording.transcript.failed",
+    ]);
   });
 
   test("recording events reach workspace and organization webhooks without titles", async () => {
@@ -443,7 +487,7 @@ describe("recordings", () => {
         (select count(*)::int from recordings where id = ${recording.recordingId}) as recordings,
         (select count(*)::int from recording_chunks where recording_id = ${recording.recordingId}) as chunks,
         (select count(*)::int from recording_events where recording_id = ${recording.recordingId}) as events`;
-    expect(rows).toEqual({ recordings: 0, chunks: 0, events: 2 });
+    expect(rows).toEqual({ recordings: 0, chunks: 0, events: 3 });
   });
 
   test("deleting the workspace removes its recordings", async () => {

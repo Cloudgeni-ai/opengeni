@@ -1,5 +1,6 @@
 import type {
   Recording,
+  RecordingDiarization,
   RecordingPerson,
   RecordingSpeaker,
   RecordingTrack,
@@ -65,6 +66,7 @@ function trackView(row: TrackRow): RecordingTrack {
     chunkCount: row.chunkCount,
     totalBytes: Number(row.totalBytes),
     durationMilliseconds: row.durationMilliseconds,
+    playable: row.preparedObjectKey !== null,
   };
 }
 
@@ -80,8 +82,10 @@ export function recordingTranscriptVersionView(row: VersionRow): RecordingTransc
     isCurrent: row.isCurrent,
     languages: row.languages,
     diarized: row.diarized,
+    diarization: row.diarization,
     audioMilliseconds: row.audioMilliseconds,
     segmentCount: row.segmentCount,
+    costUsd: row.costUsdMicros === null ? null : Number(row.costUsdMicros) / 1_000_000,
     requestedBySubjectId: row.requestedBySubjectId,
     errorCode: row.errorCode,
     createdAt: row.createdAt.toISOString(),
@@ -203,6 +207,7 @@ async function insertEvent(
       ownerSubjectId: recording.ownerSubjectId,
       visibility: fromVisibility(recording.visibility),
       externalRef: recording.externalRef,
+      state: recording.state,
       ...data,
     },
   });
@@ -259,6 +264,10 @@ export async function createRecording(
           mimeType: track.mimeType,
         })),
       );
+      await insertEvent(tx, inserted[0]!, "recording.started", {
+        startedAt: startedAt.toISOString(),
+        trackCount: input.tracks.length,
+      });
     }
     const [row] = await tx
       .select()
@@ -463,16 +472,31 @@ export async function listDeletingRecordingObjectKeys(
         ),
       );
     if (row?.state !== "deleting") return null;
-    const chunks = await tx
-      .select({ objectKey: schema.recordingChunks.objectKey })
-      .from(schema.recordingChunks)
-      .where(
-        and(
-          eq(schema.recordingChunks.workspaceId, input.workspaceId),
-          eq(schema.recordingChunks.recordingId, input.recordingId),
+    const [chunks, tracks] = await Promise.all([
+      tx
+        .select({ objectKey: schema.recordingChunks.objectKey })
+        .from(schema.recordingChunks)
+        .where(
+          and(
+            eq(schema.recordingChunks.workspaceId, input.workspaceId),
+            eq(schema.recordingChunks.recordingId, input.recordingId),
+          ),
         ),
-      );
-    return chunks.map((chunk) => chunk.objectKey);
+      tx
+        .select({ objectKey: schema.recordingTracks.preparedObjectKey })
+        .from(schema.recordingTracks)
+        .where(
+          and(
+            eq(schema.recordingTracks.workspaceId, input.workspaceId),
+            eq(schema.recordingTracks.recordingId, input.recordingId),
+            isNotNull(schema.recordingTracks.preparedObjectKey),
+          ),
+        ),
+    ]);
+    return [
+      ...chunks.map((chunk) => chunk.objectKey),
+      ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
+    ];
   });
 }
 
@@ -516,6 +540,96 @@ export function recordingChunkObjectKey(input: {
   sha256: string;
 }): string {
   return `workspaces/${input.workspaceId}/recordings/${input.recordingId}/${input.trackNumber}/${input.chunkNumber}-${input.sha256}`;
+}
+
+/** Where the worker stores a track's prepared, seekable audio file. */
+export function recordingPreparedTrackObjectKey(input: {
+  workspaceId: string;
+  recordingId: string;
+  trackNumber: number;
+  extension: string;
+}): string {
+  return `workspaces/${input.workspaceId}/recordings/${input.recordingId}/prepared/track-${input.trackNumber}.${input.extension}`;
+}
+
+/**
+ * Record the worker's prepared file for a track and its measured duration.
+ * The recording's duration becomes the longest prepared track.
+ */
+export async function setRecordingTrackPrepared(
+  db: Database,
+  input: RecordingActor & {
+    recordingId: string;
+    trackNumber: number;
+    objectKey: string;
+    bytes: number;
+    durationMilliseconds: number;
+  },
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const recording = await lockRecording(tx, input.workspaceId, input.recordingId);
+    const duration = Math.max(0, Math.round(input.durationMilliseconds));
+    const updated = await tx
+      .update(schema.recordingTracks)
+      .set({
+        preparedObjectKey: input.objectKey,
+        preparedBytes: input.bytes,
+        durationMilliseconds: duration,
+      })
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, input.workspaceId),
+          eq(schema.recordingTracks.recordingId, input.recordingId),
+          eq(schema.recordingTracks.trackNumber, input.trackNumber),
+        ),
+      )
+      .returning({ trackNumber: schema.recordingTracks.trackNumber });
+    if (updated.length === 0) throw new RecordingNotFoundError("Track not found");
+    if (duration > recording.durationMilliseconds) {
+      await tx
+        .update(schema.recordings)
+        .set({ durationMilliseconds: duration, updatedAt: sql`clock_timestamp()` })
+        .where(
+          and(
+            eq(schema.recordings.workspaceId, input.workspaceId),
+            eq(schema.recordings.id, input.recordingId),
+          ),
+        );
+    }
+  });
+}
+
+/** A track's prepared file, for playback and re-runs. Null until the worker made it. */
+export async function getRecordingTrackPreparedObject(
+  db: Database,
+  input: RecordingActor & { recordingId: string; trackNumber: number },
+): Promise<{ objectKey: string; bytes: number } | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await tx
+      .select({
+        objectKey: schema.recordingTracks.preparedObjectKey,
+        bytes: schema.recordingTracks.preparedBytes,
+        state: schema.recordings.state,
+      })
+      .from(schema.recordingTracks)
+      .innerJoin(
+        schema.recordings,
+        and(
+          eq(schema.recordings.workspaceId, schema.recordingTracks.workspaceId),
+          eq(schema.recordings.id, schema.recordingTracks.recordingId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, input.workspaceId),
+          eq(schema.recordingTracks.recordingId, input.recordingId),
+          eq(schema.recordingTracks.trackNumber, input.trackNumber),
+        ),
+      );
+    if (!row || row.state === "deleting") throw new RecordingNotFoundError();
+    if (!row.objectKey || row.bytes === null) return null;
+    return { objectKey: row.objectKey, bytes: Number(row.bytes) };
+  });
 }
 
 /**
@@ -1033,9 +1147,108 @@ export function isTrackSpeakerLabel(label: string): boolean {
   return /^track-[0-7]$/u.test(label);
 }
 
+type TimedLabel = {
+  startMilliseconds: number;
+  endMilliseconds: number;
+  trackNumber: number | null;
+  speakerLabel: string | null;
+};
+
 /**
- * Store a finished transcript and make it current. Names given to whole-track
- * speakers in the previous current version carry over.
+ * Match a new version's diarized labels to the previous version's named
+ * labels by overlapping speech on the same track. A new label takes the name
+ * of the previous label it overlaps most, when that covers at least half of
+ * its speech. Two new labels may map to one person (the model split them);
+ * that is the same as a merge.
+ */
+export function matchCarriedSpeakerLabels(
+  previous: readonly TimedLabel[],
+  next: readonly TimedLabel[],
+  namedPreviousLabels: ReadonlySet<string>,
+): Map<string, string> {
+  const speech = new Map<string, number>();
+  const overlap = new Map<string, Map<string, number>>();
+  const byTrack = new Map<number, TimedLabel[]>();
+  for (const segment of previous) {
+    if (!segment.speakerLabel || !namedPreviousLabels.has(segment.speakerLabel)) continue;
+    const track = segment.trackNumber ?? -1;
+    const list = byTrack.get(track) ?? [];
+    list.push(segment);
+    byTrack.set(track, list);
+  }
+  for (const list of byTrack.values()) {
+    list.sort((left, right) => left.startMilliseconds - right.startMilliseconds);
+  }
+  const ordered = [...next].sort((left, right) => left.startMilliseconds - right.startMilliseconds);
+  const cursor = new Map<number, number>();
+  for (const segment of ordered) {
+    const label = segment.speakerLabel;
+    if (!label || isTrackSpeakerLabel(label)) continue;
+    const length = Math.max(0, segment.endMilliseconds - segment.startMilliseconds);
+    speech.set(label, (speech.get(label) ?? 0) + length);
+    const track = segment.trackNumber ?? -1;
+    const list = byTrack.get(track);
+    if (!list) continue;
+    // Previous segments ending before this one starts can never overlap a
+    // later segment either, since both lists are ordered by start.
+    let index = cursor.get(track) ?? 0;
+    while (index < list.length && list[index]!.endMilliseconds <= segment.startMilliseconds) {
+      index += 1;
+    }
+    cursor.set(track, index);
+    for (let scan = index; scan < list.length; scan += 1) {
+      const candidate = list[scan]!;
+      if (candidate.startMilliseconds >= segment.endMilliseconds) break;
+      const shared =
+        Math.min(candidate.endMilliseconds, segment.endMilliseconds) -
+        Math.max(candidate.startMilliseconds, segment.startMilliseconds);
+      if (shared <= 0) continue;
+      const counts = overlap.get(label) ?? new Map<string, number>();
+      counts.set(candidate.speakerLabel!, (counts.get(candidate.speakerLabel!) ?? 0) + shared);
+      overlap.set(label, counts);
+    }
+  }
+  const matches = new Map<string, string>();
+  for (const [label, counts] of overlap) {
+    let best: [string, number] | null = null;
+    for (const entry of counts) {
+      if (!best || entry[1] > best[1]) best = entry;
+    }
+    const total = speech.get(label) ?? 0;
+    if (best && total > 0 && best[1] * 2 >= total) matches.set(label, best[0]);
+  }
+  return matches;
+}
+
+/** Segments of a version with human speaker moves applied. */
+async function effectiveTimedLabels(tx: Database, versionId: string): Promise<TimedLabel[]> {
+  return await tx
+    .select({
+      startMilliseconds: schema.recordingTranscriptSegments.startMilliseconds,
+      endMilliseconds: schema.recordingTranscriptSegments.endMilliseconds,
+      trackNumber: schema.recordingTranscriptSegments.trackNumber,
+      speakerLabel: sql<
+        string | null
+      >`coalesce(${schema.recordingSegmentEdits.speakerLabel}, ${schema.recordingTranscriptSegments.speakerLabel})`,
+    })
+    .from(schema.recordingTranscriptSegments)
+    .leftJoin(
+      schema.recordingSegmentEdits,
+      and(
+        eq(schema.recordingSegmentEdits.versionId, schema.recordingTranscriptSegments.versionId),
+        eq(
+          schema.recordingSegmentEdits.segmentIndex,
+          schema.recordingTranscriptSegments.segmentIndex,
+        ),
+      ),
+    )
+    .where(eq(schema.recordingTranscriptSegments.versionId, versionId));
+}
+
+/**
+ * Store a finished transcript and make it current. Names from the previous
+ * current version carry over: whole-track speakers by label, diarized
+ * speakers by overlapping speech.
  */
 export async function completeRecordingTranscriptVersion(
   db: Database,
@@ -1044,6 +1257,8 @@ export async function completeRecordingTranscriptVersion(
     processingOwner: string;
     languages: readonly string[];
     diarized: boolean;
+    diarization: RecordingDiarization;
+    costUsdMicros?: number | null | undefined;
     audioMilliseconds: number;
     segments: readonly CompletedRecordingSegment[];
     /** Speakers the capture itself identifies, such as the microphone's owner. */
@@ -1117,6 +1332,11 @@ export async function completeRecordingTranscriptVersion(
         isCurrent: true,
         languages: [...input.languages],
         diarized: input.diarized,
+        diarization: input.diarization,
+        costUsdMicros:
+          input.costUsdMicros === null || input.costUsdMicros === undefined
+            ? null
+            : Math.max(0, Math.round(input.costUsdMicros)),
         audioMilliseconds: Math.max(0, Math.round(input.audioMilliseconds)),
         segmentCount: ordered.length,
         processingOwner: null,
@@ -1151,6 +1371,9 @@ export async function completeRecordingTranscriptVersion(
         .select()
         .from(schema.recordingSpeakerAssignments)
         .where(eq(schema.recordingSpeakerAssignments.versionId, previous.id));
+      const byPreviousLabel = new Map(
+        carried.map((assignment) => [assignment.speakerLabel, assignment]),
+      );
       for (const assignment of carried) {
         if (!isTrackSpeakerLabel(assignment.speakerLabel)) continue;
         if (!labels.has(assignment.speakerLabel)) continue;
@@ -1166,6 +1389,38 @@ export async function completeRecordingTranscriptVersion(
           source: assignment.source === "confirmed" ? "carried_over" : assignment.source,
           assignedBySubjectId: assignment.assignedBySubjectId,
         });
+      }
+      // Diarized labels mean nothing across versions; match them by speech.
+      const named = new Set(
+        carried
+          .filter(
+            (assignment) =>
+              !isTrackSpeakerLabel(assignment.speakerLabel) &&
+              (assignment.source === "confirmed" || assignment.source === "carried_over"),
+          )
+          .map((assignment) => assignment.speakerLabel),
+      );
+      if (named.size > 0) {
+        const matches = matchCarriedSpeakerLabels(
+          await effectiveTimedLabels(tx, previous.id),
+          ordered,
+          named,
+        );
+        for (const [label, previousLabel] of matches) {
+          if (assignments.has(label)) continue;
+          const assignment = byPreviousLabel.get(previousLabel)!;
+          assignments.set(label, {
+            accountId: recording.accountId,
+            workspaceId: input.workspaceId,
+            recordingId: recording.id,
+            versionId: version.id,
+            speakerLabel: label,
+            personId: assignment.personId,
+            displayName: assignment.displayName,
+            source: "carried_over",
+            assignedBySubjectId: assignment.assignedBySubjectId,
+          });
+        }
       }
     }
     if (assignments.size > 0) {
@@ -1192,6 +1447,7 @@ export async function completeRecordingTranscriptVersion(
       model: version.model,
       segmentCount: ordered.length,
       languages: [...input.languages],
+      previousVersionId: previous?.id ?? null,
     });
     return recordingTranscriptVersionView(completed!);
   });
@@ -1301,9 +1557,9 @@ async function speakersFor(tx: Database, version: VersionRow): Promise<Recording
         ),
       ),
     tx
-      .selectDistinct({ label: schema.recordingSegmentSpeakerOverrides.speakerLabel })
-      .from(schema.recordingSegmentSpeakerOverrides)
-      .where(eq(schema.recordingSegmentSpeakerOverrides.versionId, version.id)),
+      .selectDistinct({ label: schema.recordingSegmentEdits.speakerLabel })
+      .from(schema.recordingSegmentEdits)
+      .where(eq(schema.recordingSegmentEdits.versionId, version.id)),
     tx
       .select({
         label: schema.recordingSpeakerAssignments.speakerLabel,
@@ -1367,19 +1623,20 @@ export async function getRecordingTranscriptPage(
         trackNumber: schema.recordingTranscriptSegments.trackNumber,
         speakerLabel: sql<
           string | null
-        >`coalesce(${schema.recordingSegmentSpeakerOverrides.speakerLabel}, ${schema.recordingTranscriptSegments.speakerLabel})`,
-        text: schema.recordingTranscriptSegments.text,
+        >`coalesce(${schema.recordingSegmentEdits.speakerLabel}, ${schema.recordingTranscriptSegments.speakerLabel})`,
+        text: sql<string>`coalesce(${schema.recordingSegmentEdits.text}, ${schema.recordingTranscriptSegments.text})`,
+        edited: sql<boolean>`${schema.recordingSegmentEdits.text} IS NOT NULL`,
       })
       .from(schema.recordingTranscriptSegments)
       .leftJoin(
-        schema.recordingSegmentSpeakerOverrides,
+        schema.recordingSegmentEdits,
         and(
           eq(
-            schema.recordingSegmentSpeakerOverrides.versionId,
+            schema.recordingSegmentEdits.versionId,
             schema.recordingTranscriptSegments.versionId,
           ),
           eq(
-            schema.recordingSegmentSpeakerOverrides.segmentIndex,
+            schema.recordingSegmentEdits.segmentIndex,
             schema.recordingTranscriptSegments.segmentIndex,
           ),
         ),
@@ -1494,42 +1751,199 @@ export async function updateRecordingSpeakers(
         if (!originalLabel.has(override.segmentIndex)) {
           throw new RecordingNotFoundError(`Segment ${override.segmentIndex} not found`);
         }
-        if (originalLabel.get(override.segmentIndex) === override.label) {
-          await tx
-            .delete(schema.recordingSegmentSpeakerOverrides)
-            .where(
-              and(
-                eq(schema.recordingSegmentSpeakerOverrides.versionId, version.id),
-                eq(schema.recordingSegmentSpeakerOverrides.segmentIndex, override.segmentIndex),
-              ),
-            );
-          continue;
-        }
-        const values = {
-          speakerLabel: override.label,
-          assignedBySubjectId: input.subjectId,
-          assignedAt: sql`clock_timestamp()`,
-        };
-        await tx
-          .insert(schema.recordingSegmentSpeakerOverrides)
-          .values({
-            accountId: version.accountId,
-            workspaceId: input.workspaceId,
-            recordingId: input.recordingId,
-            versionId: version.id,
-            segmentIndex: override.segmentIndex,
-            ...values,
-          })
-          .onConflictDoUpdate({
-            target: [
-              schema.recordingSegmentSpeakerOverrides.versionId,
-              schema.recordingSegmentSpeakerOverrides.segmentIndex,
-            ],
-            set: values,
-          });
+        await writeSegmentEdit(tx, version, input.subjectId, override.segmentIndex, {
+          speakerLabel:
+            originalLabel.get(override.segmentIndex) === override.label ? null : override.label,
+        });
       }
     }
-    return await speakersFor(tx, version);
+    const speakers = await speakersFor(tx, version);
+    const recording = await lockRecording(tx, input.workspaceId, input.recordingId);
+    await insertEvent(tx, recording, "recording.speakers.updated", {
+      versionId: version.id,
+      versionNumber: version.versionNumber,
+    });
+    return speakers;
+  });
+}
+
+/**
+ * Set one field of a segment's human edit; null clears that field. A row
+ * left with neither a label nor text is removed, so the original shows again.
+ */
+async function writeSegmentEdit(
+  tx: Database,
+  version: VersionRow,
+  subjectId: string,
+  segmentIndex: number,
+  patch: { speakerLabel?: string | null; text?: string | null },
+): Promise<void> {
+  const values = {
+    ...(patch.speakerLabel !== undefined ? { speakerLabel: patch.speakerLabel } : {}),
+    ...(patch.text !== undefined ? { text: patch.text } : {}),
+    editedBySubjectId: subjectId,
+    editedAt: sql`clock_timestamp()`,
+  };
+  const [existing] = await tx
+    .select()
+    .from(schema.recordingSegmentEdits)
+    .where(
+      and(
+        eq(schema.recordingSegmentEdits.versionId, version.id),
+        eq(schema.recordingSegmentEdits.segmentIndex, segmentIndex),
+      ),
+    )
+    .for("update");
+  const speakerLabel =
+    patch.speakerLabel !== undefined ? patch.speakerLabel : (existing?.speakerLabel ?? null);
+  const text = patch.text !== undefined ? patch.text : (existing?.text ?? null);
+  const where = and(
+    eq(schema.recordingSegmentEdits.versionId, version.id),
+    eq(schema.recordingSegmentEdits.segmentIndex, segmentIndex),
+  );
+  if (speakerLabel === null && text === null) {
+    if (existing) await tx.delete(schema.recordingSegmentEdits).where(where);
+    return;
+  }
+  if (existing) {
+    await tx.update(schema.recordingSegmentEdits).set(values).where(where);
+    return;
+  }
+  await tx.insert(schema.recordingSegmentEdits).values({
+    accountId: version.accountId,
+    workspaceId: version.workspaceId,
+    recordingId: version.recordingId,
+    versionId: version.id,
+    segmentIndex,
+    speakerLabel,
+    text,
+    editedBySubjectId: subjectId,
+  });
+}
+
+/**
+ * Correct segment text in one version. Setting a segment's text back to its
+ * original, or to null, removes the correction.
+ */
+export async function updateRecordingSegments(
+  db: Database,
+  input: RecordingActor & {
+    recordingId: string;
+    versionId?: string | undefined;
+    edits: ReadonlyArray<{ segmentIndex: number; text: string | null }>;
+  },
+): Promise<RecordingTranscriptSegment[]> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    await lockRecording(tx, input.workspaceId, input.recordingId);
+    const version = await resolveVersion(tx, input.workspaceId, input.recordingId, input.versionId);
+    if (version.state !== "complete") {
+      throw new RecordingConflictError("This transcript is not finished", "transcript_not_ready");
+    }
+    const indexes = [...new Set(input.edits.map((edit) => edit.segmentIndex))];
+    const originals = await tx
+      .select({
+        index: schema.recordingTranscriptSegments.segmentIndex,
+        text: schema.recordingTranscriptSegments.text,
+      })
+      .from(schema.recordingTranscriptSegments)
+      .where(
+        and(
+          eq(schema.recordingTranscriptSegments.versionId, version.id),
+          inArray(schema.recordingTranscriptSegments.segmentIndex, indexes),
+        ),
+      );
+    const originalText = new Map(originals.map((segment) => [segment.index, segment.text]));
+    for (const edit of input.edits) {
+      if (!originalText.has(edit.segmentIndex)) {
+        throw new RecordingNotFoundError(`Segment ${edit.segmentIndex} not found`);
+      }
+      const text = edit.text === null ? null : edit.text.trim();
+      await writeSegmentEdit(tx, version, input.subjectId, edit.segmentIndex, {
+        text: text === null || text === originalText.get(edit.segmentIndex) ? null : text,
+      });
+    }
+    const rows = await tx
+      .select({
+        index: schema.recordingTranscriptSegments.segmentIndex,
+        startMilliseconds: schema.recordingTranscriptSegments.startMilliseconds,
+        endMilliseconds: schema.recordingTranscriptSegments.endMilliseconds,
+        trackNumber: schema.recordingTranscriptSegments.trackNumber,
+        speakerLabel: sql<
+          string | null
+        >`coalesce(${schema.recordingSegmentEdits.speakerLabel}, ${schema.recordingTranscriptSegments.speakerLabel})`,
+        text: sql<string>`coalesce(${schema.recordingSegmentEdits.text}, ${schema.recordingTranscriptSegments.text})`,
+        edited: sql<boolean>`${schema.recordingSegmentEdits.text} IS NOT NULL`,
+      })
+      .from(schema.recordingTranscriptSegments)
+      .leftJoin(
+        schema.recordingSegmentEdits,
+        and(
+          eq(schema.recordingSegmentEdits.versionId, schema.recordingTranscriptSegments.versionId),
+          eq(
+            schema.recordingSegmentEdits.segmentIndex,
+            schema.recordingTranscriptSegments.segmentIndex,
+          ),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.recordingTranscriptSegments.versionId, version.id),
+          inArray(schema.recordingTranscriptSegments.segmentIndex, indexes),
+        ),
+      )
+      .orderBy(asc(schema.recordingTranscriptSegments.segmentIndex));
+    return rows;
+  });
+}
+
+/**
+ * Make a finished version the one everyone reads. Any member who can see the
+ * recording may switch it, as with re-runs.
+ */
+export async function setCurrentRecordingTranscriptVersion(
+  db: Database,
+  input: RecordingActor & { recordingId: string; versionId: string },
+): Promise<RecordingTranscriptVersion> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const recording = await lockRecording(tx, input.workspaceId, input.recordingId);
+    const version = await resolveVersion(tx, input.workspaceId, input.recordingId, input.versionId);
+    if (version.state !== "complete") {
+      throw new RecordingConflictError("This transcript is not finished", "transcript_not_ready");
+    }
+    if (version.isCurrent) return recordingTranscriptVersionView(version);
+    const [previous] = await tx
+      .update(schema.recordingTranscriptVersions)
+      .set({ isCurrent: false })
+      .where(
+        and(
+          eq(schema.recordingTranscriptVersions.workspaceId, input.workspaceId),
+          eq(schema.recordingTranscriptVersions.recordingId, input.recordingId),
+          eq(schema.recordingTranscriptVersions.isCurrent, true),
+        ),
+      )
+      .returning({ id: schema.recordingTranscriptVersions.id });
+    const [current] = await tx
+      .update(schema.recordingTranscriptVersions)
+      .set({ isCurrent: true })
+      .where(eq(schema.recordingTranscriptVersions.id, version.id))
+      .returning();
+    await tx
+      .update(schema.recordings)
+      .set({ updatedAt: sql`clock_timestamp()` })
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      );
+    await insertEvent(tx, recording, "recording.transcript.current_changed", {
+      versionId: version.id,
+      versionNumber: version.versionNumber,
+      providerId: version.providerId,
+      model: version.model,
+      previousVersionId: previous?.id ?? null,
+    });
+    return recordingTranscriptVersionView(current!);
   });
 }
 

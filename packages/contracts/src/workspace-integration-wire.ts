@@ -16,9 +16,12 @@ export const WORKSPACE_WEBHOOK_EVENT_TYPES = [
   "usage.threshold_reached",
   "usage.exhausted",
   "usage.period_reset",
+  "recording.started",
   "recording.finished",
   "recording.transcript.ready",
   "recording.transcript.failed",
+  "recording.transcript.current_changed",
+  "recording.speakers.updated",
   "recording.deleted",
 ] as const;
 
