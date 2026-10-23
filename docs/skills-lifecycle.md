@@ -18,7 +18,9 @@ or cancellation errors retain their existing failure behavior.
 Session response-page effective-tool metadata asks `hasWorkspaceManagedSkill`
 for a live scoped boolean, not the full descriptor list. It shares the descriptor
 reader's active-revision, expiry, tenant and subject predicate and excludes
-session-selected Skills. This is neither a visibility cache nor a replacement
+session-selected Skills. A boolean aggregate avoids the sparse-match nested-loop
+amplification observed with `EXISTS`; it still scans the visible candidate set,
+not a constant-time presence index. This is neither a visibility cache nor a replacement
 for the actual Skill catalog or accepted turn context. The disposable diagnostic
 `bun scripts/operator/bench-skill-presence.ts` compares both reads with 0, 1 and
 1,000 canonical Skills; its JSON sizes are decoded response bytes, not wire

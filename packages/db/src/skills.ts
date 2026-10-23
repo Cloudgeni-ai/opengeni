@@ -277,12 +277,13 @@ export async function hasWorkspaceManagedSkill(
   context: SkillReadContext,
 ): Promise<boolean> {
   const run = async (tx: Database) => {
+    // Aggregate rather than EXISTS: sparse matches must not favor a startup-cost
+    // nested-loop plan that repeatedly probes the same RLS-visible head set.
     const [row] = await rawRows<{ present: boolean }>(
       tx,
-      sql`SELECT EXISTS (
-        SELECT 1 ${activeSkillDescriptorSource(context)}
-          AND coalesce(r.skill_activation_mode,'workspace_managed')='workspace_managed'
-      ) AS present`,
+      sql`SELECT coalesce(bool_or(
+        coalesce(r.skill_activation_mode,'workspace_managed')='workspace_managed'
+      ), false) AS present ${activeSkillDescriptorSource(context)}`,
     );
     return row!.present;
   };
