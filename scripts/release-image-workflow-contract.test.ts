@@ -632,9 +632,7 @@ describe("release image workflow contract", () => {
       "github.event_name == 'push' && 'release-version-latest-main' || format('release-publish-{0}', inputs.source_sha)",
     );
     expect(release).toContain("cancel-in-progress: ${{ github.event_name == 'push' }}");
-    expect(ci).toContain(
-      "format('ci-{0}-{1}', github.run_id, github.run_attempt)",
-    );
+    expect(ci).toContain("format('ci-{0}-{1}', github.run_id, github.run_attempt)");
     expect(ci).toContain(
       "cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}",
     );
