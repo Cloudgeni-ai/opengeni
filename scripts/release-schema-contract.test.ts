@@ -2340,6 +2340,10 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0922_attached_device_computer_session_indexes.sql",
+      "0921_attached_device_session_indexes.sql",
+      "0920_attached_browser_cross_workspace_validate.sql",
+      "0919_attached_browser_cross_workspace.sql",
       "0918_organization_personal_workspaces_setting.sql",
       "0917_continue_waiting_work.sql",
       "0916_scoped_turn_history_pages.sql",

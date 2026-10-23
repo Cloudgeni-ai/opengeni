@@ -162,6 +162,9 @@ type ComputerPlacement = {
   lease: LeaseSnapshot | null;
   /** Current placement consent, separate from passive viewing authority. */
   screenControlAllowed?: boolean;
+  /** Where an attached device's Chrome profile is stored: its machine's
+   *  enrollment workspace, which can be another workspace. */
+  attachedDeviceWorkspaceId?: string;
 };
 
 type ActiveComputerControllerCallback<T> = (input: {
@@ -363,7 +366,13 @@ export function registerComputerSessionRoutes(
           if (!prepared) {
             prepared = await prepareComputerSessionCreate(
               deps.db,
-              computerCreateInput(grant, workspaceId, request, placement.placement),
+              computerCreateInput(
+                grant,
+                workspaceId,
+                request,
+                placement.placement,
+                placement.attachedDeviceWorkspaceId,
+              ),
             );
           }
           if (isTerminalOperation(prepared.operation.state)) return prepared;
@@ -1328,6 +1337,7 @@ export function registerComputerSessionRoutes(
         session: built.session as unknown as BrowserControlPlacementSession,
         lease: null,
         screenControlAllowed: enrollment.allowScreenControl === true,
+        attachedDeviceWorkspaceId: device.workspaceId,
       });
     }
     const runWithChannelA =
@@ -2009,6 +2019,7 @@ function computerCreateInput(
   workspaceId: string,
   request: CreateComputerSessionRequestValue,
   placement: InteractionPlacement,
+  attachedDeviceWorkspaceId?: string,
 ) {
   return {
     accountId: grant.accountId,
@@ -2018,6 +2029,7 @@ function computerCreateInput(
     actorSubjectId: grant.subjectId,
     name: request.name ?? "Computer",
     placement,
+    attachedDeviceWorkspaceId: attachedDeviceWorkspaceId ?? null,
   };
 }
 

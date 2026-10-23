@@ -300,6 +300,9 @@ type BrowserPlacement = {
   session: BrowserControlPlacementSession;
   lease: LeaseSnapshot | null;
   transport: PlacementBrowserTransport;
+  /** Where an attached device's Chrome profile is stored: its machine's
+   *  enrollment workspace, which can be another workspace. */
+  attachedDeviceWorkspaceId?: string;
 };
 
 export function registerBrowserSessionRoutes(
@@ -472,7 +475,13 @@ export function registerBrowserSessionRoutes(
             if (!prepared) {
               prepared = await prepareBrowserSessionCreate(
                 deps.db,
-                browserCreateInput(grant, workspaceId, request, placement.placement),
+                browserCreateInput(
+                  grant,
+                  workspaceId,
+                  request,
+                  placement.placement,
+                  placement.attachedDeviceWorkspaceId,
+                ),
               );
             }
             stages.mark("prepare");
@@ -3907,6 +3916,7 @@ export function registerBrowserSessionRoutes(
           browserName: device.browserName,
           browserVersion: device.browserVersion,
         },
+        attachedDeviceWorkspaceId: device.workspaceId,
       });
     }
     const runWithChannelA =
@@ -5106,6 +5116,7 @@ export function browserCreateInput(
   workspaceId: string,
   request: CreateBrowserSessionRequestValue,
   placement: InteractionPlacement,
+  attachedDeviceWorkspaceId?: string,
 ) {
   if (request.storageMode === "ephemeral_context" && placement.kind !== "sandbox_group") {
     throw new BrowserControlUnsupportedError(
@@ -5159,6 +5170,7 @@ export function browserCreateInput(
         : engine === "lightpanda"
           ? { capabilities: LIGHTPANDA_BROWSER_SESSION_CAPABILITIES }
           : {}),
+    attachedDeviceWorkspaceId: attached ? (attachedDeviceWorkspaceId ?? null) : null,
   };
 }
 
