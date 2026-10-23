@@ -1,5 +1,19 @@
 # @opengeni/db
 
+## 4.7.1
+
+### Patch Changes
+
+- 2138bba: Renew sandbox agent links in one locked SQL statement instead of separate row, clock and update queries. Preserve the database-clock lease, refusal precedence and longer heartbeat extensions while removing two database round trips per successful renewal.
+  - @opengeni/codemode@4.7.1
+  - @opengeni/codex@4.7.1
+  - @opengeni/config@4.7.1
+  - @opengeni/contracts@4.7.1
+  - @opengeni/network@4.7.1
+  - @opengeni/observability@4.7.1
+  - @opengeni/subscriptions@4.7.1
+  - @opengeni/xai-subscription@4.7.1
+
 ## 4.7.0
 
 ### Patch Changes
