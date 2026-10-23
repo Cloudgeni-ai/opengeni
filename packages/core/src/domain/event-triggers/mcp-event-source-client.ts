@@ -1,5 +1,6 @@
 import { createPinnedIntegrationTransport } from "@opengeni/capabilities";
 import type { McpServerConfig, Settings } from "@opengeni/config";
+import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
   listEnabledMcpCapabilityServers,
@@ -67,6 +68,76 @@ type ResolvedServer = McpEventSourceConnection & {
   refreshable: boolean;
 };
 
+/** The person a source listens as, in the source's workspace. */
+export type EventSourceOwner = {
+  accountId: string;
+  workspaceId: string;
+  ownerSubjectId: string;
+};
+
+/** The workspace's MCP servers: the deployment's and the connectors added to it. */
+export async function workspaceMcpServers(
+  deps: Pick<McpEventSourceClientDeps, "db" | "settings">,
+  workspaceId: string,
+  only?: { serverIds: readonly string[] },
+): Promise<McpServerConfig[]> {
+  const enabled = await listEnabledMcpCapabilityServers(
+    deps.db,
+    workspaceId,
+    only ? { capabilityIds: [], serverIds: only.serverIds } : undefined,
+  );
+  const servers = settingsWithMcpCapabilityServers(deps.settings, enabled).mcpServers;
+  return only ? servers.filter((server) => only.serverIds.includes(server.id)) : servers;
+}
+
+/** The owner's sign-ins to `servers`, exactly as the owner's own chats would attach them. */
+export async function ownerConnectionBindings(
+  deps: Pick<McpEventSourceClientDeps, "db">,
+  owner: EventSourceOwner,
+  servers: McpServerConfig[],
+): Promise<McpConnectionAccountBinding[]> {
+  const visible = await visibleMcpAccountConnections(deps.db, {
+    accountId: owner.accountId,
+    workspaceId: owner.workspaceId,
+    source: { kind: "subject", subjectId: owner.ownerSubjectId, accountId: owner.accountId },
+  });
+  return mcpAccountBindingsFromVisibleConnections({
+    accountId: owner.accountId,
+    workspaceId: owner.workspaceId,
+    subjectId: owner.ownerSubjectId,
+    servers,
+    connections: visible,
+  });
+}
+
+/**
+ * Request headers for `destinationUrl`, signed in with one of the owner's
+ * connections. A credential that cannot be resolved means the owner has to
+ * reconnect: `reconnect` says so.
+ */
+export function ownerConnectionHeaders(
+  deps: Pick<McpEventSourceClientDeps, "db" | "settings">,
+  owner: EventSourceOwner,
+  server: McpServerConfig,
+  binding: McpConnectionAccountBinding,
+  request: { toolName: string; destinationUrl: string; reconnect: string },
+): (forceRefresh: boolean) => Promise<Record<string, string>> {
+  const resolve = buildConnectionTokenResolver(deps.db, deps.settings);
+  return async (forceRefresh) => {
+    const result = await resolve({
+      workspaceId: binding.originWorkspaceId,
+      ...(binding.subjectScope === "subject" ? { subjectId: owner.ownerSubjectId } : {}),
+      serverId: server.id,
+      toolName: request.toolName,
+      connectionRef: binding.connectionRef,
+      destinationUrl: request.destinationUrl,
+      ...(forceRefresh ? { forceRefresh: true } : {}),
+    });
+    if (result.status !== "ok") throw new McpEventSourceUnavailableError(request.reconnect);
+    return { ...server.headers, ...result.headers };
+  };
+}
+
 async function resolveServer(
   deps: McpEventSourceClientDeps,
   source: McpEventSourceTarget,
@@ -76,12 +147,7 @@ async function resolveServer(
   if (source.kind !== "mcp" || !serverId || !owner) {
     throw new McpEventSourceUnavailableError("This source is not an MCP connector");
   }
-  const enabled = await listEnabledMcpCapabilityServers(deps.db, source.workspaceId, {
-    capabilityIds: [],
-    serverIds: [serverId],
-  });
-  const settings = settingsWithMcpCapabilityServers(deps.settings, enabled);
-  const server = settings.mcpServers.find((candidate) => candidate.id === serverId);
+  const [server] = await workspaceMcpServers(deps, source.workspaceId, { serverIds: [serverId] });
   if (!server) {
     throw new McpEventSourceUnavailableError(
       "The connector this source listens to is no longer added to the workspace",
@@ -102,40 +168,25 @@ async function resolveServer(
       `${mcpServerDisplayName(server)} signs in through the app Opengeni runs in, which automations can't use for events`,
     );
   }
-  const visible = await visibleMcpAccountConnections(deps.db, {
+  const listener = {
     accountId: source.accountId,
     workspaceId: source.workspaceId,
-    source: { kind: "subject", subjectId: owner, accountId: source.accountId },
-  });
-  const bindings = mcpAccountBindingsFromVisibleConnections({
-    accountId: source.accountId,
-    workspaceId: source.workspaceId,
-    subjectId: owner,
-    servers: [server],
-    connections: visible,
-  });
+    ownerSubjectId: owner,
+  };
+  const bindings = await ownerConnectionBindings(deps, listener, [server]);
   const binding = source.connectionId
     ? bindings.find((candidate) => candidate.connectionId === source.connectionId)
     : bindings[0];
   if (!binding) throw new McpEventSourceUnavailableError(reconnect);
-  const resolve = buildConnectionTokenResolver(deps.db, deps.settings);
   return {
     server,
     connectionId: binding.connectionId,
     refreshable: true,
-    headers: async (forceRefresh) => {
-      const result = await resolve({
-        workspaceId: binding.originWorkspaceId,
-        ...(binding.subjectScope === "subject" ? { subjectId: owner } : {}),
-        serverId: server.id,
-        toolName: "events",
-        connectionRef: binding.connectionRef,
-        destinationUrl: server.url,
-        ...(forceRefresh ? { forceRefresh: true } : {}),
-      });
-      if (result.status !== "ok") throw new McpEventSourceUnavailableError(reconnect);
-      return { ...server.headers, ...result.headers };
-    },
+    headers: ownerConnectionHeaders(deps, listener, server, binding, {
+      toolName: "events",
+      destinationUrl: server.url,
+      reconnect,
+    }),
   };
 }
 

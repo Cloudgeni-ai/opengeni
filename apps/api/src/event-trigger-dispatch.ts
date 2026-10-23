@@ -7,7 +7,9 @@ import {
 import type { Settings } from "@opengeni/config";
 import {
   eventTriggersEnabled,
+  pumpDueEventSourceFeeds,
   pumpDueMcpEventSubscriptions,
+  type EventSourceFeedPumpDeps,
   type McpEventSubscriptionPumpDeps,
 } from "@opengeni/core";
 import {
@@ -163,12 +165,13 @@ export function startEventTriggerDispatchPump(
 const DAY_SECONDS = 24 * 60 * 60;
 
 /**
- * Keeps MCP event subscriptions alive: each due one is polled, or its webhook
- * subscription created or refreshed. Steps hold a lease, so replicas share
- * the work without stepping on each other.
+ * Keeps event subscriptions alive: each due MCP subscription is polled, or its
+ * webhook subscription created or refreshed, and each due source feed (Gmail)
+ * is read. Steps hold a lease, so replicas share the work without stepping on
+ * each other.
  */
-export function startMcpEventSubscriptionPump(
-  deps: McpEventSubscriptionPumpDeps,
+export function startEventSubscriptionPump(
+  deps: McpEventSubscriptionPumpDeps & EventSourceFeedPumpDeps,
   intervalMs = 5_000,
 ): () => Promise<void> {
   return startLoop(
@@ -176,12 +179,16 @@ export function startMcpEventSubscriptionPump(
       if (!eventTriggersEnabled(deps.settings)) return;
       // Keep going while full batches come back, so a backlog drains promptly.
       for (let pass = 0; pass < 10; pass += 1) {
-        if ((await pumpDueMcpEventSubscriptions(deps)) < 32) return;
+        const stepped = await Promise.all([
+          pumpDueMcpEventSubscriptions(deps),
+          pumpDueEventSourceFeeds(deps),
+        ]);
+        if (stepped.every((count) => count < 32)) return;
       }
     },
     intervalMs,
     (error) =>
-      deps.observability?.error("MCP event subscription pass failed", {
+      deps.observability?.error("Event subscription pass failed", {
         error: error instanceof Error ? error.message : String(error),
       }),
   );

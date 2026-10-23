@@ -105,6 +105,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       request,
       baseUrl: baseUrl(c),
       githubApp: request.kind === "github" ? githubAppWebhookPort(deps) : null,
+      ...(deps.eventSourceFetch ? { fetch: deps.eventSourceFetch } : {}),
     });
     c.header("cache-control", "private, no-store");
     return c.json(CreateEventSourceResponse.parse(created), 201);
@@ -199,6 +200,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       settings: deps.settings,
       source,
       githubApp: source.kind === "github" ? githubAppWebhookPort(deps) : null,
+      ...(deps.eventSourceFetch ? { fetch: deps.eventSourceFetch } : {}),
     });
     return c.json(ListEventTypesResponse.parse({ sourceId: source.id, eventTypes }));
   });
