@@ -1,0 +1,320 @@
+/**
+ * The recorder on the Meetings page. Idle, it is one row: a title, whether to
+ * include a tab's audio, and Start recording. Live, the same panel shows the
+ * clock, a level meter per track, Pause and Stop, and where the audio is (on
+ * this device, uploading, or waiting for the connection).
+ */
+import { useEffect, useId, useRef, useState } from "react";
+import { CircleIcon, MicIcon, PauseIcon, PlayIcon, SquareIcon } from "lucide-react";
+
+import { Button } from "@opengeni/react/ui/button";
+import { Checkbox } from "@opengeni/react/ui/field";
+import { Input } from "@opengeni/react/ui/input";
+import { Notice } from "@opengeni/react/ui/notice";
+import { cn } from "@opengeni/react/app/lib/utils";
+
+import { formatClock } from "./meeting-model";
+import type { MeetingRecorder } from "./recorder-context";
+
+type RecorderError = NonNullable<MeetingRecorder["error"]>;
+
+/** What went wrong and what to do, in the browser's terms. */
+export function recorderErrorText(error: RecorderError): { title: string; body: string } {
+  switch (error.code) {
+    case "microphone_denied":
+      return {
+        title: "Microphone blocked",
+        body: "Allow microphone access for this site in your browser's address bar or settings, then start again.",
+      };
+    case "microphone_unavailable":
+      return {
+        title: "No microphone found",
+        body: "Connect a microphone or check that no other app is holding it, then start again.",
+      };
+    case "system_audio_not_shared":
+      return {
+        title: "The tab's audio wasn't shared",
+        body: "When your browser asks what to share, pick the meeting tab and turn on Share tab audio. Or record without it.",
+      };
+    case "system_audio_unavailable":
+      return {
+        title: "Can't record a tab's audio here",
+        body: "This browser can't share a tab's audio. Record with the microphone only, or use Chrome or Edge on a computer.",
+      };
+    case "unsupported":
+      return {
+        title: "This browser can't record",
+        body: "Use a current version of Chrome, Edge, Safari or Firefox.",
+      };
+    case "upload_failed":
+      return {
+        title: "Upload stopped",
+        body: "The recording is saved on this device. It uploads again when you reopen Meetings.",
+      };
+    default:
+      return { title: "Recording stopped", body: error.message };
+  }
+}
+
+/** Where the audio is right now, in one short line. */
+export function uploadLine(recorder: MeetingRecorder, online: boolean): string | null {
+  const upload = recorder.upload;
+  const capturing = recorder.state === "recording" || recorder.state === "paused";
+  if (upload?.failed) return `Upload failed: ${upload.failed.message}`;
+  if (upload?.finalized) return "Uploaded";
+  if (!online) return "Offline. The audio is saved on this device and uploads when you're back";
+  if (upload?.retryingAfterError) {
+    return "Connection trouble. The audio is saved on this device; retrying";
+  }
+  if (capturing) return "Saved and uploaded as you go, so a dropped connection loses nothing";
+  if (!upload) return null;
+  if (upload.pendingChunks === 0) return "Finishing the upload";
+  return `Uploading ${upload.pendingChunks} ${upload.pendingChunks === 1 ? "piece" : "pieces"} of audio`;
+}
+
+function useOnline(): boolean {
+  const [online, setOnline] = useState(() =>
+    typeof navigator === "undefined" ? true : navigator.onLine,
+  );
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
+  }, []);
+  return online;
+}
+
+/** A level bar fed from the analyser every frame, without re-rendering React. */
+function LevelMeter({
+  recorder,
+  trackNumber,
+  label,
+  paused,
+}: {
+  recorder: MeetingRecorder;
+  trackNumber: number;
+  label: string;
+  paused: boolean;
+}) {
+  const barRef = useRef<HTMLSpanElement>(null);
+  const levels = recorder.levels;
+  useEffect(() => {
+    let frame = 0;
+    let smoothed = 0;
+    const tick = () => {
+      const level = paused ? 0 : (levels()[trackNumber] ?? 0);
+      // Fast attack, slow release, so speech reads as steady movement.
+      smoothed = level > smoothed ? level : smoothed * 0.88 + level * 0.12;
+      if (barRef.current) barRef.current.style.transform = `scaleX(${Math.max(0.02, smoothed)})`;
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [levels, trackNumber, paused]);
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="w-24 shrink-0 truncate text-xs leading-4 text-fg-muted">{label}</span>
+      <span
+        aria-hidden="true"
+        className="relative h-1.5 min-w-16 flex-1 overflow-hidden rounded-full bg-surface-2"
+      >
+        <span
+          ref={barRef}
+          className="absolute inset-0 origin-left rounded-full bg-status-idle transition-transform duration-75 motion-reduce:transition-none"
+          style={{ transform: "scaleX(0.02)" }}
+        />
+      </span>
+    </div>
+  );
+}
+
+function trackLabel(source: string): string {
+  if (source === "microphone") return "Microphone";
+  if (source === "system") return "Tab audio";
+  return "Audio";
+}
+
+export function RecorderPanel({
+  recorder,
+  onStopped,
+}: {
+  /** Null while the capture code loads. */
+  recorder: MeetingRecorder | null;
+  /** After Stop, with the recording to open. */
+  onStopped?: ((recordingId: string) => void) | undefined;
+}) {
+  const titleId = useId();
+  const tabAudioId = useId();
+  const [title, setTitle] = useState("");
+  const [tabAudio, setTabAudio] = useState(false);
+  const [errorDismissed, setErrorDismissed] = useState(false);
+  const online = useOnline();
+  const state = recorder?.state ?? "idle";
+  const live = state === "recording" || state === "paused" || state === "stopping";
+
+  if (recorder && !recorder.supported) {
+    return (
+      <Notice tone="muted" title="This browser can't record">
+        Use a current version of Chrome, Edge, Safari or Firefox to record meetings.
+      </Notice>
+    );
+  }
+
+  if (recorder && live) {
+    const paused = state === "paused";
+    const recordingId = recorder.recordingId;
+    const line = uploadLine(recorder, online);
+    return (
+      <section
+        aria-label="Recording"
+        className="rounded-[14px] border border-border bg-surface p-5 shadow-[0_1px_2px_rgb(0_0_0/0.04)] max-sm:p-4"
+      >
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="relative flex size-3 shrink-0" aria-hidden="true">
+              {!paused ? (
+                <span className="absolute inset-0 animate-ping rounded-full bg-status-failed/60 motion-reduce:animate-none" />
+              ) : null}
+              <span
+                className={cn(
+                  "relative size-3 rounded-full",
+                  paused ? "bg-fg-subtle" : "bg-status-failed",
+                )}
+              />
+            </span>
+            <div className="min-w-0">
+              <p className="text-sm leading-5 font-medium text-fg">
+                {state === "stopping" ? "Finishing" : paused ? "Paused" : "Recording"}
+              </p>
+              <p
+                className="text-2xl leading-8 font-semibold tracking-[-0.5px] text-fg tabular-nums"
+                role="timer"
+                aria-live="off"
+              >
+                {formatClock(recorder.elapsedMilliseconds)}
+              </p>
+            </div>
+          </div>
+          <div className="grid min-w-48 flex-1 gap-2">
+            {recorder.tracks.map((track) => (
+              <LevelMeter
+                key={track.trackNumber}
+                recorder={recorder}
+                trackNumber={track.trackNumber}
+                label={trackLabel(track.source)}
+                paused={paused}
+              />
+            ))}
+          </div>
+          <div className="flex shrink-0 items-center gap-2 max-sm:w-full">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={state === "stopping"}
+              onClick={() => (paused ? recorder.resume() : recorder.pause())}
+              className="rounded-[10px] pointer-coarse:h-11 max-sm:flex-1"
+            >
+              {paused ? <PlayIcon aria-hidden="true" /> : <PauseIcon aria-hidden="true" />}
+              {paused ? "Resume" : "Pause"}
+            </Button>
+            <Button
+              type="button"
+              disabled={state === "stopping"}
+              onClick={() => {
+                void recorder.stop().then(() => {
+                  if (recordingId) onStopped?.(recordingId);
+                });
+              }}
+              className="rounded-[10px] pointer-coarse:h-11 max-sm:flex-1"
+            >
+              <SquareIcon aria-hidden="true" className="fill-current" />
+              Stop
+            </Button>
+          </div>
+        </div>
+        {line ? (
+          <p className="mt-3 text-xs leading-4.5 text-fg-muted" aria-live="polite">
+            {line}
+          </p>
+        ) : null}
+      </section>
+    );
+  }
+
+  const starting = state === "starting";
+  const error = recorder?.error && !errorDismissed ? recorder.error : null;
+  const start = async () => {
+    if (!recorder) return;
+    setErrorDismissed(false);
+    await recorder.start({
+      ...(title.trim() ? { title: title.trim() } : {}),
+      systemAudio: tabAudio,
+    });
+  };
+  return (
+    <section aria-label="New recording" className="grid gap-3">
+      <form
+        className="flex items-center gap-3 rounded-[14px] border border-border bg-surface p-2 pl-4 shadow-[0_1px_2px_rgb(0_0_0/0.04)] max-sm:flex-wrap max-sm:p-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void start();
+        }}
+      >
+        <MicIcon aria-hidden="true" className="size-4 shrink-0 text-fg-subtle max-sm:hidden" />
+        <label htmlFor={titleId} className="sr-only">
+          Meeting title
+        </label>
+        <Input
+          id={titleId}
+          value={title}
+          maxLength={300}
+          onChange={(event) => setTitle(event.target.value)}
+          placeholder="Name this meeting (optional)"
+          className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0 max-sm:basis-full dark:bg-transparent"
+          disabled={starting}
+        />
+        {recorder?.systemAudioSupported ? (
+          <label
+            htmlFor={tabAudioId}
+            className="flex shrink-0 cursor-pointer items-center gap-2 text-sm leading-5 text-fg-label select-none pointer-coarse:min-h-11"
+            title="Records the other people in a browser call, such as Google Meet or Teams on the web"
+          >
+            <Checkbox
+              id={tabAudioId}
+              checked={tabAudio}
+              disabled={starting}
+              onCheckedChange={setTabAudio}
+            />
+            Include a tab's audio
+          </label>
+        ) : null}
+        <Button
+          type="submit"
+          disabled={!recorder || starting}
+          className="shrink-0 rounded-[10px] pointer-coarse:h-11 max-sm:w-full"
+        >
+          <CircleIcon aria-hidden="true" className="fill-status-failed text-status-failed" />
+          {starting ? "Starting" : "Start recording"}
+        </Button>
+      </form>
+      {tabAudio && !error ? (
+        <p className="px-1 text-xs leading-4.5 text-fg-muted">
+          Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio.
+        </p>
+      ) : null}
+      {error ? (
+        <Notice
+          tone="failed"
+          title={recorderErrorText(error).title}
+          onDismiss={() => setErrorDismissed(true)}
+        >
+          {recorderErrorText(error).body}
+        </Notice>
+      ) : null}
+    </section>
+  );
+}

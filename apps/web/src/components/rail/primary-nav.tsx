@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { useKnowledgeReviewIndicator } from "./use-knowledge-review-indicator";
 import { useScheduledTaskAttentionIndicator } from "./use-scheduled-task-attention";
+import { useMeetingRecorderState } from "@/components/meetings/recorder-context";
 import { InboxLink } from "@/components/rail/inbox-link";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
@@ -40,6 +41,8 @@ export function WorkspaceShortcutLinks({
     scheduleAttention === undefined,
   );
   const schedulesNeedAttention = scheduleAttention ?? fetchedAttention;
+  const recorderState = useMeetingRecorderState();
+  const recording = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   return (
@@ -52,6 +55,7 @@ export function WorkspaceShortcutLinks({
           needsAttention={
             item.to === "/workspaces/$workspaceId/schedules" && schedulesNeedAttention
           }
+          recording={item.to === "/workspaces/$workspaceId/meetings" && recording}
           workspaceId={rail.workspaceId}
           variant="rail"
           collapsed={rail.collapsed}
@@ -71,6 +75,8 @@ export function PrimaryNavExtras() {
   const rail = useRail();
   const pendingKnowledge = useKnowledgeReviewIndicator(rail.workspaceId);
   const schedulesNeedAttention = useScheduledTaskAttentionIndicator(rail.workspaceId);
+  const recorderState = useMeetingRecorderState();
+  const recordingMeeting = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const activeWorkspaceItem = PRIMARY_WORKSPACE_ITEMS.find((item) =>
     isConfigItemActive(pathname, rail.workspaceId, item.to),
@@ -164,6 +170,24 @@ export function PrimaryNavExtras() {
                     pathname,
                     rail.workspaceId,
                     "/workspaces/$workspaceId/schedules",
+                  )}
+                  onNavigate={() => rail.setDrawerOpen(false)}
+                />
+              ) : null}
+              {recordingMeeting ? (
+                <WorkspaceConfigLink
+                  item={
+                    PRIMARY_WORKSPACE_ITEMS.find(
+                      (item) => item.to === "/workspaces/$workspaceId/meetings",
+                    )!
+                  }
+                  workspaceId={rail.workspaceId}
+                  variant="rail"
+                  recording
+                  active={isConfigItemActive(
+                    pathname,
+                    rail.workspaceId,
+                    "/workspaces/$workspaceId/meetings",
                   )}
                   onNavigate={() => rail.setDrawerOpen(false)}
                 />

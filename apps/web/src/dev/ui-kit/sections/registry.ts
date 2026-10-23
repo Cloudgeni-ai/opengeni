@@ -124,6 +124,7 @@ export const SECTION_KEYS = [
   "page-models-cache",
   "page-schedules",
   "page-schedule-form",
+  "page-meetings",
   "page-knowledge",
   "page-org-people",
 ] as const;
@@ -898,6 +899,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Create or edit a schedule: what to do, when, a name and advanced options.",
     usedOn: "Schedules",
     load: () => import("./page-schedule-form"),
+  },
+  {
+    key: "page-meetings",
+    group: "Pages",
+    title: "Meetings",
+    purpose: "Record a meeting, then read its transcript and name who spoke.",
+    usedOn: "Main rail",
+    load: () => import("./page-meetings"),
   },
   {
     key: "page-knowledge",

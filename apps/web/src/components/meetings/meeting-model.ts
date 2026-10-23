@@ -1,0 +1,248 @@
+/**
+ * Plain helpers for the Meetings pages: words for a recording's state, clock
+ * times, speaker names and colors, and the transcript grouped into turns.
+ * No React here, so each rule is tested on its own.
+ */
+import type {
+  Recording,
+  RecordingSpeaker,
+  RecordingTrack,
+  RecordingTranscriptSegment,
+  RecordingTranscriptVersion,
+} from "@opengeni/contracts";
+
+/** "4:07", "1:02:09". Never negative; rounds down to the second. */
+export function formatClock(milliseconds: number): string {
+  const total = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const ss = String(seconds).padStart(2, "0");
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${ss}` : `${minutes}:${ss}`;
+}
+
+/** "45 sec", "12 min", "1 h 5 min": a recording's length in a list. */
+export function formatDuration(milliseconds: number): string {
+  const seconds = Math.round(Math.max(0, milliseconds) / 1000);
+  if (seconds < 60) return `${seconds} sec`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
+}
+
+export type MeetingPhase =
+  | { kind: "uploading" }
+  | { kind: "transcribing"; version: RecordingTranscriptVersion | null }
+  | { kind: "ready"; version: RecordingTranscriptVersion }
+  | { kind: "failed"; version: RecordingTranscriptVersion | null }
+  | { kind: "no_transcript" };
+
+/**
+ * Where a recording is in its life, from the reader's side. A recording still
+ * capturing is "uploading": the audio is on the recorder's device until its
+ * chunks reach storage. A failed re-run leaves an older complete version
+ * current, so the transcript stays readable.
+ */
+export function meetingPhase(recording: Recording): MeetingPhase {
+  if (recording.state === "capturing") return { kind: "uploading" };
+  const version = recording.transcript;
+  if (version?.state === "complete") return { kind: "ready", version };
+  if (version?.state === "queued" || version?.state === "processing") {
+    return { kind: "transcribing", version };
+  }
+  if (version?.state === "failed" || recording.state === "failed") {
+    return { kind: "failed", version: version ?? null };
+  }
+  if (recording.state === "processing") return { kind: "transcribing", version: null };
+  return { kind: "no_transcript" };
+}
+
+/** The one-word state a list row shows, or null when there is nothing to say. */
+export function meetingStatusLabel(
+  phase: MeetingPhase,
+): { label: string; tone: "progress" | "danger" | "neutral" } | null {
+  switch (phase.kind) {
+    case "uploading":
+      return { label: "Uploading", tone: "progress" };
+    case "transcribing":
+      return { label: "Transcribing", tone: "progress" };
+    case "failed":
+      return { label: "Transcript failed", tone: "danger" };
+    case "no_transcript":
+      return { label: "No transcript", tone: "neutral" };
+    case "ready":
+      return null;
+  }
+}
+
+/**
+ * Plain words for a transcription error code, with what to do about it. The
+ * codes are the worker's: its own (`missing_provider_key`, `invalid_audio`,
+ * ...) and the provider's, prefixed `provider_`.
+ */
+export function transcriptErrorText(code: string | null): string {
+  switch (code) {
+    case "missing_provider_key":
+      return "This workspace has no key for the transcription service. An admin can add one in workspace settings, under Models.";
+    case "provider_unauthorized":
+      return "The transcription service rejected this workspace's key. An admin can replace it in workspace settings, under Models.";
+    case "provider_quota_exceeded":
+      return "The transcription service account is out of credit. Try again once it's topped up.";
+    case "provider_too_large":
+      return "This recording is longer than the model accepts. Try another model.";
+    case "provider_not_supported":
+    case "model_unavailable":
+      return "That model isn't available anymore. Try another model.";
+    case "invalid_audio":
+    case "provider_invalid_audio":
+    case "ffmpeg_failed":
+      return "The audio couldn't be read. Part of the upload may be damaged.";
+    case "storage_unavailable":
+      return "The audio couldn't be fetched from storage. Try again in a few minutes.";
+    default:
+      return "Something went wrong while transcribing. Try again, or pick another model.";
+  }
+}
+
+const DIARIZED_LABEL = /^(?:(t\d+)_)?speaker_(\d+)$/u;
+const TRACK_LABEL = /^track-(\d+)$/u;
+
+/**
+ * The name to show for a speaker: the person or plain name someone gave it,
+ * else "Speaker 2" for a model's label, or the track's role for a track label.
+ */
+export function speakerDisplayName(
+  label: string | null,
+  speakers: readonly RecordingSpeaker[],
+  tracks: readonly RecordingTrack[],
+): string {
+  if (!label) return "Unknown speaker";
+  const speaker = speakers.find((candidate) => candidate.label === label);
+  if (speaker && speaker.name.trim() && speaker.name !== label) return speaker.name;
+  return defaultSpeakerName(label, tracks);
+}
+
+export function defaultSpeakerName(label: string, tracks: readonly RecordingTrack[]): string {
+  const diarized = DIARIZED_LABEL.exec(label);
+  if (diarized) return `Speaker ${Number(diarized[2]) + 1}`;
+  const track = TRACK_LABEL.exec(label);
+  if (track) {
+    const source = tracks.find((candidate) => candidate.trackNumber === Number(track[1]))?.source;
+    if (source === "microphone") return "Microphone";
+    if (source === "system") return "Shared audio";
+    return `Track ${Number(track[1]) + 1}`;
+  }
+  return label;
+}
+
+/** True when someone named this label (a person or a plain name). */
+export function speakerIsNamed(label: string, speakers: readonly RecordingSpeaker[]): boolean {
+  const speaker = speakers.find((candidate) => candidate.label === label);
+  return Boolean(speaker && (speaker.personId || (speaker.name && speaker.name !== label)));
+}
+
+/**
+ * A stable color slot (1-6, the chart palette) per speaker label, in order of
+ * first appearance so the first voice is always the same hue.
+ */
+export function speakerColorSlots(
+  segments: readonly RecordingTranscriptSegment[],
+): Map<string, number> {
+  const slots = new Map<string, number>();
+  for (const segment of segments) {
+    const label = segment.speakerLabel;
+    if (label && !slots.has(label)) slots.set(label, (slots.size % 6) + 1);
+  }
+  return slots;
+}
+
+export type TranscriptTurn = {
+  /** First segment index; stable across edits that keep the order. */
+  key: number;
+  speakerLabel: string | null;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  segments: RecordingTranscriptSegment[];
+};
+
+/**
+ * Consecutive segments of one speaker read as one turn, the way a person reads
+ * a transcript. A long pause starts a new turn even for the same voice, so a
+ * timestamp is never far from the words it marks.
+ */
+export function groupTranscriptTurns(
+  segments: readonly RecordingTranscriptSegment[],
+  maxGapMilliseconds = 30_000,
+): TranscriptTurn[] {
+  const turns: TranscriptTurn[] = [];
+  for (const segment of segments) {
+    const last = turns.at(-1);
+    if (
+      last &&
+      last.speakerLabel === segment.speakerLabel &&
+      segment.startMilliseconds - last.endMilliseconds <= maxGapMilliseconds
+    ) {
+      last.segments.push(segment);
+      last.endMilliseconds = Math.max(last.endMilliseconds, segment.endMilliseconds);
+      continue;
+    }
+    turns.push({
+      key: segment.index,
+      speakerLabel: segment.speakerLabel,
+      startMilliseconds: segment.startMilliseconds,
+      endMilliseconds: segment.endMilliseconds,
+      segments: [segment],
+    });
+  }
+  return turns;
+}
+
+/** The segment playing at `milliseconds`, or the last one that started before it. */
+export function activeSegmentIndex(
+  segments: readonly RecordingTranscriptSegment[],
+  milliseconds: number,
+): number | null {
+  let low = 0;
+  let high = segments.length - 1;
+  let found: number | null = null;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const segment = segments[middle]!;
+    if (segment.startMilliseconds <= milliseconds) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return found === null ? null : segments[found]!.index;
+}
+
+/** "ElevenLabs Scribe v2 · English · 3 speakers" style facts for a version. */
+export function versionSummary(
+  version: RecordingTranscriptVersion,
+  modelName: string | null,
+): string[] {
+  const parts = [modelName ?? version.model];
+  const languages = version.languages.map(languageName).filter(Boolean);
+  if (languages.length > 0) parts.push(languages.join(", "));
+  return parts;
+}
+
+export function languageName(code: string): string {
+  try {
+    const names = new Intl.DisplayNames(["en"], { type: "language" });
+    return names.of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/** A short, readable default title for a new recording: "Meeting, Oct 23, 14:05". */
+export function defaultMeetingTitle(now: Date): string {
+  const date = now.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const time = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return `Meeting, ${date}, ${time}`;
+}

@@ -8,6 +8,7 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/plugins"
   | "/workspaces/$workspaceId/schedules"
+  | "/workspaces/$workspaceId/meetings"
   | "/workspaces/$workspaceId/state"
   | "/workspaces/$workspaceId/artifacts"
   | "/workspaces/$workspaceId/settings";
@@ -21,6 +22,7 @@ export type WorkspaceConfigIcon =
   | "brain-circuit"
   | "plug"
   | "calendar-clock"
+  | "audio-lines"
   | "panels-top-left"
   | "settings";
 
@@ -58,6 +60,12 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     icon: "calendar-clock",
     label: "Schedules",
     description: "Run agents on a schedule",
+  },
+  {
+    to: "/workspaces/$workspaceId/meetings",
+    icon: "audio-lines",
+    label: "Meetings",
+    description: "Record meetings and read who said what",
   },
   {
     to: "/workspaces/$workspaceId/artifacts",
