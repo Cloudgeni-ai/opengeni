@@ -244,12 +244,23 @@ labels replace their wire ids; a readable id-based fallback keeps paginated
 history understandable.
 
 Agent-created child sessions use the same tool and lifecycle. Their requests are
-owned by the exact child session and surface when that child is opened; the
-parent session shows only its existing `Needs you` child signal. An authorized
-workspace controller answers on the child route. Settlement wakes the child's
-frozen turn and returns the structured result to that original child tool call;
-the parent receives only the child's later ordinary terminal result, not a copy
-of the human answer.
+owned by the exact child session. The web app also pins them above the
+composer of every ancestor session: for each descendant whose status is
+`requires_action` (the same state behind the parent's `Needs you` signal), the
+parent page reads that child's pending requests and newest approval events and
+renders the ordinary answer form or approval card, naming the child and linking
+to it at the request's moment. Answers and decisions go to the child's own
+routes, so the server's permission checks and the draft store are the same as
+on the child page. Several waiting children stack under one collapsible line.
+Live session-list hints that name a descendant (the server batches them, about
+every 15 seconds) and the output of the parent agent's own
+`session_human_input_respond` or `session_steer` call re-read the tree; the
+lineage poll covers pages without hints. The tree read stops at 200
+descendants and 5 levels, so the `Needs you` count can include a child the
+card does not show; the child's own page still has its request.
+Settlement wakes the child's frozen turn and returns the structured result to
+that original child tool call; the parent agent receives only the child's later
+ordinary terminal result, not a copy of the human answer.
 
 ## Acceptance boundary
 
