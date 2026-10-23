@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act } from "react";
+import { act, useState } from "react";
 import type {
   ComposerDraft,
   SessionEvent,
@@ -10,6 +10,7 @@ import type {
 import { OpenGeniApiError } from "@opengeni/sdk";
 import * as Composer from "../src/composer";
 import {
+  hasQueuedSendInFlight,
   latestRecallableQueuedTurn,
   shouldRecallQueuedOnKey,
   useQueuedPromptRecall,
@@ -17,6 +18,7 @@ import {
   type QueuedPromptRecallOutcome,
 } from "../src/hooks/use-queued-prompt-recall";
 import { useTurnQueue, type UseTurnQueueResult } from "../src/hooks/use-turn-queue";
+import type { ComposerOptimisticMessage } from "../src/hooks/use-composer";
 import type { SlashCommandContext } from "../src/hooks/use-slash-commands";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
@@ -212,6 +214,60 @@ describe("latestRecallableQueuedTurn", () => {
     );
     expect(latestRecallableQueuedTurn([], none, ME)).toBeNull();
   });
+
+  test("a known viewer never recalls an unattributed prompt", () => {
+    const unattributed = fakeTurn({
+      id: "unattributed",
+      initiator: undefined as unknown as SessionTurn["initiator"],
+    });
+    expect(latestRecallableQueuedTurn([unattributed], none, ME)).toBeNull();
+  });
+});
+
+function optimistic(overrides: Partial<ComposerOptimisticMessage>): ComposerOptimisticMessage {
+  return {
+    clientEventId: "client-1",
+    delivery: "send",
+    destination: "queue",
+    text: "just sent",
+    annotations: [],
+    resources: [],
+    occurredAt: "2026-10-23T11:00:00.000Z",
+    state: "sending",
+    ...overrides,
+  };
+}
+
+describe("hasQueuedSendInFlight", () => {
+  const queued = new Set(["in-queue"]);
+
+  test("a send on its way into the queue is in flight", () => {
+    expect(hasQueuedSendInFlight([optimistic({})], queued, 4)).toBe(true);
+    expect(
+      hasQueuedSendInFlight(
+        [optimistic({ state: "queued", turnId: "new", appliedQueueVersion: 5 })],
+        queued,
+        4,
+      ),
+    ).toBe(true);
+  });
+
+  test("settled, failed, steered or chat sends are not", () => {
+    expect(hasQueuedSendInFlight(undefined, queued, 4)).toBe(false);
+    expect(
+      hasQueuedSendInFlight([optimistic({ state: "queued", turnId: "in-queue" })], queued, 4),
+    ).toBe(false);
+    expect(
+      hasQueuedSendInFlight(
+        [optimistic({ state: "queued", turnId: "ran", appliedQueueVersion: 4 })],
+        queued,
+        4,
+      ),
+    ).toBe(false);
+    expect(hasQueuedSendInFlight([optimistic({ state: "failed" })], queued, 4)).toBe(false);
+    expect(hasQueuedSendInFlight([optimistic({ delivery: "steer" })], queued, 4)).toBe(false);
+    expect(hasQueuedSendInFlight([optimistic({ destination: "chat" })], queued, 4)).toBe(false);
+  });
 });
 
 describe("useTurnQueue recallTurn", () => {
@@ -324,6 +380,8 @@ function recallComposer(overrides: Partial<RecallComposer> = {}): RecallComposer
     draftLoading: false,
     draftPersistence: "durable",
     applyDraft: (draft) => applied.push(draft),
+    sending: false,
+    optimisticMessages: [],
     ...overrides,
     applied,
     values,
@@ -333,8 +391,8 @@ function recallComposer(overrides: Partial<RecallComposer> = {}): RecallComposer
 function recallQueue(
   turns: SessionTurn[],
   recallTurn: NonNullable<UseTurnQueueResult["recallTurn"]>,
-): Pick<UseTurnQueueResult, "queue" | "mutationFor" | "recallTurn"> {
-  return { queue: turns, mutationFor: () => null, recallTurn };
+): Pick<UseTurnQueueResult, "queue" | "snapshot" | "mutationFor" | "recallTurn"> {
+  return { queue: turns, snapshot: queueSnapshot(turns), mutationFor: () => null, recallTurn };
 }
 
 describe("useQueuedPromptRecall", () => {
@@ -434,6 +492,57 @@ describe("useQueuedPromptRecall", () => {
     expect(composer.applied).toHaveLength(1);
     expect(composer.values).toEqual(["recalled\ntyped meanwhile"]);
     await hook.unmount();
+  });
+
+  test("Up right after sending waits for the new prompt instead of taking an older one", async () => {
+    const older = fakeTurn({ id: "older" });
+    let calls = 0;
+    const recallTurn = async () => {
+      calls += 1;
+      return { status: "failed" as const };
+    };
+    const sending = await renderHook(
+      () =>
+        useQueuedPromptRecall({
+          queue: recallQueue([older], recallTurn),
+          composer: recallComposer({ sending: true }),
+        }),
+      undefined,
+    );
+    expect(sending.result.current).toMatchObject({ available: false, turnId: null });
+    await flushing(async () => {
+      expect(await sending.result.current!.recall()).toBe("unavailable");
+    });
+    await sending.unmount();
+    const landing = await renderHook(
+      () =>
+        useQueuedPromptRecall({
+          queue: recallQueue([older], recallTurn),
+          composer: recallComposer({
+            optimisticMessages: [optimistic({ state: "queued", turnId: "newer" })],
+          }),
+        }),
+      undefined,
+    );
+    expect(landing.result.current).toMatchObject({ available: false, turnId: null });
+    await flushing(async () => {
+      expect(await landing.result.current!.recall()).toBe("unavailable");
+    });
+    expect(calls).toBe(0);
+    await landing.unmount();
+    const newer = fakeTurn({ id: "newer" });
+    const landed = await renderHook(
+      () =>
+        useQueuedPromptRecall({
+          queue: recallQueue([older, newer], recallTurn),
+          composer: recallComposer({
+            optimisticMessages: [optimistic({ state: "queued", turnId: "newer" })],
+          }),
+        }),
+      undefined,
+    );
+    expect(landed.result.current).toMatchObject({ available: true, turnId: "newer" });
+    await landed.unmount();
   });
 
   test("is off without durable drafts, and unavailable with nothing waiting", async () => {
@@ -567,12 +676,70 @@ describe("composer Up-arrow recall", () => {
     expect(idle.recall.calls).toBe(0);
   });
 
-  test("a prompt the agent already took shows a quiet notice", async () => {
+  test("a prompt the agent already took shows a quiet, announced notice", async () => {
     const { value } = fakeRecall("already_sent");
     const textarea = await mountComposer("", value);
     await pressUp(textarea);
     await flush();
-    expect(mounted?.container.textContent).toContain("Already sent");
+    const notice = mounted?.container.querySelector('[role="status"]');
+    expect(notice?.textContent).toBe("Already sent");
     expect(textarea.value).toBe("");
+  });
+
+  test("a second Up while the first withdraw runs does not withdraw twice", async () => {
+    let calls = 0;
+    let release: (outcome: QueuedPromptRecallOutcome) => void = () => {};
+    const value: ComposerQueuedRecall = {
+      available: true,
+      turnId: "turn",
+      recall: () => {
+        calls += 1;
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      },
+    };
+    const textarea = await mountComposer("", value);
+    await pressUp(textarea);
+    await pressUp(textarea);
+    expect(calls).toBe(1);
+    await act(async () => {
+      release("already_sent");
+      await Promise.resolve();
+    });
+    await pressUp(textarea);
+    expect(calls).toBe(2);
+  });
+
+  test("the recalled prompt lands with the caret at its end", async () => {
+    const recalledText = "first line\nsecond line";
+    let setText: (text: string) => void = () => {};
+    function Harness() {
+      const [text, setTextState] = useState("");
+      setText = setTextState;
+      const controller = Composer.useChatComposerController({
+        delivery: { ...delivery(text), setValue: setTextState },
+        queuedRecall: {
+          available: text.length === 0,
+          turnId: "turn",
+          recall: async () => {
+            setText(recalledText);
+            return "recalled";
+          },
+        },
+      });
+      return (
+        <Composer.Root controller={controller}>
+          <Composer.Input />
+        </Composer.Root>
+      );
+    }
+    mounted = await renderComponent(<Harness />);
+    const textarea = mounted.container.querySelector("textarea")!;
+    await pressUp(textarea);
+    await flush();
+    expect(textarea.value).toBe(recalledText);
+    expect(textarea.selectionStart).toBe(recalledText.length);
+    expect(textarea.selectionEnd).toBe(recalledText.length);
   });
 });

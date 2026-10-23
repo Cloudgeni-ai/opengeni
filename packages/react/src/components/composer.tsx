@@ -597,14 +597,18 @@ export function useChatComposerController({
           placeCaretAtEnd();
         });
       } else if (outcome === "already_sent") {
-        setNotice({ tone: "ok", message: messages.queuedPromptAlreadySent });
+        setNotice({
+          tone: "ok",
+          message:
+            messages.queuedPromptAlreadySent ?? t("composerMessages.queuedPromptAlreadySent"),
+        });
       }
     } catch {
       // Recall is a convenience; the queue surface reports real failures.
     } finally {
       recallingRef.current = false;
     }
-  }, [messages.queuedPromptAlreadySent, placeCaretAtEnd, queuedRecall]);
+  }, [messages.queuedPromptAlreadySent, placeCaretAtEnd, queuedRecall, t]);
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1621,6 +1625,7 @@ export function Status() {
         {controller.activeNotice ? (
           <motion.p
             key="notice"
+            role="status"
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}

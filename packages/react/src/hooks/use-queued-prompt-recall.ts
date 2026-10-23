@@ -1,6 +1,6 @@
 import type { SessionTurn } from "@opengeni/sdk";
 import { useCallback, useMemo, useRef } from "react";
-import type { ComposerState } from "./use-composer";
+import type { ComposerOptimisticMessage, ComposerState } from "./use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "./use-turn-queue";
 
 /** What one Up-arrow recall did. `unavailable` leaves the composer untouched. */
@@ -53,9 +53,10 @@ export function shouldRecallQueuedOnKey(
 }
 
 /**
- * The newest waiting human prompt this person may pull back: queued, not
- * mid-mutation, not a once personal-resource attachment (the server refuses
- * those), and theirs when the viewer is known.
+ * The newest waiting human prompt this person may pull back: the last one in
+ * queue order (the one that would run last), queued, not mid-mutation, not a
+ * once personal-resource attachment (the server refuses those), and initiated
+ * by this viewer when one is given.
  */
 export function latestRecallableQueuedTurn(
   turns: readonly SessionTurn[],
@@ -68,10 +69,37 @@ export function latestRecallableQueuedTurn(
     if (turn.source !== "user" && turn.source !== "api") continue;
     if (mutationFor(turn.id) !== null) continue;
     if (turn.personalResources?.mode === "once") continue;
-    if (subjectId && turn.initiator?.subjectId && turn.initiator.subjectId !== subjectId) continue;
+    if (subjectId && turn.initiator?.subjectId !== subjectId) continue;
     return turn;
   }
   return null;
+}
+
+/**
+ * A just-sent prompt still on its way into the queue. Until it shows up there,
+ * "the latest waiting prompt" is unknown, so recall waits rather than pulling
+ * back an older one.
+ */
+export function hasQueuedSendInFlight(
+  messages: readonly ComposerOptimisticMessage[] | undefined,
+  queuedTurnIds: ReadonlySet<string>,
+  queueVersion: number | null | undefined,
+): boolean {
+  // Same projection as the queue panel's optimistic rows; failed sends stay in
+  // the composer's retry UI and never block recall.
+  return (messages ?? []).some(
+    (message) =>
+      message.delivery === "send" &&
+      message.destination === "queue" &&
+      message.state !== "failed" &&
+      (!message.turnId || !queuedTurnIds.has(message.turnId)) &&
+      !(
+        message.turnId &&
+        message.appliedQueueVersion != null &&
+        queueVersion != null &&
+        queueVersion >= message.appliedQueueVersion
+      ),
+  );
 }
 
 /**
@@ -85,7 +113,7 @@ export function useQueuedPromptRecall({
   subjectId,
   enabled = true,
 }: {
-  queue: Pick<UseTurnQueueResult, "queue" | "mutationFor" | "recallTurn">;
+  queue: Pick<UseTurnQueueResult, "queue" | "snapshot" | "mutationFor" | "recallTurn">;
   composer:
     | Pick<
         ComposerState,
@@ -96,12 +124,15 @@ export function useQueuedPromptRecall({
         | "draftLoading"
         | "draftPersistence"
         | "applyDraft"
+        | "sending"
+        | "optimisticMessages"
       >
     | undefined;
   subjectId?: string | null | undefined;
   enabled?: boolean | undefined;
 }): ComposerQueuedRecall | undefined {
   const candidate = latestRecallableQueuedTurn(queue.queue, queue.mutationFor, subjectId);
+  const settling = composer ? recallSettling(composer, queue) : false;
   const live = useRef({ queue, composer, subjectId });
   live.current = { queue, composer, subjectId };
   const supported =
@@ -115,6 +146,7 @@ export function useQueuedPromptRecall({
     const recallTurn = current.queue.recallTurn;
     if (!target || target.draftPersistence === "disabled" || !recallTurn) return "unavailable";
     if (target.draftLoading || target.hasDraftContent()) return "unavailable";
+    if (recallSettling(target, current.queue)) return "unavailable";
     const turn = latestRecallableQueuedTurn(
       current.queue.queue,
       current.queue.mutationFor,
@@ -140,8 +172,25 @@ export function useQueuedPromptRecall({
   return useMemo(
     () =>
       supported
-        ? { available: candidate !== null, turnId: candidate?.id ?? null, recall }
+        ? {
+            available: candidate !== null && !settling,
+            turnId: settling ? null : (candidate?.id ?? null),
+            recall,
+          }
         : undefined,
-    [candidate, recall, supported],
+    [candidate, recall, settling, supported],
+  );
+}
+
+function recallSettling(
+  composer: Pick<ComposerState, "sending" | "optimisticMessages">,
+  queue: Pick<UseTurnQueueResult, "queue" | "snapshot">,
+): boolean {
+  if (composer.sending) return true;
+  if (!composer.optimisticMessages?.length) return false;
+  return hasQueuedSendInFlight(
+    composer.optimisticMessages,
+    new Set(queue.queue.map((turn) => turn.id)),
+    queue.snapshot?.version,
   );
 }

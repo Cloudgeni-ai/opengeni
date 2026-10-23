@@ -37,7 +37,7 @@ export type ChatComposerMessages = {
   sendAndResumeTitle: string;
   annotationNotesRequired: string;
   /** Quiet notice when Up tried to recall a prompt the agent already took. */
-  queuedPromptAlreadySent: string;
+  queuedPromptAlreadySent?: string | undefined;
   workspacePaused: string;
   pausedHere: string;
   parentBlocker: string;

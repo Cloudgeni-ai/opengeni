@@ -223,6 +223,12 @@ export type SessionConversationProps = ClientOverride &
     surface?: HostSurfacePreference | undefined;
     /** Conversation-owned copy (error actions). */
     labels?: Partial<SessionConversationLabels> | undefined;
+    /**
+     * The signed-in person's subject id. When set, Up in an empty composer
+     * pulls their latest waiting prompt back for editing; prompts from anyone
+     * else are never recalled. Omit it and Up keeps its normal behaviour.
+     */
+    viewerSubjectId?: string | null | undefined;
     /** Presentation/custom controls only; queue and delivery wiring stay owned here. */
     composerProps?: Omit<
       ChatComposerProps,
@@ -371,6 +377,7 @@ function ConversationView({
   surface,
   labels: labelOverrides,
   composerProps,
+  viewerSubjectId,
   chromeProps,
   humanInputProps,
   approvalProps,
@@ -406,11 +413,14 @@ function ConversationView({
     feed.connectionState,
     feed.initialLoading,
   );
-  const queuedRecall = useQueuedPromptRecall({
+  const builtInQueuedRecall = useQueuedPromptRecall({
     queue,
     composer,
-    enabled: sessionId !== null && !terminal,
+    subjectId: viewerSubjectId,
+    enabled: sessionId !== null && !terminal && Boolean(viewerSubjectId),
   });
+  // One recall drives both the composer key and the queue row's ↑ hint.
+  const queuedRecall = composerProps?.queuedRecall ?? builtInQueuedRecall;
   const formatError = useErrorMessage();
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
@@ -761,7 +771,7 @@ function ConversationView({
                   detail.session?.effectiveControl
                 }
                 queuedAheadCount={queue.queue.length}
-                queuedRecall={composerProps?.queuedRecall ?? queuedRecall}
+                queuedRecall={queuedRecall}
               />
             </div>
           </>
