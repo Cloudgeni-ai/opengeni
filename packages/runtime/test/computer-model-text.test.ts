@@ -185,7 +185,7 @@ describe("computerObservationText", () => {
     });
     const text = computerObservationText(native);
     expect(text.split("\n").at(-1)).toBe(
-      "Elements are not listed here because this session reads them with cua_get_window_state; reading them here too would invalidate its element tokens. Call cua_get_window_state for this window's elements.",
+      "Elements are not listed here because this session reads them with interaction__cua_get_window_state; reading them here too would invalidate its element tokens. Call interaction__cua_get_window_state for this window's elements.",
     );
     expect(text).not.toContain("no readable elements");
     // Two empty native-owned readings are not "nothing changed".

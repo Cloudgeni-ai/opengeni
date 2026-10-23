@@ -350,7 +350,7 @@ export function computerObservationText(observation: ComputerTextObservation): s
   }
   if (semantic.kind === "snapshot" && semantic.readByNativeTools) {
     lines.push(
-      "Elements are not listed here because this session reads them with cua_get_window_state; reading them here too would invalidate its element tokens. Call cua_get_window_state for this window's elements.",
+      "Elements are not listed here because this session reads them with interaction__cua_get_window_state; reading them here too would invalidate its element tokens. Call interaction__cua_get_window_state for this window's elements.",
     );
     return lines.join("\n");
   }
