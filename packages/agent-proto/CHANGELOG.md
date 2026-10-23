@@ -1,5 +1,7 @@
 # @opengeni/agent-proto
 
+## 4.7.1
+
 ## 4.7.0
 
 ## 4.6.1

@@ -1,5 +1,11 @@
 # @opengeni/interaction
 
+## 4.7.1
+
+### Patch Changes
+
+- @opengeni/contracts@4.7.1
+
 ## 4.7.0
 
 ### Patch Changes

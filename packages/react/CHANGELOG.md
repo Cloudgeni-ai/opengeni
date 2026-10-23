@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 4.7.1
+
+### Patch Changes
+
+- @opengeni/connect@4.7.1
+- @opengeni/contracts@4.7.1
+- @opengeni/sdk@4.7.1
+
 ## 4.7.0
 
 ### Patch Changes
