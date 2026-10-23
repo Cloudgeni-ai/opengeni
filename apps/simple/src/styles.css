@@ -131,3 +131,67 @@ body {
   -webkit-mask-repeat: no-repeat;
   -webkit-mask-position: center;
 }
+
+/* Settings > Connections. Opengeni's own pieces (logos, the connect dialog,
+   which copies these tokens into its portal) follow the app's palette. */
+.simple-connections {
+  --og-color-bg: var(--app-bg);
+  --og-color-canvas: var(--app-card);
+  --og-color-surface-1: var(--app-card);
+  --og-color-surface-2: var(--app-sidebar);
+  --og-color-surface-3: var(--app-hover);
+  --og-color-hover: var(--app-hover);
+  --og-color-border: var(--app-border);
+  --og-color-fg: var(--app-fg);
+  --og-color-fg-muted: var(--app-muted);
+  --og-color-fg-subtle: var(--app-muted);
+}
+
+/* Brand marks sit on a light tile in both themes, like the web app. */
+.simple-connection-logo {
+  display: inline-flex;
+  flex-shrink: 0;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--app-border);
+  background: #fff;
+}
+.simple-connection-logo .og-connection-logo {
+  --og-connection-icon-padding: 5px;
+  --og-connection-icon-background: transparent;
+  --og-connection-icon-color: inherit;
+  --og-connection-icon-radius: 10px;
+}
+.simple-connection-logo:has(.simple-connection-monogram) {
+  box-shadow: none;
+  background: transparent;
+}
+.simple-connection-logo:has(.simple-connection-monogram) .og-connection-logo {
+  --og-connection-icon-padding: 0px;
+}
+.simple-connection-monogram {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: oklch(0.94 0.04 var(--monogram-hue));
+  color: oklch(0.45 0.12 var(--monogram-hue));
+  font-size: 15px;
+  font-weight: 600;
+}
+.dark .simple-connection-monogram {
+  background: oklch(0.34 0.06 var(--monogram-hue));
+  color: oklch(0.88 0.07 var(--monogram-hue));
+}
+.dark .simple-connection-logo {
+  box-shadow: none;
+}
+.simple-connection-logo .og-connection-skeleton-mark {
+  width: 100%;
+  height: 100%;
+  background: var(--app-hover);
+}
+.simple-connection-logo:has(.og-connection-skeleton-mark) {
+  background: transparent;
+}

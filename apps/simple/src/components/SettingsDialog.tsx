@@ -1,22 +1,12 @@
-import {
-  authorizeConnectAttempt,
-  ConnectController,
-  createBrowserConnectNavigation,
-} from "@opengeni/connect";
-import { ConnectPanel } from "@opengeni/react/connect";
 import { SiteDetail, SiteList } from "@opengeni/react/sites";
-import type {
-  CodexConnectionStatus,
-  ConnectionMetadata,
-  ScheduledTask,
-  Workspace,
-} from "@opengeni/sdk";
+import type { CodexConnectionStatus, ScheduledTask, Workspace } from "@opengeni/sdk";
 import { ArrowLeft, ExternalLink, Pause, Play, Trash2, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { client, EFFORT_LABELS, type AvatarThemeOption, type EffortLevel } from "../lib/app-api";
 import type { ReplyLength } from "../lib/context";
 import { AgentAvatar, type AvatarSubject } from "./AgentAvatar";
 import { CodexConnect } from "./CodexConnect";
+import { ConnectionsSettings } from "./ConnectionsSettings";
 
 export type SettingsTab =
   | "general"
@@ -116,7 +106,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
             <X size={18} />
           </button>
           {props.tab === "general" ? <General {...props} /> : null}
-          {props.tab === "connections" ? <Connections workspaceId={props.workspaceId} /> : null}
+          {props.tab === "connections" ? (
+            <ConnectionsSettings workspaceId={props.workspaceId} />
+          ) : null}
           {props.tab === "models" ? (
             <Section
               title="Model"
@@ -297,68 +289,6 @@ function AvatarStyles(props: SettingsDialogProps) {
         })}
       </div>
     </div>
-  );
-}
-
-function Connections({ workspaceId }: { workspaceId: string }) {
-  // Owned by the effect, so React's development double-mount can't hand the
-  // panel a controller that was already disposed.
-  const [controller, setController] = useState<ConnectController | null>(null);
-  const [connections, setConnections] = useState<ConnectionMetadata[] | null>(null);
-  useEffect(() => {
-    const next = new ConnectController(client.connectTransport(), workspaceId);
-    setController(next);
-    return () => next.dispose();
-  }, [workspaceId]);
-  useEffect(() => {
-    void client
-      .listConnections(workspaceId)
-      .then(setConnections)
-      .catch(() => setConnections([]));
-  }, [workspaceId]);
-  return (
-    <Section
-      title="Connections"
-      hint="Agents ask to connect what they need right in the chat. You can also connect things here."
-    >
-      {connections && connections.length ? (
-        <div className="mb-6 flex flex-wrap gap-2">
-          {connections.map((connection) => (
-            <span
-              key={connection.id}
-              className="inline-flex items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-card)] px-3 py-1 text-sm"
-            >
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${connection.status === "active" ? "bg-emerald-500" : "bg-amber-500"}`}
-              />
-              {connection.providerDomain}
-            </span>
-          ))}
-        </div>
-      ) : null}
-      <div className="og-connect-host">
-        {controller ? (
-          <ConnectPanel
-            controller={controller}
-            client={client}
-            returnUrl={window.location.href}
-            title={null}
-            presentation="catalog"
-            showProviderConnections
-            onAuthorize={(attempt) =>
-              authorizeConnectAttempt(
-                client.connectTransport(),
-                attempt,
-                createBrowserConnectNavigation(window),
-                { mode: "popup" },
-              ).then(async (result) => {
-                if (result) await controller.recover(result.id);
-              })
-            }
-          />
-        ) : null}
-      </div>
-    </Section>
   );
 }
 
