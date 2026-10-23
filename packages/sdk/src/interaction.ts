@@ -748,6 +748,14 @@ export type BrowserRecordingSaveResponse = {
   actionLogPath: string;
 };
 
+/** A save still moving the recording off its browser host (HTTP 202). The
+ * SDK repeats the request with the same operationId after `retryAfterMs`. */
+export type BrowserRecordingSaveProgress = {
+  state: "uploading";
+  recording: BrowserRecordingSummary;
+  retryAfterMs: number;
+};
+
 export type InteractionRect = {
   x: number;
   y: number;
