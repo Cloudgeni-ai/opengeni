@@ -353,6 +353,11 @@ test("Archived filter opens only the archive folder; restore retains the origina
       sessionId: "00000000-0000-4000-9000-000000000401",
       archived: false,
       expectedVersion: 1,
+      mode: "hide_for_me",
+      confirmPause: false,
+      clientEventId: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
       previousChannelId: redesignId,
       returnedChannelId: redesignId,
     },
