@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import type postgres from "postgres";
 import {
   AgentEvent,
   AgentEventAck,
@@ -36,8 +37,9 @@ import {
   recordConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
 import { createConnectedCommandOutputCapture } from "@opengeni/db/session-command-output";
-import { handleAgentEventPayload } from "../src/sandbox/metrics-ingestion";
+import { handleAgentEventPayload, startMetricsIngestion } from "../src/sandbox/metrics-ingestion";
 import { ingestConnectedCommandCompletion } from "../src/sandbox/command-completion";
+import { createConnectedCommandCompletionLocator } from "../src/sandbox/completion-locator";
 
 function reader(
   exitCode: number | OpExit,
@@ -147,6 +149,90 @@ async function fixture(crossWorkspace = false) {
   return identity;
 }
 
+test("completion lookup batches exact process identities and reads fresh terminal state", async () => {
+  const command = await fixture(true);
+  const locate = createConnectedCommandCompletionLocator(client.db);
+  const missing = { ...command, opId: crypto.randomUUID() };
+  const wrong = ["controlWorkspaceId", "enrollmentId", "connectionInstanceId"].map((key) => ({
+    ...command,
+    [key]: crypto.randomUUID(),
+  }));
+  const inputs = [command, missing, command, ...wrong];
+  const expected = await Promise.all(
+    inputs.map((input) => locateConnectedCommandCompletion(client.db, input)),
+  );
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  const previousDebug = driver.options.debug;
+  const queries: string[] = [];
+  driver.options.debug = (_id, query) => {
+    queries.push(query);
+  };
+  try {
+    expect(await Promise.all(inputs.map(locate))).toEqual(expected);
+    expect(
+      queries.filter((query) => query.includes("classify_connected_command_ops")),
+    ).toHaveLength(4);
+    expect(queries.some((query) => query.includes("locate_connected_command_completion"))).toBe(
+      false,
+    );
+  } finally {
+    driver.options.debug = previousDebug;
+  }
+  await settleConnectedMachineSessionBackgroundCommand(client.db, {
+    ...command,
+    outcome: "exited",
+    exitCode: 0,
+    reason: "op_exit",
+  });
+  expect(await locate(command)).toEqual({ ...expected[0]!, terminal: true });
+});
+
+test("ingestion batches a burst without acknowledging missing rows or changing retry behavior", async () => {
+  const command = await fixture();
+  let receipts = 0;
+  const bus = Object.assign(new MemoryEventBus(), {
+    getOpStreamConnection: () =>
+      ({
+        publish: () => {
+          receipts++;
+        },
+      }) as unknown as ReturnType<NonNullable<EventBus["getOpStreamConnection"]>>,
+  });
+  const stop = startMetricsIngestion({ db: client.db, bus });
+  const subject = `agent.${command.controlWorkspaceId}.${command.enrollmentId}.connection.${command.connectionInstanceId}.events`;
+  const payloads = Array.from({ length: 32 }, () =>
+    AgentEvent.encode({
+      event: {
+        $case: "operationCompleted",
+        operationCompleted: {
+          opId: crypto.randomUUID(),
+          exit: OpExit.fromPartial({ exitCode: 0 }),
+        },
+      },
+    }).finish(),
+  );
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  const previousDebug = driver.options.debug;
+  const queries: string[] = [];
+  driver.options.debug = (_id, query) => {
+    queries.push(query);
+  };
+  try {
+    for (let tick = 0; tick < 2; tick++) {
+      await Promise.all(payloads.map((payload) => bus.emitAgentEvent(subject, payload)));
+      await stop.whenIdle();
+      expect(
+        queries.filter((query) => query.includes("classify_connected_command_ops")),
+      ).toHaveLength(tick + 1);
+      expect(receipts).toBe(0);
+    }
+  } finally {
+    driver.options.debug = previousDebug;
+    stop();
+  }
+  expect(await getSessionBackgroundCommand(client.db, command)).toMatchObject({ state: "running" });
+});
+
 test("pushed terminal proof settles the original command once despite route changes and reaper backoff", async () => {
   const command = await fixture(true);
   await shared.admin`update sessions set active_epoch = active_epoch + 3 where id = ${command.sessionId}`;
@@ -175,6 +261,8 @@ test("pushed terminal proof settles the original command once despite route chan
     completed,
     bus,
     reader(completed.exit),
+    undefined,
+    createConnectedCommandCompletionLocator(client.db),
   );
   const result = await getSessionBackgroundCommand(client.db, command);
   expect(result).toMatchObject({ state: "exited", exitCode: -1, settlementReason: "op_cancelled" });
