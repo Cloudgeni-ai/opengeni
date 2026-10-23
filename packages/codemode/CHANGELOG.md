@@ -1,5 +1,16 @@
 # @opengeni/codemode
 
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [3089aaf]
+- Updated dependencies [e2a641c]
+- Updated dependencies [85fb89e]
+  - @opengeni/sdk@4.8.0
+  - @opengeni/contracts@4.8.0
+  - @opengeni/tool-gateway@4.8.0
+
 ## 4.7.2
 
 ### Patch Changes

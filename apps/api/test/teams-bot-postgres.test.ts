@@ -397,7 +397,23 @@ test("events for sessions without a Teams route create no wake or ghost route", 
 
 test("composed application routes Connector ingress without cookie or API-contract header, still rejecting unsigned requests", async () => {
   const f = await fixture();
+  f.deps.settings.authRequired = true;
+  f.deps.settings.accessKey = "test-only-required-api-key";
+  f.deps.settings.environment = "development";
   const app = createApp(f.deps);
+  const protectedRead = await app.request(`/v1/workspaces/${f.i.workspace_id}/sessions`);
+  expect(protectedRead.status).toBe(401);
+  expect(await protectedRead.json()).toEqual({ error: "unauthorized" });
+  const protectedMutation = await app.request(`/v1/workspaces/${f.i.workspace_id}/sessions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-opengeni-access-key": "test-only-required-api-key",
+    },
+    body: "{}",
+  });
+  expect(protectedMutation.status).toBe(409);
+  expect(((await protectedMutation.json()) as { code: string }).code).toBe("API_CONTRACT_CHANGED");
   const response = await app.request("/v1/integrations/teams/messages", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -405,6 +421,17 @@ test("composed application routes Connector ingress without cookie or API-contra
   });
   expect(response.status).toBe(401);
   expect(await response.json()).toEqual({ error: "Invalid Connector token" });
+  const token = `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify({ iss: "https://api.botframework.com", aud: f.deps.settings.teamsBotClientId, exp: Math.floor(Date.now() / 1000) + 300 })).toString("base64url")}.`;
+  const unsignedConnector = await app.request("/v1/integrations/teams/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      type: "message",
+      channelId: "msteams",
+      serviceUrl: "https://smba.trafficmanager.net/emea/",
+    }),
+  });
+  expect(unsignedConnector.status).toBe(401);
   f.deps.settings.teamsBotAllowedTenantIds = [];
   const disabled = await app.request("/v1/integrations/teams/messages", {
     method: "POST",

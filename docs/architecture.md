@@ -3165,14 +3165,19 @@ instruction inspection for both modular and legacy agents. Persona overrides
 do not remove it. See `docs/local-development.md`.
 
 Teams admission uses an internal durable inbox proof at native session/message commit
-(`packages/core/src/application/teams-private-session.ts` and `packages/db/src/teams-private-
-session.ts`). It binds the exact installation generation, actor, linked human, route, message,
+(`packages/core/src/application/teams-private-session.ts` and `packages/db/src/teams-private-session.ts`). It binds the exact installation generation, actor, linked human, route, message,
 and current lease. Personal Teams conversations may create private sessions in an authorized
-shared workspace under the existing organization privacy policy; this does not mint managed-
-browser authority or permit Personal workspace binding, visibility changes, forks, or
+shared workspace under the existing organization privacy policy; this does not mint managed-browser authority or permit Personal workspace binding, visibility changes, forks, or
 approvals.
 
 Teams reply discovery uses a content-free sequence wake on relevant durable session events.
 The owner-only trigger updates the reserved route in the event transaction; delivery still
 checks the exact linked human and current session audience before reading reply content.
 Idle routes are excluded from pump claims, and pending output keeps its durable delivery state.
+Personal sidebar Archive is an atomic composition of native Pause and personal
+visibility in `archiveHumanSessionWorkstream` (`packages/core/src/application/session-commands.ts`).
+Its personal-state fence precedes the normal control/workspace/session locks;
+post-commit fanout uses the existing durable control outboxes. Shared-chat control
+authority is independent of creator identity. Restore never resumes, and explicit
+Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
+background-command semantics.

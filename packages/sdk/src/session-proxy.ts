@@ -1268,6 +1268,8 @@ export function createSessionProxyHandler(
           return json(
             await client.requestJson("PUT", `${session}/archive`, {
               archived,
+              // The embedded proxy grants personal hiding, never shared Pause.
+              mode: "hide_for_me",
               ...(typeof expectedVersion === "number" ? { expectedVersion } : {}),
             }),
           );

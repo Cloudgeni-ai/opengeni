@@ -948,6 +948,9 @@
 :where(.og-root).bottom-full,:where(.og-root) .bottom-full {
     bottom: 100%;
   }
+:where(.og-root).-left-1,:where(.og-root) .-left-1 {
+    left: calc(var(--spacing) * -1);
+  }
 :where(.og-root).-left-2\.5,:where(.og-root) .-left-2\.5 {
     left: calc(var(--spacing) * -2.5);
   }
@@ -1652,9 +1655,6 @@
 :where(.og-root).max-h-\[92dvh\],:where(.og-root) .max-h-\[92dvh\] {
     max-height: 92dvh;
   }
-:where(.og-root).max-h-\[172px\],:where(.og-root) .max-h-\[172px\] {
-    max-height: 172px;
-  }
 :where(.og-root).max-h-\[480px\],:where(.og-root) .max-h-\[480px\] {
     max-height: 480px;
   }
@@ -1945,9 +1945,6 @@
   }
 :where(.og-root).w-\[300\%\],:where(.og-root) .w-\[300\%\] {
     width: 300%;
-  }
-:where(.og-root).w-\[400px\],:where(.og-root) .w-\[400px\] {
-    width: 400px;
   }
 :where(.og-root).w-\[calc\(100\%\+1\.5rem\)\],:where(.og-root) .w-\[calc\(100\%\+1\.5rem\)\] {
     width: calc(100% + 1.5rem);
@@ -5802,6 +5799,11 @@
       }
     }
   }
+:where(.og-root).group-focus-visible\:w-0\.5,:where(.og-root) .group-focus-visible\:w-0\.5 {
+    &:is(:where(.group):focus-visible *) {
+      width: calc(var(--spacing) * 0.5);
+    }
+  }
 :where(.og-root).group-focus-visible\:bg-og-accent,:where(.og-root) .group-focus-visible\:bg-og-accent {
     &:is(:where(.group):focus-visible *) {
       background-color: var(--og-color-accent);
@@ -8755,9 +8757,14 @@
       padding-inline: calc(var(--spacing) * 3.5);
     }
   }
-:where(.og-root).max-xl\:w-\[360px\],:where(.og-root) .max-xl\:w-\[360px\] {
-    @media (width < 80rem) {
-      width: 360px;
+:where(.og-root).max-lg\:hidden,:where(.og-root) .max-lg\:hidden {
+    @media (width < 64rem) {
+      display: none;
+    }
+  }
+:where(.og-root).max-lg\:h-12,:where(.og-root) .max-lg\:h-12 {
+    @media (width < 64rem) {
+      height: calc(var(--spacing) * 12);
     }
   }
 :where(.og-root).max-lg\:h-\[55\%\],:where(.og-root) .max-lg\:h-\[55\%\] {
@@ -8775,6 +8782,11 @@
       flex-direction: column;
     }
   }
+:where(.og-root).max-lg\:justify-end,:where(.og-root) .max-lg\:justify-end {
+    @media (width < 64rem) {
+      justify-content: flex-end;
+    }
+  }
 :where(.og-root).max-lg\:border-t,:where(.og-root) .max-lg\:border-t {
     @media (width < 64rem) {
       border-top-style: var(--tw-border-style);
@@ -8785,6 +8797,11 @@
     @media (width < 64rem) {
       border-left-style: var(--tw-border-style);
       border-left-width: 0px;
+    }
+  }
+:where(.og-root).max-lg\:px-2,:where(.og-root) .max-lg\:px-2 {
+    @media (width < 64rem) {
+      padding-inline: calc(var(--spacing) * 2);
     }
   }
 :where(.og-root).max-sm\:sr-only,:where(.og-root) .max-sm\:sr-only {
@@ -9579,6 +9596,16 @@
       display: inline-flex;
     }
   }
+:where(.og-root).lg\:w-\(--og-site-chat-width\),:where(.og-root) .lg\:w-\(--og-site-chat-width\) {
+    @media (width >= 64rem) {
+      width: var(--og-site-chat-width);
+    }
+  }
+:where(.og-root).lg\:w-12,:where(.og-root) .lg\:w-12 {
+    @media (width >= 64rem) {
+      width: calc(var(--spacing) * 12);
+    }
+  }
 :where(.og-root).lg\:max-w-full,:where(.og-root) .lg\:max-w-full {
     @media (width >= 64rem) {
       max-width: 100%;
@@ -9609,6 +9636,11 @@
       grid-template-columns: repeat(5, minmax(0, 1fr));
     }
   }
+:where(.og-root).lg\:flex-col,:where(.og-root) .lg\:flex-col {
+    @media (width >= 64rem) {
+      flex-direction: column;
+    }
+  }
 :where(.og-root).lg\:flex-row,:where(.og-root) .lg\:flex-row {
     @media (width >= 64rem) {
       flex-direction: row;
@@ -9632,6 +9664,12 @@
 :where(.og-root).lg\:gap-2,:where(.og-root) .lg\:gap-2 {
     @media (width >= 64rem) {
       gap: calc(var(--spacing) * 2);
+    }
+  }
+:where(.og-root).lg\:border-l,:where(.og-root) .lg\:border-l {
+    @media (width >= 64rem) {
+      border-left-style: var(--tw-border-style);
+      border-left-width: 1px;
     }
   }
 :where(.og-root).lg\:px-0,:where(.og-root) .lg\:px-0 {
@@ -10358,6 +10396,11 @@
       top: auto;
     }
   }
+:where(.og-root).pointer-coarse\:-right-5\.5,:where(.og-root) .pointer-coarse\:-right-5\.5 {
+    @media (pointer: coarse) {
+      right: calc(var(--spacing) * -5.5);
+    }
+  }
 :where(.og-root).pointer-coarse\:right-0,:where(.og-root) .pointer-coarse\:right-0 {
     @media (pointer: coarse) {
       right: calc(var(--spacing) * 0);
@@ -10366,6 +10409,11 @@
 :where(.og-root).pointer-coarse\:bottom-0,:where(.og-root) .pointer-coarse\:bottom-0 {
     @media (pointer: coarse) {
       bottom: calc(var(--spacing) * 0);
+    }
+  }
+:where(.og-root).pointer-coarse\:-left-5\.5,:where(.og-root) .pointer-coarse\:-left-5\.5 {
+    @media (pointer: coarse) {
+      left: calc(var(--spacing) * -5.5);
     }
   }
 :where(.og-root).pointer-coarse\:-mx-\[19px\],:where(.og-root) .pointer-coarse\:-mx-\[19px\] {

@@ -2341,6 +2341,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0918_teams_conversations.sql",
+      "0917_continue_waiting_work.sql",
       "0916_scoped_turn_history_pages.sql",
       "0915_inbox_mute_scheduled_runs.sql",
       "0914_knowledge_group_summary_projection.sql",

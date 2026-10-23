@@ -8441,6 +8441,12 @@ export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       archived: z.boolean(),
+      /** Stable for retries of one intent; use a fresh ID for a later intentional archive. */
+      clientEventId: z.string().min(1).max(200).optional(),
+      /** Hiding alone never changes shared execution. Ordinary archive pauses first. */
+      mode: z.enum(["pause_and_archive", "hide_for_me"]).optional(),
+      /** Required when the locked chat tree has active work. Restore never resumes. */
+      confirmPause: z.boolean().optional(),
       expectedVersion: z.number().int().nonnegative().optional(),
     })
     .strict(),
@@ -8731,6 +8737,10 @@ export const SessionRealtimeWebsocketResponse = /* @__PURE__ */ defineSchema(() 
       connectionEpoch: z.number().int().positive(),
       startupFenceSequence: z.number().int().nonnegative(),
       modeVersion: z.number().int().positive(),
+      /**
+       * @deprecated Always empty: the prior conversation travels in the
+       * provider's session instructions. Kept for clients of earlier releases.
+       */
       initialItems: z.array(SessionRealtimeWebsocketInitialItem).max(128),
       instructions: z.string().min(1).max(32_768),
       /**
@@ -21472,9 +21482,34 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
     ownerName: z.string().nullable(),
     isOwner: z.boolean(),
     queuedTurnBlocked: z.boolean(),
+    /**
+     * Results from other people's work (their workers' results and agent
+     * messages) waiting because only the machine's owner may start work on
+     * it, grouped by whose work it is. Older servers omit it.
+     */
+    waitingWork: z
+      .array(
+        z.object({
+          /** The person's display name, when known. */
+          name: z.string().nullable(),
+          /** The waiting results come from the caller's own work. */
+          isYou: z.boolean(),
+          results: z.number().int().positive(),
+        }),
+      )
+      .optional(),
   }),
 );
 export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
+
+/** POST /v1/workspaces/:ws/sessions/:id/waiting-work/continue */
+export const ContinueSessionWaitingWorkResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** How many waiting results the agent now continues with under the caller's authority. */
+    continued: z.number().int().nonnegative(),
+  }),
+);
+export type ContinueSessionWaitingWorkResponse = z.infer<typeof ContinueSessionWaitingWorkResponse>;
 
 /** GET /v1/workspaces/:ws/machines; active pointer fields are session-scoped. */
 export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>

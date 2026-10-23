@@ -273,3 +273,8 @@ Teams to inspect progress and complete approvals; retain delivery evidence when
 escalating a missing reply. These diagnostics are not proof of successful live
 Microsoft delivery.
 
+
+Disconnect disables the existing tenant/workspace binding and cancels pending work.
+Reconnect uses that same binding. Moving a Teams organization to a different
+workspace, or replacing the Teams organization bound to a workspace, is not supported.
+The retained binding preserves existing conversation and delivery history.

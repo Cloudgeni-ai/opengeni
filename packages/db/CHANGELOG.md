@@ -1,5 +1,22 @@
 # @opengeni/db
 
+## 4.8.0
+
+### Patch Changes
+
+- b0d752d: Batch artifact-list source-session authorization reads within existing response windows, while preserving per-source host authorization and a separate post-host visibility check.
+- e4712be: Add a scope-aligned ordered history index so prepared receipt-page reads avoid intersecting a full-session index with the current turn. History, authorization and cursor behavior are unchanged.
+- 238c599: A Site stays in its chat's project when people use it. New Site conversations started from the console are now filed in the Site's project: the API's "no project" (`null`) used to skip that rule and file them in Default. And a Site keeps its row in its own project even when its conversations sit in another one.
+- Updated dependencies [85fb89e]
+  - @opengeni/contracts@4.8.0
+  - @opengeni/codemode@4.8.0
+  - @opengeni/codex@4.8.0
+  - @opengeni/config@4.8.0
+  - @opengeni/observability@4.8.0
+  - @opengeni/network@4.8.0
+  - @opengeni/subscriptions@4.8.0
+  - @opengeni/xai-subscription@4.8.0
+
 ## 4.7.2
 
 ### Patch Changes

@@ -3789,6 +3789,32 @@ function SessionChatPane(props: {
                     refresh: [props.onReloadSession, props.queue.refresh],
                   })
                 }
+                onContinueWaitingWork={async () => {
+                  await context.client.continueSessionWaitingWork(
+                    props.session.workspaceId,
+                    props.session.id,
+                  );
+                  // A chat the refusal blocked resumes with the usual fenced
+                  // Resume; a running chat picks them up at its next step.
+                  if (
+                    sessionAdmissionReason(props.session) !== null &&
+                    admissionControl.state !== "paused"
+                  )
+                    await recheckSessionAdmission({
+                      control: admissionControl,
+                      refreshOnly: admissionRefreshRequired,
+                      resume: (control) =>
+                        context.client.resumeSession(props.session.workspaceId, props.session.id, {
+                          clientEventId: crypto.randomUUID(),
+                          expectedControlEtag: control.controlEtag,
+                        }),
+                      refresh: [props.onReloadSession, props.queue.refresh],
+                    });
+                  else await props.onReloadSession();
+                  // Machines last: the notice clears once nothing waits, and a
+                  // still-blocked session read in between would flash the refusal.
+                  await runsOn.fleet.refresh();
+                }}
               />
               {waitingSubSessions.length > 0 ? (
                 <Suspense fallback={null}>

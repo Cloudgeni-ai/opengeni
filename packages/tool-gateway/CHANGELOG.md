@@ -1,5 +1,13 @@
 # @opengeni/tool-gateway
 
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [85fb89e]
+  - @opengeni/contracts@4.8.0
+  - @opengeni/observability@4.8.0
+
 ## 4.7.2
 
 ### Patch Changes
