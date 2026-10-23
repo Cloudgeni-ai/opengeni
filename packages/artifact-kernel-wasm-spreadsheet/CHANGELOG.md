@@ -1,5 +1,7 @@
 # @opengeni/artifact-kernel-wasm-spreadsheet
 
+## 4.7.0
+
 ## 4.6.1
 
 ## 4.5.0
