@@ -104,6 +104,12 @@ export async function loadInboxExecutionContext(
   const eligibleIds = new Set<string>();
   for (const update of input.updates) {
     if (!context || context.externalLink || !human || !informationalAgentUpdate(update)) continue;
+    // The personal machine's owner let someone else's waiting result continue
+    // under their own receiving context (the 0917 fence accepts the same).
+    if (update.continuedBySubjectId === human) {
+      eligibleIds.add(update.id);
+      continue;
+    }
     const origin = inboxOrigin(update, input.sessionId);
     const turn = origin ? byId.get(origin.turnId) : undefined;
     if (

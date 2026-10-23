@@ -8685,6 +8685,17 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/waiting-work/continue",
+      "sdk": [
+        "OpenGeniClient.continueSessionWaitingWork"
+      ],
+      "request": [],
+      "response": [
+        "ContinueSessionWaitingWorkResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture",
       "sdk": [
@@ -14432,6 +14443,15 @@
         "$.serverId": "string!",
         "$.tools": "array!",
         "$.tools[]": "ref(ConnectorToolPermissionEntry)"
+      }
+    },
+    "ContinueSessionWaitingWorkResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.continued": "integer!"
       }
     },
     "CorrectPreferenceRegistryRequest": {
@@ -24985,7 +25005,12 @@
         "$.machineName": "string!",
         "$.ownerName": "string! null",
         "$.queuedTurnBlocked": "boolean!",
-        "$.sandboxId": "string!"
+        "$.sandboxId": "string!",
+        "$.waitingWork": "array?",
+        "$.waitingWork[]": "object",
+        "$.waitingWork[].isYou": "boolean!",
+        "$.waitingWork[].name": "string! null",
+        "$.waitingWork[].results": "integer!"
       }
     },
     "SessionMcpApprovalPolicy": {
@@ -37380,6 +37405,7 @@
       "connectClaudeSubscriptionSetupToken",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
+      "continueSessionWaitingWork",
       "controlSession",
       "correctPreferenceRegistry",
       "createAdditionalOrganization",
@@ -38105,6 +38131,7 @@
       "connectClaudeSubscriptionSetupToken",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
+      "continueSessionWaitingWork",
       "controlSession",
       "correctPreferenceRegistry",
       "createAdditionalOrganization",
@@ -38830,6 +38857,7 @@
       "connectClaudeSubscriptionSetupToken",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
+      "continueSessionWaitingWork",
       "controlSession",
       "correctPreferenceRegistry",
       "createAdditionalOrganization",
@@ -40222,6 +40250,9 @@
       ],
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
+      ],
+      "continueSessionWaitingWork": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "controlSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"cancel\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedControlEtag\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -42683,6 +42714,9 @@
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
       ],
+      "continueSessionWaitingWork": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "controlSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"cancel\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedControlEtag\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -44954,6 +44988,9 @@
       ],
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
+      ],
+      "continueSessionWaitingWork": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "controlSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"cancel\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedControlEtag\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -47357,6 +47394,9 @@
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
       ],
+      "continueSessionWaitingWork": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "controlSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"cancel\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedControlEtag\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -49582,6 +49622,9 @@
       ],
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
+      ],
+      "continueSessionWaitingWork": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "controlSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"cancel\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedControlEtag\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

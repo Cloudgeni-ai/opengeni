@@ -10429,6 +10429,24 @@ export type SessionMachineAccess = {
   ownerName: string | null;
   isOwner: boolean;
   queuedTurnBlocked: boolean;
+  /** Results from other people's work (their workers' results and agent
+   *  messages) waiting because only the machine's owner may start work on it,
+   *  grouped by whose work it is. Older servers omit it. */
+  waitingWork?: SessionWaitingWork[] | undefined;
+};
+
+export type SessionWaitingWork = {
+  /** The person's display name, when known. */
+  name: string | null;
+  /** The waiting results come from the caller's own work. */
+  isYou: boolean;
+  results: number;
+};
+
+/** POST /v1/workspaces/:ws/sessions/:id/waiting-work/continue */
+export type ContinueSessionWaitingWorkResponse = {
+  /** How many waiting results the agent now continues with under your authority. */
+  continued: number;
 };
 
 export type MachinesResponse = {
