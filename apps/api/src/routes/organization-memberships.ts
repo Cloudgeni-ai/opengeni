@@ -68,6 +68,7 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   getOrganizationAdministrationOverview,
   getOrganizationInvitationForAdministration,
+  getOrganizationPrivacyPreferences,
   getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
@@ -371,7 +372,16 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       });
       return context.json(
         ListManagedOrganizationMembershipsResponse.parse({
-          memberships: result.organizationMemberships,
+          // Each organization says whether its people keep a Personal
+          // workspace to see and work in, so the app can hide it when off.
+          memberships: await Promise.all(
+            result.organizationMemberships.map(async (membership) => ({
+              ...membership,
+              personalWorkspacesEnabled: (
+                await getOrganizationPrivacyPreferences(deps.db, membership.organizationId)
+              ).personalWorkspacesEnabled,
+            })),
+          ),
         }),
       );
     } catch (error) {

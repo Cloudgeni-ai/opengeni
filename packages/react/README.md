@@ -180,13 +180,12 @@ separately. Pass `conversationProps` for message rendering and tool renderers,
 
 Live voice is opt-in, because a call spends your credits and asks the browser
 for the microphone. Turn it on with `realtimeVoice={true}` (via `OpenGeniChat`'s
-`conversationProps` too) or `createSessionProxyHandler({ realtimeVoice: true })`.
+`conversationProps` too).
 The composer then shows a voice button when the workspace offers an available
 voice model (for example hosted GPT Live with credits): the user talks, the
 voice model answers and hands work to the agent in the same chat, and the
-transcript lands in the timeline. It stays hidden when no model is available,
-when the proxy sets `realtimeVoice: false`, or when you pass
-`realtimeVoice={false}`. The voice code loads lazily on first display.
+transcript lands in the timeline. It stays hidden when no model is available
+or when you pass `realtimeVoice={false}`. The voice code loads lazily on first display.
 The voice button never names the voice model (the model menu does, when
 shown), and neither does the React Native call screen. To name the action
 after your assistant, set its text through `messages`: on the web,
@@ -197,9 +196,9 @@ idle hint; on React Native, `"native.timeline.messages.startACall"`.
 
 The working indicator before the first reply says "Thinking…". Pass
 `genieLoading` (`phrases`, `messages`, `orb`, or a whole `render`) to use your
-own copy or visual. File attachments follow the proxy: it reports them off when
-`files: false`, and for anonymous visitors (`visitor: true` from `resolve`)
-unless it sets `visitorUploads: true`.
+own copy or visual. File attachments follow the client config: a session proxy
+reports them off for anonymous visitors (`visitor: true` from `resolve`) unless
+it sets `visitorUploads: true`, and `attachments={false}` hides them.
 
 `SessionConversation` and `OpenGeniChat` are built to look native inside
 someone else's product with zero styling:
@@ -224,9 +223,8 @@ someone else's product with zero styling:
 Attachments appear when the deployment enables uploads (`attachments={false}`
 opts out), the microphone appears when it reports voice input available
 (`voiceInput={false}` opts out), generated images, video, published files and
-screenshots display through the conversation's session scope, actions a
-session proxy reports unavailable (`sessionCreation`, `archive`, `artifacts`)
-are hidden, the session goal shows with Pause/Resume/Clear, sub-agent cards
+screenshots display through the conversation's session scope, Site previews
+are hidden when the client config reports `artifacts: false`, the session goal shows with Pause/Resume/Clear, sub-agent cards
 open the child through `onOpenSession` (`OpenGeniChat` opens it in place),
 pending tool approvals render Approve/Reject, a yes/no question
 renders as two buttons, a failed load offers Try again, and `toolRegistry`

@@ -66,7 +66,7 @@ function readOwnUsage(
 
 /**
  * The signed-in member's own usage in one workspace, read through `/usage/me`
- * (the session proxy serves exactly this route). Never reads another member.
+ * (also through a session proxy). Never reads another member.
  */
 export function useUsage(options: UseUsageOptions = {}): UseUsageResult {
   const context = useContext(OpenGeniContext);

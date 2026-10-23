@@ -153,11 +153,16 @@ each browser and its agent may use:
   subagents, or use Knowledge, schedules, or workspace tools. As a further
   safeguard, set the demo workspace's Agent learning (Knowledge, Instructions,
   Skills) to Off.
-- **Closed proxy surfaces.** Browser session creation, the session list,
-  archive, model selection, files and uploads, voice input, realtime voice,
-  sandbox files, artifacts, and Sites are all off. A browser can change only
-  the sessions it started: workspace-level writes (such as resuming a paused
-  workspace) are refused. Mutations must be same-origin and come from an
+- **Closed relay surfaces.** The relay's `refuse` hook forwards only the
+  routes the panel uses: the workspace, its model catalog, live-control stream
+  and the caller's own usage, inference control for the visitor's chat, and
+  in a chat the visitor started its read, events and stream, send, steer,
+  queue, composer draft, control, human input, goal and read state. Everything
+  else is a 404, including browser session creation, the session list,
+  archive, files and uploads, voice, sandbox files, artifacts, and Sites, and
+  model selection is off. A browser can change only the sessions it started:
+  other workspace-level writes (such as resuming a paused workspace) are
+  refused. Mutations must be same-origin and come from an
   established visitor (`authorizeMutation`). Request bodies are limited to
   32 KiB on the proxy and the demo API, and to 64 KiB for every request the
   server accepts, MCP calls included.

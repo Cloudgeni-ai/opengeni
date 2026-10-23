@@ -183,6 +183,14 @@ function fakeOpenGeni(options: FakeOptions = {}) {
     const body = text ? (JSON.parse(text) as Record<string, unknown>) : undefined;
     calls.push({ method: request.method, path: url.pathname, headers: request.headers, body });
     const base = `/v1/workspaces/${WORKSPACE_ID}`;
+    if (url.pathname === `${base}/access/grant`) {
+      return Response.json({
+        workspaceId: WORKSPACE_ID,
+        accountId: "account-1",
+        subjectId: "subject-maya",
+        permissions: ["sessions:read"],
+      });
+    }
     if (url.pathname === `${base}/external-members`) {
       return options.membership?.clone() ?? Response.json({ subjectId: "subject-maya" });
     }
@@ -560,16 +568,11 @@ describe("Northstar anonymous visitor isolation", () => {
     const config = (await (
       await handler(browserRequest(`${PROXY}/config/client`, cookie))
     ).json()) as Record<string, unknown>;
+    // Visitors cannot upload; the panel hides voice and models itself.
     expect(config).toMatchObject({
       workspaceId: WORKSPACE_ID,
       fileUploads: { enabled: false },
-      voiceInput: { available: false },
-      realtimeVoice: false,
       modelSelection: false,
-      archive: false,
-      sessionCreation: false,
-      sandboxFiles: false,
-      artifacts: false,
     });
 
     const session = `${WORKSPACE}/sessions/${sessionId}`;
@@ -591,9 +594,10 @@ describe("Northstar anonymous visitor isolation", () => {
     for (const route of disabled) {
       await expectStatus(handler, cookie, route, 404, "route_not_allowed");
     }
-    // Only the client config reached Opengeni.
+    // Only the client config (and its viewer grant) reached Opengeni.
     expect(upstream.calls.slice(callsBefore).map((call) => call.path)).toEqual([
       "/v1/config/client",
+      `/v1/workspaces/${WORKSPACE_ID}/access/grant`,
     ]);
 
     // The browser cannot pick a model, and messages stay small.
@@ -1578,8 +1582,8 @@ describe("Northstar proxied Opengeni traffic", () => {
     expect(await errorMessage(limited)).toBe(
       "Too many agent panel reads from this browser. Try again in 60 seconds.",
     );
-    // 299 reads, plus the session read the proxy makes before opening the stream.
-    expect(upstream.count("GET", sessionId)).toBe(300);
+    // 299 reads; the relay opens the stream without an extra read.
+    expect(upstream.count("GET", sessionId)).toBe(299);
     expect(upstream.count("GET", "/events/stream")).toBe(1);
     expect(upstream.count("GET", "/queue")).toBe(0);
     // A stream refused by the read limit never keeps its stream slot.

@@ -2,7 +2,7 @@
 // root and the session entry so hosts that don't meter usage never load it.
 //
 // Member-facing: `useUsage` + `<UsageMeter>` read the signed-in member's own
-// `/usage/me` (the session proxy serves exactly that route) and
+// `/usage/me` (also through a session proxy) and
 // `<UsageLimitNotice>` is the calm near/at-limit line for a composer header.
 // Admin-facing: `<UsageMemberList>` shows every member against their limit and
 // edits it with a share-of-budget slider; your backend saves the rule.

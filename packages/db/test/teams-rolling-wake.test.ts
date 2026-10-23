@@ -12,7 +12,7 @@ test("rolling Teams wake preserves an existing custom event writer before new-ro
   let client: ReturnType<typeof createDb> | null = null;
   try {
     // Give this isolated clone a fully provisioned pre-migration runtime role.
-    // Dropping only the new Teams objects models the schema just before 0918.
+    // Dropping only the new Teams objects models the schema just before 0919.
     await provisionRoles(shared.adminUrl, { appRole: role, appPassword: password });
     const url = new URL(shared.appUrl);
     url.username = role;
@@ -47,7 +47,7 @@ test("rolling Teams wake preserves an existing custom event writer before new-ro
       "drop table teams_bot_inbox,teams_bot_outbox,teams_bot_routes,teams_bot_links,teams_bot_proofs,teams_bot_installations cascade",
     );
     const migration = await readFile(
-      new URL("../drizzle/0918_teams_conversations.sql", import.meta.url),
+      new URL("../drizzle/0919_teams_conversations.sql", import.meta.url),
       "utf8",
     );
     await shared.admin.begin(async (tx) => {

@@ -165,7 +165,7 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
-import { sessionUsageLimitsProducerEnabled } from "@opengeni/core";
+import { PersonalWorkspacesOffError, sessionUsageLimitsProducerEnabled } from "@opengeni/core";
 import {
   CodexCompactionV2ProviderLockedError,
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -2370,33 +2370,41 @@ export function createAppComposition(deps: AppDependencies): {
     const error =
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
-        : (sessionUsageLimitHttpError(rawError) ??
-          allowanceExhaustedHttpError(rawError) ??
-          subscriptionSettingsLockedHttpError(rawError) ??
-          workspaceControlBusyHttpError(rawError) ??
-          scheduledTaskTargetAccessHttpError(rawError) ??
-          agentConfigHttpError(rawError) ??
-          modelUnavailableHttpError(rawError) ??
-          connectionAccountSelectionHttpError(rawError) ??
-          (rawError instanceof UnsupportedLatencyModeError
-            ? new ApiHttpError(422, {
-                code: "validation_failed",
-                message: rawError.message,
-                retryable: false,
-                outcomeUnknown: false,
-                details: {
-                  code: rawError.code,
-                  modelId: rawError.modelId,
-                  latencyMode: rawError.latencyMode,
-                  allowedLatencyModes: [...rawError.allowedLatencyModes],
-                },
-              })
-            : null) ??
-          requestBodyValidationHttpError(rawError) ??
-          invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
-          databaseUnavailableHttpError(rawError, c.req.method) ??
-          databaseContentionHttpError(rawError, c.req.method) ??
-          rawError);
+        : rawError instanceof PersonalWorkspacesOffError
+          ? new ApiHttpError(403, {
+              code: "forbidden",
+              message: rawError.message,
+              retryable: false,
+              outcomeUnknown: false,
+              details: { code: rawError.code },
+            })
+          : (sessionUsageLimitHttpError(rawError) ??
+            allowanceExhaustedHttpError(rawError) ??
+            subscriptionSettingsLockedHttpError(rawError) ??
+            workspaceControlBusyHttpError(rawError) ??
+            scheduledTaskTargetAccessHttpError(rawError) ??
+            agentConfigHttpError(rawError) ??
+            modelUnavailableHttpError(rawError) ??
+            connectionAccountSelectionHttpError(rawError) ??
+            (rawError instanceof UnsupportedLatencyModeError
+              ? new ApiHttpError(422, {
+                  code: "validation_failed",
+                  message: rawError.message,
+                  retryable: false,
+                  outcomeUnknown: false,
+                  details: {
+                    code: rawError.code,
+                    modelId: rawError.modelId,
+                    latencyMode: rawError.latencyMode,
+                    allowedLatencyModes: [...rawError.allowedLatencyModes],
+                  },
+                })
+              : null) ??
+            requestBodyValidationHttpError(rawError) ??
+            invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
+            databaseUnavailableHttpError(rawError, c.req.method) ??
+            databaseContentionHttpError(rawError, c.req.method) ??
+            rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);

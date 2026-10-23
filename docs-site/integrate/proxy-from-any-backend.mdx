@@ -4,55 +4,30 @@ description: "Serve the Opengeni conversation from Django, Rails, Go, PHP, or Ja
 icon: "server"
 ---
 
-[`createSessionProxyHandler`](/embed-manually) is JavaScript. On any other backend, write the same proxy in your own framework and render `<OpenGeniChat baseUrl="/api/opengeni" />` against it.
+[`createSessionProxyHandler`](/embed-manually) is JavaScript. On any other backend, write the same relay in your own framework and render `<OpenGeniChat baseUrl="/api/opengeni" />` (or the full `SessionApp`) against it.
 
-The proxy forwards a fixed list of routes to the Opengeni API, adds the organization key and the signed-in user's identity, and returns 404 for everything else.
+The relay forwards the signed-in user's requests to the Opengeni API as that user. Opengeni's permissions decide what each request may do; your relay only pins the workspace, adds the organization key and the user's identity, and keeps closed whatever your product does not offer.
 
-## Routes to forward
+## What to forward
 
-Forward `/api/opengeni/v1/<path>` to `/v1/<path>` upstream. `{ws}` must equal the workspace your server resolved for the user.
+Forward `/api/opengeni/v1/<path>` to `/v1/<path>` upstream, with the query string and body unchanged.
 
-| Method   | Path                                                                       | Rules                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| -------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET      | `config/client`                                                            | Add `workspaceId={ws}`. In the response, set `apiContractRevision` to the browser's `x-opengeni-api-contract`, set `sandboxFiles: false`, drop `artifacts` and `voiceInput.resumable`, set `voiceInput.available: false` unless you forward `transcriptions`, set `realtimeVoice: false` unless you forward the `realtime` routes (`true` also shows the stock voice button, which is otherwise opt-in), set `fileUploads.enabled: false` when you do not forward uploads (for example for anonymous visitors), and set `modelSelection: false` if you fix the model |
-| GET      | `workspaces/{ws}`                                                          |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| GET      | `workspaces/{ws}/model-catalog`                                            |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| GET      | `workspaces/{ws}/usage/me`                                                 | only the `period` query                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| GET      | `workspaces/{ws}/live-events/stream`                                       | SSE                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| POST     | `workspaces/{ws}/inference-control`                                        | `action` must be `"resume"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| POST     | `workspaces/{ws}/files/uploads`                                            | only `scope`, `filename`, `contentType`, `sizeBytes`, `sha256`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| POST     | `workspaces/{ws}/files/uploads/{id}/complete`                              |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| POST     | `workspaces/{ws}/files/{id}/download-url`                                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| GET      | `workspaces/{ws}/sessions`                                                 | require `view=page`; add `createdByKind=subject&createdBySubjectId=<subjectId>` to list only the user's chats                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| POST     | `workspaces/{ws}/sessions`                                                 | browser sends only `initialMessage`, `idempotencyKey`, file `resources`, and (unless you fix the model) `model`, `reasoningEffort`, `latencyMode`; your server adds the agent, tools, and [privacy settings](/integrate/users-and-tenants#choose-who-shares-chats)                                                                                                                                                                                                                                                                                                   |
-| POST     | `workspaces/{ws}/transcriptions`                                           | optional voice input; multipart with only `audio`, `mimeType`, `durationSeconds`; up to 25 MiB                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| GET      | `workspaces/{ws}/sessions/{sid}`                                           |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| PATCH    | `workspaces/{ws}/sessions/{sid}`                                           | only `{ "title" }`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| PUT      | `workspaces/{ws}/sessions/{sid}/archive`                                   | only `archived`, `expectedVersion`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| PUT      | `workspaces/{ws}/sessions/{sid}/attention`                                 | only `{ "unread": false }` and optional `acknowledgedThroughSequence` (the open conversation marks itself read)                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| GET      | `workspaces/{ws}/sessions/{sid}/events`                                    | refuse `mode=forensic`; return the upstream `x-opengeni-*` paging headers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| GET      | `workspaces/{ws}/sessions/{sid}/events/stream`                             | SSE; forward `Last-Event-ID`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| POST     | `workspaces/{ws}/sessions/{sid}/events`                                    | `type` must be `user.message`, `user.approvalDecision`, or `user.humanInputResponse`; message rules                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| POST     | `workspaces/{ws}/sessions/{sid}/steer`                                     | message rules                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| GET      | `workspaces/{ws}/sessions/{sid}/queue`                                     |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| POST     | `workspaces/{ws}/sessions/{sid}/queue/{id}/{move\|edit\|steer\|delete}`    |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| GET, PUT | `workspaces/{ws}/sessions/{sid}/composer-draft`                            | message rules on PUT                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| POST     | `workspaces/{ws}/sessions/{sid}/composer-draft/submit`                     | message rules                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| POST     | `workspaces/{ws}/sessions/{sid}/control`                                   | `action` must be `"pause"` or `"resume"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| GET      | `workspaces/{ws}/sessions/{sid}/human-input-requests[/{id}]`               |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| GET      | `workspaces/{ws}/realtime-model-catalog`                                   | optional live voice (this row and the `realtime` rows below)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| POST     | `workspaces/{ws}/sessions/{sid}/realtime`                                  | starts a call; forward the JSON body unchanged, like every `realtime` route                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| POST     | `workspaces/{ws}/sessions/{sid}/realtime/{webrtc\|gateway\|supergrok}`     |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| PATCH    | `workspaces/{ws}/sessions/{sid}/realtime/{rid}/heartbeat`                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| POST     | `workspaces/{ws}/sessions/{sid}/realtime/{rid}/connections/{cid}/activate` |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| POST     | `workspaces/{ws}/sessions/{sid}/realtime/{rid}/sync`                       | your server may put its `modelContext` before the browser's on `entries` of kind `delegation_call`, `user_transcript`, and `assistant_transcript`                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| DELETE   | `workspaces/{ws}/sessions/{sid}/realtime/{rid}`                            | ends the call; JSON body                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Request                                                   | Rule                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Any method on `workspaces/{ws}` and `workspaces/{ws}/...` | Forward as the user. `{ws}` must equal the workspace your server resolved for the user; answer 403 for any other.                                                                                                                                                                                                                                                        |
+| `GET config/client`                                       | Add `workspaceId={ws}`. In the response, add `workspaceId`, set `apiContractRevision` to the browser's `x-opengeni-api-contract`, drop `artifacts` (unless you serve the artifact viewer) and `sessionUsageLimits`, set `fileUploads.enabled: false` when you refuse uploads (for example for anonymous visitors), and set `modelSelection: false` if you fix the model. |
+| `GET workspaces`                                          | Read `GET /v1/workspaces/{ws}` as the user and return it as a one-item list (an empty list on 403 or 404).                                                                                                                                                                                                                                                               |
+| `GET access/me`                                           | Forward, then replace `workspaceGrants` with the user's grant for `{ws}` from `GET /v1/workspaces/{ws}/access/grant`, and drop `credential`.                                                                                                                                                                                                                             |
+| Anything else                                             | 404.                                                                                                                                                                                                                                                                                                                                                                     |
 
-**Message rules:** reject `mcpCredentialUpdates`, and allow only `{ "kind": "file" }` entries in `resources`. If you fix the model, overwrite `model`, `reasoningEffort`, and `latencyMode` with your values rather than dropping them. Your server may add `modelContext` and `mcpCredentialUpdates` itself.
+Narrow the surface with the organization key's permissions and each member's permissions first: a request made as a user holds only the permissions both hold. Refuse any further routes your product keeps closed with a 404.
 
-Artifact viewing is not covered here. Link artifacts to your own pages with `resolveLink`.
+**If your server owns chat setup** (it builds the agent, tools and MCP servers for each chat), also:
 
-Look up each user's `subjectId` once from `GET /v1/access/me` and cache it.
+- accept only `initialMessage`, `idempotencyKey`, file `resources`, and (unless you fix the model) `model`, `reasoningEffort`, `latencyMode` on `POST workspaces/{ws}/sessions`, and build the rest of the request on the server with your [privacy settings](/integrate/users-and-tenants#choose-who-shares-chats);
+- refuse `PUT sessions/{sid}/{agent|tool-policy|skills|variable-sets|usage-limit|visibility}`, `POST sessions/{sid}/{active-sandbox|codex-account|forks}`, and `POST workspaces/{ws}/chat/completions`.
+
+**Message rules** for `POST sessions/{sid}/events` (`user.message`), `steer` and `composer-draft/submit`: reject `mcpCredentialUpdates`, and always refuse `POST sessions/{sid}/mcp-credentials/rotate` and `session-imports` (imported history is stored as genuine transcript, so only your server may write it). If you fix the model, overwrite `model`, `reasoningEffort`, and `latencyMode` with your values rather than dropping them. Your server may add `modelContext` and `mcpCredentialUpdates` itself.
 
 ## Headers
 
@@ -63,20 +38,21 @@ Authorization: Bearer <organization API key>
 x-opengeni-external-actor: <percent-encoded JSON>
   {"mode":"external","identity":{"externalId":"<your user id>","source":"<your app>"}}
 x-opengeni-api-contract: <copied from the browser's request>
-Content-Type: application/json            (requests with a body)
-Last-Event-ID: <copied from the browser>  (SSE only)
+Content-Type, Accept, Range, If-None-Match, If-Match, If-Modified-Since,
+Last-Event-ID, x-opengeni-session-id, x-opengeni-correlation-id,
+x-opengeni-chunk-*                         (copied from the browser when present)
 ```
 
-Return upstream status codes and error bodies unchanged; the SDK reads them.
+Return upstream status codes, error bodies, and the `Content-Type`, `Content-Length`, `Content-Disposition`, `Content-Range`, `Accept-Ranges`, `ETag`, `Last-Modified`, `Retry-After`, `Content-Security-Policy`, `Cross-Origin-Resource-Policy` and `x-opengeni-*` headers unchanged; the SDK reads them. Add `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and `Content-Security-Policy: sandbox` when upstream sends none.
 
 ## Security rules
 
 - Authenticate the user on every request and derive the workspace and user id on the server.
 - Reject any `{ws}` other than the resolved one.
-- Match both route and method.
-- Apply your CSRF protection to POST, PUT, and PATCH.
-- Cap request bodies (1 MiB is plenty) and don't log bodies or keys.
-- Stream SSE unbuffered and close the upstream request when the browser disconnects.
+- Reject path segments that decode to empty, `.` or `..`, or contain `/`, `\` or control characters, and percent-encode each segment again when you forward it.
+- Apply your CSRF protection to every method except GET and HEAD.
+- Cap request bodies you parse (1 MiB is plenty) and don't log bodies or keys.
+- Stream request bodies, responses and SSE unbuffered, and close the upstream request when the browser disconnects.
 - Store each tenant's workspace id. Create it once with `POST /v1/workspaces/external` (the SDK's `ensureWorkspace`). Users are added to it on their first request.
 
 ## Django example
@@ -92,46 +68,48 @@ API = os.environ["OPENGENI_API_BASE_URL"].rstrip("/")
 KEY = os.environ["OPENGENI_API_KEY"]
 SOURCE = "acme-app"
 
-ROUTES = [  # (method, pattern); {ws} is replaced with the resolved workspace id
-    ("GET", r"config/client"),
-    ("GET", r"workspaces/{ws}(/model-catalog|/live-events/stream|/usage/me)?"),
-    ("POST", r"workspaces/{ws}/(inference-control|files/uploads(/[^/]+/complete)?|files/[^/]+/download-url)"),
-    ("GET", r"workspaces/{ws}/sessions"),
-    ("POST", r"workspaces/{ws}/sessions"),
-    ("GET", r"workspaces/{ws}/sessions/[^/]+(/events(/stream)?|/queue|/composer-draft|/human-input-requests(/[^/]+)?)?"),
-    ("PATCH", r"workspaces/{ws}/sessions/[^/]+"),
-    ("PUT", r"workspaces/{ws}/sessions/[^/]+/(archive|composer-draft)"),
-    ("POST", r"workspaces/{ws}/sessions/[^/]+/(events|steer|control|composer-draft/submit|queue/[^/]+/(move|edit|steer|delete))"),
-]
+FORWARDED = {"content-type", "accept", "range", "if-none-match", "if-match",
+             "if-modified-since", "last-event-id", "x-opengeni-api-contract",
+             "x-opengeni-session-id", "x-opengeni-correlation-id"}
+# Routes your product keeps closed, matched after workspaces/{ws}/.
+REFUSED = [r"sessions/[^/]+/mcp-credentials/rotate", r"session-imports(/.*)?"]
+RELAYED = {"content-length", "content-disposition", "content-range", "accept-ranges", "etag",
+           "last-modified", "retry-after", "content-security-policy",
+           "cross-origin-resource-policy"}
 
 def upstream_headers(request, user_id):
     actor = {"mode": "external", "identity": {"externalId": user_id, "source": SOURCE}}
     headers = {
         "Authorization": f"Bearer {KEY}",
         "x-opengeni-external-actor": urllib.parse.quote(json.dumps(actor), safe=""),
-        "Content-Type": "application/json",
     }
-    for name in ("x-opengeni-api-contract", "Last-Event-ID"):
-        if name in request.headers:
-            headers[name] = request.headers[name]
+    for name, value in request.headers.items():
+        if name.lower() in FORWARDED or name.lower().startswith("x-opengeni-chunk-"):
+            headers[name] = value
     return headers
 
 def opengeni_proxy(request, rest):
-    user = request.user  # your auth; CsrfViewMiddleware covers POST/PUT/PATCH
+    user = request.user  # your auth; CsrfViewMiddleware covers every unsafe method
     if not user.is_authenticated:
         return JsonResponse({"error": {"code": "unauthorized"}}, status=401)
     ws = user.profile.opengeni_workspace_id  # resolved on the server
     path = rest.removeprefix("v1/")
-    if not any(m == request.method and re.fullmatch(p.replace("{ws}", re.escape(ws)), path)
-               for m, p in ROUTES):
+    segments = path.split("/")
+    if any(s in ("", ".", "..") or "\\" in s or not s.isprintable() for s in segments):
         return JsonResponse({"error": {"code": "route_not_allowed"}}, status=404)
-    body = request.body if request.method != "GET" else None
-    if body and len(body) > 1_048_576:
-        return JsonResponse({"error": {"code": "body_too_large"}}, status=413)
-    # Apply the body rules from the table here, build the full session request
-    # for POST .../sessions, and add the creator filter to the session list.
+    if segments[0] == "workspaces" and len(segments) > 1:
+        if segments[1] != ws:
+            return JsonResponse({"error": {"code": "workspace_not_allowed"}}, status=403)
+        inner = "/".join(segments[2:])
+        if any(re.fullmatch(pattern, inner) for pattern in REFUSED):
+            return JsonResponse({"error": {"code": "route_not_allowed"}}, status=404)
+    elif not (request.method == "GET" and path in ("config/client", "workspaces", "access/me")):
+        return JsonResponse({"error": {"code": "route_not_allowed"}}, status=404)
+    body = request.body if request.method not in ("GET", "HEAD") else None
+    # Apply the message rules here; if your server owns chat setup, build the
+    # full request for POST .../sessions. Scope workspaces and access/me to ws.
     headers = upstream_headers(request, str(user.id))
-    url = f"{API}/v1/{path}"
+    url = f"{API}/v1/" + "/".join(urllib.parse.quote(s, safe="") for s in segments)
     if path == "config/client":
         params = {**request.GET.dict(), "workspaceId": ws}
     else:
@@ -159,16 +137,20 @@ def opengeni_proxy(request, rest):
         config = upstream.json()
         config["apiContractRevision"] = request.headers.get(
             "x-opengeni-api-contract", config["apiContractRevision"])
-        config["sandboxFiles"] = False
+        config["workspaceId"] = ws
         config.pop("artifacts", None)
-        if "voiceInput" in config:  # transcriptions are not forwarded here
-            config["voiceInput"]["available"] = False
+        config.pop("sessionUsageLimits", None)
         return JsonResponse(config)
     response = HttpResponse(upstream.content, status=upstream.status_code,
                             content_type=upstream.headers.get("content-type", "application/json"))
-    for name, value in upstream.headers.items():  # event paging headers
-        if name.startswith("x-opengeni-") and name != "x-opengeni-api-contract":
+    for name, value in upstream.headers.items():
+        lower = name.lower()
+        if lower in RELAYED or (lower.startswith("x-opengeni-") and lower != "x-opengeni-api-contract"):
             response[name] = value
+    response["Cache-Control"] = "no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    if "content-security-policy" not in upstream.headers:
+        response["Content-Security-Policy"] = "sandbox"
     return response
 ```
 

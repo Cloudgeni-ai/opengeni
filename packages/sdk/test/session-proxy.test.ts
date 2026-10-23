@@ -11,10 +11,6 @@ import {
 } from "../src/index";
 import { parseSseStream } from "../src/sse";
 import { OPENGENI_API_CONTRACT_REVISION, type ClientConfig } from "../src/types";
-import {
-  SESSION_PROXY_SITE_HTML_MAX_BYTES,
-  SessionProxySiteHtmlTooLargeError,
-} from "../src/session-proxy";
 import { hangingBytesStream, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
 /** The artifact-viewer capability, or undefined when the proxy reports none. */
@@ -163,6 +159,9 @@ function upstreamServer() {
         credential: { kind: "api_key" },
       });
     }
+    if (path === `/v1/workspaces/${WORKSPACE_ID}`) {
+      return Response.json({ id: WORKSPACE_ID, name: "Product" });
+    }
     if (path === "/v1/workspaces") {
       return Response.json([
         { id: WORKSPACE_ID, name: "Product" },
@@ -289,40 +288,6 @@ async function rejection(promise: Promise<unknown>): Promise<OpenGeniApiError> {
 }
 
 describe("createSessionProxyHandler", () => {
-  test("upstream capabilities cannot enable artifacts on this product proxy", async () => {
-    for (const enabled of [false, true]) {
-      const upstream = upstreamServer();
-      const service = new OpenGeniClient({
-        baseUrl: API,
-        apiKey: "og_org_key",
-        fetch: async (input, init) => {
-          const path = new URL(input instanceof Request ? input.url : input).pathname;
-          if (path === "/v1/config/client")
-            return Response.json({
-              apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
-              artifacts: {
-                editableLiveUrl: "wss://untrusted.example/",
-                cachePartition: {
-                  accountId: "other",
-                  principalId: "other",
-                  authorizationEpoch: "other",
-                },
-              },
-            });
-          if (path.endsWith("/access/grant")) return Response.json({}, { status: 404 });
-          return upstream.fetch(input, init);
-        },
-      });
-      const handler = createSessionProxyHandler(service, {
-        artifacts: enabled,
-        resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
-      });
-      const response = await handler(new Request(`${PRODUCT}/api/opengeni/v1/config/client`));
-      expect(response.status).toBe(200);
-      expect((await response.json()).artifacts).toBe(false);
-    }
-  });
-
   test("old APIs keep conversation bootstrap while artifact capability fails closed", async () => {
     const upstream = upstreamServer();
     let supported = false;
@@ -344,7 +309,6 @@ describe("createSessionProxyHandler", () => {
       },
     });
     const handler = createSessionProxyHandler(service, {
-      artifacts: true,
       resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
     });
     const browser = new OpenGeniClient({
@@ -355,18 +319,6 @@ describe("createSessionProxyHandler", () => {
     expect(config.artifacts).toBe(false);
     expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect((await browser.getSession(WORKSPACE_ID, SESSION_ID)).id).toBe(SESSION_ID);
-    const artifact = await handler(
-      new Request(
-        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`,
-        { headers: { "x-opengeni-session-id": SESSION_ID } },
-      ),
-    );
-    expect(artifact.status).toBe(404);
-    expect(
-      upstream.requests.some((request) =>
-        request.url.pathname.endsWith(`/editable-artifacts/${EDITABLE_ID}`),
-      ),
-    ).toBe(false);
     // A deployment upgrade is discovered without a sticky negative cache.
     supported = true;
     expect(viewer(await browser.getClientConfig())?.cachePartition.principalId).toBe("subject-u42");
@@ -388,7 +340,6 @@ describe("createSessionProxyHandler", () => {
         },
       });
       const handler = createSessionProxyHandler(service, {
-        artifacts: true,
         resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
       });
       expect((await handler(new Request(`${PRODUCT}/api/opengeni/v1/config/client`))).status).toBe(
@@ -481,37 +432,8 @@ describe("createSessionProxyHandler", () => {
     expect(upstream.requests).toHaveLength(0);
   });
 
-  test("rejects routes outside the conversation allowlist", async () => {
-    const { upstream, browser, handler } = setup();
-    for (const attempt of [
-      browser.listScheduledTasks(WORKSPACE_ID),
-      browser.cancelSession(WORKSPACE_ID, SESSION_ID),
-      browser.getSessionModelContext(WORKSPACE_ID, SESSION_ID),
-      browser.listEvents(WORKSPACE_ID, SESSION_ID, { mode: "forensic" }),
-    ]) {
-      expect([403, 404]).toContain((await rejection(attempt)).status);
-    }
-    const traversal = await handler(
-      new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/..%2F..%2Fkeys`),
-    );
-    expect(traversal.status).toBe(404);
-    const deleted = await handler(
-      new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`, {
-        method: "DELETE",
-      }),
-    );
-    // DELETE reaches routing only to clear a goal; nothing else is deletable.
-    expect(deleted.status).toBe(404);
-    const options = await handler(
-      new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}`, { method: "OPTIONS" }),
-    );
-    expect(options.status).toBe(405);
-    expect(options.headers.get("allow")).toBe("GET, POST, PUT, PATCH, DELETE");
-    expect(upstream.requests).toHaveLength(0);
-  });
-
-  test("goal controls: read, pause/resume only, and clear", async () => {
-    const { upstream, browser, handler } = setup();
+  test("goal controls pass through as the resolved user, under the session check", async () => {
+    const { upstream, browser } = setup();
     const goal = `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal`;
     await browser.getGoal(WORKSPACE_ID, SESSION_ID);
     await browser.pauseGoal(WORKSPACE_ID, SESSION_ID, { rationale: "end-user text" });
@@ -521,33 +443,10 @@ describe("createSessionProxyHandler", () => {
       upstream.requests.map((request) => [request.method, request.url.pathname, request.body]),
     ).toEqual([
       ["GET", goal, undefined],
-      ["PATCH", goal, { status: "paused" }],
+      ["PATCH", goal, { status: "paused", rationale: "end-user text" }],
       ["PATCH", goal, { status: "active" }],
       ["DELETE", goal, undefined],
     ]);
-    upstream.requests.length = 0;
-    // The objective, limits, completion and rationale stay server-side.
-    for (const body of [
-      { status: "completed" },
-      { objective: "Something else" },
-      { status: "active", maxAutoContinuations: 99 },
-    ]) {
-      const refused = await rejection(browser.updateGoal(WORKSPACE_ID, SESSION_ID, body as never));
-      expect(refused.status).toBe(403);
-      expect(refused.code).toBe("goal_update_not_allowed");
-    }
-    // Goal revisions stay out of the browser boundary, and DELETE only clears.
-    expect((await rejection(browser.listGoalRevisions(WORKSPACE_ID, SESSION_ID))).status).toBe(404);
-    for (const path of [
-      `${goal}/revisions`,
-      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/queue`,
-    ]) {
-      const response = await handler(
-        new Request(`${PRODUCT}/api/opengeni${path}`, { method: "DELETE" }),
-      );
-      expect(response.status).toBe(404);
-    }
-    expect(upstream.requests).toHaveLength(0);
     // A product-level session check guards the goal too.
     const guarded = setup({ authorizeSession: () => false });
     expect((await rejection(guarded.browser.deleteGoal(WORKSPACE_ID, SESSION_ID))).status).toBe(
@@ -625,7 +524,6 @@ describe("createSessionProxyHandler", () => {
     const inputs: unknown[] = [];
     const admissions: SessionProxyMessageInput[] = [];
     const { upstream, browser } = setup({
-      realtimeVoice: true,
       createSession: (input) => {
         inputs.push(input);
         return { initialMessage: input.initialMessage, tools: [] };
@@ -648,12 +546,6 @@ describe("createSessionProxyHandler", () => {
     });
     expect(upstream.requests[0]!.body).not.toHaveProperty("initialMessage");
 
-    const disabled = setup({ realtimeVoice: false, createSession: () => ({ tools: [] }) });
-    expect(
-      (await rejection(disabled.browser.createSession(WORKSPACE_ID, { startMode: "realtime" })))
-        .code,
-    ).toBe("route_not_allowed");
-    expect(disabled.upstream.requests).toEqual([]);
     for (const fields of [
       { initialMessage: "Do not silently send this" },
       { resources: [{ kind: "file", fileId: "file-1" }] },
@@ -741,16 +633,16 @@ describe("createSessionProxyHandler", () => {
     });
   });
 
-  test("voice input is forwarded as the resolved user, one recording at a time", async () => {
+  test("voice input is forwarded as the resolved user", async () => {
     const { upstream, browser } = setup();
     const config = await browser.getClientConfig();
-    // Resumable chunk uploads are not proxied, so the browser uses one-shot recordings.
     expect(config.voiceInput).toEqual({
       available: true,
       maxDurationSeconds: 60,
       maxSizeBytes: 1024,
       acceptedMimeTypes: ["audio/webm"],
-    });
+      resumable: { maxDurationSeconds: 600, maxSizeBytes: 4096, maxChunkSizeBytes: 512 },
+    } as never);
     const result = await browser.transcribeAudio(WORKSPACE_ID, {
       audio: new Uint8Array([1, 2, 3]),
       mimeType: "audio/webm",
@@ -776,21 +668,6 @@ describe("createSessionProxyHandler", () => {
       }),
     );
     expect(other.status).toBe(403);
-  });
-
-  test("voiceInput: false reports voice unavailable and refuses recordings", async () => {
-    const { upstream, browser } = setup({ voiceInput: false });
-    expect((await browser.getClientConfig()).voiceInput?.available).toBe(false);
-    const refused = await rejection(
-      browser.transcribeAudio(WORKSPACE_ID, {
-        audio: new Uint8Array([1]),
-        mimeType: "audio/webm",
-      }),
-    );
-    expect(refused.status).toBe(404);
-    expect(
-      upstream.requests.some((request) => request.url.pathname.endsWith("/transcriptions")),
-    ).toBe(false);
   });
 
   test("live voice routes are forwarded unchanged as the resolved user", async () => {
@@ -919,50 +796,6 @@ describe("createSessionProxyHandler", () => {
     expect(checked).toEqual(calls.map(() => SESSION_ID));
   });
 
-  test("live voice routes are exact and keep the session check", async () => {
-    const session = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`;
-    const send = (
-      handler: (request: Request) => Promise<Response>,
-      method: string,
-      path: string,
-      body?: unknown,
-    ) =>
-      handler(
-        new Request(`${session}/${path}`, {
-          method,
-          headers: { "content-type": "application/json" },
-          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        }),
-      );
-    const denied = setup({ authorizeSession: () => false });
-    const refused = await send(denied.handler, "POST", "realtime", OWNER);
-    expect(refused.status).toBe(404);
-    expect((await refused.json()).error.code).toBe("session_not_found");
-    const open = setup();
-    for (const [method, path] of [
-      ["GET", "realtime"],
-      ["DELETE", "realtime"],
-      ["POST", `realtime/${REALTIME_ID}`],
-      ["POST", "realtime/codex"],
-      ["POST", `realtime/${REALTIME_ID}/heartbeat`],
-      ["PATCH", `realtime/${REALTIME_ID}/sync`],
-      ["POST", `realtime/${REALTIME_ID}/connections/${CONNECTION_ID}`],
-      ["POST", `realtime/${REALTIME_ID}/ledger`],
-    ] as const) {
-      expect((await send(open.handler, method, path, OWNER)).status).toBe(404);
-    }
-    expect((await send(open.handler, "POST", "realtime")).status).toBe(400);
-    expect(denied.upstream.requests).toHaveLength(0);
-    expect(open.upstream.requests).toHaveLength(0);
-  });
-
-  test("only an explicit realtimeVoice: true offers voice to stock UIs", async () => {
-    expect((await setup().browser.getClientConfig()).realtimeVoice).toBeUndefined();
-    expect((await setup({ realtimeVoice: true }).browser.getClientConfig()).realtimeVoice).toBe(
-      true,
-    );
-  });
-
   test("anonymous visitors cannot upload unless visitorUploads is set", async () => {
     const visitor = {
       resolve: () => ({ workspaceId: WORKSPACE_ID, user: "visitor:abc", visitor: true }),
@@ -1001,37 +834,8 @@ describe("createSessionProxyHandler", () => {
       `/v1/workspaces/${WORKSPACE_ID}/files/uploads`,
     );
 
-    // Signed-in users follow `files`; `files: false` now also reports uploads off.
+    // Signed-in users upload as Opengeni allows.
     expect((await setup().browser.getClientConfig()).fileUploads?.enabled).not.toBe(false);
-    expect((await setup({ files: false }).browser.getClientConfig()).fileUploads?.enabled).toBe(
-      false,
-    );
-  });
-
-  test("realtimeVoice: false reports voice off and refuses every voice route", async () => {
-    const { upstream, browser } = setup({ realtimeVoice: false });
-    expect((await browser.getClientConfig()).realtimeVoice).toBe(false);
-    const catalog = await rejection(browser.getWorkspaceRealtimeModelCatalog(WORKSPACE_ID));
-    expect(catalog.status).toBe(404);
-    const begin = await rejection(
-      browser.beginSessionRealtime(WORKSPACE_ID, SESSION_ID, {
-        ...OWNER,
-        operationId: OPERATION_ID,
-        model: "opengeni-azure/gpt-live-1",
-      }),
-    );
-    expect(begin.status).toBe(404);
-    const end = await rejection(
-      browser.endSessionRealtime(WORKSPACE_ID, SESSION_ID, REALTIME_ID, {
-        ...OWNER,
-        expectedVersion: 1,
-        reason: "user_stop",
-      }),
-    );
-    expect(end.status).toBe(404);
-    expect(upstream.requests.some((request) => request.url.pathname.includes("realtime"))).toBe(
-      false,
-    );
   });
 
   test("beforeForwardMessage gates voice start and adds context to spoken messages", async () => {
@@ -1163,19 +967,6 @@ describe("createSessionProxyHandler", () => {
     expect(begun).toHaveLength(2);
   });
 
-  test("creation is unavailable unless the server supplies a createSession hook", async () => {
-    const { upstream, browser } = setup();
-    expect(
-      (await rejection(browser.createSession(WORKSPACE_ID, { initialMessage: "hi" } as never)))
-        .status,
-    ).toBe(404);
-    expect(upstream.requests).toHaveLength(0);
-    // Reported so stock UIs hide "New chat" instead of failing on send.
-    expect((await browser.getClientConfig()).sessionCreation).toBe(false);
-    const hooked = setup({ createSession: (input) => input });
-    expect((await hooked.browser.getClientConfig()).sessionCreation).toBe(true);
-  });
-
   test("messages cannot rotate MCP credentials or attach non-file resources", async () => {
     const { upstream, browser } = setup();
     const credentials = await rejection(
@@ -1217,17 +1008,6 @@ describe("createSessionProxyHandler", () => {
       latencyMode: "fast",
     });
     expect(upstream.requests[1]!.body).toEqual({ text: "steer" });
-    expect(
-      (
-        await rejection(
-          browser.requestJson(
-            "PUT",
-            `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/model-policy`,
-            { model: "expensive-model" },
-          ),
-        )
-      ).status,
-    ).toBe(404);
     expect(upstream.requests).toHaveLength(2);
   });
 
@@ -1330,42 +1110,6 @@ describe("createSessionProxyHandler", () => {
     expect(upstream.requests[1]!.url.searchParams.get("view")).toBe("next");
   });
 
-  test("serves the provider's workspace read, live stream, and workspace resume only", async () => {
-    const { upstream, browser } = setup();
-    await browser.getWorkspace(WORKSPACE_ID);
-    expect(upstream.requests[0]!.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}`);
-
-    const controller = new AbortController();
-    const live = browser.streamWorkspaceLiveEvents(WORKSPACE_ID, {
-      controlAfter: 2,
-      signal: controller.signal,
-    });
-    const first = await live[Symbol.asyncIterator]().next();
-    controller.abort();
-    expect(first.value).toMatchObject({ type: "workspace.control.changed", sequence: 4 });
-    const stream = upstream.requests.find((request) =>
-      request.url.pathname.endsWith("/live-events/stream"),
-    )!;
-    expect(stream.url.searchParams.get("controlAfter")).toBe("2");
-    expect(stream.headers.get("x-opengeni-external-actor")).not.toBeNull();
-
-    const before = upstream.requests.length;
-    const pause = await rejection(
-      browser.setWorkspaceInferenceState(WORKSPACE_ID, { action: "pause", clientEventId: "c1" }),
-    );
-    expect(pause.status).toBe(403);
-    const cancel = await rejection(browser.cancelSession(WORKSPACE_ID, SESSION_ID));
-    expect(cancel.status).toBe(403);
-    expect(upstream.requests).toHaveLength(before);
-    await browser.setWorkspaceInferenceState(WORKSPACE_ID, {
-      action: "resume",
-      clientEventId: "c2",
-    });
-    expect(upstream.requests.at(-1)!.url.pathname).toBe(
-      `/v1/workspaces/${WORKSPACE_ID}/inference-control`,
-    );
-  });
-
   test("keeps a quiet session stream alive under Bun.serve's 10-second idle timeout", async () => {
     const { handler } = setup();
     const response = await handler(
@@ -1390,7 +1134,7 @@ describe("createSessionProxyHandler", () => {
     expect(Date.now() - started).toBeLessThan(9_000);
   }, 15_000);
 
-  test("re-streams session SSE and honors the browser resume cursor", async () => {
+  test("relays session SSE and the browser's resume cursor", async () => {
     const { upstream, handler } = setup();
     const response = await handler(
       new Request(
@@ -1398,14 +1142,15 @@ describe("createSessionProxyHandler", () => {
         { headers: { "Last-Event-ID": "5" } },
       ),
     );
-    expect(response.headers.get("Content-Type")).toBe("text/event-stream; charset=utf-8");
+    expect(response.headers.get("Content-Type")).toMatch(/^text\/event-stream/);
+    expect(response.headers.get("Cache-Control")).toBe("no-cache, no-transform");
     const iterator = parseSseStream(response.body!)[Symbol.asyncIterator]();
     const first = await iterator.next();
     const second = await iterator.next();
     expect([first.value!.id, second.value!.id]).toEqual(["6", "7"]);
     await iterator.return?.(undefined);
     const stream = upstream.requests.find((request) => request.url.pathname.endsWith("/stream"))!;
-    expect(stream.url.searchParams.get("after")).toBe("5");
+    expect(stream.headers.get("last-event-id")).toBe("5");
     expect(stream.headers.get("x-opengeni-external-actor")).not.toBeNull();
   });
 
@@ -1677,7 +1422,7 @@ describe("createSessionProxyHandler", () => {
     ]);
   });
 
-  test("response hooks run only after host authorization and event allowlisting", async () => {
+  test("response hooks run only after host authorization and for responses", async () => {
     let hookCalls = 0;
     const beforeForwardMessage = () => {
       hookCalls++;
@@ -1689,20 +1434,17 @@ describe("createSessionProxyHandler", () => {
         (await rejection(denied.browser.sendEvent(WORKSPACE_ID, SESSION_ID, event))).status,
       ).toBe(404);
     }
+    // Other event types are Opengeni's to accept or refuse, unchanged.
     const allowed = setup({ beforeForwardMessage });
-    expect(
-      (
-        await rejection(
-          allowed.browser.sendEvent(WORKSPACE_ID, SESSION_ID, {
-            type: "tool.result",
-            payload: {},
-          } as never),
-        )
-      ).status,
-    ).toBe(403);
+    await allowed.browser.sendEvent(WORKSPACE_ID, SESSION_ID, {
+      type: "tool.result",
+      payload: { mcpCredentialUpdates: [] },
+    } as never);
     expect(hookCalls).toBe(0);
     expect(denied.upstream.requests).toHaveLength(0);
-    expect(allowed.upstream.requests).toHaveLength(0);
+    expect(allowed.upstream.requests.map((request) => request.body)).toEqual([
+      { type: "tool.result", payload: { mcpCredentialUpdates: [] } },
+    ]);
   });
 
   test("modelSelection: false is reported in client config so UIs hide the picker", async () => {
@@ -1712,537 +1454,6 @@ describe("createSessionProxyHandler", () => {
     expect((await open.browser.getClientConfig()).modelSelection).toBeUndefined();
     const offered = setup({ modelSelection: true });
     expect((await offered.browser.getClientConfig()).modelSelection).toBe(true);
-  });
-
-  test("lists only the resolved user's chats by default, filtered server-side", async () => {
-    const { upstream, browser } = setup();
-    const page = await browser.listSessionPage(WORKSPACE_ID, {
-      parentSessionId: null,
-      createdBy: { kind: "subject", subjectId: "someone-else" },
-    });
-    expect(page.sessions.map((session) => session.id)).toEqual([SESSION_ID]);
-    expect(page.pinned).toEqual([]);
-    await browser.listSessionPage(WORKSPACE_ID, { cursor: "c2" });
-    const lists = upstream.requests.filter((request) => request.url.pathname.endsWith("/sessions"));
-    for (const list of lists) {
-      expect(list.url.searchParams.get("createdByKind")).toBe("subject");
-      expect(list.url.searchParams.get("createdBySubjectId")).toBe("subject-u42");
-      expect(list.headers.get("x-opengeni-external-actor")).not.toBeNull();
-    }
-    expect(lists[1]!.url.searchParams.get("cursor")).toBe("c2");
-    // The acting subject is resolved once and cached.
-    expect(upstream.requests.filter((r) => r.url.pathname === "/v1/access/me")).toHaveLength(1);
-    // The legacy array form is refused rather than silently unfiltered.
-    expect((await rejection(browser.listSessions(WORKSPACE_ID))).status).toBe(400);
-  });
-
-  test("visible lists pass through; false disables listing", async () => {
-    const visible = setup({ sessionList: "visible" });
-    await visible.browser.listSessionPage(WORKSPACE_ID);
-    expect(visible.upstream.requests[0]!.url.searchParams.get("createdByKind")).toBeNull();
-    const off = setup({ sessionList: false });
-    expect((await rejection(off.browser.listSessionPage(WORKSPACE_ID))).status).toBe(404);
-  });
-
-  test("personal archive proxy cannot acquire shared Pause from browser payloads", async () => {
-    const { browser, upstream } = setup();
-    await browser.updateSessionArchive(WORKSPACE_ID, SESSION_ID, {
-      archived: true,
-      mode: "pause_and_archive",
-      confirmPause: true,
-      clientEventId: "untrusted-pause",
-    });
-    expect(upstream.requests[0]!.body).toEqual({ archived: true, mode: "hide_for_me" });
-    await browser.updateSessionArchive(WORKSPACE_ID, SESSION_ID, { archived: false });
-    expect(upstream.requests[1]!.body).toEqual({ archived: false, mode: "hide_for_me" });
-  });
-
-  test("archives and restores the user's chat unless disabled", async () => {
-    const { upstream, browser } = setup();
-    await browser.updateSessionArchive(WORKSPACE_ID, SESSION_ID, {
-      archived: true,
-      expectedVersion: 2,
-    });
-    expect(upstream.requests[0]!.method).toBe("PUT");
-    expect(upstream.requests[0]!.body).toEqual({
-      archived: true,
-      expectedVersion: 2,
-      mode: "hide_for_me",
-    });
-    const off = setup({ archive: false });
-    expect(
-      (
-        await rejection(
-          off.browser.updateSessionArchive(WORKSPACE_ID, SESSION_ID, { archived: true }),
-        )
-      ).status,
-    ).toBe(404);
-    // Reported so stock UIs hide "Archive" instead of failing on click.
-    expect((await browser.getClientConfig()).archive).toBe(true);
-    expect((await off.browser.getClientConfig()).archive).toBe(false);
-  });
-
-  test("an open conversation can mark itself read, and nothing else about attention", async () => {
-    const { upstream, browser } = setup();
-    await browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, {
-      unread: false,
-      acknowledgedThroughSequence: 42,
-    });
-    await browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, { unread: false });
-    expect(upstream.requests.map((request) => [request.method, request.url.pathname])).toEqual([
-      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/attention`],
-      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/attention`],
-    ]);
-    expect(upstream.requests.map((request) => request.body)).toEqual([
-      { unread: false, acknowledgedThroughSequence: 42 },
-      { unread: false },
-    ]);
-    for (const request of [
-      { unread: true },
-      { activelyWorking: true },
-      { unread: false, activelyWorking: false },
-      { unread: false, expectedVersion: 3 },
-      { unread: false, acknowledgedThroughSequence: -1 },
-      { unread: false, acknowledgedThroughSequence: 1.5 },
-    ]) {
-      expect(
-        (
-          await rejection(
-            browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, request as never),
-          )
-        ).status,
-      ).toBe(400);
-    }
-    expect(upstream.requests).toHaveLength(2);
-  });
-
-  test("retained media a session produced is served under files, scoped and association-checked", async () => {
-    const RETAINED = "44444444-4444-4444-8444-444444444444";
-    const OTHER_SESSION = "55555555-5555-4555-8555-555555555555";
-    const workspace = `/v1/workspaces/${WORKSPACE_ID}`;
-    const sessionPath = `${workspace}/sessions/${SESSION_ID}`;
-    const page = (range: string | null) =>
-      new Response(new Uint8Array([2, 3]), {
-        status: 206,
-        headers: {
-          "Content-Type": "image/png",
-          "Content-Length": "2",
-          "Content-Range": "bytes 1-2/4",
-          "Accept-Ranges": "bytes",
-          "X-Range": range ?? "",
-        },
-      });
-    const build = (overrides: Partial<SessionProxyHandlerOptions> = {}) => {
-      const base = upstreamServer();
-      const seen: string[] = [];
-      const fetch = async (input: string | URL | Request, init?: RequestInit) => {
-        const request = new Request(input, init);
-        const url = new URL(request.url);
-        const path = url.pathname;
-        seen.push(`${request.method} ${path}${url.search}`);
-        if (path.endsWith(`/artifact-associations/${RETAINED}`)) {
-          return path.startsWith(`${sessionPath}/`) && url.searchParams.get("kind") === "retained"
-            ? Response.json({ sessionId: SESSION_ID, artifactId: RETAINED, kind: "retained" })
-            : Response.json({ error: { code: "not_found" } }, { status: 404 });
-        }
-        if (path === `${workspace}/artifacts/${RETAINED}/content`) {
-          return page(request.headers.get("range"));
-        }
-        if (path === `${workspace}/artifacts/${RETAINED}/playback-source`) {
-          return Response.json({ artifactId: RETAINED, url: "https://objects.example/v.mp4" });
-        }
-        if (path === `${sessionPath}/artifacts/${RETAINED}`) {
-          return Response.json({ artifactId: RETAINED, available: true });
-        }
-        if (path === `${sessionPath}/artifacts/${RETAINED}/content`) {
-          return page(request.headers.get("range"));
-        }
-        return await base.fetch(request);
-      };
-      const service = new OpenGeniClient({ baseUrl: API, apiKey: "og_org_key", fetch });
-      const handler = createSessionProxyHandler(service, {
-        resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42", source: "northwind" }),
-        ...overrides,
-      });
-      return { handler, seen };
-    };
-    const at = (path: string) => `${PRODUCT}/api/opengeni${path}`;
-    const scoped = (sessionId = SESSION_ID) => ({
-      "x-opengeni-session-id": sessionId,
-      range: "bytes=1-2",
-    });
-    const content = at(`${workspace}/artifacts/${RETAINED}/content`);
-    const playback = at(`${workspace}/artifacts/${RETAINED}/playback-source`);
-
-    const on = build();
-    const read = await on.handler(new Request(content, { headers: scoped() }));
-    expect(read.status).toBe(206);
-    expect([...new Uint8Array(await read.arrayBuffer())]).toEqual([2, 3]);
-    expect(read.headers.get("content-range")).toBe("bytes 1-2/4");
-    expect(read.headers.get("accept-ranges")).toBe("bytes");
-    expect(read.headers.get("content-security-policy")).toBe("sandbox");
-    expect(on.seen).toEqual([
-      `GET ${sessionPath}/artifact-associations/${RETAINED}?kind=retained`,
-      `GET ${workspace}/artifacts/${RETAINED}/content`,
-    ]);
-    const minted = await on.handler(
-      new Request(playback, {
-        method: "POST",
-        headers: { ...scoped(), "Content-Type": "application/json" },
-      }),
-    );
-    expect(minted.status).toBe(200);
-    expect(on.seen.at(-1)).toBe(`POST ${workspace}/artifacts/${RETAINED}/playback-source`);
-
-    // The session must be named, readable by the product, and the producer.
-    on.seen.length = 0;
-    expect((await on.handler(new Request(content))).status).toBe(400);
-    expect(
-      (await on.handler(new Request(content, { headers: scoped(OTHER_SESSION) }))).status,
-    ).toBe(404);
-    expect(on.seen.some((line) => line.includes("/content"))).toBe(false);
-    const refused = build({ authorizeSession: () => false });
-    expect((await refused.handler(new Request(content, { headers: scoped() }))).status).toBe(404);
-    expect(refused.seen).toEqual([]);
-    // Only content reads and playback minting; never metadata or other verbs.
-    for (const [url, method] of [
-      [at(`${workspace}/artifacts/${RETAINED}`), "GET"],
-      [content, "POST"],
-      [playback, "GET"],
-    ] as const) {
-      const response = await on.handler(
-        new Request(url, {
-          method,
-          headers: { ...scoped(), "Content-Type": "application/json" },
-          ...(method === "POST" ? { body: "{}" } : {}),
-        }),
-      );
-      expect(response.status).toBe(404);
-    }
-    expect(
-      (await on.handler(new Request(content, { headers: { ...scoped(), range: "bytes=\u0001" } })))
-        .status,
-    ).toBe(400);
-
-    // Screenshots are read through the session the browser can already read.
-    on.seen.length = 0;
-    const metadata = await on.handler(
-      new Request(at(`${sessionPath}/artifacts/${RETAINED}`), { headers: scoped() }),
-    );
-    expect(metadata.status).toBe(200);
-    const shot = await on.handler(
-      new Request(at(`${sessionPath}/artifacts/${RETAINED}/content`), { headers: scoped() }),
-    );
-    expect(shot.status).toBe(206);
-    expect(on.seen.filter((line) => line.includes("/artifacts/"))).toEqual([
-      `GET ${sessionPath}/artifacts/${RETAINED}`,
-      `GET ${sessionPath}/artifacts/${RETAINED}/content`,
-    ]);
-
-    // files: false closes every retained-media route.
-    const off = build({ files: false });
-    for (const url of [content, at(`${sessionPath}/artifacts/${RETAINED}/content`)]) {
-      expect((await off.handler(new Request(url, { headers: scoped() }))).status).toBe(404);
-    }
-    expect(off.seen.some((line) => line.includes("/artifacts/"))).toBe(false);
-  });
-
-  test("sandbox link downloads forward only the file read, unless disabled", async () => {
-    const { upstream, browser, handler } = setup({ sandboxFiles: true });
-    await browser.fsRead(WORKSPACE_ID, SESSION_ID, {
-      path: "reports/weekly.pdf",
-      encoding: "base64",
-      maxBytes: 1024,
-      workspaceOnly: true,
-    });
-    expect(upstream.requests.at(-1)!.url.pathname).toBe(
-      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/read-workspace`,
-    );
-    expect(upstream.requests.at(-1)!.body).toEqual({
-      path: "reports/weekly.pdf",
-      encoding: "base64",
-      maxBytes: 1024,
-      workspaceOnly: true,
-    });
-    // A browser cannot pick another compute route or smuggle extra fields.
-    const smuggled = await handler(
-      new Request(
-        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/read`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: "a.txt", route: { sandboxId: "other" }, extra: true }),
-        },
-      ),
-    );
-    expect(smuggled.status).toBe(200);
-    expect(upstream.requests.at(-1)!.body).toEqual({ path: "a.txt", workspaceOnly: true });
-    const count = upstream.requests.length;
-    for (const body of [
-      {},
-      { path: "a.txt", encoding: "hex" },
-      { path: "a", maxBytes: "1" },
-      { path: "a", maxBytes: 0 },
-      { path: "a", maxBytes: -1 },
-      { path: "a", maxBytes: 26214401 },
-    ]) {
-      const rejected = await handler(
-        new Request(
-          `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/read`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          },
-        ),
-      );
-      expect(rejected.status).toBe(400);
-    }
-    // Writes stay outside the conversation allowlist.
-    expect(
-      (
-        await rejection(
-          browser.fsWrite(WORKSPACE_ID, SESSION_ID, { path: "a.txt", content: "x" } as never),
-        )
-      ).status,
-    ).toBe(404);
-    expect(upstream.requests).toHaveLength(count);
-    const off = setup({ sandboxFiles: false });
-    expect(
-      (await rejection(off.browser.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a.txt" } as never)))
-        .status,
-    ).toBe(404);
-    expect(off.upstream.requests).toHaveLength(0);
-  });
-
-  test("sandbox reads are opt-in independently of file-id downloads and pin workspaceOnly", async () => {
-    for (const options of [{}, { files: false }]) {
-      const off = setup(options);
-      expect(
-        (await rejection(off.browser.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a" }))).status,
-      ).toBe(404);
-      expect(off.upstream.requests).toHaveLength(0);
-      expect((await off.browser.getClientConfig()).sandboxFiles).toBe(false);
-    }
-    const enabled = setup({ sandboxFiles: true });
-    await enabled.browser.fsRead(WORKSPACE_ID, SESSION_ID, { path: "src/a", workspaceOnly: false });
-    expect(enabled.upstream.requests.at(-1)!.body).toEqual({ path: "src/a", workspaceOnly: true });
-    expect((await enabled.browser.getClientConfig()).sandboxFiles).toBe(true);
-    const defaults = setup();
-    await defaults.browser.createFileDownloadUrl(
-      WORKSPACE_ID,
-      "33333333-3333-4333-8333-333333333333",
-    );
-    expect(defaults.upstream.requests.at(-1)!.url.pathname).toContain("/download-url");
-  });
-
-  test("workspace Sites are opt-in, read-only and need no session", async () => {
-    const site = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}`;
-    const list = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts`;
-    // Off by default: the session-scoped artifact path still requires a session.
-    expect((await setup({ artifacts: true }).handler(new Request(site))).status).toBe(400);
-    expect((await setup().handler(new Request(site))).status).toBe(404);
-
-    const on = setup({ sites: true });
-    const forwarded = async (url: string) => {
-      const response = await on.handler(new Request(url));
-      expect(response.status).toBe(200);
-      return on.upstream.requests.at(-1)!.url;
-    };
-    expect((await forwarded(site)).pathname).toBe(
-      `/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}`,
-    );
-    const content = await forwarded(`${site}/content?versionId=v1&smuggled=1`);
-    expect(content.pathname).toBe(
-      `/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}/content`,
-    );
-    expect(Object.fromEntries(content.searchParams)).toEqual({ versionId: "v1" });
-    const listed = await forwarded(`${list}?limit=5&sourceSessionId=x`);
-    expect(Object.fromEntries(listed.searchParams)).toEqual({ limit: "5" });
-    const html = await on.handler(new Request(`${site}/html?versionId=v1`));
-    expect(await html.text()).toBe("<h1>Dashboard</h1>");
-    expect((await on.handler(new Request(`${site}/html`))).status).toBe(400);
-
-    // Writes stay closed without a session, and so do editable artifacts.
-    for (const [url, method] of [
-      [`${site}/rollback`, "POST"],
-      [`${site}/status`, "PUT"],
-    ] as const) {
-      const response = await on.handler(
-        new Request(url, { method, headers: { "Content-Type": "application/json" }, body: "{}" }),
-      );
-      expect(response.status).toBe(404);
-    }
-    const editable = site.replace("published-artifacts", "editable-artifacts");
-    expect((await on.handler(new Request(editable))).status).toBe(404);
-  });
-
-  test("Excel workbook routes are opt-in and act as the resolved user", async () => {
-    const off = setup();
-    await expect(off.browser.createOfficeWorkbookTicket(WORKSPACE_ID)).rejects.toMatchObject({
-      status: 404,
-    });
-    expect(off.upstream.requests.some((r) => r.url.pathname.includes("/office/"))).toBe(false);
-
-    const on = setup({ office: true });
-    await on.browser.createOfficeWorkbookTicket(WORKSPACE_ID);
-    const minted = on.upstream.requests.at(-1)!;
-    expect(minted.method).toBe("POST");
-    expect(minted.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/office/workbook-tickets`);
-    expect(minted.headers.get("x-opengeni-external-actor")).toContain("u_42");
-    await on.browser.listOfficeWorkbooks(WORKSPACE_ID).catch(() => undefined);
-    const listed = on.upstream.requests.at(-1)!;
-    expect(listed.method).toBe("GET");
-    expect(listed.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/office/workbooks`);
-    // Another workspace and other office paths stay closed.
-    await expect(on.browser.createOfficeWorkbookTicket(OTHER_WORKSPACE_ID)).rejects.toMatchObject({
-      status: 403,
-    });
-    const other = await on.handler(
-      new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/office/anything`),
-    );
-    expect(other.status).toBe(404);
-  });
-
-  test("artifact viewer routes are opt-in, session-scoped, and association-checked", async () => {
-    const item = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`;
-    const scoped = { "x-opengeni-session-id": SESSION_ID };
-    const off = setup();
-    expect((await off.handler(new Request(item, { headers: scoped }))).status).toBe(404);
-    expect((await off.browser.getClientConfig()).artifacts).toBe(false);
-    expect(off.upstream.requests.some((r) => r.url.pathname.includes("artifacts/"))).toBe(false);
-
-    const on = setup({ artifacts: true });
-    const config = await on.browser.getClientConfig();
-    expect(viewer(config)?.editableLiveUrl).toBe(
-      "wss://api.example.test/v1/editable-artifacts/live",
-    );
-    expect(viewer(config)?.cachePartition).toMatchObject({
-      accountId: "acct-1",
-      principalId: "subject-u42",
-    });
-    expect(viewer(config)?.cachePartition.authorizationEpoch).toMatch(/^sha256:[0-9a-f]{64}$/);
-
-    // The session must be named, and a product check can refuse it.
-    expect((await on.handler(new Request(item))).status).toBe(400);
-    const refused = setup({ artifacts: true, authorizeSession: () => false });
-    expect((await refused.handler(new Request(item, { headers: scoped }))).status).toBe(404);
-
-    const read = await on.handler(
-      new Request(`${item}?replicaId=1234567890abcdef&extra=1`, { headers: scoped }),
-    );
-    expect(read.status).toBe(200);
-    const forwarded = on.upstream.requests.at(-1)!;
-    expect(forwarded.url.pathname).toBe(
-      `/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`,
-    );
-    expect(Object.fromEntries(forwarded.url.searchParams)).toEqual({
-      replicaId: "1234567890abcdef",
-    });
-    const listing = on.upstream.requests.find((r) =>
-      r.url.pathname.endsWith(`/artifact-associations/${EDITABLE_ID}`),
-    )!;
-    expect(listing.url.pathname).toContain(`/sessions/${SESSION_ID}/`);
-    expect(Object.fromEntries(listing.url.searchParams)).toEqual({ kind: "editable" });
-
-    const ticket = await on.handler(
-      new Request(`${item}/live-ticket`, {
-        method: "POST",
-        headers: { ...scoped, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          replicaId: "1234567890abcdef",
-          modality: "document",
-          smuggled: true,
-        }),
-      }),
-    );
-    expect(ticket.status).toBe(201);
-    expect(on.upstream.requests.at(-1)!.body).toEqual({
-      replicaId: "1234567890abcdef",
-      modality: "document",
-      sourceSessionId: SESSION_ID,
-    });
-
-    // An artifact Opengeni does not list for this session is not served.
-    const other = await on.handler(
-      new Request(item.replace(EDITABLE_ID, "fedcba9876543210fedcba9876543210"), {
-        headers: scoped,
-      }),
-    );
-    expect(other.status).toBe(404);
-    // Writes and other artifact operations stay closed.
-    for (const [path, method] of [
-      [`${item}/versions`, "POST"],
-      [`${item}/materializations`, "POST"],
-      [
-        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}/rollback`,
-        "POST",
-      ],
-    ] as const) {
-      const response = await on.handler(
-        new Request(path, {
-          method,
-          headers: { ...scoped, "Content-Type": "application/json" },
-          body: "{}",
-        }),
-      );
-      expect(response.status).toBe(404);
-    }
-
-    const site = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}`;
-    expect((await on.handler(new Request(`${site}/html`, { headers: scoped }))).status).toBe(400);
-    const html = await on.handler(
-      new Request(`${site}/html?versionId=${SESSION_ID}`, { headers: scoped }),
-    );
-    expect(html.status).toBe(200);
-    expect(await html.text()).toBe("<h1>Dashboard</h1>");
-    expect(html.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
-    expect(html.headers.get("content-disposition")).toContain("attachment");
-    const catalog = on.upstream.requests.find((r) =>
-      r.url.pathname.endsWith(`/artifact-associations/${SITE_ID}`),
-    )!;
-    expect(catalog.url.pathname).toContain(`/sessions/${SESSION_ID}/`);
-    expect(Object.fromEntries(catalog.url.searchParams)).toEqual({ kind: "site" });
-  });
-
-  test("reauthorizes source sessions on repeated association reads without a positive cache", async () => {
-    const upstream = upstreamServer();
-    let allowed = true;
-    let checks = 0;
-    const service = new OpenGeniClient({
-      baseUrl: API,
-      apiKey: "og_org_key",
-      fetch: async (input, init) => {
-        const request = new Request(input, init);
-        if (request.url.includes("/artifact-associations/")) {
-          checks += 1;
-          if (!allowed) {
-            return Response.json({ error: { code: "session_not_found" } }, { status: 404 });
-          }
-        }
-        return upstream.fetch(input, init);
-      },
-    });
-    const handler = createSessionProxyHandler(service, {
-      artifacts: true,
-      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
-    });
-    const request = () =>
-      new Request(
-        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`,
-        {
-          headers: { "x-opengeni-session-id": SESSION_ID },
-        },
-      );
-    expect((await handler(request())).status).toBe(200);
-    allowed = false;
-    expect((await handler(request())).status).toBe(404);
-    expect(checks).toBe(2);
-    expect(
-      upstream.requests.filter((r) =>
-        r.url.pathname.endsWith(`/editable-artifacts/${EDITABLE_ID}`),
-      ),
-    ).toHaveLength(1);
   });
 
   test("refreshes effective grants and changes the authorization epoch on config reread", async () => {
@@ -2268,7 +1479,6 @@ describe("createSessionProxyHandler", () => {
       },
     });
     const handler = createSessionProxyHandler(service, {
-      artifacts: true,
       resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
     });
     const config = async () => {
@@ -2285,120 +1495,6 @@ describe("createSessionProxyHandler", () => {
     expect(reads).toBe(2);
   });
 
-  test("streams Site HTML with backpressure and an actual-byte ceiling without buffering", async () => {
-    const upstream = upstreamServer();
-    let pulls = 0;
-    let cancelled: unknown;
-    const chunk = new Uint8Array(64 * 1024);
-    const service = new OpenGeniClient({
-      baseUrl: API,
-      apiKey: "og_org_key",
-      fetch: async (input, init) => {
-        if (new URL(input instanceof Request ? input.url : input).pathname.endsWith("/html")) {
-          return new Response(
-            new ReadableStream<Uint8Array>(
-              {
-                pull(controller) {
-                  pulls += 1;
-                  controller.enqueue(chunk);
-                },
-                cancel(reason) {
-                  cancelled = reason;
-                },
-              },
-              { highWaterMark: 0 },
-            ),
-            // Even an incorrect declared length cannot bypass the actual-byte check.
-            { headers: { "Content-Length": "1" } },
-          );
-        }
-        return upstream.fetch(input, init);
-      },
-    });
-    const handler = createSessionProxyHandler(service, {
-      artifacts: true,
-      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
-    });
-    const response = await handler(
-      new Request(
-        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}/html?versionId=v1`,
-        {
-          headers: { "x-opengeni-session-id": SESSION_ID },
-        },
-      ),
-    );
-    expect(response.status).toBe(200);
-    expect(pulls).toBe(0);
-    const reader = response.body!.getReader();
-    let bytes = 0;
-    try {
-      for (;;) {
-        const result = await reader.read();
-        if (result.done) throw new Error("An infinite upstream should exceed the ceiling");
-        bytes += result.value.byteLength;
-      }
-    } catch (error) {
-      expect(error).toBeInstanceOf(SessionProxySiteHtmlTooLargeError);
-      expect((error as SessionProxySiteHtmlTooLargeError).code).toBe("site_html_too_large");
-    } finally {
-      reader.releaseLock();
-    }
-    expect(bytes).toBe(SESSION_PROXY_SITE_HTML_MAX_BYTES);
-    expect(pulls).toBe(SESSION_PROXY_SITE_HTML_MAX_BYTES / chunk.byteLength + 1);
-    expect(cancelled).toBeInstanceOf(SessionProxySiteHtmlTooLargeError);
-  });
-
-  test("cancels upstream Site HTML on downstream cancellation and request abort", async () => {
-    for (const mode of ["cancel", "abort"] as const) {
-      const upstream = upstreamServer();
-      let cancelled: unknown;
-      let pulls = 0;
-      const abort = new AbortController();
-      const service = new OpenGeniClient({
-        baseUrl: API,
-        apiKey: "og_org_key",
-        fetch: async (input, init) => {
-          if (new URL(input instanceof Request ? input.url : input).pathname.endsWith("/html")) {
-            return new Response(
-              new ReadableStream<Uint8Array>(
-                {
-                  pull(controller) {
-                    pulls += 1;
-                    controller.enqueue(new Uint8Array([42]));
-                  },
-                  cancel(reason) {
-                    cancelled = reason;
-                  },
-                },
-                { highWaterMark: 0 },
-              ),
-            );
-          }
-          return upstream.fetch(input, init);
-        },
-      });
-      const handler = createSessionProxyHandler(service, {
-        artifacts: true,
-        resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
-      });
-      const response = await handler(
-        new Request(
-          `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}/html?versionId=v1`,
-          {
-            headers: { "x-opengeni-session-id": SESSION_ID },
-            signal: abort.signal,
-          },
-        ),
-      );
-      expect(pulls).toBe(0);
-      if (mode === "cancel") await response.body!.cancel("consumer closed");
-      else abort.abort("request closed");
-      await Promise.resolve();
-      expect(cancelled).toBe(mode === "cancel" ? "consumer closed" : "request closed");
-      expect(pulls).toBe(0);
-    }
-  });
-
   test("artifactViewerCapability gives a custom proxy the same client-config capability", async () => {
     const { upstream } = setup();
     const service = new OpenGeniClient({
@@ -2411,7 +1507,7 @@ describe("createSessionProxyHandler", () => {
       workspaceId: WORKSPACE_ID,
       source: "northwind",
     });
-    const proxied = await setup({ artifacts: true }).browser.getClientConfig();
+    const proxied = await setup().browser.getClientConfig();
     expect(capability).toEqual(viewer(proxied)!);
     await expect(
       artifactViewerCapability({
@@ -2422,7 +1518,7 @@ describe("createSessionProxyHandler", () => {
   });
 });
 
-describe("createSessionProxyHandler sessionApp", () => {
+describe("createSessionProxyHandler pass-through", () => {
   const mount = `${PRODUCT}/api/opengeni/v1`;
   const ws = `${mount}/workspaces/${WORKSPACE_ID}`;
   const chat = `${ws}/sessions/${SESSION_ID}`;
@@ -2432,22 +1528,8 @@ describe("createSessionProxyHandler sessionApp", () => {
     init?: RequestInit,
   ) => handler(new Request(url, init));
 
-  test("is off by default: the app's extra routes stay closed", async () => {
-    const { handler, upstream } = setup();
-    for (const url of [
-      `${mount}/access/me`,
-      `${mount}/workspaces`,
-      `${ws}/capabilities`,
-      `${chat}/children`,
-      `${mount}/catalog-assets/logos/github.svg`,
-    ]) {
-      expect((await send(handler, url)).status).toBe(404);
-    }
-    expect(upstream.requests).toHaveLength(0);
-  });
-
   test("bootstraps with the resolved workspace only, never other access or the key", async () => {
-    const { handler } = setup({ sessionApp: true });
+    const { handler } = setup();
     const access = (await (await send(handler, `${mount}/access/me`)).json()) as Record<
       string,
       unknown
@@ -2463,6 +1545,40 @@ describe("createSessionProxyHandler sessionApp", () => {
       id: string;
     }>;
     expect(workspaces.map((workspace) => workspace.id)).toEqual([WORKSPACE_ID]);
+  });
+
+  test("lists only the resolved workspace, read as the user, and none it cannot read", async () => {
+    const { handler, upstream } = setup();
+    expect(await (await send(handler, `${mount}/workspaces`)).json()).toEqual([
+      { id: WORKSPACE_ID, name: "Product" },
+    ]);
+    const read = upstream.requests.at(-1)!;
+    expect(read.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}`);
+    expect(read.headers.get("x-opengeni-external-actor")).toContain("u_42");
+    expect(upstream.requests.some((request) => request.url.pathname === "/v1/workspaces")).toBe(
+      false,
+    );
+
+    const refusing = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        if (new URL(request.url).pathname === `/v1/workspaces/${WORKSPACE_ID}`) {
+          return Response.json(
+            { error: { code: "not_found", message: "Workspace not found." } },
+            { status: 404 },
+          );
+        }
+        return await upstream.fetch(request);
+      },
+    });
+    const outsider = createSessionProxyHandler(refusing, {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+    });
+    const empty = await send(outsider, `${mount}/workspaces`);
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toEqual([]);
   });
 
   test("bootstraps an external actor, whose access inventory is empty, from its effective grant", async () => {
@@ -2487,7 +1603,6 @@ describe("createSessionProxyHandler sessionApp", () => {
     });
     const handler = createSessionProxyHandler(service, {
       resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42", source: "northwind" }),
-      sessionApp: true,
     });
     const access = (await (await send(handler, `${mount}/access/me`)).json()) as Record<
       string,
@@ -2507,7 +1622,7 @@ describe("createSessionProxyHandler sessionApp", () => {
   });
 
   test("reads pass through as the resolved user, streams included", async () => {
-    const { handler, upstream } = setup({ sessionApp: true });
+    const { handler, upstream } = setup();
     const capabilities = await send(handler, `${ws}/capabilities?view=composer`);
     expect(capabilities.status).toBe(200);
     const read = upstream.requests.at(-1)!;
@@ -2532,52 +1647,8 @@ describe("createSessionProxyHandler sessionApp", () => {
     expect((await send(handler, `${mount}/catalog-assets/logos/a%2Fb.svg`)).status).toBe(404);
   });
 
-  test("the proxy's own routes, administration and other workspaces stay closed", async () => {
-    const { handler, upstream } = setup({ sessionApp: true });
-    const before = upstream.requests.length;
-    for (const url of [
-      `${ws}/members`,
-      `${ws}/api-keys`,
-      `${ws}/allowance`,
-      `${ws}/usage`,
-      `${ws}/office/workbooks`,
-      `${mount}/workspaces/${OTHER_WORKSPACE_ID}/capabilities`,
-      `${mount}/organizations`,
-      `${chat}/fs/read`,
-    ]) {
-      const response = await send(handler, url);
-      expect([403, 404]).toContain(response.status);
-    }
-    expect(upstream.requests.length).toBe(before);
-  });
-
-  test("only the app's listed writes pass; other writes are refused", async () => {
-    const { handler, upstream } = setup({ sessionApp: true });
-    const put = (url: string, body: unknown, method = "PUT") =>
-      send(handler, url, {
-        method,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-    expect((await put(`${chat}/pin`, { pinned: true })).status).toBe(200);
-    expect(upstream.requests.at(-1)!.body).toEqual({ pinned: true });
-    expect((await put(`${ws}/new-session-draft`, { text: "hi" })).status).toBe(200);
-    expect((await put(`${ws}/channels`, { name: "Q3" }, "POST")).status).toBe(200);
-    const before = upstream.requests.length;
-    for (const [url, method] of [
-      [`${ws}/scheduled-tasks`, "POST"],
-      [`${ws}/settings`, "PATCH"],
-      [`${chat}/children`, "POST"],
-      [`${chat}/control`, "DELETE"],
-    ] as const) {
-      expect((await put(url, {}, method)).status).toBe(404);
-    }
-    expect(upstream.requests.length).toBe(before);
-  });
-
   test("authorizeSession still guards every chat route", async () => {
     const { handler, upstream } = setup({
-      sessionApp: true,
       authorizeSession: async () => false,
     });
     expect((await send(handler, `${chat}/children`)).status).toBe(404);
@@ -2587,7 +1658,6 @@ describe("createSessionProxyHandler sessionApp", () => {
   test("creates a chat from the session app's own create body", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({
-      sessionApp: true,
       createSession: (input) => {
         inputs.push(input);
         return { initialMessage: input.initialMessage, modelContext: "Server context." };
@@ -2648,7 +1718,6 @@ describe("createSessionProxyHandler sessionApp", () => {
 
   test("leaves a new-chat draft that changed after it was sent", async () => {
     const { upstream, browser } = setup({
-      sessionApp: true,
       createSession: (input) => ({ initialMessage: input.initialMessage }),
     });
     await browser.createSession(WORKSPACE_ID, {
@@ -2660,7 +1729,6 @@ describe("createSessionProxyHandler sessionApp", () => {
 
   test("refuses a connected-account choice and still refuses other configuration", async () => {
     const { upstream, browser } = setup({
-      sessionApp: true,
       createSession: (input) => ({ initialMessage: input.initialMessage }),
     });
     const accounts = await rejection(
@@ -2681,20 +1749,336 @@ describe("createSessionProxyHandler sessionApp", () => {
     expect(upstream.requests).toHaveLength(0);
   });
 
-  test("without the session app, its create fields stay refused", async () => {
-    const { upstream, browser } = setup({
-      createSession: (input) => ({ initialMessage: input.initialMessage }),
+  test("forwards any workspace route as the resolved user, body, query and status included", async () => {
+    const upstream = upstreamServer();
+    const seen: Request[] = [];
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        seen.push(request.clone());
+        if (new URL(request.url).pathname.endsWith("/projects/p1")) {
+          return new Response(JSON.stringify({ id: "p1", name: "Renamed" }), {
+            status: 202,
+            headers: {
+              "Content-Type": "application/json",
+              "X-OpenGeni-Has-More": "false",
+              "x-opengeni-api-contract": "upstream-later",
+              "Set-Cookie": "upstream=1",
+              ETag: '"v2"',
+            },
+          });
+        }
+        return await upstream.fetch(request);
+      },
     });
-    for (const extra of [
-      { visibility: "workspace" },
-      { clientEventId: "event-1" },
-      { expectedNewSessionDraftRevision: 1 },
-    ]) {
-      const refused = await rejection(
-        browser.createSession(WORKSPACE_ID, { initialMessage: "hi", ...extra } as never),
-      );
-      expect(refused.code).toBe("create_field_not_allowed");
+    const handler = createSessionProxyHandler(service, {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42", source: "northwind" }),
+    });
+    const response = await send(handler, `${ws}/projects/p1?expand=sessions`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: "product-session=secret",
+        Authorization: "Bearer product-token",
+        "x-opengeni-external-actor": "forged",
+        "x-opengeni-access-key": "forged",
+        "x-opengeni-correlation-id": "corr-1",
+        "If-Match": '"v1"',
+      },
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ id: "p1", name: "Renamed" });
+    expect(response.headers.get("x-opengeni-has-more")).toBe("false");
+    expect(response.headers.get("etag")).toBe('"v2"');
+    expect(response.headers.get("x-opengeni-api-contract")).toBeNull();
+    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("content-security-policy")).toBe("sandbox");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    const forwarded = seen.at(-1)!;
+    expect(forwarded.method).toBe("PATCH");
+    expect(new URL(forwarded.url).pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/projects/p1`);
+    expect(new URL(forwarded.url).searchParams.get("expand")).toBe("sessions");
+    expect(await forwarded.json()).toEqual({ name: "Renamed" });
+    expect(forwarded.headers.get("authorization")).toBe("Bearer og_org_key");
+    expect(forwarded.headers.get("cookie")).toBeNull();
+    expect(forwarded.headers.get("x-opengeni-access-key")).toBeNull();
+    expect(forwarded.headers.get("x-opengeni-correlation-id")).toBe("corr-1");
+    expect(forwarded.headers.get("if-match")).toBe('"v1"');
+    expect(
+      JSON.parse(decodeURIComponent(forwarded.headers.get("x-opengeni-external-actor")!)),
+    ).toEqual({ mode: "external", identity: { externalId: "u_42", source: "northwind" } });
+  });
+
+  test("relays Opengeni's refusals and empty answers unchanged", async () => {
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input) => {
+        const path = new URL(input instanceof Request ? input.url : input).pathname;
+        if (path.endsWith("/members")) {
+          return Response.json(
+            { error: { code: "forbidden", message: "Missing permission." } },
+            { status: 403 },
+          );
+        }
+        return new Response(null, { status: 204 });
+      },
+    });
+    const handler = createSessionProxyHandler(service, {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+    });
+    const refused = await send(handler, `${ws}/members`);
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({
+      error: { code: "forbidden", message: "Missing permission." },
+    });
+    const deleted = await send(handler, `${ws}/channels/c1`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(deleted.status).toBe(204);
+    expect(await deleted.text()).toBe("");
+  });
+
+  test("outside the workspace only the bootstrap reads answer", async () => {
+    const { handler, upstream } = setup();
+    for (const [path, method] of [
+      ["/accounts", "GET"],
+      ["/accounts/acct-1/members", "GET"],
+      ["/workspaces", "POST"],
+      ["/access/me", "POST"],
+      ["/me/settings", "GET"],
+      ["/config/server", "GET"],
+    ] as const) {
+      const response = await send(handler, `${mount}${path}`, {
+        method,
+        ...(method === "POST"
+          ? { headers: { "Content-Type": "application/json" }, body: "{}" }
+          : {}),
+      });
+      expect(response.status).toBe(404);
     }
     expect(upstream.requests).toHaveLength(0);
+  });
+
+  test("relays keys and subject ids in paths re-encoded, and refuses unsafe segments", async () => {
+    const { handler, upstream } = setup();
+    const relayed = await send(
+      handler,
+      `${ws}/members/${encodeURIComponent("user:a.b")}/allowance`,
+    );
+    expect(relayed.status).toBe(200);
+    expect(upstream.requests.at(-1)!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/members/user%3Aa.b/allowance`,
+    );
+    const before = upstream.requests.length;
+    for (const path of [
+      `${ws}/files/a%2Fb`,
+      `${ws}/files/a%5Cb`,
+      `${ws}/files/a%00b`,
+      `${ws}/files/${"x".repeat(513)}`,
+      `${ws}/sessions/${encodeURIComponent("not:an-id")}`,
+    ]) {
+      expect((await send(handler, path)).status).toBe(404);
+    }
+    expect(upstream.requests).toHaveLength(before);
+  });
+
+  test("with createSession the server owns chat setup; without it Opengeni's permissions decide", async () => {
+    const owned = setup({ createSession: (input) => ({ initialMessage: input.initialMessage }) });
+    const open = setup();
+    const routes: Array<[string, string]> = [
+      ["PUT", `${chat}/agent`],
+      ["PUT", `${chat}/tool-policy`],
+      ["PUT", `${chat}/skills`],
+      ["PUT", `${chat}/variable-sets`],
+      ["PUT", `${chat}/usage-limit`],
+      ["PUT", `${chat}/visibility`],
+      ["POST", `${chat}/active-sandbox`],
+      ["POST", `${chat}/codex-account`],
+      ["POST", `${chat}/forks`],
+      ["POST", `${ws}/chat/completions`],
+    ];
+    for (const [method, url] of routes) {
+      const init = { method, headers: { "Content-Type": "application/json" }, body: "{}" };
+      expect((await send(owned.handler, url, init)).status).toBe(404);
+      expect((await send(open.handler, url, init)).status).toBe(200);
+    }
+    expect(owned.upstream.requests).toHaveLength(0);
+    expect(open.upstream.requests).toHaveLength(routes.length);
+    // The user's own controls stay open either way.
+    for (const [method, path] of [
+      ["PUT", "archive"],
+      ["PUT", "pin"],
+      ["PATCH", ""],
+      ["PATCH", "mcp-servers/app/approval-policy"],
+      ["POST", "context/compact"],
+    ] as const) {
+      const response = await send(owned.handler, path ? `${chat}/${path}` : chat, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(200);
+    }
+    // MCP credentials are always the server's.
+    for (const { handler, upstream } of [owned, open]) {
+      const before = upstream.requests.length;
+      const rotate = await send(handler, `${chat}/mcp-credentials/rotate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(rotate.status).toBe(404);
+      expect(upstream.requests).toHaveLength(before);
+    }
+  });
+
+  test("refuse closes routes the product keeps to itself", async () => {
+    const routes: unknown[] = [];
+    const { handler, upstream } = setup({
+      refuse: (route) => {
+        routes.push(route);
+        if (route.segments[0] === "members") return true;
+        if (route.segments[2] === "terminal") {
+          return Response.json({ error: { code: "no_terminal" } }, { status: 403 });
+        }
+        return undefined;
+      },
+    });
+    expect((await send(handler, `${ws}/members`)).status).toBe(404);
+    const terminal = await send(handler, `${chat}/terminal/exec`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(terminal.status).toBe(403);
+    expect((await send(handler, `${chat}/queue`)).status).toBe(404); // upstream's own 404
+    expect(upstream.requests.map((request) => request.url.pathname)).toEqual([
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/queue`,
+    ]);
+    expect(routes).toEqual([
+      { method: "GET", segments: ["members"], sessionId: undefined },
+      {
+        method: "POST",
+        segments: ["sessions", SESSION_ID, "terminal", "exec"],
+        sessionId: SESSION_ID,
+      },
+      { method: "GET", segments: ["sessions", SESSION_ID, "queue"], sessionId: SESSION_ID },
+    ]);
+  });
+
+  test("a chat named in x-opengeni-session-id passes the host's session check", async () => {
+    const checked: string[] = [];
+    const { handler, upstream } = setup({
+      authorizeSession: (sessionId) => {
+        checked.push(sessionId);
+        return sessionId === SESSION_ID;
+      },
+    });
+    const artifact = `${ws}/artifacts/a1/content`;
+    expect(
+      (await send(handler, artifact, { headers: { "x-opengeni-session-id": "other-chat" } }))
+        .status,
+    ).toBe(404);
+    expect(
+      (await send(handler, artifact, { headers: { "x-opengeni-session-id": SESSION_ID } })).status,
+    ).toBe(200);
+    expect(
+      (await send(handler, artifact, { headers: { "x-opengeni-session-id": "../x" } })).status,
+    ).toBe(400);
+    expect(checked).toEqual(["other-chat", SESSION_ID]);
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]!.headers.get("x-opengeni-session-id")).toBe(SESSION_ID);
+  });
+
+  test("without createSession the browser's own create request passes, with the server's additions", async () => {
+    const { upstream, browser } = setup({
+      chats: "shared",
+      beforeForwardMessage: (input) =>
+        input.delivery === "create" ? { modelContext: "Server context." } : undefined,
+    });
+    await browser.createSession(WORKSPACE_ID, {
+      initialMessage: "Hello",
+      visibility: "private",
+      modelContext: "Browser context.",
+      skills: ["s1"],
+    } as never);
+    expect(upstream.requests[0]!.body).toEqual({
+      initialMessage: "Hello",
+      visibility: "private",
+      agentAccess: "workspace",
+      memoryScope: "workspace",
+      skills: ["s1"],
+      modelContext: "Server context.\n\nBrowser context.",
+    });
+    const smuggled = await rejection(
+      browser.createSession(WORKSPACE_ID, {
+        initialMessage: "Hello",
+        mcpCredentialUpdates: [],
+      } as never),
+    );
+    expect(smuggled.code).toBe("credential_update_not_allowed");
+    expect(upstream.requests).toHaveLength(1);
+  });
+
+  test("the default mutation policy refuses cross-site requests and form encodings", async () => {
+    const { handler, upstream } = setup();
+    for (const headers of [
+      { "Sec-Fetch-Site": "cross-site", "Content-Type": "application/json" },
+      { "Content-Type": "text/plain" },
+      { "Content-Type": "application/x-www-form-urlencoded" },
+    ]) {
+      const response = await send(handler, `${chat}/pin`, { method: "PUT", headers, body: "{}" });
+      expect(response.status).toBe(403);
+    }
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  test("heartbeats go only between events, never inside one", async () => {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async () => {
+        const encoder = new TextEncoder();
+        let step = 0;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              step += 1;
+              if (step === 1) controller.enqueue(encoder.encode('id: 1\ndata: {"a":'));
+              else if (step === 2) {
+                await released;
+                controller.enqueue(encoder.encode("1}\n\n"));
+              } else await new Promise(() => undefined);
+            },
+          }),
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      },
+    });
+    const handler = createSessionProxyHandler(service, {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+      heartbeatMs: 10,
+    });
+    const response = await send(handler, `${ws}/live-events/stream`);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = decoder.decode((await reader.read()).value);
+    await Bun.sleep(60);
+    release();
+    while (!text.includes(": ping")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value);
+    }
+    await reader.cancel();
+    expect(text.startsWith('id: 1\ndata: {"a":1}\n\n: ping\n\n')).toBe(true);
   });
 });

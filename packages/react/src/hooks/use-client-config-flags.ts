@@ -19,32 +19,37 @@ export type ClientConfigFlagsSource = {
 };
 
 export type ClientConfigFlags = {
-  /** Whether the config has loaded. Proxy capability flags stay `true` until it says otherwise. */
+  /**
+   * Whether the config has loaded. Capability flags stay `true` until it says
+   * otherwise. Current session proxies report only `artifacts`, `fileUploads`
+   * and `modelSelection`; the other `false` flags come from older proxies.
+   */
   loaded: boolean;
   uploads: boolean;
   modelSelection: boolean;
   sandboxFiles: boolean;
   defaultReasoningEffort: ReasoningEffort | null;
   /**
-   * Inline Site previews and the artifact viewer. `false` only when a session
-   * proxy says it does not serve them; native deployments omit the flag.
+   * Inline Site previews and the artifact viewer. `false` only when the config
+   * says they are unavailable (a session proxy that cannot open the editor's
+   * live socket); native deployments omit the flag.
    */
   artifacts: boolean;
-  /** Browser chat creation. `false` only when a session proxy has no `createSession` hook. */
+  /** Browser chat creation. `false` only when an older session proxy reports it off. */
   sessionCreation: boolean;
-  /** Chat archive/restore. `false` only when a session proxy disables it. */
+  /** Chat archive/restore. `false` only when an older session proxy reports it off. */
   archive: boolean;
   /** Native voice input when the deployment can transcribe, else null. */
   voiceInput: ClientVoiceInputConfig | null;
   /**
-   * Live voice. `false` until the config loads and when a session proxy turns
-   * it off; availability otherwise comes from the realtime model catalog.
+   * Live voice. `false` until the config loads and when an older session proxy
+   * turns it off; availability otherwise comes from the realtime model catalog.
    */
   realtimeVoice: boolean;
   /**
-   * The host explicitly offers live voice to end users (a session proxy with
-   * `realtimeVoice: true`). Embedded conversations show the voice button only
-   * then or when their `realtimeVoice` prop is `true`.
+   * An older session proxy explicitly offers live voice (`realtimeVoice:
+   * true`). Embedded conversations show the voice button only then or when
+   * their `realtimeVoice` prop is `true`.
    */
   realtimeVoiceOffered: boolean;
   /**

@@ -779,17 +779,10 @@ export function createDemoServer(config: DemoServerConfig): DemoServer {
       const refusal = sessionMessages.consume(caller.visitorId, caller.clientAddress);
       return refusal ? tooManyProxyRequests(refusal) : undefined;
     },
-    // Browser-initiated creation stays off (no `createSession` hook), and so
-    // does every surface this panel does not use.
-    sessionList: false,
-    archive: false,
+    // A public demo: only the routes this panel uses. Chats start through
+    // /api/demo/sessions, never from the browser.
+    refuse: ({ method, segments }) => !panelRoute(method, segments),
     modelSelection: false,
-    files: false,
-    voiceInput: false,
-    realtimeVoice: false,
-    sandboxFiles: false,
-    artifacts: false,
-    sites: false,
     maxBodyBytes: MAX_BODY_BYTES,
   });
 
@@ -1522,4 +1515,43 @@ if (import.meta.main) {
   console.log("Opengeni auth          ", env.apiKey ? "configured" : "MISSING");
   console.log("Opengeni workspace     ", env.workspaceId || "MISSING");
   console.log("Client address         ", clientIpHeader ?? "socket peer address");
+}
+
+/** Workspace reads the conversation panel makes. */
+const PANEL_WORKSPACE_READS: ReadonlySet<string> = new Set([
+  "",
+  "model-catalog",
+  "live-events/stream",
+  "usage/me",
+]);
+/** A chat's routes the panel uses: read, follow, send, steer, queue, answer, pause, mark read. */
+const PANEL_CHAT_ROUTES: ReadonlySet<string> = new Set([
+  "",
+  "events",
+  "events/stream",
+  "steer",
+  "queue",
+  "composer-draft",
+  "composer-draft/submit",
+  "control",
+  "human-input-requests",
+  "goal",
+  "attention",
+]);
+
+/** Whether the relay forwards this route for the panel. */
+function panelRoute(method: string, segments: readonly string[]): boolean {
+  const path = segments.join("/");
+  if (segments[0] !== "sessions") {
+    if (method === "POST") return path === "inference-control";
+    return method === "GET" && PANEL_WORKSPACE_READS.has(path);
+  }
+  // No chat list and no browser-created chats.
+  if (segments.length < 2) return false;
+  const [area = ""] = segments.slice(2);
+  return (
+    PANEL_CHAT_ROUTES.has(segments.slice(2).join("/")) ||
+    area === "queue" ||
+    area === "human-input-requests"
+  );
 }

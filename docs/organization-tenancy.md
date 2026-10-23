@@ -794,6 +794,18 @@ only narrow these: `OPENGENI_PRIVACY_ONLY_ME_ALLOWED`,
 `OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED`. See
 [the audience design](design/privacy-audiences-2026-10-11.md#settings).
 
+The same settings let owners and admins turn Personal workspaces off
+(`personalWorkspaces`, column `personal_workspaces_enabled`, migration 0918).
+Off hides each person's Personal workspace from the workspace switcher and
+landing (the membership projection carries `personalWorkspacesEnabled: false`
+and the access context's default prefers a shared workspace), refuses new root
+chats and schedules there with `403` and detail code `personal_workspaces_off`,
+and routes Slack direct messages as if the person had no Personal workspace.
+The workspace itself stays: it still anchors the person's own machines,
+browsers and vaults, which keep working from shared workspaces, and existing
+chats, their workers and existing schedules there keep working and stay
+reachable by link.
+
 Pre-registration invitation creation now claims a matching durable
 `organization_user_setup_deliveries` row and append-only attempt before calling
 the shared managed-auth email transport. The delivery freezes the invited

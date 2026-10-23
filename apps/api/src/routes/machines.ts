@@ -514,11 +514,33 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       // A person decides this; an agent cannot lend itself the owner's machine.
       throw new HTTPException(403, { message: "only the machine's owner can continue this work" });
     }
+    const sessionId = c.req.param("sessionId");
+    // Registered before the session route module, so its authorization
+    // middleware does not cover this path: the person must be able to control
+    // this exact chat (its audience included) before deciding for it.
+    try {
+      await requireSessionAuthorization(deps, grant, {
+        sessionId,
+        operation: "session.control",
+        surface: "http",
+      });
+    } catch (error) {
+      if (error instanceof SessionAuthorizationDeniedError) {
+        throw new HTTPException(404, { message: "session not found", cause: error });
+      }
+      if (error instanceof SessionAuthorizationUnavailableError) {
+        throw new HTTPException(503, {
+          message: "session authorization is unavailable",
+          cause: error,
+        });
+      }
+      throw error;
+    }
     try {
       const continued = await continueSessionWaitingWork(db, {
         accountId: grant.accountId,
         workspaceId,
-        sessionId: c.req.param("sessionId"),
+        sessionId,
         subjectId: grant.subjectId,
       });
       return c.json(ContinueSessionWaitingWorkResponse.parse({ continued }));

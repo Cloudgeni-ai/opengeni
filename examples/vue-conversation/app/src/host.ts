@@ -25,7 +25,8 @@ export function createHostHandler(client: OpenGeniClient, options: HostOptions) 
   const proxy = createSessionProxyHandler(client, {
     basePath: "/api/conversation",
     chats: "private",
-    files: false,
+    // The guest desk takes no attachments: keep Opengeni's file routes closed.
+    refuse: ({ segments }) => segments[0] === "files",
     modelSelection: false,
     maxBodyBytes: 32_768,
     resolve: async (request) => {

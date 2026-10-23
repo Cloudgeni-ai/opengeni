@@ -365,8 +365,9 @@ describe("session control surface architecture", () => {
     expect(row).toContain("<ContextMenuContent");
     expect(row).toContain("<RowQuickActions");
     expect(quickActions).toContain('aria-label={session.pinned ? "Unpin session" : "Pin session"}');
-    expect(quickActions).toContain(
-      'aria-label={session.archived ? "Restore session" : "Archive session"}',
+    // Someone who cannot pause the chat only hides it for themselves (#5711).
+    expect(quickActions).toMatch(
+      /aria-label=\{\s*archiveActionLabel\(archiveContext, session\) === "Hide for me"\s*\? "Hide for me"\s*: session\.archived\s*\? "Restore session"\s*: "Archive session"\s*\}/,
     );
     expect(quickActions).toContain("group-hover:opacity-100");
     expect(quickActions).toContain("group-focus-within:opacity-100");
@@ -402,8 +403,8 @@ describe("session control surface architecture", () => {
 
   test("bounds rendered groups independently of cached pages and keyboard navigation", async () => {
     const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
-    expect(list).toContain(
-      "sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId)",
+    expect(list).toMatch(
+      /sessionGroupWindowNodes\(\s*nodes,\s*visibleCountForGroup\(key\),\s*activeSessionId,/,
     );
     expect(list).toContain("visibleForestRows(visibleForest, expanded, activeSessionId)");
     expect(list).toContain("visibleNodes={visibleNodesForGroup(");
