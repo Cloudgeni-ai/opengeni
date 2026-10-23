@@ -1,5 +1,12 @@
 # @opengeni/desktop
 
+## 4.7.1
+
+### Patch Changes
+
+- @opengeni/agent-host@4.7.1
+- @opengeni/sdk@4.7.1
+
 ## 4.7.0
 
 ### Patch Changes

@@ -1,5 +1,24 @@
 # @opengeni/runtime
 
+## 4.7.1
+
+### Patch Changes
+
+- @opengeni/agent-proto@4.7.1
+- @opengeni/capabilities@4.7.1
+- @opengeni/codemode@4.7.1
+- @opengeni/codex@4.7.1
+- @opengeni/config@4.7.1
+- @opengeni/contracts@4.7.1
+- @opengeni/decisions@4.7.1
+- @opengeni/interaction@4.7.1
+- @opengeni/network@4.7.1
+- @opengeni/observability@4.7.1
+- @opengeni/sdk@4.7.1
+- @opengeni/tool-gateway@4.7.1
+- @opengeni/vaults@4.7.1
+- @opengeni/xai-subscription@4.7.1
+
 ## 4.7.0
 
 ### Minor Changes

@@ -1,5 +1,12 @@
 # @opengeni/vaults-onepassword
 
+## 4.7.1
+
+### Patch Changes
+
+- @opengeni/contracts@4.7.1
+- @opengeni/vaults@4.7.1
+
 ## 4.7.0
 
 ### Patch Changes
