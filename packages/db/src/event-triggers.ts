@@ -399,6 +399,8 @@ export type RecordEventDeliveryInput = {
   accountId: string;
   workspaceId: string;
   sourceId: string;
+  /** The MCP subscription stream the delivery arrived on; empty for other sources. */
+  streamKey?: string;
   status: EventDeliveryStatus;
   reason: string | null;
   /** The sender's delivery identity, or a digest of the body. */
@@ -454,88 +456,101 @@ export async function recordEventDelivery(
   db: Database,
   input: RecordEventDeliveryInput,
 ): Promise<RecordEventDeliveryResult> {
-  const settleMs = Math.max(0, Math.floor(input.settleMs ?? EVENT_DISPATCH_SETTLE_MS));
   return await withWorkspaceRls(db, input.workspaceId, async (scoped) =>
-    scoped.transaction(async (tx) => {
-      const [stored] = await rawRows<DeliveryRowRaw & { duplicate: boolean }>(
-        tx,
-        sql`insert into event_deliveries (
-            account_id, workspace_id, source_id, status, reason, dedupe_key, body, body_bytes,
-            body_sha256, headers, replay_of_delivery_id
-          ) values (
-            ${input.accountId}, ${input.workspaceId}, ${input.sourceId}, ${input.status},
-            ${input.reason}, ${input.dedupeKey}, ${input.body ? Buffer.from(input.body) : null},
-            ${input.bodyBytes}, ${input.bodySha256}, ${JSON.stringify(input.headers)}::jsonb,
-            ${input.replayOfDeliveryId ?? null}
-          )
-          on conflict (source_id, dedupe_key) where replay_of_delivery_id is null
-          do update set duplicate_count = event_deliveries.duplicate_count + 1,
-            last_duplicate_at = now()
-          returning *, (xmax <> 0) as duplicate`,
-      );
-      if (!stored) throw new Error("event delivery was not stored");
-      const deliveryRow = deliveryRowFromRaw(stored);
-      if (stored.duplicate) {
-        const eventIds = await deliveryEventIds(tx, input.workspaceId, [deliveryRow.id]);
-        return {
-          delivery: mapDelivery(deliveryRow, eventIds.get(deliveryRow.id) ?? []),
-          duplicate: true,
-          eventIds: [],
-          matchedTaskIds: [],
-        };
-      }
-      const inserted: Array<{ id: string; event: StoredEventInput }> = [];
-      for (const event of input.events) {
-        const [row] = await tx
-          .insert(schema.inboundEvents)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sourceId: input.sourceId,
-            deliveryId: deliveryRow.id,
-            externalId: event.externalId,
-            streamKey: event.streamKey,
-            type: event.type,
-            occurredAt: event.occurredAt,
-            subject: event.subject,
-            summary: event.summary,
-            url: event.url,
-            actorKind: event.actor.kind,
-            actorName: event.actor.name,
-            data: event.data,
-            dataTruncated: event.dataTruncated,
-            gapBefore: event.gapBefore,
-          })
-          .onConflictDoNothing()
-          .returning({ id: schema.inboundEvents.id });
-        if (row) inserted.push({ id: row.id, event });
-      }
-      const matched = await queueMatchingEvents(tx, input, inserted, settleMs);
-      const [updated] = await tx
-        .update(schema.eventDeliveries)
-        .set({ eventCount: inserted.length })
-        .where(eq(schema.eventDeliveries.id, deliveryRow.id))
-        .returning();
-      await tx
-        .update(schema.eventSources)
-        .set({ lastDeliveryAt: sql`now()` })
-        .where(
-          and(
-            eq(schema.eventSources.workspaceId, input.workspaceId),
-            eq(schema.eventSources.id, input.sourceId),
-          ),
-        );
-      return {
-        delivery: mapDelivery(
-          updated ?? deliveryRow,
-          inserted.map((entry) => entry.id),
-        ),
-        duplicate: false,
-        eventIds: inserted.map((entry) => entry.id),
-        matchedTaskIds: matched,
-      };
-    }),
+    scoped.transaction((tx) => recordEventDeliveryInTransaction(tx, input)),
   );
+}
+
+/**
+ * `recordEventDelivery` inside a caller's workspace-scoped transaction, so a
+ * caller can commit its own state (an MCP subscription's cursor) atomically
+ * with the delivery.
+ */
+export async function recordEventDeliveryInTransaction(
+  tx: Database,
+  input: RecordEventDeliveryInput,
+): Promise<RecordEventDeliveryResult> {
+  const settleMs = Math.max(0, Math.floor(input.settleMs ?? EVENT_DISPATCH_SETTLE_MS));
+  const [stored] = await rawRows<DeliveryRowRaw & { duplicate: boolean }>(
+    tx,
+    sql`insert into event_deliveries (
+        account_id, workspace_id, source_id, stream_key, status, reason, dedupe_key, body,
+        body_bytes, body_sha256, headers, replay_of_delivery_id
+      ) values (
+        ${input.accountId}, ${input.workspaceId}, ${input.sourceId}, ${input.streamKey ?? ""},
+        ${input.status}, ${input.reason}, ${input.dedupeKey},
+        ${input.body ? Buffer.from(input.body) : null}, ${input.bodyBytes}, ${input.bodySha256},
+        ${JSON.stringify(input.headers)}::jsonb, ${input.replayOfDeliveryId ?? null}
+      )
+      on conflict (source_id, dedupe_key) where replay_of_delivery_id is null
+      do update set duplicate_count = event_deliveries.duplicate_count + 1,
+        last_duplicate_at = now()
+      returning *, (xmax <> 0) as duplicate`,
+  );
+  if (!stored) throw new Error("event delivery was not stored");
+  const deliveryRow = deliveryRowFromRaw(stored);
+  if (stored.duplicate) {
+    const eventIds = await deliveryEventIds(tx, input.workspaceId, [deliveryRow.id]);
+    return {
+      delivery: mapDelivery(deliveryRow, eventIds.get(deliveryRow.id) ?? []),
+      duplicate: true,
+      eventIds: [],
+      matchedTaskIds: [],
+    };
+  }
+  const inserted: Array<{ id: string; event: StoredEventInput }> = [];
+  for (const event of input.events) {
+    const [row] = await tx
+      .insert(schema.inboundEvents)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sourceId: input.sourceId,
+        deliveryId: deliveryRow.id,
+        externalId: event.externalId,
+        streamKey: event.streamKey,
+        type: event.type,
+        occurredAt: event.occurredAt,
+        subject: event.subject,
+        summary: event.summary,
+        url: event.url,
+        actorKind: event.actor.kind,
+        actorName: event.actor.name,
+        data: event.data,
+        dataTruncated: event.dataTruncated,
+        gapBefore: event.gapBefore,
+        // The write time, not the transaction's: events of one delivery
+        // then list in the order the source sent them.
+        receivedAt: sql`clock_timestamp()`,
+      })
+      .onConflictDoNothing()
+      .returning({ id: schema.inboundEvents.id });
+    if (row) inserted.push({ id: row.id, event });
+  }
+  const matched = await queueMatchingEvents(tx, input, inserted, settleMs);
+  const [updated] = await tx
+    .update(schema.eventDeliveries)
+    .set({ eventCount: inserted.length })
+    .where(eq(schema.eventDeliveries.id, deliveryRow.id))
+    .returning();
+  await tx
+    .update(schema.eventSources)
+    .set({ lastDeliveryAt: sql`now()` })
+    .where(
+      and(
+        eq(schema.eventSources.workspaceId, input.workspaceId),
+        eq(schema.eventSources.id, input.sourceId),
+      ),
+    );
+  return {
+    delivery: mapDelivery(
+      updated ?? deliveryRow,
+      inserted.map((entry) => entry.id),
+    ),
+    duplicate: false,
+    eventIds: inserted.map((entry) => entry.id),
+    matchedTaskIds: matched,
+  };
 }
 
 type DeliveryRowRaw = {
@@ -543,6 +558,7 @@ type DeliveryRowRaw = {
   account_id: string;
   workspace_id: string;
   source_id: string;
+  stream_key: string;
   received_at: Date | string;
   status: string;
   reason: string | null;
@@ -567,6 +583,7 @@ function deliveryRowFromRaw(raw: DeliveryRowRaw): DeliveryRow {
     accountId: raw.account_id,
     workspaceId: raw.workspace_id,
     sourceId: raw.source_id,
+    streamKey: raw.stream_key,
     receivedAt: asDate(raw.received_at),
     status: raw.status,
     reason: raw.reason,
@@ -609,7 +626,8 @@ async function deliveryEventIds(
 /**
  * Evaluate the source's active triggers on runnable automations and queue
  * each matching event once per automation. A trigger only sees a private
- * source when its automation belongs to the source's owner.
+ * source when its automation belongs to the source's owner, and an event only
+ * fires the triggers of the stream it arrived on (an MCP subscription).
  */
 async function queueMatchingEvents(
   tx: Database,
@@ -624,10 +642,11 @@ async function queueMatchingEvents(
     event_types: string[];
     conditions: unknown;
     include_own_events: boolean;
+    stream_key: string;
   }>(
     tx,
     sql`select trigger.id, trigger.task_id, trigger.event_types, trigger.conditions,
-        trigger.include_own_events
+        trigger.include_own_events, trigger.stream_key
       from event_triggers trigger
       join scheduled_tasks task
         on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
@@ -648,6 +667,7 @@ async function queueMatchingEvents(
     if (!conditions.success) continue;
     for (const { id, event } of events) {
       if (
+        trigger.stream_key !== event.streamKey ||
         !input.match(event, {
           eventTypes: trigger.event_types,
           conditions: conditions.data,
@@ -695,6 +715,8 @@ export type EventDeliveryForReplay = {
   delivery: EventDelivery;
   body: Uint8Array | null;
   headers: Record<string, string>;
+  /** The MCP subscription stream it arrived on; empty for other sources. */
+  streamKey: string;
 };
 
 export async function getEventDeliveryForReplay(
@@ -721,6 +743,7 @@ export async function getEventDeliveryForReplay(
       delivery: mapDelivery(row, eventIds.get(row.id) ?? []),
       body: row.body,
       headers: row.headers,
+      streamKey: row.streamKey,
     };
   });
 }
@@ -980,7 +1003,8 @@ export async function getScheduledTaskEvents(
  * Replace an automation's event triggers and set its event run policy. A
  * trigger keeps its id while its position stays, so runs keep pointing at it.
  * No triggers removes the policy too; the automation is a plain schedule
- * again. `once` re-arms whenever it is set.
+ * again. `once` re-arms whenever it is set. MCP triggers carry the stream key
+ * of their subscription, which is created here when missing.
  */
 export async function setScheduledTaskEvents(
   db: Database,
@@ -988,7 +1012,7 @@ export async function setScheduledTaskEvents(
     accountId: string;
     workspaceId: string;
     taskId: string;
-    triggers: ParsedEventTriggerInput[];
+    triggers: Array<ParsedEventTriggerInput & { streamKey?: string }>;
     maxRunsPerHour?: number | undefined;
     once?: boolean | undefined;
   },
@@ -998,6 +1022,18 @@ export async function setScheduledTaskEvents(
       await tx.execute(
         sql`select id from scheduled_tasks where workspace_id = ${input.workspaceId} and id = ${input.taskId} for update`,
       );
+      const previous = await tx
+        .select({
+          sourceId: schema.eventTriggers.sourceId,
+          streamKey: schema.eventTriggers.streamKey,
+        })
+        .from(schema.eventTriggers)
+        .where(
+          and(
+            eq(schema.eventTriggers.workspaceId, input.workspaceId),
+            eq(schema.eventTriggers.taskId, input.taskId),
+          ),
+        );
       if (input.triggers.length === 0) {
         await tx
           .delete(schema.eventTriggers)
@@ -1019,6 +1055,7 @@ export async function setScheduledTaskEvents(
           sql`update scheduled_task_event_inbox set status = 'skipped'
             where workspace_id = ${input.workspaceId} and task_id = ${input.taskId} and status = 'pending'`,
         );
+        await syncMcpEventSubscriptions(tx, input.workspaceId, input.taskId, previous);
         return;
       }
       await tx
@@ -1059,6 +1096,7 @@ export async function setScheduledTaskEvents(
           conditions: trigger.conditions,
           includeOwnEvents: trigger.includeOwnEvents,
           arguments: trigger.arguments ?? null,
+          streamKey: trigger.streamKey ?? "",
           status: "active",
           statusReason: null,
         };
@@ -1087,10 +1125,64 @@ export async function setScheduledTaskEvents(
           ),
         );
       }
+      await syncMcpEventSubscriptions(tx, input.workspaceId, input.taskId, previous);
     }),
   );
   return (
     (await getScheduledTaskEvents(db, input.workspaceId, [input.taskId])).get(input.taskId) ?? null
+  );
+}
+
+/**
+ * Create the MCP subscriptions an automation's triggers want and wake every
+ * subscription it uses or used, so the subscription pump starts, keeps or
+ * ends each one now instead of at its next poll or refresh. The pump decides
+ * from the committed triggers and automation whether a subscription is still
+ * wanted, so this may run before a status change in the same transaction.
+ */
+export async function syncMcpEventSubscriptions(
+  tx: Database,
+  workspaceId: string,
+  taskId: string,
+  previous: ReadonlyArray<{ sourceId: string; streamKey: string }> = [],
+): Promise<void> {
+  await tx.execute(
+    sql`insert into mcp_event_subscriptions (
+        account_id, workspace_id, source_id, stream_key, event_name, arguments
+      )
+      select distinct on (trigger.source_id, trigger.stream_key)
+        trigger.account_id, trigger.workspace_id, trigger.source_id, trigger.stream_key,
+        trigger.event_types[1], coalesce(trigger.arguments, '{}'::jsonb)
+      from event_triggers trigger
+      join scheduled_tasks task
+        on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
+      join event_sources source
+        on source.id = trigger.source_id and source.workspace_id = trigger.workspace_id
+      where trigger.workspace_id = ${workspaceId} and trigger.task_id = ${taskId}
+        and trigger.stream_key <> '' and trigger.status <> 'disabled'
+        and source.kind = 'mcp' and task.deleted_at is null
+      order by trigger.source_id, trigger.stream_key
+      on conflict (source_id, stream_key) do nothing`,
+  );
+  const earlier = previous.filter((entry) => entry.streamKey !== "");
+  await tx.execute(
+    sql`update mcp_event_subscriptions subscription
+      set next_action_at = now(), updated_at = now()
+      where subscription.workspace_id = ${workspaceId} and subscription.next_action_at > now()
+        and (
+          (subscription.source_id, subscription.stream_key) in (
+            select trigger.source_id, trigger.stream_key from event_triggers trigger
+            where trigger.workspace_id = ${workspaceId} and trigger.task_id = ${taskId}
+              and trigger.stream_key <> '')
+          ${
+            earlier.length > 0
+              ? sql`or (subscription.source_id, subscription.stream_key) in (${sql.join(
+                  earlier.map((entry) => sql`(${entry.sourceId}::uuid, ${entry.streamKey})`),
+                  sql`, `,
+                )})`
+              : sql``
+          }
+        )`,
   );
 }
 
@@ -1100,12 +1192,28 @@ export async function rearmScheduledTaskEvents(
   workspaceId: string,
   taskId: string,
 ): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, (scoped) =>
-    scoped.execute(
+  await withWorkspaceRls(db, workspaceId, async (scoped) => {
+    await scoped.execute(
       sql`update scheduled_task_event_settings
         set armed_at = now(), completed_at = null, throttle_notified = false, updated_at = now()
         where workspace_id = ${workspaceId} and task_id = ${taskId}`,
-    ),
+    );
+    await syncMcpEventSubscriptions(scoped, workspaceId, taskId);
+  });
+}
+
+/**
+ * Have the subscription pump look at an automation's MCP streams now, after
+ * it was paused, resumed or deleted, so a stream nothing wants is ended at
+ * once instead of at its next poll or refresh.
+ */
+export async function wakeScheduledTaskMcpEventSubscriptions(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, (scoped) =>
+    syncMcpEventSubscriptions(scoped, workspaceId, taskId),
   );
 }
 

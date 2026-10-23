@@ -94,6 +94,8 @@ export const eventDeliveries = pgTable(
     duplicateCount: integer("duplicate_count").notNull().default(0),
     lastDuplicateAt: timestamp("last_duplicate_at", { withTimezone: true }),
     replayOfDeliveryId: uuid("replay_of_delivery_id"),
+    // Migration 0932: the MCP subscription stream a delivery arrived on.
+    streamKey: text("stream_key").notNull().default(""),
   },
   (table) => ({
     dedupe: uniqueIndex("event_deliveries_dedupe_uq")
@@ -162,6 +164,8 @@ export const eventTriggers = pgTable(
     conditions: jsonb("conditions").$type<unknown[]>().notNull().default([]),
     includeOwnEvents: boolean("include_own_events").notNull().default(false),
     arguments: jsonb("arguments").$type<Record<string, unknown> | null>(),
+    // Migration 0932: the MCP subscription stream the trigger listens on.
+    streamKey: text("stream_key").notNull().default(""),
     status: text("status").notNull().default("active"),
     statusReason: text("status_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -224,5 +228,41 @@ export const scheduledTaskEventInbox = pgTable(
   },
   (table) => ({
     event: unique("scheduled_task_event_inbox_event_uq").on(table.taskId, table.eventId),
+  }),
+);
+
+// Migration 0932: one MCP Events subscription per (source, event name,
+// canonical arguments) that runnable automations want.
+export const mcpEventSubscriptions = pgTable(
+  "mcp_event_subscriptions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => eventSources.id, { onDelete: "cascade" }),
+    streamKey: text("stream_key").notNull(),
+    eventName: text("event_name").notNull(),
+    arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull().default({}),
+    mode: text("mode"),
+    cursor: text("cursor"),
+    gapPending: boolean("gap_pending").notNull().default(false),
+    routeId: uuid("route_id"),
+    secretEncrypted: text("secret_encrypted"),
+    serverSubscriptionId: text("server_subscription_id"),
+    refreshBefore: timestamp("refresh_before", { withTimezone: true }),
+    nextActionAt: timestamp("next_action_at", { withTimezone: true }).notNull().defaultNow(),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    failures: integer("failures").notNull().default(0),
+    failingSince: timestamp("failing_since", { withTimezone: true }),
+    lastError: text("last_error"),
+    lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    stream: unique("mcp_event_subscriptions_stream_uq").on(table.sourceId, table.streamKey),
+    route: uniqueIndex("mcp_event_subscriptions_route_id_key").on(table.routeId),
   }),
 );
