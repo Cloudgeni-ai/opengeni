@@ -24,6 +24,39 @@ reconciliation is mandatory but does not recreate failure history. A supervisor
 STOP is not a GitHub Manual-rules restoration. The reviewed operator OFF procedure
 and rules restoration are separately required for a durable operational stop.
 
+An explicitly authorized operator START creates a new control generation and resets
+the **settled** failure streak, backoff and local stop latch from the preceding
+generation. This is an operator reset, not an automatic retry. Surviving in-flight
+or outcome-unknown checkpoint phases remain fail-closed across generations; START
+does not authorize clearing them or replaying an unknown write.
+
+### Evidenced operator OFF time in latency accounting
+
+`BATCHER_OPERATOR_OFF_EVIDENCE` optionally supplies bounded noncredential JSON with
+schema `batcher-operator-off/v1`, repository/branchPrefix/mode/serviceUid, consecutive
+provider control versions (`version`, `at`, `state`, `generation`) and proven drain
+receipts (`at`, `controlVersion`, `controlGeneration`, `serviceUid`, `manualZero`,
+`writerExited`, `stateStable`, `forced`). This is trusted operator input, not an
+authentication mechanism: retain the provider version responses and actual drained
+STOP receipts, verify the service identity, then approve the configuration change.
+Untrusted PR/comment content must never populate it.
+
+Credit begins only at successful non-forced drain completion and ends at the first
+subsequent START control version. Gaps, invalid scope, future/reversed timestamps,
+unproven exits and intervals longer than seven days are refused; open STOP intervals
+earn no credit. No duration is inferred from missing observations. The journal adds
+evidence-digest-bound intervals to stage records without altering raw timestamps.
+Intervals are clipped to each exact ready-binding/first-CI-start window and unioned
+with evidenced main-capacity waits, avoiding overlap or duplicate credit. Raw p95 is
+still reported and genuine residual slowness still triggers the breaker. Credits
+survive ordinary journal/ledger reconstruction; no state file is edited by hand.
+
+No historical OFF duration is assumed merely because the service is stopped now.
+Without configured evidence or retained credits, the original conservative raw
+latency remains. Supervisors must explicitly forward the optional setting to the
+active child; adding evidence requires a separately reviewed runtime configuration
+update, not an implicit history reset.
+
 ## Explicit first activation initialization
 
 Active mode requires a present, operator-initialized `refs/heads/batcher-state`.
@@ -578,7 +611,7 @@ all ordinary landing guards. Capacity-induced latency must not deadlock a tested
 candidate. Red/unknown results, new publication and retries remain held;
 reconciliation and observation continue. The window is based on the first CI
 start; an aged-out sample is unknown, not newly healthy. Historical stage data is
-retained, not reset. stage.json reports raw and capacity-adjusted p95, windowSeconds,
+retained, not reset. stage.json reports raw and capacity/OFF-adjusted p95, windowSeconds,
 sample count, coverageSince and completeWindow alongside the signal. This is a
 sample of heads that reached CI, not a latency claim for unknown/unstarted work
 or a completeness claim about all historical PRs. Small/partial samples are

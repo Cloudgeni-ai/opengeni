@@ -49,6 +49,57 @@ test("two-hour window ages samples without deleting history or fabricating healt
   expect(latencySummary(stages, at(161))).toEqual({ p95: null, samples: 0 });
   expect(stages.one.ciStartedAt).toBe(at(40));
 });
+test("operator OFF credits survive restart and durable replay without rewriting timestamps", async () => {
+  const { settings, observation: o } = await setup();
+  const proof = {
+    schema: "batcher-operator-off/v1",
+    repository: settings.repository,
+    branchPrefix: settings.branchPrefix,
+    mode: settings.mode,
+    serviceUid: "s",
+    controls: [
+      { version: 1, at: at(5), state: "stopped", generation: "stop-00000001" },
+      { version: 2, at: at(30), state: "running", generation: "start-00000002" },
+    ],
+    drains: [
+      {
+        at: at(10),
+        controlVersion: 1,
+        controlGeneration: "stop-00000001",
+        serviceUid: "s",
+        manualZero: true,
+        writerExited: true,
+        stateStable: true,
+        forced: false,
+      },
+    ],
+  };
+  settings.operatorOffEvidence = JSON.stringify(proof);
+  o.ledger.stages.one = sample();
+  const journal = new ObservationJournal(settings);
+  const observed = await journal.observe({ ...o, now: at(50), headroom: null });
+  expect(observed.telemetry?.p95ReadyToCiSeconds).toBe(1200);
+  expect(observed.telemetry?.rawP95ReadyToCiSeconds).toBe(2400);
+  const records = await journal.records(at(50));
+  expect(records.stages.one!.readyAt).toBe(at(0));
+  expect(records.stages.one!.ciStartedAt).toBe(at(40));
+  expect(
+    (await new ObservationJournal(settings).observe({ ...o, now: at(51), headroom: null }))
+      .telemetry?.p95ReadyToCiSeconds,
+  ).toBe(1200);
+  const fresh = await setup();
+  fresh.observation.ledger.stages = records.stages;
+  expect(
+    (
+      await new ObservationJournal(fresh.settings).observe({
+        ...fresh.observation,
+        now: at(52),
+        headroom: null,
+      })
+    ).telemetry?.p95ReadyToCiSeconds,
+  ).toBe(1200);
+  expect(records.stages.one!.operatorOffWaits).toHaveLength(1);
+});
 test("capacity credits are bounded, unioned and tied to exact ready binding before first start", () => {
   const s = sample();
   s.mainCapacityWaits = [
