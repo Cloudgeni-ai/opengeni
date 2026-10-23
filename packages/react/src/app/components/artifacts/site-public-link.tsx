@@ -77,7 +77,7 @@ export function SitePublicLink({
     return (
       <span className="mr-1 hidden items-center gap-2 sm:inline-flex">
         <span className="inline-flex items-center gap-1.5 text-2xs font-medium text-fg-subtle">
-          <span aria-hidden="true" className="size-1.5 rounded-full bg-status-idle" />
+          <span aria-hidden="true" className="size-1.5 rounded-full border border-fg-subtle" />
           Not published
         </span>
         {canPublish ? (
