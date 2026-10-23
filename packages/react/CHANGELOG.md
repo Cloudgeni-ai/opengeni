@@ -1,5 +1,21 @@
 # @opengeni/react
 
+## 5.2.1
+
+### Minor Changes
+
+- fb72b9d: Any member can now give a session they started their own access, not only organization owners and admins. The app calls it full access. Its agent can do exactly what that person can do in the app and nothing more, and the access ends when the person leaves the session's workspace. The organization's on/off switch is unchanged.
+
+### Patch Changes
+
+- b3a641c: With the `chatList` feature off, the new-chat page no longer shows the project picker or the workspace's recent chats, so an embed that shows a single chat does not list the others.
+- c4d18a1: The app no longer reads the workspace GitHub status for a member whose grant lacks `github:use`; it shows no GitHub state instead of a failed 403 request.
+- Updated dependencies [fb72b9d]
+- Updated dependencies [2d6484c]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/sdk@5.2.0
+  - @opengeni/connect@5.2.0
+
 ## 5.1.2
 
 ### Minor Changes
