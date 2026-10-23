@@ -174,3 +174,7 @@ export {
 } from "./timeline/annotation-model";
 export type { AnnotationSelection } from "./timeline/annotation-model";
 export { annotationNoteNeedsDisclosure } from "./components/timeline-annotation-layout";
+export {
+  agentWorkHumanInputSummary,
+  isAgentWorkHumanInput,
+} from "./timeline/agent-work-human-input";

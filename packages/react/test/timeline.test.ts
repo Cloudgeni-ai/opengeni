@@ -9,6 +9,10 @@ import {
 } from "../src/timeline/compaction-copy";
 import { readableWorkStatus } from "../src/timeline/work-presentation";
 import {
+  agentWorkHumanInputSummary,
+  isAgentWorkHumanInput,
+} from "../src/timeline/agent-work-human-input";
+import {
   buildTimeline,
   creditExhaustedFromEvents,
   extractSessionRef,
@@ -1652,6 +1656,145 @@ describe("buildTimeline", () => {
       false,
       false,
     ]);
+  });
+
+  test("folds a question an agent or the system answered into its turn's work details", () => {
+    const questions = [
+      {
+        id: "region",
+        kind: "single_select",
+        label: "Region",
+        prompt: "Where should it run?",
+        options: [{ id: "eu", label: "EU North" }],
+      },
+    ];
+    const turn = (turnId: string, respondedByKind: string | undefined, outcome = "answered") => [
+      event("turn.started", {}, { turnId }),
+      event(
+        "agent.toolCall.created",
+        {
+          id: `ask-${turnId}`,
+          name: "request_human_input",
+          arguments: { questions },
+        },
+        { turnId },
+      ),
+      event(
+        "session.humanInput.requested",
+        {
+          request: {
+            id: `request-${turnId}`,
+            toolCallId: `ask-${turnId}`,
+            questions,
+          },
+        },
+        { turnId },
+      ),
+      event(
+        "user.humanInputResponse",
+        {
+          requestId: `request-${turnId}`,
+          ...(respondedByKind ? { respondedByKind } : {}),
+          response:
+            outcome === "answered"
+              ? { outcome, answers: [{ questionId: "region", values: ["eu"] }] }
+              : { outcome },
+        },
+        { turnId },
+      ),
+      event("agent.message.completed", { messageId: `m-${turnId}`, text: "Done." }, { turnId }),
+      event("turn.completed", {}, { turnId }),
+    ];
+    reset();
+    const groups = groupTimeline(
+      englishText,
+      buildTimeline(englishText, [
+        ...turn("by-agent", "agent_attempt"),
+        ...turn("by-system", "system", "skipped"),
+        ...turn("skipped-by-agent", "agent_attempt", "skipped"),
+        ...turn("by-person", "human"),
+        ...turn("by-api", "api"),
+        ...turn("legacy", undefined),
+        ...turn("expired", "system", "expired"),
+      ]),
+      { readableTurns: true },
+    );
+    const topLevel = groups.flatMap((group) =>
+      group.kind === "item" && group.item.kind === "human-input" ? [group.item.turnId] : [],
+    );
+    // A system skip is a scheduled run's question nobody answered in time: the
+    // person must still see it, like an expired question.
+    expect(topLevel).toEqual(["by-system", "by-person", "by-api", "legacy", "expired"]);
+    const inWork: Record<string, HumanInputItem> = {};
+    for (const group of groups) {
+      if (group.kind !== "activity" || !group.work) continue;
+      for (const detail of group.work.details) {
+        if (detail.kind !== "item" || detail.item.kind !== "human-input") continue;
+        // Each question folds into its own turn's work, not a neighbour's.
+        expect(group.id).toBe(`work-${detail.item.turnId}`);
+        inWork[detail.item.turnId!] = detail.item;
+      }
+    }
+    expect(Object.keys(inWork)).toEqual(["by-agent", "skipped-by-agent"]);
+    expect(isAgentWorkHumanInput(inWork["by-agent"]!)).toBe(true);
+    const labels = {
+      answered: "Answered",
+      skipped: "Skipped",
+      secretSaved: (secret: { vaultName: string }) => `Saved to ${secret.vaultName}`,
+    };
+    expect(agentWorkHumanInputSummary(inWork["by-agent"]!, labels)).toBe("Region → EU North");
+    expect(agentWorkHumanInputSummary(inWork["skipped-by-agent"]!, labels)).toBe(
+      "Region → Skipped",
+    );
+  });
+
+  test("summarizes several agent answers on one line without secret values", () => {
+    const item: HumanInputItem = {
+      kind: "human-input",
+      id: "h",
+      turnId: "t",
+      requestId: "r",
+      questions: [],
+      response: { outcome: "answered", answers: [] },
+      answers: [
+        {
+          questionId: "a",
+          label: "Branch",
+          prompt: "Which branch?",
+          values: ["main", "release"],
+        },
+        {
+          questionId: "b",
+          label: "Deploy\n token",
+          prompt: "Token?",
+          values: [],
+          secret: {
+            reference: "vault-reference-placeholder",
+            username: null,
+            vaultName: "Deploy",
+            itemName: "token",
+            saveTo: "task",
+          },
+        },
+        { questionId: "c", label: "Notes", prompt: "Notes?", values: [] },
+      ],
+      answeredByAgent: true,
+      occurredAt: new Date(0).toISOString(),
+    };
+    expect(
+      agentWorkHumanInputSummary(item, {
+        answered: "Answered",
+        skipped: "Skipped",
+        secretSaved: (secret) => `Saved to ${secret.vaultName}`,
+      }),
+    ).toBe("Branch → main, release · Deploy token → Saved to Deploy · Notes → Answered");
+    expect(isAgentWorkHumanInput({ ...item, answeredByAgent: false })).toBe(false);
+    expect(
+      isAgentWorkHumanInput({
+        ...item,
+        response: { outcome: "expired" },
+      }),
+    ).toBe(false);
   });
 
   test("projects realtime voice text while retaining expandable execution context", () => {

@@ -279,10 +279,17 @@ submission returns `200` with the winning event. A later agent call returns
 Either answer refreshes the human's card, which then disappears, and the parent
 gets a deferred `child_requires_action_resolved` update. The
 `user.humanInputResponse` event records `respondedByKind`
-(`human | api | agent_attempt | system`), and the conversation says "Agent
-answered" for an agent's answer. Agents are told to answer a child's question
-only from their task context and to leave questions only a person can answer
-(decisions, preferences, credentials, approvals) to the person.
+(`human | api | agent_attempt | system`). A question an agent answered or
+skipped is agent work, not conversation: the timeline folds it into that turn's
+work details as one quiet row ("Asked  Target branch → main") that opens to the
+question, who answered, and the answer
+(`isAgentWorkHumanInput` in
+`packages/react/src/timeline/agent-work-human-input.ts`, shared by web and
+native). A person's or API client's answer, an expired or cancelled question,
+and a system skip (a scheduled run's question nobody answered in time) keep the
+conversation card. Agents are told to answer a child's question only from their
+task context and to leave questions only a person can answer (decisions,
+preferences, credentials, approvals) to the person.
 
 ## Acceptance boundary
 

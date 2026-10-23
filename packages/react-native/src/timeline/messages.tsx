@@ -21,6 +21,8 @@ export interface NativeTimelineMessages {
     answered: string;
     /** An agent answered (for example the parent of a sub-session); defaults to `answered`. */
     agentAnswered?: string;
+    /** An agent skipped the question; defaults to `skipped`. */
+    agentSkipped?: string;
     skipped: string;
     expired: string;
     cancelled: string;
@@ -118,6 +120,7 @@ export const defaultNativeTimelineMessages = (t: OpenGeniText): NativeTimelineMe
   humanInputOutcome: {
     answered: t("native.timeline.messages.youAnswered"),
     agentAnswered: t("native.timeline.messages.agentAnswered"),
+    agentSkipped: t("native.timeline.messages.agentSkipped"),
     skipped: t("native.timeline.messages.skipped"),
     expired: t("native.timeline.messages.expired"),
     cancelled: t("native.timeline.messages.cancelled"),
