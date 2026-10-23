@@ -186,6 +186,9 @@ bun scripts/merge-batcher/main.ts run
 # CI interface: stdout contains only the inspected JSON manifest.
 bun scripts/merge-batcher/main.ts inspect --tip "$TIP_SHA" --git-dir "$BARE_GIT_DIR"
 
+# Batch CI entry: a candidate manifest or a base-comparison manifest, with `purpose`.
+bun scripts/merge-batcher/main.ts inspect-run --tip "$TIP_SHA" --git-dir "$BARE_GIT_DIR"
+
 # Focused verification (two test workers maximum).
 bun test --max-concurrency 2 scripts/merge-batcher/*.test.ts
 node node_modules/typescript/bin/tsc -p scripts/merge-batcher/tsconfig.json
@@ -369,6 +372,107 @@ candidates cannot submit pending retries: the candidate must still be rooted in
 current main or an exact live predecessor chain, checked before and after the
 durable submission claim. An unknown POST outcome remains reconciliation-only,
 never a blind replay; these observations do not make GitHub REST atomic with Git.
+
+## Base-comparison evidence (`batch-base-comparison/v1`)
+
+A failed candidate is compared only with the exact base's own run of the **same**
+batch suite: the candidate's frozen execution plan and recipe on the exact base
+tree. Full-main CI is never a substitute. This section is the producer side
+(`scripts/merge-batcher/base-comparison.ts`, `scripts/ci/batch-comparison.ts`);
+the active controller owns when to publish a base run, the durable once-only
+reservation, capacity, discovery and recovery. Nothing here publishes, reruns,
+cancels or lands, and no base-purpose run exists until the controller publishes one.
+
+- **Version and support.** Comparison-bearing results carry
+  `comparison.comparisonSchema: "batch-base-comparison/v1"`; absent metadata holds
+  attribution. A base whose tree lacks `scripts/ci/batch-comparison.json` with that
+  schema is `unsupported-base` (`baseSupport`): hold, with no overlay or substitute.
+- **Frozen plan.** The executed plan fields (`unitTests` sorted and unique,
+  `typecheckProjects`, `guards`, `exampleBuildProjects`, `buildPackages`) form the
+  execution plan; `planDigest` is its canonical SHA-256. Every candidate run uploads
+  `execution-plan.json` and `inventory.json` in `batch-plan-${runAttempt}`;
+  `planArtifact(run, planDigest)` binds the exact run, attempt, tip and digest.
+- **Deterministic base commit.** `buildBase` commits the base tree with the base as
+  its sole parent, the base's own committer date and one
+  `Batch-Base-Manifest: {comparisonSchema, purpose: "base-comparison", baseSha,
+  baseTreeSha, planDigest, recipeDigest, plan}` trailer, with no candidate or time
+  fields. `baseRunId` is the manifest digest, so the same triple always yields the
+  same commit; requesting-candidate provenance belongs in the controller ledger.
+  `inspectBase` re-derives everything and rejects any `Batch-Manifest` trailer,
+  so a base tip never inspects (or lands) as a candidate. The branch is
+  `<prefix>base/<baseRunId>`; `classifyQueueRef` separates it from candidates. An
+  existing identical ref proves publication only, never completion.
+- **Base run.** For a base tip, the plan job runs `inspect-run`, then
+  `batch-comparison.ts freeze` (no impact recompute). If any planned unit file is
+  absent from the base tree, planning fails as infrastructure (exit 75) before any
+  other job, and the whole comparison is not comparable (`absentFromBase` lets the
+  controller hold before publishing). Source steps and unit processes run in
+  continue mode so every expected unit gets a verdict; per-process limits, the
+  1200-second shard deadline and job timeouts are unchanged. Candidates stay
+  fail-fast, and their comparison steps are best-effort and never change their verdict.
+- **Units and coverage.** A unit is one Bun process: `{category, files}` with the
+  sorted files that process ran; a batched process is never expanded per file.
+  `inventory.json` lists the exact processes `run-unit-shard` starts for every
+  shard. The ready job (base-checked-out verifier) writes `batch-comparison.json`
+  to `batch-comparison-${runAttempt}` and binds it by `evidenceDigest` in the
+  result header. Statuses are `pass`, `fail`, `timeout`, `killed`,
+  `infrastructure` and `not-run`; only exits the receipt classifies as code
+  failures are `fail`. Coverage is complete only when every expected unit and all
+  four source steps (`site-runtime`, `changeset`, `typecheck`, `guards`) are
+  `pass` or `fail`, nothing is absent, all receipts agree and the recipe is known.
+- **Sidecars.** Receipts (`receipt-<job>.json`) keep exactly the verdict fields.
+  Each `source` and `unit-<n>` task writes its role evidence (environment, unit
+  exits, step exits) beside its receipt as `comparison-<job>.json`, bound to the
+  same schema, batch, tip, run, attempt and job. The ready job runs the verifier of
+  the candidate's base, and older verifiers copy every `receipt-*.json` row into
+  the result; folding evidence into receipts would push a full-inventory result
+  past the controller's 64 KiB result bound even when everything passed. A sidecar
+  counts only for a job whose receipt verified for this exact attempt; a missing,
+  stale or duplicate sidecar leaves coverage incomplete, never green.
+- **Recipe.** `recipeDigest` binds the blob IDs of the batch harness's transitive
+  local import closure, every harness script that closure or the workflow executes
+  (spawned as `["bun", "<script>"]`, run as `bun <script>` or by root package
+  script name, recursively, with their own imports and executions) inside
+  `scripts/`, the workflow, tool configuration (`.oxlintrc.json`, `.oxfmtrc.json`,
+  `.changeset/config.json`, `tsconfig.base.json`), `.bun-version`, `bun.lock`, every
+  `package.json` and other toolchain pins, plus role-bound environment: runner
+  OS/architecture, image OS/version, Bun and Node versions and concurrency settings
+  for `source`, and the same plus PostgreSQL `version()` and files-per-process for
+  units. Harness-owned policy inputs that those sources' code reads directly are
+  recipe too: non-source files under `scripts/` named by repository path, relative
+  path or a bare name beside the reader, such as the public-API breaking-change
+  allowlist and the shard profiles. Product code and data a guard inspects (docs,
+  migrations, catalog data, everything outside `scripts/`) and generated snapshots
+  (`*.gen.*`) are compared, never recipe. Configuration found by composed path is
+  recipe as well: the `<project>/tsconfig.json` the typecheck step compiles for
+  every harness typecheck root (`HARNESS_TYPECHECK_PROJECTS`, the list project
+  discovery uses), each `tsconfig.json`/`jsconfig.json` Bun's runtime consults
+  walking up from a bound source to the nearest one (including the test database
+  helper in `packages/testing`), and the relative `extends` chain of every bound
+  config. Lint and format policy the pinned oxlint and oxfmt find by name in any
+  directory is recipe too: every `.gitignore`, `.eslintignore`, `.prettierignore`,
+  `.editorconfig`, nested or alternative oxlint/oxfmt config, and the local
+  `jsPlugins` an oxlint config loads. The walk is a closed worklist over typed
+  edges: lint configs follow `extends` and `jsPlugins` (so a plugin declared in an
+  inherited policy is reached), and config modules and plugins are lint policy
+  code that follows every local import and every relative path its code names,
+  inside or outside `scripts/`. Lint policy code the walk cannot follow (a
+  computed `import()`/`require()`, an unresolvable import, unparseable code) fails
+  closed. Configs of product packages the harness does not execute are compiled as
+  code under comparison and stay unbound. An executed script, named policy input
+  or consulted config that is not tracked is bound as absent. Plan and ready jobs
+  are excluded. Missing or disagreeing evidence leaves the recipe unknown and the
+  run not comparable.
+- **Verification and verdict.** `verifyBaseRun` requires the batch workflow, the
+  exact base branch and tip, the latest attempt, a completed run, a base-purpose
+  result (`verifyRunResult`; `verifyResult` rejects every non-candidate purpose),
+  outcome `success` or `code_failure`, the manifest's plan and recipe digests and
+  complete coverage. `verifyEvidence` recomputes inventory, recipe and completeness.
+  `compareFailures` returns `new-failure-demonstrated` only for candidate `fail`
+  units or steps whose identical base unit or step passed under the identical
+  recipe; otherwise `no-demonstrated-new-failure` or `not-comparable`, which both
+  hold. An empty difference never proves inheritance, and one base pass against one
+  candidate failure shows a difference, not causation.
 
 ## State machine and recovery
 

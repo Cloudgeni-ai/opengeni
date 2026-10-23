@@ -7,7 +7,7 @@ import {
   describeTestConcurrencyBudget,
   detectedMemoryState,
 } from "./ci/resource-budget";
-import { typecheckProjects } from "./ci/workspace";
+import { typecheckConfig, typecheckProjects } from "./ci/workspace";
 
 // Typecheck the whole workspace with the pinned tsrs compiler. Each
 // package/app carries its own tsconfig with the per-package compilerOptions
@@ -80,7 +80,7 @@ type ProjectResult = { project: string; status: number; output: string };
 
 function typecheckProject(project: string): Promise<ProjectResult> {
   return new Promise((resolve) => {
-    const child = spawn("node", [compiler, "--noEmit", "-p", join(project, "tsconfig.json")], {
+    const child = spawn("node", [compiler, "--noEmit", "-p", typecheckConfig(project)], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";

@@ -43,6 +43,7 @@ if (import.meta.main) {
       // Blank acquisition does not apply candidate migrations; those stay tests.
       const fixture = await acquireBlankTestDatabase!("batch-infrastructure");
       if (!fixture) throw new Error("Real PostgreSQL fixture is unavailable");
+      await recordPostgresIdentity(fixture.databaseUrl);
       await fixture.release();
     } else throw new Error("usage: batch-setup.ts install|postgres");
   } catch (error) {
@@ -51,5 +52,30 @@ if (import.meta.main) {
       error instanceof Error ? error.message : String(error),
     );
     process.exit(75);
+  }
+}
+
+/** Comparison evidence only: a failure to record never changes the setup verdict. */
+async function recordPostgresIdentity(adminUrl: string): Promise<void> {
+  const path = process.env.BATCH_POSTGRES_EVIDENCE;
+  if (!path) return;
+  try {
+    const { default: postgres } = await import("postgres");
+    const sql = postgres(adminUrl, { max: 1 });
+    try {
+      const [row] = await sql<{ version: string }[]>`select version() as version`;
+      if (row?.version)
+        (await import("node:fs")).writeFileSync(
+          path,
+          JSON.stringify({ serverVersion: row.version }) + "\n",
+        );
+    } finally {
+      await sql.end({ timeout: 5 });
+    }
+  } catch (error) {
+    console.error(
+      "PostgreSQL identity not recorded:",
+      error instanceof Error ? error.message : String(error),
+    );
   }
 }

@@ -1,5 +1,6 @@
 import { createSign } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
+import { validateExecutionPlan, type ExecutionPlan } from "./base-comparison";
 import { admit, type Comment, type PullInput, type ReadyEvent } from "./evidence";
 import {
   type Config,
@@ -812,15 +813,120 @@ export class GitHubReader {
     }
     return matches.length === 1 ? matches[0]! : null;
   }
+  /**
+   * One named JSON entry of exactly one artifact of this exact run attempt and
+   * tip. Missing, expired, oversized, duplicated or malformed artifacts are
+   * unknown (null), never evidence. Provider errors other than 404/410 throw.
+   */
+  async runArtifactJson(input: {
+    runId: number;
+    headSha: string;
+    artifact: string;
+    entry: string;
+    maxBytes: number;
+  }): Promise<unknown> {
+    const artifacts = (
+      await this.pages(`actions/runs/${input.runId}/artifacts`, "artifacts")
+    ).filter(
+      (a) =>
+        a.name === input.artifact &&
+        a.workflow_run?.id === input.runId &&
+        a.workflow_run?.head_sha === input.headSha,
+    );
+    if (artifacts.length !== 1) return null;
+    const a = artifacts[0]!;
+    if (a.expired || !(a.size_in_bytes <= input.maxBytes)) return null;
+    const response = await this.transport(
+      `https://api.github.com/repos/${this.config.repository}/actions/artifacts/${a.id}/zip`,
+      {
+        headers: { Authorization: `Bearer ${await this.auth.token()}` },
+        redirect: "manual",
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    this.checkRateLimit(response);
+    let download = response;
+    if (response.status === 302) {
+      const target = new URL(response.headers.get("location") ?? "");
+      if (target.protocol !== "https:") return null;
+      // Never forward the repository credential to the artifact storage origin.
+      download = await this.transport(target, { signal: AbortSignal.timeout(30_000) });
+    }
+    if (!download.ok) {
+      this.checkRateLimit(download);
+      if ([404, 410].includes(download.status)) return null;
+      throw new ProviderError(download.status, "artifact download");
+    }
+    try {
+      return JSON.parse(
+        readResultZip(new Uint8Array(await download.arrayBuffer()), [input.entry], {
+          archiveBytes: input.maxBytes,
+          entryBytes: input.maxBytes,
+        }),
+      );
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * The frozen execution plan a failed candidate ran, bound to its exact run
+   * attempt and to the planDigest of its verified comparison evidence.
+   */
+  async planArtifact(
+    run: Pick<Run, "id" | "attempt" | "headSha">,
+    planDigest: string,
+  ): Promise<ExecutionPlan | null> {
+    const raw = await this.runArtifactJson({
+      runId: run.id,
+      headSha: run.headSha,
+      artifact: `batch-plan-${run.attempt}`,
+      entry: "execution-plan.json",
+      maxBytes: COMPARISON_ARTIFACT_BYTES,
+    });
+    try {
+      const plan = validateExecutionPlan(raw);
+      return digest(plan) === planDigest ? plan : null;
+    } catch {
+      return null;
+    }
+  }
+  /** Raw result and comparison documents of one exact run attempt, for verifyEvidence. */
+  async comparisonArtifacts(
+    run: Pick<Run, "id" | "attempt" | "headSha">,
+  ): Promise<{ result: unknown; evidence: unknown } | null> {
+    const result = await this.runArtifactJson({
+      runId: run.id,
+      headSha: run.headSha,
+      artifact: `batch-result-${run.attempt}`,
+      entry: "batch-result.json",
+      maxBytes: 1_000_000,
+    });
+    if (!result) return null;
+    const evidence = await this.runArtifactJson({
+      runId: run.id,
+      headSha: run.headSha,
+      artifact: `batch-comparison-${run.attempt}`,
+      entry: "batch-comparison.json",
+      maxBytes: COMPARISON_ARTIFACT_BYTES,
+    });
+    return evidence ? { result, evidence } : null;
+  }
 }
+
+/** Bound for frozen plans and comparison evidence of a full-inventory batch. */
+export const COMPARISON_ARTIFACT_BYTES = 8_000_000;
 
 // Small bounded ZIP reader: no extraction paths, subprocesses, third-party APIs,
 // or artifact-controlled filenames written to disk. Uses central-directory sizes.
 export function readResultZip(
   bytes: Uint8Array,
   allowedNames = ["batch-result.json", "result.json"],
+  limits: { archiveBytes: number; entryBytes: number } = {
+    archiveBytes: 1_000_000,
+    entryBytes: 65_536,
+  },
 ): string {
-  if (bytes.byteLength > 1_000_000) throw new Error("Artifact too large");
+  if (bytes.byteLength > limits.archiveBytes) throw new Error("Artifact too large");
   const b = Buffer.from(bytes);
   let end = -1;
   for (let i = b.length - 22; i >= Math.max(0, b.length - 65_557); i--)
@@ -848,8 +954,8 @@ export function readResultZip(
     if (!allowedNames.includes(name)) continue;
     if (
       flags & 1 ||
-      size > 65_536 ||
-      compressed > 1_000_000 ||
+      size > limits.entryBytes ||
+      compressed > limits.archiveBytes ||
       b.readUInt32LE(offset) !== 0x04034b50
     )
       throw new Error("Invalid result entry");
@@ -860,7 +966,7 @@ export function readResultZip(
       compression === 0
         ? data
         : compression === 8
-          ? inflateRawSync(data, { maxOutputLength: 65_536 })
+          ? inflateRawSync(data, { maxOutputLength: limits.entryBytes })
           : null;
     if (!decoded || decoded.length !== size) throw new Error("Invalid compression");
     results.push(decoded.toString("utf8"));

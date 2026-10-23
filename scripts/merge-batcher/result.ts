@@ -35,8 +35,24 @@ export function verifyResult(
   runId: number,
   attempt: number,
 ): VerifiedResult | null {
+  return verifyRunResult(raw, manifest, runId, attempt, "candidate");
+}
+
+/**
+ * Same verification for any batch-workflow purpose. A receipt without a
+ * purpose is a candidate receipt; a base-comparison receipt can never verify as
+ * a candidate result and therefore never authorizes landing.
+ */
+export function verifyRunResult(
+  raw: unknown,
+  manifest: Pick<Manifest, "batchId" | "tipSha">,
+  runId: number,
+  attempt: number,
+  purpose: "candidate" | "base-comparison",
+): VerifiedResult | null {
   if (!raw || typeof raw !== "object") return null;
   const data = raw as Record<string, unknown>;
+  if ((data.purpose ?? "candidate") !== purpose) return null;
   if (
     data.schemaVersion !== 1 ||
     data.batchId !== manifest.batchId ||
