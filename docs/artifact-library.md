@@ -145,6 +145,20 @@ search, and a Filter menu for archived items and sorting. The session panel
 uses the same catalog with a source-session filter. Both open the existing
 type-specific viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
 
+In the session panel a plain click on an image or file opens the artifact
+viewer (`artifact-viewer.tsx`): one window-sized dialog that steps through
+exactly the artifacts the panel lists, in its order, so search, filters and
+sorting carry over. Previous/Next in its header, Left/Right, or a touch swipe
+step without wrapping; the header shows "3 of 23", the title, Download for
+images and the row's ⋯ menu (whose Open still opens the artifact in the panel);
+Escape closes it. Images fit the window without being scaled past their pixels,
+a click toggles actual size, and neighbouring images preload through the
+retained-image cache. Sites, documents, spreadsheets and presentations keep
+opening in the panel on click, and show their embedded preview when the viewer
+steps onto them, where arrow keys stay with the content. The workspace library
+keeps its URL-based browsing on artifact pages (below). Chat images keep the
+timeline lightbox, which already pages through every image in the conversation.
+
 Workspace-library tabs, search, sorting and archive filters travel in the URL
 when opening a viewer. The Artifacts back link and browser Back return to that
 same query, with the library's scroll position and loaded pages restored in the
