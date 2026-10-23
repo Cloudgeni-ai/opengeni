@@ -254,6 +254,10 @@ service does not interpret an incomplete observation as an empty queue.
 
 The GitHub-only admission contract is an open, non-draft PR with `queue-ready`
 and successful configured required GitHub-hosted checks on its exact current head.
+The admission workflow is fast lint, types and selected units, not the full PR
+suite; full main CI remains the independent post-merge backstop. These instructions
+apply to coding agents in Cursor and other workspaces without an owner-specific
+comment format or human-only intake step.
 Agent evidence comments, VM attestations and reviewer session UUIDs are not intake
 gates. Approval requirements remain those of existing repository protection;
 the batcher adds no separate approval requirement. Required checks must be trusted

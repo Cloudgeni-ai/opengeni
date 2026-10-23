@@ -791,7 +791,8 @@ End-to-end agent runs require the full stack plus valid model and sandbox creden
 Follow [`docs/merge-batcher.md`](docs/merge-batcher.md); historical measurements
 and inactive alternatives remain in [`docs/merge-queue.md`](docs/merge-queue.md).
 Admission uses GitHub: an open, non-draft PR with `queue-ready` and the configured
-required GitHub-hosted checks passing on its exact current head. Agent comments,
+required fast GitHub-hosted checks (lint, types and selected unit tests) passing
+on its exact current head, not the full PR suite. Agent comments,
 VM attestations and reviewer session UUIDs are not admission requirements.
 Approval requirements come from the existing repository protection policy;
 the batcher adds no separate human or agent approval gate. Follow the repository's
