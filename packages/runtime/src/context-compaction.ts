@@ -4,13 +4,17 @@
  * The checkpoint model sees the current active history plus one fixed
  * checkpoint prompt, then the active history is rebuilt from the newest real
  * user/system input messages within one cumulative 20k-token budget plus one summary.
- * Assistant messages, tool calls/results, and reasoning are removed from the
+ * A retained person's message keeps the last reply its own turn gave (matched
+ * by the turn id of each history row, never for the turn running the
+ * compaction), so an answered request never reads as still pending. Other
+ * assistant messages, tool calls/results, and reasoning are removed from the
  * active model-facing history; retained input images and database audit rows remain.
  */
 
 import {
   TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE,
   hasOpaqueProviderArtifact,
+  RETAINED_REPLY_TURN_FIELD,
   projectRejectedReasoningArtifact,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
@@ -1632,11 +1636,13 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
 function prepareRetainedInputs(
   items: readonly CompactionItem[],
   isCandidate: (item: CompactionItem) => boolean,
+  turns: CompactionTurnContext | undefined,
 ): {
   source: CompactionItem[];
   charged: CompactionItem[];
   skip: (index: number) => boolean;
   goalAllowanceTokens: (index: number) => number;
+  reply: (index: number) => CompactionItem | undefined;
 } {
   const source = expandUnchangedSessionGoalContexts(items);
   const charged = collapseRepeatedSessionGoalContexts(source);
@@ -1647,6 +1653,7 @@ function prepareRetainedInputs(
       break;
     }
   }
+  const replies = finishedTurnReplies(source, turns);
   return {
     source,
     charged,
@@ -1659,6 +1666,138 @@ function prepareRetainedInputs(
             estimateTextTokens(messageText(source[index]!)) -
               estimateTextTokens(messageText(charged[index]!)),
           ),
+    reply: (index) => {
+      const replyIndex = replies.get(index);
+      return replyIndex === undefined ? undefined : source[replyIndex];
+    },
+  };
+}
+
+/**
+ * A retained reply keeps at most this much text (its start and end, middle
+ * truncated). It only has to show that the request was answered and how; the
+ * summary carries the substance, and a long reply kept whole would undo the
+ * compaction. It is kept even when the person's message used the whole retained
+ * budget, because dropping it would leave an answered request reading as
+ * pending again.
+ */
+export const RETAINED_REPLY_MAX_TOKENS = 512;
+
+/**
+ * Which turn wrote each compaction input item, so a retained request is paired
+ * only with its own turn's answer.
+ */
+export type CompactionTurnContext = {
+  /** Turn id of each input item, in the same order; null or absent when unknown. */
+  itemTurnIds: readonly (string | null | undefined)[];
+  /** The turn running this compaction. It may still be working, so its requests stay open. */
+  activeTurnId?: string | null;
+};
+
+/** A rebuilt history plus the turn each item belongs to (null for compaction-made items). */
+export type CompactionReplacement = {
+  history: CompactionItem[];
+  turnIds: (string | null)[];
+};
+
+/** A message a person wrote (not platform context, a catalog or a summary). */
+function isPersonMessage(item: CompactionItem): boolean {
+  return (
+    isUserMessage(item) &&
+    !isCompactionSummary(item) &&
+    !isAttachmentCatalog(item) &&
+    readSkillCatalogContext(item) === null
+  );
+}
+
+function isAssistantReply(item: CompactionItem): boolean {
+  return (
+    itemType(item) === "message" &&
+    itemRole(item) === "assistant" &&
+    messageText(item).trim().length > 0
+  );
+}
+
+function knownTurnId(turns: CompactionTurnContext | undefined, index: number): string | null {
+  const turnId = turns?.itemTurnIds[index];
+  return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
+}
+
+/**
+ * The turn that gave an assistant reply: its row's turn id, or for a reply copy
+ * an earlier compaction retained (stored without a turn id) the turn recorded
+ * on the copy itself.
+ */
+function replyTurnId(
+  items: readonly CompactionItem[],
+  turns: CompactionTurnContext,
+  index: number,
+): string | null {
+  const known = knownTurnId(turns, index);
+  if (known !== null) return known;
+  const recorded = items[index]![RETAINED_REPLY_TURN_FIELD];
+  return typeof recorded === "string" && recorded.length > 0 ? recorded : null;
+}
+
+/**
+ * Person message index → index of the last assistant message its own turn
+ * gave, matched by the turn id each history row was written with. The turn
+ * running the compaction is skipped, since its request may still be open, and
+ * so are messages whose turn is unknown (rows an earlier compaction rewrote
+ * without one): a later input message is not proof that their turn finished.
+ * When a turn holds several person messages, only the last one before the
+ * reply is paired, so a reply is never retained twice.
+ */
+function finishedTurnReplies(
+  items: readonly CompactionItem[],
+  turns: CompactionTurnContext | undefined,
+): Map<number, number> {
+  const replies = new Map<number, number>();
+  if (!turns) return replies;
+  const activeTurnId = turns.activeTurnId ?? null;
+  const lastReplyByTurn = new Map<string, number>();
+  for (let index = 0; index < items.length; index += 1) {
+    if (!isAssistantReply(items[index]!)) continue;
+    const turnId = replyTurnId(items, turns, index);
+    if (turnId !== null && turnId !== activeTurnId) lastReplyByTurn.set(turnId, index);
+  }
+  const pairedTurns = new Set<string>();
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const turnId = knownTurnId(turns, index);
+    if (turnId === null || pairedTurns.has(turnId)) continue;
+    const replyIndex = lastReplyByTurn.get(turnId);
+    if (replyIndex === undefined || replyIndex < index) continue;
+    if (!isPersonMessage(items[index]!)) continue;
+    replies.set(index, replyIndex);
+    pairedTurns.add(turnId);
+  }
+  return replies;
+}
+
+/**
+ * The retained copy of a reply: its text only (middle-truncated to the budget,
+ * at most {@link RETAINED_REPLY_MAX_TOKENS}), without provider ids or
+ * provider data that belonged to the dropped response. The copy records the
+ * turn that gave the reply in {@link RETAINED_REPLY_TURN_FIELD} (stripped at
+ * the model wire); its row is stored without a turn id, so the original reply
+ * stays the only row of that turn with that text.
+ */
+function retainedReply(
+  item: CompactionItem,
+  turnId: string | null,
+): { item: CompactionItem; tokens: number } {
+  const text = messageText(item);
+  const kept = truncateMiddleByEstimatedTokens(text, RETAINED_REPLY_MAX_TOKENS);
+  const phase = (item as { phase?: unknown }).phase;
+  return {
+    item: {
+      type: "message",
+      role: "assistant",
+      ...(phase === "commentary" || phase === "final_answer" ? { phase } : {}),
+      content: [{ type: "output_text", text: kept }],
+      ...(turnId !== null ? { [RETAINED_REPLY_TURN_FIELD]: turnId } : {}),
+    },
+    tokens: estimateTextTokens(kept),
   };
 }
 
@@ -1701,6 +1840,9 @@ function withOnlyNewestAttachmentsInline(items: readonly CompactionItem[]): Comp
  * the newest user/system input messages that fit one cumulative, model-bounded budget
  * (prior summaries excluded) plus one marked summary item. Only the newest
  * user message with attachments keeps its images inline.
+ * When turn ids are given, a retained person's message from another turn is
+ * followed by that turn's last reply, charged to the same budget, so it does
+ * not read as pending. Without a known turn id no reply is kept.
  * Each distinct session goal context is kept once, and answered transient
  * machine-status batches are left to the summary.
  * Attachments of messages that were not retained are listed in one dated
@@ -1712,8 +1854,34 @@ export function buildCompactionReplacementHistory(
   retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
   retainedMessageBudgetTokens = COMPACT_USER_MESSAGE_MAX_TOKENS,
   attachmentUploadTimes: AttachmentUploadTimes = new Map(),
+  turns?: CompactionTurnContext,
 ): CompactionItem[] {
+  return buildCompactionReplacement(
+    items,
+    summaryBody,
+    retainedItemTokens,
+    retainedMessageBudgetTokens,
+    attachmentUploadTimes,
+    turns,
+  ).history;
+}
+
+/**
+ * {@link buildCompactionReplacementHistory} plus the turn each rebuilt item
+ * belongs to: a retained message keeps its original turn, and a retained reply
+ * copy is null and records its turn in the item instead, so a later compaction
+ * can pair them again.
+ */
+export function buildCompactionReplacement(
+  items: readonly CompactionItem[],
+  summaryBody: string,
+  retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
+  retainedMessageBudgetTokens = COMPACT_USER_MESSAGE_MAX_TOKENS,
+  attachmentUploadTimes: AttachmentUploadTimes = new Map(),
+  turns?: CompactionTurnContext,
+): CompactionReplacement {
   const retainedReversed: CompactionItem[] = [];
+  const retainedTurnIdsReversed: (string | null)[] = [];
   let remaining = Math.max(
     0,
     Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, retainedMessageBudgetTokens),
@@ -1721,6 +1889,7 @@ export function buildCompactionReplacementHistory(
   const prepared = prepareRetainedInputs(
     withOnlyNewestAttachmentsInline(items),
     isPortableRetentionCandidate,
+    turns,
   );
   for (let index = prepared.charged.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const item = prepared.charged[index]!;
@@ -1730,17 +1899,22 @@ export function buildCompactionReplacementHistory(
     const textTokens = estimateTextTokens(messageText(item));
     const nonTextTokens = Math.max(0, retainedItemTokens(item) - textTokens);
     if (nonTextTokens >= remaining) continue;
-    retainedReversed.push(
-      compactRetainedMessage(
-        prepared.source[index]!,
-        remaining - nonTextTokens + prepared.goalAllowanceTokens(index),
-      ),
+    const message = compactRetainedMessage(
+      prepared.source[index]!,
+      remaining - nonTextTokens + prepared.goalAllowanceTokens(index),
     );
-    if (textTokens + nonTextTokens > remaining) {
-      remaining = 0;
-      break;
+    remaining = Math.max(0, remaining - textTokens - nonTextTokens);
+    const turnId = knownTurnId(turns, index);
+    const reply = prepared.reply(index);
+    if (reply) {
+      const kept = retainedReply(reply, turnId);
+      retainedReversed.push(kept.item);
+      retainedTurnIdsReversed.push(null);
+      remaining = Math.max(0, remaining - kept.tokens);
     }
-    remaining -= textTokens + nonTextTokens;
+    retainedReversed.push(message);
+    retainedTurnIdsReversed.push(turnId);
+    if (remaining === 0) break;
   }
   const currentCatalog = latestSkillCatalogContext(items);
   const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
@@ -1750,10 +1924,16 @@ export function buildCompactionReplacementHistory(
     ...(attachmentCatalog ? [attachmentCatalog] : []),
     ...retained,
   ];
+  const turnIds: (string | null)[] = [
+    ...(currentCatalog ? [null] : []),
+    ...(attachmentCatalog ? [null] : []),
+    ...retainedTurnIdsReversed.reverse(),
+  ];
   history.push(buildSummaryItem(summaryBody));
   const reasoning = latestReasoningConfiguration(items);
   if (reasoning) history.push(reasoningConfigurationItem(reasoning));
-  return history;
+  while (turnIds.length < history.length) turnIds.push(null);
+  return { history, turnIds };
 }
 
 /** True for a Codex remote-compaction output item with opaque encrypted content. */
@@ -1782,6 +1962,8 @@ export function isRetainedRemoteV2Message(item: unknown): boolean {
  * Build the active history after Codex remote compaction v2:
  * newest retained user/system/developer messages within the CLI 64k budget plus the
  * opaque `{ type: "compaction", encrypted_content }` item.
+ * As in the portable rebuild, a retained person's message from another known
+ * turn is followed by that turn's last reply, charged to the same budget.
  *
  * Both modes keep attachments inline only on the newest user message that has
  * them, and charge its projected image tokens against the budget.
@@ -1791,17 +1973,37 @@ export function buildRemoteV2ReplacementHistory(
   compactionItem: CompactionItem,
   retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
   attachmentUploadTimes: AttachmentUploadTimes = new Map(),
+  turns?: CompactionTurnContext,
 ): CompactionItem[] {
+  return buildRemoteV2Replacement(
+    items,
+    compactionItem,
+    retainedItemTokens,
+    attachmentUploadTimes,
+    turns,
+  ).history;
+}
+
+/** {@link buildRemoteV2ReplacementHistory} plus the turn each rebuilt item belongs to. */
+export function buildRemoteV2Replacement(
+  items: readonly CompactionItem[],
+  compactionItem: CompactionItem,
+  retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
+  attachmentUploadTimes: AttachmentUploadTimes = new Map(),
+  turns?: CompactionTurnContext,
+): CompactionReplacement {
   if (!isRemoteCompactionItem(compactionItem)) {
     throw new EmptyCompactionSummaryError({
       stage: "remote_v2_compaction_item",
     });
   }
   const retainedReversed: CompactionItem[] = [];
+  const retainedTurnIdsReversed: (string | null)[] = [];
   let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
   const prepared = prepareRetainedInputs(
     withOnlyNewestAttachmentsInline(items),
     (item) => readSkillCatalogContext(item) === null && isRetainedRemoteV2Message(item),
+    turns,
   );
   for (let index = prepared.charged.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const item = prepared.charged[index]!;
@@ -1814,14 +2016,19 @@ export function buildRemoteV2ReplacementHistory(
     if (nonTextTokens >= remaining) continue;
     const full = prepared.source[index]!;
     const allowance = prepared.goalAllowanceTokens(index);
-    if (chargeTokens <= remaining) {
-      retainedReversed.push(compactRetainedMessage(full, remaining - nonTextTokens + allowance));
-      remaining -= chargeTokens;
-      continue;
+    const message = compactRetainedMessage(full, remaining - nonTextTokens + allowance);
+    remaining = Math.max(0, remaining - chargeTokens);
+    const turnId = knownTurnId(turns, index);
+    const reply = prepared.reply(index);
+    if (reply) {
+      const kept = retainedReply(reply, turnId);
+      retainedReversed.push(kept.item);
+      retainedTurnIdsReversed.push(null);
+      remaining = Math.max(0, remaining - kept.tokens);
     }
-    retainedReversed.push(compactRetainedMessage(full, remaining - nonTextTokens + allowance));
-    remaining = 0;
-    break;
+    retainedReversed.push(message);
+    retainedTurnIdsReversed.push(turnId);
+    if (remaining === 0) break;
   }
   const currentCatalog = latestSkillCatalogContext(items);
   const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
@@ -1831,6 +2038,11 @@ export function buildRemoteV2ReplacementHistory(
     ...(attachmentCatalog ? [attachmentCatalog] : []),
     ...retained,
   ];
+  const turnIds: (string | null)[] = [
+    ...(currentCatalog ? [null] : []),
+    ...(attachmentCatalog ? [null] : []),
+    ...retainedTurnIdsReversed.reverse(),
+  ];
   history.push({
     type: "compaction",
     encrypted_content: compactionItem.encrypted_content,
@@ -1838,7 +2050,8 @@ export function buildRemoteV2ReplacementHistory(
   });
   const reasoning = latestReasoningConfiguration(items);
   if (reasoning) history.push(reasoningConfigurationItem(reasoning));
-  return history;
+  while (turnIds.length < history.length) turnIds.push(null);
+  return { history, turnIds };
 }
 
 function isAttachmentCatalog(item: unknown): boolean {
