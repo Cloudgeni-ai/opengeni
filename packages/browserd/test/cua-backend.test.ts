@@ -2758,30 +2758,48 @@ describe("CUA desktop boundary", () => {
       });
       const token = (observation: ComputerBackendObservation, index: number) =>
         `${observation.observationId.split(":").pop()}:${index}`;
+      const asBatch = (
+        first: ComputerBackendActionCommand,
+        ...rest: ComputerBackendActionCommand["action"][]
+      ): ComputerBackendActionCommand => ({
+        ...first,
+        action: {
+          type: "batch",
+          actions: [first.action, ...rest],
+        } as ComputerBackendActionCommand["action"],
+      });
+      const enter = {
+        type: "keyboard",
+        action: "press",
+        value: "enter",
+      } as ComputerBackendActionCommand["action"];
 
-      test("a batch's first action presses the one link of the name and says so", async () => {
+      test("a batch's first action naming a button shown as a link goes to CUA by role and name", async () => {
         const fixture = new LinkFixture();
         fixture.links = ["Edit billing"];
+        fixture.standIns = { 0: { role: "AXLink", name: "Edit billing" } };
         const { backend, observation } = await open(fixture);
         try {
           const reported: unknown[] = [];
-          const first = named(observation, "button", "Edit billing");
           await backend.dispatch(
-            {
-              ...first,
-              action: {
-                type: "batch",
-                actions: [first.action, { type: "keyboard", action: "press", value: "enter" }],
-              } as ComputerBackendActionCommand["action"],
-            },
+            asBatch(named(observation, "button", "Edit billing"), enter),
             (standIn) => reported.push(standIn),
           );
           const steps = fixture.calls.find((call) => call.name === "run_steps")!.args.steps as {
             tool: string;
             args: Record<string, unknown>;
+            wait_for?: Record<string, unknown>;
           }[];
+          // CUA decides, once the window has settled, whether the link is the
+          // one meant; nothing is retargeted from the batch's observation.
           expect(steps[0]!.tool).toBe("click");
-          expect(steps[0]!.args.element_token).toBe(token(observation, 2));
+          expect(steps[0]!.args.element_token).toBeUndefined();
+          expect(steps[0]!.args).toMatchObject({
+            role: "button",
+            name: "Edit billing",
+            exact: true,
+          });
+          expect(steps[0]!.wait_for).toMatchObject({ role: "button", name: "Edit billing" });
           expect(reported).toEqual([
             { actionIndex: 0, requestedRole: "button", role: "link", name: "Edit billing" },
           ]);
@@ -2790,68 +2808,33 @@ describe("CUA desktop boundary", () => {
         }
       });
 
-      test("a single action presses the link, and a real button of the name wins", async () => {
+      test("a first action with nothing alike, a value write or a single action fails at once", async () => {
         const fixture = new LinkFixture();
-        fixture.links = ["Edit billing", "Apply"];
-        const first = await open(fixture);
-        try {
-          const reported: unknown[] = [];
-          await first.backend.dispatch(
-            named(first.observation, "button", "Edit billing"),
-            (standIn) => reported.push(standIn),
-          );
-          expect(mutations(fixture).at(-1)?.args.element_token).toBe(token(first.observation, 2));
-          expect(reported).toEqual([
-            { actionIndex: 0, requestedRole: "button", role: "link", name: "Edit billing" },
-          ]);
-          // A link named for a button: the link "Apply" is the one meant.
-          const second = await first.backend.observe(first.observation.target.id);
-          const standIns: unknown[] = [];
-          await first.backend.dispatch(named(second, "button", "Apply"), (standIn) =>
-            standIns.push(standIn),
-          );
-          expect(mutations(fixture).at(-1)?.args.element_token).toBe(token(second, 0));
-          expect(standIns).toEqual([]);
-        } finally {
-          await first.backend.close();
-        }
-      });
-
-      test("two links of the name, or a value set on one, are refused before anything runs", async () => {
-        const fixture = new LinkFixture();
-        fixture.links = ["Edit billing", "Edit billing"];
+        fixture.links = ["Edit billing"];
         const { backend, observation } = await open(fixture);
         try {
-          const failure = await backend
-            .dispatch(named(observation, "button", "Edit billing"))
-            .catch((error: unknown) => error);
-          expect(failure).toMatchObject({ code: "locator_ambiguous", dispatched: false });
-          expect(String((failure as Error).message)).toBe(
-            `No button here is named "Edit billing", and 2 elements of other roles are: link ${observation.roots[2]!.ref}, link ${observation.roots[3]!.ref}; act on the one meant by its ref`,
-          );
+          for (const attempt of [
+            // Nothing of either role has the name.
+            asBatch(named(observation, "button", "Upgrade"), enter),
+            // A value is not pressed: no stand-in.
+            asBatch(named(observation, "button", "Edit billing", "set_value")),
+            // One action on its own keeps its immediate answer.
+            named(observation, "button", "Edit billing"),
+          ]) {
+            const failure = await backend.dispatch(attempt).catch((error: unknown) => error);
+            expect(failure).toMatchObject({ code: "locator_not_found", dispatched: false });
+          }
+          expect(fixture.ran).toBe(false);
+          expect(mutations(fixture)).toHaveLength(0);
+          // A button of the name is acted on by its token, as before.
+          await backend.dispatch(asBatch(named(observation, "button", "Apply"), enter));
+          const steps = fixture.calls.find((call) => call.name === "run_steps")!.args.steps as {
+            args: Record<string, unknown>;
+          }[];
+          expect(steps[0]!.args.element_token).toBe(token(observation, 0));
         } finally {
           await backend.close();
         }
-        const single = new LinkFixture();
-        single.links = ["Edit billing"];
-        const second = await open(single);
-        try {
-          const action = named(second.observation, "button", "Edit billing", "set_value").action;
-          const failure = await second.backend
-            .dispatch({
-              ...batch(second.observation),
-              action: {
-                type: "batch",
-                actions: [action],
-              } as ComputerBackendActionCommand["action"],
-            })
-            .catch((error: unknown) => error);
-          expect(failure).toMatchObject({ code: "locator_not_found", dispatched: false });
-        } finally {
-          await second.backend.close();
-        }
-        expect(mutations(fixture)).toHaveLength(0);
-        expect(fixture.ran || single.ran).toBe(false);
       });
 
       const upgrade = (observation: ComputerBackendObservation) => ({

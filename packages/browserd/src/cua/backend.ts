@@ -293,7 +293,7 @@ export class CuaComputerBackend implements ComputerBackend {
         await this.batchSteps(command);
         return;
       }
-      await this.operations(this.withStandIn(command).command);
+      await this.operations(command);
     });
   }
 
@@ -324,8 +324,7 @@ export class CuaComputerBackend implements ComputerBackend {
             false,
           );
       }
-      const local = this.withStandIn(command);
-      const operations = await this.operations(local.command);
+      const operations = await this.operations(command);
       // Filling a date field takes several steps: run them as one batch.
       if (
         operations.length > 1 &&
@@ -393,7 +392,6 @@ export class CuaComputerBackend implements ComputerBackend {
           throw error;
         }
       }
-      if (local.standIn) standIn?.(local.standIn);
       const after = await this.observeAfter(command.targetId, acted, known, report);
       if (after?.target.id !== command.targetId) return after;
       const confirmed = await this.confirmInput(after, operations);
@@ -490,26 +488,18 @@ export class CuaComputerBackend implements ComputerBackend {
    * the only state its refs come from, before any of them runs. */
   private async batchSteps(
     command: ComputerBackendActionCommand,
-  ): Promise<{ steps: Operation[]; actionOf: number[]; standIns: ComputerBackendRoleStandIn[] }> {
+  ): Promise<{ steps: Operation[]; actionOf: number[] }> {
     if (command.action.type !== "batch") throw new Error("not a batch");
     const { actions } = command.action;
     const steps: Operation[] = [];
     const actionOf: number[] = [];
-    const standIns: ComputerBackendRoleStandIn[] = [];
     for (const [index, action] of actions.entries()) {
       try {
-        // Only the first action stands in from the batch's observation: a
-        // later one may name an element an earlier one brings up, so CUA
-        // finds it when its step runs, once the window settles.
-        const local =
-          index === 0
-            ? this.withStandIn({ ...command, action })
-            : { command: { ...command, action }, standIn: null };
-        if (local.standIn) standIns.push(local.standIn);
         const operations = await this.operations(
-          local.command,
+          { ...command, action },
           index > 0,
           steps.some((step) => step.stepOptions !== undefined),
+          true,
         );
         for (const operation of operations) {
           steps.push(operation);
@@ -526,7 +516,7 @@ export class CuaComputerBackend implements ComputerBackend {
         throw refused;
       }
     }
-    return { steps, actionOf, standIns };
+    return { steps, actionOf };
   }
 
   /** A batch runs as one CUA run_steps call (or a few, when its actions take
@@ -540,7 +530,8 @@ export class CuaComputerBackend implements ComputerBackend {
     single = false,
     standIn?: (standIn: ComputerBackendRoleStandIn) => void,
   ): Promise<ComputerBackendObservation | null> {
-    const { steps, actionOf, standIns } = await this.batchSteps(command);
+    const { steps, actionOf } = await this.batchSteps(command);
+    const standIns: ComputerBackendRoleStandIn[] = [];
     const actions = command.action.type === "batch" ? command.action.actions : [];
     const observed = this.observations.get(command.targetId);
     this.observations.delete(command.targetId);
@@ -1399,6 +1390,7 @@ export class CuaComputerBackend implements ComputerBackend {
     laterInBatch = false,
     /** An earlier action of the batch names its element (see namedOperation). */
     afterNamed = false,
+    inBatch = false,
   ): Promise<Operation[]> {
     if (command.action.type === "batch") throw unsupported("A batch cannot contain a batch");
     if (command.action.type === "pointer" && command.action.clickCount === 2) {
@@ -1564,9 +1556,11 @@ export class CuaComputerBackend implements ComputerBackend {
       try {
         node = this.locateObserved(command.targetId, observed, action.locator);
       } catch (error) {
-        // Not in the batch's observation: an earlier action may bring it up.
+        // Not in the batch's observation: an earlier action may bring it up,
+        // or the element shown under the other role pressed alike may be the
+        // one meant, which CUA's step decides once the window has settled.
         const named =
-          laterInBatch &&
+          (laterInBatch || (inBatch && mayStandIn(observed.roots, action))) &&
           error instanceof ComputerBackendError &&
           error.code === "locator_not_found" &&
           ACTIONS_ON_UNSEEN.has(action.action)
@@ -1890,65 +1884,6 @@ export class CuaComputerBackend implements ComputerBackend {
     return [...candidates.filter((id) => !inner(id)), ...candidates.filter((id) => inner(id))];
   }
 
-  /** An action that presses a button or link it names by role and name, when
-   * nothing of that role has the name in the current observation and exactly
-   * one element of the other of the two roles does, with that whole name:
-   * the action names that element by its ref instead, and says so. Models
-   * confuse the two roles, and on the web the difference is rarely visible.
-   * Several such elements fail at once, naming their refs. */
-  private withStandIn(command: ComputerBackendActionCommand): {
-    command: ComputerBackendActionCommand;
-    standIn: ComputerBackendRoleStandIn | null;
-  } {
-    const none = { command, standIn: null };
-    const action = command.action;
-    if (action.type !== "semantic" || action.locator.kind !== "role") return none;
-    const { role, name, exact } = action.locator;
-    if (
-      name === undefined ||
-      !PRESSED_ALIKE_ROLES.has(role) ||
-      !PRESSING_ACTIONS.has(action.action)
-    )
-      return none;
-    const observed = this.observations.get(command.targetId);
-    if (!observed || observed.observationId !== command.expectedObservationId) return none;
-    if (observed.roots.some((node) => node.role === role)) {
-      try {
-        locate(observed.roots, action.locator);
-        return none;
-      } catch (error) {
-        // Several of the role named: that error stands.
-        if (!(error instanceof ComputerBackendError) || error.code !== "locator_not_found")
-          return none;
-      }
-    }
-    const wanted = exact === true ? name : name.trim().toLowerCase();
-    const alike = observed.roots.filter(
-      (node) =>
-        node.role !== role &&
-        PRESSED_ALIKE_ROLES.has(node.role) &&
-        node.actions.includes(action.action) &&
-        node.name !== undefined &&
-        (exact === true ? node.name : node.name.trim().toLowerCase()) === wanted,
-    );
-    if (alike.length > 1)
-      throw new ComputerBackendError(
-        "locator_ambiguous",
-        `No ${role} here is named "${name}", and ${alike.length} elements of other roles are: ${alike
-          .slice(0, 5)
-          .map((node) => `${node.role} ${node.ref}`)
-          .join(", ")}; act on the one meant by its ref`,
-        false,
-        false,
-      );
-    const node = alike[0];
-    if (!node) return none;
-    return {
-      command: { ...command, action: { ...action, locator: { kind: "ref", ref: node.ref } } },
-      standIn: { actionIndex: 0, requestedRole: role, role: node.role, name: node.name! },
-    };
-  }
-
   /** The element a locator names. A ref from an earlier observation of the
    * same window names the same element in the latest one only while the
    * window is unchanged: CUA honours only the tokens of its latest reading,
@@ -2027,13 +1962,39 @@ const ACTIONS_ON_UNSEEN: ReadonlySet<string> = new Set([
  * enable: CUA's longest wait for one step. */
 const NAMED_STEP_WAIT_MS = 10_000;
 
-/** Roles pressed alike, which an action that presses one may stand in for
- * each other (see withStandIn). Toggles, choices and menus keep their roles. */
-const PRESSED_ALIKE_ROLES: ReadonlySet<string> = new Set(["button", "link"]);
-/** Actions that do the same on a button and a link. */
-const PRESSING_ACTIONS: ReadonlySet<string> = new Set(["invoke", "focus", "show_menu"]);
 /** How long its lookup then waits, once the check found the element. */
 const NAMED_STEP_FIND_MS = 1_000;
+
+/** Roles pressed alike: CUA's step that names one may use the one element
+ * of the other with that name, once the window has settled. */
+const PRESSED_ALIKE_ROLES: ReadonlySet<string> = new Set(["button", "link"]);
+
+/** Whether the first action of a batch, naming a button or link its
+ * observation does not show, may mean an element shown with that name under
+ * the other role: its step then goes to CUA by role and name, which uses that
+ * element only when the window's complete reading settles with exactly one
+ * such element and no element of the role named. Otherwise the action fails
+ * at once, as before. */
+function mayStandIn(
+  roots: readonly InteractionSemanticNodeValue[],
+  action: SemanticAction,
+): boolean {
+  const { locator } = action;
+  if (
+    locator.kind !== "role" ||
+    locator.name === undefined ||
+    !PRESSED_ALIKE_ROLES.has(locator.role) ||
+    !["invoke", "show_menu", "focus"].includes(action.action)
+  )
+    return false;
+  const wanted = locator.name.trim().toLowerCase();
+  return roots.some(
+    (node) =>
+      node.role !== locator.role &&
+      PRESSED_ALIKE_ROLES.has(node.role) &&
+      node.name?.trim().toLowerCase() === wanted,
+  );
+}
 
 /** The roles macOS and Windows observations show, as CUA's lookup names
  * them where they differ ("text" there is a text field; here it is static
