@@ -1076,7 +1076,6 @@ export function registerComputerSessionRoutes(
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
         // Still live on a machine its task has since moved away from: record
         // the move now, so the retirement below ends it there in this call.
-        let movedNow = false;
         if (
           before.session.lifecycle !== "lost" &&
           before.session.controller &&
@@ -1087,7 +1086,6 @@ export function registerComputerSessionRoutes(
             connectedSandboxId: before.session.placement.sandboxId,
           }))
         ) {
-          movedNow = true;
           before = await getComputerSessionControlRecord(deps.db, {
             accountId: grant.accountId,
             workspaceId,
@@ -1117,15 +1115,13 @@ export function registerComputerSessionRoutes(
               "This computer session still runs on the Connected Machine its task moved away from, and that machine could not stop it now. Try again when the machine is online.",
             );
           }
-          // The move just recorded may have left other resources of this task
-          // on that machine; end them too without making this request wait.
-          if (movedNow) {
-            void retireSourceFormerPlacements(channelServices, {
-              grant,
-              sourceSessionId: before.sourceSessionId,
-              origin: null,
-            });
-          }
+          // The machine is reachable again: end anything else this task left
+          // on it too, without making this request wait.
+          void retireSourceFormerPlacements(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            origin: null,
+          });
         }
         if (before.session.controller) controllerAuthorityRoot(deps);
         const prepared = await prepareComputerSessionEnd(deps.db, {

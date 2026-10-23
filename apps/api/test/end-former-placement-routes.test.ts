@@ -51,7 +51,9 @@ describe("ending a browser or Desktop left live on the task's former machine", (
             scenario: "already lost to the move",
             status: 200,
             lifecycle: "ended",
-            calls: ["retire this on former", "prepare", "complete"],
+            // A retry once the machine is back also ends what else the task
+            // left there.
+            calls: ["retire this on former", "retire others", "prepare", "complete"],
           },
           {
             resource,
