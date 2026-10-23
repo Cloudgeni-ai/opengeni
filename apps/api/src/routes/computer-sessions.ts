@@ -49,6 +49,7 @@ import {
   getComputerSessionControlRecord,
   getLiveEnrollmentConnection,
   getSession,
+  interactionControllerGone,
   listComputerSessions,
   prepareComputerSessionCreate,
   prepareComputerSessionEnd,
@@ -1125,13 +1126,28 @@ export function registerComputerSessionRoutes(
           operationId: request.operationId,
         });
         const binding = record.session.controller;
-        if (!binding) {
+        // A computer with no controller, or in a Chrome profile that can never
+        // be reached again, ends here; completing under the bound generation
+        // fences that controller off.
+        if (
+          !binding ||
+          (record.session.placement?.kind === "attached_device" &&
+            (await interactionControllerGone(
+              deps.db,
+              await attachedBrowserViewer(deps, grant, workspaceId),
+              {
+                ...record.session.placement,
+                deviceWorkspaceId: record.deviceWorkspaceId,
+                placementInstanceId: binding.placementInstanceId,
+              },
+            )))
+        ) {
           const completed = await completeComputerSessionEnd(deps.db, {
             accountId: grant.accountId,
             workspaceId,
             operationId: request.operationId,
             computerSessionId,
-            expectedControllerGeneration: null,
+            expectedControllerGeneration: binding?.controllerGeneration ?? null,
           });
           await releaseInteractionHolder(
             grant,

@@ -1442,6 +1442,11 @@ describe("BrowserSession route discipline", () => {
     // completion keeps the bound generation so that controller stays fenced.
     expect(gone).toBeLessThan(route.indexOf("dispatchBrowserSessionOperation"));
     expect(gone).toBeLessThan(route.indexOf("withBrowserPlacement("));
+    // Pinned to the session's stored profile workspace and bound Chrome
+    // generation, so a restarted, deleted or unshared profile counts as gone.
+    const check = route.slice(gone, route.indexOf("completeBrowserSessionEnd", gone));
+    expect(check).toContain("record.deviceWorkspaceId");
+    expect(check).toContain("binding.placementInstanceId");
     const completion = route.slice(gone, route.indexOf("requireSourceSession", gone));
     expect(completion).toContain(
       "expectedControllerGeneration: binding?.controllerGeneration ?? null",

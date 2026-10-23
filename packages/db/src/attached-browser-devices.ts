@@ -1100,19 +1100,28 @@ export async function getAttachedBrowserDevice(
 /** Where a browser or computer's controller runs, as far as ending it needs. */
 export type InteractionControllerPlacement =
   | { kind: "connected_machine"; sandboxId: string }
-  | { kind: "attached_device"; deviceId: string; deviceWorkspaceId?: string | null }
+  | {
+      kind: "attached_device";
+      deviceId: string;
+      deviceWorkspaceId?: string | null;
+      /** The Chrome generation the session's controller is bound to. */
+      placementInstanceId?: string | null;
+    }
   | { kind: string };
 
 /** True when a browser or computer's controller can never be reached again,
  * so ending it completes in the control plane:
  *  - on a Connected Machine that was removed (revoked); that machine can no
  *    longer run or keep it;
- *  - in a person's own Chrome whose device is disconnected, or whose machine
- *    was removed. Such a session holds no Opengeni process or profile; the
- *    tabs it opened stay with the person as ordinary tabs.
- * A machine that is only offline still holds its sessions' processes and
- * private profiles, so it is not gone. Both checks go through the viewer's
- * own owner-aware machine listing: a machine hidden from them is never gone. */
+ *  - in a person's own Chrome whose profile is disconnected, has restarted
+ *    since the session was placed, is gone, or is no longer reachable from
+ *    this viewer's workspace (its machine was removed or stopped being shared
+ *    here). Such a session holds no Opengeni process or profile, and nobody
+ *    here can reach the controller to end it there; the tabs it opened stay
+ *    with the person as ordinary tabs, and completing under the bound
+ *    generation fences that controller off.
+ * A Connected Machine that is only offline, or hidden from this viewer, still
+ * holds its sessions' processes and private profiles, so it is not gone. */
 export async function interactionControllerGone(
   db: Database,
   viewer: AttachedBrowserViewer,
@@ -1134,6 +1143,10 @@ export async function interactionControllerGone(
     });
   }
   if (placement && "deviceId" in placement && placement.kind === "attached_device") {
+    const expectedGeneration =
+      "placementInstanceId" in placement && typeof placement.placementInstanceId === "string"
+        ? placement.placementInstanceId
+        : null;
     try {
       const device = await getAttachedBrowserDevice(db, {
         ...viewer,
@@ -1143,9 +1156,12 @@ export async function interactionControllerGone(
             ? placement.deviceWorkspaceId
             : null,
       });
-      return device.state !== "connected";
+      return (
+        device.state !== "connected" ||
+        (expectedGeneration !== null && device.connectionGeneration !== expectedGeneration)
+      );
     } catch (error) {
-      if (error instanceof AttachedBrowserDeviceNotFoundError) return false;
+      if (error instanceof AttachedBrowserDeviceNotFoundError) return true;
       throw error;
     }
   }

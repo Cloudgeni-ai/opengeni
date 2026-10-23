@@ -3333,6 +3333,7 @@ export function registerBrowserSessionRoutes(
             workspaceId,
             record.session.placement,
             record.deviceWorkspaceId,
+            binding.placementInstanceId,
           ))
         ) {
           const completed = await completeBrowserSessionEnd(deps.db, {
@@ -4608,13 +4609,15 @@ export function registerBrowserSessionRoutes(
     );
   }
 
-  /** See `interactionControllerGone`: a removed machine or a disconnected
-   * Chrome device; a managed browser on a machine that is only offline waits. */
+  /** See `interactionControllerGone`: a removed machine, or a Chrome profile
+   * that is disconnected, restarted, gone or no longer reachable here; a
+   * managed browser on a machine that is only offline waits. */
   async function browserControllerGone(
     grant: AccessGrant,
     workspaceId: string,
     placement: InteractionPlacement | null,
     deviceWorkspaceId: string | null,
+    placementInstanceId: string | null,
   ): Promise<boolean> {
     if (placement?.kind !== "connected_machine" && placement?.kind !== "attached_device") {
       return false;
@@ -4622,7 +4625,9 @@ export function registerBrowserSessionRoutes(
     return await interactionControllerGone(
       deps.db,
       await attachedBrowserViewer(deps, grant, workspaceId),
-      placement.kind === "attached_device" ? { ...placement, deviceWorkspaceId } : placement,
+      placement.kind === "attached_device"
+        ? { ...placement, deviceWorkspaceId, placementInstanceId }
+        : placement,
     );
   }
 

@@ -7,6 +7,7 @@ import {
   activateBrowserSession,
   activateComputerSession,
   AttachedBrowserDeviceNotFoundError,
+  completeBrowserSessionEnd,
   createDb,
   createOrganizationInvitation,
   createSession,
@@ -19,6 +20,7 @@ import {
   interactionControllerGone,
   listAttachedBrowserDevices,
   prepareBrowserSessionCreate,
+  prepareBrowserSessionEnd,
   prepareComputerSessionCreate,
   reconcileAttachedBrowserInventory,
   revokeEnrollment,
@@ -224,6 +226,35 @@ async function activeAttachedBrowser(
   return { browser, controller };
 }
 
+/** End, as the End route does: a controller nobody here can reach again is
+ *  gone, so the end completes in the control plane under its generation. */
+async function expectEndsInControlPlane(
+  org: Org,
+  scope: { accountId: string; workspaceId: string },
+  browserSessionId: string,
+  controller: { controllerGeneration: string },
+  placement: Parameters<typeof interactionControllerGone>[2],
+) {
+  expect(await interactionControllerGone(client.db, viewer(org, org.owner), placement)).toBe(true);
+  const operationId = crypto.randomUUID();
+  await prepareBrowserSessionEnd(client.db, {
+    ...scope,
+    browserSessionId,
+    operationId,
+    actorSubjectId: org.owner,
+  });
+  const completed = await completeBrowserSessionEnd(client.db, {
+    ...scope,
+    operationId,
+    browserSessionId,
+    expectedControllerGeneration: controller.controllerGeneration,
+  });
+  expect(completed.session.lifecycle).toBe("ended");
+  expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
+    lifecycle: "ended",
+  });
+}
+
 async function personalWorkspaceOf(org: Org, subjectId: string): Promise<string> {
   const [row] = await shared.admin<Array<{ personalWorkspaceId: string | null }>>`
     select personal_workspace_id as "personalWorkspaceId" from organization_memberships
@@ -366,7 +397,7 @@ describe("ending a browser whose controller can never be reached again", () => {
     expect(await interactionControllerGone(client.db, viewer(org, org.owner), attached)).toBe(true);
   });
 
-  test("someone else's personal machine is never judged gone for a person it is hidden from", async () => {
+  test("a hidden Connected Machine is never gone; a Chrome profile nobody here can reach is", async () => {
     const org = await organization();
     const personal = await machine(org, "user");
     const sandboxId = await sandboxOf(personal.enrollmentId);
@@ -382,12 +413,14 @@ describe("ending a browser whose controller can never be reached again", () => {
         sandboxId,
       }),
     ).toBe(false);
+    // A Chrome session holds no Opengeni process; one this person cannot
+    // reach ends in the control plane rather than never.
     expect(
       await interactionControllerGone(client.db, asMember, {
         kind: "attached_device",
         deviceId: personal.deviceId,
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       await interactionControllerGone(client.db, viewer(org, org.owner), {
         kind: "connected_machine",
@@ -472,12 +505,30 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
         deviceId: personal.deviceId,
       }),
     ).rejects.toBeInstanceOf(AttachedBrowserDeviceNotFoundError);
+    // Nothing the member could reach: ending such a session completes here.
     expect(
       await interactionControllerGone(client.db, viewer(org, org.member), {
         kind: "attached_device",
         deviceId: personal.deviceId,
       }),
+    ).toBe(true);
+    // The owner still reaches it on its current generation, not on an old one.
+    expect(
+      await interactionControllerGone(client.db, viewer(org, org.owner), {
+        kind: "attached_device",
+        deviceId: personal.deviceId,
+        deviceWorkspaceId: personalWorkspaceId,
+        placementInstanceId: "extension-1",
+      }),
     ).toBe(false);
+    expect(
+      await interactionControllerGone(client.db, viewer(org, org.owner), {
+        kind: "attached_device",
+        deviceId: personal.deviceId,
+        deviceWorkspaceId: personalWorkspaceId,
+        placementInstanceId: "extension-0",
+      }),
+    ).toBe(true);
 
     // Disconnecting there is seen here on the next read.
     await reconcileAttachedBrowserInventory(client.db, {
@@ -723,6 +774,65 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
     expect(
       await getBrowserSession(client.db, { ...scope, browserSessionId: browser.session.id }),
     ).toMatchObject({ lifecycle: "lost" });
+  });
+
+  test("a session elsewhere still ends once its profile's workspace is deleted", async () => {
+    const org = await organization();
+    const personalWorkspaceId = await personalWorkspaceOf(org, org.owner);
+    const personal = await machine(org, "user", personalWorkspaceId);
+    const scope = { accountId: org.accountId, workspaceId: org.workspaceId };
+    const { browser, controller } = await activeAttachedBrowser(
+      org,
+      scope,
+      personal.deviceId,
+      personalWorkspaceId,
+    );
+    await shared.admin.begin(async (tx) => {
+      await tx`update organization_memberships
+        set personal_workspace_id = null, status = 'revoked', revoked_at = now()
+        where account_id = ${org.accountId} and subject_id = ${org.owner}`;
+      await tx`delete from workspaces where id = ${personalWorkspaceId}`;
+    });
+    await expectEndsInControlPlane(org, scope, browser.session.id, controller, {
+      kind: "attached_device",
+      deviceId: personal.deviceId,
+      deviceWorkspaceId: personalWorkspaceId,
+      placementInstanceId: controller.placementInstanceId,
+    });
+  });
+
+  test("a session elsewhere still ends once its machine stops being shared there", async () => {
+    const org = await organization();
+    const personalWorkspaceId = await personalWorkspaceOf(org, org.owner);
+    const everyone = await machine(org, "organization", personalWorkspaceId);
+    const scope = { accountId: org.accountId, workspaceId: org.workspaceId };
+    const { browser, controller } = await activeAttachedBrowser(
+      org,
+      scope,
+      everyone.deviceId,
+      personalWorkspaceId,
+    );
+    const placement = {
+      kind: "attached_device",
+      deviceId: everyone.deviceId,
+      deviceWorkspaceId: personalWorkspaceId,
+      placementInstanceId: controller.placementInstanceId,
+    };
+    expect(await interactionControllerGone(client.db, viewer(org, org.owner), placement)).toBe(
+      false,
+    );
+    // Narrowed to the workspace it is enrolled in: the profile row and its
+    // generation are unchanged, but nobody here can reach it any more.
+    await shared.admin`
+      update enrollments set authority_scope = 'workspace' where id = ${everyone.enrollmentId}`;
+    await expect(
+      getAttachedBrowserDevice(client.db, {
+        ...viewer(org, org.owner),
+        deviceId: everyone.deviceId,
+        deviceWorkspaceId: personalWorkspaceId,
+      }),
+    ).rejects.toBeInstanceOf(AttachedBrowserDeviceNotFoundError);
+    await expectEndsInControlPlane(org, scope, browser.session.id, controller, placement);
   });
 
   test("a session from before profiles recorded their workspace still ends with its profile", async () => {

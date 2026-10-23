@@ -234,4 +234,27 @@ describe("ComputerSession route discipline", () => {
       dispatched.indexOf("completeComputerSessionEnd"),
     );
   });
+
+  test("ends a computer in a Chrome profile nobody here can reach in the control plane", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const route = source.slice(
+      source.indexOf('"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/end"'),
+      source.indexOf("async function withComputerPlacement"),
+    );
+    const gone = route.indexOf("interactionControllerGone(");
+    expect(gone).toBeGreaterThan(route.indexOf("const binding = record.session.controller"));
+    // Checked before any controller dispatch, pinned to the session's stored
+    // profile workspace and bound Chrome generation.
+    expect(gone).toBeLessThan(route.indexOf("dispatchComputerSessionOperation"));
+    expect(gone).toBeLessThan(route.indexOf("withComputerPlacement("));
+    const check = route.slice(gone, route.indexOf("completeComputerSessionEnd", gone));
+    expect(check).toContain("deviceWorkspaceId: record.deviceWorkspaceId");
+    expect(check).toContain("placementInstanceId: binding.placementInstanceId");
+    // Completion keeps the bound generation so that controller stays fenced.
+    const completion = route.slice(gone, route.indexOf("requireSourceSession", gone));
+    expect(completion).toContain(
+      "expectedControllerGeneration: binding?.controllerGeneration ?? null",
+    );
+    expect(completion).toContain("releaseInteractionHolder");
+  });
 });
