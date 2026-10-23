@@ -45,13 +45,12 @@ import {
 } from "../../lib/actions/chat-directory";
 import { matchesChord, type Chord } from "../../lib/actions/chords";
 import {
-  rankSites,
   readSidebarSites,
-  recentSites,
   siteRecords,
   useSiteDirectoryVersion,
   type SiteRecord,
 } from "../../lib/actions/site-directory";
+import { rankSites, recentSites } from "../../lib/actions/site-rank";
 import { useAppActions } from "../../lib/actions/actions-provider";
 import {
   foldForSearch,

@@ -1,13 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
-  rankSites,
   readSidebarSites,
-  recentSites,
   rememberSidebarSites,
   sitePath,
   siteRecords,
   type SiteRecord,
 } from "./site-directory";
+import { rankSites, recentSites } from "./site-rank";
 import { LOOSE_MATCH_BELOW } from "./rank";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
