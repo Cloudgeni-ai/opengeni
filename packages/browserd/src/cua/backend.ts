@@ -906,6 +906,7 @@ export class CuaComputerBackend implements ComputerBackend {
             .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
         roots: [],
         nodeCount: 0,
+        readByNativeTools: true,
         focusedRef: null,
         changedRegions: [],
       };
