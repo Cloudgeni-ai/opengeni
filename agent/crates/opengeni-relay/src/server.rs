@@ -599,6 +599,21 @@ pub(crate) mod conn {
                 if claims.port != key.port {
                     return Err("viewer token port does not match the channel key".to_string());
                 }
+                // A token bound to one machine's exact stream only opens that one.
+                if claims
+                    .agent_id
+                    .as_ref()
+                    .is_some_and(|agent| *agent != key.agent_id)
+                {
+                    return Err("viewer token machine does not match the channel key".to_string());
+                }
+                if claims
+                    .channel_id
+                    .as_ref()
+                    .is_some_and(|channel| *channel != key.channel_id)
+                {
+                    return Err("viewer token stream does not match the channel key".to_string());
+                }
                 // The epoch fences are applied at attach (the floors), from the
                 // claims of THIS exact verification — no re-verify, no window
                 // where an expiring token attaches unfenced.

@@ -2616,10 +2616,16 @@ export class SelfhostedSession {
       // The relay's wss route (`/stream`); buildStreamUrl honors `path`.
       path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
       query: routingQuery,
+      relayChannel: { workspaceId: this.controlWorkspaceId, agentId: this.agentId, channelId },
     };
   }
 
   private relayEndpoint(channel: StreamChannel): ExposedPortEndpoint {
+    // The viewer token is minted for this channel, so it must be this machine's
+    // own: enrolled in the workspace it is addressed in, under its own id.
+    if (channel.workspaceId !== this.controlWorkspaceId || channel.agentId !== this.agentId) {
+      throw new Error("selfhosted stream channel does not belong to this machine");
+    }
     const tls = this.relay.tls ?? true;
     const routingQuery =
       `ws=${encodeURIComponent(channel.workspaceId)}` +
@@ -2634,6 +2640,11 @@ export class SelfhostedSession {
       path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
       query: routingQuery,
       protocol: kindToProtocol(channel.kind),
+      relayChannel: {
+        workspaceId: channel.workspaceId,
+        agentId: channel.agentId,
+        channelId: channel.channelId,
+      },
     };
   }
 
