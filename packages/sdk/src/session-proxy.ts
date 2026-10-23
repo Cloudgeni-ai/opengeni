@@ -550,8 +550,15 @@ export function createSessionProxyHandler(
         // the key's own authority.
         if (!reading) return notAllowed();
         if (root === "workspaces") {
-          const workspaces = await client.listWorkspaces();
-          return json(workspaces.filter((workspace) => workspace.id === workspaceId));
+          // One read of the resolved workspace as the user, not a list of all of theirs.
+          try {
+            return json([await client.getWorkspace(workspaceId)]);
+          } catch (error) {
+            const notReadable =
+              error instanceof OpenGeniApiError && (error.status === 403 || error.status === 404);
+            if (notReadable) return json([]);
+            throw error;
+          }
         }
         if (root === "access" && rest.length === 1 && rest[0] === "me") {
           // An external actor's access inventory is empty: its authority for
