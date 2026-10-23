@@ -115,9 +115,10 @@ export type SessionProxyRoute = {
 
 /**
  * What the browser supplies when creating a chat while the server owns chat
- * setup (`createSession` is set), besides `modelContext`, which the relay
- * appends after any context the hook and `beforeForwardMessage` return, as it
- * does for follow-up messages. After the hook returns, the relay adds the
+ * setup (`createSession` is set), besides `modelContext`: as for follow-up
+ * messages, `beforeForwardMessage` receives it as `browserContext`, and the
+ * relay appends it (or what that hook returns in its place) after the
+ * server's context. After the hook returns, the relay adds the
  * attached files to the created request (deduplicated by file id) and, when
  * `modelSelection` is not `false`, applies the browser's explicit model
  * choices over the hook's, exactly as follow-up messages carry them. Return a
@@ -157,8 +158,9 @@ export type SessionProxyMessageInput = {
    * - `resume` (a paused chat), `retry` (a failed turn) and `queue-steer` (a
    *   queued message moved into the running turn) start work without new text.
    * `realtime` is live voice: once when a call starts (refuse it, or rotate
-   * MCP credentials), and before each batch of finalized transcripts and spoken
-   * requests is saved (refuse it, or add `modelContext`).
+   * MCP credentials), and once for each finalized transcript or spoken request
+   * before its batch is saved (refuse the batch, or decide the entry's
+   * context; `realtimeKind` names the entry).
    */
   delivery:
     | "create"
@@ -175,9 +177,20 @@ export type SessionProxyMessageInput = {
    * The browser's key for this action (`clientEventId`, or `idempotencyKey`
    * for `create`). Opengeni accepts an action once per key, so a retry carries
    * the same key: use it to make your own bookkeeping (billing, context)
-   * idempotent. Absent when the browser sent none.
+   * idempotent. For a voice entry, the entry's `operationId`. Absent when the
+   * browser sent none.
    */
   clientEventId?: string | undefined;
+  /**
+   * The model context the browser attached to this message or voice entry
+   * (for example the page, record or selection it was sent from). It is the
+   * browser's claim, unverified. The relay forwards it after your own
+   * `modelContext` unless you return `browserContext`. Absent when the
+   * browser sent none.
+   */
+  browserContext?: string | undefined;
+  /** For a live voice entry, which kind of entry is about to be saved. */
+  realtimeKind?: "user_transcript" | "assistant_transcript" | "delegation_call" | undefined;
 };
 
 /** Server-side additions the host attaches to one forwarded user message or response. */
@@ -190,6 +203,14 @@ export type SessionProxyMessageExtras = {
    * a retried voice entry must carry the same context to be accepted.
    */
   modelContext?: string | undefined;
+  /**
+   * What the model gets in place of the browser's `browserContext`: omit it
+   * to keep the browser's context as sent, return a string to replace it (for
+   * example the validated, normalized form your product accepts), or `null`
+   * to drop it. Return a `Response` instead to refuse a malformed claim. Keep
+   * it the same for a retry with the same `clientEventId`.
+   */
+  browserContext?: string | null | undefined;
   /**
    * Header-only credential rotation for MCP servers already attached to the
    * session (for example a fresh short-lived per-user bearer), applied
@@ -283,8 +304,9 @@ export type SessionProxyHandlerOptions = {
    * request that starts the agent working again without a message (resume,
    * retry, queue steer), and live voice start and transcript save
    * (`delivery: "realtime"`): every browser action that starts model work.
-   * Return server-owned `modelContext` (messages and voice transcripts only)
-   * and MCP credential rotations, or a `Response` to reject the action. For
+   * Return server-owned `modelContext` and what replaces the browser's own
+   * context (`browserContext`; both for messages and voice transcripts only),
+   * MCP credential rotations, or a `Response` to reject the action. For
    * actions without a message body, the relay applies the rotations before
    * forwarding.
    */
@@ -810,12 +832,16 @@ export function createSessionProxyHandler(
         // Submit repeats the saved policy as a mandatory integrity fence. Never
         // replace it with a newer draft's policy: outcome-unknown retries must
         // retain the original receipt hash. The API rejects any new selection.
-        const message = sanitizeMessage(value, modelSelection || input.delivery === "submit");
-        const extras = await messageExtras(input);
+        const { modelContext: sent, ...message } = sanitizeMessage(
+          value,
+          modelSelection || input.delivery === "submit",
+        );
+        const browser = withBrowserContext(sent);
+        const extras = await messageExtras({ ...input, ...browser });
         if (extras instanceof Response) return extras;
         const modelContext = joinContext(
           extras?.modelContext,
-          typeof message.modelContext === "string" ? message.modelContext : undefined,
+          decidedBrowserContext(extras, browser.browserContext),
         );
         return {
           ...message,
@@ -854,15 +880,20 @@ export function createSessionProxyHandler(
         const body = (await readJsonBody(request, maxBodyBytes))!;
         if (!options.createSession) {
           // Opengeni's own create request, as the user, with the server's additions.
-          const created = browserPayload(body) as CreateSessionRequest;
+          const { modelContext: sent, ...created } = browserPayload(body) as CreateSessionRequest;
           if (!modelSelection) for (const field of MODEL_FIELDS) delete created[field];
+          const browser = withBrowserContext(sent);
           const extras = await messageExtras({
             delivery: "create",
             ...(created.startMode === "realtime" ? { startMode: "realtime" as const } : {}),
             ...keyed(actionKey(created)),
+            ...browser,
           });
           if (extras instanceof Response) return extras;
-          const modelContext = joinContext(extras?.modelContext, created.modelContext);
+          const modelContext = joinContext(
+            extras?.modelContext,
+            decidedBrowserContext(extras, browser.browserContext),
+          );
           return await forward({
             ...defaults,
             ...(toolServer
@@ -886,12 +917,13 @@ export function createSessionProxyHandler(
           delivery: "create",
           ...(input.startMode ? { startMode: input.startMode } : {}),
           ...keyed(input.idempotencyKey),
+          ...withBrowserContext(browser.modelContext),
         });
         if (extras instanceof Response) return extras;
         const modelContext = joinContext(
           extras?.modelContext,
           created.modelContext,
-          browser.modelContext,
+          decidedBrowserContext(extras, browser.modelContext),
         );
         const response = await forward({
           ...created,
@@ -1039,12 +1071,34 @@ export function createSessionProxyHandler(
         ) {
           const body = (await readJsonBody(request, maxBodyBytes))!;
           if (!hasRealtimeMessages(body)) return await forward(body);
-          const extras = await options.beforeForwardMessage(
-            { sessionId, delivery: "realtime" },
-            context,
-          );
-          if (extras instanceof Response) return extras;
-          return await forward(withRealtimeContext(body, extras?.modelContext));
+          // Each transcript or spoken request becomes its own message, with its
+          // own key and its own page: the host decides each entry's context.
+          const entries: unknown[] = [];
+          for (const entry of body.entries as unknown[]) {
+            if (!isRealtimeMessage(entry)) {
+              entries.push(entry);
+              continue;
+            }
+            const { modelContext: sent, ...fields } = entry;
+            const browser = withBrowserContext(sent);
+            const extras = await options.beforeForwardMessage(
+              {
+                sessionId,
+                delivery: "realtime",
+                ...keyed(typeof fields.operationId === "string" ? fields.operationId : undefined),
+                realtimeKind: fields.kind,
+                ...browser,
+              },
+              context,
+            );
+            if (extras instanceof Response) return extras;
+            const modelContext = joinContext(
+              extras?.modelContext,
+              decidedBrowserContext(extras, browser.browserContext),
+            );
+            entries.push(modelContext ? { ...fields, modelContext } : fields);
+          }
+          return await forward({ ...body, entries });
         }
       }
       return await forward();
@@ -1338,37 +1392,20 @@ const REALTIME_MESSAGE_KINDS: ReadonlySet<string> = new Set([
   "assistant_transcript",
 ]);
 
-function hasRealtimeMessages(body: Record<string, unknown>): boolean {
+type RealtimeMessageEntry = Record<string, unknown> & {
+  kind: NonNullable<SessionProxyMessageInput["realtimeKind"]>;
+};
+
+function isRealtimeMessage(entry: unknown): entry is RealtimeMessageEntry {
   return (
-    Array.isArray(body.entries) &&
-    body.entries.some(
-      (entry) =>
-        entry !== null &&
-        typeof entry === "object" &&
-        REALTIME_MESSAGE_KINDS.has((entry as { kind?: unknown }).kind as string),
-    )
+    entry !== null &&
+    typeof entry === "object" &&
+    REALTIME_MESSAGE_KINDS.has((entry as { kind?: unknown }).kind as string)
   );
 }
 
-/** Server context goes before the browser's on each message-bearing entry. */
-function withRealtimeContext(
-  body: Record<string, unknown>,
-  serverContext: string | undefined,
-): Record<string, unknown> {
-  if (!serverContext?.trim() || !Array.isArray(body.entries)) return body;
-  return {
-    ...body,
-    entries: body.entries.map((entry: unknown) => {
-      if (entry === null || typeof entry !== "object") return entry;
-      const record = entry as Record<string, unknown>;
-      if (!REALTIME_MESSAGE_KINDS.has(record.kind as string)) return entry;
-      const modelContext = joinContext(
-        serverContext,
-        typeof record.modelContext === "string" ? record.modelContext : undefined,
-      );
-      return modelContext ? { ...record, modelContext } : entry;
-    }),
-  };
+function hasRealtimeMessages(body: Record<string, unknown>): boolean {
+  return Array.isArray(body.entries) && body.entries.some(isRealtimeMessage);
 }
 
 /**
@@ -1935,6 +1972,24 @@ function sanitizeMessage(value: unknown, modelSelection: boolean): Record<string
     for (const field of MODEL_FIELDS) delete input[field];
   }
   return input;
+}
+
+/** The browser's model context as hook input, when it sent some. */
+function withBrowserContext(context: unknown): { browserContext?: string } {
+  if (context === undefined) return {};
+  if (typeof context !== "string") {
+    reject(400, "invalid_model_context", "modelContext must be a string.");
+  }
+  return context.trim() ? { browserContext: context } : {};
+}
+
+/** The browser's context as the host decided: kept (absent), replaced (a string) or dropped (`null`). */
+function decidedBrowserContext(
+  extras: SessionProxyMessageExtras | undefined,
+  sent: string | undefined,
+): string | undefined {
+  if (extras?.browserContext === undefined) return sent;
+  return extras.browserContext ?? undefined;
 }
 
 function joinContext(...parts: Array<string | undefined>): string | undefined {

@@ -276,4 +276,168 @@ describe("session proxy hooks", () => {
     expect(response.status).toBe(503);
     expect(forwarded()).toHaveLength(2);
   });
+  test("beforeForwardMessage decides what becomes of the browser's own context", async () => {
+    const inputs: SessionProxyMessageInput[] = [];
+    const { handler, forwarded } = setup({
+      beforeForwardMessage: (input) => {
+        inputs.push(input);
+        if (input.browserContext === "Page: /admin") {
+          return Response.json({ error: { code: "invalid_page" } }, { status: 400 });
+        }
+        if (input.delivery === "send") {
+          return { modelContext: "Signed in: u_42", browserContext: "Project 7 (verified)" };
+        }
+        if (input.delivery === "steer") return { browserContext: null };
+        return undefined;
+      },
+    });
+    const claim = "project=7";
+    const statuses = [
+      await handler(
+        post(`${SESSION}/events`, {
+          type: "user.message",
+          clientEventId: "m1",
+          payload: { text: "hi", modelContext: claim },
+        }),
+      ),
+      await handler(
+        post(`${SESSION}/steer`, { text: "now", clientEventId: "s1", modelContext: claim }),
+      ),
+      await handler(
+        post(`${SESSION}/composer-draft/submit`, {
+          text: "draft",
+          clientEventId: "d1",
+          modelContext: claim,
+        }),
+      ),
+      await handler(
+        post(`${SESSION}/steer`, { text: "x", clientEventId: "s2", modelContext: "Page: /admin" }),
+      ),
+      // Not a string: refused before any hook or upstream call.
+      await handler(post(`${SESSION}/steer`, { text: "x", clientEventId: "s3", modelContext: 7 })),
+      await handler(
+        post(`${BASE}/sessions`, {
+          initialMessage: "start",
+          idempotencyKey: "c1",
+          modelContext: claim,
+        }),
+      ),
+    ].map((response) => response.status);
+    expect(statuses).toEqual([200, 200, 200, 400, 400, 200]);
+
+    expect(inputs).toEqual([
+      { sessionId: SESSION_ID, delivery: "send", clientEventId: "m1", browserContext: claim },
+      { sessionId: SESSION_ID, delivery: "steer", clientEventId: "s1", browserContext: claim },
+      { sessionId: SESSION_ID, delivery: "submit", clientEventId: "d1", browserContext: claim },
+      {
+        sessionId: SESSION_ID,
+        delivery: "steer",
+        clientEventId: "s2",
+        browserContext: "Page: /admin",
+      },
+      { delivery: "create", clientEventId: "c1", browserContext: claim },
+    ]);
+    const bodies = forwarded().map((request) => request.body);
+    expect(bodies).toHaveLength(4);
+    // Replaced, after the host's own context.
+    expect(bodies[0]).toEqual({
+      type: "user.message",
+      clientEventId: "m1",
+      payload: { text: "hi", modelContext: "Signed in: u_42\n\nProject 7 (verified)" },
+    });
+    // Dropped.
+    expect(bodies[1]).toEqual({ text: "now", clientEventId: "s1" });
+    // Kept as sent.
+    expect(bodies[2]).toEqual({ text: "draft", clientEventId: "d1", modelContext: claim });
+    expect(bodies[3]).toMatchObject({ initialMessage: "start", modelContext: claim });
+  });
+
+  test("each voice entry's context is decided on its own, under the entry's operation id", async () => {
+    const ids = [1, 2, 3, 4, 5, 6].map(
+      (n) => `${n}${n}${n}${n}${n}${n}${n}${n}-0000-4000-8000-000000000000`,
+    );
+    const inputs: SessionProxyMessageInput[] = [];
+    const { handler, forwarded } = setup({
+      beforeForwardMessage: (input) => {
+        inputs.push(input);
+        if (input.browserContext === "project=9") return new Response("Not yours", { status: 403 });
+        if (input.browserContext === "project=7") return { browserContext: "Project 7 (verified)" };
+        if (input.realtimeKind === "assistant_transcript") return { browserContext: null };
+        return { modelContext: "Signed in: u_42" };
+      },
+    });
+    const sync = async (entries: unknown[]) =>
+      (await handler(post(`${SESSION}/realtime/${ids[5]}/sync`, { expectedVersion: 2, entries })))
+        .status;
+
+    expect(
+      await sync([
+        {
+          operationId: ids[0],
+          kind: "user_transcript",
+          role: "user",
+          text: "open",
+          modelContext: "project=7",
+        },
+        {
+          operationId: ids[1],
+          kind: "assistant_transcript",
+          role: "assistant",
+          text: "Ok.",
+          modelContext: "x",
+        },
+        { operationId: ids[2], kind: "interruption" },
+        { operationId: ids[3], kind: "delegation_call", text: "summarize" },
+      ]),
+    ).toBe(200);
+    expect(inputs).toEqual([
+      {
+        sessionId: SESSION_ID,
+        delivery: "realtime",
+        clientEventId: ids[0],
+        realtimeKind: "user_transcript",
+        browserContext: "project=7",
+      },
+      {
+        sessionId: SESSION_ID,
+        delivery: "realtime",
+        clientEventId: ids[1],
+        realtimeKind: "assistant_transcript",
+        browserContext: "x",
+      },
+      {
+        sessionId: SESSION_ID,
+        delivery: "realtime",
+        clientEventId: ids[3],
+        realtimeKind: "delegation_call",
+      },
+    ]);
+    expect((forwarded().at(-1)!.body as { entries: unknown[] }).entries).toEqual([
+      {
+        operationId: ids[0],
+        kind: "user_transcript",
+        role: "user",
+        text: "open",
+        modelContext: "Project 7 (verified)",
+      },
+      { operationId: ids[1], kind: "assistant_transcript", role: "assistant", text: "Ok." },
+      { operationId: ids[2], kind: "interruption" },
+      {
+        operationId: ids[3],
+        kind: "delegation_call",
+        text: "summarize",
+        modelContext: "Signed in: u_42",
+      },
+    ]);
+
+    // One refused entry refuses its batch; nothing is saved.
+    const count = forwarded().length;
+    expect(
+      await sync([
+        { operationId: ids[4], kind: "user_transcript", text: "a", modelContext: "project=7" },
+        { operationId: ids[5], kind: "user_transcript", text: "b", modelContext: "project=9" },
+      ]),
+    ).toBe(403);
+    expect(forwarded()).toHaveLength(count);
+  });
 });
