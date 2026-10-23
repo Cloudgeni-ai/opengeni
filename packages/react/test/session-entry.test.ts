@@ -181,7 +181,11 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/timeline/agent-work-human-input.ts"))).toBe(
       true,
     );
-    expect(reactSources.length).toBe(57);
+    // Up-arrow recall of the person's latest waiting prompt.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-queued-prompt-recall.ts"))).toBe(
+      true,
+    );
+    expect(reactSources.length).toBe(58);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);
