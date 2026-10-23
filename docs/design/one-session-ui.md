@@ -127,7 +127,9 @@ embed.
 - **`SessionApp`** (`@opengeni/react/session-app`): `apiBaseUrl`, `headers`,
   `consoleUrl`, `workspaceId`, `sessionId` and `onSessionChange`, `preset`,
   `features`, `slots`, `surfaces` (PDF preview, editable artifacts), `theme`,
-  `messageContext`, `openUrl`, `onUnauthorized`. It renders its own `og-root`
+  `messageContext`, `openUrl`, `onUnauthorized`, `resolveLink` and
+  `renderLink` (the host's handling of links in agent messages, asked before
+  the app's own: the dock, else the web app page through `openUrl`). It renders its own `og-root`
   with `data-og-theme`, never touching the host page's `<html>`. A 401 from
   either the SDK client or a raw app request calls `onUnauthorized`.
 - **Styles.** The web app's design system (token bridge, base rules, motion)

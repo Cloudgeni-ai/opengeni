@@ -250,7 +250,7 @@ import {
   sessionDockLayoutStorageId,
   updateSessionDockNavigation,
 } from "../lib/session-dock-preferences";
-import { consoleLinkResolver } from "../lib/session-artifact-navigation";
+import { useAppLinkResolver } from "../lib/session-artifact-navigation";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
@@ -2005,6 +2005,7 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
+  const resolveLink = useAppLinkResolver();
   const hostMessageContext = useHostMessageContext();
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
@@ -3582,7 +3583,7 @@ function SessionChatPane(props: {
                       onViewDetails={viewToolReviewDetails}
                     >
                       <MessageTimeline
-                        resolveLink={consoleLinkResolver}
+                        resolveLink={resolveLink}
                         renderMessageSender={renderMessageSender}
                         allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                         trailingState={
