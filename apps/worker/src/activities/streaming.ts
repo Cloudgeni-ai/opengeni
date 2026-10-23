@@ -4,6 +4,7 @@ import type { AppendEventInput } from "@opengeni/db";
 import {
   SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES,
   reasoningDeltaSeparator,
+  canMergeReasoningDelta,
 } from "@opengeni/events";
 import { Context } from "@temporalio/activity";
 
@@ -93,7 +94,8 @@ export function mergeAdjacentTextDeltas(events: AppendEventInput[]): AppendEvent
       run &&
       run.first.type === event.type &&
       run.head.messageId === delta.messageId &&
-      run.head.phase === delta.phase
+      run.head.phase === delta.phase &&
+      (event.type !== "agent.reasoning.delta" || canMergeReasoningDelta(run.text, delta.text))
     ) {
       const piece =
         (event.type === "agent.reasoning.delta"
@@ -261,8 +263,16 @@ export function createRuntimeBatcher<Mutation = never>(
     clearTrailingTimer();
     // Clear `drainPromise` in the same step that finishes the requested prefix,
     // so a new flush never joins a drain that has already finished its work.
-    let finished = false;
-    const running = (async () => {
+    // Publish ownership before invoking the sink: a synchronous callback may
+    // enqueue another boundary, which must join this drain rather than start one.
+    let resolveDrain!: () => void;
+    let rejectDrain!: (reason: unknown) => void;
+    const running = new Promise<void>((resolve, reject) => {
+      resolveDrain = resolve;
+      rejectDrain = reject;
+    });
+    drainPromise = running;
+    void (async () => {
       try {
         while (flushedSequence < requestedFlushSequence) {
           const batch = pending.splice(
@@ -301,14 +311,10 @@ export function createRuntimeBatcher<Mutation = never>(
           }
         }
       } finally {
-        finished = true;
         drainPromise = null;
         if (!flushFailed) armTrailingTimer();
       }
-    })();
-    if (!finished) {
-      drainPromise = running;
-    }
+    })().then(resolveDrain, rejectDrain);
     return running;
   }
 

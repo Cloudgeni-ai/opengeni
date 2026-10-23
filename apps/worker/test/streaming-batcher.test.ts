@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEventType } from "@opengeni/contracts";
 import type { AppendEventInput } from "@opengeni/db";
 import type { Context } from "@temporalio/activity";
+import { reasoningDeltaSeparator } from "@opengeni/events";
 import {
   createRuntimeBatcher,
   mergeAdjacentTextDeltas,
@@ -23,6 +24,68 @@ const PTY: SessionEventType = "terminal.pty.output.delta"; // stays structural
 const TOOLCALL: SessionEventType = "agent.toolCall.created"; // structural
 
 describe("atomic structural checkpoints", () => {
+  test("reentrant enqueue joins the published drain without concurrent or empty appends", async () => {
+    const batches: number[][] = [];
+    let active = 0;
+    let peak = 0;
+    let release!: () => void;
+    const first = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let nested: Promise<void> | undefined;
+    const batcher = createRuntimeBatcher(async (events) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      batches.push(events.map((event) => (event.payload as { n: number }).n));
+      if (batches.length === 1) {
+        nested = batcher.push(delta(1, TOOLCALL));
+        await first;
+      }
+      active -= 1;
+    });
+    try {
+      await batcher.push(delta(0));
+      expect(batches).toEqual([[0]]);
+      release();
+      await nested;
+      await batcher.flush();
+      expect(batches).toEqual([[0], [1]]);
+      expect(peak).toBe(1);
+    } finally {
+      release();
+      await batcher.flush();
+    }
+  });
+
+  test("reasoning headings preserve rendering when fragments cross an active append", async () => {
+    const realNow = Date.now;
+    Date.now = () => 1_000_000;
+    const stored: string[] = [];
+    let release!: () => void;
+    const first = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const batcher = createRuntimeBatcher(async (events) => {
+      stored.push(...events.map((event) => (event.payload as { text: string }).text));
+      if (stored.length === 1) await first;
+    });
+    try {
+      await batcher.push({ type: REASONING, payload: { text: "**First*" } });
+      await batcher.push({ type: REASONING, payload: { text: "*" } });
+      release();
+      for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+      await batcher.push({ type: REASONING, payload: { text: "**Second**" } });
+      await batcher.flush();
+      expect(
+        stored.reduce((text, part) => text + reasoningDeltaSeparator(text, part) + part, ""),
+      ).toBe("**First**\n\n**Second**");
+    } finally {
+      release();
+      await batcher.flush();
+      Date.now = realNow;
+    }
+  });
+
   test("an active append does not pull later deltas through an unopened flush window", async () => {
     const realNow = Date.now;
     Date.now = () => 1_000_000;
@@ -125,7 +188,10 @@ describe("atomic structural checkpoints", () => {
       release = resolve;
     });
     const batcher = createRuntimeBatcher<number>(async (events, mutations = []) => {
-      batches.push({ events: events.map((e) => (e.payload as { n: number }).n), mutations });
+      batches.push({
+        events: events.map((e) => (e.payload as { n: number }).n),
+        mutations,
+      });
       if (batches.length === 1) await held;
     });
     await batcher.push(delta(0));
@@ -189,6 +255,25 @@ describe("mergeAdjacentTextDeltas", () => {
     payload: { text: t, ...extra },
   });
 
+  test("reasoning write batches preserve joins across split bold markers", () => {
+    const parts = ["", "*", "**", "***", "**b", "a*", "a**", "\n"];
+    const render = (fragments: string[]) =>
+      fragments.reduce((value, next) => value + reasoningDeltaSeparator(value, next) + next, "");
+    for (const first of parts)
+      for (const second of parts)
+        for (const third of parts) {
+          const raw = [first, second, third];
+          for (let split = 0; split <= raw.length; split++) {
+            const merge = (fragments: string[]) =>
+              mergeAdjacentTextDeltas(fragments.map((value) => text(value, {}, REASONING)));
+            const merged = [...merge(raw.slice(0, split)), ...merge(raw.slice(split))];
+            expect(render(merged.map((row) => (row.payload as { text: string }).text))).toBe(
+              render(raw),
+            );
+          }
+        }
+  });
+
   test("stores adjacent fragments of one stream as one delta with the exact text", () => {
     // A surrogate pair split across provider fragments rejoins exactly.
     const merged = mergeAdjacentTextDeltas([
@@ -199,7 +284,11 @@ describe("mergeAdjacentTextDeltas", () => {
     expect(merged).toEqual([
       {
         type: DELTA,
-        payload: { text: "Hello \u{1F600}!", messageId: "m1", phase: "final_answer" },
+        payload: {
+          text: "Hello \u{1F600}!",
+          messageId: "m1",
+          phase: "final_answer",
+        },
       },
     ]);
   });
@@ -257,7 +346,10 @@ describe("mergeAdjacentTextDeltas", () => {
       text("**Three**", {}, REASONING),
     ]);
     expect(merged).toEqual([
-      { type: REASONING, payload: { text: "**One**\n\n**Two** detail**Three**" } },
+      {
+        type: REASONING,
+        payload: { text: "**One**\n\n**Two** detail**Three**" },
+      },
     ]);
   });
 
@@ -562,7 +654,10 @@ describe("nextStreamEvent", () => {
     };
 
     for (let index = 0; index < 256; index += 1) {
-      expect(await nextStreamEvent(iterator, context)).toEqual({ done: false, value: index });
+      expect(await nextStreamEvent(iterator, context)).toEqual({
+        done: false,
+        value: index,
+      });
     }
 
     expect(cancellationSubscriptions).toBe(0);
