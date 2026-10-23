@@ -36745,6 +36745,12 @@
       "toDate": "value",
       "useMinuteNow": "value"
     },
+    "@opengeni/react/ui/resize-handle": {
+      "RESIZE_HANDLE_LARGE_STEP": "value",
+      "RESIZE_HANDLE_STEP": "value",
+      "ResizeHandle": "value",
+      "ResizeHandleProps": "type"
+    },
     "@opengeni/react/ui/revision-history": {
       "previousContent": "value",
       "Revision": "type",

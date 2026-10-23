@@ -1,8 +1,25 @@
 import { SITE_ID_HEADER, SITE_VERSION_HEADER } from "@opengeni/contracts/site-session-http";
 import type { Session, SessionListResponse } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
-import { InfoIcon, Maximize2Icon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  InfoIcon,
+  Maximize2Icon,
+  MoreHorizontalIcon,
+  PanelRightCloseIcon,
+  PanelRightOpenIcon,
+  PlusIcon,
+} from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type RefObject,
+} from "react";
 import { SiteView } from "../../artifacts";
 import { NewConversation } from "../../components/new-conversation";
 import type {
@@ -17,23 +34,29 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "../../ui/dropdown-menu";
+import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
 import { useAppContext } from "../app-context";
 import { useAppApi } from "../lib/app-api";
 import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
-import { t } from "../lib/console-text";
-import { formatTimestamp } from "../lib/format";
 import { Link, useNavigate } from "../lib/navigation";
 import { hasWorkspacePermission } from "../lib/permissions";
 import { sessionDisplayTitle } from "../lib/session-rename";
-import { sessionStateLabel } from "../lib/session-rail";
 import { sessionSiteOrigin } from "../lib/session-site-origin";
-import { isRunningStatus, relativeTimeLabel } from "../lib/sessions-group";
+import {
+  SITE_CHAT_DEFAULT_WIDTH,
+  SITE_CHAT_MAX_WIDTH,
+  SITE_CHAT_MIN_WIDTH,
+  SITE_MIN_WIDTH,
+  useSiteChatPanelLayout,
+} from "../lib/site-chat-panel";
 import { useRecordSiteOpened } from "../lib/site-opened";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
 
 const SITE_ROUTE = "/workspaces/$workspaceId/sites/$siteId";
+/** The panel's width while it sits beside the Site, set live while dragging. */
+const WIDTH_VARIABLE = "--og-site-chat-width";
 
 type SiteState =
   | { status: "loading" }
@@ -41,9 +64,11 @@ type SiteState =
   | { status: "ready"; title: string; versionId: string | null; archived: boolean };
 
 /**
- * A Site with its conversations beside it. The Site fills the page; the
- * panel keeps one conversation open (the newest when the Site opens, unless
- * one is chosen), lists the others to switch between, and starts a new one.
+ * A Site with its chat beside it. The Site fills the page; the panel shows
+ * one conversation (the newest when the Site opens, unless one is chosen) as
+ * a regular chat, narrower, and starts a new one. The sidebar lists the
+ * Site's conversations, so the panel doesn't repeat them. The panel can be
+ * resized and hidden; both are remembered per person.
  */
 export function SiteViewRoute({
   workspaceId,
@@ -80,8 +105,10 @@ export function SiteViewRoute({
       });
     return () => abort.abort();
   }, [client, siteAttempt, siteId, workspaceId]);
+  const frame = useRef<HTMLDivElement>(null);
   return (
     <div
+      ref={frame}
       className="flex min-h-0 min-w-0 flex-1 max-lg:flex-col"
       data-workspace-scroll-owner="self-managed"
     >
@@ -95,8 +122,9 @@ export function SiteViewRoute({
           archivedMessage="This Site is archived. Restore it from Site details."
         />
       </div>
-      <SiteConversationsColumn
+      <SiteChatPanel
         key={`${workspaceId}:${siteId}`}
+        frame={frame}
         workspaceId={workspaceId}
         siteId={siteId}
         site={site}
@@ -108,44 +136,29 @@ export function SiteViewRoute({
 }
 
 const PAGE_SIZE = 30;
-/** The most a session list page returns. */
-const MAX_PAGE_SIZE = 100;
 
-/** The Site's own conversations for this viewer, newest activity first. */
+/**
+ * The Site's newest conversations for this viewer, newest activity first.
+ * The panel needs the newest to open by default and the titles to name the
+ * one open; the sidebar is where all of them are listed.
+ */
 function useSiteConversations(workspaceId: string, siteId: string) {
   const { client } = useAppContext();
   const [page, setPage] = useState<SessionListResponse | null>(null);
   const [error, setError] = useState<Error | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
   const request = useRef<AbortController | null>(null);
-  const more = useRef<AbortController | null>(null);
-  // A refresh re-reads as many as are loaded, so "Show older" survives updates.
-  const loadedCount = useRef(0);
-  useEffect(() => {
-    loadedCount.current = page?.sessions.length ?? 0;
-  }, [page]);
-  const read = useCallback(
-    (signal: AbortSignal, cursor?: string, limit = PAGE_SIZE) =>
-      client.listSessionPage(workspaceId, {
-        originSiteId: siteId,
-        parentSessionId: null,
-        sortBy: "updatedAt",
-        limit,
-        signal,
-        ...(cursor ? { cursor } : {}),
-      }),
-    [client, siteId, workspaceId],
-  );
   const refresh = useCallback(async () => {
     request.current?.abort();
     const abort = new AbortController();
     request.current = abort;
     try {
-      const next = await read(
-        abort.signal,
-        undefined,
-        Math.min(MAX_PAGE_SIZE, Math.max(PAGE_SIZE, loadedCount.current)),
-      );
+      const next = await client.listSessionPage(workspaceId, {
+        originSiteId: siteId,
+        parentSessionId: null,
+        sortBy: "updatedAt",
+        limit: PAGE_SIZE,
+        signal: abort.signal,
+      });
       if (abort.signal.aborted) return;
       setPage(next);
       setError(null);
@@ -153,45 +166,13 @@ function useSiteConversations(workspaceId: string, siteId: string) {
       if (!abort.signal.aborted)
         setError(failure instanceof Error ? failure : new Error(String(failure)));
     }
-  }, [read]);
+  }, [client, siteId, workspaceId]);
   useEffect(() => {
     void refresh();
-    return () => {
-      request.current?.abort();
-      more.current?.abort();
-    };
+    return () => request.current?.abort();
   }, [refresh]);
-  // This list shows only Site conversations, which ordinary hints never name.
+  // Only Site conversations matter here, which ordinary hints never name.
   useSessionListHintRefresh(refresh, error, { siteConversations: true });
-  const loadMore = useCallback(async () => {
-    const cursor = page?.nextCursor;
-    if (!cursor || loadingMore) return;
-    const abort = new AbortController();
-    more.current = abort;
-    setLoadingMore(true);
-    try {
-      const next = await read(abort.signal, cursor);
-      if (abort.signal.aborted) return;
-      setPage((current) =>
-        // Only extend the page this cursor came from; a refresh since replaced it.
-        current?.nextCursor === cursor
-          ? {
-              ...next,
-              sessions: [
-                ...new Map(
-                  [...current.sessions, ...next.sessions].map((session) => [session.id, session]),
-                ).values(),
-              ],
-            }
-          : current,
-      );
-    } catch {
-      // The button stays, so trying again is one click.
-    } finally {
-      if (more.current === abort) more.current = null;
-      setLoadingMore(false);
-    }
-  }, [loadingMore, page?.nextCursor, read]);
   const sessions = useMemo(
     () =>
       page
@@ -202,24 +183,42 @@ function useSiteConversations(workspaceId: string, siteId: string) {
         : [],
     [page],
   );
-  return {
-    sessions,
-    loaded: page !== null,
-    error,
-    nextCursor: page?.nextCursor ?? null,
-    loadingMore,
-    refresh,
-    loadMore,
-  };
+  return { sessions, loaded: page !== null, error, refresh };
 }
 
-function SiteConversationsColumn({
+/** How wide the panel may be: its own limit, less what the Site needs beside it. */
+function useAvailableWidth(frame: RefObject<HTMLDivElement | null>) {
+  const [max, setMax] = useState(SITE_CHAT_MAX_WIDTH);
+  useLayoutEffect(() => {
+    const element = frame.current;
+    if (!element) return;
+    const measure = () => {
+      const room = element.getBoundingClientRect().width - SITE_MIN_WIDTH;
+      // An unmeasured frame (no layout yet) keeps the panel's own limit.
+      setMax(
+        room > 0
+          ? Math.max(SITE_CHAT_MIN_WIDTH, Math.min(SITE_CHAT_MAX_WIDTH, Math.floor(room)))
+          : SITE_CHAT_MAX_WIDTH,
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [frame]);
+  return max;
+}
+
+function SiteChatPanel({
+  frame,
   workspaceId,
   siteId,
   site,
   retrySite,
   conversation,
 }: {
+  frame: RefObject<HTMLDivElement | null>;
   workspaceId: string;
   siteId: string;
   site: SiteState;
@@ -229,12 +228,19 @@ function SiteConversationsColumn({
   const context = useAppContext();
   const api = useAppApi();
   const navigate = useNavigate();
-  const headingId = useId();
+  const panelId = useId();
   const panel = useRef<HTMLElement>(null);
+  const hideButtonId = `${panelId}-hide`;
+  const showButtonId = `${panelId}-show`;
   const list = useSiteConversations(workspaceId, siteId);
+  const { layout, update: updateLayout } = useSiteChatPanelLayout(context.accessContext.subjectId);
+  const maxWidth = useAvailableWidth(frame);
+  const width = Math.min(layout.width, maxWidth);
   const [composing, setComposing] = useState(false);
   const [handoff, setHandoff] = useState<CreatedConversation | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
+  // A conversation opened by link that isn't among the newest is named once read.
+  const [linked, setLinked] = useState<Session | null>(null);
 
   // The conversation open without a choice is fixed when the Site opens, so
   // activity elsewhere never swaps it out from under the person reading it.
@@ -292,6 +298,7 @@ function SiteConversationsColumn({
           session.archived
         )
           fallBack.current();
+        else setLinked(session);
       },
       (failure: unknown) => {
         if (
@@ -308,16 +315,31 @@ function SiteConversationsColumn({
   // Move focus to the composer New opened, or to the new conversation's.
   useEffect(() => {
     if (focusRequest === 0) return;
-    let frame = 0;
+    let animation = 0;
     let tries = 0;
     const attempt = () => {
       const input = panel.current?.querySelector<HTMLTextAreaElement>("textarea:not([disabled])");
       if (input) input.focus();
-      else if ((tries += 1) < 60) frame = requestAnimationFrame(attempt);
+      else if ((tries += 1) < 60) animation = requestAnimationFrame(attempt);
     };
-    frame = requestAnimationFrame(attempt);
-    return () => cancelAnimationFrame(frame);
+    animation = requestAnimationFrame(attempt);
+    return () => cancelAnimationFrame(animation);
   }, [focusRequest]);
+
+  // Hiding and showing keep focus on the control that brings the panel back.
+  const [focusToggle, setFocusToggle] = useState<"show" | "hide" | null>(null);
+  useEffect(() => {
+    if (!focusToggle) return;
+    document.getElementById(focusToggle === "show" ? showButtonId : hideButtonId)?.focus();
+  }, [focusToggle, hideButtonId, layout.collapsed, showButtonId]);
+  const hide = () => {
+    updateLayout({ collapsed: true });
+    setFocusToggle("show");
+  };
+  const show = () => {
+    updateLayout({ collapsed: false });
+    setFocusToggle("hide");
+  };
 
   const ready = site.status === "ready" ? site : null;
   const canCreate =
@@ -364,7 +386,6 @@ function SiteConversationsColumn({
     },
     [api, siteId, versionId, workspaceId],
   );
-  const conversations = list.sessions;
   const handedOff = handoff !== null && handoff.sessionId === selectedId ? handoff : null;
   // The handoff is for the conversation's first open only.
   useEffect(() => {
@@ -375,153 +396,204 @@ function SiteConversationsColumn({
   useEffect(() => {
     if (handoffId !== null && selectedId === handoffId) setFocusRequest((request) => request + 1);
   }, [handoffId, selectedId]);
+
+  const selected =
+    list.sessions.find((session) => session.id === selectedId) ??
+    (linked?.id === selectedId ? linked : null);
+  const title = showComposer
+    ? "New conversation"
+    : selected
+      ? sessionDisplayTitle(selected)
+      : handedOff?.initialMessage
+        ? handedOff.initialMessage
+        : "Conversation";
+
   return (
-    <aside
-      ref={panel}
-      aria-labelledby={headingId}
-      className="flex min-h-0 w-[400px] shrink-0 flex-col border-l border-border bg-bg max-xl:w-[360px] max-lg:h-[55%] max-lg:w-full max-lg:border-t max-lg:border-l-0"
-    >
-      <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border pr-2 pl-4">
-        <h2 id={headingId} className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
-          Conversations
-        </h2>
-        {canCreate ? (
-          <Button
-            type="button"
-            variant={showComposer ? "secondary" : "ghost"}
-            size="sm"
-            className="pointer-coarse:h-11"
-            onClick={startNew}
-          >
-            <PlusIcon aria-hidden="true" className="size-3.5" />
-            New
-          </Button>
-        ) : null}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
+    <>
+      <aside
+        ref={panel}
+        id={panelId}
+        aria-label="Conversation"
+        hidden={layout.collapsed}
+        style={{ [WIDTH_VARIABLE]: `${width}px` } as CSSProperties}
+        className={cn(
+          "relative flex min-h-0 shrink-0 flex-col border-l border-border bg-bg lg:w-(--og-site-chat-width) max-lg:h-[55%] max-lg:w-full max-lg:border-t max-lg:border-l-0",
+          // Hidden, not unmounted: the conversation keeps its place and stream.
+          layout.collapsed && "hidden",
+        )}
+      >
+        <ResizeHandle
+          label="Resize chat"
+          controls={panelId}
+          value={width}
+          min={SITE_CHAT_MIN_WIDTH}
+          max={maxWidth}
+          edge="start"
+          // Live while dragging without re-rendering the conversation.
+          onResize={(next) => panel.current?.style.setProperty(WIDTH_VARIABLE, `${next}px`)}
+          onResizeEnd={(next) => {
+            panel.current?.style.setProperty(WIDTH_VARIABLE, `${next}px`);
+            updateLayout({ width: next });
+          }}
+          onReset={() => updateLayout({ width: SITE_CHAT_DEFAULT_WIDTH })}
+          onCollapse={hide}
+          className="max-lg:hidden"
+        />
+        <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border pr-2 pl-4">
+          <h2 className="min-w-0 flex-1 truncate text-sm font-medium text-fg" title={title}>
+            {title}
+          </h2>
+          {canCreate ? (
             <Button
+              type="button"
+              variant={showComposer ? "secondary" : "ghost"}
+              size="sm"
+              className="pointer-coarse:h-11"
+              onClick={startNew}
+            >
+              <PlusIcon aria-hidden="true" className="size-3.5" />
+              New
+            </Button>
+          ) : null}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label="More"
+                title="More"
+                className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+              >
+                <MoreHorizontalIcon aria-hidden="true" className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              {selectedId ? (
+                <DropdownMenuItem asChild>
+                  <Link
+                    to="/workspaces/$workspaceId/sessions/$sessionId"
+                    params={{ workspaceId, sessionId: selectedId }}
+                  >
+                    <Maximize2Icon aria-hidden="true" />
+                    Open as a full chat
+                  </Link>
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem asChild>
+                <Link
+                  to="/workspaces/$workspaceId/artifacts/$artifactId"
+                  params={{ workspaceId, artifactId: siteId }}
+                >
+                  <InfoIcon aria-hidden="true" />
+                  Site details
+                </Link>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button
+            id={hideButtonId}
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Hide chat"
+            title="Hide chat"
+            aria-controls={panelId}
+            aria-expanded={true}
+            className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+            onClick={hide}
+          >
+            <PanelRightCloseIcon aria-hidden="true" className="size-4" />
+          </Button>
+        </div>
+        {/* The regular chat's inset, so the composer sits as it does in a full chat. */}
+        <div className="flex min-h-0 flex-1 flex-col px-3 pb-3">
+          {!list.loaded && !conversation ? (
+            list.error ? (
+              <Retry message="Couldn’t load conversations." onRetry={() => void list.refresh()} />
+            ) : (
+              <PanelLoading label="Loading conversations" />
+            )
+          ) : showComposer ? (
+            canCreate ? (
+              <NewConversation
+                key={`new:${siteId}`}
+                createSession={createSession}
+                // A Site's new conversation takes only text and a model; files
+                // can be added once it has started.
+                attachments={false}
+                modelPicker
+                // Voice-first chats aren't offered from a Site.
+                realtimeVoice={false}
+                labels={{ title: ready ? `Ask about ${ready.title}` : "New conversation" }}
+                onCreated={(created) => {
+                  setHandoff(created);
+                  void list.refresh();
+                  // Opening it ends composing, like any other choice.
+                  toSite({ conversation: created.sessionId });
+                }}
+                className="min-h-0 flex-1"
+              />
+            ) : site.status === "loading" ? (
+              <PanelLoading label="Loading Site" />
+            ) : site.status === "error" ? (
+              <Retry message="Couldn’t load this Site." onRetry={retrySite} />
+            ) : (
+              <p className="py-4 pl-1 text-sm text-fg-muted">
+                {ready?.archived
+                  ? "No conversations yet."
+                  : "No conversations yet. Conversations started in this Site appear here."}
+              </p>
+            )
+          ) : selectedId ? (
+            <SessionConversation
+              key={selectedId}
+              sessionId={selectedId}
+              // As in a regular chat: choose the model and attach files.
+              modelPicker
+              // The first prompt and anything typed meanwhile carry over.
+              {...(handedOff?.initialMessage
+                ? { pendingPrompt: { text: handedOff.initialMessage, sentAt: handedOff.sentAt } }
+                : {})}
+              {...(handedOff ? { composerOptions: { initialDraft: handedOff.draft } } : {})}
+              onOpenSession={(sessionId) =>
+                void navigate({
+                  to: "/workspaces/$workspaceId/sessions/$sessionId",
+                  params: { workspaceId, sessionId },
+                })
+              }
+              className="min-h-0 flex-1"
+            />
+          ) : null}
+        </div>
+      </aside>
+      {layout.collapsed ? (
+        <div className="flex shrink-0 border-border bg-bg lg:w-12 lg:flex-col lg:border-l max-lg:h-12 max-lg:justify-end max-lg:border-t max-lg:px-2">
+          <div className="flex h-12 items-center justify-center">
+            <Button
+              id={showButtonId}
               type="button"
               variant="ghost"
               size="icon-sm"
-              aria-label="More"
+              aria-label="Show chat"
+              title="Show chat"
+              aria-controls={panelId}
+              aria-expanded={false}
               className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+              onClick={show}
             >
-              <MoreHorizontalIcon aria-hidden="true" className="size-4" />
+              <PanelRightOpenIcon aria-hidden="true" className="size-4" />
             </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48">
-            {selectedId ? (
-              <DropdownMenuItem asChild>
-                <Link
-                  to="/workspaces/$workspaceId/sessions/$sessionId"
-                  params={{ workspaceId, sessionId: selectedId }}
-                >
-                  <Maximize2Icon aria-hidden="true" />
-                  Open as a full chat
-                </Link>
-              </DropdownMenuItem>
-            ) : null}
-            <DropdownMenuItem asChild>
-              <Link
-                to="/workspaces/$workspaceId/artifacts/$artifactId"
-                params={{ workspaceId, artifactId: siteId }}
-              >
-                <InfoIcon aria-hidden="true" />
-                Site details
-              </Link>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-      {conversations.length > (showComposer ? 0 : 1) ? (
-        <nav
-          aria-label={`Conversations in ${ready?.title ?? "this Site"}`}
-          className="max-h-[172px] shrink-0 overflow-y-auto border-b border-border p-1.5"
-        >
-          <ul className="flex flex-col gap-px">
-            {conversations.map((session) => (
-              <ConversationRow
-                key={session.id}
-                workspaceId={workspaceId}
-                siteId={siteId}
-                session={session}
-                selected={session.id === selectedId}
-              />
-            ))}
-          </ul>
-          {list.nextCursor ? (
-            <button
-              type="button"
-              disabled={list.loadingMore}
-              onClick={() => void list.loadMore()}
-              className="mt-px flex h-8 w-full items-center rounded-md px-2 text-left text-xs text-fg-muted hover:bg-hover hover:text-fg pointer-coarse:h-11"
-            >
-              {list.loadingMore ? "Loading…" : "Show older"}
-            </button>
-          ) : null}
-        </nav>
+          </div>
+        </div>
       ) : null}
-      <div className="flex min-h-0 flex-1 flex-col">
-        {!list.loaded && !conversation ? (
-          list.error ? (
-            <Retry message="Couldn’t load conversations." onRetry={() => void list.refresh()} />
-          ) : (
-            <PanelLoading label="Loading conversations" />
-          )
-        ) : showComposer ? (
-          canCreate ? (
-            <NewConversation
-              key={`new:${siteId}`}
-              createSession={createSession}
-              attachments={false}
-              // Voice-first chats aren't offered from a Site.
-              realtimeVoice={false}
-              labels={{ title: ready ? `Ask about ${ready.title}` : "New conversation" }}
-              onCreated={(created) => {
-                setHandoff(created);
-                void list.refresh();
-                // Opening it ends composing, like any other choice.
-                toSite({ conversation: created.sessionId });
-              }}
-              className="min-h-0 flex-1"
-            />
-          ) : site.status === "loading" ? (
-            <PanelLoading label="Loading Site" />
-          ) : site.status === "error" ? (
-            <Retry message="Couldn’t load this Site." onRetry={retrySite} />
-          ) : (
-            <p className="p-4 text-sm text-fg-muted">
-              {ready?.archived
-                ? "No conversations yet."
-                : "No conversations yet. Conversations started in this Site appear here."}
-            </p>
-          )
-        ) : selectedId ? (
-          <SessionConversation
-            key={selectedId}
-            sessionId={selectedId}
-            // The first prompt and anything typed meanwhile carry over.
-            {...(handedOff?.initialMessage
-              ? { pendingPrompt: { text: handedOff.initialMessage, sentAt: handedOff.sentAt } }
-              : {})}
-            {...(handedOff ? { composerOptions: { initialDraft: handedOff.draft } } : {})}
-            onOpenSession={(sessionId) =>
-              void navigate({
-                to: "/workspaces/$workspaceId/sessions/$sessionId",
-                params: { workspaceId, sessionId },
-              })
-            }
-            className="min-h-0 flex-1"
-          />
-        ) : null}
-      </div>
-    </aside>
+    </>
   );
 }
 
 function PanelLoading({ label }: { label: string }) {
   return (
-    <div className="flex flex-col gap-3 p-4" aria-busy="true">
+    <div className="flex flex-col gap-3 py-4 pl-1" aria-busy="true">
       <Skeleton className="h-4 w-2/3" />
       <Skeleton className="h-16 w-full rounded-lg" />
       <span className="sr-only" role="status">
@@ -533,51 +605,11 @@ function PanelLoading({ label }: { label: string }) {
 
 function Retry({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <p className="p-4 text-sm text-fg-muted">
+    <p className="py-4 pl-1 text-sm text-fg-muted">
       {message}{" "}
-      <button type="button" className="text-fg underline underline-offset-2" onClick={onRetry}>
+      <button type="button" className="og-link" onClick={onRetry}>
         Try again
       </button>
     </p>
-  );
-}
-
-function ConversationRow({
-  workspaceId,
-  siteId,
-  session,
-  selected,
-}: {
-  workspaceId: string;
-  siteId: string;
-  session: Session;
-  selected: boolean;
-}) {
-  const title = sessionDisplayTitle(session);
-  const running = isRunningStatus(session.status);
-  return (
-    <li>
-      <Link
-        to={SITE_ROUTE}
-        params={{ workspaceId, siteId }}
-        search={{ conversation: session.id }}
-        aria-current={selected ? "page" : undefined}
-        aria-label={`${title}. ${sessionStateLabel(session)}. Updated ${formatTimestamp(session.updatedAt)}`}
-        className={cn(
-          "flex h-8 items-center gap-2 rounded-md border px-2 text-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:h-11",
-          selected
-            ? "border-brand/20 bg-selection text-fg"
-            : "border-transparent text-fg-label hover:bg-hover hover:text-fg",
-        )}
-      >
-        <span className="min-w-0 flex-1 truncate">{title}</span>
-        {running ? (
-          <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-status-running" />
-        ) : null}
-        <span aria-hidden="true" className="shrink-0 text-xs tabular-nums text-fg-subtle">
-          {relativeTimeLabel(t, session.updatedAt)}
-        </span>
-      </Link>
-    </li>
   );
 }
