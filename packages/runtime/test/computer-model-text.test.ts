@@ -315,6 +315,49 @@ describe("computer session and action text", () => {
       ].join("\n"),
     );
   });
+
+  test("says which element of another role an action pressed, and how to name it", () => {
+    const standIn = { actionIndex: 0, requestedRole: "button", role: "link", name: "Edit billing" };
+    expect(
+      computerActionText({
+        operationId: "op-1",
+        targetId: "window:1",
+        state: "completed",
+        error: null,
+        observation: null,
+        roleStandIns: [standIn],
+      }),
+    ).toBe(
+      [
+        "Action completed on window:1 (operation op-1).",
+        'The action named button "Edit billing", but no button here has that name, so it used the link "Edit billing"; name it as role "link" next time.',
+      ].join("\n"),
+    );
+    const batch = computerActionText({
+      type: "batch",
+      targetId: "window:1",
+      actionCount: 2,
+      steps: [
+        { operationId: "op-1", state: "completed", error: null },
+        { operationId: "op-2", state: "completed", error: null },
+      ],
+      observation: null,
+      roleStandIns: [{ ...standIn, actionIndex: 1 }],
+    });
+    expect(batch.split("\n").at(-1)).toBe(
+      'Action 2 named button "Edit billing", but no button here has that name, so it used the link "Edit billing"; name it as role "link" next time.',
+    );
+    // Without a stand-in, the text is unchanged.
+    expect(
+      computerActionText({
+        operationId: "op-1",
+        targetId: "window:1",
+        state: "completed",
+        error: null,
+        observation: null,
+      }),
+    ).toBe("Action completed on window:1 (operation op-1).");
+  });
 });
 
 describe("computerObservationDiff", () => {

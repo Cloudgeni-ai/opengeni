@@ -3172,6 +3172,7 @@ describe("interaction attempt tools", () => {
     const after = { ...initial, observationId: "after-batch" };
     const requests: ComputerActionRequest[] = [];
     let stopAfter: number | null = null;
+    let roleStandIns: ComputerActionReceipt["roleStandIns"];
     let sessionReads = 0;
     let observed = 0;
     const definitions = createInteractionAttemptToolDefinitions({
@@ -3188,7 +3189,11 @@ describe("interaction attempt tools", () => {
         },
         actInComputer: async (_workspaceId, _computerSessionId, value) => {
           requests.push(value);
-          if (stopAfter === null) return computerReceipt(value.operationId, after);
+          if (stopAfter === null)
+            return {
+              ...computerReceipt(value.operationId, after),
+              ...(roleStandIns ? { roleStandIns } : {}),
+            };
           return {
             ...computerReceipt(value.operationId, after),
             state: "outcome_unknown",
@@ -3268,6 +3273,16 @@ describe("interaction attempt tools", () => {
     expect(text).toStartWith(`Batch stopped on ${target.id} at action 2 of 3: action 2 failed`);
     // The bookkeeping that says how far the batch got is not shown again.
     expect(text).not.toContain("batchActionsCompleted");
+
+    // An action that pressed a link it named as a button says so.
+    stopAfter = null;
+    roleStandIns = [{ actionIndex: 0, requestedRole: "button", role: "link", name: "Pay" }];
+    const stoodIn = await run();
+    expect(stoodIn.structuredContent).toMatchObject({ roleStandIns });
+    expect((stoodIn.content[0] as { text: string }).text).toContain(
+      'Action 1 named button "Pay", but no button here has that name, so it used the link "Pay"; name it as role "link" next time.\n',
+    );
+    expect(result.structuredContent).not.toHaveProperty("roleStandIns");
     // Support is read once for the session.
     expect(sessionReads).toBe(1);
   });

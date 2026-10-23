@@ -13670,6 +13670,8 @@
         "$.observation.target": "ref(ComputerTarget)!",
         "$.operationId": "string!",
         "$.protocolVersion": "const!=[\"1\"]",
+        "$.roleStandIns": "array?",
+        "$.roleStandIns[]": "ref(ComputerActionRoleStandIn)",
         "$.settledAt": "string! null",
         "$.state": "ref(InteractionOperationState)!",
         "$.targetId": "string!"
@@ -13733,6 +13735,18 @@
         "$|type=launch.applicationId": "string!",
         "$|type=launch.type": "const!=[\"\\\"launch\\\"\"]",
         "$|type=batch": "ref(ComputerActionBatch)"
+      }
+    },
+    "ComputerActionRoleStandIn": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.actionIndex": "integer!",
+        "$.name": "string!",
+        "$.requestedRole": "string!",
+        "$.role": "string!"
       }
     },
     "ComputerClipboard": {
@@ -32260,6 +32274,7 @@
       "ComputerActionBatch": "type",
       "ComputerActionReceipt": "type",
       "ComputerActionRequest": "type",
+      "ComputerActionRoleStandIn": "type",
       "ComputerClipboard": "type",
       "ComputerClipboardResource": "value",
       "ComputerFrame": "type",
@@ -34463,6 +34478,7 @@
       "ComputerActionBatch": "type",
       "ComputerActionReceipt": "type",
       "ComputerActionRequest": "type",
+      "ComputerActionRoleStandIn": "type",
       "ComputerClipboard": "type",
       "ComputerClipboardResource": "value",
       "ComputerFrame": "type",

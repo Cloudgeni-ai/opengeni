@@ -304,8 +304,7 @@ export class CuaComputerBackend implements ComputerBackend {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
-      if (command.action.type === "batch")
-        return await this.dispatchBatch(command, false, standIn);
+      if (command.action.type === "batch") return await this.dispatchBatch(command, false, standIn);
       // Passive previews never change the native action frame. Human pointer
       // input obtains its own fresh frame under the same serialized queue.
       // CUA then refuses stale native pixel/zoom input until the agent re-reads.
@@ -1891,12 +1890,6 @@ export class CuaComputerBackend implements ComputerBackend {
     return [...candidates.filter((id) => !inner(id)), ...candidates.filter((id) => inner(id))];
   }
 
-  /** The element a locator names. A ref from an earlier observation of the
-   * same window names the same element in the latest one only while the
-   * window is unchanged: CUA honours only the tokens of its latest reading,
-   * so when every element still reads the same, in the same order, the ref
-   * acts through its element's current token. Otherwise it is refused. A ref
-   * seen nowhere says which observation is current. */
   /** An action that presses a button or link it names by role and name, when
    * nothing of that role has the name in the current observation and exactly
    * one element of the other of the two roles does, with that whole name:
@@ -1911,7 +1904,11 @@ export class CuaComputerBackend implements ComputerBackend {
     const action = command.action;
     if (action.type !== "semantic" || action.locator.kind !== "role") return none;
     const { role, name, exact } = action.locator;
-    if (name === undefined || !PRESSED_ALIKE_ROLES.has(role) || !PRESSING_ACTIONS.has(action.action))
+    if (
+      name === undefined ||
+      !PRESSED_ALIKE_ROLES.has(role) ||
+      !PRESSING_ACTIONS.has(action.action)
+    )
       return none;
     const observed = this.observations.get(command.targetId);
     if (!observed || observed.observationId !== command.expectedObservationId) return none;
@@ -1952,6 +1949,12 @@ export class CuaComputerBackend implements ComputerBackend {
     };
   }
 
+  /** The element a locator names. A ref from an earlier observation of the
+   * same window names the same element in the latest one only while the
+   * window is unchanged: CUA honours only the tokens of its latest reading,
+   * so when every element still reads the same, in the same order, the ref
+   * acts through its element's current token. Otherwise it is refused. A ref
+   * seen nowhere says which observation is current. */
   private locateObserved(
     targetId: string,
     observed: ComputerBackendObservation,
