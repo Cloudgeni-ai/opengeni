@@ -889,6 +889,9 @@ machine agent: leases, groups, setup and usage follow the managed path, while
 transport (op-stream, relay PTY/desktop, agent error grammar) follows the
 Connected Machine path via `usesAgentTransport`. Its agent is reached through
 the API's agent gateway over its host's link, never by dialing Opengeni.
+Link renewal locks the enrollment before sampling the database clock, checking
+the owner/instance and extending its lease in one statement; a longer heartbeat
+lease is preserved. Refusal codes and renewal cadence are unchanged.
 Compute sleeps idle sandboxes, so compute leases never idle-drain; group end
 (chat/workspace deletion) drains them and the reaper deletes the sandbox and
 revokes its `sandbox` enrollment. See [compute backend](compute-backend.md).
