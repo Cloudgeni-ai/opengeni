@@ -591,6 +591,22 @@ export async function getOrganizationModelProviderCatalogForWorkspace(
     providerKinds: readonly OrganizationModelCatalogProviderKind[];
   },
 ): Promise<Record<OrganizationModelCatalogProviderKind, OrganizationModelProviderCatalogEntry>> {
+  if (input.providerKinds.length === 0)
+    return await getOrganizationModelProviderCatalogInScope(db, input);
+  return await withRlsContext(db, input, (scopedDb) =>
+    getOrganizationModelProviderCatalogInScope(scopedDb, input),
+  );
+}
+
+/** Internal reader; the caller owns the workspace's tenant scope and shared fence. */
+export async function getOrganizationModelProviderCatalogInScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKinds: readonly OrganizationModelCatalogProviderKind[];
+  },
+): Promise<Record<OrganizationModelCatalogProviderKind, OrganizationModelProviderCatalogEntry>> {
   const catalog: Record<
     OrganizationModelCatalogProviderKind,
     OrganizationModelProviderCatalogEntry
@@ -604,46 +620,42 @@ export async function getOrganizationModelProviderCatalogForWorkspace(
     azure_openai: { active: false, models: [], endpoint: null },
   };
   if (input.providerKinds.length === 0) return catalog;
-  return await withRlsContext(db, input, async (scopedDb) => {
-    // Every row of a requested kind: readiness comes from active rows only,
-    // while Azure's non-secret endpoint is kept from a revoked row too, so its
-    // curated deployments stay listed (not ready) instead of vanishing.
-    const connections = await scopedDb
-      .select({
-        providerKind: schema.organizationModelProviderConnections.providerKind,
-        status: schema.organizationModelProviderConnections.status,
-        endpoint: schema.organizationModelProviderConnections.endpoint,
-      })
-      .from(schema.organizationModelProviderConnections)
-      .where(
-        and(
-          eq(schema.organizationModelProviderConnections.accountId, input.accountId),
-          inArray(schema.organizationModelProviderConnections.providerKind, [
-            ...input.providerKinds,
-          ]),
-        ),
-      );
-    const models = await scopedDb
-      .select()
-      .from(schema.organizationModelProviderCustomModels)
-      .where(
-        and(
-          eq(schema.organizationModelProviderCustomModels.accountId, input.accountId),
-          inArray(schema.organizationModelProviderCustomModels.providerKind, [
-            ...input.providerKinds,
-          ]),
-          isNull(schema.organizationModelProviderCustomModels.retiredAt),
-        ),
-      );
-    for (const connection of connections) {
-      if (connection.providerKind === "elevenlabs") continue;
-      const entry = catalog[connection.providerKind];
-      if (connection.status === "active") entry.active = true;
-      if (connection.providerKind === "azure_openai") entry.endpoint = connection.endpoint ?? null;
-    }
-    for (const model of models) catalog[model.providerKind].models.push(mapModel(model));
-    return catalog;
-  });
+  // Every row of a requested kind: readiness comes from active rows only,
+  // while Azure's non-secret endpoint is kept from a revoked row too, so its
+  // curated deployments stay listed (not ready) instead of vanishing.
+  const connections = await scopedDb
+    .select({
+      providerKind: schema.organizationModelProviderConnections.providerKind,
+      status: schema.organizationModelProviderConnections.status,
+      endpoint: schema.organizationModelProviderConnections.endpoint,
+    })
+    .from(schema.organizationModelProviderConnections)
+    .where(
+      and(
+        eq(schema.organizationModelProviderConnections.accountId, input.accountId),
+        inArray(schema.organizationModelProviderConnections.providerKind, [...input.providerKinds]),
+      ),
+    );
+  const models = await scopedDb
+    .select()
+    .from(schema.organizationModelProviderCustomModels)
+    .where(
+      and(
+        eq(schema.organizationModelProviderCustomModels.accountId, input.accountId),
+        inArray(schema.organizationModelProviderCustomModels.providerKind, [
+          ...input.providerKinds,
+        ]),
+        isNull(schema.organizationModelProviderCustomModels.retiredAt),
+      ),
+    );
+  for (const connection of connections) {
+    if (connection.providerKind === "elevenlabs") continue;
+    const entry = catalog[connection.providerKind];
+    if (connection.status === "active") entry.active = true;
+    if (connection.providerKind === "azure_openai") entry.endpoint = connection.endpoint ?? null;
+  }
+  for (const model of models) catalog[model.providerKind].models.push(mapModel(model));
+  return catalog;
 }
 
 export async function getOrganizationModelProviderCustomModelForExecution(

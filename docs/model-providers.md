@@ -1518,6 +1518,14 @@ for choices. Older string-list-only clients may show the unusable hint but
 receive the ordinary rejection instead of failing bootstrap parsing.
 Billing/usage admission and a provider's live response are separate from model
 selection. Changes between listing and creating are re-evaluated at creation.
+Within each catalog resolution, `loadWorkspaceModelCatalogInputs` reads public
+workspace connection metadata, bounded workspace custom models and organization
+provider/model metadata in one short tenant-scoped transaction. It reuses the
+canonical in-scope readers, retaining each SELECT's READ COMMITTED snapshot and
+the caller's provider sets. No credentials or provider I/O enter this transaction.
+Default selection and fresh admission still load their own catalog; results are
+never cached between them or across requests. Subscription readiness, live
+availability and retained-model lookups keep their separate existing boundaries.
 Responses contain no connected-account identity, provider secrets, or execution
 topology. Child inheritance and keyed repair keep their accepted-work rules.
 

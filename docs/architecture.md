@@ -738,7 +738,10 @@ machine-continuation anchor when needed, without changing canonical roles/conten
 exception text stays structural.
 
 Model admission overlaps pooled metadata, preserving authority;
-transaction handles stay serial. Enums remain additive within major releases;
+transaction handles stay serial. Public connection and custom-model metadata
+share a short scope through `packages/db/src/workspace-model-catalog-inputs.ts`;
+default selection and fresh admission still read independently, outside provider
+discovery and credential I/O. Enums remain additive within major releases;
 parity tests pin mirrors.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,

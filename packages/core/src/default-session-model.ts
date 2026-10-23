@@ -22,9 +22,7 @@ import {
   getWorkspace,
   getWorkspaceConnectionModelRestrictions,
   getWorkspaceModelPolicy,
-  getOrganizationModelProviderCatalogForWorkspace,
-  listConnectionsMetadata,
-  listWorkspaceProviderCustomModelsByKind,
+  loadWorkspaceModelCatalogInputs,
   readSubscriptionCoreRouteReadiness,
   readSubscriptionCoreProviderRouteForWorkspace,
   readSubscriptionCoreClaudeCatalogReadiness,
@@ -471,14 +469,23 @@ export async function loadWorkspaceModelSelectionInput(
   // Only pool-backed callers share this read across the independent batches.
   // A transaction has one LOCAL scope and must retain its batch ordering;
   // minimal/custom database ports retain the historical fallback as well.
-  const workspaceConnectionsRead =
+  const readCatalog = async () =>
+    await loadWorkspaceModelCatalogInputs(db, {
+      accountId,
+      workspaceId,
+      providerKinds,
+      organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
+    });
+  const sharedCatalogRead =
     typeof db.transaction === "function" &&
     typeof (db as Database & { rollback?: unknown }).rollback !== "function"
-      ? listConnectionsMetadata(db, workspaceId, null)
+      ? readCatalog()
       : undefined;
   // The catalog batch still owns this failure. An unavailable shared read
   // must not replace the input batch's independent restriction error.
-  const restrictionMetadata = workspaceConnectionsRead?.catch(() => undefined);
+  const restrictionMetadata = sharedCatalogRead
+    ?.then((catalog) => catalog.workspaceConnections)
+    .catch(() => undefined);
   const inputRead = (async () => {
     // Claude's provider route and core projection, read once for both
     // readers that need it; the other reads do not wait for it.
@@ -505,23 +512,9 @@ export async function loadWorkspaceModelSelectionInput(
   // Transaction handles share one backend and LOCAL scope. Preserve the old
   // batch ordering there rather than introduce concurrent nested savepoints.
   if (typeof (db as Database & { rollback?: unknown }).rollback === "function") await inputRead;
-  // One scoped read per catalog family (workspace connection metadata,
-  // workspace custom models, organization provider readiness + models) instead
-  // of one scoped transaction per provider kind. The batched readers keep each
-  // provider's filters, bound and overflow error, exactly as the workspace
-  // model catalog route reads them.
-  const catalogRead = (async () =>
-    Promise.all([
-      workspaceConnectionsRead ?? listConnectionsMetadata(db, workspaceId, null),
-      listWorkspaceProviderCustomModelsByKind(db, { accountId, workspaceId, providerKinds }),
-      getOrganizationModelProviderCatalogForWorkspace(db, {
-        accountId,
-        workspaceId,
-        // Organization Azure OpenAI has no workspace custom-model rail, so it
-        // is read here beside the shared kinds.
-        providerKinds: [...providerKinds, "openai", "azure_openai"],
-      }),
-    ]))();
+  // The public metadata families share one short tenant scope. Subscription
+  // discovery stays outside it, and admission loads a new catalog of its own.
+  const catalogRead = sharedCatalogRead ?? readCatalog();
   // Observe both batches before admission resumes or fails. Retain the previous
   // input-batch error precedence even if the independent catalog fails first.
   const [inputResult, catalogResult] = await Promise.allSettled([inputRead, catalogRead]);
@@ -533,7 +526,8 @@ export async function loadWorkspaceModelSelectionInput(
     policy,
     { active: codexSubscriptionActive, observations },
   ] = inputResult.value;
-  const [workspaceConnections, workspaceCustomModels, organizationProviders] = catalogResult.value;
+  const { workspaceConnections, workspaceCustomModels, organizationProviders } =
+    catalogResult.value;
   const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>
     workspaceProviderApiKeyConnectionMetadataFromConnections(workspaceConnections, kind) !== null;
   const claudeConnections: ClaudeConnectionCatalog = {};
