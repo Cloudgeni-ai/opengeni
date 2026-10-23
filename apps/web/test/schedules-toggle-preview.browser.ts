@@ -50,6 +50,10 @@ try {
       await page.waitForTimeout(100);
       expect(await titles()).toEqual(order);
       await page.keyboard.press("Escape");
+      // The closing menu returns focus to ⋯; wait for it before moving focus.
+      await expect(
+        page.getByRole("button", { name: "More actions for Daily kitchen prevention brief" }),
+      ).toBeFocused();
 
       // Space on the focused switch pauses it again; focus stays on it.
       await brief.focus();
