@@ -63,7 +63,8 @@ test("an external identity fence and a repeated session write do not deadlock", 
   const writer = postgres(shared.adminUrl, { max: 1 });
   const fence = postgres(shared.adminUrl, { max: 1 });
   try {
-    const [{ pid: fencePid }] = await fence<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+    const [fenceBackend] = await fence<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+    const fencePid = fenceBackend!.pid;
     let releaseWriter!: () => void;
     const writerMayContinue = new Promise<void>((resolve) => (releaseWriter = resolve));
     let writerHoldsSession!: () => void;
