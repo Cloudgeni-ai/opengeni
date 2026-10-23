@@ -1,5 +1,46 @@
 # @opengeni/worker-bundle
 
+## 4.7.0
+
+### Patch Changes
+
+- 7308de5: Rolling deploys no longer restart running agent turns. A turn worker that is shutting down stops taking new work at once and lets its in-flight turns finish normally for up to 90 seconds (`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS`) before checkpointing any remaining turn for recovery on another worker; the Temporal force stop follows at 105 seconds (`OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS`). Control workers keep their 5-second natural window. The worker process now exits as soon as its drain and resource cleanup finish instead of waiting for leftover open handles, so old pods no longer stay `Terminating` until Kubernetes kills them. The Helm chart surges a replacement turn pod before removing an old one and renders both settings from `worker.turns.shutdown`, derived from the turn pod's termination grace (120 seconds by default) when unset.
+- Updated dependencies [bf88717]
+- Updated dependencies [31ef5b7]
+- Updated dependencies [31095f1]
+- Updated dependencies [5e3fb3c]
+- Updated dependencies [0e9e59e]
+- Updated dependencies [afb32f5]
+- Updated dependencies [1ea2039]
+- Updated dependencies [7308de5]
+- Updated dependencies [b8452ee]
+  - @opengeni/runtime@4.7.0
+  - @opengeni/db@4.7.0
+  - @opengeni/config@4.7.0
+  - @opengeni/core@4.7.0
+  - @opengeni/contracts@4.7.0
+  - @opengeni/documents@4.7.0
+  - @opengeni/events@4.7.0
+  - @opengeni/github@4.7.0
+  - @opengeni/storage@4.7.0
+  - @opengeni/capabilities@4.7.0
+  - @opengeni/codemode@4.7.0
+  - @opengeni/codex@4.7.0
+  - @opengeni/interaction@4.7.0
+  - @opengeni/observability@4.7.0
+  - @opengeni/sdk@4.7.0
+  - @opengeni/tool-gateway@4.7.0
+  - @opengeni/vaults@4.7.0
+  - @opengeni/vaults-keeper@4.7.0
+  - @opengeni/vaults-onepassword@4.7.0
+  - @opengeni/vaults-protonpass@4.7.0
+  - @opengeni/agent-proto@4.7.0
+  - @opengeni/decisions@4.7.0
+  - @opengeni/jev@4.7.0
+  - @opengeni/network@4.7.0
+  - @opengeni/subscriptions@4.7.0
+  - @opengeni/xai-subscription@4.7.0
+
 ## 4.6.1
 
 ### Patch Changes
