@@ -573,6 +573,14 @@ function safePosture(): RuntimeDatabasePosture {
       })),
     ],
     privateRoutines: [
+      ...runtimePosture.EVENT_TRIGGER_RUNTIME_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      })),
       {
         name: "knowledge_index_due_v1(text, integer)",
         owner: "opengeni_migrator",
@@ -775,6 +783,50 @@ describe("runtime database posture evaluator", () => {
       expect(evaluateRuntimeDatabasePosture(executable, options)).toContain(
         `subscription owner implementation ${name} is missing or unsafe`,
       );
+    }
+  });
+
+  test("requires exact event trigger capabilities with safe ownership, ACLs and search paths", () => {
+    const names = ["scheduled_task_event_settings", "event_deliveries", "inbound_events"];
+    const eventOptions: RuntimeDatabasePostureOptions = {
+      ...options,
+      protectedTables: ["tenant_rows", ...names],
+      tablePrivileges: {
+        ...options.tablePrivileges,
+        ...Object.fromEntries(
+          names.map((name) => [name, ["SELECT", "INSERT", "UPDATE", "DELETE"]]),
+        ),
+      },
+    };
+    function eventPosture() {
+      const posture = safePosture();
+      for (const name of ["scheduled_task_event_settings", "event_deliveries", "inbound_events"])
+        posture.tables.push({ ...posture.tables[0]!, name });
+      return posture;
+    }
+    expect(evaluateRuntimeDatabasePosture(eventPosture(), eventOptions)).toEqual([]);
+    for (const name of runtimePosture.EVENT_TRIGGER_RUNTIME_ROUTINES) {
+      for (const unsafe of [
+        null,
+        { execute: false },
+        { publicExecute: true },
+        { securityDefiner: false },
+        { owner: "opengeni_app" },
+        { owner: "unrelated_owner" },
+        { configuration: ["search_path=public, opengeni_private, public"] },
+        { configuration: ["search_path=pg_catalog, public"] },
+      ]) {
+        const posture = eventPosture();
+        if (unsafe)
+          Object.assign(posture.privateRoutines.find((routine) => routine.name === name)!, unsafe);
+        else
+          posture.privateRoutines = posture.privateRoutines.filter(
+            (routine) => routine.name !== name,
+          );
+        expect(evaluateRuntimeDatabasePosture(posture, eventOptions)).toContain(
+          `event trigger capability ${name} is missing or unsafe`,
+        );
+      }
     }
   });
 
@@ -1766,6 +1818,19 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0929 event sources, deliveries, events, triggers and the automation
+          // event inbox, occurrences and settings: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 7
+            : 0) +
+          // 0929 credential-free event ingress routes: full DML, no RLS.
+          (tables === NON_RLS_RUNTIME_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0820 adds retained browser downloads: read, insert and update, FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
@@ -1820,7 +1885,11 @@ describe("runtime database posture evaluator", () => {
         1 + // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
         1 + // 0908 personal Site opens: full-DML, FORCE-RLS.
         1 + // 0909 session message search texts: read and insert, FORCE-RLS.
-        6; // 0918 Teams durable integration state: full-DML, FORCE-RLS.
+        6 + // 0930 Teams durable integration state: full-DML, FORCE-RLS.
+        8; // 0929 event triggers: seven full-DML FORCE-RLS tables and one routing table.
+      expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
+      expect(NON_RLS_RUNTIME_TABLES).toContain("event_ingress_routes");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("event_ingress_routes");
       expect(FORCE_RLS_TABLES).toContain("site_opens");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_opens");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");

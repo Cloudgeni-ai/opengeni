@@ -1734,6 +1734,9 @@ export const FORCE_RLS_TABLES = [
   "editable_artifacts",
   "enrollment_token_redemptions",
   "enrollments",
+  "event_deliveries",
+  "event_sources",
+  "event_triggers",
   "external_identities",
   "external_identity_links",
   "external_link_task_authorities",
@@ -1763,6 +1766,7 @@ export const FORCE_RLS_TABLES = [
   "host_mcp_turn_authorities",
   "image_generation_operations",
   "import_batches",
+  "inbound_events",
   "integration_facet_binding_owners",
   "integration_facet_bindings",
   "integration_facet_definitions",
@@ -1905,6 +1909,9 @@ export const FORCE_RLS_TABLES = [
   "sandboxes",
   "scheduled_task_blocker_reviews",
   "scheduled_task_connection_authority_snapshots",
+  "scheduled_task_event_inbox",
+  "scheduled_task_event_occurrences",
+  "scheduled_task_event_settings",
   "scheduled_task_personal_resource_authorities",
   "scheduled_task_personal_resource_snapshots",
   "scheduled_task_reusable_connection_materializations",
@@ -2120,6 +2127,7 @@ export const NON_RLS_RUNTIME_TABLES = [
   "auth_verifications",
   "automation_webhook_endpoints",
   "deployment_model_catalog",
+  "event_ingress_routes",
   "integration_oauth_clients",
   "managed_accounts",
   "mcp_oauth_access_tokens",
@@ -2186,6 +2194,10 @@ export const RUNTIME_FULL_DML_TABLES = [
   "editable_artifact_replica_leases",
   "enrollment_token_redemptions",
   "enrollments",
+  "event_deliveries",
+  "event_ingress_routes",
+  "event_sources",
+  "event_triggers",
   "file_uploads",
   "files",
   "generated_image_artifacts",
@@ -2196,6 +2208,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "host_mcp_delegations",
   "image_generation_operations",
   "import_batches",
+  "inbound_events",
   "integration_facet_binding_owners",
   "integration_facet_bindings",
   "integration_oauth_clients",
@@ -2250,6 +2263,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sandbox_workspace_mutation_admissions",
   "sandboxes",
   "scheduled_task_blocker_reviews",
+  "scheduled_task_event_inbox",
+  "scheduled_task_event_occurrences",
+  "scheduled_task_event_settings",
   "scheduled_task_schedule_outbox",
   "session_admin_access",
   "session_attempt_interruptions",
@@ -2740,7 +2756,13 @@ const DECLARED_TARGET_TABLES = new Set<string>([
 // inventory, NOT a new grant list; all named checks below remain authoritative.
 // New private capabilities must be explicitly registered here as known and get
 // their own authority checks. Do not refresh this inventory from a live catalog.
+export const EVENT_TRIGGER_RUNTIME_ROUTINES = [
+  "list_due_event_trigger_tasks_v1(integer)",
+  "prune_event_intake_v1(integer, integer, integer)",
+] as const;
+
 const DECLARED_PRIVATE_ROUTINES = new Set<string>([
+  ...EVENT_TRIGGER_RUNTIME_ROUTINES,
   ...legacyRoutines.private,
   ...OWNER_INTERNAL_PRIVATE_ROUTINES,
   ...RETIRED_PRIVATE_ROUTINES,
@@ -6002,6 +6024,26 @@ export function evaluateRuntimeDatabasePosture(
     `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
     `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, pg_temp`,
   ];
+  for (const name of EVENT_TRIGGER_RUNTIME_ROUTINES) {
+    if (!tableByName.has("scheduled_task_event_settings")) continue;
+    const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+    const routine = routines[0];
+    const owners = ["scheduled_task_event_settings", "event_deliveries", "inbound_events"].map(
+      (table) => tableByName.get(table)?.owner,
+    );
+    if (
+      routines.length !== 1 ||
+      !routine ||
+      !routine.execute ||
+      routine.publicExecute ||
+      !routine.securityDefiner ||
+      routine.owner === expectedRole ||
+      owners.some((owner) => !owner || owner !== routine.owner) ||
+      !routine.configuration?.some((value) => integrationSearchPaths.includes(value))
+    ) {
+      violations.push(`event trigger capability ${name} is missing or unsafe`);
+    }
+  }
   // Read-only maintenance work checks hold exactly the authority of the claim
   // each previews. Once that claim exists, its check must too, so a cadence
   // never silently loses the ability to see work.

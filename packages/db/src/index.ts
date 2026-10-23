@@ -90119,6 +90119,7 @@ export * from "./active-sandbox";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";
+export * from "./event-triggers";
 export * from "./organization-model-providers";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";

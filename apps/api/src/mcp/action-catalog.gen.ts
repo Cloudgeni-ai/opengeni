@@ -919,6 +919,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "createEventSource",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/event-sources",
+    "request": [
+      "CreateEventSourceRequest"
+    ],
+    "response": [
+      "CreateEventSourceResponse"
+    ]
+  },
+  {
     "id": "createFeedback",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/feedback",
@@ -1502,6 +1513,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteDocument",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteEventSource",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId",
     "request": [],
     "response": []
   },
@@ -2898,6 +2916,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/materializations/:jobId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "getEventSource",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId",
+    "request": [],
+    "response": [
+      "EventSource"
+    ]
   },
   {
     "id": "getFile",
@@ -4388,11 +4415,38 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listEventDeliveries",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/deliveries",
+    "request": [],
+    "response": [
+      "ListEventDeliveriesResponse"
+    ]
+  },
+  {
     "id": "listEventPage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events",
     "request": [],
     "response": []
+  },
+  {
+    "id": "listEventSources",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/event-sources",
+    "request": [],
+    "response": [
+      "EventSource"
+    ]
+  },
+  {
+    "id": "listEventSourceTypes",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/event-types",
+    "request": [],
+    "response": [
+      "EventTypeDescriptor"
+    ]
   },
   {
     "id": "listFiles",
@@ -4461,6 +4515,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ExternalIdentityLinkPage"
     ],
     "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
+  },
+  {
+    "id": "listInboundEvents",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/events",
+    "request": [],
+    "response": [
+      "ListInboundEventsResponse"
+    ]
   },
   {
     "id": "listInbox",
@@ -6691,6 +6754,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "replayEventDelivery",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/deliveries/:deliveryId/replay",
+    "request": [],
+    "response": [
+      "EventDelivery"
+    ]
+  },
+  {
     "id": "reportBrowserAuthRun",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report",
@@ -6943,6 +7015,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "rotateEventSourceSecret",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/rotate-secret",
+    "request": [],
+    "response": [
+      "RotateEventSourceSecretResponse"
+    ]
+  },
+  {
     "id": "rotateOrganizationCredentialProviderSecret",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/credential-provider/rotate-secret",
@@ -7048,6 +7129,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "BrowserRecordingSaveRequest"
     ],
     "response": [
+      "BrowserRecordingSaveProgress",
       "BrowserRecordingSaveResponse"
     ]
   },
@@ -7138,6 +7220,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionEvent"
+    ]
+  },
+  {
+    "id": "sendTestEvent",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/test",
+    "request": [
+      "SendTestEventRequest"
+    ],
+    "response": [
+      "SendTestEventResponse"
     ]
   },
   {
@@ -7829,6 +7922,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "UpdateConnectorToolPermissionsRequest"
     ],
     "response": []
+  },
+  {
+    "id": "updateEventSource",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId",
+    "request": [
+      "UpdateEventSourceRequest"
+    ],
+    "response": [
+      "EventSource"
+    ]
   },
   {
     "id": "updateExternalIdentityMembership",

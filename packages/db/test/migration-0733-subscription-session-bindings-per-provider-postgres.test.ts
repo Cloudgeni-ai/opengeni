@@ -451,18 +451,27 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
-      // 0929 adds the Teams conversation tables to both posture inventories.
+      // 0929 adds event-trigger state; ingress routing is non-RLS.
+      "inbound_events",
+      "event_deliveries",
+      "event_sources",
+      "event_triggers",
+      "scheduled_task_event_inbox",
+      "scheduled_task_event_occurrences",
+      "scheduled_task_event_settings",
+      "event_ingress_routes",
+      // 0930 adds the Teams conversation tables to both posture inventories.
       "teams_bot_inbox",
       "teams_bot_installations",
       "teams_bot_links",
       "teams_bot_outbox",
       "teams_bot_proofs",
       "teams_bot_routes",
-    ];
+    ].sort();
     // 0823 (personal machine consent) adds protected tables the runtime role
     // never reads directly; insert them in the sorted protected list.
     const PROTECTED_TABLES = [
-      ...SITE_DATA_TABLES,
+      ...SITE_DATA_TABLES.filter((table) => table !== "event_ingress_routes"),
       "session_attempt_machine_consents",
       "session_turn_machine_consents",
     ].sort();

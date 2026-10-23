@@ -497,6 +497,13 @@ export type DispatchScheduledTaskRunInput = {
       credentialRestriction?: never;
     }
   | {
+      /** Events matched the automation's triggers; the run acts with its own authority. */
+      triggerType: Extract<ScheduledTaskTriggerType, "event">;
+      agentRunUsageIdempotencyKey?: never;
+      initiator?: never;
+      credentialRestriction?: never;
+    }
+  | {
       triggerType: Extract<
         ScheduledTaskTriggerType,
         "manual" | "initial" | "provider_event" | "retry" | "repair"

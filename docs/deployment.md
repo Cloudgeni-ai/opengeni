@@ -19,6 +19,15 @@ every API, worker, web, SDK/React and embedded consumer, then enable
 `OPENGENI_SESSION_USAGE_LIMITS_ENABLED`. Disabling it refuses new limits but
 keeps enforcing persisted ones. See [task usage limit rollout](session-usage-limits.md#rollout-and-activation).
 
+Event triggers for automations (migration 0929) are off by default. Apply the
+migration, upgrade every API and worker, then set
+`OPENGENI_EVENT_TRIGGERS_ENABLED=true` on the API to turn on event sources, the
+public webhook intake at `/v1/webhooks/events/:routeId` and event runs. While it
+is off, the intake answers 404, automations cannot be given event triggers, and
+no event runs start; stored deliveries and events still expire on schedule
+(delivery bodies after 7 days, events after 30). See
+[automations and events](design/automations-and-events.md).
+
 Allowance accounting tables are in `opengeni_private`, with FORCE RLS and
 EXECUTE-only lifecycle access. This preserves older binaries' exact data-schema
 inventory during a rolling upgrade; no maintenance drain is required for these
@@ -6293,3 +6302,7 @@ The default `OPENGENI_SLACK_ACCESS_MODE=limited` uses the reviewed Web API MCP
 bridge with one shared history/replies slot per minute and no search. Apply the
 generated Slack app scopes before rollout. See [Slack](slack-bot.md#unlisted-pilot-and-rollout)
 for the feature limits and external-workspace release acceptance.
+
+### Event capability repair (0931)
+
+Migration 0931 is a maintenance cutover for the event-trigger capabilities introduced by 0929. Stop every API, control worker and turn worker before the release's middle migration span, supply the complete old/new runtime login list through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply migrations and provision the current role, then start only the matching binary. The previous evaluator rejects these callable SECURITY DEFINER capabilities and the new non-RLS event ingress routing table's CRUD contract; never restart a pre-0931 binary or use one as rollback. The forward repair hardens the function search paths and strips inherited runtime grants; 0929 remains immutable. Teams migration 0930 remains independently rolling-safe.

@@ -3194,3 +3194,7 @@ post-commit fanout uses the existing durable control outboxes. Shared-chat contr
 authority is independent of creator identity. Restore never resumes, and explicit
 Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
 background-command semantics.
+
+### Event capability repair (0931)
+
+Migration 0931 is a maintenance cutover for the event-trigger capabilities introduced by 0929. Stop every API, control worker and turn worker before the release's middle migration span, supply the complete old/new runtime login list through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply migrations and provision the current role, then start only the matching binary. The previous evaluator rejects these callable SECURITY DEFINER capabilities and the new non-RLS event ingress routing table's CRUD contract; never restart a pre-0931 binary or use one as rollback. The forward repair hardens the function search paths and strips inherited runtime grants; 0929 remains immutable. Teams migration 0930 remains independently rolling-safe.

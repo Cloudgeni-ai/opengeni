@@ -24,6 +24,7 @@ import {
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
   SESSION_USAGE_LIMITS_PASSTHROUGH_ENV,
+  EVENT_TRIGGERS_PASSTHROUGH_ENV,
   MCP_OAUTH_PASSTHROUGH_ENV,
   API_REQUEST_SOURCE_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
@@ -1835,6 +1836,23 @@ describe("deployment contract", () => {
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     expect(absent.runtimeEnv).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED=");
     expect(absent.missingEnvVars).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED");
+  });
+
+  test("renders the event triggers flag only when configured", () => {
+    expect(EVENT_TRIGGERS_PASSTHROUGH_ENV).toEqual(["OPENGENI_EVENT_TRIGGERS_ENABLED"]);
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_EVENT_TRIGGERS_ENABLED: "true",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_EVENT_TRIGGERS_ENABLED=true");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_EVENT_TRIGGERS_ENABLED=");
+    expect(absent.missingEnvVars).not.toContain("OPENGENI_EVENT_TRIGGERS_ENABLED");
   });
 
   test("renders configured external browser providers without making them mandatory", () => {
