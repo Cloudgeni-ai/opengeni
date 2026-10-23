@@ -2185,6 +2185,23 @@ describe("CUA desktop boundary", () => {
       code: "frame_stale",
       dispatched: false,
     });
+    // A value write CUA did not apply (and restored) changed nothing: a
+    // definite failure. One that left the control changed stays unknown.
+    fixture.mutation = result({ effect: "not_applied", code: "write_not_applied" }, true);
+    await expect(callDesktop(fixture, "set_value", {}, true)).rejects.toMatchObject({
+      code: "driver_failed",
+      dispatched: false,
+    });
+    for (const [effect, code] of [
+      ["cleared", "write_cleared"],
+      ["partial", "value_not_reached"],
+    ]) {
+      fixture.mutation = result({ effect, code }, true);
+      await expect(callDesktop(fixture, "set_value", {}, true)).rejects.toMatchObject({
+        code: "outcome_unknown",
+        dispatched: true,
+      });
+    }
     // A failure CUA reports only as text keeps CUA's reason.
     fixture.mutation = {
       text: "Failed to launch: The system cannot find the file specified.",
@@ -2710,6 +2727,16 @@ describe("CUA desktop boundary", () => {
           expected: { code: "observation_stale", dispatched: true },
           details: { batchActionsCompleted: 2, batchStoppedActionState: "failed" },
         },
+        // A later value write CUA did not apply changed nothing.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "write_not_applied",
+            message: "set_value did not take",
+          }),
+          expected: { code: "driver_failed", dispatched: true },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
       ]) {
         const fixture = new BatchFixture();
         fixture.reply = reply;
@@ -3198,6 +3225,8 @@ describe("CUA desktop boundary", () => {
       class NumberFixture extends BatchFixture {
         value = "5";
         shows: ((written: string) => string) | null = (written) => written;
+        /** A range input "Volume" from 0 to 100 in steps of 7. */
+        volume = "14";
         async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
           const args = JSON.parse(argumentsJson) as Record<string, unknown>;
           const steps =
@@ -3205,7 +3234,11 @@ describe("CUA desktop boundary", () => {
               ? (args.steps as { tool: string; args: Record<string, unknown> }[])
               : [{ tool: name, args }];
           for (const step of steps)
-            if (step.tool === "set_value" && this.shows)
+            if (step.tool === "set_value" && String(step.args.element_token).endsWith(":4"))
+              this.volume = String(
+                Math.min(98, Math.max(0, Math.round(Number(step.args.value) / 7) * 7)),
+              );
+            else if (step.tool === "set_value" && this.shows)
               this.value = this.shows(String(step.args.value));
           const response = await super.callTool(name, argumentsJson);
           if (name !== "get_window_state" || !args.include_accessibility_tree) return response;
@@ -3237,6 +3270,15 @@ describe("CUA desktop boundary", () => {
               role: "AXIncrementor",
               label: "Day Start",
               value: "--",
+              actions: ["AXIncrement", "AXDecrement"],
+            },
+            {
+              element_index: 4,
+              element_token: `${s}:4`,
+              parent_index: 0,
+              role: "AXSlider",
+              label: "Volume",
+              value: this.volume,
               actions: ["AXIncrement", "AXDecrement"],
             },
           ];
@@ -3318,6 +3360,39 @@ describe("CUA desktop boundary", () => {
           // Emptying it on purpose is what it was asked.
           fixture.shows = (written) => written;
           await backend.dispatch(setSeats(fresh, ""));
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a slider its steps or range stop short of the value fails", async () => {
+        const fixture = new NumberFixture();
+        const { backend, observation } = await open(fixture);
+        const setVolume = (observation: ComputerBackendObservation, value: string) =>
+          backend.dispatch({
+            ...command(observation),
+            action: {
+              type: "semantic",
+              locator: { kind: "role", role: "slider", name: "Volume" },
+              action: "set_value",
+              value,
+            },
+          });
+        try {
+          const after = await setVolume(observation, "28");
+          expect(after!.roots.find((node) => node.name === "Volume")!.value).toBe("28");
+          for (const [value, reads] of [
+            ["30", "28"],
+            ["150", "98"],
+          ]) {
+            const failure = await setVolume(
+              await backend.observe(observation.target.id),
+              value!,
+            ).catch((error: unknown) => error);
+            expect(String((failure as Error).message)).toContain(
+              `the slider ${observation.roots.find((node) => node.name === "Volume")!.ref} reads "${reads}" instead of the value it was given; give it a value within its range that its steps reach`,
+            );
+          }
         } finally {
           await backend.close();
         }

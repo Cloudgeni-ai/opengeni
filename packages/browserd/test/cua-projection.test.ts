@@ -359,6 +359,11 @@ test("a web date field Chrome left without a value reads what its parts read", (
     ).find((node) => node.ref === "s1:2")!.value;
   expect(typedOver(["7", "3", "2027"])).toBe("2027-03-07");
   expect(typedOver(["dd", "mm", "yyyy"])).toBe("2026-01-02");
+  // Parts that are no calendar date do not stand for the field.
+  expect(typedOver(["31", "2", "2027"])).toBe("2026-01-02");
+  expect(typedOver(["29", "2", "2027"])).toBe("2026-01-02");
+  expect(typedOver(["29", "2", "2028"])).toBe("2028-02-29");
+  expect(typedOver(["31", "4", "2027"])).toBe("2026-01-02");
   expect(dateFieldValueFromParts(["hours", "minutes", "meridiem"], ["2", "05", "PM"])).toBe(
     "14:05",
   );

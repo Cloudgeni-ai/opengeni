@@ -70,7 +70,12 @@ type Operation = {
   /** A text or number field's value before set_value wrote this one: a
    * field that still reads it afterwards did not take the write. A number
    * field (`numeric`) compares as numbers, and reading empty fails too. */
-  expectText?: { ref: string; value: string; before: string; numeric?: true };
+  expectText?: {
+    ref: string;
+    value: string;
+    before: string;
+    numeric?: "number field" | "slider";
+  };
   /** This step only fills a field (a part of a date field's input), so it
    * cannot submit or clear another field. */
   fillsField?: true;
@@ -1568,14 +1573,18 @@ export class CuaComputerBackend implements ComputerBackend {
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
-            ...((node.role === "textbox" || node.role === "spinbutton") &&
+            ...((node.role === "textbox" || node.role === "spinbutton" || node.role === "slider") &&
             (node.value === undefined || typeof node.value === "string")
               ? {
                   expectText: {
                     ref: node.ref,
                     value: String(action.value),
                     before: node.value ?? "",
-                    ...(node.role === "spinbutton" ? { numeric: true as const } : {}),
+                    ...(node.role === "spinbutton"
+                      ? { numeric: "number field" as const }
+                      : node.role === "slider"
+                        ? { numeric: "slider" as const }
+                        : {}),
                   },
                 }
               : {}),
@@ -2103,8 +2112,7 @@ async function readPermissions(
 /** What the input a set of steps sent did not do, read from the window
  * afterwards: a date field that reads another value than the one typed into
  * its parts, a text field that still reads what it did before set_value, a
- * number field that reads its old value or nothing instead of the number it
- * was given.
+ * number field or slider that reads anything but the number it was given.
  * The input ran either way, so these are not refusals. A date field reads
  * what its parts read (see projectElements). A field the reading no longer
  * shows is left to the caller's own look. */
@@ -2159,18 +2167,20 @@ function inputFailures(
       if (!reading.found) continue;
       const now = reading.value ?? "";
       if (expected.numeric) {
-        // A number field reads its number back as a number ("7.50" reads
-        // "7.5"), and reads empty when it refused the text it was given.
+        // A number field or slider reads its number back as a number ("7.50"
+        // reads "7.5"). Anything else is not the value it was given: its old
+        // value, nothing (a number field that refused text), or where a
+        // slider's steps or range stopped it.
         const number = (text: string) => (text.trim() === "" ? Number.NaN : Number(text));
-        const same = (a: string, b: string) => a === b || number(a) === number(b);
-        if (
-          !same(now, expected.value) &&
-          (same(now, expected.before) || (now.trim() === "" && expected.value.trim() !== ""))
-        )
+        if (now !== expected.value && number(now) !== number(expected.value))
           failures.push(
-            `the number field ${expected.ref} reads ${
+            `the ${expected.numeric} ${expected.ref} reads ${
               now.trim() ? `"${now.slice(0, 64)}"` : "empty"
-            } instead of the value it was given; give it a plain number, such as 42 or 7.5`,
+            } instead of the value it was given; ${
+              expected.numeric === "slider"
+                ? "give it a value within its range that its steps reach"
+                : "give it a plain number, such as 42 or 7.5"
+            }`,
           );
         continue;
       }

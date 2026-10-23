@@ -382,6 +382,13 @@ export function parseDateValue(value: string): DateParts | null {
     const [low, high] = ranges[key];
     if (part < low || part > high) return null;
   }
+  // A real calendar date: the 31st of February is not one.
+  if (parts.day !== undefined && parts.month !== undefined) {
+    const year = parts.year;
+    const leap = year === undefined || (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0));
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][parts.month - 1]!;
+    if (parts.day > days) return null;
+  }
   return parts;
 }
 

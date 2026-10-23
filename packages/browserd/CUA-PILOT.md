@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`c06778bc5df8a8bd233f000ab3c10eca390990b4`: upstream `cua-driver-rs-v0.37.0`
+`7432b4e84f1334c9fd315bbff070f784bcb5c229`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -26,7 +26,12 @@ In web content it writes any number as text: Chrome empties a number field
 (`<input type=number>`, an AXIncrementor) given a CFNumber. A number field a
 write leaves empty gets its previous value back, and the write is refused as
 not applied. A control that takes a value write but keeps its value (a web
-range input) is stepped to the value with its increment and decrement actions.
+range input) is stepped to the value with its increment and decrement actions;
+a value outside the range it reports is refused before any step, and a run
+that stops short fails with `value_not_reached` and what it reads now.
+`write_not_applied` always means the control holds what it held before (a
+number field a value emptied reports `write_cleared`), so Opengeni maps it to
+a definite failure.
 A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
 control a moment after the write.
 A `run_steps` lookup or check may set `exact: true`, so its name must be the
@@ -143,7 +148,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/c06778bc5df8a8bd233f000ab3c10eca390990b4/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/7432b4e84f1334c9fd315bbff070f784bcb5c229/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
