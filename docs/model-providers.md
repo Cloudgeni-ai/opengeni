@@ -2199,18 +2199,23 @@ in order; later system items keep their conversation position. Tool names unsupp
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and Opengeni's text compaction remain available.
 
-Claude Opus 5.5 and Sonnet 5.5 write their notes for the person between tool
-calls as progress-update `thinking` blocks, not `text` blocks. For those models
-requests use `thinking.display: "updates"` (beta
-`thinking-display-updates-2026-08-18`): reasoning blocks come back empty, and
-every `thinking` block with text is a progress update. Each non-empty one becomes
-an assistant message, streamed as output text, so it is shown as a reply and
-counts as visible text for `wait_for_input` and final-answer checks; empty
-reasoning blocks stay reasoning items. The message carries the signed block, and
-replay sends that block back unchanged in its original position, so the history
-bytes match what Claude returned. The shown text is Anthropic's short rendering
-of the note, not the verbatim note; replay gives the model its full note. Other
-Claude models keep `display: "summarized"` and their existing reasoning items.
+Claude Opus 5.5 and Sonnet 5.5 can write a progress update before a tool call
+as its own `thinking` block. For those models requests use
+`thinking.display: "updates"` (beta `thinking-display-updates-2026-08-18`):
+reasoning blocks come back empty, and only progress updates carry text. That
+text is Anthropic's summary of the update, not the words the model wrote, and it
+can claim things the model never said. It therefore stays a reasoning item,
+streamed as reasoning and shown as a thought: it is never an assistant message,
+never `agent.message.completed` or `turn.completed.reply`, and never counts as
+visible text for `wait_for_input` or final-answer checks. When a person's turn
+has only such a summary before `wait_for_input`, the wait is refused so the
+model writes its reply as a `text` block; if it still writes none, nothing is
+recorded as the reply. A `text` block is always recorded verbatim. Replay sends
+each signed block back unchanged in its original position, so history bytes
+match what Claude returned; history stored while updates were briefly recorded
+as assistant messages replays the same signed block. Other APIs see the summary
+only as labelled historical reasoning. Other Claude models keep
+`display: "summarized"` and their existing reasoning items.
 
 Native Claude HTTP and SSE errors retain status and bounded retry/request
 metadata. Documented tier-spend proof and configured-spend HTTP 400 prefixes
