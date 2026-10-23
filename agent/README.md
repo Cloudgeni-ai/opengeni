@@ -1,9 +1,15 @@
-# `opengeni-agent` — the Connected Machine agent (Rust workspace)
+# Opengeni Runner (`opengeni-agent`, Rust workspace)
 
-The Rust agent that turns a user's own machine into a **Connected Machine** — a
+Opengeni Runner is the Rust program that turns a user's own machine into a **Connected Machine** — a
 first-class, co-equal PRIMARY Opengeni compute target (the `selfhosted` backend,
 internally). This is a standalone Cargo workspace — it is **not** part of the bun
 monorepo (the bun workspaces glob excludes it, and Cargo build output is gitignored).
+
+The product name is Opengeni Runner, so it is not confused with the AI agents
+that use the machine. The command, crates, service names, macOS bundle
+identifier and wire protocol keep their `opengeni-agent` / `agent` identifiers,
+which installed machines and release tooling depend on. Older text in this
+directory that says "the agent" means the Runner.
 
 **How the control plane treats a Connected Machine** (canonical:
 [`../docs/architecture.md`](../docs/architecture.md) §3.8 and [`../AGENTS.md`](../AGENTS.md)):

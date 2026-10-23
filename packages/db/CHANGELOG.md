@@ -1,5 +1,39 @@
 # @opengeni/db
 
+## 5.2.1
+
+### Minor Changes
+
+- fb72b9d: Any member can now give a session they started their own access, not only organization owners and admins. The app calls it full access. Its agent can do exactly what that person can do in the app and nothing more, and the access ends when the person leaves the session's workspace. The organization's on/off switch is unchanged.
+
+### Patch Changes
+
+- 9413acc: Read a scoped Skill-presence boolean for session effective-tool metadata instead of loading every active Skill descriptor. Preserve live visibility and activation rules; full Skill catalog reads remain unchanged.
+- Updated dependencies [e1126c2]
+- Updated dependencies [fb72b9d]
+  - @opengeni/codex@5.2.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/config@5.2.0
+  - @opengeni/codemode@5.2.0
+  - @opengeni/observability@5.2.0
+  - @opengeni/network@5.2.0
+  - @opengeni/subscriptions@5.2.0
+  - @opengeni/xai-subscription@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- 4e1a73f: Read workspace control state and kind within one fresh scoped transaction, preserving hidden-workspace handling and nested scope restoration.
+  - @opengeni/codemode@5.1.0
+  - @opengeni/codex@5.1.0
+  - @opengeni/config@5.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/network@5.1.0
+  - @opengeni/observability@5.1.0
+  - @opengeni/subscriptions@5.1.0
+  - @opengeni/xai-subscription@5.1.0
+
 ## 5.0.2
 
 ### Minor Changes

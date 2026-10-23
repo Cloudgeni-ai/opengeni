@@ -20,6 +20,7 @@ import { latestRun, infrastructureRetryReason } from "./planner";
 import { latencySummary } from "./journal";
 
 export interface ActiveReads {
+  openPullNumbers?(): Promise<number[]>;
   baseCI(sha: string): Promise<import("./model").BaseCiEvidence>;
   ready(): Promise<{ ready: Pull[]; excluded: { number: number; reason: string }[] }>;
   runs(manifest: Manifest, branch: string): Promise<Run[]>;
@@ -79,7 +80,7 @@ function followupRequest(
       landedTipSha: record.tipSha,
       marker,
       title: `Remaining work after #${record.pull.number}`,
-      body: `Remaining source-branch work after #${record.pull.number} was merged. The tested snapshot was ${record.pull.headSha}, landed at ${record.tipSha}. Recovery observed newer head ${headSha}; it has NOT been tested by that batch. This PR needs normal fresh exact-head VM/independent-review evidence and a ready signal before candidate CI. No evidence or readiness was copied.\n\n${marker}`,
+      body: `Remaining source-branch work after #${record.pull.number} was merged. The tested snapshot was ${record.pull.headSha}, landed at ${record.tipSha}. Recovery observed newer head ${headSha}; it has NOT been tested by that batch. This PR needs exact-head required GitHub CI and queue-ready before candidate CI. No evidence or readiness was copied.\n\n${marker}`,
     },
   };
 }
@@ -106,6 +107,24 @@ function addComment(
     lastError: null,
   };
   return id;
+}
+
+export function stageOnNotice(ledger: Ledger, id: string, numbers: number[], now: string): boolean {
+  if (!/^[a-zA-Z0-9_-]{8,128}$/.test(id) || numbers.some((n) => !Number.isSafeInteger(n) || n <= 0))
+    throw Error("Invalid ON notice identity/inventory");
+  if (ledger.onNotices?.[id]) return false;
+  const recipients = [...new Set(numbers)].sort((a, b) => a - b);
+  for (const number of recipients)
+    addComment(
+      ledger,
+      `on-notice:${id}`,
+      number,
+      "Merges now go through the batcher: add `queue-ready` to land",
+      now,
+    );
+  ledger.onNotices ??= {};
+  ledger.onNotices[id] = { at: now, recipients };
+  return true;
 }
 
 /** Real GitHub adapter: Git refs are atomic; PR metadata and REST calls are not.
@@ -195,6 +214,15 @@ export class GitHubActiveExecutor implements Executor {
     return { sha, ledger, main: state.main };
   }
   prepareLedger(ledger: Ledger, effect: Effect, now: string): Ledger {
+    if (effect.kind === "publish")
+      for (const pull of effect.manifest.pulls)
+        addComment(
+          ledger,
+          `queued:${pull.number}:${pull.headSha}`,
+          pull.number,
+          `Queued exact head ${pull.headSha} in batch ${effect.manifest.batchId}. Candidate CI: https://github.com/${this.config.repository}/actions/workflows/batch-ci.yml`,
+          now,
+        );
     if (effect.kind === "retry") {
       const id = digest({
         kind: "rerun",
@@ -670,7 +698,7 @@ export class GitHubActiveExecutor implements Executor {
           note =
             status === "requeued"
               ? "Newer open head is automatically eligible; merging against landed main includes only its remaining delta. It still requires its own candidate CI."
-              : "Newer work remains open and tracked for automatic requeue after normal readiness plus exact-new-head VM/independent-review evidence. No evidence was inherited from the landed head.";
+              : "Newer work remains open and tracked for automatic requeue after queue-ready plus exact-new-head required GitHub CI. No evidence was inherited from the landed head.";
         }
       }
     } catch (error) {
@@ -726,6 +754,17 @@ export class GitHubActiveExecutor implements Executor {
     let state = await this.load();
     if (!this.available(state)) return null;
     const messages: string[] = [];
+    // Explicit operator rollout ID only. Reading every open PR is independent
+    // of admission/owner identity; the durable claim prevents repeated notices.
+    if (this.config.onNoticeId && !state.ledger.onNotices?.[this.config.onNoticeId]) {
+      if (!this.reads.openPullNumbers) throw Error("Complete open PR inventory unavailable");
+      const recipients = await this.reads.openPullNumbers();
+      await this.persist(state, (ledger) => {
+        stageOnNotice(ledger, this.config.onNoticeId!, recipients, this.now());
+      });
+      state = await this.load();
+      if (!this.available(state)) return "ON notice staged by current owner";
+    }
     // Bound work per tick. Completed effects are immutable history; blocked
     // effects remain visible without starving candidate planning.
     const effect = Object.values(state.ledger.effects)

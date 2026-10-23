@@ -97,7 +97,7 @@ const PUBLIC_API_WORKSPACES = new Set([
   "@opengeni/sdk",
 ]);
 const MIGRATION_FENCES = [/^packages\/db\/drizzle\//, /^packages\/db\/src\/migrate\.ts$/];
-const DOC_PATTERN = /^(?:docs\/|[^/]+\.md$)/;
+const DOC_PATTERN = /^(?:docs\/(?!merge-batcher-admin\/).+\.mdx?|[^/]+\.md)$/;
 
 export const TEMPORAL_WORKFLOW_INTEGRATION_TESTS = [
   "test/integration/temporal-workflow.integration.ts",

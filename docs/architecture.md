@@ -361,8 +361,13 @@ observations. Historical retirement retains records without input/wakes.
 Terminal proof atomically commits settlement/audit. Connected Machine runners
 push `OperationCompleted` independently of output attachment and credit; API
 ingestion claims the original process/operation, captures retained output through
-its verified exit frontier, then uses the same fenced settlement. Pushes cannot
-steal an active reaper claim; a racing push preserves an immediate retry. The runner
+its verified exit frontier, then uses the same fenced settlement.
+`sandbox/completion-locator.ts` combines only
+pending exact-process lookups within one event-loop turn using the existing
+inventory classifier. Results are discarded after resolution, arrivals during a
+read start a fresh batch, and claims still revalidate the command. Missing rows
+remain unacknowledged so exits racing adoption retain their heartbeat retry.
+Pushes cannot steal an active reaper claim; a racing push preserves an immediate retry. The runner
 retries unacknowledged terminal records on reconnect and its existing heartbeat
 cadence over the bulk connection. Completion collectors use independent ingestion
 capacity and yield before their claim expires, preserving heartbeat/control liveness.
@@ -671,6 +676,13 @@ Canonical: `packages/core/src/access/index.ts`,
 [`browser-login-session-sets.md`](browser-login-session-sets.md),
 [`agent-session-authority.md`](agent-session-authority.md), and
 [`credentials.md`](credentials.md).
+
+Complete workspace reads resolve bootstrap metadata first, then read visible
+control state and canonical kind in one fresh workspace scope. A hidden or
+missing control row still makes the workspace unreadable. The shared tenancy
+fence spans both reads; nested calls restore their caller's tenant and actor
+settings. This is ordinary READ COMMITTED, not a cached or single-snapshot
+workspace view.
 
 ### 3.7 Contracts and configuration are code-owned
 
@@ -3098,6 +3110,12 @@ Historical replay guards grant no access. Cleanup and verification are tracked i
 Future suppliers must reuse native connections.
 
 ### Embeddable connection presentation
+
+MCP OAuth account matching uses one owner/resource policy in
+`apps/api/src/integrations/oauth-account-identity.ts`: verified repeats reuse an
+active account; providers without identity proof permit one live account per
+owner/resource. Explicit reconnect checks known identity and exact resource binding.
+See [connection presentation](connection-presentation.md#duplicate-oauth-accounts).
 
 Shared connection presentation and host boundaries: [embedding authority internals](embedding-authority-internals.md#connection-presentation).
 

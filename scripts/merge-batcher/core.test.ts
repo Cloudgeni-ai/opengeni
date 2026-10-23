@@ -292,7 +292,7 @@ describe("readiness and deterministic planning", () => {
   test("first code-red predecessor invalidates speculative descendants without cancelling", () => {
     const a = candidate(),
       b = candidate([pull(2)], a.manifest.tipSha, a.manifest.batchId);
-    a.runs = [run(a, "code_failure")];
+    a.runs = [run(a, "code_failure", 2)];
     b.runs = [{ ...run(b, "unknown"), status: "in_progress" }];
     const action = plan(observation([pull(1), pull(2)], [a, b]), cfg);
     expect(action.kind).toBe("record");
@@ -307,9 +307,29 @@ describe("readiness and deterministic planning", () => {
     o.ledger.recovery = [{ batchId: digest("failed-parent"), pulls: [pull(2)] }];
     expect(plan(o, { ...cfg, maxInflight: 2 }).kind).toBe("wait");
   });
-  test("first trusted code failure splits without retry or member blame", () => {
-    const c = candidate([pull(1), pull(2), pull(3)]);
+  test("first code failure retries once before split, with backoff and durable intent", () => {
+    const c = candidate([pull(1), pull(2)]);
     c.runs = [run(c, "code_failure")];
+    const o = observation(c.manifest.pulls, [c]);
+    o.now = new Date(Date.parse(NOW) + 61000).toISOString();
+    expect(plan(o, cfg).kind).toBe("retry");
+    expect(infrastructureRetryReason(c, c.runs[0]!, cfg)).toBe("failed-batch");
+    o.ledger.retries[c.manifest.batchId] = {
+      runId: 100,
+      fromAttempt: 1,
+      requestedAt: o.now,
+      reason: "failed-batch",
+    };
+    expect(plan(o, cfg).kind).toBe("wait");
+    expect(o.ledger.recovery).toEqual([]);
+    c.runs.push(run(c, "code_failure", 2));
+    expect(plan(o, cfg).kind).toBe("record");
+    const version = candidate([{ ...pull(1), headRef: "changeset-release/main" }]);
+    expect(infrastructureRetryReason(version, run(version, "code_failure"), cfg)).toBeNull();
+  });
+  test("second trusted code failure splits without further retry or member blame", () => {
+    const c = candidate([pull(1), pull(2), pull(3)]);
+    c.runs = [run(c, "code_failure", 2)];
     const action = plan(observation(c.manifest.pulls, [c]), cfg);
     expect(action.kind).toBe("record");
     if (action.kind === "record") {
@@ -323,7 +343,7 @@ describe("readiness and deterministic planning", () => {
   });
   test("parking blocks identical heads across main/readiness changes but not other or newer heads", () => {
     const failed = candidate();
-    failed.runs = [run(failed, "code_failure")];
+    failed.runs = [run(failed, "code_failure", 2)];
     const o = observation([pull(1), pull(2)], [failed]);
     const action = plan(o, cfg);
     expect(action.kind).toBe("record");
@@ -332,7 +352,7 @@ describe("readiness and deterministic planning", () => {
     expect(o.ledger.parked?.[0]).toMatchObject({
       baseSha: SHA,
       runId: 100,
-      attempt: 1,
+      attempt: 2,
       announced: false,
     });
     expect(plan(o, cfg).kind).toBe("park");
@@ -350,7 +370,7 @@ describe("readiness and deterministic planning", () => {
   });
   test("split publication retains reservations for invalidated running descendants", () => {
     const failed = candidate([pull(1), pull(2)]);
-    failed.runs = [run(failed, "code_failure")];
+    failed.runs = [run(failed, "code_failure", 2)];
     const child = candidate([pull(3)], failed.manifest.tipSha, failed.manifest.batchId);
     child.runs = [{ ...run(child, "unknown"), status: "in_progress" }];
     const o = observation([pull(1), pull(2), pull(3)], [failed, child]);
@@ -371,7 +391,7 @@ describe("readiness and deterministic planning", () => {
     for (const member of ready.slice(0, 3)) {
       const failed = candidate([member]);
       failed.manifest.recoveryOf = cohortId;
-      failed.runs = [run(failed, "code_failure")];
+      failed.runs = [run(failed, "code_failure", 2)];
       o.candidates.push(failed);
       const action = plan(o, cfg);
       expect(action.kind).toBe("record");
@@ -847,7 +867,7 @@ describe("controller isolation and fencing", () => {
       if (last === "wait") break;
     }
     expect(last).toBe("wait");
-    expect(retryCalls).toBe(0);
+    expect(retryCalls).toBe(2); // Once for the cohort, once for its failed singleton.
     expect(comments).toBe(1);
     const final = await reader.observe();
     expect(final.ledger.ejected).toEqual([]);
@@ -914,9 +934,9 @@ describe("wire adapters and CLI", () => {
     data.tasks.push({ ...data.tasks[0]!, job: "plan", exitCode: 1, outcome: "success" });
     expect(verifyResult(data, c.manifest, 100, 1)?.infrastructureOnly).toBeUndefined();
   });
-  test("process-leak code-red is never retried away", () => {
+  test("second process-leak code-red is parked, not retried again", () => {
     const c = candidate();
-    c.runs = [{ ...run(c, "code_failure"), retryable: false }];
+    c.runs = [{ ...run(c, "code_failure", 2), retryable: false }];
     const action = plan(observation([pull(1)], [c]), cfg);
     expect(action.kind).toBe("record");
     if (action.kind === "record") {
@@ -1147,6 +1167,7 @@ describe("wire adapters and CLI", () => {
     let conclusion = "failure";
     let path = cfg.workflow;
     const transport = (async (url: string) => {
+      if (url.includes("/jobs")) return Response.json({ jobs: [] });
       if (url.includes("/artifacts"))
         return Response.json({ artifacts: [{ name: "batch-result-1" }] });
       return Response.json({
@@ -1292,7 +1313,7 @@ describe("integration boundaries and queue-only shadow CI", () => {
     "#5243 inherited %s base splits without ejecting or blaming innocent members",
     (status) => {
       const c = candidate([pull(5436), pull(5439), pull(5440)]);
-      c.runs = [run(c, "code_failure")];
+      c.runs = [run(c, "code_failure", 2)];
       const o = observation(c.manifest.pulls, [c]);
       o.baseCI!.status = status;
       const action = plan(o, { ...cfg, mode: "active" });
@@ -1310,12 +1331,12 @@ describe("integration boundaries and queue-only shadow CI", () => {
       expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
     },
   );
-  test("infra retry eligibility rejects code, ambiguous, second-attempt, Version and unrelated runs", () => {
+  test("batch retry eligibility rejects ambiguous, second-attempt, Version and unrelated runs", () => {
     const c = candidate();
     const good = run(c, "infrastructure");
     expect(infrastructureRetryReason(c, good, cfg)).toBe("verified-infrastructure");
     for (const bad of [
-      run(c, "code_failure"),
+      run(c, "code_failure", 2),
       run(c, "unknown"),
       run(c, "infrastructure", 2),
       { ...good, status: "in_progress" as const },
@@ -1332,7 +1353,7 @@ describe("integration boundaries and queue-only shadow CI", () => {
     const version = candidate([{ ...pull(1), headRef: "changeset-release/main" }]);
     expect(infrastructureRetryReason(version, run(version, "infrastructure"), cfg)).toBeNull();
   });
-  test("mutation boundary refuses code/main/running/repeated retries without any POST", async () => {
+  test("mutation boundary refuses repeated code/main/running retries without any POST", async () => {
     let posts = 0;
     const transport = (async () => {
       posts++;
@@ -1346,7 +1367,7 @@ describe("integration boundaries and queue-only shadow CI", () => {
     const writer = new GitHubMutations(reader);
     const c = candidate();
     for (const bad of [
-      run(c, "code_failure"),
+      run(c, "code_failure", 2),
       run(c, "infrastructure", 2),
       { ...run(c, "infrastructure"), branch: "main" },
       { ...run(c, "infrastructure"), status: "in_progress" as const },
@@ -1358,7 +1379,9 @@ describe("integration boundaries and queue-only shadow CI", () => {
   test.each([
     ["cancelled", [], [], "provider-cancelled"],
     ["failure", [], [], "no-job-logs"],
-    ["cancelled", [], [{ status: "completed", conclusion: "failure" }], null],
+    ["cancelled", [], [{ status: "completed", conclusion: "failure" }], "failed-batch"],
+    ["failure", [], [{ status: "completed", conclusion: "failure" }], "failed-batch"],
+    ["timed_out", [], [{ status: "completed", conclusion: "timed_out" }], "failed-batch"],
     ["cancelled", [], [{ status: "in_progress", conclusion: null }], null],
     [
       "failure",

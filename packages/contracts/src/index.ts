@@ -119,6 +119,7 @@ import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN } from "./product-lifecycle-facts";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
+import { WorkspaceRecordingSettings } from "./recordings";
 import { MediaGenerationResult } from "./video-generation";
 import { KnowledgeProviderCitation } from "./knowledge";
 import { XaiProviderAccountAuthoritySnapshotV1 } from "./xai-provider-account-authority";
@@ -158,6 +159,13 @@ export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
 export * from "./desktop-app";
+export * from "./event-triggers";
+import {
+  ScheduledOccurrenceEvents,
+  ScheduledTaskEvents,
+  ScheduledTaskEventsInput,
+  ScheduledTaskRunEventOccurrence,
+} from "./event-triggers";
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
@@ -1362,7 +1370,7 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 
 /**
  * Tools a session has only while it has admin access: the organization's
- * actions, run as the owner or admin who gave it. Admin access, not the
+ * actions, run as the person who gave it, with exactly their access. Admin access, not the
  * session's tool selection, decides whether they are there.
  */
 export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
@@ -2575,6 +2583,7 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
 ] as const;
 
 export * from "./transcription-recordings";
+export * from "./recordings";
 
 /** Per-session / workspace Codex compaction strategy. */
 export const CodexCompactionMode = /* @__PURE__ */ defineSchema(() =>
@@ -2834,7 +2843,7 @@ export function workspaceModelCompactionThreshold(
 }
 
 /**
- * Whether owners and admins may give an agent session admin access. Off by
+ * Whether members may give a session they started their own access. Off by
  * default; turning it off ends every session's admin access.
  */
 export const OrganizationAgentAdminAccess = /* @__PURE__ */ defineSchema(() =>
@@ -2854,8 +2863,8 @@ export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
 
 /**
  * A session's admin access as the viewer sees it. While `active`, the agent
- * in this session can do what `grantedBy` can manage across the
- * organization, checked live on every action.
+ * in this session can do what `grantedBy` can do, checked live on every
+ * action.
  */
 export const SessionAdminAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -2868,7 +2877,7 @@ export const SessionAdminAccess = /* @__PURE__ */ defineSchema(() =>
     allowed: z.boolean(),
     /**
      * The viewer may turn it on, or choose a new time limit while it is on: an
-     * owner or admin, in person, on their own session.
+     * member, in person, on a session they started.
      */
     canGrant: z.boolean(),
     /** The viewer may turn it off. */
@@ -3196,6 +3205,8 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // The workspace's default realtime voice model; null or absent follows
       // the organization. Read leniently.
       realtimeDefaultModel: z.string().nullable().optional().catch(undefined),
+      // Meeting recording defaults. Read leniently.
+      recordings: WorkspaceRecordingSettings.optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3398,6 +3409,8 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
       // Default realtime voice model; null follows the organization again.
       realtimeDefaultModel: SessionRealtimeModel.nullable().optional(),
+      // Meeting recording defaults, replaced as a whole.
+      recordings: WorkspaceRecordingSettings.optional(),
     })
     .passthrough(),
 );
@@ -10534,6 +10547,8 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
          * person pinned for them can no longer be used.
          */
         unavailableConnectors: z.array(z.string().min(1).max(256)).max(128).optional(),
+        /** Event runs only: the events that caused this run. */
+        events: ScheduledOccurrenceEvents.optional(),
       })
       .passthrough(),
     z
@@ -11680,7 +11695,7 @@ export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ /* @__PURE__ */ define
 export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
 
 export const ScheduledTaskTriggerType = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z.enum(["scheduled", "manual", "initial", "provider_event", "retry", "repair"]),
+  z.enum(["scheduled", "manual", "initial", "provider_event", "retry", "repair", "event"]),
 );
 export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
 
@@ -12462,6 +12477,11 @@ export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
      * active and until a run succeeds). Absent when nothing blocks it.
      */
     blocker: ScheduledTaskBlocker.optional(),
+    /**
+     * Read-only response projection: the automation's event triggers and
+     * event run policy. Absent when it has no event triggers.
+     */
+    events: ScheduledTaskEvents.optional(),
   }),
 );
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
@@ -12910,6 +12930,8 @@ export const ScheduledTaskRun = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() 
     degradedAccounts: ScheduledTaskDegradedAccounts.optional(),
     /** Why the scheduler refused this occurrence before running it (see the schema). */
     admissionRefusal: ScheduledTaskAdmissionRefusal.nullable().optional(),
+    /** Event runs only: the trigger and events that caused the run. */
+    eventOccurrence: ScheduledTaskRunEventOccurrence.nullable().optional(),
     /**
      * Read-time: this dispatched run's own turn is waiting on a person (a tool
      * approval or structured question) since `since`; `expiresAt` is when the
@@ -13065,6 +13087,8 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     // session's own environment for an existing-session task. null means none.
     rigId: z.string().uuid().nullable().optional(),
     metadata: ScheduledTaskMetadataInput.default({}),
+    /** Event triggers and the event run policy. Use schedule `{ type: "manual" }` for an event-only automation. */
+    events: ScheduledTaskEventsInput.optional(),
   },
   { rejectKeys: ["selectedHostMcpDelegations", "connectionAccounts"] },
 ).superRefine((value, context) => {
@@ -13154,6 +13178,8 @@ export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */
       overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
       status: ScheduledTaskStatus.default("active"),
       metadata: ScheduledTaskMetadataInput.default({}),
+      /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
+      events: ScheduledTaskEventsInput.optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -13258,6 +13284,8 @@ export const UpdateScheduledTaskRequest =
       // resolved per fire, so an update takes effect on the next dispatch.
       rigId: z.string().uuid().nullable().optional(),
       metadata: z.record(z.string(), z.unknown()).optional(),
+      /** Replace the event triggers and event run policy; `{ triggers: [] }` removes every trigger. */
+      events: ScheduledTaskEventsInput.optional(),
     },
     { rejectKeys: ["selectedHostMcpDelegations", "connectionAccounts"] },
   ).superRefine((value, context) => {
@@ -22287,6 +22315,11 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
      * Omitted by older servers, which ignore `usageLimitMicros` on create.
      */
     sessionUsageLimits: z.object({ enabled: z.boolean() }).strict().optional(),
+    /**
+     * Whether automations can have event triggers on this server: event
+     * sources, the webhook intake and event runs. Omitted by older servers.
+     */
+    eventTriggers: z.object({ enabled: z.boolean() }).strict().optional(),
     // Whether this deployment offers the Jev-backed code_search agent tool and
     // whether workspaces without their own setting get it.
     codeSearch: z

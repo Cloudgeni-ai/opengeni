@@ -9,6 +9,7 @@ const reaperActivity = proxyActivities<
     | "maintainBrowserStateArtifacts"
     | "recoverVideoGenerationWorkflows"
     | "recoverSessionTitleWorkflows"
+    | "recoverRecordingWorkflows"
     | "reconcileRecentModelCallFacts"
   >
 >({
@@ -24,6 +25,9 @@ export async function fileUploadReaperWorkflow(): Promise<void> {
   await reaperActivity.recoverVideoGenerationWorkflows();
   if (patched("independent-session-title-recovery-v1")) {
     await reaperActivity.recoverSessionTitleWorkflows();
+  }
+  if (patched("recording-workflow-recovery-v1")) {
+    await reaperActivity.recoverRecordingWorkflows();
   }
   await reaperActivity.reconcileRecentModelCallFacts();
 }

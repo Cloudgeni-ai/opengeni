@@ -50,6 +50,7 @@ export interface Manifest extends Omit<BatchSpec, "pulls"> {
 }
 export type Outcome = "success" | "code_failure" | "infrastructure" | "cancelled" | "unknown";
 export type InfrastructureRetryReason =
+  | "failed-batch"
   | "verified-infrastructure"
   | "provider-cancelled"
   | "no-job-logs";
@@ -142,6 +143,7 @@ export interface Ledger {
   invalidated: string[];
   ejected: Ejection[];
   parked?: ParkedPull[];
+  onNotices?: Record<string, { at: string; recipients: number[] }>;
   recovery: { batchId: string; pulls: Pull[] }[];
   retries: Record<string, RetryIntent>;
   codeFailures: Record<string, string[]>;
@@ -705,6 +707,7 @@ export interface Config {
   gitDir: string;
   outputDir: string;
   operatorOffEvidence?: string;
+  onNoticeId?: string;
   port: number;
   fetchTimeoutSeconds: number;
   missingRunSeconds: number;
@@ -723,6 +726,8 @@ export function config(env: Record<string, string | undefined>): Config {
   if (mode !== "shadow" && mode !== "shadow-ci" && mode !== "active")
     throw new Error("Invalid BATCHER_MODE");
   const repository = env.BATCHER_REPOSITORY ?? "Cloudgeni-ai/opengeni";
+  if (env.BATCHER_ON_NOTICE_ID && !/^[a-zA-Z0-9_-]{8,128}$/.test(env.BATCHER_ON_NOTICE_ID))
+    throw new Error("Invalid BATCHER_ON_NOTICE_ID");
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("Invalid repository");
   const baseBranch = env.BATCHER_BASE_BRANCH ?? "main";
   const branchPrefix = env.BATCHER_BRANCH_PREFIX ?? (mode === "active" ? "queue/live/" : "queue/");
@@ -758,6 +763,7 @@ export function config(env: Record<string, string | undefined>): Config {
     leaseSeconds: integer("BATCHER_LEASE_SECONDS", 120, 3600),
     gitDir: env.BATCHER_GIT_DIR ?? "/data/objects.git",
     outputDir: env.BATCHER_OUTPUT_DIR ?? "/data/shadow",
+    ...(env.BATCHER_ON_NOTICE_ID ? { onNoticeId: env.BATCHER_ON_NOTICE_ID } : {}),
     ...(env.BATCHER_OPERATOR_OFF_EVIDENCE
       ? { operatorOffEvidence: env.BATCHER_OPERATOR_OFF_EVIDENCE }
       : {}),

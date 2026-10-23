@@ -227,6 +227,13 @@ export const SESSION_USAGE_LIMITS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_SESSION_USAGE_LIMITS_ENABLED",
 ];
 
+/** Event triggers for automations (API + both workers). Default off in
+ * @opengeni/config; a valueEnv passthrough emitted only when set. Enable only
+ * after every API and worker image understands the `event` run trigger. */
+export const EVENT_TRIGGERS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_EVENT_TRIGGERS_ENABLED",
+];
+
 /** Agent configuration rollout switches (sessions.agent_config, migration
  * 0559). Both default off in @opengeni/config; valueEnv passthroughs emitted
  * only when set. Enable admission only after every worker runs a 0559-aware
@@ -3063,6 +3070,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of SESSION_USAGE_LIMITS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of EVENT_TRIGGERS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of AGENT_CONFIG_PASSTHROUGH_ENV) {

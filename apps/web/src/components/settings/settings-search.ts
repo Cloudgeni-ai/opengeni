@@ -106,6 +106,7 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "recovery",
     "data",
     "admin access",
+    "full access",
   ],
   "account:security": [
     "password",
@@ -173,7 +174,7 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
   ],
   "organization:security": [
     { label: "Data retention", keywords: ["retention", "delete data"] },
-    { label: "Admin access for agent sessions", keywords: ["agents", "admin"] },
+    { label: "Full access for agent sessions", keywords: ["agents", "admin", "elevate"] },
   ],
   "account:security": [
     { label: "Password", keywords: ["change password", "sign in"] },

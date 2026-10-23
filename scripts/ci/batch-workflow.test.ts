@@ -5,7 +5,7 @@ const workflow = Bun.YAML.parse(raw) as any;
 
 test("one push-tip batch workflow does not run per PR or cancel active work", () => {
   expect(workflow.on).toEqual({ push: { branches: ["queue/**"] } });
-  expect(workflow.permissions).toEqual({ contents: "read" });
+  expect(workflow.permissions).toEqual({ contents: "read", actions: "read" });
   expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
   expect(workflow.concurrency.group).toContain("github.ref");
   expect(workflow.jobs.ready.name).toBe("Batch ready");

@@ -7,7 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
-import { CuaComputerBackend } from "../src/cua/backend";
+import { CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
 import type {
@@ -953,6 +953,27 @@ describe("CUA desktop boundary", () => {
         message:
           "CUA refused the element reference because the window was read again since; observe it again and act on a ref from that observation",
       });
+      // An element CUA places in another window of the app that is not a
+      // target here: say nothing was done, without CUA's own tool or a
+      // window that cannot be observed.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "element_outside_target_window",
+            message:
+              "Background input refused (element_outside_target_window): the addressed element belongs to window 9, a separate window of this app, not to window 1; read window 9 with get_window_state and address the element there",
+          },
+        },
+        true,
+      );
+      await expect(
+        backend.dispatch(command(await backend.observe(target.id))),
+      ).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message: `That element is in another window of this app, not in ${target.id}, so nothing was done`,
+      });
       fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
       fixture.applyLabel = "Apply";
       fixture.fieldLabel = "Password";
@@ -1188,6 +1209,27 @@ describe("CUA desktop boundary", () => {
         dispatched: false,
         message:
           "Keys reach only the focused window of a background app, and another of its windows has focus (one of cua:window:42:3), so none were sent: act on that window, or close it first",
+      });
+      // An element CUA places in another window of the app that is a target
+      // here: point at that target.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "element_outside_target_window",
+            message:
+              "Background input refused (element_outside_target_window): the addressed element belongs to window 3, a separate window of this app, not to window 1; read window 3 with get_window_state and address the element there",
+          },
+        },
+        true,
+      );
+      await expect(
+        backend.dispatch(command(await backend.observe("cua:window:42:1"))),
+      ).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "That element is in another window of this app (cua:window:42:3), not in cua:window:42:1, so nothing was done: observe cua:window:42:3 and act on its refs there",
       });
       // There is no focus action; work happens in the background.
       await expect(
@@ -2185,6 +2227,23 @@ describe("CUA desktop boundary", () => {
       code: "frame_stale",
       dispatched: false,
     });
+    // A value write CUA did not apply (and restored) changed nothing: a
+    // definite failure. One that left the control changed stays unknown.
+    fixture.mutation = result({ effect: "not_applied", code: "write_not_applied" }, true);
+    await expect(callDesktop(fixture, "set_value", {}, true)).rejects.toMatchObject({
+      code: "driver_failed",
+      dispatched: false,
+    });
+    for (const [effect, code] of [
+      ["cleared", "write_cleared"],
+      ["partial", "value_not_reached"],
+    ]) {
+      fixture.mutation = result({ effect, code }, true);
+      await expect(callDesktop(fixture, "set_value", {}, true)).rejects.toMatchObject({
+        code: "outcome_unknown",
+        dispatched: true,
+      });
+    }
     // A failure CUA reports only as text keeps CUA's reason.
     fixture.mutation = {
       text: "Failed to launch: The system cannot find the file specified.",
@@ -2426,6 +2485,232 @@ describe("CUA desktop boundary", () => {
       }
     });
 
+    test("a later action may name an element an earlier one brings up, and CUA waits for it", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        const crossing = batch(observation);
+        if (crossing.action.type !== "batch") throw new Error("not a batch");
+        crossing.action.actions = [
+          crossing.action.actions[0]!,
+          {
+            type: "semantic",
+            locator: { kind: "role", role: "textbox", name: "Seats" },
+            action: "set_value",
+            value: 12,
+          },
+          { type: "semantic", locator: { kind: "label", text: "Save changes" }, action: "invoke" },
+        ];
+        await backend.validate(crossing);
+        await backend.dispatch(crossing);
+        const calls = fixture.calls.filter((call) => call.name === "run_steps");
+        expect(calls).toHaveLength(1);
+        const { steps } = calls[0]!.args as {
+          steps: { tool: string; args: Record<string, unknown>; [key: string]: unknown }[];
+        };
+        expect(steps.map((step) => step.tool)).toEqual(["click", "set_value", "click"]);
+        expect(steps[0]!.args.element_token).toBeDefined();
+        expect(steps[0]).not.toHaveProperty("wait_for");
+        expect(steps[1]!.args).not.toHaveProperty("element_token");
+        expect(steps[1]).toMatchObject({
+          args: { pid: 42, window_id: 1, role: "textfield", name: "Seats", value: "12" },
+          timeout_ms: 1_000,
+          wait_for: {
+            role: "textfield",
+            name: "Seats",
+            pid: 42,
+            window_id: 1,
+            enabled: true,
+            timeout_ms: 10_000,
+          },
+        });
+        expect(steps[2]).toMatchObject({
+          args: { name: "Save changes", button: "left", delivery_mode: "background" },
+          wait_for: { name: "Save changes", enabled: true },
+        });
+        expect(steps[2]!.args).not.toHaveProperty("role");
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("after a step found by name, later elements are found by name too", async () => {
+      // CUA's lookup re-reads the window, which retires the tokens of the
+      // batch's observation, so a later token would stop the batch as stale.
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        const apply = observation.roots[0]!;
+        const crossing: ComputerBackendActionCommand = {
+          ...batch(observation),
+          action: {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "enter" },
+              {
+                type: "semantic",
+                locator: { kind: "role", role: "textbox", name: "Seats", exact: true },
+                action: "set_value",
+                value: "4",
+              },
+              { type: "semantic", locator: { kind: "ref", ref: apply.ref }, action: "invoke" },
+            ],
+          },
+        };
+        await backend.dispatch(crossing);
+        const { steps } = fixture.calls.find((call) => call.name === "run_steps")!.args as {
+          steps: { tool: string; args: Record<string, unknown> }[];
+        };
+        expect(steps[1]!.args).toMatchObject({ role: "textfield", name: "Seats", exact: true });
+        expect(steps[2]!.args).toMatchObject({ role: "button", name: "Apply", exact: true });
+        expect(steps[2]!.args).not.toHaveProperty("element_token");
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("after a step found by name, an element CUA cannot find by its shown name is refused up front", async () => {
+      const crossing = (observation: ComputerBackendObservation): ComputerBackendActionCommand => ({
+        ...batch(observation),
+        action: {
+          type: "batch",
+          actions: [
+            { type: "keyboard", action: "press", value: "enter" },
+            {
+              type: "semantic",
+              locator: { kind: "role", role: "textbox", name: "Seats" },
+              action: "set_value",
+              value: "4",
+            },
+            {
+              type: "semantic",
+              locator: { kind: "ref", ref: observation.roots[0]!.ref },
+              action: "invoke",
+            },
+          ],
+        },
+      });
+      // Shown without Chrome's live memory figure, which CUA's lookup matches.
+      const memory = new BatchFixture();
+      memory.applyLabel = "Inbox - Memory usage - 85.2 MB";
+      const first = await open(memory);
+      try {
+        expect(first.observation.roots[0]!.name).toBe("Inbox");
+        const failure = await first.backend
+          .dispatch(crossing(first.observation))
+          .catch((error: unknown) => error);
+        expect(failure).toMatchObject({ dispatched: false });
+        expect(String((failure as Error).message)).toContain("no label of its own");
+        expect(memory.ran).toBe(false);
+      } finally {
+        await first.backend.close();
+      }
+      // Two buttons by the same name: the lookup could not tell them apart.
+      class TwinFixture extends BatchFixture {
+        override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const response = await super.callTool(name, argumentsJson);
+          if (name !== "get_window_state" || !response.structuredJson) return response;
+          const data = JSON.parse(response.structuredJson);
+          if (data.elements)
+            data.elements.push({
+              ...data.elements[0],
+              element_index: 2,
+              element_token: `${data.snapshot_id}:2`,
+              frame: { x: 120, y: 60, w: 40, h: 20 },
+            });
+          response.structuredJson = JSON.stringify(data);
+          return response;
+        }
+      }
+      const twins = new TwinFixture();
+      const second = await open(twins);
+      try {
+        const failure = await second.backend
+          .dispatch(crossing(second.observation))
+          .catch((error: unknown) => error);
+        expect(failure).toMatchObject({ dispatched: false });
+        expect(String((failure as Error).message)).toContain("Several elements here");
+        expect(twins.ran).toBe(false);
+      } finally {
+        await second.backend.close();
+      }
+    });
+
+    test("a named step uses the lookup's role names, except AT-SPI roles on Linux", () => {
+      const args = { pid: 7, window_id: 3, session: "s" };
+      const fill = {
+        type: "semantic",
+        locator: { kind: "role", role: "text", name: "Email" },
+        action: "set_value",
+        value: "a@b.c",
+      } as const;
+      expect(namedOperation("macos", args, fill, null)?.args).toMatchObject({
+        role: "statictext",
+        name: "Email",
+      });
+      expect(namedOperation("linux", args, fill, null)?.args).toMatchObject({
+        role: "text",
+        name: "Email",
+      });
+      expect(namedOperation("linux", args, fill, null)?.args).not.toHaveProperty("exact");
+      // A number field is a spinbutton here and an incrementor to the lookup.
+      expect(
+        namedOperation(
+          "macos",
+          args,
+          { ...fill, locator: { kind: "role", role: "spinbutton", name: "Seats" }, value: "42" },
+          null,
+        )?.args,
+      ).toMatchObject({ role: "incrementor", name: "Seats", value: "42" });
+      // A ref names nothing on its own: without the observed element it stays refused.
+      expect(
+        namedOperation(
+          "macos",
+          args,
+          { type: "semantic", locator: { kind: "ref", ref: "s1:9" }, action: "invoke" },
+          null,
+        ),
+      ).toBeNull();
+    });
+
+    test("an element not yet seen is refused first in a batch, by ref, or for other actions", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        const missing = { kind: "role", role: "button", name: "Not there" } as const;
+        const variants: ComputerBackendActionCommand["action"][] = [
+          { type: "batch", actions: [{ type: "semantic", locator: missing, action: "invoke" }] },
+          {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "enter" },
+              {
+                type: "semantic",
+                locator: { kind: "identifier", value: "nope" },
+                action: "invoke",
+              },
+            ],
+          },
+          {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "enter" },
+              { type: "semantic", locator: missing, action: "expand" },
+            ],
+          },
+        ];
+        for (const action of variants) {
+          const failure = await backend
+            .dispatch({ ...batch(observation), action })
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_not_found", dispatched: false });
+        }
+        expect(fixture.ran).toBe(false);
+      } finally {
+        await backend.close();
+      }
+    });
+
     test("a batch CUA stopped says how far it got", async () => {
       const step = (index: number, fields: Record<string, unknown>) => ({
         ok: true,
@@ -2483,6 +2768,65 @@ describe("CUA desktop boundary", () => {
           reply: step(2, { phase: "action", code: "stale_element_token", message: "stale" }),
           expected: { code: "observation_stale", dispatched: true },
           details: { batchActionsCompleted: 2, batchStoppedActionState: "failed" },
+        },
+        // A later value write CUA did not apply changed nothing.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "write_not_applied",
+            message: "set_value did not take",
+          }),
+          expected: { code: "driver_failed", dispatched: true },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // An element of another window of the app was refused before
+        // anything was sent: the failure names that window as a target.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "element_outside_target_window",
+            message:
+              "Background input refused (element_outside_target_window): the addressed element belongs to window 7, a separate window of this app, not to window 1; read window 7 with get_window_state and address the element there",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: That element is in another window of this app, not in cua:window:42:1, so nothing was done",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // Pointer or key input to an element of a bubble the window shows was
+        // refused before anything was sent: say what reaches it.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "element_in_attached_window",
+            message: "CUA's own reason, naming its own tools",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: That element is in a bubble or popover shown over this window, which takes only invoke and set_value on its ref; pointer and key input would land on the window under it, so none was sent",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // One that could not be proven to be in the window at all keeps
+        // CUA's own reason, and is still a definite refusal.
+        {
+          reply: step(0, {
+            phase: "action",
+            code: "element_outside_target_window",
+            message: "the addressed element could not be proven to belong to window 1",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: false,
+            message:
+              "CUA stopped the batch at action 1: the addressed element could not be proven to belong to window 1",
+          },
+          details: undefined,
         },
       ]) {
         const fixture = new BatchFixture();
@@ -2959,6 +3303,213 @@ describe("CUA desktop boundary", () => {
           expect(String((failure as Error).message)).toStartWith(
             "All 2 actions of the batch ran, but the text field ",
           );
+        } finally {
+          await backend.close();
+        }
+      });
+    });
+
+    describe("a web number field takes set_value and says when it did not", () => {
+      /** Chrome's `<input type=number>` "Seats" as macOS reads it: an
+       * AXIncrementor in web content, next to a date field whose parts are
+       * AXIncrementors too. `shows` is what it reads after a write. */
+      class NumberFixture extends BatchFixture {
+        value = "5";
+        shows: ((written: string) => string) | null = (written) => written;
+        /** A range input "Volume" from 0 to 100 in steps of 7. */
+        volume = "14";
+        /** Whether the window reads Volume's value, as many native sliders don't. */
+        volumeReadable = true;
+        async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+          const steps =
+            name === "run_steps"
+              ? (args.steps as { tool: string; args: Record<string, unknown> }[])
+              : [{ tool: name, args }];
+          for (const step of steps)
+            if (step.tool === "set_value" && String(step.args.element_token).endsWith(":4"))
+              this.volume = String(
+                Math.min(98, Math.max(0, Math.round(Number(step.args.value) / 7) * 7)),
+              );
+            else if (step.tool === "set_value" && this.shows)
+              this.value = this.shows(String(step.args.value));
+          const response = await super.callTool(name, argumentsJson);
+          if (name !== "get_window_state" || !args.include_accessibility_tree) return response;
+          const data = JSON.parse(response.structuredJson!);
+          const s = data.snapshot_id as string;
+          data.elements = [
+            { element_index: 0, role: "AXWebArea", label: "Page", actions: [] },
+            {
+              element_index: 1,
+              element_token: `${s}:1`,
+              parent_index: 0,
+              role: "AXIncrementor",
+              label: "Seats",
+              value: this.value,
+              actions: ["AXPress", "AXShowMenu", "AXIncrement", "AXDecrement"],
+            },
+            {
+              element_index: 2,
+              element_token: `${s}:2`,
+              parent_index: 0,
+              role: "AXDateField",
+              label: "Start",
+              actions: ["AXPress"],
+            },
+            {
+              element_index: 3,
+              element_token: `${s}:3`,
+              parent_index: 2,
+              role: "AXIncrementor",
+              label: "Day Start",
+              value: "--",
+              actions: ["AXIncrement", "AXDecrement"],
+            },
+            {
+              element_index: 4,
+              element_token: `${s}:4`,
+              parent_index: 0,
+              role: "AXSlider",
+              label: "Volume",
+              ...(this.volumeReadable ? { value: this.volume } : {}),
+              actions: ["AXIncrement", "AXDecrement"],
+            },
+          ];
+          response.structuredJson = JSON.stringify(data);
+          return response;
+        }
+      }
+      const seats = (observation: ComputerBackendObservation) =>
+        observation.roots.find((node) => node.name === "Seats")!;
+      const setSeats = (
+        observation: ComputerBackendObservation,
+        value: string,
+      ): ComputerBackendActionCommand => ({
+        ...command(observation),
+        action: {
+          type: "semantic",
+          locator: { kind: "ref", ref: seats(observation).ref },
+          action: "set_value",
+          value,
+        },
+      });
+
+      test("it is a spinbutton that offers set_value; a date part stays as it was", async () => {
+        const { backend, observation } = await open(new NumberFixture());
+        try {
+          expect(seats(observation)).toMatchObject({
+            role: "spinbutton",
+            value: "5",
+            actions: ["invoke", "set_value", "focus"],
+          });
+          expect(observation.roots.find((node) => node.name === "Day Start")).toMatchObject({
+            role: "AXIncrementor",
+            actions: [],
+          });
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a number it shows, as a number, passes", async () => {
+        const fixture = new NumberFixture();
+        // Chrome reads 7.50 back as the number 7.5.
+        fixture.shows = (written) => String(Number(written));
+        const { backend, observation } = await open(fixture);
+        try {
+          const after = await backend.dispatch(setSeats(observation, "42"));
+          expect(seats(after!).value).toBe("42");
+          const again = await backend.dispatch(setSeats(after!, "7.50"));
+          expect(seats(again!).value).toBe("7.5");
+          // The value goes to the field as it was given.
+          expect(JSON.stringify(fixture.calls)).toContain('"value":"7.50"');
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a write it emptied, or did not take, fails", async () => {
+        const fixture = new NumberFixture();
+        fixture.shows = () => "";
+        const { backend, observation } = await open(fixture);
+        try {
+          const emptied = await backend
+            .dispatch(setSeats(observation, "42"))
+            .catch((error: unknown) => error);
+          expect(emptied).toMatchObject({
+            code: "driver_failed",
+            dispatched: true,
+            message: `The value was written, but the number field ${seats(observation).ref} reads empty instead of the value it was given; give it a plain number, such as 42 or 7.5`,
+          });
+          fixture.shows = null;
+          fixture.value = "5";
+          const fresh = await backend.observe(observation.target.id);
+          const ignored = await backend
+            .dispatch(setSeats(fresh, "42"))
+            .catch((error: unknown) => error);
+          expect(String((ignored as Error).message)).toContain(
+            `the number field ${seats(fresh).ref} reads "5" instead of the value it was given`,
+          );
+          // Emptying it on purpose is what it was asked.
+          fixture.shows = (written) => written;
+          await backend.dispatch(setSeats(fresh, ""));
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a slider its steps or range stop short of the value fails", async () => {
+        const fixture = new NumberFixture();
+        const { backend, observation } = await open(fixture);
+        const setVolume = (current: ComputerBackendObservation, value: string) =>
+          backend.dispatch({
+            ...command(current),
+            action: {
+              type: "semantic",
+              locator: { kind: "role", role: "slider", name: "Volume" },
+              action: "set_value",
+              value,
+            },
+          });
+        try {
+          const after = await setVolume(observation, "28");
+          expect(after!.roots.find((node) => node.name === "Volume")!.value).toBe("28");
+          for (const [value, reads] of [
+            ["30", "28"],
+            ["150", "98"],
+          ]) {
+            const failure = await setVolume(
+              await backend.observe(observation.target.id),
+              value!,
+            ).catch((error: unknown) => error);
+            expect(String((failure as Error).message)).toContain(
+              `the slider ${observation.roots.find((node) => node.name === "Volume")!.ref} reads "${reads}" instead of the value it was given; give it a value within its range that its steps reach`,
+            );
+          }
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a slider whose value the window does not read is not checked", async () => {
+        const fixture = new NumberFixture();
+        fixture.volumeReadable = false;
+        const { backend, observation } = await open(fixture);
+        try {
+          const after = await backend.dispatch({
+            ...command(observation),
+            action: {
+              type: "semantic",
+              locator: {
+                kind: "ref",
+                ref: observation.roots.find((node) => node.name === "Volume")!.ref,
+              },
+              action: "set_value",
+              value: "28",
+            },
+          });
+          expect(after!.roots.find((node) => node.name === "Volume")!.value).toBeUndefined();
+          expect(fixture.volume).toBe("28");
         } finally {
           await backend.close();
         }

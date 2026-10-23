@@ -76,6 +76,7 @@ import {
 } from "./lossless-columns";
 
 export * from "./editable-artifacts-schema";
+export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";
 export * from "./slack-api-rate-limit-schema";
 export * from "./organization-recovery-schema";
@@ -15508,6 +15509,7 @@ export * from "./governed-learning-evaluator-schema";
 export * from "./governed-learning-activation-schema";
 export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
+export * from "./recordings-schema";
 export * from "./interaction-schema";
 export * from "./site-data-schema";
 

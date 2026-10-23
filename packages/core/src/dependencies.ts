@@ -101,6 +101,30 @@ export type SessionWorkflowClient = {
     versionId?: string;
     workflowId?: string;
   }) => Promise<void>;
+  /**
+   * Durably deletes objects a request staged in storage once `deleteAfter`
+   * passes, whether or not the request ever finishes. Repeating the same keys
+   * is a no-op. Optional for embedded clients; callers without it must clean
+   * up within the request.
+   */
+  scheduleTransientObjectDeletion?: (input: {
+    workspaceId: string;
+    objectKeys: string[];
+    deleteAfter: Date;
+  }) => Promise<void>;
+  /**
+   * Start a recording's transcript or deletion workflow. Starting one that is
+   * already running does nothing. Optional for embedded clients; the worker's
+   * recovery sweep starts any it misses.
+   */
+  startRecordingWorkflow?: (input: {
+    kind: "transcript" | "deletion";
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    versionId: string | null;
+    ownerSubjectId: string;
+  }) => Promise<void>;
   check?: () => Promise<void>;
 };
 

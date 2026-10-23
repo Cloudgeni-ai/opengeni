@@ -1,4 +1,5 @@
 import type { Context } from "hono";
+import { HTTPException } from "hono/http-exception";
 import type { z } from "zod";
 import { ZodError } from "zod";
 
@@ -58,6 +59,42 @@ export async function parseRequestJson<Schema extends z.ZodType>(
   schema: Schema,
 ): Promise<z.output<Schema>> {
   return parseRequestBody(schema, await readRequestJson(c));
+}
+
+/**
+ * Read a raw request body, refusing (413) one larger than `maxBytes` before
+ * buffering it. Webhook intakes verify signatures over these exact bytes.
+ */
+export async function readBoundedRawBody(
+  request: Request,
+  maxBytes: number,
+  tooLargeMessage = "request body is too large",
+): Promise<Uint8Array> {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new HTTPException(413, { message: tooLargeMessage });
+  }
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > maxBytes) {
+      await reader.cancel();
+      throw new HTTPException(413, { message: tooLargeMessage });
+    }
+    chunks.push(value);
+  }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
 }
 
 /**

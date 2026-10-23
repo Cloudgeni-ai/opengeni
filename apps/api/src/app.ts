@@ -165,7 +165,11 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
-import { PersonalWorkspacesOffError, sessionUsageLimitsProducerEnabled } from "@opengeni/core";
+import {
+  eventTriggersEnabled,
+  PersonalWorkspacesOffError,
+  sessionUsageLimitsProducerEnabled,
+} from "@opengeni/core";
 import {
   CodexCompactionV2ProviderLockedError,
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -338,6 +342,8 @@ import { registerSkillRoutes } from "./routes/skills";
 import { registerChannelRoutes } from "./routes/channels";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
+import { registerEventSourceRoutes } from "./routes/event-sources";
+import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
 import {
   archivedSessionImportErrorResponse,
@@ -1552,6 +1558,7 @@ export function createAppComposition(deps: AppDependencies): {
         sessionUsageLimits: {
           enabled: sessionUsageLimitsProducerEnabled(deps.settings),
         },
+        eventTriggers: { enabled: eventTriggersEnabled(deps.settings) },
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -2311,6 +2318,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceIntegrationRoutes(app, routeDeps);
   registerOrganizationIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
+  registerEventSourceRoutes(app, routeDeps);
+  registerRecordingRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
   registerOrganizationModelDefaultsRoutes(app, routeDeps);
@@ -3154,6 +3163,7 @@ const routeLabelPatterns: Array<{
     label: "/v1/billing/entitlements",
   },
   { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
+  { pattern: /^\/v1\/webhooks\/events\/[^/]+$/, label: "/v1/webhooks/events/:routeId" },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/(registrations|repositories)(?:\/[^/]+)?$/,
     label: (match) => `/v1/workspaces/:workspaceId/pr-review/${match[1]}`,

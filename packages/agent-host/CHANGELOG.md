@@ -1,5 +1,19 @@
 # @opengeni/agent-host
 
+## 5.2.1
+
+### Patch Changes
+
+- Updated dependencies [2d6484c]
+  - @opengeni/sdk@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- Updated dependencies [5d377a7]
+  - @opengeni/sdk@5.1.0
+
 ## 5.0.2
 
 ### Patch Changes

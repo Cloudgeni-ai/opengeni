@@ -67,12 +67,21 @@ type Operation = {
   args: Record<string, unknown>;
   /** The value a date field must read once this step's input has run. */
   expectDate?: { ref: string; value: string; segments: readonly DateSegment[] };
-  /** A text field's value before set_value wrote this one: a field that
-   * still reads it afterwards did not take the write. */
-  expectText?: { ref: string; value: string; before: string };
+  /** A text or number field's value before set_value wrote this one: a
+   * field that still reads it afterwards did not take the write. A number
+   * field (`numeric`) compares as numbers, and reading empty fails too. */
+  expectText?: {
+    ref: string;
+    value: string;
+    before: string;
+    numeric?: "number field" | "slider";
+  };
   /** This step only fills a field (a part of a date field's input), so it
    * cannot submit or clear another field. */
   fillsField?: true;
+  /** run_steps options of a step that names its element instead of carrying
+   * a token: how long CUA waits for it, and the check that holds first. */
+  stepOptions?: { timeout_ms: number; wait_for: Record<string, unknown> };
 };
 
 /** Every CUA action waits for the agent cursor to reach its target, and the
@@ -113,6 +122,10 @@ export class CuaComputerBackend implements ComputerBackend {
     string,
     { fields: Map<string, DateSegment[]>; owners: Map<string, string> }
   >();
+  /** Per window, the element's own label behind each CUA token of its latest
+   * reading: what CUA's lookup by name matches. An observed name can instead
+   * come from the element's text or drop Chrome's live memory figure. */
+  private readonly ownLabels = new Map<string, Map<string, string>>();
   private lastRef = 0;
   private readonly frames = new Map<string, Frame>();
   private tail: Promise<unknown> = Promise.resolve();
@@ -351,7 +364,14 @@ export class CuaComputerBackend implements ComputerBackend {
             throw (
               (command.action.type === "keyboard"
                 ? this.keyboardRefusal(command.targetId, error.cuaCode, error.code, observed)
-                : null) ?? error
+                : null) ??
+              (await this.elementWindowRefusal(
+                command.targetId,
+                error.cuaCode,
+                error.code,
+                error.message,
+              )) ??
+              error
             );
           // macOS answers an accessibility action with "cannot complete"
           // (-25205) even when it pressed the button or opened the item, often
@@ -469,7 +489,11 @@ export class CuaComputerBackend implements ComputerBackend {
     const actionOf: number[] = [];
     for (const [index, action] of actions.entries()) {
       try {
-        const operations = await this.operations({ ...command, action }, index > 0);
+        const operations = await this.operations(
+          { ...command, action },
+          index > 0,
+          steps.some((step) => step.stepOptions !== undefined),
+        );
         for (const operation of operations) {
           steps.push(operation);
           actionOf.push(index);
@@ -516,7 +540,7 @@ export class CuaComputerBackend implements ComputerBackend {
           // finds stale names an element of a window that changed since: the
           // batch stops there instead of acting on a lookalike CUA finds again.
           refind_stale: false,
-          steps: chunk.map((step) => ({ tool: step.name, args: step.args })),
+          steps: chunk.map((step) => ({ tool: step.name, args: step.args, ...step.stepOptions })),
         });
       } catch (error) {
         // A later call refused before it ran: the earlier calls still did.
@@ -563,15 +587,22 @@ export class CuaComputerBackend implements ComputerBackend {
     const definite = outcome.definite && actionOf.indexOf(action) === step;
     const stoppedAction =
       command.action.type === "batch" ? command.action.actions[action] : undefined;
-    const refusal =
-      definite && stoppedAction?.type === "keyboard"
-        ? this.keyboardRefusal(
-            command.targetId,
-            outcome.cuaCode,
-            outcome.code ?? "invalid_action",
-            observed,
-          )
-        : null;
+    const refusal = definite
+      ? ((stoppedAction?.type === "keyboard"
+          ? this.keyboardRefusal(
+              command.targetId,
+              outcome.cuaCode,
+              outcome.code ?? "invalid_action",
+              observed,
+            )
+          : null) ??
+        (await this.elementWindowRefusal(
+          command.targetId,
+          outcome.cuaCode,
+          outcome.code ?? "invalid_action",
+          outcome.message,
+        )))
+      : null;
     const reason = refusal?.message ?? outcome.message;
     const message = single
       ? `CUA stopped part way through the input: ${reason}`
@@ -933,6 +964,44 @@ export class CuaComputerBackend implements ComputerBackend {
     );
   }
 
+  /** CUA refuses input to an element outside the addressed window, and names
+   * CUA's own tools and window numbers when it does. Say what the caller can
+   * do instead:
+   * - an element of a bubble or popover the window shows as its own takes
+   *   accessibility actions (invoke, set_value) but no pointer or key input,
+   *   which would land on the window under it;
+   * - an element of another window of the app is that window's to act on,
+   *   pointed at only when it is a target the caller can observe. */
+  private async elementWindowRefusal(
+    targetId: string,
+    cuaCode: string | null | undefined,
+    code: ComputerBackendErrorCode,
+    message: string,
+  ): Promise<ComputerBackendError | null> {
+    const target = this.targetsById.get(targetId);
+    if (!target) return null;
+    if (cuaCode === "element_in_attached_window")
+      return new ComputerBackendError(
+        code,
+        "That element is in a bubble or popover shown over this window, which takes only invoke and set_value on its ref; pointer and key input would land on the window under it, so none was sent",
+        false,
+        false,
+      );
+    if (cuaCode !== "element_outside_target_window") return null;
+    const owner = /belongs to window (\d{1,10})\b/.exec(message)?.[1];
+    if (!owner) return null;
+    const other = `cua:window:${target.pid}:${owner}`;
+    await this.discover().catch(() => undefined);
+    return new ComputerBackendError(
+      code,
+      this.targetsById.has(other)
+        ? `That element is in another window of this app (${other}), not in ${targetId}, so nothing was done: observe ${other} and act on its refs there`
+        : `That element is in another window of this app, not in ${targetId}, so nothing was done`,
+      false,
+      false,
+    );
+  }
+
   private async observeTarget(targetId: string): Promise<ComputerBackendObservation> {
     const target = await this.target(targetId);
     if (
@@ -1016,6 +1085,16 @@ export class CuaComputerBackend implements ComputerBackend {
     );
     while (this.openingTokens.size > 32)
       this.openingTokens.delete(this.openingTokens.keys().next().value!);
+    this.ownLabels.delete(targetId);
+    this.ownLabels.set(
+      targetId,
+      new Map(
+        state.elements
+          .filter((element) => element.element_token && element.label)
+          .map((element) => [element.element_token!, element.label!]),
+      ),
+    );
+    while (this.ownLabels.size > 32) this.ownLabels.delete(this.ownLabels.keys().next().value!);
     this.dateFieldTokens.delete(targetId);
     if (this.identity.platform === "macos") {
       const byIndex = new Map(state.elements.map((element) => [element.element_index, element]));
@@ -1276,6 +1355,8 @@ export class CuaComputerBackend implements ComputerBackend {
   private async operations(
     command: ComputerBackendActionCommand,
     laterInBatch = false,
+    /** An earlier action of the batch names its element (see namedOperation). */
+    afterNamed = false,
   ): Promise<Operation[]> {
     if (command.action.type === "batch") throw unsupported("A batch cannot contain a batch");
     if (command.action.type === "pointer" && command.action.clickCount === 2) {
@@ -1437,7 +1518,21 @@ export class CuaComputerBackend implements ComputerBackend {
       );
     }
     if (action.type === "semantic") {
-      const node = this.locateObserved(command.targetId, observed, action.locator);
+      let node: InteractionSemanticNodeValue;
+      try {
+        node = this.locateObserved(command.targetId, observed, action.locator);
+      } catch (error) {
+        // Not in the batch's observation: an earlier action may bring it up.
+        const named =
+          laterInBatch &&
+          error instanceof ComputerBackendError &&
+          error.code === "locator_not_found" &&
+          ACTIONS_ON_UNSEEN.has(action.action)
+            ? namedOperation(this.identity.platform, args, action, null)
+            : null;
+        if (!named) throw error;
+        return [named];
+      }
       if (!node.actions.includes(action.action) && !selectsByPressing(node, action.action)) {
         const field = this.dateFieldOf(command.targetId, node.ref);
         if (field)
@@ -1459,6 +1554,38 @@ export class CuaComputerBackend implements ComputerBackend {
       // An earlier action of the batch can enable it; CUA refuses it if not.
       if (!laterInBatch && node.states.includes("disabled"))
         throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
+      if (afterNamed) {
+        // An earlier step found its element by name, which re-read the window
+        // and so retired every token of the batch's observation: this element
+        // is found by name too.
+        const token = this.elementToken(command.targetId, node.ref);
+        const special =
+          (action.action === "set_value" &&
+            this.dateFieldTokens.get(command.targetId)?.fields.has(token)) ||
+          (action.action === "invoke" && this.openingTokens.get(command.targetId)?.has(token));
+        // CUA finds an element by its own label only, and by that label it
+        // must find this one element.
+        const findable =
+          node.name !== undefined && node.name === this.ownLabels.get(command.targetId)?.get(token);
+        if (
+          findable &&
+          !special &&
+          observed.roots.filter((other) => other.role === node.role && other.name === node.name)
+            .length > 1
+        )
+          throw unsupported(
+            "Several elements here have this element's role and name, and it comes after an action that names an element not yet shown, so it cannot be told apart in the same batch: act on it in its own call",
+          );
+        const named =
+          special || !findable ? null : namedOperation(this.identity.platform, args, action, node);
+        if (!named)
+          throw unsupported(
+            special
+              ? "This field or file comes after an action that names an element not yet shown, so it cannot be filled or opened in the same batch: act on it in its own call"
+              : "This element has no label of its own, and it comes after an action that names an element not yet shown, so it cannot be found again in the same batch: act on it in its own call",
+          );
+        return [named];
+      }
       if (action.action === "focus")
         return [
           {
@@ -1498,13 +1625,25 @@ export class CuaComputerBackend implements ComputerBackend {
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
-            ...(node.role === "textbox" &&
-            (node.value === undefined || typeof node.value === "string")
+            // A slider is only checked when the window reads its value as a
+            // number: many native sliders expose a range but no readable
+            // value, and some read it as text such as "50 %".
+            ...(((node.role === "textbox" || node.role === "spinbutton") &&
+              (node.value === undefined || typeof node.value === "string")) ||
+            (node.role === "slider" &&
+              typeof node.value === "string" &&
+              node.value.trim() !== "" &&
+              Number.isFinite(Number(node.value)))
               ? {
                   expectText: {
                     ref: node.ref,
                     value: String(action.value),
                     before: node.value ?? "",
+                    ...(node.role === "spinbutton"
+                      ? { numeric: "number field" as const }
+                      : node.role === "slider"
+                        ? { numeric: "slider" as const }
+                        : {}),
                   },
                 }
               : {}),
@@ -1774,6 +1913,91 @@ const MAX_RUN_STEPS = 64;
 /** Roles chosen by pressing them: a radio button or a tab. */
 const PRESS_TO_SELECT_ROLES = new Set(["radio", "radio button", "tab", "page tab", "TabItem"]);
 
+/** What a later action of a batch may do to an element its observation does
+ * not show yet: an action whose meaning does not depend on the element's kind. */
+const ACTIONS_ON_UNSEEN: ReadonlySet<string> = new Set([
+  "invoke",
+  "show_menu",
+  "set_value",
+  "focus",
+]);
+
+/** How long a batch step that names its element waits for it to appear and
+ * enable: CUA's longest wait for one step. */
+const NAMED_STEP_WAIT_MS = 10_000;
+/** How long its lookup then waits, once the check found the element. */
+const NAMED_STEP_FIND_MS = 1_000;
+
+/** The roles macOS and Windows observations show, as CUA's lookup names
+ * them where they differ ("text" there is a text field; here it is static
+ * text). Linux observations show AT-SPI roles, which CUA reads as they are. */
+const CUA_LOOKUP_ROLES: Readonly<Record<string, string>> = {
+  textbox: "textfield",
+  text: "statictext",
+  radio: "radiobutton",
+  combobox: "popupbutton",
+  spinbutton: "incrementor",
+};
+
+type SemanticAction = Extract<ComputerBackendActionCommand["action"], { type: "semantic" }>;
+
+/** The step for a later action of a batch that names its element by role
+ * and name instead of carrying a token: CUA finds the element when the step
+ * runs, after waiting for it to appear and enable. `node` is the element as
+ * the batch's observation shows it, when it shows it; a ref or identifier
+ * locator then names it by its role and exact name. Null when the element
+ * cannot be named: a ref or identifier the observation does not show, or an
+ * element without a role and name. */
+export function namedOperation(
+  platform: "macos" | "windows" | "linux",
+  args: Record<string, unknown>,
+  action: SemanticAction,
+  node: InteractionSemanticNodeValue | null,
+): Operation | null {
+  if (action.action === "set_value" && action.value === undefined) return null;
+  const { locator } = action;
+  const byLocator = locator.kind === "role" || locator.kind === "label" || locator.kind === "text";
+  if (!byLocator && !node) return null;
+  const role = locator.kind === "role" ? locator.role : byLocator ? undefined : node!.role;
+  const name = byLocator ? (locator.kind === "role" ? locator.name : locator.text) : node!.name;
+  const exact = byLocator ? locator.exact === true : true;
+  const selector = {
+    ...(role !== undefined
+      ? { role: platform === "linux" ? role : (CUA_LOOKUP_ROLES[role] ?? role) }
+      : {}),
+    ...(name !== undefined && name !== "" ? { name, ...(exact ? { exact: true } : {}) } : {}),
+  };
+  if (!("name" in selector) && (byLocator ? !("role" in selector) : true)) return null;
+  // The check waits for the element; the lookup after it finds it at once.
+  const stepOptions = {
+    timeout_ms: NAMED_STEP_FIND_MS,
+    wait_for: {
+      ...selector,
+      pid: args.pid,
+      window_id: args.window_id,
+      enabled: true,
+      timeout_ms: NAMED_STEP_WAIT_MS,
+    },
+  };
+  if (action.action === "set_value")
+    return {
+      name: "set_value",
+      args: { ...args, ...selector, value: String(action.value) },
+      stepOptions,
+    };
+  return {
+    name: "click",
+    args: {
+      ...args,
+      ...selector,
+      button: action.action === "show_menu" ? "right" : "left",
+      ...(action.action === "focus" ? { action: "focus" } : {}),
+      delivery_mode: "background",
+    },
+    stepOptions,
+  };
+}
+
 /** `select` is the natural verb for a radio button or tab, which the platform
  * offers only as a press, so it presses one rather than being refused. */
 function selectsByPressing(
@@ -1946,10 +2170,11 @@ async function readPermissions(
 
 /** What the input a set of steps sent did not do, read from the window
  * afterwards: a date field that reads another value than the one typed into
- * its parts, a text field that still reads what it did before set_value.
- * The input ran either way, so these are not refusals. A date field Chrome
- * left without a value reads what its parts read (see projectElements). A
- * field the reading no longer shows is left to the caller's own look. */
+ * its parts, a text field that still reads what it did before set_value, a
+ * number field or slider that reads anything but the number it was given.
+ * The input ran either way, so these are not refusals. A date field reads
+ * what its parts read (see projectElements). A field the reading no longer
+ * shows is left to the caller's own look. */
 function inputFailures(
   observation: ComputerBackendObservation,
   steps: readonly Operation[],
@@ -2000,6 +2225,26 @@ function inputFailures(
       const reading = read(expected.ref);
       if (!reading.found) continue;
       const now = reading.value ?? "";
+      if (expected.numeric) {
+        // A number field or slider reads its number back as a number ("7.50"
+        // reads "7.5"). Anything else is not the value it was given: its old
+        // value, nothing (a number field that refused text), or where a
+        // slider's steps or range stopped it.
+        const number = (text: string) => (text.trim() === "" ? Number.NaN : Number(text));
+        // A slider that no longer reads a value says nothing about the write.
+        if (expected.numeric === "slider" && now.trim() === "") continue;
+        if (now !== expected.value && number(now) !== number(expected.value))
+          failures.push(
+            `the ${expected.numeric} ${expected.ref} reads ${
+              now.trim() ? `"${now.slice(0, 64)}"` : "empty"
+            } instead of the value it was given; ${
+              expected.numeric === "slider"
+                ? "give it a value within its range that its steps reach"
+                : "give it a plain number, such as 42 or 7.5"
+            }`,
+          );
+        continue;
+      }
       // The value is not repeated: it may be a secret typed at dispatch.
       if (now === expected.before && now !== expected.value)
         failures.push(

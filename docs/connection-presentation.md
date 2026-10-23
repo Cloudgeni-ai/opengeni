@@ -74,3 +74,29 @@ shared. Host translations are message overrides, not a separate locale subsystem
 Mount it only in the open activity drawer. It accepts the hook's explicit
 client/workspace override and does not fetch history. Keep command and connection
 setup implementations outside the initial session bundle.
+## Duplicate OAuth accounts
+
+All MCP OAuth callbacks use the shared owner/resource policy in
+`apps/api/src/integrations/oauth-account-identity.ts`. Connect never implicitly
+selects the first credential for a provider domain. Explicit reconnect binds the
+exact connection and MCP URL. Callbacks serialize the workspace, owner and exact
+resource bucket before inspecting or writing connections.
+
+Authenticated verification adapters declare their identity metadata tuple
+(including a tenant when identities are tenant-scoped); display names are never
+identity. A repeated Connect for an active verified account returns its existing
+ID without rotating credentials, resetting approvals or rewriting accepted work.
+Changed permissions or an inactive account require explicit reconnect. A known
+identity cannot change during reconnect.
+
+OAuth and MCP do not require an account-identity endpoint. Without verified
+identity, the shared policy permits one live connection per owner and exact
+resource and refuses additional Connect attempts with reconnect guidance. It
+never treats opaque tokens, decoded JWTs or missing identity as proof that two
+accounts are the same. A reviewed verification adapter can enable distinct
+accounts without changing the persistence policy.
+
+Existing duplicate records are not deleted or rebound by this flow. Their
+accepted session/schedule references and approval policies remain intact.
+Account lists and pickers show available provider names, workspace names and
+emails; internal IDs and hashes are not account labels.

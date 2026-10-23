@@ -27,8 +27,8 @@ describe("agentStatus from the agent's own explanation", () => {
   test("an older agent names the agent and its version as the side to update", () => {
     const status = agentStatus({ ...base, refusal: refusal("agent_outdated") });
     expect(status).toEqual(agentOutdated("0.1.110"));
-    expect(status.title).toBe("Update the Opengeni agent");
-    expect(status.detail).toContain("Opengeni agent 0.1.110 on this computer is older");
+    expect(status.title).toBe("Update Opengeni Runner");
+    expect(status.detail).toContain("Opengeni Runner 0.1.110 on this computer is older");
   });
 
   test("an older extension names the extension as the side to update", () => {
@@ -75,7 +75,7 @@ describe("agentStatus without an explanation", () => {
     const status = agentStatus({ error: "Native host has exited.", everConnected: false });
     expect(status).toEqual(agentOutdated(null));
     expect(status.detail).toBe(
-      "The Opengeni agent on this computer is older than this extension. Update the Opengeni app or agent on this computer, or restart it if it just updated; then this profile connects.",
+      "Opengeni Runner on this computer is older than this extension. Update the Opengeni app or Runner on this computer, or restart it if it just updated; then this profile connects.",
     );
   });
 

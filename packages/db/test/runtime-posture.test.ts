@@ -1760,12 +1760,34 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0929 event sources, deliveries, events, triggers and the automation
+          // event inbox, occurrences and settings: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 7
+            : 0) +
+          // 0929 credential-free event ingress routes: full DML, no RLS.
+          (tables === NON_RLS_RUNTIME_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0820 adds retained browser downloads: read, insert and update, FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0930 meeting recordings: FORCE RLS; eight full-DML tables and an
+          // append-only event log.
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 9
+            : tables === RUNTIME_FULL_DML_TABLES
+              ? 8
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 1
+                : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1813,7 +1835,12 @@ describe("runtime database posture evaluator", () => {
         1 + // 0842 owner-scoped Site chat access: full-DML, FORCE-RLS.
         1 + // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
         1 + // 0908 personal Site opens: full-DML, FORCE-RLS.
-        1; // 0909 session message search texts: read and insert, FORCE-RLS.
+        1 + // 0909 session message search texts: read and insert, FORCE-RLS.
+        8 + // 0929 event triggers: seven full-DML FORCE-RLS tables and one routing table.
+        9; // 0930 meeting recordings: FORCE-RLS; eight full-DML, one read and insert.
+      expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
+      expect(NON_RLS_RUNTIME_TABLES).toContain("event_ingress_routes");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("event_ingress_routes");
       expect(FORCE_RLS_TABLES).toContain("site_opens");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_opens");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");

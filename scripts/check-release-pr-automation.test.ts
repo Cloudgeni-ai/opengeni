@@ -4158,6 +4158,7 @@ describe("workflow contracts", () => {
     ).toEqual([
       ["Begin exact-head automation checks", "${{ github.token }}"],
       ["Admit trusted dispatch and exact source tree", "${{ github.token }}"],
+      ["Yield Version validation to main and batch CI", "${{ github.token }}"],
       ["Complete exact-head source-admission check", "${{ github.token }}"],
     ]);
     expect(

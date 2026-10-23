@@ -224,7 +224,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       if (result?.accepted) {
         toast.success(`Updating ${machine.name} to v${result.targetVersion}`, {
           description:
-            "The agent installs it once the machine is idle. If work is running, the update is postponed and you can start it again later.",
+            "Opengeni Runner installs it once the machine is idle. If work is running, the update is postponed and you can start it again later.",
         });
       }
     });
@@ -235,7 +235,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<LaptopIcon className="size-4" />}
         title="Machines"
-        description="Your own computers, connected as agent sandboxes. One agent can serve this workspace alongside any other Opengeni workspaces or deployments already connected to the machine."
+        description="Your own computers, connected so agents can work on them. Opengeni Runner on a machine can serve this workspace alongside any other Opengeni workspaces or deployments it is already connected to."
       />
 
       <div className="pt-6">

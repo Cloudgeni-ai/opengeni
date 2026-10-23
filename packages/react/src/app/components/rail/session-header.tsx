@@ -152,7 +152,7 @@ export function SessionHeader({
    */
   repliesMute?: SessionRepliesMute | null | undefined;
   /**
-   * This session's admin access, when the viewer can see it on or give it.
+   * This session's full access, when the viewer can see it on or give it.
    * Absent hides the shield and the menu action.
    */
   adminAccess?: SessionAdminAccessControl | null | undefined;
@@ -539,7 +539,7 @@ export function SessionHeader({
             {adminAccess?.state.active && adminAccess.state.canRevoke ? (
               <DropdownMenuItem disabled={adminAccess.busy} onSelect={() => adminAccess.revoke()}>
                 <ShieldOffIcon />
-                Turn off admin access
+                Turn off full access
               </DropdownMenuItem>
             ) : adminAccess && !adminAccess.state.active && adminAccess.state.canGrant ? (
               <DropdownMenuItem
@@ -549,7 +549,7 @@ export function SessionHeader({
                 }}
               >
                 <ShieldCheckIcon />
-                Give admin access…
+                Give full access…
               </DropdownMenuItem>
             ) : null}
             {canArchive ? (

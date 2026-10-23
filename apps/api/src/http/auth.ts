@@ -89,6 +89,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "POST" && path.startsWith("/v1/webhooks/automations/")) {
     return true;
   }
+  // Event source webhooks are authenticated by the sender's signature, which
+  // the intake verifies over the raw body before reading anything.
+  if (c.req.method === "POST" && path.startsWith("/v1/webhooks/events/")) {
+    return true;
+  }
   if (c.req.method === "POST" && path === "/v1/webhooks/pr-review/github") {
     return true;
   }

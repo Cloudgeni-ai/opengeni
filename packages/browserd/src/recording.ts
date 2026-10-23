@@ -70,6 +70,14 @@ export type RecordingSummary = {
 
 type Clock = () => number;
 
+/** One upload of a stopped recording's bundle to one storage object. */
+type RecordingTransfer = {
+  /** The object, without its signature: a renewed grant names the same one. */
+  target: string;
+  state: "uploading" | "uploaded" | "failed";
+  done: Promise<void>;
+};
+
 export class BrowserRecording {
   readonly recordingId = randomUUID();
   private readonly startedAtMs: number;
@@ -92,6 +100,7 @@ export class BrowserRecording {
   private bundle: { path: string; sizeBytes: number; sha256: string } | null = null;
   private limitTimer: ReturnType<typeof setTimeout> | null = null;
   private releasePresence: () => void;
+  private transfer: RecordingTransfer | null = null;
 
   private constructor(
     parentDirectory: string,
@@ -218,6 +227,42 @@ export class BrowserRecording {
   async discard(): Promise<void> {
     await this.stop("session_ended").catch(() => undefined);
     await rm(this.directory, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  /**
+   * Uploads the stopped bundle to `target`, or joins the upload already going
+   * there, so a caller that gave up waiting and asks again never starts a
+   * second copy. A finished upload to the same object is not repeated
+   * unless `replace` asks for it. A failed one is replaced by the next
+   * request, and an upload to another object starts once the current one
+   * settles.
+   */
+  transferTo(target: string, upload: () => Promise<void>, replace = false): RecordingTransfer {
+    this.exportable();
+    const current = this.transfer;
+    if (
+      current &&
+      current.target === target &&
+      (current.state === "uploading" || (current.state === "uploaded" && !replace))
+    ) {
+      return current;
+    }
+    const previous =
+      current?.state === "uploading" ? current.done.catch(() => undefined) : Promise.resolve();
+    const transfer: RecordingTransfer = { target, state: "uploading", done: Promise.resolve() };
+    transfer.done = previous.then(upload).then(
+      () => {
+        transfer.state = "uploaded";
+      },
+      (error: unknown) => {
+        transfer.state = "failed";
+        throw error;
+      },
+    );
+    // Callers may stop waiting; the outcome stays readable on the transfer.
+    transfer.done.catch(() => undefined);
+    this.transfer = transfer;
+    return transfer;
   }
 
   private elapsed(): number {
