@@ -21,7 +21,9 @@ latch, a heartbeat stale for 900 seconds in any state, or an expired fixed phase
 deadline triggers the reviewed one-command OFF. A trigger is not restoration proof.
 Before the first heartbeat, age is measured from the durable activation time,
 never from the watchdog's first poll. Unknown/malformed health or write outcomes
-hold and alert; they do not establish safe restoration.
+hold and alert; they do not establish safe restoration. A stale heartbeat or
+expired phase may still request fencing/draining while effects are unknown, but
+Manual restoration remains blocked until complete no-unknown reconciliation.
 
 Before an action claim, uncertainty (including unavailable/stale health, unknown
 writes or drift) leaves the record watching: emit an alert with the stable
@@ -79,7 +81,9 @@ Health means liveness: the producer must persist a heartbeat on every loop,
 including CI waits and backoff, with its activity/wait due information. A heartbeat
 stale for 900 seconds triggers in **every** state; there are no 31/76/151-minute
 exemptions. A separate durable phase has a fixed start/deadline and a timeout plus
-small margin from the immutable `binding.phaseLimits`. Fresh heartbeat never
+small margin from the immutable `binding.phaseLimits` caps. The phase duration
+may be shorter than its cap (notably backoff); its margin must match, and backoff
+deadline must equal its durable wait-due time plus that margin. Fresh heartbeat never
 extends that deadline. Last healthy completion remains truthful diagnostic data,
 not a fabricated timestamp used to keep the controller alive. Exact production
 phase caps must be published with the paired runtime configuration; test fixture

@@ -26,6 +26,7 @@ export type Observation = {
     deadlineAt: number;
     timeoutMs: number;
     marginMs: number;
+    waitDueAt?: number;
   };
   revision: string;
   stopped: boolean;
@@ -166,24 +167,30 @@ export function classify(
       (!o.phase ||
         !o.phase.id ||
         !Object.hasOwn(expected.phaseLimits, o.phase.kind) ||
-        o.phase.timeoutMs !== expected.phaseLimits[o.phase.kind]?.timeoutMs ||
+        o.phase.timeoutMs > expected.phaseLimits[o.phase.kind]!.timeoutMs ||
         o.phase.marginMs !== expected.phaseLimits[o.phase.kind]?.marginMs ||
         !Number.isFinite(o.phase.startedAt) ||
         o.phase.startedAt < o.activatedAt ||
         o.phase.startedAt > o.observedAt ||
         !Number.isFinite(o.phase.timeoutMs) ||
-        o.phase.timeoutMs <= 0 ||
+        o.phase.timeoutMs < 0 ||
         !Number.isFinite(o.phase.marginMs) ||
         o.phase.marginMs < 0 ||
-        o.phase.deadlineAt !== o.phase.startedAt + o.phase.timeoutMs + o.phase.marginMs))
+        o.phase.deadlineAt !== o.phase.startedAt + o.phase.timeoutMs + o.phase.marginMs ||
+        (o.phase.kind === "backoff" &&
+          (!Number.isFinite(o.phase.waitDueAt) ||
+            o.phase.waitDueAt !== o.phase.startedAt + o.phase.timeoutMs))))
   )
     return "unknown";
-  if (o.policy === "drift" || o.writes === "unknown") return "unknown";
-  if (o.policy === "manual") return "manual";
-  if (o.stopped) return "stopped";
-  if (o.crashLoop) return "crash-loop";
+  if (o.policy === "drift") return "unknown";
+  if (o.policy === "manual") return o.writes === "unknown" ? "unknown" : "manual";
   if (now - (o.heartbeatAt ?? o.activatedAt) >= staleAfterMs) return "stale-health";
   if (o.phase && now >= o.phase.deadlineAt) return "phase-deadline";
+  // Timeout permits fencing/draining even with unknown effects, never safe
+  // Manual by itself. The OFF/bridge proof must resolve every unknown first.
+  if (o.writes === "unknown") return "unknown";
+  if (o.stopped) return "stopped";
+  if (o.crashLoop) return "crash-loop";
   return "healthy";
 }
 

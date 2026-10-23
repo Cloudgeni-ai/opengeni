@@ -112,6 +112,32 @@ function fixture() {
   };
 }
 describe("portable independent watchdog policy (fake provider, not live OFF qualification)", () => {
+  test("actual core backoff mapping accepts a bounded variable wait and binds its due time", () => {
+    const f = fixture(),
+      now = f.ports.now();
+    const expected = {
+      ...binding,
+      phaseLimits: { backoff: { timeoutMs: 3_600_000, marginMs: 30_000 } },
+    };
+    f.patch({
+      binding: expected,
+      phase: {
+        id: "wait-1",
+        kind: "backoff",
+        startedAt: now,
+        timeoutMs: 120_000,
+        marginMs: 30_000,
+        waitDueAt: now + 120_000,
+        deadlineAt: now + 150_000,
+      },
+    });
+    expect(classify(f.observation(), expected, now)).toBe("healthy");
+    f.advance(150_000);
+    f.patch({ heartbeatAt: f.ports.now() });
+    expect(classify(f.observation(), expected, f.ports.now())).toBe("phase-deadline");
+    f.patch({ phase: { ...f.observation().phase!, waitDueAt: now + 121_000 } });
+    expect(classify(f.observation(), expected, f.ports.now())).toBe("unknown");
+  });
   test("fresh loop heartbeat covers CI/backoff liveness without forging a healthy completion", () => {
     const f = fixture();
     f.patch({ lastHealthyAt: 100_000, heartbeatAt: f.ports.now() });
@@ -156,8 +182,14 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
     f.advance(staleAfterMs);
     expect(classify(f.observation(), binding, f.ports.now())).toBe("stale-health");
     f.patch({ writes: "unknown" });
-    expect(await tick(f.ports, binding, "unknown")).toBe("observation-unknown");
-    expect(f.calls.off).toBe(0);
+    f.ports.off = async (expected) => {
+      f.calls.off++;
+      expect(expected.writes).toBe("unknown");
+      throw Error("Fence/drain attempted; unresolved effect prevents Manual");
+    };
+    expect(await tick(f.ports, binding, "unknown")).toBe("off-intent");
+    expect(f.calls.off).toBe(1);
+    expect(f.stored()!.value.receipt).toBeNull();
   });
   test.each(["stopped", "crash-loop", "stale-health"] as const)(
     "%s calls OFF once and posts verified result",
