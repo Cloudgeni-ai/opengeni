@@ -455,6 +455,32 @@ describe("AttachedChromeCdpConnection", () => {
 
     await connection.shutdown();
   }, 10_000);
+
+  test("keeps polling fast while a command runs past the quiet window", async () => {
+    class SlowListBridge extends FakeBridge {
+      slow = false;
+      override async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+        if (payload.type === "tabs.list" && this.slow) await Bun.sleep(3_500);
+        return await super.request<T>(payload);
+      }
+    }
+    const bridge = new SlowListBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    connection.on("Page.frameNavigated", () => undefined);
+    bridge.slow = true;
+    const command = connection.send("Target.getTargets");
+
+    await Bun.sleep(2_500);
+    const during = bridge.pollCount;
+    await Bun.sleep(500);
+    expect(bridge.pollCount - during).toBeGreaterThan(4);
+
+    await command;
+    await connection.shutdown();
+  }, 10_000);
 });
 
 for (const lost of [false, true]) {

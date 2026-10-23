@@ -22,9 +22,9 @@ import {
 const POLL_INTERVAL_MS = 50;
 // A connection nobody has used for a while (an open session waiting for its
 // next instruction) polls slowly: each poll is a native-messaging round trip
-// into the person's browser. Any command wakes it back to the fast interval
-// at once, and flushes still wait for the next batch, so actions never see
-// the slower interval.
+// into the person's browser. Polling stays fast while a command or event wait
+// is running, any new one wakes an idle wait at once, and flushes still wait
+// for the next batch, so actions never see the slower interval.
 const POLL_IDLE_INTERVAL_MS = 1_000;
 const POLL_ACTIVE_WINDOW_MS = 2_000;
 const POLL_LIMIT = 1_000;
@@ -280,8 +280,10 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private pollTask: Promise<void> | null = null;
   private pollReady: Promise<void> | null = null;
   private wakePoll: (() => void) | null = null;
-  // When a command was last sent or an event last arrived.
+  // When a command was last sent or finished, or an event last arrived.
   private lastActivityAt = Date.now();
+  // Commands and event waits still running; polling stays fast while any are.
+  private inFlight = 0;
   // Whether the poll loop is waiting the slow idle interval.
   private pollingIdle = false;
   private readonly flushWaiters = new Set<{ sequence: number; release: () => void }>();
@@ -328,6 +330,20 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     if (this.stopped) throw new CdpTransportError("attached Chrome transport is closed");
     if (options.signal?.aborted) throw new CdpTransportError(`CDP ${method} was aborted`);
     this.markActive();
+    this.inFlight += 1;
+    try {
+      return await this.sendNow<T>(method, params, options);
+    } finally {
+      this.inFlight -= 1;
+      this.lastActivityAt = Date.now();
+    }
+  }
+
+  private async sendNow<T>(
+    method: string,
+    params: Readonly<Record<string, unknown>>,
+    options: { sessionId?: string },
+  ): Promise<T> {
     try {
       if (options.sessionId) {
         const tabId = this.sessionTabs.get(options.sessionId);
@@ -445,6 +461,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   ): Promise<CdpEvent> {
     if (options.signal?.aborted) throw new CdpTransportError(`CDP ${method} wait was aborted`);
     const timeoutMs = boundedTimeout(options.timeoutMs ?? 30_000);
+    this.markActive();
+    this.inFlight += 1;
+    let waiting = true;
     return await new Promise<CdpEvent>((resolveEvent, rejectEvent) => {
       const timer = setTimeout(() => {
         cleanup();
@@ -468,6 +487,11 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         clearTimeout(timer);
         unsubscribe();
         options.signal?.removeEventListener("abort", aborted);
+        if (waiting) {
+          waiting = false;
+          this.inFlight -= 1;
+          this.lastActivityAt = Date.now();
+        }
       };
       options.signal?.addEventListener("abort", aborted, { once: true });
     });
@@ -749,7 +773,8 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   /** Waits one poll interval (the slow one after a quiet spell), or less when
    * a flush or a new command needs the next batch now. */
   private async pollPause(): Promise<void> {
-    const idle = Date.now() - this.lastActivityAt >= POLL_ACTIVE_WINDOW_MS;
+    if (this.stopped) return;
+    const idle = this.inFlight === 0 && Date.now() - this.lastActivityAt >= POLL_ACTIVE_WINDOW_MS;
     await new Promise<void>((resolve) => {
       const wake = () => {
         clearTimeout(timer);
