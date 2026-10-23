@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { plan } from "./planner";
 import {
   digest,
   ejectionKey,
@@ -19,13 +20,47 @@ interface JournalData {
   conflicts: Record<string, { pull: Pull; at: string }>;
   stages: Record<string, StageSample>;
   missing: Record<string, MissingRun>;
+  lastCapacityHold?: { at: string; runId: number; config: string; keys: string[] } | null;
 }
 const DAY = 86_400_000;
+export const LATENCY_WINDOW_MS = 2 * 60 * 60 * 1000;
+const MAX_HOLD_GAP_MS = 300_000;
+function creditedWait(
+  waits: NonNullable<StageSample["mainCapacityWaits"]>,
+  ready: number,
+  start: number,
+) {
+  const intervals = waits
+    .filter((w) => Number.isSafeInteger(w.mainRunId) && w.mainRunId > 0)
+    .map((w) => [Date.parse(w.from), Date.parse(w.to)] as const)
+    .filter(
+      ([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a && b - a <= MAX_HOLD_GAP_MS,
+    )
+    .map(([a, b]) => [Math.max(a, ready), Math.min(b, start)] as const)
+    .filter(([a, b]) => b > a)
+    .sort((a, b) => a[0] - b[0]);
+  let total = 0,
+    end = ready;
+  for (const [a, b] of intervals) {
+    total += Math.max(0, b - Math.max(a, end));
+    end = Math.max(end, b);
+  }
+  return total;
+}
 export function latencySummary(
   stages: Record<string, StageSample>,
   now: string,
+  adjustCapacity = true,
 ): { p95: number | null; samples: number } {
   const firstStarts = new Map<string, { readyAt: string; startedAt: string }>();
+  const waits = new Map<string, NonNullable<StageSample["mainCapacityWaits"]>>();
+  if (adjustCapacity)
+    for (const sample of Object.values(stages))
+      for (const wait of sample.mainCapacityWaits ?? []) {
+        const list = waits.get(wait.key) ?? [];
+        list.push(wait);
+        waits.set(wait.key, list);
+      }
   for (const sample of Object.values(stages))
     if (sample.ciStartedAt) {
       for (const binding of sample.readyBindings ?? []) {
@@ -34,13 +69,20 @@ export function latencySummary(
           firstStarts.set(binding.key, { readyAt: binding.readyAt, startedAt: sample.ciStartedAt });
       }
     }
-  const latencies = [...firstStarts.values()]
+  const latencies = [...firstStarts.entries()]
     .filter(
-      (s) =>
-        Date.parse(s.startedAt) >= Date.parse(now) - DAY &&
+      ([, s]) =>
+        Date.parse(s.startedAt) >= Date.parse(now) - LATENCY_WINDOW_MS &&
         Date.parse(s.startedAt) <= Date.parse(now),
     )
-    .map((s) => (Date.parse(s.startedAt) - Date.parse(s.readyAt)) / 1000)
+    .map(([key, s]) => {
+      const ready = Date.parse(s.readyAt),
+        start = Date.parse(s.startedAt);
+      return (
+        (start - ready - (adjustCapacity ? creditedWait(waits.get(key) ?? [], ready, start) : 0)) /
+        1000
+      );
+    })
     .filter((n) => Number.isFinite(n) && n >= 0)
     .sort((a, b) => a - b);
   return {
@@ -140,6 +182,7 @@ export class ObservationJournal {
   }
   async observe(o: Observation): Promise<Observation> {
     const data = await this.load(o.now);
+    const previousAt = data.lastObservedAt;
     if (
       data.lastObservedAt &&
       Date.parse(o.now) - Date.parse(data.lastObservedAt) >
@@ -158,6 +201,13 @@ export class ObservationJournal {
             ciStartedAt: local.ciStartedAt ?? sample.ciStartedAt,
             ciCompletedAt: local.ciCompletedAt ?? sample.ciCompletedAt,
             landedAt: local.landedAt ?? sample.landedAt,
+            mainCapacityWaits: [
+              ...new Map(
+                [...(sample.mainCapacityWaits ?? []), ...(local.mainCapacityWaits ?? [])].map(
+                  (w) => [JSON.stringify(w), w],
+                ),
+              ).values(),
+            ],
             ...(sample.retry ? { retry: sample.retry } : {}),
           }
         : structuredClone(sample);
@@ -211,6 +261,92 @@ export class ObservationJournal {
     }
     const present = new Set(o.candidates.map((c) => c.manifest.batchId));
     for (const id of Object.keys(data.missing)) if (!present.has(id)) delete data.missing[id];
+    const h = o.headroom,
+      capacity = h?.capacity,
+      demand = h?.mainDemand;
+    const runId = capacity?.latestMain?.runId;
+    // Unknown/incomplete scans and demand attributable only to other work earn
+    // no credit. Both endpoints must show main alone blocking admission.
+    const mainHold =
+      o.mainBusy === true &&
+      h?.allowed === false &&
+      Number.isSafeInteger(demand) &&
+      demand! >= 0 &&
+      Number.isSafeInteger(runId) &&
+      runId! > 0 &&
+      (capacity?.hold === "main-pre-fanout" ||
+        capacity?.hold === "main-queued" ||
+        (capacity?.hold === "repository-budget" &&
+          demand! > (this.config.mainReserve ?? Infinity) &&
+          demand! + 18 > (h.budget ?? Infinity)) ||
+        (capacity?.hold === "provider-limit" &&
+          demand! > 0 &&
+          demand! + (capacity.otherRepositoryAllowance ?? -Infinity) + 18 >
+            (capacity.providerJobLimit ?? Infinity)));
+    // Credit only heads that would publish absent this main-capacity gate.
+    // A simultaneous occupied batch slot, stale binding or local conflict is
+    // not demonstrably main-capacity waiting and must remain unadjusted.
+    const withoutMainHold = mainHold
+      ? plan(
+          {
+            ...o,
+            ready: o.ready.filter((p) => !data.conflicts[ejectionKey(p)]),
+            mainBusy: false,
+            headroom: { ...h!, allowed: true },
+            telemetry: {
+              status: "unknown",
+              p95ReadyToCiSeconds: null,
+              samples: 0,
+              coverageSince: o.now,
+              completeWindow: false,
+            },
+          },
+          this.config,
+        )
+      : null;
+    const hold =
+      mainHold && withoutMainHold?.kind === "build" && withoutMainHold.publish
+        ? {
+            at: o.now,
+            runId: runId!,
+            config: digest([
+              h!.budget,
+              this.config.mainReserve,
+              capacity!.providerJobLimit,
+              capacity!.otherRepositoryAllowance,
+            ]),
+            keys: withoutMainHold.spec.pulls.map(ejectionKey),
+          }
+        : null;
+    const prior = data.lastCapacityHold;
+    if (
+      hold &&
+      prior &&
+      prior.at === previousAt &&
+      prior.runId === hold.runId &&
+      prior.config === hold.config &&
+      Date.parse(hold.at) > Date.parse(prior.at) &&
+      Date.parse(hold.at) - Date.parse(prior.at) <= MAX_HOLD_GAP_MS
+    ) {
+      for (const sample of Object.values(data.stages))
+        for (const binding of sample.readyBindings ?? []) {
+          if (
+            !hold.keys.includes(binding.key) ||
+            !prior.keys.includes(binding.key) ||
+            sample.ciStartedAt
+          )
+            continue;
+          sample.mainCapacityWaits ??= [];
+          sample.mainCapacityWaits.push({
+            key: binding.key,
+            from: prior.at,
+            to: hold.at,
+            mainRunId: hold.runId,
+          });
+          sample.mainCapacityWaits = sample.mainCapacityWaits.slice(-4096);
+        }
+    }
+    data.lastCapacityHold = hold;
     const { p95, samples } = latencySummary(data.stages, o.now);
     const excluded = [...o.excluded];
     const ready = o.ready.filter((p) => {
@@ -230,9 +366,11 @@ export class ObservationJournal {
       telemetry: {
         status: p95 === null ? "unknown" : p95 > 1800 ? "stop" : "within-threshold",
         p95ReadyToCiSeconds: p95,
+        rawP95ReadyToCiSeconds: latencySummary(data.stages, o.now, false).p95,
+        windowSeconds: LATENCY_WINDOW_MS / 1000,
         samples,
         coverageSince: data.coverageSince,
-        completeWindow: Date.parse(o.now) - Date.parse(data.coverageSince) >= DAY,
+        completeWindow: Date.parse(o.now) - Date.parse(data.coverageSince) >= LATENCY_WINDOW_MS,
       },
     };
   }

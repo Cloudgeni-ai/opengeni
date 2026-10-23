@@ -289,6 +289,7 @@ export class GitHubReader {
     result.approvalOnlyRuns = scan.approvalOnlyRuns;
     if (!scan.ok) return { ...result, reason: HEADROOM_HOLD_REASONS[scan.hold] };
     const { mainDemand, otherDemand } = scan;
+    result.mainDemand = mainDemand;
     result.occupied = mainDemand + otherDemand;
     const decision = capacityDecision({
       mainDemand,

@@ -108,6 +108,8 @@ export interface StageSample {
   landedAt: string | null;
   observedAt: string;
   retry?: RetryIntent;
+  /** Consecutive complete controller observations of a main-capacity hold. */
+  mainCapacityWaits?: { key: string; from: string; to: string; mainRunId: number }[];
 }
 export interface MissingRun {
   firstSeenAt: string;
@@ -207,6 +209,8 @@ export interface Headroom {
   reason: string;
   budget: number | null;
   occupied: number;
+  /** Present only after a complete provider demand scan. */
+  mainDemand?: number;
   reservedMain: number;
   candidateSlots: 18;
   /** Active runs whose latest jobs were read in this observation. */
@@ -670,6 +674,8 @@ export interface Observation {
   telemetry?: {
     status: "unknown" | "within-threshold" | "stop";
     p95ReadyToCiSeconds: number | null;
+    rawP95ReadyToCiSeconds?: number | null;
+    windowSeconds?: number;
     samples: number;
     coverageSince: string;
     completeWindow: boolean;

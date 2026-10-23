@@ -91,7 +91,7 @@ export function plan(o: Observation, c: Config): Action {
   if (o.telemetry?.status === "stop" && action.kind !== "land")
     return {
       kind: "wait",
-      reason: "stop signal: rolling 24h sampled p95 ready-to-CI exceeds 30 minutes",
+      reason: "stop signal: recent 2h sampled capacity-adjusted p95 ready-to-CI exceeds 30 minutes",
     };
   return action;
 }
