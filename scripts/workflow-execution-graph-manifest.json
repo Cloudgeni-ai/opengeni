@@ -86,7 +86,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "68f381c17bf4e9086912c932b0834f0bf89bf08959e713facf3d159213b37f50"
+      "sha256": "c0831b55d1b2a7d613aa3d286a2dea2a5e438290790abc91dfb4e3796215e07a"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
