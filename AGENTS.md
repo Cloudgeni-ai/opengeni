@@ -871,8 +871,8 @@ the batcher or its CI control files require an isolated batch and explicit
 independent review of those control-plane changes.
 
 Budget/threshold increases, newly skipped tests and reduced coverage must be
-explicit in the PR and evidence comment, independently confirmed by the reviewer,
-and labelled `test-policy-change`. Never conceal a failing check by weakening it.
+explicit in the PR description, labelled `test-policy-change`, and confirmed in
+independent review. Never conceal a failing check by weakening it.
 The documented `hotfix/*` → `production` incident lane stays separate; ordinary
 main changes never bypass the queue. See the incident and rollback steps in the
 queue runbook before any exceptional main action.

@@ -142,3 +142,52 @@ test("OFF uncertainty remains held without claim release or later retry", async 
   expect(f.calls.filter((x) => x === "OFF")).toHaveLength(1);
   expect(f.calls).not.toContain("DELETE");
 });
+
+test("each independent live identity and reconciliation guard blocks before claim", async () => {
+  for (const mutation of [
+    { uid: "other" },
+    { uri: "https://other.example.run.app" },
+    { template: { containers: [{ image: `registry/image@sha256:${"b".repeat(64)}` }] } },
+    { reconciling: true },
+    { observedGeneration: "26" },
+  ]) {
+    const f = fixture(),
+      original = f.deps.loadCloud;
+    f.deps.loadCloud = async (path) => {
+      const cloud = await original(path);
+      return {
+        ...cloud,
+        api: async (url, method = "GET", body) => {
+          const value = await cloud.api(url, method, body);
+          return method === "GET" ? { ...value, ...mutation } : value;
+        },
+      };
+    };
+    await expect(run(f.config, f.deps)).rejects.toThrow("Live service");
+    expect(f.calls).toEqual(["GET"]);
+  }
+});
+test("operator directory pin is checked before loading or calling provider", async () => {
+  const f = fixture(),
+    read = f.deps.read;
+  f.deps.read = async (path) => {
+    const value = await read(path);
+    if (!path.endsWith("stop-contract.json")) return value;
+    return JSON.stringify({ ...JSON.parse(value), directory: "/work/other" });
+  };
+  f.deps.loadCloud = async () => {
+    throw Error("must not load");
+  };
+  await expect(run(f.config, f.deps)).rejects.toThrow("Unexpected OFF package");
+  expect(f.calls).toEqual([]);
+});
+test("non-OK healthy-shaped status cannot suppress proven OFF", async () => {
+  const f = fixture();
+  f.deps.request = (async (_url, _init) =>
+    Response.json(
+      { state: "running", controlObservedAt: 2_000_000, consecutiveUnclassifiedFailures: 0 },
+      { status: 503 },
+    )) as typeof fetch;
+  expect(await run(f.config, f.deps)).toBe("manual");
+  expect(f.calls).toEqual(["GET", "POST", "OFF"]);
+});

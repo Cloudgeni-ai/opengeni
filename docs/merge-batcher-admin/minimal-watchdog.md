@@ -15,6 +15,13 @@ three consecutive unclassified failures triggers OFF at the next tick. A loop
 observation at least 900 seconds old triggers OFF in every running/wait state.
 Missing, future or unreachable status also requests proven OFF, never grants Manual.
 
+This deliberately conservative source currently acts on one unavailable sample,
+including a startup null or any future timestamp. A transient error or clock skew
+can therefore end an otherwise healthy activation. It does not wait fifteen
+minutes on unavailable status. This reviewed Low finding remains a rollout risk
+to acknowledge or address with a separately reviewed bounded sampling change;
+do not silently describe it as debounced or startup-tolerant.
+
 The trigger cannot declare safety from status flags. Only unchanged OFF may
 declare Manual after its verified STOP/drain/reconciliation and exact saved-policy
 restoration. Unknown effects, failed drain, rules drift or unavailable proof keep
@@ -49,6 +56,24 @@ five-minute UTC schedule, one task, parallelism one, retries zero. Task parallel
 alone does not prevent overlapping executions. Scheduler API enabling, exact
 existing identity binding and any storage access happen only under later rollout go.
 No new App or runtime administration grant is required by this lane.
+
+**Both credential paths must be explicit.** The existing operator `cloud-auth.ts`
+covers GCP only. `stage.sh` also needs an authorized GitHub ruleset-write identity
+inside the Job. The runtime App's administration-read token cannot restore rules.
+Before packaging, the rollout owner must name the existing approved OFF identity,
+its exact repository rights, secret version/storage and Job access binding. Do not
+infer that VM authentication exists in the container, copy a personal admin token,
+broaden the runtime App, or rotate the immutable workspace credential. No credential
+placement is performed by these sources or their tests.
+
+**Operator coordination is required.** The claim fences watchdog executions, not
+an independent VM operator. Before manual OFF, pause the Scheduler and reconcile
+all running Job executions, or acquire the same create-only activation claim as
+the watchdog. An existing/uncertain claim is not permission to steal ownership.
+Do not race two OFF operators or remove a claim after a timeout. After successful
+OFF, pause the schedule: later ticks otherwise report held on the retained claim.
+Held outcomes need the rollout's alert destination and operator response; a stopped
+watchdog cannot announce its own absence. A missed-run sweep remains out of scope.
 
 ## Qualification
 

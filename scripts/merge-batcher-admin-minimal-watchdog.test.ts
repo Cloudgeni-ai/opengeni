@@ -6,6 +6,7 @@ const live = { state: "running", controlObservedAt: now, consecutiveUnclassified
 test("liveness is existing supervisor control observation, not cycle completion", () => {
   expect(reason(live, now)).toBeNull();
   expect(reason({ ...live, state: "holding" }, now)).toBeNull();
+  expect(reason({ ...live, state: "unexpected" }, now)).toBe("unavailable");
   expect(reason({ ...live, controlObservedAt: now - 899_999 }, now)).toBeNull();
   expect(reason({ ...live, controlObservedAt: now - 900_000 }, now)).toBe("stale");
   expect(reason({ ...live, state: "stopped" }, now)).toBe("stopped");
