@@ -193,7 +193,10 @@ test("priority uses five-minute low-call polling and waits on provider rate hint
     calls++;
     expect(init?.method).toBe("GET");
     const url = new URL(String(input));
-    expect(url.pathname.endsWith("/actions/runs")).toBe(true);
+    expect(/\/actions\/workflows\/(ci|batch-ci)\.yml\/runs$/.test(url.pathname)).toBe(true);
+    expect(url.searchParams.get("event")).toBe("push");
+    if (url.pathname.includes("/workflows/ci.yml/"))
+      expect(url.searchParams.get("branch")).toBe("main");
     if (calls === 1) return new Response("", { status: 429, headers: { "retry-after": "60" } });
     return Response.json({
       workflow_runs:
@@ -226,5 +229,92 @@ test("priority uses five-minute low-call polling and waits on provider rate hint
     },
   );
   expect(sleeps).toEqual([60000, 300000]);
-  expect(calls).toBe(11);
+  expect(calls).toBe(21);
+});
+
+test("short provider inventory holds then rescans without admitting partial demand", async () => {
+  let now = 0;
+  const paths: string[] = [];
+  const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    expect(init?.method).toBe("GET");
+    const url = new URL(String(input));
+    paths.push(url.pathname + url.search);
+    // Reproduced live: HTTP200, reported3, two rows, no next page.
+    if (now === 0) return Response.json({ total_count: 3, workflow_runs: [{ id: 1 }, { id: 2 }] });
+    return Response.json({ total_count: 0, workflow_runs: [] });
+  }) as typeof fetch;
+  await runPrCiCommand(
+    "priority",
+    { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture" },
+    transport,
+    "pr",
+    {
+      now: () => now,
+      sleep: async (ms) => {
+        expect(ms).toBe(300000);
+        now += ms;
+      },
+    },
+  );
+  expect(now).toBe(300000);
+  expect(paths).toHaveLength(11);
+  expect(paths.every((path) => path.includes("/workflows/"))).toBe(true);
+});
+
+test("persistent incomplete priority inventory expires held without a write", async () => {
+  let now = 0,
+    calls = 0;
+  const transport = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    calls++;
+    expect(init?.method).toBe("GET");
+    return Response.json({ total_count: 1, workflow_runs: [] });
+  }) as typeof fetch;
+  await expect(
+    runPrCiCommand(
+      "priority",
+      { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture" },
+      transport,
+      "batch",
+      {
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms;
+        },
+      },
+    ),
+  ).rejects.toThrow("did not clear");
+  expect(calls).toBe(60);
+  expect(now).toBe(5 * 60 * 60 * 1000);
+});
+
+test("incomplete supersession inventory still fails before any mutation", async () => {
+  const f = await fixture();
+  const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes("/runs?"))
+      return Response.json({ total_count: 1, workflow_runs: [] });
+    return f.transport(input, init);
+  }) as typeof fetch;
+  await expect(runPrCiCommand("superseded", f.env, transport)).rejects.toThrow(
+    "Incomplete provider inventory",
+  );
+  expect(f.calls.some((c) => c.method === "POST")).toBe(false);
+});
+
+test("malformed priority response is not converted to an empty admission snapshot", async () => {
+  let sleeps = 0;
+  await expect(
+    runPrCiCommand(
+      "priority",
+      { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture" },
+      (async () => Response.json({ total_count: 0, workflow_runs: null })) as typeof fetch,
+      "pr",
+      {
+        now: () => 0,
+        sleep: async () => {
+          sleeps++;
+        },
+      },
+    ),
+  ).rejects.toThrow("Malformed");
+  expect(sleeps).toBe(0);
 });

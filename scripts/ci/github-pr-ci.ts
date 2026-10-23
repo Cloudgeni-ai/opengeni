@@ -1,5 +1,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
 
+class IncompleteInventory extends Error {}
+
 type Run = {
   id: number;
   path: string;
@@ -158,7 +160,9 @@ export async function runPrCiCommand(
       all.push(...rows);
       if (rows.length < 100) {
         if (key && Number(data.total_count) > all.length)
-          throw Error("Incomplete provider inventory");
+          throw new IncompleteInventory(
+            `Incomplete provider inventory: ${path} page=${p} reported=${data.total_count} observed=${all.length}`,
+          );
         return all;
       }
     }
@@ -172,8 +176,18 @@ export async function runPrCiCommand(
     if (lane !== "pr" && lane !== "batch") throw Error("Invalid priority lane");
     while (timing.now() < deadline) {
       const raw: Run[] = [];
-      for (const status of ["queued", "in_progress", "waiting", "pending", "requested"])
-        raw.push(...(await pages(`actions/runs?status=${status}`, "workflow_runs")));
+      try {
+        raw.push(...(await activeRuns("ci.yml", "&branch=main&event=push")));
+        if (lane === "pr") raw.push(...(await activeRuns("batch-ci.yml", "&event=push")));
+      } catch (error) {
+        if (!(error instanceof IncompleteInventory)) throw error;
+        // Status-filtered inventories can change while GitHub computes a page.
+        // Missing demand never grants admission: discard the partial snapshot
+        // and rescan at the normal bounded, rate-aware read cadence.
+        console.log(`${error.message}; priority remains held`);
+        await timing.sleep(300000);
+        continue;
+      }
       const unique = [...new Map(raw.map((r) => [r.id, r])).values()].filter(
         (r) =>
           r.id !== Number(env.GITHUB_RUN_ID) &&
