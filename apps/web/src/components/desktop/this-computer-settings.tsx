@@ -4,18 +4,21 @@
 // they can do here. Each switch is enforced by the app and its agent (see the
 // desktop's computer capabilities), and the system permissions a row needs
 // are asked for when the person turns it on, never before, one after another
-// as each is allowed. One the person hasn't allowed is a calm line naming
-// it; the Computer use row has the one button that opens the exact page in
-// the system's settings, and the row shows Allowed once the person comes
+// as each is allowed (the desktop's own asking, `allowPermissions`). One the
+// person hasn't allowed is a calm line naming it; the Computer use row has
+// the one button for it, and the row shows Allowed once the person comes
 // back. Red is only for real failures.
 import type {
   DesktopComputerCapabilities,
   DesktopComputerSettings,
-  DesktopPlatform,
   ThisComputerPermission,
   ThisComputerPermissionId,
   ThisComputerStatus,
 } from "@opengeni/sdk/desktop-bridge";
+import {
+  thisComputerNeedsPermissions,
+  thisComputerPermissionSteps,
+} from "@opengeni/sdk/this-computer";
 import { OPENGENI_BROWSER_EXTENSION_URL } from "@opengeni/contracts";
 import { CheckIcon } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
@@ -91,29 +94,17 @@ export function screenControlInEffect(
   return false;
 }
 
-/** The first screen permission still missing, to ask for when the person turns the row on. */
-export function firstMissingScreenPermission(
-  status: ThisComputerStatus | null,
-): ThisComputerPermissionId | null {
-  return (
-    status?.permissions?.find((permission) => permission.id !== "files" && !permission.granted)
-      ?.id ?? null
-  );
-}
-
 /**
- * While the page is asking for the screen permissions, the one to ask for
- * next: the same one until macOS has allowed it (the person may still be in
- * System Settings), then the next one missing, and null once none is.
+ * The screen permissions still missing, as the steps the person walks
+ * through: Input Monitoring only once Accessibility is allowed, as macOS
+ * often grants it along with Accessibility.
  */
-export function nextScreenPermission(
-  asking: ThisComputerPermissionId | null,
+export function missingScreenPermissions(
   status: ThisComputerStatus | null,
-): ThisComputerPermissionId | null {
-  if (!asking) return null;
-  const current = status?.permissions?.find((permission) => permission.id === asking);
-  if (current && !current.granted) return asking;
-  return firstMissingScreenPermission(status);
+): ThisComputerPermission[] {
+  return thisComputerPermissionSteps(status).filter(
+    (permission) => permission.id !== "files" && !permission.granted,
+  );
 }
 
 /** The missing screen permissions by the names System Settings lists them under: "A, B and C". */
@@ -127,15 +118,18 @@ export function missingPermissionNames(permissions: ThisComputerPermission[]): s
   return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
-/** The one action for a permission the system hasn't given yet. */
-export function permissionActionLabel(platform: DesktopPlatform, id: ThisComputerPermissionId) {
-  // The folders are asked about in the app's own question first.
-  if (id === "files") return "Allow";
-  return platform === "macos" ? "Open System Settings" : "Allow";
+/**
+ * Whether the folders row has its own Allow. Not while the Computer use row
+ * offers the fix: that one asks for every missing permission in turn,
+ * including the folders, and two buttons for one thing is one too many.
+ */
+export function foldersHaveOwnAction(status: ThisComputerStatus | null): boolean {
+  return !thisComputerNeedsPermissions(status);
 }
 
 const COMPUTER_USE_OFF = "Turn on Computer use first.";
 const MANAGED_ELSEWHERE = "Set in the Opengeni Agent service on this computer.";
+const UPDATE_THE_APP = "Update the Opengeni app to change this.";
 
 function Allowed() {
   return (
@@ -146,7 +140,7 @@ function Allowed() {
   );
 }
 
-/** A system permission: Allowed, or the one button that gets it. */
+/** A system permission: Allowed, the one button that gets it, or a calm line when another row has it. */
 function PermissionRow({
   label,
   description,
@@ -158,18 +152,20 @@ function PermissionRow({
   label: string;
   description: ReactNode;
   granted: boolean;
-  action: string;
-  onAction: () => void;
+  action: string | null;
+  onAction?: (() => void) | undefined;
   disabledReason?: string | undefined;
 }) {
   return (
     <SettingRow
       label={label}
-      description={disabledReason ?? description}
+      description={
+        disabledReason ?? (!granted && action === null ? "Not allowed yet." : description)
+      }
       control={
         granted ? (
           <Allowed />
-        ) : (
+        ) : action === null ? undefined : (
           <Button size="sm" variant="outline" disabled={Boolean(disabledReason)} onClick={onAction}>
             {action}
           </Button>
@@ -298,61 +294,47 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
   const status = desktop?.computer.status ?? null;
   const chrome = useChromeOnThisComputer(desktop?.workspaceId ?? "", status?.enrollmentId);
   const [turningOn, setTurningOn] = useState(false);
-  // The screen permission being asked for; the next is asked for once it's allowed.
-  const [asking, setAsking] = useState<ThisComputerPermissionId | null>(null);
-  const requestPermission = desktop?.computer.requestPermission;
-  const nextToAsk = nextScreenPermission(asking, status);
+  // Which switches apply follows the computer's state (another agent serving
+  // it, a connection made without the screen): read them again when it changes.
+  const refreshCapabilities = caps.refresh;
   useEffect(() => {
-    if (nextToAsk === asking) return;
-    setAsking(nextToAsk);
-    if (nextToAsk && requestPermission) void requestPermission(nextToAsk);
-  }, [asking, nextToAsk, requestPermission]);
+    if (status) refreshCapabilities();
+  }, [status, refreshCapabilities]);
   if (!desktop || !status || status.state === "unavailable") return null;
   const { computer, platform, workspaceId } = desktop;
   const view = screenControlView(status, caps.capabilities);
   const folders = foldersAllowed(status);
-
-  const askForScreen = (id: ThisComputerPermissionId) => {
-    setAsking(id);
-    return computer.requestPermission(id);
-  };
-
-  const allowMissing = () => {
-    const missing = firstMissingScreenPermission(status);
-    if (missing) void askForScreen(missing);
-    else if (folders === false) void computer.requestPermission("files");
-  };
+  // The app's switches are still being read: the switches wait, nothing to explain yet.
+  const loading = caps.bridge !== null && caps.capabilities === null;
 
   const reason =
     view.kind === "computerUseOff"
       ? COMPUTER_USE_OFF
       : view.kind === "managedElsewhere"
         ? (caps.capabilities?.problems?.screenControl ?? MANAGED_ELSEWHERE)
-        : caps.capabilities
+        : caps.bridge
           ? undefined
-          : "Update the Opengeni app to change this.";
+          : UPDATE_THE_APP;
   const chromeReason =
     view.kind === "computerUseOff"
       ? COMPUTER_USE_OFF
       : status.management === "service" ||
           caps.capabilities?.unavailable.includes("browserExtension")
         ? (caps.capabilities?.problems?.browserExtension ?? MANAGED_ELSEWHERE)
-        : caps.capabilities
+        : caps.bridge
           ? undefined
-          : "Update the Opengeni app to change this.";
+          : UPDATE_THE_APP;
 
   const setScreenControl = async (on: boolean) => {
-    if (!on) setAsking(null);
     const next = await caps.update("screenControl", on);
     if (!on || !next) return;
     setTurningOn(true);
     try {
       // A connection made without screen control is made again with it.
       if (!next.screenControlConnected) await computer.connect({ screenControl: true });
-      // The agent just restarted with the screen: read what macOS says now,
-      // and ask for what's missing in the same step.
-      const missing = firstMissingScreenPermission(await freshStatus(workspaceId));
-      if (missing) await askForScreen(missing);
+      // The agent just restarted with the screen: ask for what macOS is
+      // missing in the same step, from what it says now.
+      computer.allowPermissions(await freshStatus(workspaceId));
     } finally {
       setTurningOn(false);
       caps.refresh();
@@ -361,13 +343,12 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
 
   const browserOn = caps.capabilities?.settings.browserExtension ?? true;
   const screenError = caps.saving === "screenControl" ? undefined : caps.errorFor("screenControl");
-  const screenMissing =
-    view.kind === "on" ? view.permissions.filter((permission) => !permission.granted) : [];
+  const screenMissing = view.kind === "on" ? missingScreenPermissions(status) : [];
   const firstMissing = screenMissing[0];
 
   return (
     <Section variant="group" className={className}>
-      <ComputerUseRow desktop={desktop} onAllowPermissions={allowMissing} />
+      <ComputerUseRow desktop={desktop} />
       <SettingRow
         label="Control the screen"
         description={
@@ -382,8 +363,8 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
         error={view.kind === "managedElsewhere" ? undefined : screenError}
         control={
           <Switch
-            checked={screenControlInEffect(view, caps.capabilities)}
-            pending={caps.saving === "screenControl" || turningOn}
+            checked={loading ? false : screenControlInEffect(view, caps.capabilities)}
+            pending={loading || caps.saving === "screenControl" || turningOn}
             disabled={reason !== undefined}
             {...(reason ? { disabledReason: reason } : {})}
             onCheckedChange={(on) => void setScreenControl(on)}
@@ -393,7 +374,7 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
         {view.kind !== "on" ? null : firstMissing ? (
           // Not an error: a calm line naming what's missing. The Computer use
           // row above has the one Open System Settings for it, which asks for
-          // these in turn (`allowMissing`).
+          // these in turn.
           <SettingRow
             label={missingPermissionNames(screenMissing)}
             description="Not allowed yet."
@@ -440,20 +421,21 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
         }
         control={
           <Switch
-            checked={!chromeReason && browserOn}
-            pending={caps.saving === "browserExtension"}
+            checked={!chromeReason && !loading && browserOn}
+            pending={loading || caps.saving === "browserExtension"}
             disabled={chromeReason !== undefined}
             {...(chromeReason ? { disabledReason: chromeReason } : {})}
             onCheckedChange={(on) => void caps.update("browserExtension", on)}
           />
         }
       />
-      {folders !== null || view.kind === "computerUseOff" ? (
+      {/* Only macOS guards these folders. */}
+      {platform === "macos" && (folders !== null || view.kind === "computerUseOff") ? (
         <PermissionRow
           label="Desktop, Documents and Downloads"
           description="To open your files in these folders."
           granted={folders === true}
-          action={permissionActionLabel(platform, "files")}
+          action={foldersHaveOwnAction(status) ? "Allow" : null}
           onAction={() => void computer.requestPermission("files")}
           disabledReason={view.kind === "computerUseOff" ? COMPUTER_USE_OFF : undefined}
         />
@@ -474,7 +456,7 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
   );
 }
 
-/** The app's own use of the microphone, for dictation and voice chats. */
+/** The app's own use of the microphone, for dictation, voice chats and meeting recordings. */
 export function ThisComputerMicrophoneSettings({ className }: { className?: string }) {
   const caps = useComputerCapabilities();
   const platform = desktopBridge?.platform ?? "macos";
@@ -488,8 +470,9 @@ export function ThisComputerMicrophoneSettings({ className }: { className?: stri
         label="Microphone"
         description={
           on
-            ? "For dictation and voice chats."
-            : "Off. Dictation and voice chats can't use the microphone."
+            ? "For dictation, voice chats and meeting recordings."
+            : // A recording already running keeps its microphone until it stops.
+              "Off. Dictation, voice chats and new recordings can't use the microphone."
         }
         error={pending ? undefined : caps.errorFor("microphone")}
         control={

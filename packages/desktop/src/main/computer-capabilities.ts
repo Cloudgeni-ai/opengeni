@@ -221,10 +221,15 @@ export class ComputerCapabilities {
 
   /**
    * Applies a change at once. An agent switch restarts the agent; the answer
-   * comes once that's done, with a problem on the row if it couldn't be.
+   * comes once that's done, with a problem on the row if it couldn't be. A
+   * switch that doesn't apply now (another agent serves this computer, or
+   * the agent is too old for it) is left as it is.
    */
   async update(change: unknown): Promise<DesktopComputerCapabilities> {
-    const next = mergeComputerSettings(this.settings, change);
+    const unavailable = new Set((await this.status()).unavailable);
+    // Merged after the read, so a change applied meanwhile isn't undone.
+    const next = { ...mergeComputerSettings(this.settings, change) };
+    for (const key of unavailable) next[key] = this.settings[key];
     const changed = SETTING_KEYS.filter((key) => next[key] !== this.settings[key]);
     if (changed.length === 0) return this.status();
     this.settings = next;

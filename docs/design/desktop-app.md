@@ -353,14 +353,18 @@ Screen control is a switch in the Connect dialog.
 ### Settings → Computer use
 
 One page (desktop only) shows what Opengeni may do on this computer. The
-Computer use switch (`ComputerUseRow`) comes first; the rows under it apply
-only while it is on and are shown disabled while it is off. One row per
-capability, each with one switch or one action:
+Computer use switch (`ComputerUseRow`) comes first; the screen, Chrome and
+folders rows under it apply only while it is on and are shown disabled while
+it is off. One row per capability, each with one switch or one action. A
+permission the system hasn't given is a calm line naming it, never an error;
+its one action is the Computer use row's "Open System Settings", which asks
+for each missing permission in turn (`allowPermissions`, the same asking as
+turning Computer use on):
 
 - **Control the screen.** On asks for Screen Recording, Accessibility and
-  Input Monitoring one at a time (the system prompt the first time, then the
-  exact System Settings pane), and reconnects with screen-control consent if
-  the connection lacks it. Off restarts the hosted agent with
+  Input Monitoring one at a time in the same step (the system prompt the first
+  time, then the exact System Settings pane), and reconnects with
+  screen-control consent if the connection lacks it. Off restarts the hosted agent with
   `OPENGENI_AGENT_SCREEN_CONTROL=off`: the agent's desktop is
   `TurnedOffDesktop`, which offers no display, captures nothing and injects
   nothing, and says why, whatever the connection's consent says. It also
@@ -374,10 +378,12 @@ capability, each with one switch or one action:
   native-messaging host and starts no attached-browser bridge. The row shows
   whether the Opengeni Browser extension is connected and links to it.
 - **Desktop, Documents and Downloads** (from the screen list, or from the
-  status's `folders` while screen control is off), **Microsoft Excel** (the
-  add-in's setup page), **App-shots** (moved here from Settings → Machines)
-  and the **Microphone**, which when off makes the app refuse every
-  microphone request.
+  status's `folders` while screen control is off; macOS only, with its own
+  Allow only when the Computer use row doesn't already offer the fix),
+  **Microsoft Excel** (the add-in's setup page), **App-shots** (moved here
+  from Settings → Machines) and the **Microphone**, which when off makes the
+  app refuse every new microphone request (a recording already running keeps
+  its microphone until it stops).
 
 The switches are on by default, so nothing changes for people who already use
 these features, and persist in `computer-capabilities.json` in the app's data
@@ -386,9 +392,10 @@ replaces it (a damaged one is also copied to `.corrupt`), and a save or agent
 restart that fails shows on its row. While another agent holds this computer,
 the rows say so. Changing the screen or Chrome switch restarts the agent, which stops
 its running work; the page says so. Rows refresh when the window regains
-focus, so a grant made in System Settings shows as Allowed on return. Screen
-control and Chrome switches apply to an agent the app runs; for an existing
-service, or while another agent serves this computer, they are shown disabled.
+focus or the computer's state changes, so a grant made in System Settings
+shows as Allowed on return. Screen control and Chrome switches apply to an
+agent the app runs; for an existing service, or while another agent serves
+this computer, they are shown disabled and the app ignores changes to them.
 
 The menu bar / tray item shows whether the computer is connected and offers
 Open, Pause this computer, Resume and Quit.

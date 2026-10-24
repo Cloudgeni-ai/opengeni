@@ -174,4 +174,33 @@ describe("the person's switches for the app's agent", () => {
       await older.done();
     }
   });
+
+  test("asks the agent binary once, and again only when it's replaced", async () => {
+    const fake = await fakeComputer({ screenControl: true, browserExtension: true });
+    const asked = { count: 0 };
+    const internals = fake.computer as unknown as {
+      permissions(): Promise<unknown>;
+      permissionsCache: unknown;
+      hostedPath: string;
+    };
+    const permissions = internals.permissions.bind(fake.computer);
+    internals.permissions = () => {
+      asked.count += 1;
+      return permissions();
+    };
+    try {
+      expect(await fake.computer.screenControlSwitchSupported()).toBe(true);
+      internals.permissionsCache = null;
+      expect(await fake.computer.screenControlSwitchSupported()).toBe(true);
+      expect(asked.count).toBe(1);
+      // An update replaces the binary: its answer is read again.
+      const binary = await readFile(internals.hostedPath, "utf8");
+      await writeFile(internals.hostedPath, binary.replace('"screenControlSwitch":true', '"x":1'));
+      internals.permissionsCache = null;
+      expect(await fake.computer.screenControlSwitchSupported()).toBe(false);
+      expect(asked.count).toBe(2);
+    } finally {
+      await fake.done();
+    }
+  });
 });

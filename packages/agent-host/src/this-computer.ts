@@ -375,6 +375,8 @@ export class ThisComputer {
   private state: ComputerState;
   private connectionsCache: { at: number; value: AgentConnection[] } | null = null;
   private permissionsCache: { at: number; value: Permissions } | null = null;
+  /** Whether the agent binary honours the screen-control switch, for the binary it was read from. */
+  private switchSupport: { binary: string; value: boolean } | null = null;
   private reading: Promise<AgentConnection[]> | null = null;
   /** The last connections read, kept when the cache is cleared, to notice a change. */
   private lastConnections: AgentConnection[] | null = null;
@@ -1496,9 +1498,21 @@ export class ThisComputer {
    */
   async screenControlSwitchSupported(): Promise<boolean | null> {
     if (!this.runsOwnAgent || !existsSync(this.hostedPath)) return null;
+    // An answer holds for as long as the binary does: asking means running it.
+    let binary: string;
+    try {
+      const file = statSync(this.hostedPath);
+      binary = `${file.size}:${file.mtimeMs}`;
+    } catch {
+      return null;
+    }
+    if (this.switchSupport?.binary === binary) return this.switchSupport.value;
     try {
       const permissions = await this.permissions();
-      return permissions ? permissions.screenControlSwitch === true : null;
+      if (!permissions) return null;
+      const value = permissions.screenControlSwitch === true;
+      this.switchSupport = { binary, value };
+      return value;
     } catch {
       return null;
     }

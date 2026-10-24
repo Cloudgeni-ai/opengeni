@@ -2,11 +2,10 @@ import { describe, expect, test } from "bun:test";
 import type { DesktopComputerCapabilities, ThisComputerStatus } from "@opengeni/sdk/desktop-bridge";
 
 import {
-  firstMissingScreenPermission,
   foldersAllowed,
+  foldersHaveOwnAction,
   missingPermissionNames,
-  nextScreenPermission,
-  permissionActionLabel,
+  missingScreenPermissions,
   screenControlInEffect,
   screenControlView,
 } from "./this-computer-settings";
@@ -86,18 +85,28 @@ describe("the Control the screen row", () => {
     });
   });
 
-  test("turning it on asks for the first screen permission macOS hasn't given", () => {
-    expect(firstMissingScreenPermission(connected)).toBe("accessibility");
+  test("what's missing follows the steps: Input Monitoring once Accessibility is allowed", () => {
+    expect(missingScreenPermissions(connected)).toEqual([{ id: "accessibility", granted: false }]);
+    const accessibilityAllowed: ThisComputerStatus = {
+      ...connected,
+      permissions: connected.permissions!.map((permission) =>
+        permission.id === "accessibility" ? { ...permission, granted: true } : permission,
+      ),
+    };
+    expect(missingScreenPermissions(accessibilityAllowed)).toEqual([
+      { id: "inputMonitoring", granted: false },
+    ]);
+    // The folders are their own row.
     expect(
-      firstMissingScreenPermission({
+      missingScreenPermissions({
         ...connected,
         permissions: [
           { id: "screenRecording", granted: true },
           { id: "files", granted: false },
         ],
       }),
-    ).toBeNull();
-    expect(firstMissingScreenPermission(null)).toBeNull();
+    ).toEqual([]);
+    expect(missingScreenPermissions(null)).toEqual([]);
   });
 
   test("a switch the app can't change shows what is in effect", () => {
@@ -108,29 +117,6 @@ describe("the Control the screen row", () => {
     );
     expect(screenControlInEffect({ kind: "off" }, capabilities())).toBe(false);
     expect(screenControlInEffect({ kind: "on", permissions: [] }, null)).toBe(true);
-  });
-
-  test("asks for each screen permission in turn, as the one before is allowed", () => {
-    // Nothing is asked for until the person turns the row on or presses the button.
-    expect(nextScreenPermission(null, connected)).toBeNull();
-    // Still in System Settings: the same one, so it isn't asked for again.
-    expect(nextScreenPermission("accessibility", connected)).toBe("accessibility");
-    const accessibilityAllowed: ThisComputerStatus = {
-      ...connected,
-      permissions: connected.permissions!.map((permission) =>
-        permission.id === "accessibility" ? { ...permission, granted: true } : permission,
-      ),
-    };
-    expect(nextScreenPermission("accessibility", accessibilityAllowed)).toBe("inputMonitoring");
-    // All the screen's allowed (the folders are their own row): done.
-    const screenAllowed: ThisComputerStatus = {
-      ...connected,
-      permissions: connected.permissions!.map((permission) =>
-        permission.id === "files" ? permission : { ...permission, granted: true },
-      ),
-    };
-    expect(nextScreenPermission("inputMonitoring", screenAllowed)).toBeNull();
-    expect(nextScreenPermission("accessibility", null)).toBeNull();
   });
 
   test("what's missing is named in one line, as System Settings lists it", () => {
@@ -159,10 +145,20 @@ describe("the Desktop, Documents and Downloads row", () => {
 });
 
 describe("the one action for a missing permission", () => {
-  test("macOS turns screen permissions on in System Settings; the folders are asked about first", () => {
-    expect(permissionActionLabel("macos", "screenRecording")).toBe("Open System Settings");
-    expect(permissionActionLabel("macos", "accessibility")).toBe("Open System Settings");
-    expect(permissionActionLabel("macos", "files")).toBe("Allow");
-    expect(permissionActionLabel("windows", "screenRecording")).toBe("Allow");
+  test("the folders have their own Allow only while the Computer use row offers no fix", () => {
+    // Screen permissions or the folders missing: the Computer use row's one button asks for them.
+    expect(foldersHaveOwnAction(connected)).toBe(false);
+    expect(
+      foldersHaveOwnAction({
+        ...connected,
+        permissions: connected.permissions!.map((permission) =>
+          permission.id === "files" ? permission : { ...permission, granted: true },
+        ),
+      }),
+    ).toBe(false);
+    // Screen control off: the folders are reported on their own, with their own Allow.
+    expect(foldersHaveOwnAction({ ...connected, permissions: undefined, folders: false })).toBe(
+      true,
+    );
   });
 });

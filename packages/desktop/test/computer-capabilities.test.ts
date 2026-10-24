@@ -238,6 +238,27 @@ describe("what Opengeni may do on this computer", () => {
       browserExtension: "Another Opengeni agent is serving this computer.",
     });
   });
+
+  test("a change to a switch that doesn't apply now is ignored, and nothing restarts", async () => {
+    const elsewhere = capabilities({ unavailable: () => ["screenControl", "browserExtension"] });
+    const status = await elsewhere.capabilities.update({
+      screenControl: false,
+      browserExtension: false,
+      microphone: false,
+    });
+    expect(status.settings).toEqual({
+      screenControl: true,
+      browserExtension: true,
+      microphone: false,
+    });
+    expect(elsewhere.saved().screenControl).toBe(true);
+    expect(elsewhere.events.agent).toBe(0);
+
+    const older = capabilities({ screenControlSwitch: async () => false });
+    await older.capabilities.update({ screenControl: false });
+    expect(older.saved().screenControl).toBe(true);
+    expect(older.events.agent).toBe(0);
+  });
 });
 
 describe("the microphone", () => {

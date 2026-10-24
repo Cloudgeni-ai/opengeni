@@ -28,7 +28,7 @@ export function useDesktopThisComputer() {
         productName: "Opengeni",
         workspaceId: "workspace",
         labels: defaultThisComputerLabels(),
-        openSetup: () => {},
+        allowPermissions: computer.allowPermissions,
         signIn: null,
       }
     : null;
