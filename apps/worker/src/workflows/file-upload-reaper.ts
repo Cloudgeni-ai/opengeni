@@ -10,6 +10,7 @@ const reaperActivity = proxyActivities<
     | "recoverVideoGenerationWorkflows"
     | "recoverSessionTitleWorkflows"
     | "recoverRecordingWorkflows"
+    | "applyRecordingRetention"
     | "reconcileRecentModelCallFacts"
   >
 >({
@@ -28,6 +29,9 @@ export async function fileUploadReaperWorkflow(): Promise<void> {
   }
   if (patched("recording-workflow-recovery-v1")) {
     await reaperActivity.recoverRecordingWorkflows();
+  }
+  if (patched("recording-retention-v1")) {
+    await reaperActivity.applyRecordingRetention();
   }
   await reaperActivity.reconcileRecentModelCallFacts();
 }

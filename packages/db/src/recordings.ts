@@ -139,6 +139,7 @@ function recordingView(
     durationMilliseconds: row.durationMilliseconds,
     externalRef: row.externalRef,
     metadata: row.metadata,
+    audioDeletedAt: row.audioDeletedAt?.toISOString() ?? null,
     transcription: row.transcription as RecordingTranscriptionOptions,
     tracks: tracks
       .filter((track) => track.recordingId === row.id)
@@ -1400,6 +1401,12 @@ export async function createRecordingTranscriptVersion(
     }
     if (recording.state === "capturing") {
       throw new RecordingConflictError("This recording is still capturing", "still_capturing");
+    }
+    if (recording.audioDeletedAt) {
+      throw new RecordingConflictError(
+        "The audio was deleted under this workspace's retention, so it can't be transcribed again",
+        "audio_deleted",
+      );
     }
     const [pending] = await tx
       .select({ id: schema.recordingTranscriptVersions.id })
@@ -2716,4 +2723,152 @@ export async function listStalledRecordingWork(
     versionId: row.version_id,
     ownerSubjectId: row.owner_subject_id,
   }));
+}
+
+export type DueRecordingRetention = {
+  /** audio: delete the audio, keep the transcript. recording: delete the meeting. */
+  kind: "audio" | "recording";
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+  ownerSubjectId: string;
+};
+
+/**
+ * Meetings whose workspace retention has passed, across every workspace.
+ * Identity only; the caller acts on each as its owner.
+ */
+export async function listDueRecordingRetention(
+  db: Database,
+  limit = 50,
+): Promise<DueRecordingRetention[]> {
+  const rows = await rawRows<{
+    kind: "audio" | "recording";
+    account_id: string;
+    workspace_id: string;
+    recording_id: string;
+    owner_subject_id: string;
+  }>(db, sql`select * from opengeni_private.list_due_recording_retention_v1(${limit})`);
+  return rows.map((row) => ({
+    kind: row.kind,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    recordingId: row.recording_id,
+    ownerSubjectId: row.owner_subject_id,
+  }));
+}
+
+/**
+ * Retention is deleting a meeting's audio: stamp it, so nothing plays or
+ * transcribes it from now on, and return the audio objects to delete. Null
+ * when there is nothing to do (the meeting is gone, being deleted, still
+ * being captured or transcribed). Repeating it returns the same objects.
+ */
+export async function beginRecordingAudioExpiry(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<string[] | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      )
+      .for("update");
+    if (!row || row.purpose !== "meeting") return null;
+    if (row.state !== "ready" && row.state !== "failed") return null;
+    if (!row.audioDeletedAt) {
+      const [pending] = await tx
+        .select({ id: schema.recordingTranscriptVersions.id })
+        .from(schema.recordingTranscriptVersions)
+        .where(
+          and(
+            eq(schema.recordingTranscriptVersions.workspaceId, input.workspaceId),
+            eq(schema.recordingTranscriptVersions.recordingId, input.recordingId),
+            inArray(schema.recordingTranscriptVersions.state, ["queued", "processing"]),
+          ),
+        )
+        .limit(1);
+      if (pending) return null;
+      await tx
+        .update(schema.recordings)
+        .set({ audioDeletedAt: sql`clock_timestamp()`, updatedAt: sql`clock_timestamp()` })
+        .where(
+          and(
+            eq(schema.recordings.workspaceId, input.workspaceId),
+            eq(schema.recordings.id, input.recordingId),
+          ),
+        );
+    }
+    const [chunks, tracks] = await Promise.all([
+      tx
+        .select({ objectKey: schema.recordingChunks.objectKey })
+        .from(schema.recordingChunks)
+        .where(
+          and(
+            eq(schema.recordingChunks.workspaceId, input.workspaceId),
+            eq(schema.recordingChunks.recordingId, input.recordingId),
+          ),
+        ),
+      tx
+        .select({ objectKey: schema.recordingTracks.preparedObjectKey })
+        .from(schema.recordingTracks)
+        .where(
+          and(
+            eq(schema.recordingTracks.workspaceId, input.workspaceId),
+            eq(schema.recordingTracks.recordingId, input.recordingId),
+          ),
+        ),
+    ]);
+    return [
+      ...new Set([
+        ...chunks.map((chunk) => chunk.objectKey),
+        ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
+      ]),
+    ];
+  });
+}
+
+/**
+ * The audio objects are gone: drop the chunk rows and the tracks' pointers
+ * at prepared audio, which also takes the meeting off the retention sweep.
+ */
+export async function completeRecordingAudioExpiry(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await tx
+      .select({ audioDeletedAt: schema.recordings.audioDeletedAt })
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      )
+      .for("update");
+    if (!row?.audioDeletedAt) return;
+    await tx
+      .delete(schema.recordingChunks)
+      .where(
+        and(
+          eq(schema.recordingChunks.workspaceId, input.workspaceId),
+          eq(schema.recordingChunks.recordingId, input.recordingId),
+        ),
+      );
+    await tx
+      .update(schema.recordingTracks)
+      .set({ preparedObjectKey: null, preparedBytes: null, preparedSha256: null })
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, input.workspaceId),
+          eq(schema.recordingTracks.recordingId, input.recordingId),
+        ),
+      );
+  });
 }

@@ -193,6 +193,46 @@ describe("Meeting page", () => {
       await view.unmount();
     }
   });
+
+  test("a meeting whose audio retention deleted keeps its transcript and says why", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId="7f8a9b0c-1d2e-4f3a-8b4c-5d6e7f8a9b0c"
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "The audio was deleted on");
+      expect(view.container.textContent).toContain("keeps audio only for a set time");
+      const again = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Transcribe again",
+      );
+      expect(again?.disabled).toBe(true);
+    } finally {
+      await view.unmount();
+    }
+  });
+});
+
+describe("Retention settings", () => {
+  test("names periods and warns only when a change deletes sooner", async () => {
+    const { retentionPeriodName, retentionChangeWarning } = await import("./meeting-settings");
+    expect(retentionPeriodName(30)).toBe("30 days");
+    expect(retentionPeriodName(365)).toBe("1 year");
+    expect(retentionPeriodName(730)).toBe("2 years");
+    expect(retentionChangeWarning(undefined, { transcriptDays: 365 })?.confirmLabel).toBe(
+      "Delete old meetings",
+    );
+    expect(retentionChangeWarning(undefined, { audioDays: 0 })?.title).toBe(
+      "Delete audio once transcribed?",
+    );
+    expect(retentionChangeWarning({ audioDays: 7 }, { audioDays: 30 })).toBeNull();
+    expect(retentionChangeWarning({ transcriptDays: 90 }, {})).toBeNull();
+  });
 });
 
 describe("Recorder errors", () => {

@@ -868,7 +868,8 @@ export async function grantDeferredRuntimeAccess(
       opengeni_private.prune_event_intake_v1(integer, integer, integer),
       opengeni_private.list_stalled_recording_work_v1(integer),
       opengeni_private.list_due_mcp_event_subscriptions_v1(integer),
-      opengeni_private.list_due_event_source_feeds_v1(integer)
+      opengeni_private.list_due_event_source_feeds_v1(integer),
+      opengeni_private.list_due_recording_retention_v1(integer)
       TO "${role.replaceAll('"', '""')}";
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE event_ingress_routes
       TO "${role.replaceAll('"', '""')}";

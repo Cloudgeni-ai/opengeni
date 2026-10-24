@@ -725,7 +725,8 @@ export function MeetingDetailPage({
       (entry.state === "queued" || entry.state === "processing"),
   );
   const audioGone =
-    recording.state !== "capturing" && !recording.tracks.some((track) => track.playable);
+    recording.audioDeletedAt !== null ||
+    (recording.state !== "capturing" && !recording.tracks.some((track) => track.playable));
   const canRerun = recording.state !== "capturing" && !audioGone && !rerunPending;
   const unnamedCount = speakerLabels.filter(
     (label) => !speakerIsNamed(label, transcript.speakers),
@@ -997,12 +998,13 @@ export function MeetingDetailPage({
         ) : null}
         {audioGone ? (
           <Notice tone="muted">
-            The audio for this meeting isn't available anymore, so it can't be played or transcribed
-            again. The transcript stays.
+            {recording.audioDeletedAt
+              ? `The audio was deleted on ${formatAbsoluteTime(recording.audioDeletedAt)}, because this workspace keeps audio only for a set time. The transcript stays, but the meeting can't be played or transcribed again.`
+              : "The audio for this meeting isn't available anymore, so it can't be played or transcribed again. The transcript stays."}
           </Notice>
         ) : null}
       </div>
-      {sources.length > 0 ? (
+      {sources.length > 0 && !recording.audioDeletedAt ? (
         // A direct child of the page, so it stays in view through the whole transcript.
         <div className="sticky top-0 z-10 -mx-1 mt-4 bg-bg px-1 pt-2 pb-2">
           <MeetingPlayer

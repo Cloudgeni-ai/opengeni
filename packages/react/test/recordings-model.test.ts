@@ -78,6 +78,7 @@ function recordingWith(
     durationMilliseconds: 0,
     errorCode: null,
     externalRef: null,
+    audioDeletedAt: null,
     metadata: {},
     transcription: {},
     tracks: [],

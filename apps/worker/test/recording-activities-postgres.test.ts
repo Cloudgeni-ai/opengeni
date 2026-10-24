@@ -541,3 +541,77 @@ describe("stalled recording recovery", () => {
     expect(starts).toContain(recordingId);
   });
 });
+
+// Last: it grants the deferred EXECUTE the recovery test expects withheld.
+describe.skipIf(!hasFfmpeg)("recording retention", () => {
+  test("retention deletes old audio and keeps the transcript, then hands old meetings to deletion", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    const { recordingId, workspaceId } = recording.input;
+    const { activities: transcribe } = activities(
+      storage,
+      fakeProvider(async () => ({
+        languages: ["en"],
+        audioMilliseconds: 1_000,
+        diarized: false,
+        words: [],
+      })),
+    );
+    await transcribe.transcribeRecordingVersion(recording.input);
+    expect(storage.objects.size).toBe(6);
+    await shared.admin`
+      UPDATE recordings
+      SET started_at = now() - interval '10 days', capture_ended_at = now() - interval '10 days'
+      WHERE id = ${recordingId}
+    `;
+    await updateWorkspaceSettings(db, workspaceId, {
+      recordings: { retention: { audioDays: 7, transcriptDays: 30 } },
+    });
+    const starts: string[] = [];
+    const debug: string[] = [];
+    const services = async () =>
+      ({
+        db,
+        objectStorage: storage.storage,
+        observability: {
+          warn: () => undefined,
+          info: () => undefined,
+          debug: (message: string) => debug.push(message),
+        },
+        startRecordingWorkflow: async (work: { recordingId: string }) => {
+          starts.push(work.recordingId);
+          return "started";
+        },
+      }) as unknown as ControlActivityServices;
+    const run = createRecordingActivities(services, {
+      registry: createRecordingTranscriptionProviderRegistry([]),
+      loadApiKey: async () => null,
+      heartbeat: () => undefined,
+      cancellationSignal: () => undefined,
+    });
+
+    // After the recovery test, so the runtime has EXECUTE on 0946's inventory.
+    await grantDeferredRuntimeAccess(shared.admin);
+    const audio = await run.applyRecordingRetention();
+    expect(audio).toMatchObject({ audioDeleted: 1, recordingsDeleted: 0, failed: 0 });
+    expect(storage.objects.size).toBe(0);
+    const kept = await getRecording(db, { ...recording.actor, recordingId });
+    expect(kept.audioDeletedAt).not.toBeNull();
+    expect(kept.transcript?.state).toBe("complete");
+    expect(await run.applyRecordingRetention()).toMatchObject({ found: 0 });
+
+    await updateWorkspaceSettings(db, workspaceId, {
+      recordings: { retention: { audioDays: 1, transcriptDays: 5 } },
+    });
+    expect(await run.applyRecordingRetention()).toMatchObject({
+      recordingsDeleted: 1,
+      failed: 0,
+    });
+    expect(starts).toEqual([recordingId]);
+    await expect(getRecording(db, { ...recording.actor, recordingId })).rejects.toThrow(
+      "Recording not found",
+    );
+  });
+});
