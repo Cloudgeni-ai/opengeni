@@ -2986,13 +2986,15 @@ function derivedOperationId(purpose: string, operationId: string, subject: strin
 }
 
 /**
- * Run a computer_act batch: each action is its own durable operation, fenced
- * by the observation the action before it returned, so it acts on the state
- * that action left. Stops at the first action that does not complete. A
- * retried call derives the same operation IDs; an action that already ran
- * under its ID returns its recorded receipt, whatever fence it ran with.
- * Before reading a fresh fence, the step's recorded receipt is read alongside
- * it, so a retry reuses what already ran even when the window is gone.
+ * Run a computer_act batch. A computer that supports it runs the batch as one
+ * operation (see actInComputerNativeBatch). Otherwise each action is its own
+ * durable operation, fenced by the observation the action before it
+ * returned, so it acts on the state that action left, and the batch stops at
+ * the first action that does not complete. A retried call derives the same
+ * operation IDs; an action that already ran under its ID returns its
+ * recorded receipt, whatever fence it ran with. One action at a time, a
+ * step's recorded receipt is read before a fresh fence, so a retry reuses
+ * what already ran even when the window is gone.
  */
 async function actInComputerBatch(
   transport: InteractionTransport,
