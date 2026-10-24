@@ -710,7 +710,7 @@ export function scheduleErrorReference(error: unknown): string | undefined {
  */
 export function scheduleAgentOpeningMessage(request: string, timeZone: string): string {
   return [
-    "Help me create a schedule in this workspace.",
+    "Help me create an automation in this workspace.",
     "",
     request.trim(),
     "",

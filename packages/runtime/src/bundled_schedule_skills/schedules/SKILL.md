@@ -1,6 +1,6 @@
 ---
 name: schedules
-description: Create a schedule, recurring task, reminder, or monitor. Read this before turning a user's request into scheduled work, including a create request from the Schedules page. Discover the required resources and integrations, then create the task with the user's cadence and time zone.
+description: Create a schedule, recurring task, reminder, or monitor. Read this before turning a user's request into scheduled work, including a create request from the Automations page. Discover the required resources and integrations, then create the task with the user's cadence and time zone.
 ---
 
 # Create a schedule

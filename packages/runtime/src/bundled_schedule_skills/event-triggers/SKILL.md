@@ -26,6 +26,7 @@ happens, and `events: { triggers: [...], once: true }`. Keep the default
 destination, this chat. Omit `schedule` unless the user also wants a deadline:
 "when X, or at 17:00 anyway" is one once-automation with a trigger and a
 one-time schedule. Whichever comes first runs it, and the automation finishes.
+The wait belongs to this chat: archiving the chat removes it.
 
 ## Standing automations
 
