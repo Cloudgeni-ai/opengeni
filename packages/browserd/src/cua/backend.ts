@@ -1173,7 +1173,22 @@ export class CuaComputerBackend implements ComputerBackend {
         unindexedTextByElement(state.tree_markdown, this.identity.platform),
       ),
     );
-    const signs = progressSigns(roots, unindexedRows(state.tree_markdown, this.identity.platform));
+    // The rows folded into a field are its text, typed by the person.
+    const refTokens = this.tokens.get(targetId);
+    const fieldTokens = new Set(
+      roots.filter((node) => node.actions.includes("set_value")).map((n) => refTokens?.get(n.ref)),
+    );
+    const fieldIndexes = new Set(
+      state.elements
+        .filter((element) => element.element_token && fieldTokens.has(element.element_token))
+        .map((element) => element.element_index),
+    );
+    const signs = progressSigns(
+      roots,
+      unindexedRows(state.tree_markdown, this.identity.platform).filter(
+        (row) => !fieldIndexes.has(row.owner),
+      ),
+    );
     this.openingTokens.delete(targetId);
     this.openingTokens.set(
       targetId,

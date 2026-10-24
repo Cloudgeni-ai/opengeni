@@ -1337,7 +1337,7 @@ describe("CUA desktop boundary", () => {
        * save disables, so the web area reads "Saving... | Delete". Or not
        * as a save: a web menu with a disabled "Move to…" item folded into
        * the web area, or the button ("Options…") turning disabled as it was. */
-      shows: "label" | "folded" | "menu" | "disabled" = "label";
+      shows: "label" | "folded" | "menu" | "disabled" | "typed" = "label";
       /** The press reveals a long preview cut short with "…" instead. */
       preview = false;
       reads = 0;
@@ -1367,6 +1367,9 @@ describe("CUA desktop boundary", () => {
             '- [2] AXWebArea "Billing"\n  - AXMenu\n    - AXMenuItem "Move to…"\n';
         } else if (busy && this.shows === "disabled") {
           Object.assign(state.elements[0], { enabled: false });
+        } else if (busy && this.shows === "typed") {
+          extra.push({ role: "AXTextArea", label: "Reply", actions: [] });
+          state.tree_markdown = '- [2] AXTextArea "Reply"\n  - AXStaticText "Let me check..."\n';
         } else if (busy) {
           Object.assign(state.elements[0], { label: "Saving...", enabled: false });
           extra.push({ role: "AXStaticText", label: "Loading billing details…", actions: [] });
@@ -1445,9 +1448,9 @@ describe("CUA desktop boundary", () => {
       await previewBackend.close();
     }
 
-    // A disabled menu item ("Move to…") and a control that turns disabled as
-    // it was ("Options…") are not work in progress.
-    for (const shows of ["menu", "disabled"] as const) {
+    // A disabled menu item ("Move to…"), a control that turns disabled as it
+    // was ("Options…") and text typed into a field are not work in progress.
+    for (const shows of ["menu", "disabled", "typed"] as const) {
       const quiet = new SavingFixture();
       quiet.shows = shows;
       quiet.busyReads = 1000;
