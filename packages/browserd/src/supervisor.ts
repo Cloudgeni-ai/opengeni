@@ -2577,7 +2577,9 @@ export class BrowserSupervisor {
           failures.push(cleanupError);
         }
       }
-      if (recoveredReceipt && !adoptedLaunch && !driverClosed)
+      // A relaunch whose browser would not close is caught by the next
+      // recovery's own check that no process still uses the profile.
+      if (recoveredReceipt && !adoptedLaunch && !driverClosed && !relaunchesProfile)
         this.recoveryTransportsUncertain.add(options.browserSessionId);
       if (workingReceipt) {
         console.error("browser launch failed before its working-runtime receipt completed", {
