@@ -467,8 +467,9 @@ and Batch CI. A waiting run whose jobs are only completed or waiting for
 approval does not hold it. Main push CI whose sole waiting job is
 `Build API workload image` (public-release approval), with every other job
 completed or `pending` and unique positive job IDs, also has zero runner demand.
-This relies on the current `ci.yml` job order, in which every job not downstream
-of that approval finishes before the approval waits.
+This relies on the current `ci.yml` job order: when the approval waits, every
+job not downstream of it already has its prerequisites completed, so it is
+queued, running or finished (never `pending`); a queued or running job holds.
 The yield never approves or cancels that release. Batch runs get no such
 exemption.
 
