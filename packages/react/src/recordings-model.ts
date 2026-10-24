@@ -220,13 +220,56 @@ export function versionSummary(
   return parts;
 }
 
+/** English names for common languages, for runtimes without Intl.DisplayNames (Hermes). */
+const LANGUAGE_NAMES: Record<string, string> = {
+  ar: "Arabic",
+  cs: "Czech",
+  da: "Danish",
+  de: "German",
+  el: "Greek",
+  en: "English",
+  es: "Spanish",
+  fi: "Finnish",
+  fr: "French",
+  he: "Hebrew",
+  hi: "Hindi",
+  hu: "Hungarian",
+  id: "Indonesian",
+  is: "Icelandic",
+  it: "Italian",
+  ja: "Japanese",
+  ko: "Korean",
+  nb: "Norwegian Bokmål",
+  nl: "Dutch",
+  nn: "Norwegian Nynorsk",
+  no: "Norwegian",
+  pl: "Polish",
+  pt: "Portuguese",
+  ro: "Romanian",
+  ru: "Russian",
+  sv: "Swedish",
+  th: "Thai",
+  tr: "Turkish",
+  uk: "Ukrainian",
+  vi: "Vietnamese",
+  zh: "Chinese",
+};
+
+/** "English" for "en" or a provider's "eng"; the code itself when no name is known. */
 export function languageName(code: string): string {
+  let tag = code;
   try {
-    const names = new Intl.DisplayNames(["en"], { type: "language" });
-    return names.of(code) ?? code;
+    tag = Intl.getCanonicalLocales(code)[0] ?? code;
   } catch {
-    return code;
+    // Not a well-formed tag: show it as given.
   }
+  try {
+    const name = new Intl.DisplayNames(["en"], { type: "language" }).of(tag);
+    if (name && name !== tag) return name;
+  } catch {
+    // No Intl.DisplayNames here.
+  }
+  return LANGUAGE_NAMES[tag] ?? LANGUAGE_NAMES[tag.split("-")[0]!] ?? tag;
 }
 
 /** A short, readable default title for a new recording: "Meeting, Oct 23, 14:05". */

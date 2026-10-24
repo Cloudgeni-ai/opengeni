@@ -13,6 +13,7 @@ import {
   formatClock,
   formatDuration,
   groupTranscriptTurns,
+  languageName,
   meetingPhase,
   speakerColorSlots,
   speakerDisplayName,
@@ -144,6 +145,26 @@ describe("meetingPhase", () => {
 });
 
 describe("speakers", () => {
+  test("language names read the same with or without Intl.DisplayNames", () => {
+    expect(languageName("en")).toBe("English");
+    expect(languageName("eng")).toBe("English");
+    expect(languageName("zz")).toBe("zz");
+    const displayNames = Intl.DisplayNames;
+    try {
+      // Hermes, the phone's JavaScript engine, has no Intl.DisplayNames.
+      Reflect.deleteProperty(Intl, "DisplayNames");
+      expect(languageName("nob")).toBe("Norwegian Bokmål");
+      expect(languageName("en-GB")).toBe("English");
+      expect(languageName("zz")).toBe("zz");
+    } finally {
+      Object.defineProperty(Intl, "DisplayNames", {
+        value: displayNames,
+        configurable: true,
+        writable: true,
+      });
+    }
+  });
+
   const speakers = [
     {
       label: "speaker_0",
