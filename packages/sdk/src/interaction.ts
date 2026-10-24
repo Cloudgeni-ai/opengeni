@@ -1268,6 +1268,12 @@ export type ComputerTarget = {
   title: string;
   bounds: InteractionRect | null;
   focused: boolean;
+  /** Present on a window the platform cannot capture or read while it is off
+   * screen. */
+  offScreen?: true | undefined;
+  /** Present on the target this computer was last observed or acted on in,
+   * which a call that omits targetId works in. */
+  current?: true | undefined;
 };
 
 export type ComputerObservation = {

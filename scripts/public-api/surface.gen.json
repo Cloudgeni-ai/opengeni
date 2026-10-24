@@ -14130,6 +14130,7 @@
         "$.bounds": "ref(InteractionRect)! null",
         "$.computerSessionId": "string!",
         "$.controllerGeneration": "string!",
+        "$.current": "const?=[\"true\"]",
         "$.focused": "boolean!",
         "$.id": "string!",
         "$.kind": "enum!=[\"\\\"app\\\"\",\"\\\"screen\\\"\",\"\\\"window\\\"\"]",

@@ -3494,6 +3494,9 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
        * minimized window or a hidden app's window is not marked: reading it
        * brings it back on screen behind the person's front window. */
       offScreen: z.literal(true).optional(),
+      /** Present on the target this computer was last observed or acted on
+       * in, which a call that omits targetId works in. */
+      current: z.literal(true).optional(),
     })
     .strict(),
 );
