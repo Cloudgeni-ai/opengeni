@@ -278,6 +278,21 @@ delivery as `ignored`.
   durable, per-subscription ordering for poll, best-effort ordering for webhook.
   Opengeni orders an inbox batch by event time and tells the agent when events
   may have been missed.
+- **Servers built for ChatGPT** follow the extension's earlier design sketch,
+  which ChatGPT implements. They work the same way, over webhooks only. Three
+  differences matter to a client:
+  - They advertise a top-level `events` capability instead of the
+    `extensions` entry. The MCP client keeps only capabilities it knows, so a
+    server without the entry is asked `events/list`; one that answers offers
+    events.
+  - They number their errors -32011 to -32015 instead of -32023 to -32027.
+    Both numberings are read the same way.
+  - Their `webhook-id` is the event's `eventId`, which deduplication already
+    covers.
+
+  Over HTTP an unknown method can come back as a 404 carrying the JSON-RPC
+  error. The error in the body decides, so a server that stops offering events
+  blocks its triggers instead of retrying quietly.
 
 ## Delivering events to the agent
 

@@ -1,5 +1,10 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
-import { createMcpHandler, McpServer, ProtocolError } from "@modelcontextprotocol/server";
+import {
+  createMcpHandler,
+  McpServer,
+  ProtocolError,
+  type ServerCapabilities,
+} from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
 /**
@@ -8,9 +13,35 @@ import * as z from "zod/v4";
  * cursors and replay, duplicates, retention gaps, `maxAgeMs`, injected
  * errors, webhook verification, gap and termination envelopes, and a record
  * of every request with its `Mcp-Name` header.
+ *
+ * The `chatgpt` profile behaves like a server built for ChatGPT, which follows
+ * the extension's earlier design sketch: it advertises `capabilities.events`,
+ * numbers its errors -32011 to -32015, and sends each event with its
+ * `eventId` as the `webhook-id`.
  */
 
 export const MCP_EVENTS_EXTENSION_ID = "io.modelcontextprotocol/events";
+
+export type FakeMcpEventsProfile = "sep-3415" | "chatgpt";
+
+/** Error codes by name, in each profile's numbering. */
+const ERROR_CODES: Record<
+  FakeMcpEventsProfile,
+  Record<"NotFound" | "Forbidden" | "Unsupported" | "CallbackEndpointError", number>
+> = {
+  "sep-3415": {
+    NotFound: -32_023,
+    Forbidden: -32_024,
+    Unsupported: -32_026,
+    CallbackEndpointError: -32_027,
+  },
+  chatgpt: {
+    NotFound: -32_011,
+    Forbidden: -32_012,
+    Unsupported: -32_014,
+    CallbackEndpointError: -32_015,
+  },
+};
 
 export type FakeMcpEventType = {
   name: string;
@@ -63,7 +94,9 @@ type InjectedError = { code: number; message: string; data?: unknown };
 
 export type FakeMcpEventsServerOptions = {
   eventTypes: FakeMcpEventType[];
-  /** Advertise the events extension in `server/discover` (default true). */
+  /** Which revision of the extension to speak (default `sep-3415`). */
+  profile?: FakeMcpEventsProfile;
+  /** Offer events at all (default true); false is an ordinary server without them. */
   advertiseEvents?: boolean;
   /** The `nextPollMs` every poll answers with. */
   nextPollMs?: number;
@@ -129,6 +162,15 @@ export class FakeMcpEventsServer {
 
   private now(): Date {
     return this.options.now?.() ?? new Date();
+  }
+
+  private get profile(): FakeMcpEventsProfile {
+    return this.options.profile ?? "sep-3415";
+  }
+
+  /** An error code by name, in this server's numbering. */
+  errorCode(name: keyof (typeof ERROR_CODES)["sep-3415"]): number {
+    return ERROR_CODES[this.profile][name];
   }
 
   start(): this {
@@ -290,9 +332,13 @@ export class FakeMcpEventsServer {
 
   private requireType(name: unknown, mode: "poll" | "webhook"): FakeMcpEventType {
     const type = typeof name === "string" ? this.type(name) : undefined;
-    if (!type) throw new ProtocolError(-32_023, "Event type not found", { kind: "event" });
+    if (!type) {
+      throw new ProtocolError(this.errorCode("NotFound"), "Event type not found", {
+        kind: "event",
+      });
+    }
     if (!type.delivery.includes(mode)) {
-      throw new ProtocolError(-32_026, "Delivery mode not supported", {
+      throw new ProtocolError(this.errorCode("Unsupported"), "Delivery mode not supported", {
         feature: "deliveryMode",
         value: mode,
       });
@@ -331,13 +377,18 @@ export class FakeMcpEventsServer {
   }
 
   private createMcp(): McpServer {
+    // ChatGPT's sketch puts `events` beside `tools`, a key the SDK's
+    // capability type does not know (it still sends it).
+    const chatgptCapabilities = { events: {} } as ServerCapabilities;
     const mcp = new McpServer(
       { name: "fake-mcp-events", version: "1.0.0" },
       {
         capabilities:
           this.options.advertiseEvents === false
             ? {}
-            : { extensions: { [MCP_EVENTS_EXTENSION_ID]: {} } },
+            : this.profile === "chatgpt"
+              ? chatgptCapabilities
+              : { extensions: { [MCP_EVENTS_EXTENSION_ID]: {} } },
       },
     );
     // A tool, so the server is an ordinary one as well.
@@ -345,6 +396,7 @@ export class FakeMcpEventsServer {
       content: [{ type: "text", text: "pong" }],
     }));
     const server = mcp.server;
+    if (this.options.advertiseEvents === false) return mcp;
     server.setRequestHandler("events/list", { params: AnyParams }, async () => {
       this.takeInjected("events/list");
       return {
@@ -441,14 +493,22 @@ export class FakeMcpEventsServer {
           echoed = null;
         }
         if (post.status < 200 || post.status >= 300) {
-          throw new ProtocolError(-32_027, "Callback endpoint error", {
-            reason: post.status >= 500 ? "http_5xx" : "http_4xx",
-          });
+          throw new ProtocolError(
+            this.errorCode("CallbackEndpointError"),
+            "Callback endpoint error",
+            {
+              reason: post.status >= 500 ? "http_5xx" : "http_4xx",
+            },
+          );
         }
         if (echoed !== challenge) {
-          throw new ProtocolError(-32_027, "Callback endpoint error", {
-            reason: "challenge_failed",
-          });
+          throw new ProtocolError(
+            this.errorCode("CallbackEndpointError"),
+            "Callback endpoint error",
+            {
+              reason: "challenge_failed",
+            },
+          );
         }
         this.verified.add(verifyKey);
       }
@@ -478,7 +538,9 @@ export class FakeMcpEventsServer {
         .digest("hex")
         .slice(0, 16)}`;
       if (!this.subscriptions.delete(id)) {
-        throw new ProtocolError(-32_023, "Subscription not found", { kind: "subscription" });
+        throw new ProtocolError(this.errorCode("NotFound"), "Subscription not found", {
+          kind: "subscription",
+        });
       }
       return { resultType: "complete" };
     });
@@ -492,7 +554,9 @@ export class FakeMcpEventsServer {
     const post = await this.post(
       subscription,
       JSON.stringify(occurrence),
-      `msg_${randomUUID().replaceAll("-", "")}`,
+      this.profile === "chatgpt"
+        ? String(occurrence.eventId)
+        : `msg_${randomUUID().replaceAll("-", "")}`,
     );
     if (post.status >= 200 && post.status < 300) {
       const position = /^c(\d+)$/u.exec(String(occurrence.cursor ?? ""))?.[1];

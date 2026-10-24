@@ -37,7 +37,7 @@ export async function mcpSourceEventTypes(
   const now = options.now ?? Date.now();
   const cached = typeCache.get(source.id);
   if (!options.fresh && cached && cached.expiresAt > now) return cached.types;
-  if (!serverOffersMcpEvents(client)) {
+  if (!(await serverOffersMcpEvents(client, { timeout: 20_000 }))) {
     typeCache.delete(source.id);
     throw new McpServerWithoutEventsError(serverName);
   }
