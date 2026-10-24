@@ -79,6 +79,8 @@ pub fn event(event: &Event) {
 
 /// Report a failure that ends a running capture, and exit. The samples
 /// already written stay valid; the app sees the error line and the exit.
+/// (Core Audio reports nothing mid-capture, so macOS never calls it.)
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn fatal(code: &str, message: &str) -> ! {
     event(&Event::Error { code, message });
     std::process::exit(1);
