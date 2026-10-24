@@ -6,6 +6,7 @@ import { GitHubActiveExecutor } from "./active";
 import { main } from "./main";
 import { Controller, LiveReader } from "./controller";
 import { AtomicGitWriter, GitStore, type RefUpdate } from "./git";
+import { proveHeadRefresh } from "./head-refresh";
 import {
   GitHubAuth,
   GitHubMutations,
@@ -352,6 +353,185 @@ async function mergedOriginalWithDelta() {
 }
 
 describe("actual active executor with local bare Git and mocked GitHub", () => {
+  async function refreshedFixture() {
+    const f = await fixture();
+    const main = await f.commit({ base: "base", main: "advance" }, [f.base]);
+    await f.origin.exec(["update-ref", "refs/heads/main", main]);
+    const manifest = await f.publish();
+    const refreshed = await f.origin.commit(
+      await f.origin.mergeTree(f.head, main),
+      [f.head, main],
+      "Merge main",
+      NOW,
+    );
+    await f.origin.exec(["update-ref", "refs/heads/feature", refreshed]);
+    f.api.snapshot.headSha = refreshed;
+    f.api.snapshot.branchHeadSha = refreshed;
+    f.api.pulls = [
+      {
+        ...f.makePull(),
+        headSha: refreshed,
+        binding: {
+          ...f.makePull().binding,
+          evidenceId: "fresh",
+          evidenceDigest: digest(refreshed),
+        },
+      },
+    ];
+    return { ...f, main, manifest, refreshed };
+  }
+  test("clean merge-main refresh lands same tested tree with native new-head ancestry and retained proof", async () => {
+    const f = await refreshedFixture();
+    f.verdict(f.manifest);
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("land");
+    const refs = await f.git.remoteRefs(f.origin.dir),
+      tip = refs.get("refs/heads/main")!;
+    expect(tip).not.toBe(f.manifest.tipSha);
+    expect(await f.git.ancestor(f.manifest.tipSha, tip)).toBe(true);
+    expect(await f.git.ancestor(f.refreshed, tip)).toBe(true);
+    expect(await f.git.exec(["rev-parse", `${tip}^{tree}`])).toBe(
+      await f.git.exec(["rev-parse", `${f.manifest.tipSha}^{tree}`]),
+    );
+    const record = (await f.state()).ledger.landings[`${f.manifest.batchId}:1`]!;
+    expect(record.pull.headSha).toBe(f.refreshed);
+    expect(record.testedSnapshot?.headSha).toBe(f.head);
+    expect(record.testedSnapshot?.tipSha).toBe(f.manifest.tipSha);
+    expect(record.tipSha).toBe(tip);
+  });
+  test("clean refresh preserves in-progress candidate without rerun or early landing", async () => {
+    const f = await refreshedFixture();
+    const run = f.verdict(f.manifest);
+    run.status = "in_progress";
+    run.completedAt = null;
+    await f.controller().step();
+    expect((await f.state()).ledger.invalidated).not.toContain(f.manifest.batchId);
+    expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(f.main);
+    expect(f.api.calls.some((x) => x.includes("/rerun"))).toBe(false);
+  });
+  test("changed-head equivalence never transfers a failed result into retry or blame", async () => {
+    const f = await refreshedFixture();
+    f.verdict(f.manifest, "code_failure");
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("record");
+    expect((await f.state()).ledger.invalidated).toContain(f.manifest.batchId);
+    expect(f.api.calls.some((x) => x.includes("/rerun"))).toBe(false);
+  });
+  test("refresh rejects extra edits, linear commits, readiness churn and changed main", async () => {
+    const f = await refreshedFixture();
+    await f.git.fetch(f.origin.dir, [f.refreshed]);
+    expect(await proveHeadRefresh(f.git, f.manifest, f.api.pulls, f.main)).not.toBeNull();
+    const changed = await f.commit({ base: "base", main: "advance", feature: "changed" }, [
+      f.head,
+      f.main,
+    ]);
+    const linear = await f.commit({ base: "base", main: "advance", feature: "old" }, [f.head]);
+    await f.git.fetch(f.origin.dir, [changed, linear]);
+    for (const headSha of [changed, linear])
+      expect(
+        await proveHeadRefresh(f.git, f.manifest, [{ ...f.api.pulls[0]!, headSha }], f.main),
+      ).toBeNull();
+    expect(
+      await proveHeadRefresh(
+        f.git,
+        f.manifest,
+        [{ ...f.api.pulls[0]!, binding: { ...f.api.pulls[0]!.binding, eventId: "relabel" } }],
+        f.main,
+      ),
+    ).toBeNull();
+    expect(await proveHeadRefresh(f.git, f.manifest, f.api.pulls, f.base)).toBeNull();
+  });
+  test("final branch-head race cannot land a refresh proof", async () => {
+    const f = await refreshedFixture();
+    f.verdict(f.manifest);
+    f.api.onSnapshot = () => {
+      f.api.snapshot.branchHeadSha = f.newer;
+    };
+    await expect(f.controller().step()).rejects.toThrow("Final source branch head changed");
+    expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(f.main);
+  });
+  test("final equivalence recomputation rejects a changed tree despite stable head metadata", async () => {
+    const f = await refreshedFixture();
+    f.verdict(f.manifest);
+    const merge = f.git.mergeTree.bind(f.git);
+    f.api.onSnapshot = () => {
+      f.git.mergeTree = async (left, right) =>
+        right === f.refreshed ? "a".repeat(40) : merge(left, right);
+    };
+    await expect(f.controller().step()).rejects.toThrow("Head refresh equivalence changed");
+    expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(f.main);
+  });
+  test("refresh proof rejects side-branch merges, reversed ancestry and excessive merge chains", async () => {
+    const f = await refreshedFixture();
+    const side = await f.commit({ base: "base", side: "not-main" }, [f.base]);
+    const sideMerge = await f.origin.commit(
+      await f.origin.mergeTree(f.head, side),
+      [f.head, side],
+      "side",
+      NOW,
+    );
+    const reversed = await f.origin.commit(
+      await f.origin.mergeTree(f.head, f.main),
+      [f.main, f.head],
+      "reverse",
+      NOW,
+    );
+    let long = f.head;
+    for (let i = 0; i < 9; i++)
+      long = await f.origin.commit(
+        await f.origin.mergeTree(long, f.main),
+        [long, f.main],
+        `main${i}`,
+        NOW,
+      );
+    await f.git.fetch(f.origin.dir, [sideMerge, reversed, long]);
+    for (const headSha of [sideMerge, reversed, long])
+      expect(
+        await proveHeadRefresh(f.git, f.manifest, [{ ...f.api.pulls[0]!, headSha }], f.main),
+      ).toBeNull();
+  });
+  test("multiple refreshed members retain every new head and the full tested tree", async () => {
+    const f = await refreshedFixture();
+    const second = await f.commit({ base: "base", second: "feature" }, [f.base]);
+    const secondRefresh = await f.origin.commit(
+      await f.origin.mergeTree(second, f.main),
+      [second, f.main],
+      "main into second",
+      NOW,
+    );
+    await f.git.fetch(f.origin.dir, [f.refreshed, second, secondRefresh]);
+    const oldSecond = { ...f.makePull(second), number: 2, headRef: "second" };
+    const tested = await f.git.build({
+      schemaVersion: 1,
+      baseSha: f.main,
+      predecessor: null,
+      recoveryOf: null,
+      createdAt: NOW,
+      pulls: [f.makePull(), oldSecond],
+    });
+    const proof = await proveHeadRefresh(
+      f.git,
+      tested,
+      [
+        f.api.pulls[0]!,
+        {
+          ...oldSecond,
+          headSha: secondRefresh,
+          binding: {
+            ...oldSecond.binding,
+            evidenceId: "fresh-second",
+            evidenceDigest: digest(secondRefresh),
+          },
+        },
+      ],
+      f.main,
+    );
+    expect(proof).not.toBeNull();
+    expect(await f.git.ancestor(f.refreshed, proof!.tipSha)).toBe(true);
+    expect(await f.git.ancestor(secondRefresh, proof!.tipSha)).toBe(true);
+    expect(await f.git.ancestor(tested.tipSha, proof!.tipSha)).toBe(true);
+    expect(await f.git.exec(["rev-parse", `${proof!.tipSha}^{tree}`])).toBe(proof!.testedTree);
+  });
   test("missing initialized state alerts and refuses activation without provider writes", async () => {
     const f = await fixture();
     await f.origin.exec(["update-ref", "-d", f.cfg.stateRef]);

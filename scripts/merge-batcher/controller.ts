@@ -24,6 +24,8 @@ import {
 import { plan, latestRun, infrastructureRetryReason, type Action } from "./planner";
 import { DiskCache } from "./cache";
 import { ObservationJournal } from "./journal";
+import { proveHeadRefresh } from "./head-refresh";
+import type { HeadRefresh } from "./model";
 
 export interface Reader {
   observe(): Promise<Observation>;
@@ -31,7 +33,7 @@ export interface Reader {
 export type Effect =
   | { kind: "record" }
   | { kind: "publish"; branch: string; manifest: Manifest }
-  | { kind: "land"; manifest: Manifest; expectedBase: string }
+  | { kind: "land"; manifest: Manifest; expectedBase: string; headRefresh?: HeadRefresh }
   | { kind: "retry"; run: Run }
   | { kind: "announce"; number: number; body: string; key: string }
   | { kind: "park"; number: number; body: string; key: string };
@@ -170,6 +172,16 @@ export class LiveReader implements Reader {
         archived || this.config.mode !== "active",
         !archived || selected.has(candidate.manifest.batchId),
       );
+      const latest = latestRun(candidate, this.config);
+      if (
+        !archived &&
+        (!latest ||
+          latest.status !== "completed" ||
+          (latest.trusted && latest.outcome === "success"))
+      ) {
+        const refresh = await proveHeadRefresh(this.git, candidate.manifest, eligible, baseSha);
+        if (refresh) candidate.headRefresh = refresh;
+      }
     }
     if (historical.length)
       await this.manifestCache.set(cursorKey, (cursor + selected.size) % historical.length);
@@ -324,8 +336,14 @@ export class Controller {
         await this.stage(fresh, result);
         return result;
       }
-      bindings = manifest.pulls;
-      effect = { kind: "land", manifest, expectedBase: observation.baseSha };
+      const headRefresh = replan.candidate.headRefresh;
+      bindings = headRefresh?.pulls ?? manifest.pulls;
+      effect = {
+        kind: "land",
+        manifest,
+        expectedBase: observation.baseSha,
+        ...(headRefresh ? { headRefresh } : {}),
+      };
       ledger.landed.push(manifest.batchId);
     } else if (action.kind === "retry") {
       const reason = infrastructureRetryReason(action.candidate, action.run, this.config);
@@ -464,6 +482,8 @@ export class FencedGitExecutor implements Executor {
   }
   async transact(t: Transaction): Promise<void> {
     requireActiveCapabilities(this.capabilities);
+    if (t.effect.kind === "land" && t.effect.headRefresh)
+      throw new Error("This adapter does not implement verified head refresh landing");
     if (t.nextLedger.epoch !== t.expectedLedger.epoch + 1 || t.nextState === t.expectedState)
       throw new Error("Invalid fence transition");
     if (

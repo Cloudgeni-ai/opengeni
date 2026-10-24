@@ -18,6 +18,7 @@ import {
 } from "./model";
 import { latestRun, infrastructureRetryReason } from "./planner";
 import { observeDurableUncertainty, writeResolved } from "./cycle-outcome";
+import { proveHeadRefresh } from "./head-refresh";
 
 export interface ActiveReads {
   openPullNumbers?(): Promise<number[]>;
@@ -267,12 +268,12 @@ export class GitHubActiveExecutor implements Executor {
       );
     }
     if (effect.kind === "land")
-      for (const member of effect.manifest.pulls) {
+      for (const member of effect.headRefresh?.pulls ?? effect.manifest.pulls) {
         const { mergeSha, ...pull } = member;
         const key = `${effect.manifest.batchId}:${pull.number}`;
         ledger.landings[key] ??= {
           batchId: effect.manifest.batchId,
-          tipSha: effect.manifest.tipSha,
+          tipSha: effect.headRefresh?.tipSha ?? effect.manifest.tipSha,
           mergeSha,
           pull,
           currentHeadSha: null,
@@ -280,12 +281,23 @@ export class GitHubActiveExecutor implements Executor {
           nextCheckAt: now,
           checkedAt: null,
           note: null,
+          ...(effect.headRefresh
+            ? {
+                testedSnapshot: {
+                  tipSha: effect.manifest.tipSha,
+                  treeSha: effect.headRefresh.testedTree,
+                  headSha: effect.manifest.pulls.find((p) => p.number === pull.number)!.headSha,
+                },
+              }
+            : {}),
         };
         addComment(
           ledger,
           `landed:${key}`,
           pull.number,
-          `Merge batcher landed the exact tested PR head ${pull.headSha} in main tip ${effect.manifest.tipSha} (member merge ${mergeSha}). Only that immutable snapshot was tested; any later head is not covered by this result.`,
+          effect.headRefresh
+            ? `Merge batcher landed head ${pull.headSha} at ${effect.headRefresh.tipSha}. Tested tip ${effect.manifest.tipSha}, tree ${effect.headRefresh.testedTree}; merge-main-only refresh ancestry and identical resulting tree were verified. Later heads are not covered.`
+            : `Merge batcher landed the exact tested PR head ${pull.headSha} in main tip ${effect.manifest.tipSha} (member merge ${mergeSha}). Only that immutable snapshot was tested; any later head is not covered by this result.`,
           now,
         );
       }
@@ -333,6 +345,22 @@ export class GitHubActiveExecutor implements Executor {
         throw new Error("Candidate identity changed");
       if (effect.kind === "land") {
         if (effect.expectedBase !== inspected.baseSha) throw new Error("Tested base mismatch");
+        if (effect.headRefresh) {
+          const verified = await proveHeadRefresh(
+            this.git,
+            inspected,
+            ready.ready,
+            effect.expectedBase,
+          );
+          if (
+            !verified ||
+            digest(verified) !== digest(effect.headRefresh) ||
+            digest(t.bindings) !== digest(verified.pulls)
+          )
+            throw new Error("Head refresh equivalence changed");
+        } else if (digest(t.bindings.map(bindingKey)) !== digest(inspected.pulls.map(bindingKey))) {
+          throw new Error("Tested bindings differ");
+        }
         const branch = `${this.config.branchPrefix}${inspected.batchId}`;
         const run = latestRun(
           {
@@ -363,10 +391,11 @@ export class GitHubActiveExecutor implements Executor {
       updates.push({
         ref: this.writer.baseRef,
         expected: effect.expectedBase,
-        next: effect.manifest.tipSha,
+        next: effect.headRefresh?.tipSha ?? effect.manifest.tipSha,
       });
     // AtomicGitWriter never grants force authority to main. PR metadata may
-    // change after the final read: the only permitted destination is testedTip.
+    // change after the final read: destination is testedTip or a recomputed
+    // ancestry-only descendant with the identical tested tree.
     await this.push(updates);
     if (effect.kind === "land") await this.maintain();
   }

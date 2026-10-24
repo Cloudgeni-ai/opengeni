@@ -109,11 +109,34 @@ testable. `main.ts` wires the real `GitHubActiveExecutor` only with explicit
 For this rollout, main activation remains prohibited until the parent's release
 has finished and the parent explicitly gives the go-ahead.
 
-The accepted GitHub contract is **only the exact tested snapshot lands**, not
+The accepted GitHub contract is **only the exact tested tree lands**, not
 “no PR head can change after the final HTTP read.” The adapter rechecks every
 head/readiness/evidence binding, source branch head, exact workflow result and
 main-CI headroom immediately before its atomic Git transaction. A last-moment
 PR update remains possible; no local lock or single replica eliminates it.
+
+One narrow head-refresh exception preserves a candidate when a queued PR only
+merges main into its tested head. The verifier requires an unbroken first-parent
+chain of at most eight two-parent merges back to that head; every second parent
+must be an ancestor of the unchanged candidate base, and every merge tree must
+reproduce exactly. The PR contribution on that base and the entire rebuilt batch
+tree must both remain identical. Readiness event/source and branch identity must
+remain unchanged; current-head hosted checks must independently pass. Linear or
+squashed updates, conflict-resolution edits, side-branch merges, changed readiness,
+main movement and substantive changes rebuild normally. Patch-id equality alone
+is never sufficient. This exception applies only to root candidates.
+
+The original tested manifest, queue ref and run/attempt remain immutable. Landing
+may append ancestry-only merges of refreshed heads to the tested tip, each with
+the same tested tree and an explicit `Batch-Head-Refresh` old/new-head trailer.
+This preserves native GitHub merged-head ancestry rather than pretending the old
+head is the new one. The ledger retains `testedSnapshot` alongside the actual
+landed head/tip. The final GitHub executor recomputes the proof after fresh
+readiness reads and still requires the original exact trusted green workflow
+attempt and atomic FF-only main/state CAS. Other adapters reject this extension
+unless they implement it. GitHub metadata can still race after the final read;
+post-land reconciliation remains necessary. No remote cancellation or rerun is
+used to grant equivalence.
 
 GitHub advertises atomic receive-pack. The changing lease and FF-only main tip
 (or create-only candidate) are updated together; there is no fallback to

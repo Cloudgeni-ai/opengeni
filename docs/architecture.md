@@ -3044,8 +3044,13 @@ requires proven stopped/zero-instance operation. The controller reconstructs sta
 from Git objects and GitHub, builds one merge commit per admitted PR without checking
 out candidate code, and submits only the combined tip to `batch-ci.yml`. Exact
 run-attempt receipts distinguish assertion failures from infrastructure and
-cancellation. Landing requires the exact tested tip, a fast-forward base fence and
-a final head/readiness reread; late PR-head races require post-land reconciliation,
+cancellation. Landing requires the exact tested tree, a fast-forward base fence and
+a final head/readiness reread. Normally the tested tip itself lands; a narrowly
+verified merge-main-only head refresh may append same-tree ancestry commits for
+native PR merge identity, retaining immutable tested-tip/run evidence and explicit
+old/new-head linkage. `scripts/merge-batcher/head-refresh.ts` proves clean main-only
+merge ancestry and whole-batch tree identity; the final executor recomputes it
+before CAS. Late PR-head races require post-land reconciliation,
 never a claim that the newer head was tested. Post-merge full CI remains independent.
 Candidate plan/source/selected-unit/ready success may land on red or unknown
 full-main CI. A two-hour latency breaker retains raw measurements and deducts only

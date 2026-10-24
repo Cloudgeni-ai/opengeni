@@ -75,6 +75,14 @@ export interface Candidate {
   branch: string;
   runs: Run[];
   containedInBase: boolean;
+  headRefresh?: HeadRefresh;
+}
+export interface HeadRefresh {
+  baseSha: string;
+  testedTip: string;
+  testedTree: string;
+  tipSha: string;
+  pulls: (Pull & { mergeSha: string })[];
 }
 export interface Ejection {
   pull: Pull;
@@ -187,6 +195,7 @@ export type DurableEffect = EffectState &
     | { kind: "followup"; request: FollowupRequest }
   );
 export interface LandedPull {
+  testedSnapshot?: { tipSha: string; treeSha: string; headSha: string };
   batchId: string;
   tipSha: string;
   mergeSha: string;

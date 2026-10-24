@@ -136,7 +136,7 @@ function planCandidate(o: Observation, c: Config): Action {
         reason:
           "missing-run infrastructure hold expired; candidate abandoned pending explicit recover-missing-run confirmation",
       };
-    if (item.manifest.pulls.some((p) => !matches(p)))
+    if ((item.headRefresh?.pulls ?? item.manifest.pulls).some((p) => !matches(p)))
       return invalid(
         item.manifest.batchId,
         "head or ready/evidence binding changed; descendants invalidated, running CI preserved",
