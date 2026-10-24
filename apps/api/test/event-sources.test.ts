@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { EventOccurrenceToStart } from "@opengeni/db";
-import { signStandardWebhook, type SessionWorkflowClient } from "@opengeni/core";
+import { eventRouteSecret, signStandardWebhook, type SessionWorkflowClient } from "@opengeni/core";
 import {
   bindAuthorizedGitHubInstallationRepositories,
   createConnection,
@@ -11,6 +11,7 @@ import {
   deleteGitHubInstallationBinding,
   encryptEnvironmentValue,
   ensureExternalIdentity,
+  githubInstallationRouteKey,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -1065,6 +1066,7 @@ describe("GitHub event sources", () => {
         authorityExpiresAt: new Date(checkedAt.getTime() + 5 * 60_000),
         authorityNonce: `github-events-${crypto.randomUUID()}`,
         repositoryIds,
+        eventRouteSecret: eventRouteSecret(f.settings),
       });
     };
     const addSource = async () =>
@@ -1277,11 +1279,22 @@ describe("GitHub event sources", () => {
       accountId: f.workspace.accountId,
       workspaceId: f.workspace.id,
       installationId: first,
+      eventRouteSecret: eventRouteSecret(f.settings),
     });
     expect(await deliver(first, 701)).toEqual({ deliveries: 0 });
     const routes = await shared.admin`select external_key from event_ingress_routes
       where source_id = ${source.id} order by external_key`;
-    expect(routes.map((route) => route.external_key)).toEqual([`installation:${second}`]);
+    // The route table has no tenant RLS, so it keeps a keyed hash, never the installation.
+    expect(routes.map((route) => route.external_key)).toEqual([
+      githubInstallationRouteKey(eventRouteSecret(f.settings)!, second),
+    ]);
+    expect(routes[0]!.external_key).toMatch(/^[0-9a-f]{64}$/);
+
+    // Adding the source again recomputes lost routes.
+    await shared.admin`delete from event_ingress_routes where source_id = ${source.id}`;
+    expect(await deliver(second, 801)).toEqual({ deliveries: 0 });
+    expect((await f.addSource()).status).toBe(201);
+    expect(await deliver(second, 801)).toEqual({ deliveries: 1 });
   });
 
   test("an App that sends its webhooks elsewhere is left alone", async () => {

@@ -1,12 +1,12 @@
-import type { Settings } from "@opengeni/config";
+import { createHmac } from "node:crypto";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import type { EventTypeDescriptor } from "@opengeni/contracts";
 import {
   areGitHubRepositoriesAllowedForWorkspace,
   createEventSource,
   getEventSource,
-  githubInstallationRouteKey,
-  listEventIngressRoutesForApp,
   listGitHubInstallationIdsForWorkspace,
+  listGitHubEventRoutes,
   recordEventDelivery,
   type Database,
   type EventSourceRecord,
@@ -30,6 +30,18 @@ import { WebhookBodyError } from "./webhook-adapters";
  * at most one GitHub source, shared with the whole workspace, and it follows
  * the workspace's GitHub connection as installations are added and removed.
  */
+
+/**
+ * The secret GitHub event routes are keyed with, derived from the deployment's
+ * encryption key, or null when the deployment has none. Every writer of a
+ * workspace's GitHub bindings passes it so the routes follow the bindings.
+ */
+export function eventRouteSecret(settings: Settings): Uint8Array | null {
+  const key = environmentsEncryptionKeyBytes(settings);
+  return key
+    ? new Uint8Array(createHmac("sha256", key).update("opengeni event ingress routes").digest())
+    : null;
+}
 
 export const GITHUB_WEBHOOK_PATH = "/v1/webhooks/github";
 
@@ -112,6 +124,12 @@ export async function createGitHubEventSource(input: {
         "This deployment's GitHub App has no webhook secret (OPENGENI_GITHUB_WEBHOOK_SECRET), so it can't receive GitHub events",
     });
   }
+  const routeSecret = eventRouteSecret(input.settings);
+  if (!routeSecret) {
+    throw new HTTPException(503, {
+      message: "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for GitHub event sources",
+    });
+  }
   const installations = await listGitHubInstallationIdsForWorkspace(input.db, input.workspaceId);
   if (installations.length === 0) {
     throw new HTTPException(422, { message: "Connect GitHub to this workspace first" });
@@ -126,6 +144,7 @@ export async function createGitHubEventSource(input: {
     ownerSubjectId: null,
     visibility: "workspace",
     externalKey: GITHUB_EVENT_SOURCE_KEY,
+    routeSecret,
   });
   return source;
 }
@@ -170,7 +189,10 @@ export async function receiveGitHubWebhook(input: {
   receivedAt?: Date;
 }): Promise<GitHubWebhookIntakeResult> {
   const secret = input.settings.githubWebhookSecret?.trim();
-  if (input.settings.eventTriggersEnabled !== true || !secret) return { outcome: "not_found" };
+  const routeSecret = eventRouteSecret(input.settings);
+  if (input.settings.eventTriggersEnabled !== true || !secret || !routeSecret) {
+    return { outcome: "not_found" };
+  }
   if (!verifyGitHubWebhook({ secret, headers: input.headers, body: input.body })) {
     return { outcome: "rejected", reason: "The signature does not match" };
   }
@@ -185,11 +207,7 @@ export async function receiveGitHubWebhook(input: {
   const repositoryId = githubDeliveryRepositoryId(payload);
   if (installationId === null || repositoryId === null)
     return { outcome: "received", deliveries: 0 };
-  const routes = await listEventIngressRoutesForApp(
-    input.db,
-    "github",
-    githubInstallationRouteKey(installationId),
-  );
+  const routes = await listGitHubEventRoutes(input.db, routeSecret, installationId);
   const receivedAt = input.receivedAt ?? new Date();
   const bodySha256 = sha256Hex(input.body);
   const githubDeliveryId = input.headers.get("x-github-delivery")?.trim();

@@ -73,7 +73,7 @@ export class GmailApiError extends Error {
   }
 }
 
-export function gmailMailboxRouteKey(mailbox: string): string {
+export function gmailMailboxSourceKey(mailbox: string): string {
   return `email:${mailbox.toLowerCase()}`;
 }
 
@@ -227,7 +227,7 @@ export async function createGmailEventSource(input: {
     name: input.name ?? `Gmail (${profile.mailbox})`.slice(0, 120),
     ownerSubjectId,
     visibility: "private",
-    externalKey: gmailMailboxRouteKey(profile.mailbox),
+    externalKey: gmailMailboxSourceKey(profile.mailbox),
     connectionId: api.connectionId,
   });
   if (!created && source.ownerSubjectId !== ownerSubjectId) {

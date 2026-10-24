@@ -1,0 +1,14 @@
+-- deployment-mode: rolling
+-- online-safety-exception: unbatched-data: event_ingress_routes holds a few rows per workspace with an event source, so one set-based DELETE is instant.
+-- event_ingress_routes has no tenant RLS, so it should hold no provider
+-- identity. App routes used to key GitHub installations, Slack teams and
+-- Gmail mailboxes by their plain identity. Now only GitHub keeps app routes,
+-- keyed by an HMAC of the installation under the deployment's route secret,
+-- which SQL cannot compute: this removes every plain app route, and the
+-- release recomputes a workspace's GitHub routes whenever its bindings change
+-- or its GitHub source is added again. Slack callbacks already arrive
+-- resolved to their workspace and Gmail is read rather than delivered, so
+-- neither needs a route. Webhook and MCP routes (random ids) are kept. The
+-- previous release keeps working: it finds no app routes, as when no app
+-- source exists, and runtime DML on this table is still withheld (0937).
+DELETE FROM event_ingress_routes WHERE kind IN ('github', 'slack', 'gmail');

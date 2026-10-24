@@ -20,7 +20,7 @@ import {
   settingsForPrReviewGitHubApp,
 } from "@opengeni/github";
 import { commitGitHubLensConnect, requireGitHubLensConnect } from "./github-lens-connect";
-import type { ApiRouteDeps, PreparedConnectOperation } from "@opengeni/core";
+import { eventRouteSecret, type ApiRouteDeps, type PreparedConnectOperation } from "@opengeni/core";
 import { requireConnectOwnerAuthority } from "./connect-authority";
 import { claimOAuthAcquisition, finishOAuthAcquisition, integrationBaseUrl } from "./oauth-client";
 import {
@@ -385,6 +385,7 @@ export async function completeGitHubAppConnect(
               authorityExpiresAt: new Date(state.iat * 1000 + lifetimeMs),
               authorityNonce: state.nonce,
               repositoryIds: proof.repositories.map((repo) => repo.id),
+              eventRouteSecret: eventRouteSecret(deps.settings),
             });
             if (!bound) throw new Error("GitHub binding proof already consumed");
             return {

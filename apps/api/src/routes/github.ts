@@ -47,6 +47,7 @@ import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
+  eventRouteSecret,
   githubAppActionPolicyActor,
   hasPermission,
   listGitHubActionPolicyActors,
@@ -446,6 +447,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       installationId,
+      eventRouteSecret: eventRouteSecret(settings),
     });
     return c.body(null, 204);
   });
@@ -799,6 +801,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
             authorityExpiresAt: expiresAt,
             authorityNonce: statePayload.nonce,
             repositoryIds,
+            eventRouteSecret: eventRouteSecret(settings),
           });
         },
       );
