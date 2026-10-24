@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
 import { GitHubAuth, GitHubReader } from "./github";
+import { appOnlyGuidanceContext } from "./github-admission";
 import { config } from "./model";
 const roots: string[] = [];
 afterEach(async () => {
@@ -66,6 +67,8 @@ async function fixture() {
     protectionStatus: 404,
     checkStatus: 200,
     checkAuthorization: [] as string[],
+    guidanceApp: null as number | null,
+    guidanceContext: appOnlyGuidanceContext,
   };
   const transport = (async (
     input: Parameters<typeof fetch>[0],
@@ -224,12 +227,25 @@ async function fixture() {
       } else throw Error(`Unexpected path ${path}`);
     }
     if (url.pathname.endsWith("/pulls") && state.twoPulls) body.push({ ...body[0], number: 2 });
+    if (url.pathname.endsWith("/rules/branches/main") && state.guidanceApp !== null)
+      body.push({
+        type: "required_status_checks",
+        parameters: {
+          required_status_checks: [
+            { context: state.guidanceContext, integration_id: state.guidanceApp },
+          ],
+        },
+      });
     return Response.json(body);
   }) as typeof fetch;
   const c = config({ BATCHER_OUTPUT_DIR: root });
   return {
     state,
-    reader: new GitHubReader(c, new GitHubAuth({ GH_TOKEN: "fixture" }, transport), transport),
+    reader: new GitHubReader(
+      c,
+      new GitHubAuth({ GH_TOKEN: "fixture", GITHUB_APP_ID: "5425399" }, transport),
+      transport,
+    ),
   };
 }
 test("real reader never fetches prose evidence and binds hosted exact-head proof", async () => {
@@ -239,6 +255,19 @@ test("real reader never fetches prose evidence and binds hosted exact-head proof
   expect(f.state.commentsRead).toBe(false);
   expect(result.ready[0]!.binding.evidenceId).toBe("github-ci:100");
   expect(f.state.checkAuthorization).toEqual(["Bearer fixture"]);
+});
+test("effective App-only guidance rules do not replace or block hosted CI proof", async () => {
+  const f = await fixture();
+  f.state.guidanceApp = 5425399;
+  expect((await f.reader.ready()).ready).toHaveLength(1);
+  f.state.guidanceApp = 123;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+  f.state.guidanceApp = 5425399;
+  f.state.guidanceContext += " altered";
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+  f.state.guidanceContext = appOnlyGuidanceContext;
+  f.state.jobCheckId = 999;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
 });
 test("denied check reads fail closed without anonymous or credential fallback", async () => {
   for (const status of [401, 403, 404, 500]) {
