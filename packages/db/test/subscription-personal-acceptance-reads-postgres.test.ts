@@ -778,6 +778,11 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "teams_bot_routes",
       // 0935 adds the event source feed cursors.
       "event_source_feeds",
+      // 0940 voice recognition and 0942 live transcript tables are also withheld.
+      "recording_voiceprints",
+      "recording_speaker_voices",
+      "recording_voice_rejections",
+      "recording_live_segments",
     ].sort();
     // 0823 machine-consent tables are protected but not runtime-privileged.
     const protectedTables = [
