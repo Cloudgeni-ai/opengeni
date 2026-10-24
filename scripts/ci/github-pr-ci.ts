@@ -39,9 +39,11 @@ export function supersededPrRuns(
 }
 /**
  * Main push CI whose only waiting job is the public-release approval for
- * `Build API workload image`, with every other job completed or pending behind
- * it, holds no runner (the merge-batcher main approval-only rule). Unique
- * positive job IDs are required; anything else is not proof of zero demand.
+ * `Build API workload image`, with every other job completed or pending, holds
+ * no runner (the merge-batcher main approval-only rule). In ci.yml every job not
+ * downstream of that approval finishes before it waits, so pending jobs are its
+ * descendants. Unique positive job IDs are required; anything else is not proof
+ * of zero demand.
  */
 export function mainReleaseApprovalOnly(run: Run, jobs: Job[]): boolean {
   if (run.status !== "waiting") return false;
