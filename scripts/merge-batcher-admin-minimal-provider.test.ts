@@ -6,6 +6,34 @@ import {
   type Dependencies,
 } from "../docs/merge-batcher-admin/minimal-watchdog-provider";
 const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+
+test("image mode loads only pinned image code and forwards contract digest to OFF", async () => {
+  const f = fixture();
+  const originalRead = f.deps.read;
+  const contract = JSON.parse(await originalRead("/work/admin/stop-contract.json"));
+  contract.directory = "/opt/batcher-operator";
+  contract.receiptDirectory = "/work/operator";
+  const bytes = JSON.stringify(contract);
+  f.config.operatorDirectory = "/opt/batcher-operator";
+  f.config.contractSha256 = sha(bytes);
+  f.deps.read = async (path) => (path.endsWith("stop-contract.json") ? bytes : originalRead(path));
+  const load = f.deps.loadCloud;
+  f.deps.loadCloud = async (path) => {
+    expect(path).toBe("/opt/batcher-operator/cloud-auth.ts");
+    return load(path);
+  };
+  f.deps.off = async (_path, _flag, pin, planPin) => {
+    expect(pin).toBe(sha(bytes));
+    expect(planPin).toBe(f.config.planSha256);
+    f.calls.push("OFF");
+  };
+  await run(f.config, f.deps);
+  expect(f.calls).toContain("OFF");
+  f.config.contractSha256 = "a".repeat(64);
+  const before = f.calls.length;
+  await expect(run(f.config, f.deps)).rejects.toThrow("contract changed");
+  expect(f.calls).toHaveLength(before);
+});
 function fixture() {
   const config: Configuration = {
     service: "projects/cloudgeni-gecko/locations/europe-west1/services/batcher",
@@ -28,6 +56,7 @@ function fixture() {
       "service-config.ts",
       "service-limits.ts",
       "stopped-reconciliation.ts",
+      "stopped-lineage.ts",
     ].map((x) => [x, sha(x)]),
   );
   const calls: string[] = [],

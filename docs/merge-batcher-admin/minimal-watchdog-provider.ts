@@ -16,6 +16,8 @@ export type Configuration = {
   claimObject: string;
   activationId: string;
   planSha256: string;
+  operatorDirectory?: "/opt/batcher-operator";
+  contractSha256?: string;
 };
 const files = [
   "control.ts",
@@ -28,7 +30,12 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 export type Dependencies = {
   read(path: string): Promise<string>;
   loadCloud(path: string): Promise<Cloud>;
-  off(path: string, optIn: string): Promise<void>;
+  off(
+    path: string,
+    optIn: string,
+    expectedContractSha256?: string,
+    expectedPlanSha256?: string,
+  ): Promise<void>;
   request: typeof fetch;
   now(): number;
   record(event: unknown): void;
@@ -56,8 +63,21 @@ export async function run(config: Configuration, deps = defaults): Promise<strin
     throw Error("Claim must bind exact saved plan");
   const plan = await deps.read(join(config.adminDirectory, "plan/plan.json"));
   if (sha(plan) !== config.planSha256) throw Error("Saved plan changed");
-  const contract = JSON.parse(await deps.read(join(config.adminDirectory, "stop-contract.json")));
-  if (contract.schemaVersion !== 1 || contract.directory !== "/work/operator")
+  const contractBytes = await deps.read(join(config.adminDirectory, "stop-contract.json"));
+  const contract = JSON.parse(contractBytes);
+  const portable = config.operatorDirectory !== undefined;
+  if (
+    portable &&
+    (config.operatorDirectory !== "/opt/batcher-operator" ||
+      !/^[a-f0-9]{64}$/.test(config.contractSha256 ?? "") ||
+      sha(contractBytes) !== config.contractSha256 ||
+      contract.receiptDirectory !== "/work/operator")
+  )
+    throw Error("Pinned image operator contract changed");
+  if (
+    contract.schemaVersion !== 1 ||
+    contract.directory !== (config.operatorDirectory ?? "/work/operator")
+  )
     throw Error("Unexpected OFF package");
   for (const file of files) {
     if (sha(await deps.read(join(contract.directory, file))) !== contract.sources?.[file])
@@ -115,7 +135,12 @@ export async function run(config: Configuration, deps = defaults): Promise<strin
       }
     },
     async off() {
-      await deps.off(config.adminDirectory, "--apply-after-go");
+      await deps.off(
+        config.adminDirectory,
+        "--apply-after-go",
+        config.contractSha256,
+        config.planSha256,
+      );
     },
     async record(event) {
       deps.record({ event: "minimal-watchdog", ...event, planSha256: config.planSha256 });

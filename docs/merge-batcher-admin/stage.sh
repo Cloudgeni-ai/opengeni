@@ -9,6 +9,7 @@
   ADMIN_DIR=${1:?Usage: stage.sh EXISTING_ADMIN_DIR ACTION [ARG]}
   BATCHER_ADMIN_CODE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
   PLAN="$ADMIN_DIR/plan"
+  INPUT_PLAN="${BATCHER_VERIFIED_PLAN:-$PLAN}"
   source "$BATCHER_ADMIN_CODE/read.sh"
   action=${2:?Action required}
   verify_phase() {
@@ -23,7 +24,7 @@
   }
   reconcile_created() {
     local kind=$1 current name selected count
-    name=$(jq -er --arg kind "$kind" '.[$kind].name' "$PLAN/plan.json")
+    name=$(jq -er --arg kind "$kind" '.[$kind].name' "$INPUT_PLAN/plan.json")
     current=$(batcher_snapshot)
     selected="${current%/*}/$kind-selected.json"
     jq --arg name "$name" '[.rulesets[] | select(.name == $name and .source_type == "Repository" and .source == "Cloudgeni-ai/opengeni")]' "$current" > "$selected"
@@ -61,22 +62,22 @@
     reconcile-namespace) reconcile_created namespace; exit ;;
     create-guard) before=original; after=guard; method=POST; payload=guard; id='' ;;
     create-namespace) before=guard; after=namespace; method=POST; payload=namespace; id='' ;;
-    admit) before=namespace; after=applied; method=PUT; payload=admission; id=$(jq -er '.admissionId' "$PLAN/plan.json") ;;
-    restore-admission) before=applied; after=namespace; method=PUT; payload=restore; id=$(jq -er '.admissionId' "$PLAN/plan.json") ;;
-    delete-namespace) before=namespace; after=guard; method=DELETE; payload=''; id=$(jq -er '.id' "$PLAN/namespace-receipt.json") ;;
-    delete-guard) before=guard; after=restored; method=DELETE; payload=''; id=$(jq -er '.id' "$PLAN/guard-receipt.json") ;;
+    admit) before=namespace; after=applied; method=PUT; payload=admission; id=$(jq -er '.admissionId' "$INPUT_PLAN/plan.json") ;;
+    restore-admission) before=applied; after=namespace; method=PUT; payload=restore; id=$(jq -er '.admissionId' "$INPUT_PLAN/plan.json") ;;
+    delete-namespace) before=namespace; after=guard; method=DELETE; payload=''; id=$(jq -er '.id' "$INPUT_PLAN/namespace-receipt.json") ;;
+    delete-guard) before=guard; after=restored; method=DELETE; payload=''; id=$(jq -er '.id' "$INPUT_PLAN/guard-receipt.json") ;;
     *) echo 'Unknown action; no API writes' >&2; exit 1 ;;
   esac
   [ "${3:-}" = --apply-after-go ] || { echo 'Write stage requires --apply-after-go and separate operator authorization' >&2; exit 1; }
   case "$action" in
     create-guard|create-namespace|admit)
       jq -e --slurpfile identity "$ADMIN_DIR/identity-receipt.json" --slurpfile manifest "$BATCHER_ADMIN_CODE/app-manifest.json" \
-        '$identity[0].appId == .appId and $identity[0].installationId == .installationId and $identity[0].repository == .before.repository.full_name and ($identity[0].permissions | del(.metadata)) == $manifest[0].default_permissions and $identity[0].permissions.metadata == "read"' "$PLAN/plan.json" >/dev/null ;;
+        '$identity[0].appId == .appId and $identity[0].installationId == .installationId and $identity[0].repository == .before.repository.full_name and ($identity[0].permissions | del(.metadata)) == $manifest[0].default_permissions and $identity[0].permissions.metadata == "read"' "$INPUT_PLAN/plan.json" >/dev/null ;;
   esac
   # Compare parallel payload files before doing anything remotely. The actual
   # request is generated from the verified plan, not from these editable copies.
   if [ -n "$payload" ]; then
-    jq -e --arg key "$payload" --slurpfile body "$PLAN/$payload.json" '.[$key] == $body[0]' "$PLAN/plan.json" >/dev/null
+    jq -e --arg key "$payload" --slurpfile body "$INPUT_PLAN/$payload.json" '.[$key] == $body[0]' "$INPUT_PLAN/plan.json" >/dev/null
   fi
   case "$action" in
     delete-namespace|delete-guard)
@@ -91,9 +92,9 @@
   attempt="$PLAN/$action-attempt"
   endpoint=/repos/Cloudgeni-ai/opengeni/rulesets
   if [ -n "$id" ]; then endpoint="$endpoint/$id"; fi
-  prepared=$(mktemp -d "$PLAN/prepared.XXXXXX")
+  prepared=$(mktemp -d "$INPUT_PLAN/prepared.XXXXXX")
   jq -n --arg method "$method" --arg endpoint "$endpoint" '{method:$method,endpoint:$endpoint}' > "$prepared/request-meta.json"
-  if [ -n "$payload" ]; then jq -S --arg key "$payload" '.[$key]' "$PLAN/plan.json" > "$prepared/request.json"; fi
+  if [ -n "$payload" ]; then jq -S --arg key "$payload" '.[$key]' "$INPUT_PLAN/plan.json" > "$prepared/request.json"; fi
   if $reissue; then
     # Reverse PUT/DELETE only. Preserve every old attempt and prove the request
     # is identical before archiving it. POST/admit have no reissue action.
@@ -111,7 +112,7 @@
   cp "$prepared/request-meta.json" "$attempt/request-meta.json"
   if [ -n "$payload" ]; then cp "$prepared/request.json" "$attempt/request.json"; fi
   args=(api --method "$method" "$endpoint")
-  if [ -n "$payload" ]; then args+=(--input "$attempt/request.json"); fi
+  if [ -n "$payload" ]; then args+=(--input "$prepared/request.json"); fi
   if ! gh "${args[@]}" > "$attempt/response.json" 2> "$attempt/error.log"; then
     echo "Write failed or outcome uncertain; retained $attempt. Stop writers; reconcile by readback. A 422 must not be repaired by dropping policy fields." >&2
     exit 1

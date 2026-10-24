@@ -83,3 +83,29 @@ idle run and controlled mid-cycle kill using the actual OFF bundle. Capture exac
 Manual readback twice and observed detection/drain timing. Report these receipts
 to the rollout owner before ordinary ON. Existing unit tests are source-only,
 not provider, complete VM CI, or kill-test evidence.
+
+## Stopped configuration lineage
+
+A stopped configuration update must not turn an old drain witness into a new
+one. The pinned operator can retain a separate lineage: pass the prior receipt
+as the sixth argument to `updateStoppedService` (the fifth is its clock). It
+preserves the genuine root proof, exact provider before/after snapshots and the
+completed etag-bound update. Without that input, no lineage proof is available.
+
+OFF accepts `lineage-reconciled-disabled` only after authenticated audit readback
+confirms each consecutive MANUAL0 update, every control version remains STOP,
+the current service matches the retained endpoint, and the exact original
+ledger and all candidate/effect records are settled. The old witness generation
+is never rewritten. This path is active-mode only, at most 16 configuration
+edges and 64 intervening control versions. Only the existing capacity settings
+may change across its safety projection; image, command, identity and routing
+changes do not qualify. Missing audit/history, gaps, START, drift, pending
+candidates and unknown effects remain held without replay or a recovery START.
+
+The operator identity needs authenticated Cloud Logging entry reads and access
+to the existing control-secret versions. Delayed or unavailable audit evidence
+holds; it does not permit inference from MANUAL0 or HTTP503 alone. Repeating OFF
+can re-read evidence, but never reset its watchdog claim or replay unknown
+writes. “Any generation” means a fully validated chain, not arbitrary unknown
+lineage. New image/contract hashes and independent review are required before
+using this updated operator; source tests do not qualify a live kill drill.
