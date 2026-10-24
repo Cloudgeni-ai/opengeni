@@ -217,12 +217,12 @@ export async function runPrCiCommand(
         console.log("Higher-priority observed demand clear; repository admission granted");
         return;
       }
-      // PR CI already serializes one complete fast fanout. Main priority is a
+      // PR CI serializes a complete fast fanout within each of four buckets. Main priority is a
       // bounded courtesy, not a provider scheduling guarantee: continuous main
       // pushes must not starve the PRs that repair main. Only a complete known
       // inventory reaches this branch; unknown demand still holds above.
       if (lane === "pr" && timing.now() >= prPriorityYieldDeadline) {
-        console.log("PR priority yield reached 15 minutes; admitting one serialized fast fanout");
+        console.log("PR priority yield reached 15 minutes; admitting this bounded bucket fanout");
         return;
       }
       console.log(hold);

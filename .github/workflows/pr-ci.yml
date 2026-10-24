@@ -18,11 +18,22 @@ permissions:
   actions: read
   pull-requests: read
 
-# Reserve one PR fan-out at a time. Native FIFO is not a hard provider-priority
-# guarantee. The queue has a provider limit of 100 waiting runs; overflow cannot
-# become admission success. Only the separate supersession handler cancels runs.
+# Four stable PR buckets, each serializing its whole fan-out (at most three
+# concurrent jobs). Unlike one global FIFO, a long suite does not stop every PR
+# from starting admission. Native scheduling is not a hard priority guarantee.
+# Queue overflow is never success; only the supersession handler cancels runs.
 concurrency:
-  group: pr-ci-fanout
+  group: >-
+    pr-ci-fanout-v2-${{
+      (endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '0') ||
+       endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '4') ||
+       endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '8')) && '0' ||
+      (endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '1') ||
+       endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '5') ||
+       endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '9')) && '1' ||
+      (endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '2') ||
+       endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '6')) && '2' || '3'
+    }}
   queue: max
   cancel-in-progress: false
 

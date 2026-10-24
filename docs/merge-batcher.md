@@ -412,6 +412,26 @@ slot. Missing budget/reserve or any unrecognized or missing job status holds
 rather than inventing capacity. Waiting, pending and job-less runs can start
 requesting runners after observation.
 
+PR CI uses four stable whole-workflow concurrency buckets selected from the
+final decimal digit of the PR number (digit modulo four), shared by PR events
+and explicit dispatch. Each bucket retains FIFO `queue: max` and never cancels
+another run. One workflow peaks at three jobs (contracts and two unit shards),
+so the new lanes request at most 12 PR jobs. This leaves 2 observed main jobs in
+the 60-job budget after the 28-job other-repository allowance and 18 candidate
+slots; additional main demand holds Batch admission. During migration, the
+legacy single lane can contribute another 3 jobs, so it cannot be treated as
+free capacity. Provider inventories and the existing capacity gate still apply;
+these are bounds, not reserved runners or strict scheduling guarantees.
+
+The 15-minute main-priority courtesy starts when the admission step executes,
+not when GitHub creates a pending workflow. Four buckets reduce whole-suite
+head-of-line blocking; they do not promise a 15-minute end-to-end queue bound.
+Old pending runs retain their old workflow definition. Recovery requires a
+genuine current-head refresh by the PR owner onto the updated workflow; the
+normal supersession handler cancels only that PR's obsolete-head run. Do not
+blanket-cancel main, Batch, Version, or unrelated PR runs, or manufacture a
+passing check to drain the backlog.
+
 Further checks protect the organization's shared hosted pool. They do not
 change the 52/30/18 allocation, and the two main holds apply before any
 arithmetic:

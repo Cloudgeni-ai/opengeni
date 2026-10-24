@@ -6,11 +6,9 @@ const workflow = (name: string) =>
 
 test("PR CI reserves a bounded PR lane without cancelling main or batch", () => {
   const pr = workflow("pr-ci");
-  expect(pr.concurrency).toEqual({
-    group: "pr-ci-fanout",
-    queue: "max",
-    "cancel-in-progress": false,
-  });
+  expect(pr.concurrency.queue).toBe("max");
+  expect(pr.concurrency["cancel-in-progress"]).toBe(false);
+  expect(pr.concurrency.group).toStartWith("pr-ci-fanout-v2-${{");
   expect(pr.permissions).toEqual({ contents: "read", actions: "read", "pull-requests": "read" });
   expect(pr.on.pull_request.branches).toEqual(["main"]);
   expect(
@@ -32,6 +30,39 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
   expect(pr.jobs.plan.steps.find((s: any) => s.id === "plan").run).toContain(
     'unit_matrix=[{"index":0,"total":2},{"index":1,"total":2}]',
   );
+});
+
+test("actual concurrency expression has four stable buckets shared by PR and dispatch", () => {
+  const group = String(workflow("pr-ci").concurrency.group);
+  const expression = group.slice(group.indexOf("${{") + 3, group.lastIndexOf("}}"));
+  // Evaluate this authored expression's restricted function subset, not a
+  // second implementation of the bucket algorithm. actionlint checks GHA syntax.
+  const evaluate = new Function(
+    "github",
+    "inputs",
+    "format",
+    "endsWith",
+    `return (${expression});`,
+  );
+  const bucket = (number: number, dispatch: boolean) =>
+    evaluate(
+      { event: { pull_request: { number: dispatch ? undefined : number } } },
+      { pr_number: dispatch ? String(number) : undefined },
+      (_template: string, value: unknown) => String(value),
+      (value: string, suffix: string) => value.endsWith(suffix),
+    );
+  const buckets = new Set<string>();
+  for (let number = 1; number <= 10000; number++) {
+    const actual = bucket(number, false);
+    expect(actual).toBe(String((number % 10) % 4));
+    expect(bucket(number, true)).toBe(actual);
+    buckets.add(actual);
+  }
+  expect([...buckets].sort()).toEqual(["0", "1", "2", "3"]);
+  // Contracts + two units are the peak; plan and ready never overlap them.
+  const maxPrJobs = buckets.size * 3;
+  expect(maxPrJobs).toBe(12);
+  expect(60 - 28 - 18 - maxPrJobs).toBe(2);
 });
 
 test("Queue ready entry and labeling do not wait for PR CI", () => {
