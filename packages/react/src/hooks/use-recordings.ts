@@ -23,14 +23,7 @@ import {
   type RecordingTransport,
   type OpenGeniRecordingsTransport,
 } from "@opengeni/sdk/recordings";
-import {
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { OpenGeniContext } from "../session-context";
 import { usePolledValue } from "./internal";
 
@@ -109,13 +102,12 @@ function useEmbeddedRecordings(
   let candidate: object | undefined = override.recordings;
   if (!candidate) {
     const base = (override.client ?? context?.client) as
-      Partial<OpenGeniRecordingsTransport> | undefined;
+      | Partial<OpenGeniRecordingsTransport>
+      | undefined;
     if (base && typeof base.requestJson === "function") {
       candidate = recordingClients.get(base);
       if (!candidate) {
-        const created = new OpenGeniRecordingsClient(
-          base as OpenGeniRecordingsTransport,
-        );
+        const created = new OpenGeniRecordingsClient(base as OpenGeniRecordingsTransport);
         recordingClients.set(base, created);
         candidate = created;
       }
@@ -127,9 +119,7 @@ function useEmbeddedRecordings(
     );
   }
   const methods = candidate as Record<string, unknown>;
-  const missing = requiredMethods.filter(
-    (method) => typeof methods[method] !== "function",
-  );
+  const missing = requiredMethods.filter((method) => typeof methods[method] !== "function");
   if (missing.length > 0) {
     throw new Error(
       `@opengeni/react: ${hookName} requires recordings client method${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`,
@@ -196,10 +186,7 @@ export type UseRecorderResult = RecorderSnapshot & {
   recovered: string[];
   /** Start a new recording; per-recording options override the hook's. */
   start: (
-    overrides?: Pick<
-      UseRecorderOptions,
-      "title" | "systemAudio" | "microphone" | "visibility"
-    >,
+    overrides?: Pick<UseRecorderOptions, "title" | "systemAudio" | "microphone" | "visibility">,
   ) => Promise<void>;
   pause: () => void;
   resume: () => void;
@@ -225,9 +212,7 @@ const IDLE_SNAPSHOT: RecorderSnapshot = {
  * released) and finishes the upload in the background; keep the hook in a
  * component that outlives page navigation to record across it.
  */
-export function useRecorder(
-  options: UseRecorderOptions = {},
-): UseRecorderResult {
+export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult {
   const { client, workspaceId } = useEmbeddedRecordings(
     options,
     [
@@ -249,12 +234,9 @@ export function useRecorder(
   const transport = useMemo<RecordingTransport>(
     () => ({
       createRecording: (...args) => clientRef.current.createRecording(...args),
-      createRecordingUploads: (...args) =>
-        clientRef.current.createRecordingUploads(...args),
-      completeRecordingChunks: (...args) =>
-        clientRef.current.completeRecordingChunks(...args),
-      finalizeRecording: (...args) =>
-        clientRef.current.finalizeRecording(...args),
+      createRecordingUploads: (...args) => clientRef.current.createRecordingUploads(...args),
+      completeRecordingChunks: (...args) => clientRef.current.completeRecordingChunks(...args),
+      finalizeRecording: (...args) => clientRef.current.finalizeRecording(...args),
       deleteRecording: (...args) => clientRef.current.deleteRecording(...args),
     }),
     [],
@@ -271,14 +253,12 @@ export function useRecorder(
     supported: platform.supported,
     systemAudio: platform.systemAudioSupported,
     systemAudioKind:
-      platform.systemAudioKind ??
-      (platform.systemAudioSupported ? ("display" as const) : null),
+      platform.systemAudioKind ?? (platform.systemAudioSupported ? ("display" as const) : null),
   };
   const storeRef = useRef<RecordingChunkStore | null>(null);
   const store = useCallback(
     (): RecordingChunkStore =>
-      optionsRef.current.store ??
-      (storeRef.current ??= platformRef.current.createStore()),
+      optionsRef.current.store ?? (storeRef.current ??= platformRef.current.createStore()),
     [],
   );
 
@@ -290,12 +270,9 @@ export function useRecorder(
         client: transport,
         store: store(),
         ...(platformFetch ? { fetch: platformFetch } : {}),
-        ...(isCaptureActive
-          ? { isCaptureActive: (id: string) => isCaptureActive(id) }
-          : {}),
+        ...(isCaptureActive ? { isCaptureActive: (id: string) => isCaptureActive(id) } : {}),
         onStatus: (status) => {
-          if (status.finalized)
-            optionsRef.current.onFinished?.(status.recordingId);
+          if (status.finalized) optionsRef.current.onFinished?.(status.recordingId);
           if (status.finalized || status.discarded || status.failed) {
             setRecovered((previous) =>
               previous.includes(status.recordingId)
@@ -310,8 +287,7 @@ export function useRecorder(
   }, [transport, store]);
 
   useEffect(() => {
-    if (!support.supported || optionsRef.current.resumePending === false)
-      return;
+    if (!support.supported || optionsRef.current.resumePending === false) return;
     let cancelled = false;
     void (async () => {
       // Save what a capture cut short left half-written, then finish everything.
@@ -338,8 +314,7 @@ export function useRecorder(
       const recorder = recorderRef.current;
       if (
         recorder &&
-        (recorder.snapshot.state === "recording" ||
-          recorder.snapshot.state === "paused")
+        (recorder.snapshot.state === "recording" || recorder.snapshot.state === "paused")
       ) {
         void recorder.stop().catch(() => undefined);
       }
@@ -371,21 +346,13 @@ export function useRecorder(
         ...(merged.visibility ? { visibility: merged.visibility } : {}),
         ...(merged.externalRef ? { externalRef: merged.externalRef } : {}),
         ...(merged.metadata ? { metadata: merged.metadata as never } : {}),
-        ...(merged.transcription
-          ? { transcription: merged.transcription }
-          : {}),
-        ...(merged.microphone !== undefined
-          ? { microphone: merged.microphone }
-          : {}),
-        ...(merged.systemAudio !== undefined
-          ? { systemAudio: merged.systemAudio }
-          : {}),
+        ...(merged.transcription ? { transcription: merged.transcription } : {}),
+        ...(merged.microphone !== undefined ? { microphone: merged.microphone } : {}),
+        ...(merged.systemAudio !== undefined ? { systemAudio: merged.systemAudio } : {}),
         ...(merged.timesliceMilliseconds
           ? { timesliceMilliseconds: merged.timesliceMilliseconds }
           : {}),
-        ...(merged.keepAwake !== undefined
-          ? { keepAwake: merged.keepAwake }
-          : {}),
+        ...(merged.keepAwake !== undefined ? { keepAwake: merged.keepAwake } : {}),
         onChange: (next) => {
           if (recorderRef.current === recorder) setSnapshot(next);
         },
@@ -438,17 +405,11 @@ export type UseRecordingsResult = {
 function isProcessing(recording: Recording | null | undefined): boolean {
   if (!recording) return false;
   const state = recording.transcript?.state;
-  return (
-    recording.state === "processing" ||
-    state === "queued" ||
-    state === "processing"
-  );
+  return recording.state === "processing" || state === "queued" || state === "processing";
 }
 
 /** The recordings the signed-in person can see, newest first. Polls while any is processing. */
-export function useRecordings(
-  options: UseRecordingsOptions = {},
-): UseRecordingsResult {
+export function useRecordings(options: UseRecordingsOptions = {}): UseRecordingsResult {
   const { client, workspaceId } = useEmbeddedRecordings(
     options,
     ["listRecordings"],
@@ -483,9 +444,7 @@ export function useRecordings(
     const seen = new Set(first.map((recording) => recording.id));
     return [
       ...first,
-      ...olderForThisList.recordings.filter(
-        (recording) => !seen.has(recording.id),
-      ),
+      ...olderForThisList.recordings.filter((recording) => !seen.has(recording.id)),
     ];
   }, [state.data, olderForThisList]);
   useRefreshWhile(
@@ -518,16 +477,7 @@ export function useRecordings(
     } finally {
       setLoadingMore(false);
     }
-  }, [
-    client,
-    workspaceId,
-    query,
-    externalRef,
-    limit,
-    nextBefore,
-    loadingMore,
-    load,
-  ]);
+  }, [client, workspaceId, query, externalRef, limit, nextBefore, loadingMore, load]);
   return {
     recordings,
     loading: state.loading,
@@ -553,9 +503,7 @@ export type UseRecordingResult = {
   refresh: () => Promise<void>;
   update: (request: UpdateRecordingRequest) => Promise<Recording>;
   /** Transcribe again, optionally with another model, as a new version. */
-  rerun: (
-    transcription?: RecordingTranscriptionOptions,
-  ) => Promise<RecordingTranscriptVersion>;
+  rerun: (transcription?: RecordingTranscriptionOptions) => Promise<RecordingTranscriptVersion>;
   setCurrentVersion: (versionId: string) => Promise<void>;
   remove: () => Promise<void>;
 };
@@ -587,9 +535,7 @@ export function useRecording(
   const versions = state.data?.versions ?? [];
   const nowProcessing =
     isProcessing(recording) ||
-    versions.some(
-      (version) => version.state === "queued" || version.state === "processing",
-    );
+    versions.some((version) => version.state === "queued" || version.state === "processing");
   useRefreshWhile(enabled && nowProcessing, state.refresh);
   const refresh = state.refresh;
   const require = () => {
@@ -605,11 +551,7 @@ export function useRecording(
     refresh,
     update: useCallback(
       async (request: UpdateRecordingRequest) => {
-        const updated = await client.updateRecording(
-          workspaceId,
-          require(),
-          request,
-        );
+        const updated = await client.updateRecording(workspaceId, require(), request);
         await refresh();
         return updated;
       },
@@ -631,11 +573,7 @@ export function useRecording(
     ),
     setCurrentVersion: useCallback(
       async (versionId: string) => {
-        await client.setCurrentRecordingTranscript(
-          workspaceId,
-          require(),
-          versionId,
-        );
+        await client.setCurrentRecordingTranscript(workspaceId, require(), versionId);
         await refresh();
       },
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -686,11 +624,7 @@ export function useTranscript(
 ): UseTranscriptResult {
   const { client, workspaceId } = useEmbeddedRecordings(
     options,
-    [
-      "getRecordingTranscript",
-      "updateRecordingSpeakers",
-      "updateRecordingSegments",
-    ],
+    ["getRecordingTranscript", "updateRecordingSpeakers", "updateRecordingSegments"],
     "useTranscript",
   );
   const { versionId, refreshKey } = options;
@@ -732,13 +666,10 @@ export function useTranscript(
   const segments = useMemo(() => {
     const original = base?.segments ?? [];
     const changed = overlay?.segments;
-    return changed
-      ? original.map((segment) => changed.get(segment.index) ?? segment)
-      : original;
+    return changed ? original.map((segment) => changed.get(segment.index) ?? segment) : original;
   }, [base, overlay]);
   const versionFor = () => {
-    if (!recordingId || !base)
-      throw new Error("The transcript is not loaded yet.");
+    if (!recordingId || !base) throw new Error("The transcript is not loaded yet.");
     return { recordingId, versionId: base.version.id };
   };
   const applySpeakers = (next: RecordingSpeaker[]) =>
@@ -824,8 +755,7 @@ export function useRecordingPeople(
   );
   const query = options.query;
   const load = useCallback(
-    async () =>
-      await client.listRecordingPeople(workspaceId, query ? { query } : {}),
+    async () => await client.listRecordingPeople(workspaceId, query ? { query } : {}),
     [client, workspaceId, query],
   );
   const state = usePolledValue(load, { enabled: options.enabled });

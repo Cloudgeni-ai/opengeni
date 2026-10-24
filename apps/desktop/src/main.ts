@@ -5,9 +5,7 @@ import { app } from "electron";
 
 const here = import.meta.dirname;
 const audioCaptureName =
-  process.platform === "win32"
-    ? "opengeni-audio-capture.exe"
-    : "opengeni-audio-capture";
+  process.platform === "win32" ? "opengeni-audio-capture.exe" : "opengeni-audio-capture";
 
 createDesktopApp({
   productName: "Opengeni",

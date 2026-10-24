@@ -60,10 +60,7 @@ function fakeRecorder(
           discarded: false,
         }
       : null,
-    error:
-      mode === "denied"
-        ? { code: "microphone_denied", message: "Permission denied" }
-        : null,
+    error: mode === "denied" ? { code: "microphone_denied", message: "Permission denied" } : null,
     supported: true,
     systemAudioSupported: true,
     systemAudioKind: audio,
@@ -107,10 +104,7 @@ export default function PageMeetingsSection() {
   useEffect(() => {
     store.set(fakeRecorder(mode, startedAt, audio));
     if (mode !== "recording") return;
-    const timer = window.setInterval(
-      () => store.set(fakeRecorder(mode, startedAt, audio)),
-      250,
-    );
+    const timer = window.setInterval(() => store.set(fakeRecorder(mode, startedAt, audio)), 250);
     return () => window.clearInterval(timer);
   }, [mode, startedAt, store, audio]);
   const [openId, setOpenId] = useState(fixture.readyId);

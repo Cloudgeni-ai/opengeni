@@ -57,11 +57,7 @@ import {
   type ThisComputerPermissionId,
   type WelcomeState,
 } from "../contract";
-import {
-  AccountStore,
-  readInstalledFrom,
-  type StoredAccount,
-} from "./accounts";
+import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
 import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
@@ -78,12 +74,7 @@ import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu, readMenuActions } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
-import {
-  nativeSignInUrl,
-  parseSignInCallback,
-  pkcePair,
-  randomState,
-} from "./pkce";
+import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
 import { SystemAudioCaptures } from "./system-audio";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
@@ -120,9 +111,7 @@ function desktopPlatform(): DesktopPlatform {
 
 /** The AppImage file this process runs from, on Linux. */
 function appImagePath(): string | null {
-  return process.platform === "linux" && app.isPackaged
-    ? process.env.APPIMAGE || null
-    : null;
+  return process.platform === "linux" && app.isPackaged ? process.env.APPIMAGE || null : null;
 }
 
 /**
@@ -130,10 +119,7 @@ function appImagePath(): string | null {
  * entry name Electron publishes from package.json's desktopName.
  */
 function linuxWindowClass(): string {
-  return (process.env.CHROME_DESKTOP || `${app.getName()}.desktop`).replace(
-    /\.desktop$/,
-    "",
-  );
+  return (process.env.CHROME_DESKTOP || `${app.getName()}.desktop`).replace(/\.desktop$/, "");
 }
 
 function errorMessage(caught: unknown, fallback: string): string {
@@ -147,9 +133,7 @@ async function recordMemory(): Promise<void> {
   flushMarks(loadedMarks);
   await new Promise((resolve) => setTimeout(resolve, 15_000));
   const idle = await privateMemoryMb(app.getAppMetrics());
-  flushMarks(
-    idle === null ? loadedMarks : { ...loadedMarks, idleMemoryMb: idle },
-  );
+  flushMarks(idle === null ? loadedMarks : { ...loadedMarks, idleMemoryMb: idle });
 }
 
 /**
@@ -158,10 +142,7 @@ async function recordMemory(): Promise<void> {
  */
 function openedAtLogin(): boolean {
   if (process.argv.includes("--hidden")) return true;
-  return (
-    process.platform === "darwin" &&
-    app.getLoginItemSettings().wasOpenedAtLogin === true
-  );
+  return process.platform === "darwin" && app.getLoginItemSettings().wasOpenedAtLogin === true;
 }
 
 /**
@@ -172,10 +153,7 @@ function openedAtLogin(): boolean {
 export class DesktopShell {
   private readonly store: AccountStore;
   private window: MainWindow | null = null;
-  private readonly clients = new Map<
-    string,
-    { token: string; client: Promise<OpenGeniClient> }
-  >();
+  private readonly clients = new Map<string, { token: string; client: Promise<OpenGeniClient> }>();
   private sdk: Promise<SdkModule> | null = null;
   private pending: PendingSignIn | null = null;
   private connectingFromLink = false;
@@ -224,10 +202,7 @@ export class DesktopShell {
     const keyring = () => {
       if (!keyringChecked) {
         keyringChecked = true;
-        if (
-          process.platform === "linux" &&
-          !safeStorage.isEncryptionAvailable()
-        ) {
+        if (process.platform === "linux" && !safeStorage.isEncryptionAvailable()) {
           safeStorage.setUsePlainTextEncryption(true);
         }
       }
@@ -248,12 +223,9 @@ export class DesktopShell {
       // The bundle's icon; the executable inside it has a generic one.
       appIcon: async () =>
         (
-          await app.getFileIcon(
-            process.execPath.replace(/\/Contents\/MacOS\/[^/]+$/u, ""),
-            {
-              size: "normal",
-            },
-          )
+          await app.getFileIcon(process.execPath.replace(/\/Contents\/MacOS\/[^/]+$/u, ""), {
+            size: "normal",
+          })
         ).toDataURL(),
       // Back to the app, where the next step or the finish waits.
       onFinished: () => {
@@ -267,13 +239,9 @@ export class DesktopShell {
       home: homedir(),
       env: process.env,
       agentSigningKey: config.agentSigningKey,
-      ...(config.browserExtensionIds
-        ? { browserExtensionIds: config.browserExtensionIds }
-        : {}),
+      ...(config.browserExtensionIds ? { browserExtensionIds: config.browserExtensionIds } : {}),
       ...(config.agentPath ? { agentPath: config.agentPath } : {}),
-      ...(config.agentConfigDir
-        ? { agentConfigDir: config.agentConfigDir }
-        : {}),
+      ...(config.agentConfigDir ? { agentConfigDir: config.agentConfigDir } : {}),
       ...(config.adoptStandaloneAgent !== undefined
         ? { adoptStandaloneAgent: config.adoptStandaloneAgent }
         : {}),
@@ -297,24 +265,17 @@ export class DesktopShell {
       },
       disallowAgents: async (accountId, workspaceId, enrollmentId) => {
         const client = await this.client(accountId);
-        if (!client)
-          throw new Error("Sign in again to turn this computer off here.");
+        if (!client) throw new Error("Sign in again to turn this computer off here.");
         await disallowAgentsOnComputer(client, workspaceId, enrollmentId);
       },
       readMachine: async (accountId, _baseUrl, workspaceId, enrollmentId) => {
         const client = await this.client(accountId);
         if (!client) return null;
         const machines = await client.listMachines(workspaceId);
-        const machine = machines.machines.find(
-          (entry) => entry.enrollmentId === enrollmentId,
-        );
+        const machine = machines.machines.find((entry) => entry.enrollmentId === enrollmentId);
         return machine
           ? {
-              online: [
-                "online",
-                "consent_required",
-                "display_unavailable",
-              ].includes(machine.state),
+              online: ["online", "consent_required", "display_unavailable"].includes(machine.state),
               screenControl: machine.allowScreenControl,
               permissions: machine.runtime?.macPermissions ?? null,
             }
@@ -336,10 +297,7 @@ export class DesktopShell {
         void this.refreshTray();
       },
     });
-    const appShotStore = new AppShotSettingsStore(
-      app.getPath("userData"),
-      process.platform,
-    );
+    const appShotStore = new AppShotSettingsStore(app.getPath("userData"), process.platform);
     this.systemAudio = new SystemAudioCaptures({
       helperPath: config.systemAudioHelperPath ?? null,
       excludePid: process.pid,
@@ -362,8 +320,7 @@ export class DesktopShell {
               },
               requested: () => appShotStore.requested(),
               markRequested: (id) => appShotStore.markRequested(id),
-              onPermissionsChange: () =>
-                this.broadcast(DESKTOP_IPC.appShotsChanged),
+              onPermissionsChange: () => this.broadcast(DESKTOP_IPC.appShotsChanged),
             })
           : null,
       store: appShotStore,
@@ -378,15 +335,10 @@ export class DesktopShell {
     });
     this.inbox = new InboxNotifier({
       accounts: () => {
-        const signedIn = this.store
-          .snapshot()
-          .accounts.filter((account) => !account.signedOut);
+        const signedIn = this.store.snapshot().accounts.filter((account) => !account.signedOut);
         return signedIn.map((account) => ({
           id: account.id,
-          label:
-            signedIn.length > 1
-              ? `${account.email} · ${serverLabel(account.baseUrl)}`
-              : null,
+          label: signedIn.length > 1 ? `${account.email} · ${serverLabel(account.baseUrl)}` : null,
         }));
       },
       client: (accountId) => this.client(accountId),
@@ -412,17 +364,14 @@ export class DesktopShell {
     // Without it Windows shows no notifications for the installed app.
     if (process.platform === "win32") app.setAppUserModelId(config.appId);
     if (process.defaultApp && process.argv[1]) {
-      app.setAsDefaultProtocolClient(config.scheme, process.execPath, [
-        process.argv[1],
-      ]);
+      app.setAsDefaultProtocolClient(config.scheme, process.execPath, [process.argv[1]]);
     } else if (!appImagePath()) {
       // An AppImage registers through its own desktop entry instead (see start()).
       app.setAsDefaultProtocolClient(config.scheme);
     }
     const queued: string[] = [];
     let desktop: DesktopShell | null = null;
-    const deliver = (url: string) =>
-      desktop ? desktop.handleUrl(url) : queued.push(url);
+    const deliver = (url: string) => (desktop ? desktop.handleUrl(url) : queued.push(url));
     app.on("open-url", (event, url) => {
       event.preventDefault();
       deliver(url);
@@ -432,9 +381,7 @@ export class DesktopShell {
       if (url) deliver(url);
       else desktop?.reveal();
     });
-    const launchUrl = process.argv.find((arg) =>
-      arg.startsWith(`${config.scheme}://`),
-    );
+    const launchUrl = process.argv.find((arg) => arg.startsWith(`${config.scheme}://`));
     if (launchUrl) queued.push(launchUrl);
     void app.whenReady().then(() => {
       mark("ready");
@@ -449,14 +396,9 @@ export class DesktopShell {
     this.registerIpc();
     this.appShots.start();
     const hidden =
-      (openedAtLogin() || this.reopenedWithoutWindow()) &&
-      this.store.active() !== null;
+      (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
-    if (
-      process.platform === "darwin" &&
-      app.isPackaged &&
-      this.config.thisComputer
-    ) {
+    if (process.platform === "darwin" && app.isPackaged && this.config.thisComputer) {
       setTimeout(() => migrateMacLoginItem(this.config.appId), 5_000);
     }
     app.on("activate", () => this.reveal());
@@ -499,11 +441,7 @@ export class DesktopShell {
           app.getVersion(),
           () => {
             Menu.setApplicationMenu(this.menu());
-            if (this.updates)
-              this.broadcast(
-                DESKTOP_IPC.updatesChanged,
-                this.updates.pageState,
-              );
+            if (this.updates) this.broadcast(DESKTOP_IPC.updatesChanged, this.updates.pageState);
           },
           () => {
             this.quitConfirmed = true;
@@ -543,14 +481,8 @@ export class DesktopShell {
     if (this.confirmingQuit) return;
     this.confirmingQuit = true;
     try {
-      const summary = this.config.thisComputer
-        ? await this.computer.summary()
-        : null;
-      if (
-        summary?.running &&
-        summary.management !== "service" &&
-        !summary.needsPermissions
-      ) {
+      const summary = this.config.thisComputer ? await this.computer.summary() : null;
+      if (summary?.running && summary.management !== "service" && !summary.needsPermissions) {
         const parent = this.window?.window;
         const options: Electron.MessageBoxOptions = {
           type: "question",
@@ -584,12 +516,7 @@ export class DesktopShell {
   private rememberClosedAtLogout(): void {
     // Closing only hides the window, so what counts is whether it is visible.
     const windowShown = this.window?.window.isVisible() ?? false;
-    if (
-      process.platform !== "darwin" ||
-      windowShown ||
-      !this.computer.opensAtLogin
-    )
-      return;
+    if (process.platform !== "darwin" || windowShown || !this.computer.opensAtLogin) return;
     try {
       writeFileSync(this.closedAtLogoutPath(), "");
     } catch {
@@ -618,8 +545,7 @@ export class DesktopShell {
   /** Asks for the first screen-control permission still missing, as the menu bar item does. */
   private async allowNextPermission(): Promise<void> {
     const next = (await this.computer.summary()).missingPermissions[0];
-    if (next)
-      await this.computer.requestPermission(next).catch(() => undefined);
+    if (next) await this.computer.requestPermission(next).catch(() => undefined);
   }
 
   // --- Window -------------------------------------------------------------------------------------
@@ -654,9 +580,7 @@ export class DesktopShell {
     });
     const active = this.store.active();
     const contents =
-      active && !active.signedOut
-        ? window.showAccount(this.target(active))
-        : window.showWelcome();
+      active && !active.signedOut ? window.showAccount(this.target(active)) : window.showWelcome();
     contents.once("did-finish-load", () => {
       mark("content-loaded");
       flushMarks();
@@ -667,14 +591,11 @@ export class DesktopShell {
   }
 
   private target(account: StoredAccount) {
-    const fallback = account.workspaceId
-      ? this.paths.home(account.workspaceId)
-      : "/";
+    const fallback = account.workspaceId ? this.paths.home(account.workspaceId) : "/";
     return {
       id: account.id,
       baseUrl: account.baseUrl,
-      initialPath:
-        this.lastPaths.get(account.id) ?? account.lastPath ?? fallback,
+      initialPath: this.lastPaths.get(account.id) ?? account.lastPath ?? fallback,
     };
   }
 
@@ -702,11 +623,7 @@ export class DesktopShell {
       this.pushWelcome();
     } else if (this.failedLoads.has(accountId)) {
       // Its page didn't load: keep the welcome page up and try again now.
-      if (path)
-        this.failedLoads.set(
-          accountId,
-          new URL(path, account.baseUrl).toString(),
-        );
+      if (path) this.failedLoads.set(accountId, new URL(path, account.baseUrl).toString());
       this.showUnreachable(accountId);
       this.retryUnreachable();
     } else {
@@ -722,8 +639,7 @@ export class DesktopShell {
 
   private loadFailed(accountId: string, url: string): void {
     this.failedLoads.set(accountId, url);
-    if (this.store.snapshot().activeId === accountId)
-      this.showUnreachable(accountId);
+    if (this.store.snapshot().activeId === accountId) this.showUnreachable(accountId);
   }
 
   private loaded(accountId: string): void {
@@ -740,8 +656,7 @@ export class DesktopShell {
   /** Stand in for the account with the welcome page, which says so and keeps trying. */
   private showUnreachable(accountId: string): void {
     const account = this.store.get(accountId);
-    if (!account || account.signedOut || this.addingAccount || this.pending)
-      return;
+    if (!account || account.signedOut || this.addingAccount || this.pending) return;
     if (this.unreachable?.accountId === accountId) {
       this.unreachable.retrying = false;
     } else {
@@ -763,10 +678,7 @@ export class DesktopShell {
     const state = this.unreachable;
     if (!state) return;
     if (state.timer) clearTimeout(state.timer);
-    state.timer = setTimeout(
-      () => this.retryUnreachable(),
-      retryDelayMs(state.attempt),
-    );
+    state.timer = setTimeout(() => this.retryUnreachable(), retryDelayMs(state.attempt));
   }
 
   /** Try the unreachable account again now, unless a try is already under way. */
@@ -807,17 +719,10 @@ export class DesktopShell {
       void this.finishSignIn(callback);
       return;
     }
-    const computerLink = parseComputerConnectLink(
-      raw,
-      this.config.scheme,
-      this.paths,
-    );
+    const computerLink = parseComputerConnectLink(raw, this.config.scheme, this.paths);
     if (computerLink && this.config.thisComputer) {
       if (this.connectingFromLink || this.pending) return;
-      const account = computerLinkAccount(
-        computerLink,
-        this.store.snapshot().accounts,
-      );
+      const account = computerLinkAccount(computerLink, this.store.snapshot().accounts);
       if (account) void this.connectFromLink(account, computerLink);
       else void this.beginSignIn(computerLink.origin, computerLink);
       return;
@@ -831,11 +736,7 @@ export class DesktopShell {
       return;
     }
     const accounts = this.store.snapshot();
-    const account = accountForAppLink(
-      link,
-      accounts.accounts,
-      accounts.activeId,
-    );
+    const account = accountForAppLink(link, accounts.accounts, accounts.activeId);
     if (!account) {
       openExternalSafely(link.webUrl);
       return;
@@ -852,10 +753,7 @@ export class DesktopShell {
    * Where a menu command goes when the page doesn't handle it itself (a page
    * from an older server): the account's workspace's page for it.
    */
-  private commandPath(
-    account: StoredAccount,
-    command: DesktopCommand,
-  ): string | null {
+  private commandPath(account: StoredAccount, command: DesktopCommand): string | null {
     if (!account.workspaceId) return null;
     if (command === "newSession") return this.paths.home(account.workspaceId);
     if (command === "openInbox") return this.paths.inbox(account.workspaceId);
@@ -907,18 +805,14 @@ export class DesktopShell {
     const pending = this.pending;
     this.reveal();
     if (!pending || callback.state !== pending.state) {
-      this.welcomeError = pending
-        ? "That sign-in didn't match this request. Try again."
-        : null;
+      this.welcomeError = pending ? "That sign-in didn't match this request. Try again." : null;
       this.pushWelcome();
       return;
     }
     if (callback.kind === "error") {
       this.pending = null;
       this.welcomeError =
-        callback.error === "access_denied"
-          ? null
-          : "The sign-in didn't finish. Try again.";
+        callback.error === "access_denied" ? null : "The sign-in didn't finish. Try again.";
       this.pushWelcome();
       return;
     }
@@ -930,17 +824,12 @@ export class DesktopShell {
         codeVerifier: pending.verifier,
         redirectUri: this.redirectUri,
       });
-      const client = new OpenGeniClient(
-        this.clientOptions(pending.baseUrl, token.accessToken),
-      );
+      const client = new OpenGeniClient(this.clientOptions(pending.baseUrl, token.accessToken));
       const [context, workspaces] = await Promise.all([
         client.getAccessContext(),
         client.listWorkspaces().catch(() => []),
       ]);
-      if (
-        pending.computerLink &&
-        context.subjectId !== pending.computerLink.subjectId
-      ) {
+      if (pending.computerLink && context.subjectId !== pending.computerLink.subjectId) {
         await client.signOutNativeApp().catch(() => undefined);
         throw new Error(
           "You signed in with a different account. Return to the browser, switch to the account that offered to connect this computer, and try again.",
@@ -961,24 +850,17 @@ export class DesktopShell {
       this.welcomeError = null;
       this.window?.removeAccount(account.id);
       this.showAccount(account.id);
-      if (pending.computerLink)
-        await this.connectFromLink(account, pending.computerLink);
+      if (pending.computerLink) await this.connectFromLink(account, pending.computerLink);
       void this.inbox.poll();
     } catch (caught) {
       this.pending = null;
-      this.welcomeError = errorMessage(
-        caught,
-        "The sign-in couldn't finish. Try again.",
-      );
+      this.welcomeError = errorMessage(caught, "The sign-in couldn't finish. Try again.");
       this.pushWelcome();
     }
   }
 
   /** An external link never grants host access: confirm with the person on this computer. */
-  private async connectFromLink(
-    account: StoredAccount,
-    link: ComputerConnectLink,
-  ): Promise<void> {
+  private async connectFromLink(account: StoredAccount, link: ComputerConnectLink): Promise<void> {
     if (this.connectingFromLink) return;
     this.connectingFromLink = true;
     try {
@@ -1004,24 +886,16 @@ export class DesktopShell {
         },
         navigate: (path) => this.showAccount(account.id, path),
         connect: async (workspaceId) => {
-          await this.computer.connect(
-            account.id,
-            account.baseUrl,
-            workspaceId,
-            {
-              screenControl: true,
-            },
-          );
+          await this.computer.connect(account.id, account.baseUrl, workspaceId, {
+            screenControl: true,
+          });
         },
       });
     } catch (caught) {
       await dialog.showMessageBox({
         type: "error",
         message: "Couldn't connect this computer",
-        detail: errorMessage(
-          caught,
-          "Return to the browser and try Open app and connect again.",
-        ),
+        detail: errorMessage(caught, "Return to the browser and try Open app and connect again."),
       });
     } finally {
       this.connectingFromLink = false;
@@ -1038,10 +912,7 @@ export class DesktopShell {
     const token = this.store.token(accountId);
     if (!account || !token) return false;
     const partition = session.fromPartition(`persist:account-${accountId}`);
-    const url = new URL(
-      "/v1/native-app/web-session",
-      account.baseUrl,
-    ).toString();
+    const url = new URL("/v1/native-app/web-session", account.baseUrl).toString();
     const response = await partition.fetch(url, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
@@ -1052,9 +923,7 @@ export class DesktopShell {
       return false;
     }
     if (!response.ok)
-      throw new Error(
-        `The server couldn't open the window session (${response.status}).`,
-      );
+      throw new Error(`The server couldn't open the window session (${response.status}).`);
     // Older Electron network stacks hand Set-Cookie back instead of storing it.
     const stored = await partition.cookies.get({ url: account.baseUrl });
     if (stored.length === 0) {
@@ -1115,8 +984,7 @@ export class DesktopShell {
     return {
       baseUrl,
       ...(token ? { apiKey: token } : {}),
-      fetch: ((input: string, init?: RequestInit) =>
-        net.fetch(input, init)) as never,
+      fetch: ((input: string, init?: RequestInit) => net.fetch(input, init)) as never,
       onDeprecation: false as const,
       apiContract: "compatible" as const,
     };
@@ -1129,8 +997,7 @@ export class DesktopShell {
     const cached = this.clients.get(accountId);
     if (cached?.token === token) return await cached.client;
     const client = this.loadSdk().then(
-      ({ OpenGeniClient }) =>
-        new OpenGeniClient(this.clientOptions(account.baseUrl, token)),
+      ({ OpenGeniClient }) => new OpenGeniClient(this.clientOptions(account.baseUrl, token)),
     );
     this.clients.set(accountId, { token, client });
     return await client;
@@ -1139,14 +1006,11 @@ export class DesktopShell {
   // --- Bridge -------------------------------------------------------------------------------------
 
   /** The account whose own web app (top frame, own origin) sent this message. */
-  private senderAccount(
-    event: IpcMainInvokeEvent | IpcMainEvent,
-  ): StoredAccount {
+  private senderAccount(event: IpcMainInvokeEvent | IpcMainEvent): StoredAccount {
     const accountId = this.window?.accountFor(event.sender);
     const account = accountId ? this.store.get(accountId) : null;
     const frame = event.senderFrame;
-    if (!account || !frame || frame !== event.sender.mainFrame)
-      throw new Error("Not allowed");
+    if (!account || !frame || frame !== event.sender.mainFrame) throw new Error("Not allowed");
     if (new URL(frame.url).origin !== new URL(account.baseUrl).origin)
       throw new Error("Not allowed");
     return account;
@@ -1186,9 +1050,7 @@ export class DesktopShell {
       otherServers: this.config.allowOtherServers !== false,
       pendingServer: this.pending ? serverLabel(this.pending.baseUrl) : null,
       error: this.welcomeError,
-      canCancel: this.store
-        .snapshot()
-        .accounts.some((account) => !account.signedOut),
+      canCancel: this.store.snapshot().accounts.some((account) => !account.signedOut),
       unreachable: this.unreachableState(),
     };
   }
@@ -1218,10 +1080,7 @@ export class DesktopShell {
     const handle = <T>(
       channel: string,
       listener: (account: StoredAccount, ...args: unknown[]) => Promise<T> | T,
-    ) =>
-      ipcMain.handle(channel, (event, ...args) =>
-        listener(this.senderAccount(event), ...args),
-      );
+    ) => ipcMain.handle(channel, (event, ...args) => listener(this.senderAccount(event), ...args));
 
     handle(DESKTOP_IPC.accountsList, () => this.accountsSnapshot());
     handle(DESKTOP_IPC.accountsSwitch, (_account, id) => {
@@ -1238,22 +1097,16 @@ export class DesktopShell {
         return false;
       }
     });
-    ipcMain.on(
-      DESKTOP_IPC.accountsSetWorkspace,
-      (event, workspaceId: unknown) => {
-        try {
-          const account = this.senderAccount(event);
-          if (
-            typeof workspaceId === "string" &&
-            /^[0-9a-f-]{36}$/iu.test(workspaceId)
-          ) {
-            this.store.update(account.id, { workspaceId });
-          }
-        } catch {
-          // Ignore messages from anything but an account's own page.
+    ipcMain.on(DESKTOP_IPC.accountsSetWorkspace, (event, workspaceId: unknown) => {
+      try {
+        const account = this.senderAccount(event);
+        if (typeof workspaceId === "string" && /^[0-9a-f-]{36}$/iu.test(workspaceId)) {
+          this.store.update(account.id, { workspaceId });
         }
-      },
-    );
+      } catch {
+        // Ignore messages from anything but an account's own page.
+      }
+    });
     ipcMain.on(DESKTOP_IPC.menuActionsSet, (event, value: unknown) => {
       let account: StoredAccount;
       try {
@@ -1267,8 +1120,7 @@ export class DesktopShell {
       if ((this.pageMenuActions.get(account.id)?.key ?? "[]") === key) return;
       if (actions.length === 0) this.pageMenuActions.delete(account.id);
       else this.pageMenuActions.set(account.id, { actions, key });
-      if (this.store.snapshot().activeId === account.id)
-        Menu.setApplicationMenu(this.menu());
+      if (this.store.snapshot().activeId === account.id) Menu.setApplicationMenu(this.menu());
     });
     ipcMain.on(DESKTOP_IPC.appearanceSet, (event, appearance: unknown) => {
       try {
@@ -1276,11 +1128,7 @@ export class DesktopShell {
       } catch {
         return;
       }
-      if (
-        appearance === "light" ||
-        appearance === "dark" ||
-        appearance === "system"
-      ) {
+      if (appearance === "light" || appearance === "dark" || appearance === "system") {
         nativeTheme.themeSource = appearance;
       }
     });
@@ -1289,9 +1137,7 @@ export class DesktopShell {
     );
     handle(DESKTOP_IPC.computerConnect, (account, workspaceId, options) =>
       this.computer.connect(account.id, account.baseUrl, String(workspaceId), {
-        screenControl: Boolean(
-          (options as ThisComputerConnectOptions | undefined)?.screenControl,
-        ),
+        screenControl: Boolean((options as ThisComputerConnectOptions | undefined)?.screenControl),
       }),
     );
     handle(DESKTOP_IPC.computerPause, (account) => {
@@ -1308,26 +1154,17 @@ export class DesktopShell {
       this.computer.requestPermission(id as ThisComputerPermissionId),
     );
     handle(DESKTOP_IPC.computerDisconnect, (account, workspaceId) =>
-      this.computer.disconnect(
-        account.id,
-        account.baseUrl,
-        String(workspaceId),
-      ),
+      this.computer.disconnect(account.id, account.baseUrl, String(workspaceId)),
     );
     handle(DESKTOP_IPC.openExternal, (_account, url) => {
       if (typeof url === "string") openExternalSafely(url);
     });
     handle(DESKTOP_IPC.appShotsStatus, () => this.appShots.status());
-    handle(
-      DESKTOP_IPC.updatesState,
-      () => this.updates?.pageState ?? { kind: "none" },
-    );
+    handle(DESKTOP_IPC.updatesState, () => this.updates?.pageState ?? { kind: "none" });
     handle(DESKTOP_IPC.updatesInstall, () => {
       this.updates?.install();
     });
-    handle(DESKTOP_IPC.appShotsUpdate, (_account, change) =>
-      this.appShots.update(change),
-    );
+    handle(DESKTOP_IPC.appShotsUpdate, (_account, change) => this.appShots.update(change));
     handle(DESKTOP_IPC.appShotsRequestPermission, async (_account, id) => {
       if (id === "screenRecording" || id === "accessibility") {
         await this.appShots.requestPermission(id as DesktopAppShotPermissionId);
@@ -1352,8 +1189,7 @@ export class DesktopShell {
     });
     ipcMain.handle(DESKTOP_IPC.systemAudioStop, (event, captureId: unknown) => {
       this.senderAccount(event);
-      if (typeof captureId === "string")
-        this.systemAudio.stop(captureId, event.sender);
+      if (typeof captureId === "string") this.systemAudio.stop(captureId, event.sender);
     });
 
     ipcMain.handle(DESKTOP_IPC.welcomeState, (event) => {
@@ -1372,9 +1208,7 @@ export class DesktopShell {
       this.senderWelcome(event);
       this.pending = null;
       this.welcomeError = null;
-      const active = this.store
-        .snapshot()
-        .accounts.find((account) => !account.signedOut);
+      const active = this.store.snapshot().accounts.find((account) => !account.signedOut);
       if (active) this.showAccount(active.id);
       else this.pushWelcome();
     });
@@ -1402,8 +1236,7 @@ export class DesktopShell {
     const contents = accountId ? this.window?.contentsFor(accountId) : null;
     if (!contents || contents.isDestroyed()) return;
     const send = () => {
-      if (!contents.isDestroyed())
-        contents.send(DESKTOP_IPC.appShotsCaptured, result);
+      if (!contents.isDestroyed()) contents.send(DESKTOP_IPC.appShotsCaptured, result);
     };
     if (contents.isLoading()) contents.once("did-finish-load", send);
     else send();
@@ -1450,23 +1283,16 @@ export class DesktopShell {
               this.reveal();
               const contents = this.window?.contentsFor(active.id);
               if (contents && !contents.isDestroyed())
-                contents.send(
-                  DESKTOP_IPC.command,
-                  command,
-                  this.commandPath(active, command),
-                );
+                contents.send(DESKTOP_IPC.command, command, this.commandPath(active, command));
             }
           : null,
       pageActions:
-        active && !active.signedOut
-          ? (this.pageMenuActions.get(active.id)?.actions ?? null)
-          : null,
+        active && !active.signedOut ? (this.pageMenuActions.get(active.id)?.actions ?? null) : null,
       runPageAction: (id) => {
         if (!active || active.signedOut) return;
         this.reveal();
         const contents = this.window?.contentsFor(active.id);
-        if (contents && !contents.isDestroyed())
-          contents.send(DESKTOP_IPC.menuAction, id);
+        if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.menuAction, id);
       },
       updates: this.updates
         ? {
@@ -1501,8 +1327,7 @@ export class DesktopShell {
     }
     // macOS keeps running without a window anyway; the menu bar item is for the
     // computer. Elsewhere the tray is how a closed window comes back.
-    const wanted =
-      process.platform === "darwin" ? summary.connected : hasAccounts;
+    const wanted = process.platform === "darwin" ? summary.connected : hasAccounts;
     if (!wanted) {
       this.tray?.destroy();
       this.tray = null;
@@ -1532,8 +1357,7 @@ function setOpenAtLogin(config: DesktopAppConfig, open: boolean): void {
     if (agent) {
       app.setLoginItemSettings({ openAtLogin: open, ...agent });
       // Earlier versions registered the app itself; macOS opens that with a window.
-      if (app.getLoginItemSettings().openAtLogin)
-        app.setLoginItemSettings({ openAtLogin: false });
+      if (app.getLoginItemSettings().openAtLogin) app.setLoginItemSettings({ openAtLogin: false });
       return;
     }
     // macOS 12 reports a login launch through `wasOpenedAtLogin`.
@@ -1547,19 +1371,13 @@ function setOpenAtLogin(config: DesktopAppConfig, open: boolean): void {
  * The bundled launch agent that opens the app hidden at login (see
  * mac-login-agent.ts), on macOS 13 and later when the build includes it.
  */
-function macLoginAgent(
-  appId: string,
-): { type: "agentService"; serviceName: string } | null {
-  const major = Number.parseInt(
-    process.getSystemVersion().split(".")[0] ?? "",
-    10,
-  );
+function macLoginAgent(appId: string): { type: "agentService"; serviceName: string } | null {
+  const major = Number.parseInt(process.getSystemVersion().split(".")[0] ?? "", 10);
   if (!(major >= 13)) return null;
   const serviceName = macLoginAgentName(appId);
   // macOS reports an agent it hasn't registered yet as not found, so look in the bundle.
   const contents = dirname(dirname(app.getPath("exe")));
-  if (!existsSync(join(contents, "Library", "LaunchAgents", serviceName)))
-    return null;
+  if (!existsSync(join(contents, "Library", "LaunchAgents", serviceName))) return null;
   return { type: "agentService", serviceName };
 }
 
@@ -1575,10 +1393,7 @@ function migrateMacLoginItem(appId: string): void {
 }
 
 /** A Set-Cookie header as Electron cookie details. */
-export function cookieFromHeader(
-  url: string,
-  header: string,
-): CookiesSetDetails {
+export function cookieFromHeader(url: string, header: string): CookiesSetDetails {
   const [pair = "", ...attributes] = header.split(";");
   const separator = pair.indexOf("=");
   const details: CookiesSetDetails = {
@@ -1594,29 +1409,20 @@ export function cookieFromHeader(
     else if (key === "domain") details.domain = value;
     else if (key === "secure") details.secure = true;
     else if (key === "httponly") details.httpOnly = true;
-    else if (key === "max-age")
-      details.expirationDate = Date.now() / 1000 + Number(value);
+    else if (key === "max-age") details.expirationDate = Date.now() / 1000 + Number(value);
     else if (key === "expires" && details.expirationDate === undefined) {
       const at = Date.parse(value);
       if (Number.isFinite(at)) details.expirationDate = at / 1000;
     } else if (key === "samesite") {
       const lower = value.toLowerCase();
       details.sameSite =
-        lower === "strict"
-          ? "strict"
-          : lower === "none"
-            ? "no_restriction"
-            : "lax";
+        lower === "strict" ? "strict" : lower === "none" ? "no_restriction" : "lax";
     }
   }
   return details;
 }
 
-export function showSimpleNotification(
-  title: string,
-  body: string,
-  onClick?: () => void,
-): void {
+export function showSimpleNotification(title: string, body: string, onClick?: () => void): void {
   if (!Notification.isSupported()) return;
   const notification = new Notification({ title, body });
   if (onClick) notification.on("click", onClick);

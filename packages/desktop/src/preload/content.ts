@@ -22,10 +22,7 @@ import {
 
 function argument(name: string): string | null {
   const prefix = `--${name}=`;
-  return (
-    process.argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length) ??
-    null
-  );
+  return process.argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length) ?? null;
 }
 
 function platform(): DesktopPlatform {
@@ -34,10 +31,7 @@ function platform(): DesktopPlatform {
   return "linux";
 }
 
-function subscribe<T>(
-  channel: string,
-  listener: (payload: T) => void,
-): () => void {
+function subscribe<T>(channel: string, listener: (payload: T) => void): () => void {
   const handler = (_event: IpcRendererEvent, payload: T) => listener(payload);
   ipcRenderer.on(channel, handler);
   return () => {
@@ -54,20 +48,13 @@ if (origin && window.location.origin === origin) {
   let commandListener: ((command: DesktopCommand) => void) | null = null;
   ipcRenderer.on(
     DESKTOP_IPC.command,
-    (
-      _event,
-      command: DesktopCommand,
-      fallbackPath: string | null | undefined,
-    ) => {
+    (_event, command: DesktopCommand, fallbackPath: string | null | undefined) => {
       if (commandListener) {
         commandListener(command);
         return;
       }
       // The shell's page for the command, on this origin only.
-      if (
-        typeof fallbackPath === "string" &&
-        /^\/(?![/\\])/u.test(fallbackPath)
-      )
+      if (typeof fallbackPath === "string" && /^\/(?![/\\])/u.test(fallbackPath))
         window.location.assign(fallbackPath);
     },
   );
@@ -85,15 +72,11 @@ if (origin && window.location.origin === origin) {
   // Captures go to the page's newest listener. One that arrives before the
   // page listens (the window was just opened for it) waits briefly for it.
   let appShotListener: ((result: DesktopAppShotResult) => void) | null = null;
-  let waitingAppShot: { result: DesktopAppShotResult; at: number } | null =
-    null;
-  ipcRenderer.on(
-    DESKTOP_IPC.appShotsCaptured,
-    (_event, result: DesktopAppShotResult) => {
-      if (appShotListener) appShotListener(result);
-      else waitingAppShot = { result, at: Date.now() };
-    },
-  );
+  let waitingAppShot: { result: DesktopAppShotResult; at: number } | null = null;
+  ipcRenderer.on(DESKTOP_IPC.appShotsCaptured, (_event, result: DesktopAppShotResult) => {
+    if (appShotListener) appShotListener(result);
+    else waitingAppShot = { result, at: Date.now() };
+  });
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
@@ -111,41 +94,28 @@ if (origin && window.location.origin === origin) {
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
     accounts: {
-      list: () =>
-        ipcRenderer.invoke(
-          DESKTOP_IPC.accountsList,
-        ) as Promise<DesktopAccountsSnapshot>,
-      switchTo: (accountId) =>
-        ipcRenderer.invoke(DESKTOP_IPC.accountsSwitch, accountId),
+      list: () => ipcRenderer.invoke(DESKTOP_IPC.accountsList) as Promise<DesktopAccountsSnapshot>,
+      switchTo: (accountId) => ipcRenderer.invoke(DESKTOP_IPC.accountsSwitch, accountId),
       add: () => ipcRenderer.invoke(DESKTOP_IPC.accountsAdd),
-      signOut: (accountId) =>
-        ipcRenderer.invoke(DESKTOP_IPC.accountsSignOut, accountId),
+      signOut: (accountId) => ipcRenderer.invoke(DESKTOP_IPC.accountsSignOut, accountId),
       setWorkspace: (workspaceId) =>
         ipcRenderer.send(DESKTOP_IPC.accountsSetWorkspace, workspaceId),
       restoreWebSession: () =>
-        ipcRenderer.invoke(
-          DESKTOP_IPC.accountsRestoreWebSession,
-        ) as Promise<boolean>,
+        ipcRenderer.invoke(DESKTOP_IPC.accountsRestoreWebSession) as Promise<boolean>,
       onChange: (listener) => subscribe(DESKTOP_IPC.accountsChanged, listener),
     },
     thisComputer: {
       status: (workspaceId) =>
-        ipcRenderer.invoke(
-          DESKTOP_IPC.computerStatus,
-          workspaceId,
-        ) as Promise<ThisComputerStatus>,
+        ipcRenderer.invoke(DESKTOP_IPC.computerStatus, workspaceId) as Promise<ThisComputerStatus>,
       connect: (workspaceId, options) =>
         ipcRenderer.invoke(DESKTOP_IPC.computerConnect, workspaceId, {
           screenControl: Boolean(options.screenControl),
         }) as Promise<ThisComputerStatus>,
       pause: () => ipcRenderer.invoke(DESKTOP_IPC.computerPause),
       resume: () => ipcRenderer.invoke(DESKTOP_IPC.computerResume),
-      requestPermission: (id) =>
-        ipcRenderer.invoke(DESKTOP_IPC.computerRequestPermission, id),
-      disconnect: (workspaceId) =>
-        ipcRenderer.invoke(DESKTOP_IPC.computerDisconnect, workspaceId),
-      onChange: (listener) =>
-        subscribe(DESKTOP_IPC.computerChanged, () => listener()),
+      requestPermission: (id) => ipcRenderer.invoke(DESKTOP_IPC.computerRequestPermission, id),
+      disconnect: (workspaceId) => ipcRenderer.invoke(DESKTOP_IPC.computerDisconnect, workspaceId),
+      onChange: (listener) => subscribe(DESKTOP_IPC.computerChanged, () => listener()),
     },
     openExternal: (url) => ipcRenderer.invoke(DESKTOP_IPC.openExternal, url),
     commands: {
@@ -168,20 +138,12 @@ if (origin && window.location.origin === origin) {
         };
       },
     },
-    setAppearance: (appearance) =>
-      ipcRenderer.send(DESKTOP_IPC.appearanceSet, appearance),
+    setAppearance: (appearance) => ipcRenderer.send(DESKTOP_IPC.appearanceSet, appearance),
     appShots: {
-      status: () =>
-        ipcRenderer.invoke(
-          DESKTOP_IPC.appShotsStatus,
-        ) as Promise<DesktopAppShotStatus>,
+      status: () => ipcRenderer.invoke(DESKTOP_IPC.appShotsStatus) as Promise<DesktopAppShotStatus>,
       update: (settings) =>
-        ipcRenderer.invoke(
-          DESKTOP_IPC.appShotsUpdate,
-          settings,
-        ) as Promise<DesktopAppShotStatus>,
-      requestPermission: (id) =>
-        ipcRenderer.invoke(DESKTOP_IPC.appShotsRequestPermission, id),
+        ipcRenderer.invoke(DESKTOP_IPC.appShotsUpdate, settings) as Promise<DesktopAppShotStatus>,
+      requestPermission: (id) => ipcRenderer.invoke(DESKTOP_IPC.appShotsRequestPermission, id),
       onCapture: (listener) => {
         appShotListener = listener;
         const waiting = waitingAppShot;
@@ -193,14 +155,10 @@ if (origin && window.location.origin === origin) {
           if (appShotListener === listener) appShotListener = null;
         };
       },
-      onChange: (listener) =>
-        subscribe(DESKTOP_IPC.appShotsChanged, () => listener()),
+      onChange: (listener) => subscribe(DESKTOP_IPC.appShotsChanged, () => listener()),
     },
     updates: {
-      state: () =>
-        ipcRenderer.invoke(
-          DESKTOP_IPC.updatesState,
-        ) as Promise<DesktopUpdateState>,
+      state: () => ipcRenderer.invoke(DESKTOP_IPC.updatesState) as Promise<DesktopUpdateState>,
       install: () => ipcRenderer.invoke(DESKTOP_IPC.updatesInstall),
       onChange: (listener) => subscribe(DESKTOP_IPC.updatesChanged, listener),
     },
@@ -208,9 +166,7 @@ if (origin && window.location.origin === origin) {
       ? {
           systemAudio: {
             start: async () => {
-              const result = (await ipcRenderer.invoke(
-                DESKTOP_IPC.systemAudioStart,
-              )) as
+              const result = (await ipcRenderer.invoke(DESKTOP_IPC.systemAudioStart)) as
                 | { ok: true; captureId: string; sampleRate: number }
                 | { ok: false; error: DesktopSystemAudioError };
               if (!result.ok) throw result.error;
@@ -222,27 +178,16 @@ if (origin && window.location.origin === origin) {
             stop: async (captureId: string) => {
               await ipcRenderer.invoke(DESKTOP_IPC.systemAudioStop, captureId);
             },
-            onSamples: (
-              listener: (captureId: string, samples: Float32Array) => void,
-            ) => {
-              const handler = (
-                _event: IpcRendererEvent,
-                id: string,
-                samples: Float32Array,
-              ) => listener(id, samples);
+            onSamples: (listener: (captureId: string, samples: Float32Array) => void) => {
+              const handler = (_event: IpcRendererEvent, id: string, samples: Float32Array) =>
+                listener(id, samples);
               ipcRenderer.on(DESKTOP_IPC.systemAudioSamples, handler);
               return () => {
-                ipcRenderer.removeListener(
-                  DESKTOP_IPC.systemAudioSamples,
-                  handler,
-                );
+                ipcRenderer.removeListener(DESKTOP_IPC.systemAudioSamples, handler);
               };
             },
             onEnded: (
-              listener: (
-                captureId: string,
-                error: DesktopSystemAudioError | null,
-              ) => void,
+              listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
             ) => {
               const handler = (
                 _event: IpcRendererEvent,
@@ -251,10 +196,7 @@ if (origin && window.location.origin === origin) {
               ) => listener(id, error);
               ipcRenderer.on(DESKTOP_IPC.systemAudioEnded, handler);
               return () => {
-                ipcRenderer.removeListener(
-                  DESKTOP_IPC.systemAudioEnded,
-                  handler,
-                );
+                ipcRenderer.removeListener(DESKTOP_IPC.systemAudioEnded, handler);
               };
             },
           },

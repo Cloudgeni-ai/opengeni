@@ -71,8 +71,7 @@ describe("system audio", () => {
     expect(all[0]).toBe(0);
     expect(all[249]).toBeCloseTo(0.249, 5);
     // Batches of at least a tenth of a second, the rest when the capture ends.
-    for (const batch of page.samples.slice(0, -1))
-      expect(batch.length).toBeGreaterThanOrEqual(100);
+    for (const batch of page.samples.slice(0, -1)) expect(batch.length).toBeGreaterThanOrEqual(100);
   });
 
   test("a helper error rejects the start with the app's plain sentence", async () => {
@@ -83,16 +82,12 @@ describe("system audio", () => {
       code: "permission_denied",
       detail: "denied",
     });
-    expect((error as DesktopSystemAudioError).message).toContain(
-      "System Settings",
-    );
+    expect((error as DesktopSystemAudioError).message).toContain("System Settings");
   });
 
   test("a helper that dies before starting rejects as a failed capture", async () => {
     const audio = captures("crash");
-    const error = await audio
-      .start(new Page(3))
-      .catch((reason: unknown) => reason);
+    const error = await audio.start(new Page(3)).catch((reason: unknown) => reason);
     expect(error).toMatchObject({ code: "capture_failed" });
   });
 
@@ -104,9 +99,7 @@ describe("system audio", () => {
       channels: { samples: "samples", ended: "ended" },
     });
     expect(audio.available()).toBe(false);
-    expect(
-      await audio.start(new Page(4)).catch((reason: unknown) => reason),
-    ).toMatchObject({
+    expect(await audio.start(new Page(4)).catch((reason: unknown) => reason)).toMatchObject({
       code: "unavailable",
     });
   });

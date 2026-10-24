@@ -38,9 +38,7 @@ const targets = (TARGETS[process.platform] ?? []).filter(
   (target) => !hostOnly || target.rust.startsWith(hostArch),
 );
 if (targets.length === 0) {
-  console.error(
-    `No system audio helper for ${process.platform}/${process.arch}.`,
-  );
+  console.error(`No system audio helper for ${process.platform}/${process.arch}.`);
   process.exit(1);
 }
 
@@ -58,20 +56,11 @@ function run(command: string[]): void {
 
 rmSync(output, { recursive: true, force: true });
 const executable =
-  process.platform === "win32"
-    ? "opengeni-audio-capture.exe"
-    : "opengeni-audio-capture";
+  process.platform === "win32" ? "opengeni-audio-capture.exe" : "opengeni-audio-capture";
 for (const target of targets) {
   run(["rustup", "target", "add", target.rust]);
   if (process.platform === "linux") {
-    run([
-      "cargo",
-      "zigbuild",
-      "--release",
-      "--locked",
-      "--target",
-      `${target.rust}.2.28`,
-    ]);
+    run(["cargo", "zigbuild", "--release", "--locked", "--target", `${target.rust}.2.28`]);
   } else {
     run(["cargo", "build", "--release", "--locked", "--target", target.rust]);
   }

@@ -11,10 +11,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { release } from "node:os";
 
-import type {
-  DesktopSystemAudioError,
-  DesktopSystemAudioErrorCode,
-} from "../contract";
+import type { DesktopSystemAudioError, DesktopSystemAudioErrorCode } from "../contract";
 
 /** How often samples go to the page: a tenth of a second. */
 const BATCHES_PER_SECOND = 10;
@@ -49,18 +46,12 @@ export interface SystemAudioOptions {
 }
 
 /** Whether this OS version can record other apps' audio. */
-export function systemAudioSupported(
-  platform: NodeJS.Platform,
-  osRelease: string,
-): boolean {
-  const [major = 0, minor = 0, patch = 0] = osRelease
-    .split(".")
-    .map((part) => Number(part) || 0);
+export function systemAudioSupported(platform: NodeJS.Platform, osRelease: string): boolean {
+  const [major = 0, minor = 0, patch = 0] = osRelease.split(".").map((part) => Number(part) || 0);
   // Darwin 23.2 is macOS 14.2, the first with Core Audio process taps.
   if (platform === "darwin") return major > 23 || (major === 23 && minor >= 2);
   // Build 19041 is Windows 10 version 2004, the first with process loopback.
-  if (platform === "win32")
-    return major > 10 || (major === 10 && patch >= 19041);
+  if (platform === "win32") return major > 10 || (major === 10 && patch >= 19041);
   return platform === "linux";
 }
 
@@ -70,11 +61,7 @@ export function systemAudioUsable(
   platform: NodeJS.Platform = process.platform,
   osRelease: string = release(),
 ): boolean {
-  return Boolean(
-    helperPath &&
-    existsSync(helperPath) &&
-    systemAudioSupported(platform, osRelease),
-  );
+  return Boolean(helperPath && existsSync(helperPath) && systemAudioSupported(platform, osRelease));
 }
 
 const MESSAGES: Record<DesktopSystemAudioErrorCode, string> = {
@@ -86,14 +73,9 @@ const MESSAGES: Record<DesktopSystemAudioErrorCode, string> = {
   capture_failed: "Recording other apps' audio stopped unexpectedly.",
 };
 
-function captureError(
-  code: string | undefined,
-  detail?: string,
-): DesktopSystemAudioError {
+function captureError(code: string | undefined, detail?: string): DesktopSystemAudioError {
   const known: DesktopSystemAudioErrorCode =
-    code === "permission_denied" ||
-    code === "sound_server_unavailable" ||
-    code === "unavailable"
+    code === "permission_denied" || code === "sound_server_unavailable" || code === "unavailable"
       ? code
       : "capture_failed";
   return {
@@ -133,9 +115,7 @@ export class SystemAudioCaptures {
    * page's samples carry. A page has at most one capture: starting again ends
    * the previous one.
    */
-  start(
-    target: SystemAudioTarget,
-  ): Promise<{ captureId: string; sampleRate: number }> {
+  start(target: SystemAudioTarget): Promise<{ captureId: string; sampleRate: number }> {
     if (!this.available() || !this.options.helperPath) {
       return Promise.reject(captureError("unavailable"));
     }
@@ -180,10 +160,7 @@ export class SystemAudioCaptures {
         }
       };
       const timer = setTimeout(
-        () =>
-          settle(
-            captureError("capture_failed", "The helper did not start in time."),
-          ),
+        () => settle(captureError("capture_failed", "The helper did not start in time.")),
         START_TIMEOUT_MS,
       );
       let lines = "";
@@ -207,10 +184,7 @@ export class SystemAudioCaptures {
           } catch {
             continue;
           }
-          if (
-            event.event === "started" &&
-            typeof event.sampleRate === "number"
-          ) {
+          if (event.event === "started" && typeof event.sampleRate === "number") {
             capture.sampleRate = event.sampleRate;
             if (capture.pendingBytes > 0) this.flush(capture);
             settle(null);
@@ -230,18 +204,8 @@ export class SystemAudioCaptures {
         const error =
           capture.stopping && code === 0
             ? null
-            : (lastError ??
-              captureError(
-                "capture_failed",
-                `The helper exited with ${code}.`,
-              ));
-        settle(
-          error ??
-            captureError(
-              "capture_failed",
-              "The helper exited before starting.",
-            ),
-        );
+            : (lastError ?? captureError("capture_failed", `The helper exited with ${code}.`));
+        settle(error ?? captureError("capture_failed", "The helper exited before starting."));
         this.finish(capture, error);
       });
     });
@@ -250,12 +214,7 @@ export class SystemAudioCaptures {
   /** End one capture. Samples already sent stay valid. */
   stop(captureId: string, target?: SystemAudioTarget): void {
     const capture = this.captures.get(captureId);
-    if (
-      !capture ||
-      (target && capture.target.id !== target.id) ||
-      capture.stopping
-    )
-      return;
+    if (!capture || (target && capture.target.id !== target.id) || capture.stopping) return;
     capture.stopping = true;
     capture.child.stdin?.end();
     const timer = setTimeout(() => {
@@ -281,10 +240,7 @@ export class SystemAudioCaptures {
     capture.pending.push(chunk);
     capture.pendingBytes += chunk.length;
     if (capture.sampleRate === 0) return;
-    const batchBytes = Math.max(
-      4,
-      Math.floor(capture.sampleRate / BATCHES_PER_SECOND) * 4,
-    );
+    const batchBytes = Math.max(4, Math.floor(capture.sampleRate / BATCHES_PER_SECOND) * 4);
     if (capture.pendingBytes >= batchBytes) this.flush(capture);
   }
 
@@ -305,10 +261,7 @@ export class SystemAudioCaptures {
     }
   }
 
-  private finish(
-    capture: Capture,
-    error: DesktopSystemAudioError | null,
-  ): void {
+  private finish(capture: Capture, error: DesktopSystemAudioError | null): void {
     if (capture.ended) return;
     capture.ended = true;
     this.flush(capture);

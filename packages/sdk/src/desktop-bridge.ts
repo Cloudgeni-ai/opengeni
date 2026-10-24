@@ -95,8 +95,7 @@ export interface DesktopMenuAction {
  * not listen still gets the navigation ones (the bridge falls back to loading
  * the workspace's page), so older servers keep working.
  */
-export type DesktopCommand =
-  "newSession" | "searchSessions" | "toggleSidebar" | "openInbox";
+export type DesktopCommand = "newSession" | "searchSessions" | "toggleSidebar" | "openInbox";
 
 /** One signed-in account as the web app sees it. Never carries a credential. */
 export interface DesktopAccount {
@@ -230,16 +229,11 @@ export interface DesktopBridge {
      * sign-in from the app's own credential; true when the page should reload.
      */
     restoreWebSession(): Promise<boolean>;
-    onChange(
-      listener: (snapshot: DesktopAccountsSnapshot) => void,
-    ): Unsubscribe;
+    onChange(listener: (snapshot: DesktopAccountsSnapshot) => void): Unsubscribe;
   };
   readonly thisComputer: {
     status(workspaceId: string): Promise<ThisComputerStatus>;
-    connect(
-      workspaceId: string,
-      options: ThisComputerConnectOptions,
-    ): Promise<ThisComputerStatus>;
+    connect(workspaceId: string, options: ThisComputerConnectOptions): Promise<ThisComputerStatus>;
     pause(): Promise<void>;
     resume(): Promise<void>;
     /**
@@ -270,9 +264,7 @@ export interface DesktopBridge {
   readonly appShots?: {
     status(): Promise<DesktopAppShotStatus>;
     /** Change the settings; the shortcut follows at once. */
-    update(
-      settings: Partial<DesktopAppShotSettings>,
-    ): Promise<DesktopAppShotStatus>;
+    update(settings: Partial<DesktopAppShotSettings>): Promise<DesktopAppShotStatus>;
     /**
      * Ask for one permission: the system prompt the first time, then its list
      * in System Settings with the app's guide beside it.
@@ -309,29 +301,20 @@ export interface DesktopBridge {
     start(): Promise<{ captureId: string; sampleRate: number }>;
     stop(captureId: string): Promise<void>;
     /** Samples arrive about ten times a second, silence included. */
-    onSamples(
-      listener: (captureId: string, samples: Float32Array) => void,
-    ): Unsubscribe;
+    onSamples(listener: (captureId: string, samples: Float32Array) => void): Unsubscribe;
     /** The capture ended: stopped (error null) or failed. */
     onEnded(
-      listener: (
-        captureId: string,
-        error: DesktopSystemAudioError | null,
-      ) => void,
+      listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
     ): Unsubscribe;
   };
 }
 
 /** The bridge when the page runs inside a desktop app, else null. */
 export function getDesktopBridge(): DesktopBridge | null {
-  const candidate = (globalThis as Record<string, unknown>)[
-    DESKTOP_BRIDGE_GLOBAL
-  ];
+  const candidate = (globalThis as Record<string, unknown>)[DESKTOP_BRIDGE_GLOBAL];
   if (!candidate || typeof candidate !== "object") return null;
   const bridge = candidate as Partial<DesktopBridge>;
-  return bridge.version === DESKTOP_BRIDGE_VERSION
-    ? (bridge as DesktopBridge)
-    : null;
+  return bridge.version === DESKTOP_BRIDGE_VERSION ? (bridge as DesktopBridge) : null;
 }
 
 export function hasDesktopCapability(

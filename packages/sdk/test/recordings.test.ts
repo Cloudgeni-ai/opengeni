@@ -24,10 +24,7 @@ const RECORDING = "22222222-2222-4222-8222-222222222222";
 /** An in-memory server with the recording API's contract, plus a fake storage. */
 function fakeServer() {
   const stored = new Map<string, Uint8Array>();
-  const reserved = new Map<
-    string,
-    { sha256: string; byteLength: number; uploaded: boolean }
-  >();
+  const reserved = new Map<string, { sha256: string; byteLength: number; uploaded: boolean }>();
   const state = {
     created: 0,
     finalized: null as FinalizeRecordingRequest | null,
@@ -49,10 +46,7 @@ function fakeServer() {
     throw error;
   };
   const client: RecordingTransport = {
-    async createRecording(
-      _workspaceId: string,
-      request: CreateRecordingRequest,
-    ) {
+    async createRecording(_workspaceId: string, request: CreateRecordingRequest) {
       state.calls.push("create");
       refusal();
       state.created += 1;
@@ -63,9 +57,7 @@ function fakeServer() {
       _recordingId: string,
       request: CreateRecordingUploadsRequest,
     ) {
-      state.calls.push(
-        `reserve:${request.trackNumber}:${request.chunks.length}`,
-      );
+      state.calls.push(`reserve:${request.trackNumber}:${request.chunks.length}`);
       refusal();
       if (!state.capturing) {
         throw Object.assign(new Error("not capturing"), {
@@ -256,9 +248,9 @@ describe("RecordingUploader", () => {
     await uploader.addChunk(await testChunk(0, 0, "a"));
     const status = await uploader.finish(RECORDING);
     expect(status.finalized).toBe(true);
-    expect(
-      server.state.calls.filter((call) => call.startsWith("reserve")).length,
-    ).toBeGreaterThan(1);
+    expect(server.state.calls.filter((call) => call.startsWith("reserve")).length).toBeGreaterThan(
+      1,
+    );
     expect(server.stored.has("0/0")).toBe(true);
   });
 
@@ -267,8 +259,7 @@ describe("RecordingUploader", () => {
     const { uploader } = uploaderFor(server);
     const createdBeforeAudio: boolean[] = [];
     uploader.subscribe((status) => {
-      if (status.created && server.stored.size === 0)
-        createdBeforeAudio.push(true);
+      if (status.created && server.stored.size === 0) createdBeforeAudio.push(true);
     });
     await uploader.begin({
       workspaceId: WORKSPACE,
@@ -411,21 +402,13 @@ describe("RecordingUploader", () => {
       recordingId: RECORDING,
       create,
     });
-    for (
-      let attempt = 0;
-      attempt < 20 && server.state.created === 0;
-      attempt += 1
-    ) {
+    for (let attempt = 0; attempt < 20 && server.state.created === 0; attempt += 1) {
       await new Promise((done) => setTimeout(done, 1));
     }
     // The app was killed while capturing: a new run finds it still "capturing".
     const next = uploaderFor(server, store).uploader;
     expect(await next.resume()).toEqual([RECORDING]);
-    for (
-      let attempt = 0;
-      attempt < 50 && !next.status(RECORDING)?.discarded;
-      attempt += 1
-    ) {
+    for (let attempt = 0; attempt < 50 && !next.status(RECORDING)?.discarded; attempt += 1) {
       await new Promise((done) => setTimeout(done, 1));
     }
     expect(next.status(RECORDING)?.discarded).toBe(true);
@@ -443,11 +426,7 @@ describe("RecordingUploader", () => {
     });
     await uploader.addChunk(await testChunk(0, 0, "a"));
     // Let the background pass create it on the server.
-    for (
-      let attempt = 0;
-      attempt < 20 && server.state.created === 0;
-      attempt += 1
-    ) {
+    for (let attempt = 0; attempt < 20 && server.state.created === 0; attempt += 1) {
       await new Promise((done) => setTimeout(done, 1));
     }
     await uploader.discard(RECORDING);
@@ -486,14 +465,14 @@ describe("RecordingUploader", () => {
       databaseName: "t",
     });
     const chunks = await reopened.listChunks(RECORDING);
-    expect(
-      chunks.map((item) => `${item.trackNumber}/${item.chunkNumber}`),
-    ).toEqual(["0/0", "0/1", "1/0"]);
+    expect(chunks.map((item) => `${item.trackNumber}/${item.chunkNumber}`)).toEqual([
+      "0/0",
+      "0/1",
+      "1/0",
+    ]);
     expect(chunks[0]).not.toHaveProperty("bytes");
     expect(chunks[0]!.byteLength).toBe(2);
-    expect(
-      new TextDecoder().decode((await reopened.readChunk(RECORDING, 0, 0))!),
-    ).toBe("m0");
+    expect(new TextDecoder().decode((await reopened.readChunk(RECORDING, 0, 0))!)).toBe("m0");
     expect((await reopened.getRecording(RECORDING))?.chunkCounts).toEqual({
       0: 2,
       1: 1,
@@ -554,9 +533,7 @@ describe("RecordingUploader", () => {
         durationMilliseconds: 5_000,
       },
     ]);
-    expect(
-      new TextDecoder().decode((await store.readChunk(RECORDING, 0, 0))!),
-    ).toBe("old");
+    expect(new TextDecoder().decode((await store.readChunk(RECORDING, 0, 0))!)).toBe("old");
   });
 });
 
@@ -568,12 +545,8 @@ describe("desktopSystemAudioSource", () => {
     data: Float32Array;
   };
 
-  function fakeDesktop(
-    start: () => Promise<{ captureId: string; sampleRate: number }>,
-  ) {
-    const sampleListeners = new Set<
-      (id: string, samples: Float32Array) => void
-    >();
+  function fakeDesktop(start: () => Promise<{ captureId: string; sampleRate: number }>) {
+    const sampleListeners = new Set<(id: string, samples: Float32Array) => void>();
     const endedListeners = new Set<(id: string, error: unknown) => void>();
     const stopped: string[] = [];
     const bridge = {
@@ -599,8 +572,7 @@ describe("desktopSystemAudioSource", () => {
       stopped,
       listeners: () => sampleListeners.size + endedListeners.size,
       samples: (id: string, values: number[]) => {
-        for (const listener of sampleListeners)
-          listener(id, new Float32Array(values));
+        for (const listener of sampleListeners) listener(id, new Float32Array(values));
       },
       end: (id: string) => {
         for (const listener of [...endedListeners]) listener(id, null);
@@ -608,9 +580,7 @@ describe("desktopSystemAudioSource", () => {
     };
   }
 
-  function withMediaGlobals<T>(
-    run: (frames: Frame[], tracks: EventTarget[]) => Promise<T>,
-  ) {
+  function withMediaGlobals<T>(run: (frames: Frame[], tracks: EventTarget[]) => Promise<T>) {
     const frames: Frame[] = [];
     const tracks: EventTarget[] = [];
     const scope = globalThis as Record<string, unknown>;
