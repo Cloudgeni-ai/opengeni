@@ -17,11 +17,7 @@ import {
   type DbClient,
   type StoredEventInput,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
@@ -38,7 +34,6 @@ beforeAll(async () => {
     console.warn("[worker-scheduled-event-run] PostgreSQL unavailable, skipping");
     return;
   }
-  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl);
 }, 180_000);
 

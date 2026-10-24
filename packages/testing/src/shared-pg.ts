@@ -850,28 +850,17 @@ export async function acquireSharedTestDatabase(
 }
 
 /**
- * Grant the runtime role what migration 0937 withholds until the previous
- * release knows these objects: EXECUTE on the event trigger dispatcher's due
- * inventory, the intake retention pass, the recording recovery sweep's
- * inventory, the MCP Events pump's and the source feed pump's due
- * inventories, and DML on
- * event_ingress_routes. Tests that exercise them run as
- * they will once it is granted.
+ * Grant the runtime role what a migration withholds until the previous
+ * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES): EXECUTE
+ * on the recording retention sweep's due inventory (0946). Tests that exercise
+ * it run as they will once it is granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
   role = "opengeni_app",
 ): Promise<void> {
   await admin.unsafe(`
-    GRANT EXECUTE ON FUNCTION
-      opengeni_private.list_due_event_trigger_tasks_v1(integer),
-      opengeni_private.prune_event_intake_v1(integer, integer, integer),
-      opengeni_private.list_stalled_recording_work_v1(integer),
-      opengeni_private.list_due_mcp_event_subscriptions_v1(integer),
-      opengeni_private.list_due_event_source_feeds_v1(integer),
-      opengeni_private.list_due_recording_retention_v1(integer)
-      TO "${role.replaceAll('"', '""')}";
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE event_ingress_routes
+    GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer)
       TO "${role.replaceAll('"', '""')}";
   `);
 }

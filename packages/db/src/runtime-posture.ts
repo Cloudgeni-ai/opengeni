@@ -44,19 +44,16 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
 ] as const;
 
 /**
- * SECURITY DEFINER routines in `opengeni_private` whose runtime EXECUTE is
- * withheld for one release: the event trigger dispatcher's identity-only due
- * inventory and intake retention pass (0929), the recording recovery sweep's
- * stalled-work inventory (0930), the MCP Events subscription pump's due
- * inventory (0932), the source feed pump's due inventory (0935) and the
- * recording retention sweep's due inventory (0946, withheld from the start). Each is
- * owned by its tables' owner, never PUBLIC, with a pinned search_path. The release that knew none of them
- * rejects a runtime EXECUTE grant on an unknown definer, so 0937 withholds the
- * grant (and provisioning keeps it withheld) until this binary is the previous
- * release. Until then readiness accepts each routine with or without runtime
- * EXECUTE; the release that grants it can then require it.
+ * SECURITY DEFINER routines in `opengeni_private` the runtime calls: the event
+ * trigger dispatcher's identity-only due inventory and intake retention pass
+ * (0929), the recording recovery sweep's stalled-work inventory (0930), the
+ * MCP Events subscription pump's due inventory (0932), the source feed pump's
+ * due inventory (0935) and the recording retention sweep's due inventory
+ * (0946). Each is owned by its tables' owner, never PUBLIC, with a pinned
+ * search_path. Runtime EXECUTE is required, except while a routine is in
+ * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
  */
-export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
+export const RUNTIME_DEFINER_ROUTINES = [
   "list_due_event_trigger_tasks_v1(integer)",
   "prune_event_intake_v1(integer, integer, integer)",
   "list_stalled_recording_work_v1(integer)",
@@ -66,11 +63,23 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
 ] as const;
 
 /**
- * The tables each deferred routine reads or writes as its owner. Once they all
+ * Runtime definers whose EXECUTE is withheld for one release. A release that
+ * does not know a definer rejects a runtime EXECUTE grant on it, so the grant
+ * (and provisioning) waits until a binary that knows it is the previous
+ * release; until then readiness accepts the routine with or without runtime
+ * EXECUTE. 0937 withheld the first five and 0947 grants them; 0946 withholds
+ * the recording retention inventory until its own follow-up release.
+ */
+export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
+  "list_due_recording_retention_v1(integer)",
+] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
+
+/**
+ * The tables each runtime definer reads or writes as its owner. Once they all
  * exist, the routine must exist too.
  */
-const DEFERRED_PRIVATE_ROUTINE_TABLES: Readonly<
-  Record<(typeof DEFERRED_RUNTIME_PRIVATE_ROUTINES)[number], readonly string[]>
+const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
+  Record<(typeof RUNTIME_DEFINER_ROUTINES)[number], readonly string[]>
 > = {
   "list_due_event_trigger_tasks_v1(integer)": ["scheduled_task_event_settings"],
   "prune_event_intake_v1(integer, integer, integer)": ["event_deliveries", "inbound_events"],
@@ -83,14 +92,6 @@ const DEFERRED_PRIVATE_ROUTINE_TABLES: Readonly<
     "workspaces",
   ],
 };
-
-/**
- * Non-RLS event trigger table whose runtime DML is withheld for the same
- * reason: the previous release rejects DML on an unknown non-RLS table. It is
- * known here with no required privileges; readiness accepts either no direct
- * DML or exactly SELECT, INSERT, UPDATE and DELETE (never a partial grant).
- */
-export const RUNTIME_DEFERRED_FULL_DML_TABLES = ["event_ingress_routes"] as const;
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
   "list_subscription_plan_maintenance_accounts(integer)";
@@ -2259,6 +2260,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "enrollment_token_redemptions",
   "enrollments",
   "event_deliveries",
+  "event_ingress_routes",
   "event_source_feeds",
   "event_sources",
   "event_triggers",
@@ -2838,10 +2840,10 @@ const DECLARED_PRIVATE_ROUTINES = new Set<string>([
   ...legacyRoutines.private,
   ...OWNER_INTERNAL_PRIVATE_ROUTINES,
   ...RETIRED_PRIVATE_ROUTINES,
-  ...DEFERRED_RUNTIME_PRIVATE_ROUTINES,
+  ...RUNTIME_DEFINER_ROUTINES,
 ]);
+const RUNTIME_DEFINER_ROUTINE_NAMES = new Set<string>(RUNTIME_DEFINER_ROUTINES);
 const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_PRIVATE_ROUTINES);
-const DEFERRED_FULL_DML_TABLE_NAMES = new Set<string>(RUNTIME_DEFERRED_FULL_DML_TABLES);
 const DECLARED_TARGET_ROUTINES = new Set<string>([
   ...legacyRoutines.target,
   ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
@@ -3979,27 +3981,6 @@ export function evaluateRuntimeDatabasePosture(
     if (toleratedUnknownTables.has(table.name)) {
       // RLS governs row DML, not TRUNCATE, REFERENCES, TRIGGER or MAINTAIN.
       for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
-    }
-    if (!options.tablePrivileges && DEFERRED_FULL_DML_TABLE_NAMES.has(table.name)) {
-      // Withheld runtime DML (see RUNTIME_DEFERRED_FULL_DML_TABLES): none or all four.
-      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
-      const tableGranted = new Set(
-        FULL_DML_PRIVILEGES.filter(
-          (privilege) => privileges.find(([name]) => name === privilege)?.[1] === true,
-        ),
-      );
-      // has_any_column_privilege is also true for a table-level grant, so only
-      // column privileges the table grant doesn't cover are column-only.
-      const columnOnly = (table.columnPrivileges ?? []).filter(
-        (privilege) => !tableGranted.has(privilege as (typeof FULL_DML_PRIVILEGES)[number]),
-      );
-      if (
-        (tableGranted.size > 0 && tableGranted.size < FULL_DML_PRIVILEGES.length) ||
-        columnOnly.length > 0
-      ) {
-        const partial = [...new Set([...tableGranted, ...columnOnly])];
-        violations.push(`table ${table.name} grants partial runtime DML: ${partial.join(", ")}`);
-      }
     }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
@@ -6209,8 +6190,8 @@ export function evaluateRuntimeDatabasePosture(
     if (!DECLARED_PRIVATE_ROUTINES.has(routine.name)) {
       violations.push(...unknownRoutineViolations(routine, "opengeni_private", expectedRole));
     }
-    if (DEFERRED_PRIVATE_ROUTINE_NAMES.has(routine.name)) {
-      violations.push(...deferredPrivateRoutineViolations(routine, tableByName, targetSchema));
+    if (RUNTIME_DEFINER_ROUTINE_NAMES.has(routine.name)) {
+      violations.push(...runtimeDefinerRoutineViolations(routine, tableByName, targetSchema));
     }
     if (routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE) {
       if (
@@ -6369,12 +6350,12 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
-  for (const name of DEFERRED_RUNTIME_PRIVATE_ROUTINES) {
+  for (const name of RUNTIME_DEFINER_ROUTINES) {
     if (
-      DEFERRED_PRIVATE_ROUTINE_TABLES[name].every((table) => tableByName.has(table)) &&
+      RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => tableByName.has(table)) &&
       posture.privateRoutines.filter((routine) => routine.name === name).length !== 1
     ) {
-      violations.push(`deferred definer ${name} is missing or ambiguous`);
+      violations.push(`runtime definer ${name} is missing or ambiguous`);
     }
   }
 
@@ -6382,26 +6363,26 @@ export function evaluateRuntimeDatabasePosture(
 }
 
 /**
- * Own checks for a deferred definer: owned by its tables' owner, never PUBLIC,
+ * Own checks for a runtime definer: owned by its tables' owner, never PUBLIC,
  * not reachable from triggers or other catalog objects, and a pinned
  * search_path (0929, 0930 and 0932 pin the migration's own path with
  * `SET search_path FROM CURRENT`) naming only the target schema,
  * `opengeni_private`, `public`, `pg_catalog` or `$user`, with `pg_temp` allowed
- * only last. Runtime EXECUTE may be present or withheld.
+ * only last. Runtime EXECUTE is checked with the other declared routines.
  */
-function deferredPrivateRoutineViolations(
+function runtimeDefinerRoutineViolations(
   routine: RuntimeRoutinePosture,
   tableByName: ReadonlyMap<string, { owner: string }>,
   targetSchema: string,
 ): string[] {
   const violations: string[] = [];
-  const label = `deferred definer ${routine.name}`;
+  const label = `runtime definer ${routine.name}`;
   if (!routine.securityDefiner) violations.push(`${label} is not SECURITY DEFINER`);
   if (routine.publicExecute !== false) violations.push(`PUBLIC can execute ${label}`);
   if (routine.triggerCallable !== false) violations.push(`${label} is trigger-callable`);
   if (routine.hasDependents !== false) violations.push(`${label} has catalog dependents`);
   const tables: readonly string[] =
-    DEFERRED_PRIVATE_ROUTINE_TABLES[routine.name as keyof typeof DEFERRED_PRIVATE_ROUTINE_TABLES] ??
+    RUNTIME_DEFINER_ROUTINE_TABLES[routine.name as keyof typeof RUNTIME_DEFINER_ROUTINE_TABLES] ??
     [];
   const owners = tables.map((name) => tableByName.get(name)?.owner);
   if (owners.length === 0 || owners.some((owner) => owner !== routine.owner)) {
