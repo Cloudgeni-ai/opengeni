@@ -91,7 +91,9 @@ describe("offline batcher administration contract", () => {
     const { current, receipts } = staged(legacy, "applied");
     const retained = JSON.stringify(receipts);
     expect(() => verify(next, current, "legacy-applied", receipts)).not.toThrow();
-    expect(() => verify(legacy, current, "legacy-applied", receipts)).toThrow();
+    expect(() => verify(legacy, current, "legacy-applied", receipts)).toThrow(
+      "explicit version 4 plan",
+    );
     expect(() => verify(next, current, "applied", receipts)).toThrow();
     current.rulesets[0] = { ...next.admission, id: next.admissionId };
     expect(() => verify(next, current, "upgrade-admission", receipts)).not.toThrow();
