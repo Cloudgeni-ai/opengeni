@@ -43,6 +43,7 @@ import {
   automationCreateRequest,
   automationDraftFrom,
   automationNextRun,
+  automationRunErrorText,
   automationRunEventsLabel,
   automationRunStatusLabel,
   automationRunTriggerLabel,
@@ -845,6 +846,10 @@ function AutomationRuns({
                 ? (automationRunEventsLabel(t, run) ??
                   automationRunTriggerLabel(t, run.triggerType))
                 : automationRunTriggerLabel(t, run.triggerType);
+            const reason =
+              (run.status === "failed" || run.status === "skipped") && run.error
+                ? automationRunErrorText(t, run.error)
+                : null;
             return (
               <li
                 key={run.id}
@@ -865,9 +870,12 @@ function AutomationRuns({
                     <span aria-hidden="true">·</span>
                     <RelativeTime date={run.firedAt} />
                   </span>
-                  {run.status === "failed" && run.error ? (
-                    <span className="line-clamp-2 text-xs leading-4.5 break-words text-fg-muted">
-                      {run.error}
+                  {reason ? (
+                    <span
+                      className="line-clamp-2 text-xs leading-4.5 break-words text-fg-muted"
+                      title={reason}
+                    >
+                      {reason}
                     </span>
                   ) : null}
                 </span>

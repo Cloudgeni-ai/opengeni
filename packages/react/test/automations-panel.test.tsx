@@ -288,6 +288,24 @@ test("a queued run's status keeps up while its automation is open", async () =>
     expect(client.listScheduledTaskRuns.mock.calls.length).toBe(readsSoFar);
   }));
 
+test("a failed or skipped run says why in words, never as its code", async () => {
+  const client = fakeClient({ tasks: [task()] });
+  client.listScheduledTaskRuns.mockImplementation(async () => [
+    run({ status: "failed", error: "scheduled_turn_failed" }),
+    run({
+      id: "4f5a6b7c-8d9e-4f0a-9b1c-2d3e4f5a6b7c",
+      status: "skipped",
+      error: "scheduled_session_not_idle",
+    }),
+  ]);
+  const container = await render(client, { sessionId: SESSION_ID });
+  await click(container.querySelector<HTMLButtonElement>("[data-row-action]")!);
+  const runs = recentRuns(container);
+  expect(runs).toContain("The agent ran into an error.");
+  expect(runs).toContain("Skipped because the chat was still busy with earlier work.");
+  expect(runs).not.toContain("scheduled_");
+});
+
 test("a new automation in a chat continues it, on the default schedule when events are off", async () => {
   const client = fakeClient({ sources: "off" });
   const container = await render(client, { sessionId: SESSION_ID });
