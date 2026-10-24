@@ -83,6 +83,9 @@ type Operation = {
   /** This step only fills a field (a part of a date field's input), so it
    * cannot submit or clear another field. */
   fillsField?: true;
+  /** The checked state a checkbox or switch this step presses must read
+   * once the step has run. */
+  expectToggle?: { ref: string; wanted: boolean };
   /** run_steps options of a step that names its element instead of carrying
    * a token: how long CUA waits for it, the check that holds first, and for
    * a checkbox or switch the checked state it is pressed into when it reads
@@ -1665,12 +1668,14 @@ export class CuaComputerBackend implements ComputerBackend {
       // presses it only when it is not in that state already.
       const wanted = toggleWanted(node.role, action);
       if (wanted !== null && !afterNamed) {
+        // The observation shows its state before the action only: once an
+        // earlier action of the batch ran, CUA reads it as the step runs.
+        const state = laterInBatch ? undefined : checkedState(node);
+        if (state === wanted) return [];
         if (!laterInBatch && node.states.includes("disabled"))
           throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
-        const state = checkedState(node);
-        if (state === wanted) return [];
-        if (state !== undefined)
-          return await this.operations(
+        if (state !== undefined) {
+          const presses = await this.operations(
             {
               ...command,
               action: { type: "semantic", locator: action.locator, action: "invoke" },
@@ -1679,8 +1684,14 @@ export class CuaComputerBackend implements ComputerBackend {
             afterNamed,
             inBatch,
           );
-        // Its state is not in the observation: CUA reads it when the step
-        // runs, which needs the element's own label to find it by.
+          return presses.map((step, index) =>
+            index === presses.length - 1
+              ? { ...step, expectToggle: { ref: node.ref, wanted } }
+              : step,
+          );
+        }
+        // CUA reads its state when the step runs, which needs the element's
+        // own label to find it by.
         const token = this.elementToken(command.targetId, node.ref);
         const findable =
           node.name !== undefined &&
@@ -1690,7 +1701,9 @@ export class CuaComputerBackend implements ComputerBackend {
         const named = findable ? namedOperation(this.identity.platform, args, action, node) : null;
         if (!named || !this.initialCapabilities.actionBatches)
           throw unsupported(
-            "This window does not show whether this element is checked, so it cannot be set to checked or not: invoke it to toggle it",
+            laterInBatch
+              ? "This checkbox or switch cannot be told apart by its label once earlier actions of the batch ran, so it cannot be set to checked or not there: act on it in its own call"
+              : "This window does not show whether this element is checked, so it cannot be set to checked or not: invoke it to toggle it",
           );
         return [named];
       }
@@ -2528,6 +2541,19 @@ function inputFailures(
       : { found: false as const };
   };
   for (const [index, step] of steps.entries()) {
+    if (step.expectToggle) {
+      const expected = step.expectToggle;
+      // A later step can press it again or change it with another control.
+      if (steps.slice(index + 1).some((later) => later.fillsField !== true)) continue;
+      const node = observation.roots.find((candidate) => candidate.ref === expected.ref);
+      const state = node ? checkedState(node) : undefined;
+      if (state !== undefined && state !== expected.wanted)
+        failures.push(
+          `the checkbox or switch ${expected.ref} still reads ${
+            state ? "checked" : "not checked"
+          } after its press; observe it before pressing it again`,
+        );
+    }
     if (step.expectDate) {
       const expected = step.expectDate;
       const reading = read(expected.ref);

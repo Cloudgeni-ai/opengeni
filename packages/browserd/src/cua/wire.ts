@@ -116,6 +116,8 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // A value write the control did not apply: it holds what it held before
   // (macOS set_value, effect not_applied).
   write_not_applied: "driver_failed",
+  // A step that sets a checked state found an element that has none.
+  not_a_toggle: "invalid_action",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can

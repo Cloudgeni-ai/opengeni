@@ -209,6 +209,24 @@ describe("CUA desktop boundary", () => {
               role: "AXCheckBox",
               label: "Unread",
             },
+            {
+              ...data.elements[0],
+              element_index: 4,
+              element_token: `s${this.snapshot}:4`,
+              role: "AXCheckBox",
+              label: "Locked",
+              value: "1",
+              enabled: false,
+            },
+            {
+              // Its press does not take.
+              ...data.elements[0],
+              element_index: 5,
+              element_token: `s${this.snapshot}:5`,
+              role: "AXCheckBox",
+              label: "Stuck",
+              value: "0",
+            },
           );
         response.structuredJson = JSON.stringify(data);
         return response;
@@ -262,6 +280,19 @@ describe("CUA desktop boundary", () => {
           "This window does not show whether this element is checked, so it cannot be set to checked or not: invoke it to toggle it",
       });
       expect(clicks()).toHaveLength(2);
+      // A disabled checkbox already in that state needs no press.
+      await toggle("set_value", true, "Locked");
+      expect(clicks()).toHaveLength(2);
+      await expect(toggle("set_value", false, "Locked")).rejects.toMatchObject({
+        code: "invalid_action",
+      });
+      // A press the checkbox does not take is reported, not passed off.
+      const stuck = (await backend.observe(target.id)).roots.find((root) => root.name === "Stuck")!;
+      await expect(toggle("set_value", true, "Stuck")).rejects.toMatchObject({
+        code: "driver_failed",
+        message: `The value was written, but the checkbox or switch ${stuck.ref} still reads not checked after its press; observe it before pressing it again`,
+      });
+      expect(clicks()).toHaveLength(3);
     } finally {
       await backend.close();
     }
@@ -2860,6 +2891,83 @@ describe("CUA desktop boundary", () => {
         expect(steps[2]!.args).not.toHaveProperty("role");
       } finally {
         await backend.close();
+      }
+    });
+
+    test("a checkbox after another action of the batch is set by CUA reading it as the step runs", async () => {
+      // The first action can change it ("Select all"), so the observation's
+      // state before the batch decides nothing for a later action.
+      class ToggleBatchFixture extends BatchFixture {
+        twin = false;
+        async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const response = await super.callTool(name, argumentsJson);
+          if (name !== "get_window_state" || !response.structuredJson) return response;
+          const data = JSON.parse(response.structuredJson);
+          const checkbox = (index: number) => ({
+            ...data.elements[0],
+            element_index: index,
+            element_token: `s${this.snapshot}:${index}`,
+            role: "AXCheckBox",
+            label: "Reminders",
+            value: "0",
+          });
+          if (data.elements) data.elements.push(checkbox(2), ...(this.twin ? [checkbox(3)] : []));
+          response.structuredJson = JSON.stringify(data);
+          return response;
+        }
+      }
+      const actions = (observation: ComputerBackendObservation) => {
+        const reminders = observation.roots.find((root) => root.name === "Reminders")!;
+        return {
+          ...batch(observation),
+          action: {
+            type: "batch" as const,
+            actions: [
+              {
+                type: "semantic" as const,
+                locator: { kind: "ref" as const, ref: observation.roots[0]!.ref },
+                action: "invoke" as const,
+              },
+              {
+                type: "semantic" as const,
+                locator: { kind: "ref" as const, ref: reminders.ref },
+                action: "set_value" as const,
+                value: true,
+              },
+            ],
+          },
+        };
+      };
+      const fixture = new ToggleBatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        await backend.dispatch(actions(observation));
+        const { steps } = fixture.calls.find((call) => call.name === "run_steps")!.args as {
+          steps: { tool: string; args: Record<string, unknown>; toggle_to?: boolean }[];
+        };
+        expect(steps).toHaveLength(2);
+        expect(steps[1]).toMatchObject({
+          tool: "click",
+          args: { role: "checkbox", name: "Reminders", exact: true },
+          toggle_to: true,
+        });
+        expect(steps[1]!.args).not.toHaveProperty("element_token");
+      } finally {
+        await backend.close();
+      }
+      // Two checkboxes of that label: CUA could not tell which one is meant.
+      const twins = new ToggleBatchFixture();
+      twins.twin = true;
+      const second = await open(twins);
+      try {
+        await expect(second.backend.dispatch(actions(second.observation))).rejects.toMatchObject({
+          code: "unsupported",
+          message:
+            "Action 2 of the batch: This checkbox or switch cannot be told apart by its label once earlier actions of the batch ran, so it cannot be set to checked or not there: act on it in its own call. No action of the batch ran.",
+        });
+        expect(twins.calls.some((call) => call.name === "run_steps")).toBe(false);
+      } finally {
+        await second.backend.close();
       }
     });
 
