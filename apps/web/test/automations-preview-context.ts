@@ -19,6 +19,11 @@ import type {
 } from "@opengeni/sdk";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
+/** A chat with no automations yet, for the Automations panel in a chat. */
+export const chatSessionId = "c4a70000-0000-4000-8000-000000000001";
+/** An MCP server the host offers before the viewer has a source for it. */
+export const projectsServer = { serverId: "projects", name: "Projects" };
+export const projectId = "9e0c4b1a-2f3d-4e5f-8a6b-7c8d9e0f1a2b";
 const viewer = "viewer-subject";
 const params = new URLSearchParams(location.search);
 const eventsEnabled = params.get("events") !== "0";
@@ -131,6 +136,33 @@ const eventTypes: Record<string, EventTypeDescriptor[]> = {
     },
   ],
 };
+const projectEventTypes: EventTypeDescriptor[] = [
+  {
+    ...descriptor("project.updated", "A project changed", ["data.status", "data.budget"]),
+    argumentsSchema: {
+      type: "object",
+      properties: {
+        projectId: {
+          type: "string",
+          format: "uuid",
+          title: "Project",
+          description: "The project to watch.",
+        },
+        change: {
+          oneOf: [
+            { const: "any", title: "Any change" },
+            { const: "status", title: "Status changes" },
+            { const: "budget", title: "Budget changes" },
+          ],
+          description: "Which changes count.",
+        },
+        includeArchived: { type: "boolean", title: "Include archived projects" },
+      },
+      required: ["projectId"],
+    },
+  },
+  descriptor("project.commented", "Someone commented on a project", ["data.author"]),
+];
 
 /* Automations. */
 
@@ -428,7 +460,10 @@ function findSource(id: string): EventSource {
 }
 
 const modeled: Record<string, (...args: never[]) => unknown> = {
-  listScheduledTasks: async () => tasks.map((item) => ({ ...item })),
+  listScheduledTasks: async (_workspace: string, options: { sessionId?: string } = {}) =>
+    tasks
+      .filter((item) => !options.sessionId || item.targetSessionId === options.sessionId)
+      .map((item) => ({ ...item })),
   getScheduledTask: async (_workspace: string, id: string) => ({ ...findTask(id) }),
   listScheduledTaskAccessAttention: async () => [],
   listScheduledTaskRuns: async (_workspace: string, id: string) => runs[id] ?? [],
@@ -445,13 +480,49 @@ const modeled: Record<string, (...args: never[]) => unknown> = {
     if (found.events) found.events = { ...found.events, completedAt: null };
     return { ...found };
   },
-  triggerScheduledTask: async () => undefined,
-  deleteScheduledTask: async () => undefined,
-  createScheduledTask: async (_workspace: string, request: Partial<ScheduledTask>) => {
+  triggerScheduledTask: async (_workspace: string, id: string) => {
     await wait();
-    const created = task(90 + tasks.length, request.name ?? "New automation", "active", manual, {
-      ...request,
-    } as Partial<ScheduledTask>);
+    return { ...findTask(id), updatedAt: new Date().toISOString() };
+  },
+  deleteScheduledTask: async () => undefined,
+  createScheduledTask: async (
+    _workspace: string,
+    request: Partial<ScheduledTask> & {
+      prompt?: string;
+      events?: { triggers: Partial<EventTrigger>[]; once?: boolean; maxRunsPerHour?: number };
+    },
+  ) => {
+    await wait();
+    // The request's shape as the saved automation: a chat's prompt and stored triggers.
+    const { prompt, events: input, ...fields } = request;
+    const created = task(
+      90 + tasks.length,
+      request.name ?? "New automation",
+      "active",
+      request.schedule ?? manual,
+      {
+        ...fields,
+        ...(prompt
+          ? { runMode: "existing_session", agentConfig: { prompt, resources: [], metadata: {} } }
+          : {}),
+        ...(input
+          ? {
+              events: {
+                triggers: input.triggers.map((entry, index) =>
+                  trigger(80 + index, {
+                    ...entry,
+                    sourceKind: findSource(entry.sourceId ?? "").kind,
+                  }),
+                ),
+                maxRunsPerHour: input.maxRunsPerHour ?? 30,
+                once: input.once ?? false,
+                completedAt: null,
+                throttledSince: null,
+              },
+            }
+          : {}),
+      } as Partial<ScheduledTask>,
+    );
     tasks.push(created);
     return created;
   },
@@ -489,8 +560,24 @@ const modeled: Record<string, (...args: never[]) => unknown> = {
     return { delivery: delivery(10, { replayOfDeliveryId: id }) };
   },
   rotateEventSourceSecret: async () => ({ signingSecret: "whsec_previewSecretValue0123456789" }),
-  createEventSource: async () => {
+  createEventSource: async (
+    _workspace: string,
+    request: { kind: string; serverId?: string; name?: string },
+  ) => {
     await wait();
+    if (request.kind === "mcp") {
+      const created = source(10 + sources.length, {
+        kind: "mcp",
+        name: request.name ?? request.serverId ?? "MCP server",
+        ownerSubjectId: viewer,
+        visibility: "private",
+        mcp: { serverId: request.serverId ?? "", connectionId: null } as EventSource["mcp"],
+        lastDeliveryAt: null,
+      });
+      sources.push(created);
+      eventTypes[created.id] = projectEventTypes;
+      return { source: created };
+    }
     return { source: deploys, signingSecret: "whsec_previewSecretValue0123456789" };
   },
   deleteEventSource: async () => undefined,

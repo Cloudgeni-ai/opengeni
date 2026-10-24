@@ -2,29 +2,39 @@
  * Pure helpers for the Automations pages: when an automation runs in words
  * (its schedule and its event triggers), the next run, the list order, the
  * derived name, and the create/update requests built from the form draft.
- * The cadence words and next runs come from the shared CadencePicker logic,
- * so the list, the automation page and the form agree.
+ * The words, cadences and names come from @opengeni/react/automations, so
+ * these pages and the embeddable Automations panel agree.
  */
 import {
-  DEFAULT_CADENCE_TIME,
-  cadenceFromScheduleSpec,
   describeCadence,
   formatRunTime,
-  nextRuns,
-  toScheduleSpec,
-  validateCadence,
   type CadenceFrequency,
-  type CadenceScheduleSpec,
   type CadenceValue,
 } from "@opengeni/react/ui/cadence-picker";
 import { t } from "@opengeni/react/app/lib/console-text";
 import {
+  AUTOMATION_FREQUENCIES,
+  AUTOMATION_NAME_MAX_LENGTH,
+  automationCadence,
+  automationCadenceIssue,
+  automationCadenceRepeats,
+  automationCadenceWords,
+  automationNextRun,
+  automationRunEventsLabel,
+  automationScheduleSpec,
+  automationScheduleWords,
+  automationWhenSentence as whenSentence,
+  automationWhenWords as whenWords,
+  defaultAutomationCadence,
+  deriveAutomationName,
   emptyEventTriggersDraft,
   eventConditionDraftFrom,
   eventTriggersInputFrom,
-  eventTriggersShortLabel,
+  hasEventTriggers,
+  isFinishedOnce,
   newEventTriggerDraft,
   sameEventTriggers,
+  viewerTimeZone,
   type EventSourceChoice,
   type EventTriggersDraft,
 } from "@opengeni/react/automations";
@@ -54,6 +64,8 @@ import type {
   Session,
 } from "@opengeni/react/app/types";
 
+export { hasEventTriggers, isFinishedOnce, viewerTimeZone };
+
 /** Agent learning overrides sent with an edit (not in the SDK's update type yet). */
 export interface ScheduleLearningUpdate {
   scope: "personal" | "workspace";
@@ -63,34 +75,12 @@ export interface ScheduleLearningUpdate {
   settings: NonNullable<ScheduledTaskFormState["agentLearning"]>;
 }
 
-/**
- * The frequencies a schedule can store. No "Every month on day N": the API's
- * calendar spec has no day of month yet, so offering it would save a rule the
- * server can't keep.
- */
-export const SCHEDULE_FREQUENCIES: readonly CadenceFrequency[] = [
-  "hourly",
-  "daily",
-  "weekdays",
-  "weekly",
-  "interval",
-  "once",
-];
-
-export function viewerTimeZone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  } catch {
-    return "UTC";
-  }
-}
+/** The frequencies a schedule can store (no day of month yet). */
+export const SCHEDULE_FREQUENCIES: readonly CadenceFrequency[] = AUTOMATION_FREQUENCIES;
 
 /** "Every weekday at 09:00, your time": the default for a new schedule. */
 export function defaultCadence(timeZone: string = viewerTimeZone()): CadenceValue {
-  return {
-    timeZone,
-    rule: { frequency: "weekdays", time: DEFAULT_CADENCE_TIME },
-  };
+  return defaultAutomationCadence(timeZone);
 }
 
 /** The stored spec as an editable cadence, or null for on-demand schedules. */
@@ -98,22 +88,11 @@ export function cadenceOfSchedule(
   schedule: ScheduledTaskScheduleSpec,
   fallbackTimeZone: string = viewerTimeZone(),
 ): CadenceValue | null {
-  if (schedule.type === "manual") return null;
-  try {
-    return cadenceFromScheduleSpec(
-      schedule as unknown as CadenceScheduleSpec,
-      "timeZone" in schedule && schedule.timeZone ? schedule.timeZone : fallbackTimeZone,
-    );
-  } catch {
-    return null;
-  }
+  return automationCadence(schedule, fallbackTimeZone);
 }
 
 export function specFromCadence(value: CadenceValue, now: Date): ScheduledTaskScheduleSpec {
-  return toScheduleSpec(value.rule, {
-    timeZone: value.timeZone,
-    now,
-  }) as unknown as ScheduledTaskScheduleSpec;
+  return automationScheduleSpec(value, now);
 }
 
 export interface ScheduleWords {
@@ -124,41 +103,17 @@ export interface ScheduleWords {
 }
 
 export function scheduleWords(schedule: ScheduledTaskScheduleSpec, now: Date): ScheduleWords {
-  const cadence = cadenceOfSchedule(schedule);
-  if (!cadence) {
-    return {
-      short: "Only when you run it",
-      sentence: "Runs only when someone presses Run now",
-    };
-  }
-  return cadenceWords(cadence, now);
+  return automationScheduleWords(t, schedule, now);
 }
 
 export function cadenceWords(cadence: CadenceValue, now: Date): ScheduleWords {
-  const words = describeCadence(cadence.rule, {
-    timeZone: cadence.timeZone,
-    now,
-    text: t,
-  });
-  return { short: words.short, sentence: words.sentence };
+  return automationCadenceWords(t, cadence, now);
 }
 
 /** The next run, or null when paused, on demand, or no runs are left. */
 export function nextRunOf(task: ScheduledTask, now: Date): Date | null {
   if (!scheduledTaskStateLabel(task).active) return null;
-  const cadence = cadenceOfSchedule(task.schedule);
-  if (!cadence) return null;
-  return nextRuns(cadence.rule, { timeZone: cadence.timeZone, now, count: 1 })[0] ?? null;
-}
-
-/** It has event triggers, so events can start it. */
-export function hasEventTriggers(task: Pick<ScheduledTask, "events">): boolean {
-  return (task.events?.triggers.length ?? 0) > 0;
-}
-
-/** A run-once automation whose run happened: it no longer listens or runs. */
-export function isFinishedOnce(task: Pick<ScheduledTask, "events">): boolean {
-  return Boolean(task.events?.once && task.events.completedAt);
+  return automationNextRun({ ...task, status: "active" }, now);
 }
 
 /** Events can start it now: it is on, has triggers and has not finished. */
@@ -175,10 +130,7 @@ export function automationWhenWords(
   sources: readonly Pick<EventSource, "id" | "name">[],
   now: Date,
 ): string {
-  const triggers = eventTriggersShortLabel(t, task.events?.triggers ?? [], sources);
-  if (!triggers) return scheduleWords(task.schedule, now).short;
-  if (task.schedule.type === "manual") return triggers;
-  return `${scheduleWords(task.schedule, now).short} · ${triggers}`;
+  return whenWords(t, task, sources, now);
 }
 
 /**
@@ -190,12 +142,7 @@ export function automationWhenSentence(
   task: Pick<ScheduledTask, "schedule" | "events">,
   now: Date,
 ): string {
-  const words = scheduleWords(task.schedule, now).sentence;
-  if (!hasEventTriggers(task)) return `${words}.`;
-  if (task.schedule.type !== "manual") return `${words}, and when a matching event arrives.`;
-  return task.events?.once
-    ? "Runs once, on the first matching event."
-    : "Runs when a matching event arrives.";
+  return whenSentence(t, task, now);
 }
 
 /** "Mon 28 Sep, 08:00" or "Today, 14:00" in the viewer's zone. */
@@ -208,24 +155,16 @@ export function runTimeLabel(date: Date, now: Date): string {
  * and how many more came with it. Null for a run no event started.
  */
 export function runEventsLabel(run: Pick<ScheduledTaskRun, "eventOccurrence">): string | null {
-  const occurrence = run.eventOccurrence;
-  if (!occurrence || occurrence.eventCount === 0) return null;
-  const [first] = occurrence.events;
-  if (!first) return `${occurrence.eventCount} events`;
-  const what = first.summary ?? first.subject ?? first.type;
-  return occurrence.eventCount === 1 ? what : `${what} and ${occurrence.eventCount - 1} more`;
+  return automationRunEventsLabel(t, run);
 }
 
 export function cadenceIssue(cadence: CadenceValue | null, now: Date): string | null {
-  if (!cadence) return null;
-  return (
-    validateCadence(cadence.rule, { timeZone: cadence.timeZone, now, text: t })?.message ?? null
-  );
+  return automationCadenceIssue(t, cadence, now);
 }
 
 /** The cadence runs more than once; a run-once automation can't have one. */
 export function cadenceRepeats(cadence: CadenceValue | null): boolean {
-  return cadence !== null && cadence.rule.frequency !== "once";
+  return automationCadenceRepeats(cadence);
 }
 
 /**
@@ -288,30 +227,16 @@ export function ownerName(task: ScheduledTask): string {
    Names.
    -------------------------------------------------------------------------- */
 
-const DANGLING_WORD = /\s+(a|an|and|at|by|for|from|in|into|of|on|or|the|to|with)$/i;
-const NAME_LIMIT = 60;
-
 /**
  * The name a schedule gets when Name is left empty: the first sentence of the
  * instructions, without a leading "Every weekday at 08:00:" and at most 60
  * characters, ending on a word that carries meaning.
  */
 export function deriveScheduleName(instructions: string): string {
-  const withoutCadence = instructions.trim().replace(/^every\b.{0,40}?:\s+/i, "");
-  const firstSentence = withoutCadence.split(/(?<=[.!?])\s|\n/)[0]?.replace(/[.!?]$/, "") ?? "";
-  const clean = firstSentence.replace(/\s+/g, " ").trim();
-  if (!clean) return "";
-  const capitalized = clean.charAt(0).toLocaleUpperCase() + clean.slice(1);
-  if (capitalized.length <= NAME_LIMIT) return capitalized;
-  let cut = capitalized.slice(0, NAME_LIMIT);
-  const space = cut.lastIndexOf(" ");
-  if (space > 20) cut = cut.slice(0, space);
-  cut = cut.replace(/[,;:]$/, "");
-  while (DANGLING_WORD.test(cut)) cut = cut.replace(DANGLING_WORD, "");
-  return `${cut}…`;
+  return deriveAutomationName(instructions);
 }
 
-export const NAME_MAX_LENGTH = 80;
+export const NAME_MAX_LENGTH = AUTOMATION_NAME_MAX_LENGTH;
 
 /* ----------------------------------------------------------------------------
    The form draft.

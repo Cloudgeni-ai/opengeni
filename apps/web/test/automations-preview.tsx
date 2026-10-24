@@ -1,6 +1,8 @@
 // The real Automations and Event sources pages over deterministic data. Open
 // test/automations-preview.html?path=/workspaces/<id>/automations (any of the
-// pages' own paths) and `&theme=dark` for the dark theme.
+// pages' own paths) and `&theme=dark` for the dark theme. The embeddable
+// Automations panel is at /workspaces/<id>/panel, in a dialog-sized frame;
+// `?chat=1` scopes it to a chat.
 import { createRoot } from "react-dom/client";
 import {
   createMemoryHistory,
@@ -11,6 +13,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { OpenGeniProvider } from "@opengeni/react";
+import { AutomationsPanel } from "@opengeni/react/automations";
 import { Toaster } from "@opengeni/react/app/components/toaster";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
@@ -21,7 +24,13 @@ import {
   EventSourceNewRoute,
   EventSourcesRoute,
 } from "../src/routes/automations";
-import { previewClient, workspaceId as previewWorkspaceId } from "./automations-preview-context";
+import {
+  chatSessionId,
+  previewClient,
+  projectId,
+  projectsServer,
+  workspaceId as previewWorkspaceId,
+} from "./automations-preview-context";
 import "../src/styles.css";
 
 const query = new URLSearchParams(location.search);
@@ -120,9 +129,45 @@ const edit = createRoute({
     );
   },
 });
+const panel = createRoute({
+  getParentRoute: () => root,
+  path: "/workspaces/$workspaceId/panel",
+  validateSearch: (search: Record<string, unknown>) => ({ chat: Boolean(search.chat) }),
+  component: function Panel() {
+    const { workspaceId } = panel.useParams();
+    const inChat = panel.useSearch().chat;
+    return (
+      <div className="flex min-h-dvh justify-center p-4 sm:p-10">
+        <div
+          role="dialog"
+          aria-label="Automations"
+          className="h-fit w-full max-w-[560px] rounded-xl border border-border bg-surface p-5 shadow-lg sm:p-6"
+        >
+          <AutomationsPanel
+            client={previewClient as never}
+            workspaceId={workspaceId}
+            sessionId={inChat ? chatSessionId : undefined}
+            eventServers={[projectsServer]}
+            argumentDefaults={{ projectId }}
+            onOpenSession={() => undefined}
+          />
+        </div>
+      </div>
+    );
+  },
+});
 
 const router = createRouter({
-  routeTree: root.addChildren([list, create, sourcesList, sourceNew, sourceDetail, detail, edit]),
+  routeTree: root.addChildren([
+    list,
+    create,
+    sourcesList,
+    sourceNew,
+    sourceDetail,
+    detail,
+    edit,
+    panel,
+  ]),
   history: createMemoryHistory({
     initialEntries: [query.get("path") ?? `/workspaces/${previewWorkspaceId}/automations`],
   }),

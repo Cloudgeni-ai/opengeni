@@ -4,16 +4,18 @@
  * Controlled and data-agnostic: the host passes the sources it can read and a
  * loader for each source's event types.
  */
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { PlusIcon, Trash2Icon, XIcon } from "lucide-react";
 
 import type { EventSource, EventTypeDescriptor } from "@opengeni/sdk";
 
 import { useOpenGeniText } from "../../messages/runtime";
 import { Button } from "../../ui/button";
-import { CheckboxField, Field, TextArea, TextInput } from "../../ui/field";
+import { CheckboxField, Field, TextInput } from "../../ui/field";
 import { ComboboxSelect, SelectMenu, type SelectOption } from "../../ui/select-menu";
 import { cn } from "../../lib/cn";
+import { EventArgumentsField } from "./event-arguments-field";
+import { eventArgumentsForEvent } from "./event-arguments-model";
 import { eventSourceKindLabel } from "./event-source-model";
 import { EventSourceTile, type EventSourceLogoResolver } from "./event-source-tile";
 import {
@@ -101,6 +103,13 @@ export interface EventTriggersFieldProps {
   onAddSource?: (() => void) | undefined;
   /** Offer "Run once, then finish" (default true). */
   allowOnce?: boolean | undefined;
+  /**
+   * Arguments a new MCP subscription starts with, by name, such as the
+   * project the host's chat belongs to. Only arguments the event takes apply.
+   */
+  argumentDefaults?: Readonly<Record<string, unknown>> | undefined;
+  /** More buttons beside Add an event, such as the host's Add a schedule. */
+  actions?: ReactNode | undefined;
   disabled?: boolean | undefined;
 }
 
@@ -113,6 +122,8 @@ export function EventTriggersField({
   sourceLogo,
   onAddSource,
   allowOnce = true,
+  argumentDefaults,
+  actions,
   disabled = false,
 }: EventTriggersFieldProps) {
   const t = useOpenGeniText();
@@ -151,6 +162,7 @@ export function EventTriggersField({
           issues={issues?.triggers[trigger.key]}
           sourceLogo={sourceLogo}
           onAddSource={onAddSource}
+          argumentDefaults={argumentDefaults}
           autoFocus={lastAdded.current === trigger.key}
           disabled={disabled}
         />
@@ -169,6 +181,7 @@ export function EventTriggersField({
             ? t("automations.editor.addEvent")
             : t("automations.editor.addAnotherEvent")}
         </Button>
+        {actions}
         {full ? (
           <span className="text-xs text-fg-muted">
             {t("automations.editor.triggersMax", { max: EVENT_TRIGGERS_PER_AUTOMATION_MAX })}
@@ -204,6 +217,8 @@ export interface EventTriggerEditorProps {
   issues?: EventTriggerIssues | undefined;
   sourceLogo?: EventSourceLogoResolver | undefined;
   onAddSource?: (() => void) | undefined;
+  /** Arguments a new MCP subscription starts with; see `EventTriggersField`. */
+  argumentDefaults?: Readonly<Record<string, unknown>> | undefined;
   /** Move focus to the source picker when the block appears. */
   autoFocus?: boolean | undefined;
   disabled?: boolean | undefined;
@@ -219,6 +234,7 @@ export function EventTriggerEditor({
   issues,
   sourceLogo,
   onAddSource,
+  argumentDefaults,
   autoFocus = false,
   disabled = false,
 }: EventTriggerEditorProps) {
@@ -226,10 +242,11 @@ export function EventTriggerEditor({
   const blockRef = useRef<HTMLDivElement>(null);
   const source = sources?.find((candidate) => candidate.id === value.sourceId);
   const descriptors = eventTypes?.status === "ready" ? eventTypes.eventTypes : [];
-  const argumentsSchema = value.eventTypes
-    .map((type) => descriptors.find((descriptor) => descriptor.type === type)?.argumentsSchema)
-    .find((schema) => schema && Object.keys(schema).length > 0);
-  const showArguments = source?.kind === "mcp" && (argumentsSchema || value.argumentsText.trim());
+  const schemaOf = (types: readonly string[]) =>
+    types
+      .map((type) => descriptors.find((descriptor) => descriptor.type === type)?.argumentsSchema)
+      .find((schema) => schema && Object.keys(schema).length > 0);
+  const argumentsSchema = schemaOf(value.eventTypes);
   useEffect(() => {
     if (!autoFocus) return;
     blockRef.current?.querySelector<HTMLElement>("button, input")?.focus();
@@ -322,13 +339,37 @@ export function EventTriggerEditor({
           >
             <EventTypePicker
               value={value.eventTypes}
-              onChange={(picked) => onChange({ ...value, eventTypes: picked })}
+              onChange={(picked) =>
+                onChange({
+                  ...value,
+                  eventTypes: picked,
+                  // A newly picked MCP event keeps what applies and fills in the host's defaults.
+                  ...(source?.kind === "mcp" && picked.length > 0
+                    ? {
+                        argumentsText: eventArgumentsForEvent(
+                          schemaOf(picked),
+                          value.argumentsText,
+                          argumentDefaults,
+                        ),
+                      }
+                    : {}),
+                })
+              }
               state={eventTypes}
               single={source?.kind === "mcp"}
               invalid={Boolean(issues?.eventTypes)}
               disabled={disabled}
             />
           </Field>
+          {source?.kind === "mcp" ? (
+            <EventArgumentsField
+              schema={argumentsSchema}
+              value={value.argumentsText}
+              onChange={(argumentsText) => onChange({ ...value, argumentsText })}
+              error={issues?.arguments}
+              disabled={disabled}
+            />
+          ) : null}
           <EventConditionsEditor
             value={value.conditions}
             onChange={(conditions) => onChange({ ...value, conditions })}
@@ -336,24 +377,6 @@ export function EventTriggerEditor({
             issues={issues?.conditions}
             disabled={disabled}
           />
-          {showArguments ? (
-            <Field
-              label={t("automations.editor.subscriptionSettings")}
-              optional
-              error={issues?.arguments}
-              hint={t("automations.editor.subscriptionSettingsHint")}
-            >
-              <TextArea
-                mono
-                rows={4}
-                value={value.argumentsText}
-                onChange={(event) => onChange({ ...value, argumentsText: event.target.value })}
-                placeholder={argumentsSchema ? argumentsExample(argumentsSchema) : "{}"}
-                disabled={disabled}
-                spellCheck={false}
-              />
-            </Field>
-          ) : null}
           {source?.kind === "github" || source?.kind === "slack" ? (
             <CheckboxField
               label={t("automations.editor.includeOwn")}
@@ -367,18 +390,6 @@ export function EventTriggerEditor({
       ) : null}
     </div>
   );
-}
-
-/** A filled-in example from a JSON Schema's properties, for the placeholder. */
-function argumentsExample(schema: Record<string, unknown>): string {
-  const properties = schema.properties;
-  if (!properties || typeof properties !== "object") return "{}";
-  const example: Record<string, unknown> = {};
-  for (const [name, property] of Object.entries(properties as Record<string, unknown>)) {
-    const type = (property as { type?: unknown } | null)?.type;
-    example[name] = type === "number" || type === "integer" ? 0 : type === "boolean" ? true : "";
-  }
-  return JSON.stringify(example, null, 2);
 }
 
 /* ----------------------------------------------------------------------------
