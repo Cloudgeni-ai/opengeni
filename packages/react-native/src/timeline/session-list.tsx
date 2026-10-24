@@ -38,12 +38,7 @@ import Svg, { Path } from "react-native-svg";
 import { Icon } from "./icon";
 import { useNativeTimelineMessages } from "./messages";
 import { withAlpha } from "./primitives";
-import {
-  BAR_MAX_FONT_SCALE,
-  fontStyle,
-  useNativeTimelineTheme,
-  type WebColorToken,
-} from "./theme";
+import { BAR_MAX_FONT_SCALE, fontStyle, useNativeTimelineTheme, type WebColorToken } from "./theme";
 
 /* ----------------------------------------------------------------------------
    The web app's session list rows at phone width (Recent sessions on the
