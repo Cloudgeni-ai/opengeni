@@ -532,6 +532,77 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(await f.git.ancestor(tested.tipSha, proof!.tipSha)).toBe(true);
     expect(await f.git.exec(["rev-parse", `${proof!.tipSha}^{tree}`])).toBe(proof!.testedTree);
   });
+  test("refresh rebuild conflict rejects equivalence but unexpected errors propagate", async () => {
+    const f = await refreshedFixture();
+    await f.git.fetch(f.origin.dir, [f.refreshed]);
+    const { MergeConflict } = await import("./git");
+    const build = f.git.build.bind(f.git);
+    let failure: Error = new MergeConflict(1);
+    f.git.build = async (spec) => {
+      if (spec.pulls.some((p) => p.headSha === f.refreshed)) throw failure;
+      return build(spec);
+    };
+    expect(await proveHeadRefresh(f.git, f.manifest, f.api.pulls, f.main)).toBeNull();
+    await f.controller().step();
+    expect((await f.state()).ledger.invalidated).toContain(f.manifest.batchId);
+    expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(f.main);
+    for (const message of ["provider unavailable", "unknown write outcome"]) {
+      failure = new Error(message);
+      await expect(proveHeadRefresh(f.git, f.manifest, f.api.pulls, f.main)).rejects.toBe(failure);
+    }
+  });
+  test("refresh requires unchanged identity, root membership and bounded merge lineage", async () => {
+    const f = await refreshedFixture();
+    await f.git.fetch(f.origin.dir, [f.refreshed]);
+    const p = f.api.pulls[0]!;
+    for (const changed of [
+      { ...p, headRef: "other" },
+      { ...p, controlPlane: true },
+      { ...p, binding: { ...p.binding, source: "auto-merge" as const } },
+      { ...p, binding: { ...p.binding, at: "2026-10-21T12:00:01.000Z" } },
+      { ...f.makePull(), binding: { ...f.makePull().binding, evidenceId: "fresh" } },
+    ])
+      expect(await proveHeadRefresh(f.git, f.manifest, [changed], f.main)).toBeNull();
+    expect(
+      await proveHeadRefresh(f.git, { ...f.manifest, predecessor: "a".repeat(64) }, [p], f.main),
+    ).toBeNull();
+    expect(await proveHeadRefresh(f.git, f.manifest, [], f.main)).toBeNull();
+    let chain = f.head;
+    for (let i = 1; i <= 9; i++) {
+      chain = await f.origin.commit(
+        await f.origin.mergeTree(chain, f.main),
+        [chain, f.main],
+        `m${i}`,
+        NOW,
+      );
+      if (i < 8) continue;
+      await f.git.fetch(f.origin.dir, [chain]);
+      const proof = await proveHeadRefresh(f.git, f.manifest, [{ ...p, headSha: chain }], f.main);
+      expect(proof === null).toBe(i === 9);
+    }
+  });
+  test("content-neutral non-main ancestry, evil-revert and octopus refreshes are rejected", async () => {
+    const f = await refreshedFixture();
+    const p = f.api.pulls[0]!;
+    const mainTree = await f.origin.exec(["rev-parse", `${f.main}^{tree}`]);
+    const cherry = await f.origin.commit(mainTree, [f.base], "cherry-picked main", NOW);
+    const viaCherry = await f.origin.commit(
+      await f.origin.mergeTree(f.head, cherry),
+      [f.head, cherry],
+      "merge cherry",
+      NOW,
+    );
+    const clean = await f.origin.mergeTree(f.head, f.main);
+    const evil = await f.commit({ base: "base", main: "advance", feature: "old", injected: "x" }, [
+      f.head,
+      f.main,
+    ]);
+    const revert = await f.origin.commit(clean, [evil, f.main], "evil revert", NOW);
+    const octopus = await f.origin.commit(clean, [f.head, f.main, cherry], "octopus", NOW);
+    await f.git.fetch(f.origin.dir, [viaCherry, revert, octopus]);
+    for (const headSha of [viaCherry, revert, octopus])
+      expect(await proveHeadRefresh(f.git, f.manifest, [{ ...p, headSha }], f.main)).toBeNull();
+  });
   test("missing initialized state alerts and refuses activation without provider writes", async () => {
     const f = await fixture();
     await f.origin.exec(["update-ref", "-d", f.cfg.stateRef]);

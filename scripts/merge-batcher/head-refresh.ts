@@ -1,4 +1,4 @@
-import { GitFailure, type GitStore } from "./git";
+import { GitFailure, MergeConflict, type GitStore } from "./git";
 import { bindingKey, canonical, type HeadRefresh, type Manifest, type Pull } from "./model";
 
 /** Prove ancestry AND content. A patch-id or unchanged final diff alone is insufficient. */
@@ -82,7 +82,8 @@ export async function proveHeadRefresh(
   } catch (error) {
     // Proven composition conflict rebuilds normally; unreadable objects/errors
     // are not evidence of equivalence and must propagate to the safe read path.
-    if (error instanceof GitFailure && error.exitCode === 1) return null;
+    if (error instanceof MergeConflict || (error instanceof GitFailure && error.exitCode === 1))
+      return null;
     throw error;
   }
 }
