@@ -15,7 +15,7 @@ import type {
   UpdateScheduledTaskRequest,
 } from "@opengeni/sdk";
 
-import type { OpenGeniText } from "../../messages/runtime";
+import type { OpenGeniMessageKey, OpenGeniText } from "../../messages/runtime";
 import {
   DEFAULT_CADENCE_TIME,
   cadenceFromScheduleSpec,
@@ -287,6 +287,64 @@ export function automationRunTriggerLabel(
     case "repair":
       return t("automations.run.trigger.repair");
   }
+}
+
+type RunErrorKey = Extract<OpenGeniMessageKey, `automations.run.error.${string}`>;
+
+/** The recorded reason codes of failed and skipped runs, by what a person reads. */
+const RUN_ERROR_KEYS: Readonly<Record<string, RunErrorKey>> = {
+  scheduled_turn_failed: "automations.run.error.turnFailed",
+  scheduled_update_failed: "automations.run.error.turnFailed",
+  scheduled_turn_cancelled: "automations.run.error.turnStopped",
+  scheduled_update_cancelled: "automations.run.error.turnStopped",
+  scheduled_turn_superseded: "automations.run.error.turnInterrupted",
+  scheduled_update_superseded: "automations.run.error.turnInterrupted",
+  scheduled_turn_withdrawn_for_edit: "automations.run.error.turnWithdrawn",
+  scheduled_session_not_idle: "automations.run.error.chatBusy",
+  scheduled_session_paused: "automations.run.error.chatPaused",
+  session_cancelled: "automations.run.error.chatEnded",
+  scheduled_target_session_unavailable: "automations.run.error.chatGone",
+  scheduled_target_execution_changed: "automations.run.error.chatChanged",
+  scheduled_workspace_paused: "automations.run.error.workspacePaused",
+  scheduled_task_paused_before_claim: "automations.run.error.automationInactive",
+  scheduled_task_deleted_before_claim: "automations.run.error.automationInactive",
+  scheduled_task_inactive_before_claim: "automations.run.error.automationInactive",
+  scheduled_machine_unavailable: "automations.run.error.machineUnavailable",
+  machine_target_unavailable: "automations.run.error.machineUnavailable",
+  machine_enrollment_inactive: "automations.run.error.machineUnavailable",
+  scheduled_authority_unavailable: "automations.run.error.accessUnavailable",
+  scheduled_authority_exhausted: "automations.run.error.accessUnavailable",
+  scheduled_authority_snapshot_missing: "automations.run.error.accessUnavailable",
+  connection_account_unavailable: "automations.run.error.accountUnavailable",
+  scheduled_model_unavailable: "automations.run.error.modelUnavailable",
+  variable_set_unavailable: "automations.run.error.variableSetUnavailable",
+  rig_version_unavailable: "automations.run.error.rigUnavailable",
+  insufficient_credits: "automations.run.error.outOfCredits",
+  allowance_exhausted: "automations.run.error.allowanceUsed",
+  monthly_model_cost_limit: "automations.run.error.monthlyCostLimit",
+  monthly_agent_run_limit: "automations.run.error.monthlyRunLimit",
+  session_usage_limit: "automations.run.error.usageLimit",
+};
+
+/** Older runs recorded an unavailable model as the API's own sentence. */
+const MODEL_UNAVAILABLE_TEXT =
+  /^(?:model is not available: .+|Turn execution policy model is (?:not present in the configured catalog|retired from new selection|no longer configured))$/;
+
+const REASON_CODE = /^[a-z][a-z0-9_]*$/;
+
+/**
+ * Why a run failed or was skipped, as a sentence for people: "Skipped because
+ * the chat was still busy with earlier work." Runs record a reason code; a
+ * code this version doesn't know reads as a plain "something went wrong", never
+ * as the code. An error recorded as a sentence passes through.
+ */
+export function automationRunErrorText(t: OpenGeniText, error: string): string {
+  const trimmed = error.trim();
+  const key = Object.hasOwn(RUN_ERROR_KEYS, trimmed) ? RUN_ERROR_KEYS[trimmed] : undefined;
+  if (key) return t(key);
+  if (MODEL_UNAVAILABLE_TEXT.test(trimmed)) return t("automations.run.error.modelUnavailable");
+  if (!trimmed || REASON_CODE.test(trimmed)) return t("automations.run.error.unknown");
+  return trimmed;
 }
 
 /* ----------------------------------------------------------------------------
