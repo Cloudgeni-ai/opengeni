@@ -15,7 +15,7 @@ execution time. Connection credentials are encrypted separately from the mirror.
 | 1Password | Service-account token and official SDK | Existing connection routes remain supported. |
 | Proton Pass | Scoped personal access token and operator-installed official CLI | Create supported items and move them to Trash; no updates, field removal, vault creation or file uploads. |
 | Keeper Secrets Manager | One-time token exchanged for bound SDK configuration | Shared folders are vaults; create and update supported records; no Archive or permanent-delete action. |
-| Bitwarden Password Manager | Customer-controlled signed bridge to the unlocked official CLI | Not Bitwarden Secrets Manager; customer keeps the master password and unlock session. |
+| Bitwarden Password Manager (bitwarden.com, bitwarden.eu, self-hosted, Vaultwarden) | The account's personal API key plus its master password once, over the server's client API; decrypted inside Opengeni | My vault and each organization collection the account can open are vaults; create and update logins and notes, move items to Trash; no file uploads. Not Bitwarden Secrets Manager. |
 | External vault | Signed remote provider implemented by the embedding product | One connection can expose several vaults, with explicit operation capabilities. |
 | In-process host | Existing `connectionCredentials.vaultProvider` port | Remains supported; no remote endpoint is required. |
 
@@ -35,6 +35,38 @@ For Proton Pass, the operator installs the supported `pass-cli` binary and sets
 environments. The adapter checks the version; Opengeni does not download or
 redistribute the binary automatically. No configured binary means Proton Pass
 is unavailable in that deployment, not that the user's token is wrong.
+
+### Bitwarden and Vaultwarden
+
+Bitwarden needs nothing installed. Opengeni talks to the server's client API
+the way the official apps do and decrypts items itself:
+
+- **Setup** takes the server address, the account's personal API key
+  (Settings, Security, Keys, View API key: a `user.…` client ID and its
+  secret) and the master password. The master password opens the account's
+  user key once and is then discarded. Opengeni stores, encrypted, the API key,
+  the server's API and identity addresses and the user key. Changing the master
+  password later keeps working; rotating the account's encryption key needs a
+  reconnect. An organization API key is refused: it cannot read a vault.
+- **Vaults** are My vault and every organization collection the account can
+  open. A collection shared read-only refuses writes; one that hides passwords
+  refuses concealed values, one-time passwords and attachments.
+- **Values** are never cached. Each read asks the server for the item and
+  decrypts only the requested fields. Listing uses one encrypted sync per
+  attempt. Access tokens are reused per process until shortly before they
+  expire, because servers rate-limit logins.
+- **Writes** create logins and secure notes, update fields (keeping password
+  history and refusing a stale revision), remove fields and move items to
+  Trash, where they can be restored. Attachments and one-time passwords are
+  readable.
+- **Self-hosted servers** on a private network address need
+  `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true` in both API and
+  worker; every request is otherwise DNS-pinned to public addresses. The
+  server's `/api/config` may name API and identity hosts only on the same
+  site as the address entered.
+
+Give agents an account of their own and share only the collections they need
+with it: they can use everything that account can open.
 
 ## Connection lifecycle
 
@@ -60,7 +92,9 @@ const connection = await vaults.installVaultProvider({
 
 Setup credentials are provider-specific:
 
-- `external` and `bitwarden`: `endpoint` and `signingSecret`.
+- `external`: `endpoint` and `signingSecret`.
+- `bitwarden`: `serverUrl`, `clientId`, `clientSecret` and `masterPassword`
+  (used once, never stored).
 - `protonpass`: `token` (a scoped personal access token, not the account password).
 - `keeper`: `oneTimeToken`, optionally its region `hostname`.
 
@@ -219,13 +253,10 @@ first request, use the pending setup flow: `installVaultProvider` saves the
 encrypted key and returns the ID with `discoveryPending: true`; register that
 ID against your fixed host tenant/user, then call
 `verifyVaultProviderConnection`. Do not solve registration by accepting every
-unknown connection into one shared tenant. A customer-controlled Bitwarden
-bridge follows this same registration flow.
+unknown connection into one shared tenant.
 
 The source-level receiver examples and tests live in
-`packages/sdk/test/external-vault-receiver.test.ts`; the customer-run bridge
-and its configuration are documented in
-`packages/vaults-bitwarden-bridge/README.md`.
+`packages/sdk/test/external-vault-receiver.test.ts`.
 
 The native secret ask card still saves atomically to hosted vaults only. A
 host can collect a secret in its own UI and then expose the resulting item

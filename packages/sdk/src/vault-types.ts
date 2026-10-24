@@ -369,7 +369,16 @@ export type VaultErrorCode =
 export type ExternalVaultProviderKind = "external" | "protonpass" | "keeper" | "bitwarden";
 export type VaultProviderCredentials =
   | { provider: "external"; endpoint: string; signingSecret: string }
-  | { provider: "bitwarden"; endpoint: string; signingSecret: string }
+  | {
+      provider: "bitwarden";
+      /** https://vault.bitwarden.com, https://vault.bitwarden.eu or a self-hosted server. */
+      serverUrl: string;
+      /** The account's personal API key: `user.<uuid>` and its secret. */
+      clientId: string;
+      clientSecret: string;
+      /** Opens the account once during setup; never stored. */
+      masterPassword: string;
+    }
   | { provider: "protonpass"; token: string }
   | { provider: "keeper"; oneTimeToken: string; hostname?: string | undefined };
 export type InstallVaultProviderRequest = {

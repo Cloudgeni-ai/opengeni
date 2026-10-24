@@ -7,7 +7,7 @@ import {
   protonPassCapabilities,
 } from "./provider";
 import { FILE_FIELD_PREFIX } from "./mapping";
-import { restrictToOperations } from "./operations";
+import { restrictToOperations } from "@opengeni/vaults";
 
 export const PROTON_PASS_POOL_MAX_SESSIONS = 32;
 export const PROTON_PASS_POOL_IDLE_MS = 15 * 60_000;

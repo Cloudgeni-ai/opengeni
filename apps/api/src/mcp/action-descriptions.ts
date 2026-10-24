@@ -34,7 +34,7 @@ const RULES: Rule[] = [
     method: "POST",
     pattern: /\/vault-providers\/connections$/,
     text: () =>
-      "Connect Proton Pass, Keeper Secrets Manager, a customer-controlled Bitwarden bridge or an external vault. Set ownership and provider-specific credentials. Saved-but-pending setup returns a connection ID; register it with a remote host if needed, then verify using the saved credentials.",
+      "Connect Proton Pass, Keeper Secrets Manager, Bitwarden (including Vaultwarden) or an external vault. Set ownership and provider-specific credentials; Bitwarden takes the server address, the account's personal API key and its master password, which is used once and not stored. Saved-but-pending setup returns a connection ID; register it with a remote host if needed, then verify using the saved credentials.",
   },
   {
     method: "PUT",

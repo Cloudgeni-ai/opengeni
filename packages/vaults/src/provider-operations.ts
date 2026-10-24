@@ -1,10 +1,6 @@
-import { providerOperations } from "@opengeni/vaults";
-import {
-  VaultProviderError,
-  type ProviderWriteItem,
-  type VaultProvider,
-  type VaultProviderOperations,
-} from "./contract";
+import type { VaultProviderOperations } from "@opengeni/contracts";
+import { providerOperations } from "./provider-capabilities";
+import { VaultProviderError, type ProviderWriteItem, type VaultProvider } from "./provider";
 
 function refused(what: string): never {
   throw new VaultProviderError(

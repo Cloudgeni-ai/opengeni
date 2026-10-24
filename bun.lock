@@ -98,6 +98,7 @@
         "@opengeni/storage": "workspace:*",
         "@opengeni/tool-gateway": "workspace:*",
         "@opengeni/vaults": "workspace:*",
+        "@opengeni/vaults-bitwarden": "workspace:*",
         "@opengeni/vaults-keeper": "workspace:*",
         "@opengeni/vaults-onepassword": "workspace:*",
         "@opengeni/vaults-protonpass": "workspace:*",
@@ -252,6 +253,7 @@
         "@opengeni/subscriptions": "workspace:*",
         "@opengeni/tool-gateway": "workspace:*",
         "@opengeni/vaults": "workspace:*",
+        "@opengeni/vaults-bitwarden": "workspace:*",
         "@opengeni/vaults-keeper": "workspace:*",
         "@opengeni/vaults-onepassword": "workspace:*",
         "@opengeni/vaults-protonpass": "workspace:*",
@@ -975,18 +977,16 @@
         "typescript": "7.0.2",
       },
     },
-    "packages/vaults-bitwarden-bridge": {
-      "name": "@opengeni/vaults-bitwarden-bridge",
-      "version": "2.0.19",
-      "bin": {
-        "opengeni-bitwarden-bridge": "./src/cli.ts",
-      },
+    "packages/vaults-bitwarden": {
+      "name": "@opengeni/vaults-bitwarden",
+      "version": "5.2.1",
       "dependencies": {
+        "@noble/hashes": "^1.8.0",
         "@opengeni/contracts": "workspace:*",
-        "@opengeni/sdk": "workspace:*",
+        "@opengeni/vaults": "workspace:*",
       },
       "devDependencies": {
-        "@opengeni/vaults": "workspace:*",
+        "tsup": "^8.5.0",
         "typescript": "7.0.2",
       },
     },
@@ -1956,7 +1956,7 @@
 
     "@opengeni/vaults": ["@opengeni/vaults@workspace:packages/vaults"],
 
-    "@opengeni/vaults-bitwarden-bridge": ["@opengeni/vaults-bitwarden-bridge@workspace:packages/vaults-bitwarden-bridge"],
+    "@opengeni/vaults-bitwarden": ["@opengeni/vaults-bitwarden@workspace:packages/vaults-bitwarden"],
 
     "@opengeni/vaults-keeper": ["@opengeni/vaults-keeper@workspace:packages/vaults-keeper"],
 

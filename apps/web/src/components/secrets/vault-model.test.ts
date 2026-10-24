@@ -267,8 +267,8 @@ describe("error copy (UI-9)", () => {
     expect(vaultErrorText(vaultApiError(401, "provider_auth_expired"), undefined, "Keeper")).toBe(
       "Access to Keeper expired. Reconnect it to keep using its vaults.",
     );
-    expect(vaultErrorText(vaultApiError(423, "provider_locked"), undefined, "Bitwarden")).toBe(
-      "Bitwarden is locked on the bridge. Unlock it there, then try again.",
+    expect(vaultErrorText(vaultApiError(423, "provider_locked"), undefined, "Proton Pass")).toBe(
+      "Proton Pass is locked. Unlock it, then try again.",
     );
     expect(
       vaultErrorText(vaultApiError(502, "provider_outcome_unknown"), undefined, "Proton Pass"),
