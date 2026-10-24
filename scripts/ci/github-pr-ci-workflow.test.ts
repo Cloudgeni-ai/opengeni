@@ -41,6 +41,7 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
   expect(workflow("batch-ci").concurrency["cancel-in-progress"]).toBe(false);
   expect(Object.keys(pr.jobs).sort()).toEqual(["fast", "plan", "ready"]);
   expect(pr.jobs.fast.needs).toBe("plan");
+  expect(pr.jobs.fast["timeout-minutes"]).toBe(15);
   expect(pr.jobs.fast.strategy).toBeUndefined();
   expect(pr.jobs.plan.concurrency).toBeUndefined();
   expect(pr.jobs.fast.concurrency).toBeUndefined();

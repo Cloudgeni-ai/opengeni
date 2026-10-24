@@ -74,7 +74,7 @@
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "c693e618fb8a6c8c070e29824b6c547a81f7863cbeb1c9e58861a74fa2d468d7"
+      "sha256": "51d5273fd5cb8c0e364575c0bd6e9ecbb0502cfe479aaf9126d2e6af3d68cf90"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",

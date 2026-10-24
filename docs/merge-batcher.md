@@ -415,7 +415,8 @@ requesting runners after observation.
 PR CI uses per-PR concurrency with cancellation enabled: a newer run supersedes
 the same PR, not an unrelated PR, main or Batch run. Explicit dispatch uses its
 PR-number input for the same group. Planning, one fast-check job and the final
-aggregate run sequentially; fast checks cover lint, impacted types and at most
+aggregate run sequentially; the fast-check job has a hard 15-minute timeout and
+covers lint, impacted types and at most
 40 unit files from directly touched workspace packages, not transitive dependents.
 Changed unit files are prioritized, then paths are ordered deterministically.
 Broad workflow/root/toolchain impact explicitly selects no admission units and
