@@ -121,3 +121,74 @@ test("a Batch reservation on a later page still blocks admission", async () => {
     scannedRuns: 0,
   });
 });
+
+test("four read workers overlap independent runs while each run's pages stay sequential", async () => {
+  const source = fixture(
+    Array.from({ length: 9 }, (_, i) => run(i + 1)),
+    Array.from({ length: 201 }, (_, i) => ({
+      id: i + 1,
+      status: i === 200 ? "queued" : "completed",
+    })),
+  );
+  let active = 0,
+    peak = 0;
+  const perRun = new Set<string>();
+  const result = await scan(async (path) => {
+    if (!path.includes("/jobs?")) return source.get(path);
+    const id = path.split("/")[2]!;
+    expect(perRun.has(id)).toBe(false);
+    perRun.add(id);
+    active++;
+    peak = Math.max(peak, active);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      return await source.get(path);
+    } finally {
+      active--;
+      perRun.delete(id);
+    }
+  });
+  expect(result).toMatchObject({ ok: true, scannedRuns: 9, otherDemand: 9 });
+  expect(peak).toBe(4);
+  expect(active).toBe(0);
+  expect(source.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(27);
+});
+
+test("job read failure drains started readers and never admits partial evidence", async () => {
+  const source = fixture(Array.from({ length: 20 }, (_, i) => run(i + 1)));
+  let active = 0,
+    started = 0;
+  await expect(
+    scan(async (path) => {
+      if (!path.includes("/jobs?")) return source.get(path);
+      active++;
+      started++;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        if (path.includes("/1/jobs?")) throw Error("job page unavailable");
+        return await source.get(path);
+      } finally {
+        active--;
+      }
+    }),
+  ).rejects.toThrow("job page unavailable");
+  expect(active).toBe(0);
+  expect(started).toBe(4);
+});
+
+test("parallel observations retain the same deadline and fail closed after slow responses", async () => {
+  const source = fixture(Array.from({ length: 12 }, (_, i) => run(i + 1)));
+  let now = 0;
+  const result = await scanRunnerDemand({
+    batchWorkflow: "batch.yml",
+    baseBranch: "main",
+    now: () => now,
+    get: async (path) => {
+      const data = await source.get(path);
+      if (path.includes("/jobs?")) now = 120001;
+      return data;
+    },
+  });
+  expect(result).toMatchObject({ ok: false, hold: "deadline" });
+  expect(source.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(4);
+});

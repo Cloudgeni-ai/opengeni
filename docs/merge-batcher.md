@@ -401,7 +401,11 @@ provider snapshot lag or same-total substitutions. GitHub's status-filtered
 listing can itself cap accessible results at 1000; an inaccessible remainder
 holds as incomplete, so pagination does not promise unlimited inventory.
 Every distinct relevant active run's complete latest-job
-inventory is then read. There are no 64-run or 32-run admission limits. A
+inventory is then read using at most four concurrent read workers. Pages within
+each run remain sequential; results are reduced in the observed run order only
+after the reads settle. API errors cannot admit partial evidence. This bounds
+request concurrency, not inventory size or provider latency. There are no 64-run
+or 32-run admission limits. A
 120-second scan deadline is checked before each request and after the last
 response; an overrun or provider error holds. Each listing requires a stable
 reported total, correctly sized pages and unique identities across pages;
