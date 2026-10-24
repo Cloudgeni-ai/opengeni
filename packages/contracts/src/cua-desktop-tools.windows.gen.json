@@ -5830,6 +5830,10 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "toggle_to": {
+                "description": "On a click that names a checkbox or switch by role/name: the checked state wanted. The click runs only when the element is not in that state already, and the state is checked after it.",
+                "type": "boolean"
+              },
               "tool": {
                 "description": "Action tool to run.",
                 "enum": [
