@@ -1,5 +1,10 @@
 import { appendFileSync, readFileSync } from "node:fs";
-import { classifyPrWorkflow, fastBudget, type FastObservation } from "./pr-fast-budget";
+import {
+  classifyPrWorkflow,
+  observedPrKind,
+  fastBudget,
+  type FastObservation,
+} from "./pr-fast-budget";
 
 class IncompleteInventory extends Error {}
 class GitHubReadError extends Error {
@@ -170,7 +175,7 @@ export async function runPrCiCommand(
       const rows = key ? data[key] : data;
       if (!Array.isArray(rows)) throw Error("Malformed provider page");
       if (key === "workflow_runs" && Number(data.total_count) > 1000)
-        throw Error("Filtered provider run inventory exceeds search bound");
+        throw new IncompleteInventory("Filtered provider run inventory exceeds search bound");
       all.push(...rows);
       if (rows.length < 100) {
         if (key && Number(data.total_count) > all.length)
@@ -203,6 +208,10 @@ export async function runPrCiCommand(
           if (!Number.isSafeInteger(run.id) || !Number.isSafeInteger(run.run_attempt))
             throw new IncompleteInventory("Invalid run identity");
           const path = run.path.split("@")[0];
+          const jobs = await pages(
+            `actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`,
+            "jobs",
+          );
           let kind: FastObservation["kind"] = "other";
           if (path === ".github/workflows/pr-ci.yml") {
             if (!/^[a-f0-9]{40}$/.test(run.head_sha))
@@ -228,9 +237,11 @@ export async function runPrCiCommand(
                 ),
               );
             }
-            const classified = definitions.get(run.head_sha);
+            const classified = observedPrKind(definitions.get(run.head_sha) ?? null, jobs);
             if (!classified)
-              throw new IncompleteInventory(`Unknown PR workflow budget for run ${run.id}`);
+              throw new IncompleteInventory(
+                `Unknown or mismatched attempt job topology for run ${run.id}`,
+              );
             kind = classified;
           } else if (
             path === ".github/workflows/ci.yml" &&
@@ -242,7 +253,7 @@ export async function runPrCiCommand(
           observations.push({
             id: run.id,
             kind,
-            jobs: await pages(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`, "jobs"),
+            jobs,
             ...(kind === "legacy-pr" ? { legacyGroup: "pr-ci-fanout" } : {}),
           });
         }

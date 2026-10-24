@@ -39,6 +39,8 @@ export function fastBudget(observations: FastObservation[], ownRun: number) {
       else if (demand) permits++;
     } else if (observation.kind === "legacy-pr") {
       if (!observation.legacyGroup) return held("Unknown legacy concurrency");
+      if (observation.jobs.some((j) => j.name === FAST_ADMISSION || j.name === "PR fast checks"))
+        return held("Modern attempt cannot share a legacy reservation");
       if (demand > 3) return held("Legacy job demand exceeds verified topology");
       legacy.add(observation.legacyGroup);
     } else if (observation.kind === "main") {
@@ -60,6 +62,33 @@ export function fastBudget(observations: FastObservation[], ownRun: number) {
     allowed: reserved <= 60,
     reason: `Reserved ${reserved}/60 jobs; ${permits} fast permits; ${legacy.size} legacy groups`,
   };
+}
+
+export function observedPrKind(
+  declared: "modern-pr" | "legacy-pr" | null,
+  jobs: FastObservation["jobs"],
+): "modern-pr" | "legacy-pr" | null {
+  if (!declared) return null;
+  if (!jobs.length) return declared;
+  const modern = jobs.some((j) => j.name === FAST_ADMISSION);
+  if (modern) {
+    if (
+      declared !== "modern-pr" ||
+      jobs.some((j) => ![FAST_ADMISSION, "PR fast checks", "PR CI"].includes(j.name))
+    )
+      return null;
+    return "modern-pr";
+  }
+  if (
+    declared !== "legacy-pr" ||
+    jobs.some(
+      (j) =>
+        !["plan", "contracts", "units", "PR CI"].includes(j.name) &&
+        !/^units \([01], 2\)$/.test(j.name),
+    )
+  )
+    return null;
+  return "legacy-pr";
 }
 
 export function classifyPrWorkflow(workflow: any): "modern-pr" | "legacy-pr" | null {

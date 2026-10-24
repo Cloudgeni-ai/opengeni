@@ -424,14 +424,17 @@ at least 9 observed main jobs, 4 fast checks and 1 admission runner: 60 total.
 Additional observed demand holds new admission. Pre-fanout main reserves at
 least 30, rather than assuming its small initial job list is its final demand.
 Verified legacy global PR concurrency contributes another 3 jobs once for its
-entire queue; unknown workflow topology holds instead of assuming that bound.
+entire queue. Attempt job names must agree with the declared topology; a modern
+admission job can never be collapsed into the shared legacy reservation. PRs
+execute a merge-ref workflow, so the head file alone is not execution evidence.
+Mismatches and unknown workflow topology hold instead of assuming that bound.
 These are conservative observed admission reservations, not provider-reserved
 runners or a hard end-to-end wait guarantee. Provider demand can change after
 observation. The Batch capacity gate remains independent and unchanged.
 
 The earlier 15-minute main-priority courtesy did not bound the global pre-job
 FIFO. The new gate does not waive a real capacity hold after 15 minutes.
-Old pending runs retain their old workflow definition. Recovery requires a
+Already-created pending runs retain their scheduled definition. Recovery may require a
 genuine current-head refresh by the PR owner onto the updated workflow; the
 normal supersession handler cancels only that PR's obsolete-head run. Do not
 blanket-cancel main, Batch, Version, or unrelated PR runs, or manufacture a
