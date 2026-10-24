@@ -391,6 +391,40 @@ describe("native recorder", () => {
     expect(snapshots.some((snapshot) => snapshot.state === "starting")).toBe(true);
   });
 
+  test("a chunk file the upload pass sees before capture reads it is still counted", async () => {
+    const { store } = await storeIn();
+    const fake = fakeNative((id) => store.directory(id));
+    const server = fakeServer();
+    const recorder = createNativeRecorder({
+      client: server.client,
+      workspaceId: WORKSPACE,
+      native: fake.native,
+      store,
+      // Capture reads each chunk a little late, as on a busy phone.
+      fs: {
+        ...nodeFs,
+        async readBytes(path) {
+          await new Promise((done) => setTimeout(done, 5));
+          return await nodeFs.readBytes(path);
+        },
+      },
+      randomUUID: () => RECORDING,
+      requestPermission: async () => true,
+      notification: { title: "t", text: "t" },
+      fetch: server.fetch,
+    });
+    await recorder.start();
+    await fake.writeChunk();
+    await fake.writeChunk();
+
+    const status = await recorder.stop();
+    expect(recorder.snapshot.error).toBeNull();
+    expect(status?.finalized).toBe(true);
+    expect(server.state.finalized?.tracks).toEqual([{ trackNumber: 0, chunkCount: 3 }]);
+    expect([...server.state.uploaded].sort()).toEqual([0, 1, 2]);
+    expect(await store.listRecordings()).toEqual([]);
+  });
+
   test("a declined microphone fails without creating anything", async () => {
     const { store } = await storeIn();
     const fake = fakeNative((id) => store.directory(id));
