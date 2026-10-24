@@ -232,6 +232,23 @@ function withoutLiveMemoryUsage(label: string): string {
   return label.replace(/ - (?:High )?[Mm]emory usage - [\d.,]+\s?[KMGT]?B(?= - |$)/u, "");
 }
 
+/**
+ * The title a reading's window element carries: its own label, not the page
+ * text an unlabeled element is named by, and clipped to a target title's
+ * bounds. Undefined when the reading has no labeled window element.
+ */
+export function readWindowTitle(
+  elements: readonly CuaElement[],
+  platform: Platform,
+): string | undefined {
+  const window = elements.find(
+    (element) => observedRole(element.role) === "window" && element.label?.trim(),
+  );
+  if (!window?.label) return undefined;
+  const title = platform === "macos" ? withoutLiveMemoryUsage(window.label) : window.label;
+  return title.trim() ? title.slice(0, 4_096) : undefined;
+}
+
 /** One part of a web page's date or time field, in the order the page shows
  * them (the locale's order: day, month, year in much of the world). */
 export type DateSegment =

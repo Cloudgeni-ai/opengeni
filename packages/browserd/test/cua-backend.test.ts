@@ -1132,6 +1132,22 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("an observation's title is its window element's own label, clipped, or else the listed title", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      fixture.windowName = "";
+      expect((await backend.observe(target.id)).target.title).toBe("Fixture");
+      fixture.windowName = "Report ".repeat(1_000);
+      const long = await backend.observe(target.id);
+      expect(long.target.title).toHaveLength(4_096);
+      expect(long.target.title.startsWith("Report Report")).toBe(true);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("a ref from an earlier observation names the same element in the latest one; an unknown one says what is current", async () => {
     const fixture = new Fixture();
     const backend = await CuaComputerBackend.open(fixture);

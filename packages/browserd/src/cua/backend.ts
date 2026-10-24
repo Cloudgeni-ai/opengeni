@@ -40,6 +40,7 @@ import {
   opensOnInvoke,
   parseDateValue,
   projectElements,
+  readWindowTitle,
   TOGGLE_ROLES,
   unindexedRows,
   unindexedTextByElement,
@@ -1182,7 +1183,8 @@ export class CuaComputerBackend implements ComputerBackend {
       this.identity.platform,
       unindexedTextByElement(state.tree_markdown, this.identity.platform),
     );
-    const document = documentTitle(projected, target.native.title);
+    const shownTitle = readWindowTitle(state.elements, this.identity.platform);
+    const document = documentTitle(shownTitle, target.native.title);
     const roots = this.stabilizeRefs(targetId, document, projected);
     // The rows folded into a field are its text, typed by the person.
     const refTokens = this.tokens.get(targetId);
@@ -1247,7 +1249,7 @@ export class CuaComputerBackend implements ComputerBackend {
       // had when the windows were last listed, the page before an action.
       target: {
         ...target.native,
-        title: shownWindowTitle(projected) ?? target.native.title,
+        title: shownTitle ?? target.native.title,
         bounds: state.window_bounds ?? target.native.bounds,
       },
       frameId:
@@ -2383,18 +2385,13 @@ function inProgressText(text: string): boolean {
   return words.length > 0 && words.length <= MAX_PROGRESS_WORDS;
 }
 
-/** The title of the document a reading shows: its window element's, which
- * the reading itself carries, or else the window's listed title. A window's
+/** The title of the document a reading shows: its window element's own
+ * label, which the reading itself carries, or else the window's listed title
+ * (never the page text an unlabeled window element is named by). A window's
  * listed title is the one it had when the windows were last listed, so after
  * an action that opened another page it still names the page before. */
-function documentTitle(nodes: readonly InteractionSemanticNodeValue[], listed: string): string {
-  const shown = shownWindowTitle(nodes);
+function documentTitle(shown: string | undefined, listed: string): string {
   return shown !== undefined ? `window\u0000${shown}` : listed;
-}
-
-/** The title of the window element a reading carries, when it has one. */
-function shownWindowTitle(nodes: readonly InteractionSemanticNodeValue[]): string | undefined {
-  return nodes.find((node) => node.role === "window" && node.name)?.name || undefined;
 }
 
 /** A button among the rows CUA leaves unindexed: on macOS a disabled button
