@@ -412,6 +412,30 @@ slot. Missing budget/reserve or any unrecognized or missing job status holds
 rather than inventing capacity. Waiting, pending and job-less runs can start
 requesting runners after observation.
 
+PR CI uses per-PR concurrency with cancellation enabled: a newer run supersedes
+the same PR, not an unrelated PR, main or Batch run. Explicit dispatch uses its
+PR-number input for the same group. Planning, one fast-check job and the final
+aggregate run sequentially; fast checks cover lint, impacted types and at most
+40 unit files from directly touched workspace packages, not transitive dependents.
+Changed unit files are prioritized, then paths are ordered deterministically.
+Broad workflow/root/toolchain impact explicitly selects no admission units and
+defers full coverage to Batch CI. Release-note `.changeset/` files alone do not
+trigger this deferral: the selector re-plans without them to confirm no other
+broad fence is hidden, then selects the capped direct-package units. The original
+impact planner and Batch plan remain unchanged. The retained PR plan records the selection
+reason and original, direct, selected and deferred counts; intentional deferral
+is not a claim that those tests passed. All selected tests must execute successfully
+for the fast job and required aggregate to pass. A failed selected test is never
+converted into an intentional skip. Type selection is unchanged. Full guards
+and the full suite remain in Batch CI, whose impact plan is not capped.
+
+There is no global PR admission lock, permit system or synthetic runner reserve.
+GitHub queues bursts under its hosted capacity limits. Keep the fast gate small;
+add a global cap only if measured main/Batch starvation justifies it. The Batch
+capacity gate below is unchanged. Already-created runs retain their scheduled
+definition, so backlog recovery must use current exact-head checks, not a false
+success or blanket cancellation of main, Batch, Version or unrelated work.
+
 Further checks protect the organization's shared hosted pool. They do not
 change the 52/30/18 allocation, and the two main holds apply before any
 arithmetic:
@@ -436,6 +460,13 @@ arithmetic:
   `BATCHER_PROVIDER_JOB_LIMIT`. With the defaults, 60 - 28 - 18 = 14 observed
   repository jobs at most. Combined with 52/30/18 (other + max(30, main) + 18 <= 52,
   so other <= 4 while main <= 30), admission needs other <= 4 and main + other <= 14.
+
+The per-PR fast workflow does not impose a global PR concurrency cap. With the
+currently deployed 52/30/60/28 Batch capacity settings, five or more observed PR
+jobs therefore still hold new Batch submission. Removing global PR serialization
+does not remove that separate Batch hold; a focused follow-up will address Batch
+submission independently. GitHub provider queue wait is not eliminated by the
+smaller PR gate.
 
 The batcher's App is installed only on this repository, so it cannot read other
 repositories' jobs and does not try. The allowance replaces that observation. It is
