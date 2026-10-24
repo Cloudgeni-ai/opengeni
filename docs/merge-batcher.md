@@ -694,11 +694,16 @@ strict read-only shadow only retains local evidence and never writes remote stat
 
 Telemetry reports the nearest-rank rolling two-hour p95 from each exact
 head/ready-event's **first measured provider CI start**, deduplicating reruns and
-bisection candidates. More than 1,800 seconds emits a stop signal and holds new
-batch work, but an already-published trusted-green candidate can drain through
-all ordinary landing guards. Capacity-induced latency must not deadlock a tested
-candidate. Red/unknown results, new publication and retries remain held;
-reconciliation and observation continue. The window is based on the first CI
+bisection candidates. More than 1,800 seconds retains the legacy `stop` signal
+as an informational alert only. It does not veto build, publication, invalidation,
+dequeue, retry, split, parking or landing, including shadow publication and already
+durable retry intents. Valid numeric capacity and main-demand estimates are also
+informational. Complete evidence, active Batch/max-inflight limits, exact tested
+tree, lease/CAS, provenance and unknown-outcome safeguards still block unsafe
+actions. A completed eligible first attempt may request its single retry without
+an additional initial elapsed-time wait; provider-error backoff and reconciliation
+of uncertain submissions remain unchanged. No queue fairness or hard capacity
+guarantee follows from this policy. The window is based on the first CI
 start; an aged-out sample is unknown, not newly healthy. Historical stage data is
 retained, not reset. stage.json reports raw and capacity/OFF-adjusted p95, windowSeconds,
 sample count, coverageSince and completeWindow alongside the signal. This is a

@@ -182,7 +182,7 @@ test("other demand that independently blocks capacity earns no main-wait credit"
     expect((await journal.records(at(3))).stages.one!.mainCapacityWaits ?? []).toEqual([]);
   }
 });
-test("pre-credit latency stop cannot be bypassed to earn capacity credits", async () => {
+test("latency alert preserves raw samples while genuine observed main holds earn credit", async () => {
   const { settings, observation: o } = await setup();
   o.ledger.stages.slow = { ...sample(), batchId: "slow" };
   o.ledger.stages.slow!.readyBindings![0]!.key = "different-binding";
@@ -190,7 +190,8 @@ test("pre-credit latency stop cannot be bypassed to earn capacity credits", asyn
   const journal = new ObservationJournal(settings);
   expect((await journal.observe(o)).telemetry!.status).toBe("stop");
   expect((await journal.observe({ ...o, now: at(44) })).telemetry!.status).toBe("stop");
-  expect((await journal.records(at(44))).stages.one!.mainCapacityWaits ?? []).toEqual([]);
+  expect((await journal.records(at(44))).stages.one!.mainCapacityWaits).toHaveLength(1);
+  expect((await journal.records(at(44))).stages.slow!.ciStartedAt).toBe(sample().ciStartedAt);
 });
 test("journal-derived abandoned missing run prevents credit with spare configured slots", async () => {
   const { settings, observation: o } = await setup();
