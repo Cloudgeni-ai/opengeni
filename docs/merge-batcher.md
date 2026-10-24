@@ -419,7 +419,10 @@ aggregate run sequentially; fast checks cover lint, impacted types and at most
 40 unit files from directly touched workspace packages, not transitive dependents.
 Changed unit files are prioritized, then paths are ordered deterministically.
 Broad workflow/root/toolchain impact explicitly selects no admission units and
-defers full coverage to Batch CI. The retained PR plan records the selection
+defers full coverage to Batch CI. Release-note `.changeset/` files alone do not
+trigger this deferral: the selector re-plans without them to confirm no other
+broad fence is hidden, then selects the capped direct-package units. The original
+impact planner and Batch plan remain unchanged. The retained PR plan records the selection
 reason and original, direct, selected and deferred counts; intentional deferral
 is not a claim that those tests passed. All selected tests must execute successfully
 for the fast job and required aggregate to pass. A failed selected test is never

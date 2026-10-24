@@ -1,9 +1,9 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import type { ImpactPlan } from "./impact";
+import { createImpactPlan, type ImpactPlan } from "./impact";
 import { createWorkspaceGraph } from "./workspace";
 
 export const PR_UNIT_FILE_CAP = 40;
-type Input = Pick<ImpactPlan, "schemaVersion" | "mode" | "changedFiles" | "unitTests">;
+type Input = Pick<ImpactPlan, "schemaVersion" | "mode" | "changedFiles" | "unitTests" | "reasons">;
 
 /** Admission sampling only; the original full Batch plan is never changed. */
 export function selectPrFastPlan<T extends Input>(plan: T, packageDirectories: readonly string[]) {
@@ -12,6 +12,7 @@ export function selectPrFastPlan<T extends Input>(plan: T, packageDirectories: r
     !["full", "focused", "docs"].includes(plan.mode) ||
     !Array.isArray(plan.changedFiles) ||
     !Array.isArray(plan.unitTests) ||
+    !Array.isArray(plan.reasons) ||
     [...plan.changedFiles, ...plan.unitTests].some((path) => typeof path !== "string")
   )
     throw new Error("Invalid PR impact plan");
@@ -21,28 +22,44 @@ export function selectPrFastPlan<T extends Input>(plan: T, packageDirectories: r
   const touched = new Set(
     plan.changedFiles.map(owner).filter((dir): dir is string => Boolean(dir)),
   );
-  const direct = [...new Set(plan.unitTests.filter((path) => touched.has(owner(path) ?? "")))];
+  const inventory = [...new Set(plan.unitTests)];
+  const direct = inventory.filter((path) => touched.has(owner(path) ?? ""));
   const changed = new Set(plan.changedFiles);
-  direct.sort((a, b) => Number(changed.has(b)) - Number(changed.has(a)) || a.localeCompare(b));
-  const unitTests = plan.mode === "focused" ? direct.slice(0, PR_UNIT_FILE_CAP) : [];
+  direct.sort(
+    (a, b) => Number(changed.has(b)) - Number(changed.has(a)) || (a < b ? -1 : a > b ? 1 : 0),
+  );
+  // impact.ts returns at its first broad fence. Re-plan without release notes
+  // so a changeset cannot hide a later workflow/root/schema fence.
+  const changesetOnlyFull =
+    plan.mode === "full" &&
+    plan.reasons.length > 0 &&
+    plan.reasons.every(
+      (reason) => typeof reason?.path === "string" && reason.path.startsWith(".changeset/"),
+    ) &&
+    createImpactPlan(plan.changedFiles.filter((path) => !path.startsWith(".changeset/"))).mode ===
+      "focused";
+  const selectDirect = plan.mode === "focused" || changesetOnlyFull;
+  const unitTests = selectDirect ? direct.slice(0, PR_UNIT_FILE_CAP) : [];
   return {
     ...plan,
     unitTests,
     prAdmissionUnits: {
       policy: "direct-packages-capped-v1",
       reason:
-        plan.mode === "full"
+        plan.mode === "full" && !changesetOnlyFull
           ? "broad-impact-deferred-to-batch"
           : plan.mode === "docs"
             ? "docs-no-admission-units"
-            : direct.length > PR_UNIT_FILE_CAP
-              ? "direct-package-cap"
-              : "direct-packages",
+            : direct.length === 0
+              ? "no-direct-package-units"
+              : direct.length > PR_UNIT_FILE_CAP
+                ? "direct-package-cap"
+                : "direct-packages",
       cap: PR_UNIT_FILE_CAP,
-      originalCount: plan.unitTests.length,
+      originalCount: inventory.length,
       directCount: direct.length,
       selectedCount: unitTests.length,
-      deferredCount: plan.unitTests.length - unitTests.length,
+      deferredCount: inventory.length - unitTests.length,
     },
   };
 }

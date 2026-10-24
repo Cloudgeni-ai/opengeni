@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
 import { PR_UNIT_FILE_CAP, selectPrFastPlan } from "./pr-fast-plan";
+import { createImpactPlan } from "./impact";
 
 const plan = {
   schemaVersion: 1 as const,
   mode: "focused" as const,
+  reasons: [],
   changedFiles: ["packages/a/src/index.ts"],
   unitTests: [
     "packages/a/test/one.test.ts",
@@ -54,7 +56,40 @@ test("docs and non-package paths select no units without treating missing tests 
   expect(
     selectPrFastPlan({ ...plan, changedFiles: ["scripts/example.ts"] }, dirs).unitTests,
   ).toEqual([]);
+  expect(
+    selectPrFastPlan({ ...plan, changedFiles: ["scripts/example.ts"] }, dirs).prAdmissionUnits
+      .reason,
+  ).toBe("no-direct-package-units");
   expect(() => selectPrFastPlan({ ...plan, mode: "invalid" } as never, dirs)).toThrow(
     "Invalid PR impact plan",
   );
+});
+
+test("product plus release note selects units, but changeset cannot mask another broad fence", () => {
+  const paths = [".changeset/example.md", "packages/runtime/src/index.ts"];
+  const product = createImpactPlan(paths);
+  expect(product.mode).toBe("full");
+  expect(selectPrFastPlan(product, ["packages/runtime"]).unitTests).toHaveLength(PR_UNIT_FILE_CAP);
+  for (const fence of ["package.json", ".github/workflows/pr-ci.yml"]) {
+    const broad = createImpactPlan([...paths, fence]);
+    expect(selectPrFastPlan(broad, ["packages/runtime"]).prAdmissionUnits.reason).toBe(
+      "broad-impact-deferred-to-batch",
+    );
+    expect(selectPrFastPlan(broad, ["packages/runtime"]).unitTests).toEqual([]);
+  }
+});
+
+test("duplicates count once and ordering uses code units", () => {
+  const units = [
+    "packages/a/test/z.test.ts",
+    "packages/a/test/Z.test.ts",
+    "packages/a/test/Z.test.ts",
+  ];
+  const selected = selectPrFastPlan({ ...plan, unitTests: units }, dirs);
+  expect(selected.unitTests).toEqual(["packages/a/test/Z.test.ts", "packages/a/test/z.test.ts"]);
+  expect(selected.prAdmissionUnits).toMatchObject({
+    originalCount: 2,
+    selectedCount: 2,
+    deferredCount: 0,
+  });
 });
