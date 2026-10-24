@@ -78,7 +78,38 @@ fn failed(step: &str, status: os::Error) -> CaptureError {
     )
 }
 
+/// Whether the app may record system audio, from TCC's preflight: 0 allowed,
+/// 1 turned off, 2 not asked yet. There is no public API for this permission,
+/// and a tap the person turned off records silence instead of failing, so
+/// this is the only way to tell them. The helper's permission is its app's.
+fn audio_capture_permission() -> Option<isize> {
+    type Preflight =
+        unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> isize;
+    // SAFETY: TCCAccessPreflight takes a CFString service name and an optional
+    // options dictionary, and returns an integer status; the library stays
+    // loaded while it runs.
+    unsafe {
+        let library = libloading::Library::new(
+            "/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC",
+        )
+        .ok()?;
+        let preflight = library.get::<Preflight>(b"TCCAccessPreflight\0").ok()?;
+        let service = cf::String::from_str("kTCCServiceAudioCapture");
+        let service: &cf::String = &service;
+        Some(preflight(
+            service as *const cf::String as *const std::ffi::c_void,
+            std::ptr::null(),
+        ))
+    }
+}
+
 pub fn start(options: &Options, sink: Sink) -> Result<Capture, CaptureError> {
+    if audio_capture_permission() == Some(1) {
+        return Err(CaptureError::new(
+            "permission_denied",
+            "System Audio Recording is turned off for this app.",
+        ));
+    }
     let excluded = excluded_processes(options);
     let excluded = ns::Array::from_slice_retained(&excluded);
     let mut description = ca::TapDesc::with_mono_global_tap_excluding_processes(&excluded);

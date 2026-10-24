@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cidre = { version = "0.29", default-features = false, features = ["core_audio", "dispatch", "blocks", "macos_14_2"] }
+libloading = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.26"

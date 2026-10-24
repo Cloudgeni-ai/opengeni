@@ -41,7 +41,10 @@ export function recorderErrorText(
     case "microphone_denied":
       return {
         title: "Microphone blocked",
-        body: "Allow microphone access for this site in your browser's address bar or settings, then start again.",
+        body:
+          systemAudioKind === "desktop"
+            ? "Allow this app to use the microphone in your computer's privacy settings, then start again."
+            : "Allow microphone access for this site in your browser's address bar or settings, then start again.",
       };
     case "microphone_unavailable":
       return {
