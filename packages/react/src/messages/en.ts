@@ -986,6 +986,7 @@ export const englishMessages = {
   "composerMessages.queue": "Queue",
   "composerMessages.queuedAhead_one": "{count} waiting prompt; your message joins the queue.",
   "composerMessages.queuedAhead_other": "{count} waiting prompts; your message joins the queue.",
+  "composerMessages.queuedPromptAlreadySent": "Already sent",
   "composerMessages.queueMessageEnterSteerWith": "Queue message (Enter); steer with Cmd/Ctrl+Enter",
   "composerMessages.queueRunsAfterCurrentWork":
     "Queue: runs after the agent finishes its current work",
@@ -3376,6 +3377,7 @@ export const englishMessages = {
     "The selected model is blocked by policy. Choose an allowed model before resuming.",
   "sessionChrome.theSelectedModelIsUnavailable":
     "The selected model is unavailable. Choose an available model before resuming.",
+  "sessionChrome.upArrowKey": "Up arrow",
   "sessionChrome.update": "Update",
   "sessionChrome.usageLimit": "usage limit",
   "sessionChrome.videoResult": "Video result",

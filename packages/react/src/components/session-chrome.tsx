@@ -80,6 +80,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "rea
 import type { ComposerOptimisticMessage, ComposerState } from "../hooks/use-composer";
 import type { UseGoalResult } from "../hooks/use-goal";
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
+import type { ComposerQueuedRecall } from "../hooks/use-queued-prompt-recall";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
 import { formatClockTime } from "../lib/format";
@@ -138,6 +139,8 @@ export type SessionChromeProps = {
    * Never called for failed checkout or while replacement awaits confirmation.
    */
   onComposerFocus?: (() => void) | undefined;
+  /** The composer's Up-arrow recall; its target row's Edit tip mentions ↑. */
+  queuedRecall?: Pick<ComposerQueuedRecall, "turnId"> | undefined;
   goal?: UseGoalResult | null | undefined;
   /** Expanded agents body (host supplies tree / list). */
   agentsPanel?: ReactNode;
@@ -551,6 +554,7 @@ function SessionChromeView({
   queueFocusTarget,
   composer,
   onComposerFocus,
+  queuedRecall,
   goal,
   agentsPanel,
   commandsPanel,
@@ -997,6 +1001,7 @@ function SessionChromeView({
         onRemoveOptimistic={composer?.removeOptimisticMessage}
         readOnly={!canMutateQueue}
         mutationFor={queue.mutationFor}
+        upRecallTurnId={queuedRecall?.turnId ?? null}
         replaceDraftFor={replaceDraftFor}
         onCancelReplace={() => setReplaceDraftFor(null)}
         onConfirmReplace={
@@ -1616,6 +1621,7 @@ function QueuePanel({
   onRemoveOptimistic,
   readOnly,
   mutationFor,
+  upRecallTurnId = null,
   replaceDraftFor,
   onCancelReplace,
   onConfirmReplace,
@@ -1635,6 +1641,8 @@ function QueuePanel({
   onRemoveOptimistic?: ((clientEventId: string) => void) | undefined;
   readOnly: boolean;
   mutationFor: UseTurnQueueResult["mutationFor"];
+  /** The row Up in an empty composer would pull back. */
+  upRecallTurnId?: string | null | undefined;
   replaceDraftFor?: string | null | undefined;
   onCancelReplace?: (() => void) | undefined;
   onConfirmReplace?: (() => void) | undefined;
@@ -1729,7 +1737,7 @@ function QueuePanel({
                     {onEdit ? (
                       <IconAction
                         label={t("sessionChrome.editQueuedPromptIndex", { index: index + 1 })}
-                        tip={QUEUE_EDIT_TIP(t)}
+                        tip={upRecallTurnId === turn.id ? <QueueEditUpTip /> : QUEUE_EDIT_TIP(t)}
                         disabled={settling || pending !== null}
                         onClick={() => onEdit(turn)}
                       >
@@ -2070,6 +2078,18 @@ function QueueSteerTip() {
   );
 }
 const QUEUE_EDIT_TIP = (t: OpenGeniText) => t("sessionChrome.editInComposer");
+/** The row Up would recall: same tip plus the key, muted. */
+function QueueEditUpTip() {
+  const t = useOpenGeniText();
+  return (
+    <span className="inline-flex items-center gap-1.5" data-testid="session-chrome-queue-up-hint">
+      {QUEUE_EDIT_TIP(t)}
+      <kbd aria-label={t("sessionChrome.upArrowKey")} className="font-sans opacity-60">
+        ↑
+      </kbd>
+    </span>
+  );
+}
 const QUEUE_DELETE_TIP = (t: OpenGeniText) => t("sessionChrome.deleteThisQueuedPrompt");
 
 function IconAction({

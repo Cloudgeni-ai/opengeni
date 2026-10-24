@@ -25,6 +25,7 @@ import {
   type UseSessionConversationOptions,
 } from "../hooks/use-session-conversation";
 import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
+import { useQueuedPromptRecall } from "../hooks/use-queued-prompt-recall";
 import { useDocumentForeground, useElementOnScreen } from "../hooks/use-foreground-visibility";
 import { useSessionReadAcknowledgement } from "../hooks/use-session-read-acknowledgement";
 import {
@@ -222,6 +223,14 @@ export type SessionConversationProps = ClientOverride &
     surface?: HostSurfacePreference | undefined;
     /** Conversation-owned copy (error actions). */
     labels?: Partial<SessionConversationLabels> | undefined;
+    /**
+     * The signed-in person's subject id, as recorded on their turns
+     * (`turn.initiator.subjectId`). When set, Up in an empty composer pulls
+     * their latest waiting prompt back for editing; prompts from anyone else,
+     * including ones your backend sends with a service key, are never
+     * recalled. Omit it and Up keeps its normal behaviour.
+     */
+    viewerSubjectId?: string | null | undefined;
     /** Presentation/custom controls only; queue and delivery wiring stay owned here. */
     composerProps?: Omit<
       ChatComposerProps,
@@ -370,6 +379,7 @@ function ConversationView({
   surface,
   labels: labelOverrides,
   composerProps,
+  viewerSubjectId,
   chromeProps,
   humanInputProps,
   approvalProps,
@@ -405,6 +415,14 @@ function ConversationView({
     feed.connectionState,
     feed.initialLoading,
   );
+  const builtInQueuedRecall = useQueuedPromptRecall({
+    queue,
+    composer,
+    subjectId: viewerSubjectId,
+    enabled: sessionId !== null && !terminal && Boolean(viewerSubjectId),
+  });
+  // One recall drives both the composer key and the queue row's ↑ hint.
+  const queuedRecall = composerProps?.queuedRecall ?? builtInQueuedRecall;
   const formatError = useErrorMessage();
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
@@ -686,6 +704,7 @@ function ConversationView({
                         ...chromeProps,
                         queue,
                         composer,
+                        queuedRecall,
                         sessionStatus: status,
                         onOpenSession,
                         onComposerFocus: () =>
@@ -754,6 +773,7 @@ function ConversationView({
                   detail.session?.effectiveControl
                 }
                 queuedAheadCount={queue.queue.length}
+                queuedRecall={queuedRecall}
               />
             </div>
           </>
