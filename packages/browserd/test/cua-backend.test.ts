@@ -3482,6 +3482,48 @@ describe("CUA desktop boundary", () => {
         } finally {
           await third.backend.close();
         }
+
+        // Elements of other roles with that name are listed without CUA's
+        // element numbers too.
+        const otherRoles = new LinkFixture();
+        otherRoles.links = ["Juniper Printing", "Juniper Printing"];
+        otherRoles.reply = {
+          ok: false,
+          total: 2,
+          executed: 2,
+          failed_step: 1,
+          steps: [
+            { index: 0, ok: true, message: "ok" },
+            {
+              index: 1,
+              ok: false,
+              code: "ambiguous",
+              phase: "find",
+              message:
+                'no link "Juniper Printing" in window 7, and 2 elements of other roles have that exact name; name the role of the one meant: [15] AXButton "Juniper Printing"; [20] AXStaticText "Juniper Printing"',
+            },
+          ],
+        };
+        const fourth = await open(otherRoles);
+        try {
+          const failure = await fourth.backend
+            .dispatch(
+              asBatch(named(fourth.observation, "button", "Apply"), {
+                type: "semantic",
+                locator: { kind: "role", role: "link", name: "Juniper Printing", exact: true },
+                action: "invoke",
+              } as ComputerBackendActionCommand["action"]),
+            )
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_ambiguous" });
+          const message = (failure as Error).message;
+          expect(message).toContain(
+            'name the role of the one meant: AXButton "Juniper Printing"; AXStaticText "Juniper Printing"',
+          );
+          expect(message).not.toMatch(/\[\d+\]/);
+        } finally {
+          await fourth.backend.close();
+        }
       });
 
       test("the receipt names each stand-in, without a typed secret", async () => {

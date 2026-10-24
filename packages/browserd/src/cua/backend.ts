@@ -724,7 +724,7 @@ export class CuaComputerBackend implements ComputerBackend {
               "; add `nth` or a more exact name: ",
               "; give a more exact name, or observe the window and act on the one meant by its ref: ",
             )
-            .replace(/nth \d+: (\[\d+\] )?/g, "")
+            .replace(/(: |; )(?:nth \d+: )?(?:\[\d+\] )?/g, "$1")
         : outcome.message);
     const message = single
       ? `CUA stopped part way through the input: ${reason}`
