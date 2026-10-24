@@ -245,11 +245,15 @@ describe("computer tools without identifiers", () => {
     });
     const here = browser({ kind: "connected_machine", sandboxId: machine }, now);
     const left = browser({ kind: "sandbox_group", sandboxGroupId }, "2026-10-24T01:30:00.000Z");
+    const external = browser(
+      { kind: "external_provider", providerId: "provider", placementId: "placement" },
+      "2026-10-24T01:20:00.000Z",
+    );
     const listed: string[] = [];
-    const [tabs] = createInteractionAttemptToolDefinitions({
+    const options = {
       transport: {
         getSession: async () => ({ activeSandboxId: machine, sandboxGroupId }),
-        listBrowserSessions: async () => ({ revision: 1, sessions: [left, here] }),
+        listBrowserSessions: async () => ({ revision: 1, sessions: list }),
         listBrowserTargets: async (_workspace: string, id: string) => {
           listed.push(id);
           return { browserSessionId: id, controllerGeneration: "controller-1", targets: [] };
@@ -257,11 +261,25 @@ describe("computer tools without identifiers", () => {
       } as unknown as InteractionTransport,
       workspaceId,
       sessionId,
-      selectedTools: ["browser_tabs"],
+      selectedTools: ["browser_tabs"] as const,
       permissions: ["sessions:read", "sessions:control"],
+    };
+    const [tabs] = createInteractionAttemptToolDefinitions({
+      ...options,
+      selectedTools: [...options.selectedTools],
     });
+    let list = [left, here];
     await tabs!.execute({ operation: "list" }, { operationId: randomUUID(), caller: model });
     expect(listed).toEqual([here.id]);
+    // A browser on an external provider is on neither machine, so it stays
+    // the current one when it was used last.
+    list = [left, external, here];
+    const [again] = createInteractionAttemptToolDefinitions({
+      ...options,
+      selectedTools: [...options.selectedTools],
+    });
+    await again!.execute({ operation: "list" }, { operationId: randomUUID(), caller: model });
+    expect(listed).toEqual([here.id, external.id]);
   });
 
   test("computer_act's model schema takes a bare ref as a locator and leaves ids optional", () => {

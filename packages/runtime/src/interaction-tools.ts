@@ -1160,8 +1160,8 @@ export function createInteractionAttemptToolDefinitions(
   };
   /** The sessions on the placement this chat runs on now. One left on a
    * machine the chat has since moved away from is used only when named, as
-   * computer_open and browser_open reuse. The person's own Chrome is on
-   * neither machine. */
+   * computer_open and browser_open reuse. The person's own Chrome and an
+   * external provider's session are on neither machine. */
   const onCurrentPlacement = async <T extends { placement: z.infer<typeof InteractionPlacement> }>(
     listed: Promise<T[]>,
   ): Promise<T[]> => {
@@ -1172,7 +1172,8 @@ export function createInteractionAttemptToolDefinitions(
     return sessions.filter(
       (session) =>
         current === null ||
-        session.placement.kind === "attached_device" ||
+        (session.placement.kind !== "sandbox_group" &&
+          session.placement.kind !== "connected_machine") ||
         placementFieldsMatch(session.placement, current),
     );
   };
