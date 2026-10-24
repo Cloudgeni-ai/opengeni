@@ -64,6 +64,11 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
     // merge-tree audit and full-green publication jobs to the released tip.
     fullGreenJobs: Object.freeze(["Verify landed merge content", "Publish fully green main SHA"]),
     fullGreenStatus: "Full CI",
+    // Exact-head Version PR CI: the ci.yml workflow_dispatch run executes on
+    // main at the Version base and checks out the Version head.
+    automationCiAdmissionJob: "Admit automation Version PR",
+    automationCiReportJob: "Report exact-head automation CI",
+    automationCiReportStep: "Complete exact-head automation CI check",
   }),
   // Tested-descendant admission: a Version provenance merge plus a later fully
   // green first-parent main tip that contains it. Bounds fail closed rather than
@@ -77,6 +82,13 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
       "merge",
       "provider-verified-moving-main-merge",
     ]),
+  }),
+  // Version-head release: the exact bot Version PR head released from the
+  // two-parent merge commit that landed it. Bounds fail closed.
+  versionHead: Object.freeze({
+    mergeMethod: "merge-version-head",
+    maximumAutomationCiRuns: 10,
+    maximumReportLogBytes: 1_000_000,
   }),
 });
 
@@ -220,6 +232,36 @@ function githubClient(fetchImpl, token) {
         invariant(size <= 2 * 1024 * 1024, "release receipt archive exceeds 2 MiB");
         chunks.push(Buffer.from(chunk));
       }
+      return Buffer.concat(chunks);
+    },
+    jobLogBytes: async (id, maximumBytes) => {
+      const path = repositoryPath(`/actions/jobs/${assertPositiveInteger(id, "job ID")}/logs`);
+      let response = await fetchImpl(`${RELEASE_AUTOMATION_CONTRACT.apiUrl}${path}`, {
+        redirect: "manual",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "User-Agent": "opengeni-release-pr-automation",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      });
+      if (response.status === 302) {
+        const location = new URL(
+          assertString(response.headers.get("location"), "job log download location"),
+        );
+        invariant(location.protocol === "https:", "job log download must use HTTPS");
+        // The signed storage URL must never receive the GitHub credential.
+        response = await fetchImpl(location.href, { redirect: "error" });
+      }
+      invariant(response.ok === true && response.body, "job log download failed");
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of response.body) {
+        size += chunk.byteLength;
+        invariant(size <= maximumBytes, "job log exceeds its size bound");
+        chunks.push(Buffer.from(chunk));
+      }
+      invariant(size > 0, "job log is empty");
       return Buffer.concat(chunks);
     },
     get: async (path) => (await request("GET", path)).value,
@@ -2259,7 +2301,10 @@ async function readRetainedReleaseController(api, context) {
 
 // Binds one provider merge result to exactly one merged pull request, its
 // detail projection and its single provider merge event.
-async function readMergedReleasePull(api, mergeSha, label = "release source") {
+// With allowVersionHead, a source that is the head (not the merge result) of
+// its only associated pull request is returned unverified for the separate
+// Version-head lane, which proves that shape strictly.
+async function readMergedReleasePull(api, mergeSha, label = "release source", options = {}) {
   const source = assertCommit(
     await api.get(repositoryPath(`/git/commits/${mergeSha}`)),
     mergeSha,
@@ -2274,6 +2319,13 @@ async function readMergedReleasePull(api, mergeSha, label = "release source") {
   invariant(pulls.length === 1, `${label} is not associated with exactly one pull request`);
   const associatedPull = record(pulls[0], "associated pull request");
   const pullNumber = assertPositiveInteger(associatedPull.number, "associated pull-request number");
+  if (
+    options.allowVersionHead === true &&
+    associatedPull.merge_commit_sha !== mergeSha &&
+    associatedPull.head?.sha === mergeSha
+  ) {
+    return { versionHead: true, source, associatedPull, pullNumber };
+  }
   invariant(
     associatedPull.merge_commit_sha === mergeSha,
     "associated pull summary merge SHA changed",
@@ -3129,6 +3181,515 @@ async function verifyTestedDescendantRelease({ options, env, logger, context, ap
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Version-head release ("merge-version-head").
+//
+// A reviewed, green bot Version PR stays releasable when it lands as a
+// two-parent merge commit M: its merge result can carry changesets merged to
+// main after the Version base, while its exact head S cannot. The released
+// source is S itself. M is used only to prove that S landed on main through
+// exactly that Version PR; M's tree is never release content. Source CI is the
+// exact-head Automation PR CI run, which executes on main at the Version base
+// and is bound to S by its provider-authored report-job log.
+// ---------------------------------------------------------------------------
+
+const versionHeadIdentityError =
+  "release source is a merged pull-request head, not its merge result; " +
+  "only the bot Version PR head may be released from its merge commit";
+
+export function automationCiReportBinding(bytes) {
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("Automation PR CI report job log is not valid UTF-8");
+  }
+  text = text.replace(/^\uFEFF/, "");
+  const lines = text.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  const payloads = lines.map((line) => {
+    const match = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z (.*)$/.exec(line);
+    invariant(match !== null, "Automation PR CI report job log framing is invalid");
+    // Strip ANSI styling the runner adds to echoed commands.
+    // eslint-disable-next-line no-control-regex
+    return match[1].replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+  });
+  const exactIndexes = (value) =>
+    payloads.flatMap((payload, index) => (payload === value ? [index] : []));
+  const jobNameIndexes = exactIndexes(
+    `Complete job name: ${RELEASE_AUTOMATION_CONTRACT.checks.automationCiReportJob}`,
+  );
+  const groupIndexes = exactIndexes(
+    "##[group]Run node scripts/check-release-pr-automation.mjs complete-version-check",
+  );
+  invariant(
+    jobNameIndexes.length === 1 && groupIndexes.length === 1,
+    "Automation PR CI report job log lacks one exact-head completion step",
+  );
+  const groupEndIndex = payloads.indexOf("##[endgroup]", groupIndexes[0] + 1);
+  invariant(
+    groupEndIndex > 0,
+    "Automation PR CI report job log lacks one exact-head completion step",
+  );
+  const group = payloads.slice(groupIndexes[0] + 1, groupEndIndex);
+  const envIndexes = group.flatMap((payload, index) => (payload === "env:" ? [index] : []));
+  invariant(
+    envIndexes.length === 1,
+    "Automation PR CI report step environment is missing or ambiguous",
+  );
+  const env = new Map();
+  for (const payload of group.slice(envIndexes[0] + 1)) {
+    const match = /^ {2}([A-Z][A-Z0-9_]*): (.*)$/.exec(payload);
+    invariant(
+      match !== null && !env.has(match[1]),
+      "Automation PR CI report step environment is malformed",
+    );
+    env.set(match[1], match[2]);
+  }
+  const pullText = env.get("AUTOMATION_PR_NUMBER") ?? "";
+  const headSha = env.get("AUTOMATION_HEAD_SHA") ?? "";
+  const baseSha = env.get("AUTOMATION_BASE_SHA") ?? "";
+  invariant(
+    positiveIntegerPattern.test(pullText) &&
+      Number.isSafeInteger(Number(pullText)) &&
+      shaPattern.test(headSha) &&
+      shaPattern.test(baseSha) &&
+      headSha !== baseSha,
+    "Automation PR CI report step does not record an exact-head completion",
+  );
+  return {
+    pullNumber: Number(pullText),
+    headSha,
+    baseSha,
+    checkKind: env.get("AUTOMATION_CHECK_KIND") ?? "",
+    checkConclusion: env.get("AUTOMATION_CHECK_CONCLUSION") ?? "",
+    clean: payloads.every((payload) => !payload.startsWith("##[error]")),
+    logSha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+function exactAutomationCiJob(jobs, name, run, baseSha) {
+  const selected = jobs.filter((job) => job?.name === name);
+  invariant(selected.length === 1, `Automation PR CI job ${name} is not unique`);
+  const job = selected[0];
+  const jobId = assertPositiveInteger(job?.id, `Automation PR CI job ${name} ID`);
+  invariant(
+    job.run_id === run.id &&
+      job.run_attempt === run.run_attempt &&
+      job.status === "completed" &&
+      job.conclusion === "success" &&
+      job.head_sha === baseSha &&
+      job.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch &&
+      job.html_url ===
+        `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+          `/actions/runs/${run.id}/job/${jobId}` &&
+      job.check_run_url ===
+        `${RELEASE_AUTOMATION_CONTRACT.apiUrl}/repos/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+          `/check-runs/${jobId}`,
+    `Automation PR CI job ${name} is not successfully bound`,
+  );
+  return { job, jobId };
+}
+
+async function verifyVersionHeadAutomationCi(api, { checks, pullNumber, headSha, baseSha }) {
+  const name = RELEASE_AUTOMATION_CONTRACT.checks.automationCi;
+  const externalId = checkIdentity("automation-ci", { prNumber: pullNumber, headSha }).externalId;
+  const named = checks.filter((check) => check?.name === name);
+  invariant(
+    named.length > 0,
+    "exact-head Automation PR CI check is missing for the Version PR head",
+  );
+  invariant(
+    named.length === 1 && named[0]?.external_id === externalId,
+    "exact-head Automation PR CI check is not unique or not bound to the exact Version PR head",
+  );
+  assertSuccessfulCheckRun(named[0], name, headSha, externalId);
+  const checkRunId = assertPositiveInteger(named[0].id, "Automation PR CI check-run ID");
+
+  const listing = record(
+    await api.get(
+      repositoryPath(
+        `/actions/workflows/${RELEASE_AUTOMATION_CONTRACT.ciWorkflowFile}/runs` +
+          `?branch=${RELEASE_AUTOMATION_CONTRACT.defaultBranch}&event=workflow_dispatch` +
+          `&head_sha=${baseSha}&per_page=${recordsPerPage}&page=1`,
+      ),
+    ),
+    "Automation PR CI run listing",
+  );
+  invariant(
+    Array.isArray(listing.workflow_runs) &&
+      listing.total_count === listing.workflow_runs.length &&
+      listing.workflow_runs.length < recordsPerPage,
+    "Automation PR CI run listing is incomplete",
+  );
+  const successful = listing.workflow_runs.filter(
+    (run) => run?.status === "completed" && run?.conclusion === "success",
+  );
+  invariant(successful.length > 0, "no successful Automation PR CI run exists at the Version base");
+  invariant(
+    successful.length <= RELEASE_AUTOMATION_CONTRACT.versionHead.maximumAutomationCiRuns,
+    "successful Automation PR CI runs at the Version base exceed the bounded listing",
+  );
+  // Other green dispatch runs can share the Version base (for example an
+  // earlier head regenerated on the same base). A run counts only when its
+  // report log binds this exact PR, head and base; every bound run must then
+  // pass the full strict checks, and the newest is recorded.
+  const bound = [];
+  for (const run of successful) {
+    const id = assertPositiveInteger(run.id, "Automation PR CI run ID");
+    const attempt = assertPositiveInteger(run.run_attempt, "Automation PR CI run attempt");
+    invariant(
+      run.path === RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath &&
+        run.event === "workflow_dispatch" &&
+        run.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch &&
+        run.head_sha === baseSha &&
+        run.repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
+        run.head_repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
+        run.html_url ===
+          `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+            `/actions/runs/${id}`,
+      "Automation PR CI run is not the trusted main workflow at the Version base",
+    );
+    const jobs = await paginatedWorkflowAttemptJobs(api, id, attempt);
+    const reportJobs = jobs.filter(
+      (job) => job?.name === RELEASE_AUTOMATION_CONTRACT.checks.automationCiReportJob,
+    );
+    invariant(
+      reportJobs.length === 1,
+      `Automation PR CI job ${RELEASE_AUTOMATION_CONTRACT.checks.automationCiReportJob} is not unique`,
+    );
+    // A run whose report job did not succeed cannot bind any head.
+    if (reportJobs[0]?.status !== "completed" || reportJobs[0]?.conclusion !== "success") continue;
+    const binding = automationCiReportBinding(
+      await api.jobLogBytes(
+        assertPositiveInteger(reportJobs[0].id, "Automation PR CI report job ID"),
+        RELEASE_AUTOMATION_CONTRACT.versionHead.maximumReportLogBytes,
+      ),
+    );
+    if (
+      binding.pullNumber !== pullNumber ||
+      binding.headSha !== headSha ||
+      binding.baseSha !== baseSha
+    ) {
+      continue;
+    }
+    invariant(
+      binding.clean &&
+        binding.checkKind === "automation-ci" &&
+        binding.checkConclusion === "success",
+      "Automation PR CI report step does not record a successful exact-head completion",
+    );
+    bound.push({ run, jobs, reportLogSha256: binding.logSha256 });
+  }
+  invariant(
+    bound.length > 0,
+    "no successful Automation PR CI run is bound to the exact Version PR head",
+  );
+  const verified = bound.map(({ run, jobs, reportLogSha256 }) => {
+    const report = exactAutomationCiJob(
+      jobs,
+      RELEASE_AUTOMATION_CONTRACT.checks.automationCiReportJob,
+      run,
+      baseSha,
+    );
+    const reportSteps = (Array.isArray(report.job.steps) ? report.job.steps : []).filter(
+      (step) => step?.name === RELEASE_AUTOMATION_CONTRACT.checks.automationCiReportStep,
+    );
+    invariant(
+      reportSteps.length === 1 &&
+        reportSteps[0].status === "completed" &&
+        reportSteps[0].conclusion === "success",
+      "Automation PR CI report job did not complete the exact-head check",
+    );
+    const admission = exactAutomationCiJob(
+      jobs,
+      RELEASE_AUTOMATION_CONTRACT.checks.automationCiAdmissionJob,
+      run,
+      baseSha,
+    );
+    const required = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((jobName) => ({
+      name: jobName,
+      jobId: exactAutomationCiJob(jobs, jobName, run, baseSha).jobId,
+    }));
+    return { run, report, admission, required, reportLogSha256 };
+  });
+  const selected = verified.reduce((newest, candidate) =>
+    candidate.run.id > newest.run.id ? candidate : newest,
+  );
+  return {
+    requiredSourceChecks: selected.required.map(({ name: jobName, jobId }) =>
+      Object.freeze({
+        name: jobName,
+        appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+        appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+        workflowRunId: selected.run.id,
+        workflowRunAttempt: selected.run.run_attempt,
+        workflowJobId: jobId,
+      }),
+    ),
+    automationCi: {
+      name,
+      sha: headSha,
+      checkRunId,
+      externalId,
+      workflowPath: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+      workflowEvent: "workflow_dispatch",
+      workflowSha: baseSha,
+      workflowRunId: selected.run.id,
+      workflowRunAttempt: selected.run.run_attempt,
+      admissionJobId: selected.admission.jobId,
+      reportJobId: selected.report.jobId,
+      reportJobLogSha256: selected.reportLogSha256,
+    },
+  };
+}
+
+async function assertNoPendingChangesets(api, tree) {
+  const root = record(
+    await api.get(repositoryPath(`/git/trees/${tree.treeSha}`)),
+    "Version-head release source tree",
+  );
+  invariant(
+    root.sha === tree.treeSha && root.truncated === false && Array.isArray(root.tree),
+    "Version-head release source tree listing is incomplete",
+  );
+  const changesetDirectories = root.tree.filter((entry) => entry?.path === ".changeset");
+  invariant(changesetDirectories.length <= 1, "Version-head release source tree is ambiguous");
+  if (changesetDirectories.length === 0) return;
+  const directory = changesetDirectories[0];
+  invariant(directory.type === "tree", "Version-head .changeset entry is not a directory");
+  const directorySha = assertSha(directory.sha, "Version-head .changeset tree SHA");
+  const listing = record(
+    await api.get(repositoryPath(`/git/trees/${directorySha}`)),
+    "Version-head .changeset tree",
+  );
+  invariant(
+    listing.sha === directorySha && listing.truncated === false && Array.isArray(listing.tree),
+    "Version-head .changeset tree listing is incomplete",
+  );
+  const pending = listing.tree.filter((entry) => {
+    const path = assertString(entry?.path, "Version-head .changeset entry path");
+    return entry.type === "blob" && path.endsWith(".md") && path !== "README.md";
+  });
+  invariant(
+    pending.length === 0,
+    `Version-head release source still contains ${pending.length} pending changeset(s)`,
+  );
+}
+
+async function verifyVersionHeadRelease({
+  options,
+  logger,
+  context,
+  api,
+  initialMainSha,
+  controller,
+  controllerRelease,
+  merged,
+}) {
+  const { source, associatedPull, pullNumber } = merged;
+  const mergeCommitSha = assertSha(associatedPull.merge_commit_sha, "Version PR merge commit SHA");
+  invariant(mergeCommitSha !== context.sourceSha, "Version PR merge commit equals its head");
+  const pull = record(await api.get(repositoryPath(`/pulls/${pullNumber}`)), "pull-request detail");
+  const pullIdentity = assertMergedPull(pull, { pullNumber, sourceSha: mergeCommitSha });
+  invariant(
+    associatedPull.base?.sha === pullIdentity.baseSha &&
+      associatedPull.head?.sha === pullIdentity.headSha,
+    "associated pull summary differs from pull-request detail",
+  );
+  try {
+    assertVersionProvenancePull(pull);
+  } catch {
+    throw new Error(versionHeadIdentityError);
+  }
+  invariant(
+    pullIdentity.headSha === context.sourceSha,
+    "Version-head release source is not the exact Version PR head",
+  );
+  invariant(
+    pullIdentity.commitCount === 1 && source.parents.length === 1,
+    "Version-head release source is not one generated commit on its Version base",
+  );
+  const versionBaseSha = source.parents[0];
+  // The provider PR base can have advanced past the generated commit's parent;
+  // the reviewed patch must still be exactly that one commit on its parent.
+  const comparison = await api.get(
+    repositoryPath(`/compare/${pullIdentity.baseSha}...${context.sourceSha}`),
+  );
+  invariant(
+    comparison?.base_commit?.sha === pullIdentity.baseSha &&
+      comparison?.merge_base_commit?.sha === versionBaseSha &&
+      comparison?.ahead_by === 1 &&
+      comparison?.total_commits === 1 &&
+      Array.isArray(comparison?.commits) &&
+      comparison.commits.length === 1 &&
+      comparison.commits[0]?.sha === context.sourceSha,
+    "Version-head release source is not directly on its reviewed patch base",
+  );
+
+  const mergeCommit = assertCommit(
+    await api.get(repositoryPath(`/git/commits/${mergeCommitSha}`)),
+    mergeCommitSha,
+    "Version PR merge commit",
+  );
+  invariant(
+    mergeCommit.parents.length === 2 &&
+      mergeCommit.parents[1] === context.sourceSha &&
+      mergeCommit.parents[0] !== context.sourceSha,
+    "release source is not the second parent of the Version PR merge commit",
+  );
+  const mergePulls = await paginatedArray(
+    api,
+    repositoryPath(`/commits/${mergeCommitSha}/pulls`),
+    "Version PR merge commit associated pull requests",
+  );
+  invariant(
+    mergePulls.length === 1 &&
+      mergePulls[0]?.number === pullNumber &&
+      mergePulls[0]?.merge_commit_sha === mergeCommitSha &&
+      mergePulls[0]?.head?.sha === context.sourceSha,
+    "Version PR merge commit is not associated with exactly one pull request",
+  );
+  const timeline = await paginatedArray(
+    api,
+    repositoryPath(`/issues/${pullNumber}/timeline`),
+    "pull-request timeline",
+  );
+  assertProviderMergeEvent(timeline, mergeCommitSha, pullIdentity);
+  await assertSourceAncestorOfCurrentMain(
+    api,
+    mergeCommitSha,
+    initialMainSha,
+    "initial release main",
+    "Version PR merge commit",
+  );
+
+  const controllerIsReviewedBase = context.controllerSha === pullIdentity.baseSha;
+  if (!controllerIsReviewedBase) {
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.sourceSha,
+      context.controllerSha,
+      "release controller",
+      "admitted source",
+    );
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.controllerSha,
+      initialMainSha,
+      "initial release main",
+      "release controller",
+    );
+  }
+  const base = assertCommit(
+    await api.get(repositoryPath(`/git/commits/${pullIdentity.baseSha}`)),
+    pullIdentity.baseSha,
+    "reviewed base commit",
+  );
+  if (controllerIsReviewedBase) {
+    invariant(
+      controller.treeSha === base.treeSha,
+      "release controller tree differs from the exact reviewed base tree",
+    );
+  }
+  await assertNoPendingChangesets(api, source);
+  const review = mergedSourceReview(pullNumber, context.sourceSha, pullIdentity);
+
+  const releaseHeadTag = releaseHeadTagName(context.sourceSha);
+  const [headChecks, releaseHeadRef, releaseHeadReleaseValue] = await Promise.all([
+    paginatedCheckRuns(api, context.sourceSha),
+    api.get(repositoryPath(`/git/ref/tags/${releaseHeadTag}`)),
+    api.get(repositoryPath(`/releases/tags/${releaseHeadTag}`)),
+  ]);
+  assertReleaseHeadRef(releaseHeadRef, context.sourceSha);
+  const releaseHeadRelease = assertReleaseHeadRelease(releaseHeadReleaseValue, context.sourceSha);
+  const sourceAdmission = await verifyDurableSourceAdmission({
+    api,
+    checks: headChecks,
+    pull,
+    pullNumber,
+    baseSha: pullIdentity.baseSha,
+    headSha: context.sourceSha,
+    token: context.token,
+    fetchImpl: options.fetchImpl ?? globalThis.fetch,
+    logger,
+  });
+  const { requiredSourceChecks, automationCi } = await verifyVersionHeadAutomationCi(api, {
+    checks: headChecks,
+    pullNumber,
+    headSha: context.sourceSha,
+    baseSha: versionBaseSha,
+  });
+
+  const terminalMain = await api.get(repositoryPath("/git/ref/heads/main"));
+  const terminalMainSha = await assertReleaseMainRef(
+    api,
+    terminalMain,
+    context.sourceSha,
+    "terminal release main",
+  );
+  await assertSourceAncestorOfCurrentMain(
+    api,
+    mergeCommitSha,
+    terminalMainSha,
+    "terminal release main",
+    "Version PR merge commit",
+  );
+  if (!controllerIsReviewedBase) {
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.controllerSha,
+      terminalMainSha,
+      "terminal release main",
+      "release controller",
+    );
+  }
+
+  const provenance = {
+    version: 2,
+    admissionMode: RELEASE_AUTOMATION_CONTRACT.versionHead.mergeMethod,
+    repository: RELEASE_AUTOMATION_CONTRACT.repository,
+    sourceSha: context.sourceSha,
+    sourceTreeSha: source.treeSha,
+    sourceParents: source.parents,
+    controller: {
+      sha: context.controllerSha,
+      treeSha: controller.treeSha,
+      release: controllerRelease,
+    },
+    pullRequestNumber: pullNumber,
+    mergeMethod: RELEASE_AUTOMATION_CONTRACT.versionHead.mergeMethod,
+    sourceComposition: {
+      type: "version-head-released-from-merge-commit",
+      versionBaseSha,
+      mergeCommitSha,
+      mergeCommitTreeSha: mergeCommit.treeSha,
+      mergeCommitParents: mergeCommit.parents,
+    },
+    providerPullCommitCount: pullIdentity.commitCount,
+    mergedAt: new Date(pullIdentity.mergedAt).toISOString(),
+    reviewedBaseSha: pullIdentity.baseSha,
+    reviewedBaseTreeSha: base.treeSha,
+    reviewedHeadSha: context.sourceSha,
+    reviewedHeadTreeSha: source.treeSha,
+    releaseHead: {
+      name: releaseHeadTag,
+      ref: `refs/tags/${releaseHeadTag}`,
+      sha: context.sourceSha,
+    },
+    releaseHeadRelease,
+    review,
+    sourceAdmission,
+    requiredSourceChecks,
+    automationCi,
+  };
+  logger.log(
+    `Verified Version PR #${pullNumber} head ${context.sourceSha} released from its merge ` +
+      `commit ${mergeCommitSha} with exact-head Automation PR CI.`,
+  );
+  return provenance;
+}
+
 export async function verifyApprovedMerge(options = {}) {
   const env = options.env ?? process.env;
   const logger = options.logger ?? console;
@@ -3141,10 +3702,22 @@ export async function verifyApprovedMerge(options = {}) {
     api,
     context,
   );
-  const { source, pull, pullNumber, pullIdentity } = await readMergedReleasePull(
-    api,
-    context.sourceSha,
-  );
+  const merged = await readMergedReleasePull(api, context.sourceSha, "release source", {
+    allowVersionHead: true,
+  });
+  if (merged.versionHead) {
+    return verifyVersionHeadRelease({
+      options,
+      logger,
+      context,
+      api,
+      initialMainSha,
+      controller,
+      controllerRelease,
+      merged,
+    });
+  }
+  const { source, pull, pullNumber, pullIdentity } = merged;
   const controllerIsReviewedBase = context.controllerSha === pullIdentity.baseSha;
   if (!controllerIsReviewedBase) {
     await assertSourceAncestorOfCurrentMain(

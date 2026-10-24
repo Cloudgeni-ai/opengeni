@@ -11,6 +11,7 @@ import {
   validateVersionPrCiAdmission,
   validateVersionPrDispatch,
   verifyApprovedMerge,
+  automationCiReportBinding,
 } from "./check-release-pr-automation.mjs";
 
 const root = join(import.meta.dir, "..");
@@ -2314,6 +2315,7 @@ function approvalFixture(
     movingMainTreeTruncated?: "parent" | "source";
     movingMainParentRetainsBase?: boolean;
     patchComparisonWrongHead?: boolean;
+    pullCommitCount?: number;
   } = {},
 ) {
   const requests: RequestRecord[] = [];
@@ -2322,7 +2324,9 @@ function approvalFixture(
   const pullHeadSha = options.pullHeadSha ?? headSha;
   const reviewedBaseSha = options.reviewedBaseSha ?? baseSha;
   const retainedControllerSha = options.controllerSha ?? controllerSha;
-  const pullCommitCount = mergeMethod === "single" || mergeMethod === "moving-main-squash" ? 1 : 2;
+  const pullCommitCount =
+    options.pullCommitCount ??
+    (mergeMethod === "single" || mergeMethod === "moving-main-squash" ? 1 : 2);
   const sourceParents =
     mergeMethod === "merge"
       ? [{ sha: baseSha }, { sha: pullHeadSha }]
@@ -3765,6 +3769,1027 @@ describe("release approval provenance", () => {
         .filter((request) => request.path.endsWith("/check-runs"))
         .every((request) => request.query.get("filter") === "all"),
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Version-head release ("merge-version-head"): the exact bot Version PR head S
+// released from the two-parent merge commit M that landed it.
+// ---------------------------------------------------------------------------
+
+const versionHeadSourceSha = headSha;
+const versionHeadBaseSha = baseSha;
+const versionHeadMergeSha = mergeSha;
+const versionHeadMainParentSha = movingMainParentSha;
+const versionHeadMergeTreeSha = "ab".repeat(20);
+const versionHeadChangesetTreeSha = "cd".repeat(20);
+const versionHeadRunId = 40022525106;
+const versionHeadRunAttempt = 2;
+const versionHeadAutomationCheckId = 120654049279;
+const versionHeadLogHost = "https://logs.example.test";
+
+function versionHeadAutomationExternalId(pr = pullNumber, head = versionHeadSourceSha) {
+  return `opengeni:release-automation:automation-ci:v1:pr:${pr}:head:${head}`;
+}
+
+function versionHeadAutomationCheck(overrides: Record<string, unknown> = {}) {
+  return {
+    id: versionHeadAutomationCheckId,
+    name: RELEASE_AUTOMATION_CONTRACT.checks.automationCi,
+    head_sha: versionHeadSourceSha,
+    status: "completed",
+    conclusion: "success",
+    external_id: versionHeadAutomationExternalId(),
+    app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    ...overrides,
+  };
+}
+
+function versionHeadRun(id = versionHeadRunId, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    run_attempt: versionHeadRunAttempt,
+    status: "completed",
+    conclusion: "success",
+    event: "workflow_dispatch",
+    path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+    head_branch: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+    head_sha: versionHeadBaseSha,
+    html_url:
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/actions/runs/${id}`,
+    repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+    head_repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+    ...overrides,
+  };
+}
+
+function versionHeadJob(
+  name: string,
+  id: number,
+  run: { id: number; run_attempt: number },
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    id,
+    name,
+    run_id: run.id,
+    run_attempt: run.run_attempt,
+    status: "completed",
+    conclusion: "success",
+    head_sha: versionHeadBaseSha,
+    head_branch: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+    html_url:
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/actions/runs/${run.id}/job/${id}`,
+    check_run_url:
+      `${RELEASE_AUTOMATION_CONTRACT.apiUrl}/repos/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/check-runs/${id}`,
+    ...overrides,
+  };
+}
+
+// Job IDs are derived from the run ID so several runs never share a job.
+function versionHeadJobIds(workflowRunId: number) {
+  const base = (workflowRunId % 100_000) * 10;
+  return {
+    admission: base + 1,
+    report: base + 2,
+    required: RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((_, index) => base + 3 + index),
+  };
+}
+
+function versionHeadJobs(
+  run: { id: number; run_attempt: number },
+  overrides: {
+    admission?: Record<string, unknown>;
+    report?: Record<string, unknown>;
+    required?: Record<string, unknown>;
+    reportSteps?: Array<Record<string, unknown>>;
+  } = {},
+) {
+  const ids = versionHeadJobIds(run.id);
+  return [
+    versionHeadJob(
+      RELEASE_AUTOMATION_CONTRACT.checks.automationCiAdmissionJob,
+      ids.admission,
+      run,
+      overrides.admission,
+    ),
+    ...RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+      versionHeadJob(name, ids.required[index], run, index === 0 ? overrides.required : {}),
+    ),
+    versionHeadJob(RELEASE_AUTOMATION_CONTRACT.checks.automationCiReportJob, ids.report, run, {
+      steps: overrides.reportSteps ?? [
+        { name: "Check out trusted workflow source", status: "completed", conclusion: "success" },
+        {
+          name: RELEASE_AUTOMATION_CONTRACT.checks.automationCiReportStep,
+          status: "completed",
+          conclusion: "success",
+        },
+      ],
+      ...overrides.report,
+    }),
+  ];
+}
+
+function versionHeadReportLog(
+  options: {
+    pr?: number | string;
+    head?: string;
+    base?: string;
+    kind?: string;
+    conclusion?: string;
+    error?: boolean;
+    bom?: boolean;
+    ansi?: boolean;
+  } = {},
+) {
+  const payloads = [
+    "Current runner version: '2.329.0'",
+    `Complete job name: ${RELEASE_AUTOMATION_CONTRACT.checks.automationCiReportJob}`,
+    "##[group]Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+    "with:",
+    `  ref: ${versionHeadBaseSha}`,
+    "env:",
+    `  AUTOMATION_PR_NUMBER: ${options.pr ?? pullNumber}`,
+    "##[endgroup]",
+    `${options.ansi ? "\u001b[36;1m" : ""}##[group]Run node scripts/check-release-pr-automation.mjs complete-version-check`,
+    `${options.ansi ? "\u001b[36;1m" : ""}node scripts/check-release-pr-automation.mjs complete-version-check${options.ansi ? "\u001b[0m" : ""}`,
+    "shell: /usr/bin/bash -e {0}",
+    "env:",
+    `  AUTOMATION_PR_NUMBER: ${options.pr ?? pullNumber}`,
+    `  AUTOMATION_HEAD_SHA: ${options.head ?? versionHeadSourceSha}`,
+    `  AUTOMATION_BASE_SHA: ${options.base ?? versionHeadBaseSha}`,
+    "  AUTOMATION_SOURCE_RUN_ID: 40022322688",
+    "  AUTOMATION_SOURCE_RUN_ATTEMPT: 1",
+    `  AUTOMATION_CHECK_KIND: ${options.kind ?? "automation-ci"}`,
+    `  AUTOMATION_CHECK_CONCLUSION: ${options.conclusion ?? "success"}`,
+    "  GITHUB_TOKEN: ***",
+    "##[endgroup]",
+    ...(options.error ? ["##[error]Process completed with exit code 1."] : []),
+    "Cleaning up orphan processes",
+  ];
+  const text = payloads
+    .map(
+      (payload, index) =>
+        `2026-10-23T22:14:${String(10 + index).padStart(2, "0")}.1234567Z ${payload}`,
+    )
+    .join("\r\n");
+  return `${options.bom === false ? "" : "\uFEFF"}${text}\r\n`;
+}
+
+function versionHeadFixture(
+  options: {
+    author?: Record<string, unknown>;
+    headRef?: string;
+    pullState?: string;
+    merged?: boolean;
+    commitCount?: number;
+    sourceParents?: string[];
+    mergeParents?: string[];
+    sourceAssociations?: Array<Record<string, unknown>>;
+    mergeAssociations?: Array<Record<string, unknown>>;
+    patchComparison?: Record<string, unknown>;
+    initialMainSha?: string;
+    terminalMainSha?: string;
+    ancestry?: string[];
+    controllerSha?: string;
+    controllerTreeSha?: string;
+    changesetEntries?: Array<Record<string, unknown>>;
+    rootTreeEntries?: Array<Record<string, unknown>>;
+    sourceChecks?: Array<Record<string, unknown>>;
+    runs?: Array<Record<string, unknown>>;
+    listingTotalCount?: number;
+    jobsByRun?: Record<number, Array<Record<string, unknown>>>;
+    logsByJob?: Record<number, string | Uint8Array>;
+    logDelivery?: "redirect" | "direct" | "insecure-redirect";
+    releaseHeadRefSha?: string | null;
+    mergeEvent?: Record<string, unknown> | null;
+  } = {},
+) {
+  const requests: Array<RequestRecord & { authorized: boolean }> = [];
+  const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
+  const retainedControllerSha = options.controllerSha ?? controllerSha;
+  const initialMainSha = options.initialMainSha ?? versionHeadMergeSha;
+  const terminalMainSha = options.terminalMainSha ?? initialMainSha;
+  const ancestry = new Set(
+    options.ancestry ?? [
+      `${versionHeadSourceSha}...${versionHeadMergeSha}`,
+      `${versionHeadSourceSha}...${initialMainSha}`,
+      `${versionHeadSourceSha}...${terminalMainSha}`,
+      `${versionHeadMergeSha}...${initialMainSha}`,
+      `${versionHeadMergeSha}...${terminalMainSha}`,
+    ],
+  );
+  const commitCount = options.commitCount ?? 1;
+  const merger = { login: "merge-maintainer", id: 1234567, type: "User" };
+  const pullSummary = {
+    number: pullNumber,
+    merge_commit_sha: versionHeadMergeSha,
+    base: { sha: versionHeadBaseSha },
+    head: { sha: versionHeadSourceSha },
+  };
+  const runs = options.runs ?? [versionHeadRun()];
+  const jobsByRun: Record<number, Array<Record<string, unknown>>> = {
+    ...Object.fromEntries(
+      runs.map((run) => [
+        Number(run.id),
+        versionHeadJobs({ id: Number(run.id), run_attempt: Number(run.run_attempt) }),
+      ]),
+    ),
+    ...options.jobsByRun,
+  };
+  const logsByJob: Record<number, string | Uint8Array> = {
+    ...Object.fromEntries(
+      runs.map((run) => [versionHeadJobIds(Number(run.id)).report, versionHeadReportLog()]),
+    ),
+    ...options.logsByJob,
+  };
+  const mergeEvent =
+    options.mergeEvent === null
+      ? []
+      : [
+          options.mergeEvent ?? {
+            id: 7001,
+            node_id: "ME_fixture",
+            url: `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${prefix}/issues/events/7001`,
+            event: "merged",
+            actor: merger,
+            commit_id: versionHeadMergeSha,
+            commit_url: `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${prefix}/commits/${versionHeadMergeSha}`,
+            created_at: "2026-10-23T22:14:47Z",
+          },
+        ];
+  let mainReads = 0;
+  async function fetchImpl(input: string | URL | Request, init?: RequestInit) {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    const headers = new Headers(init?.headers);
+    requests.push({
+      method,
+      path: url.pathname,
+      query: url.searchParams,
+      authorized: headers.has("Authorization"),
+    });
+    if (url.origin === versionHeadLogHost) {
+      const body = logsByJob[Number(url.pathname.split("/").at(-1))];
+      if (body === undefined) return new Response("missing", { status: 404 });
+      return new Response(body, { status: 200 });
+    }
+    if (method !== "GET") return response({ message: `unexpected ${method}` }, 405);
+    if (url.pathname === `${prefix}/git/ref/heads/main`) {
+      mainReads += 1;
+      return response(mainRef(mainReads === 1 ? initialMainSha : terminalMainSha));
+    }
+    if (url.pathname === prefix) return response(repository());
+    if (url.pathname === `${prefix}/git/commits/${versionHeadSourceSha}`)
+      return response({
+        sha: versionHeadSourceSha,
+        tree: { sha: headTreeSha },
+        parents: (options.sourceParents ?? [versionHeadBaseSha]).map((sha) => ({ sha })),
+      });
+    if (url.pathname === `${prefix}/git/commits/${versionHeadMergeSha}`)
+      return response({
+        sha: versionHeadMergeSha,
+        tree: { sha: versionHeadMergeTreeSha },
+        parents: (options.mergeParents ?? [versionHeadMainParentSha, versionHeadSourceSha]).map(
+          (sha) => ({ sha }),
+        ),
+      });
+    if (url.pathname === `${prefix}/git/commits/${versionHeadBaseSha}`)
+      return response({
+        sha: versionHeadBaseSha,
+        tree: { sha: baseTreeSha },
+        parents: [{ sha: "1".repeat(40) }],
+      });
+    if (url.pathname === `${prefix}/git/commits/${retainedControllerSha}`)
+      return response({
+        sha: retainedControllerSha,
+        tree: { sha: options.controllerTreeSha ?? baseTreeSha },
+        parents: [{ sha: "3".repeat(40) }],
+      });
+    const tagPrefix = `${prefix}/git/ref/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}`;
+    if (url.pathname === `${tagPrefix}${retainedControllerSha}`)
+      return response({
+        ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${retainedControllerSha}`,
+        object: { type: "commit", sha: retainedControllerSha },
+      });
+    if (url.pathname === `${tagPrefix}${versionHeadSourceSha}`) {
+      if (options.releaseHeadRefSha === null)
+        return response({ message: "missing release head ref" }, 404);
+      return response({
+        ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${versionHeadSourceSha}`,
+        object: { type: "commit", sha: options.releaseHeadRefSha ?? versionHeadSourceSha },
+      });
+    }
+    const releasePrefix = `${prefix}/releases/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}`;
+    if (url.pathname === `${releasePrefix}${retainedControllerSha}`)
+      return response(releaseHeadRelease(retainedControllerSha));
+    if (url.pathname === `${releasePrefix}${versionHeadSourceSha}`)
+      return response(releaseHeadRelease(versionHeadSourceSha));
+    if (url.pathname === `${prefix}/commits/${versionHeadSourceSha}/pulls`)
+      return response(options.sourceAssociations ?? [pullSummary]);
+    if (url.pathname === `${prefix}/commits/${versionHeadMergeSha}/pulls`)
+      return response(options.mergeAssociations ?? [pullSummary]);
+    if (url.pathname === `${prefix}/pulls/${pullNumber}`)
+      return response({
+        number: pullNumber,
+        html_url: `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}/pull/${pullNumber}`,
+        state: options.pullState ?? "closed",
+        merged: options.merged ?? true,
+        merge_commit_sha: versionHeadMergeSha,
+        merged_at: "2026-10-23T22:14:46Z",
+        user: options.author ?? RELEASE_AUTOMATION_CONTRACT.versionAuthor,
+        merged_by: merger,
+        base: {
+          ref: "main",
+          sha: versionHeadBaseSha,
+          repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+        },
+        head: {
+          ref: options.headRef ?? RELEASE_AUTOMATION_CONTRACT.versionBranch,
+          sha: versionHeadSourceSha,
+          repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+        },
+        commits: commitCount,
+        changed_files: 3,
+        requested_reviewers: [],
+      });
+    if (url.pathname === `${prefix}/issues/${pullNumber}/timeline`) return response(mergeEvent);
+    if (url.pathname === `${prefix}/compare/${versionHeadBaseSha}...${versionHeadSourceSha}`)
+      return response(
+        options.patchComparison ?? {
+          status: "ahead",
+          base_commit: { sha: versionHeadBaseSha },
+          merge_base_commit: { sha: versionHeadBaseSha },
+          ahead_by: 1,
+          behind_by: 0,
+          total_commits: 1,
+          commits: [{ sha: versionHeadSourceSha, parents: [{ sha: versionHeadBaseSha }] }],
+        },
+      );
+    const compareMatch = url.pathname.match(
+      new RegExp(`^${prefix}/compare/([0-9a-f]{40})\\.\\.\\.([0-9a-f]{40})$`),
+    );
+    if (compareMatch) {
+      const [, from, to] = compareMatch;
+      return response(
+        ancestry.has(`${from}...${to}`)
+          ? {
+              status: "ahead",
+              base_commit: { sha: from },
+              merge_base_commit: { sha: from },
+              ahead_by: 1,
+              behind_by: 0,
+              total_commits: 1,
+              commits: [{ sha: to, parents: [{ sha: from }] }],
+            }
+          : {
+              status: "diverged",
+              base_commit: { sha: from },
+              merge_base_commit: { sha: "6".repeat(40) },
+              ahead_by: 1,
+              behind_by: 1,
+              total_commits: 1,
+              commits: [{ sha: to, parents: [{ sha: "6".repeat(40) }] }],
+            },
+      );
+    }
+    if (url.pathname === `${prefix}/git/trees/${headTreeSha}`)
+      return response({
+        sha: headTreeSha,
+        truncated: false,
+        tree: options.rootTreeEntries ?? [
+          { path: ".changeset", mode: "040000", type: "tree", sha: versionHeadChangesetTreeSha },
+          { path: "package.json", mode: "100644", type: "blob", sha: "2".repeat(40) },
+        ],
+      });
+    if (url.pathname === `${prefix}/git/trees/${versionHeadChangesetTreeSha}`)
+      return response({
+        sha: versionHeadChangesetTreeSha,
+        truncated: false,
+        tree: options.changesetEntries ?? [
+          { path: "README.md", mode: "100644", type: "blob", sha: "3".repeat(40) },
+          { path: "config.json", mode: "100644", type: "blob", sha: "4".repeat(40) },
+        ],
+      });
+    if (url.pathname === `${prefix}/commits/${versionHeadSourceSha}/check-runs`)
+      return response({
+        check_runs: options.sourceChecks ?? [
+          {
+            name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+            head_sha: versionHeadSourceSha,
+            status: "completed",
+            conclusion: "success",
+            external_id:
+              `opengeni:release-automation:source-admission:v1:` +
+              `pr:${pullNumber}:head:${versionHeadSourceSha}`,
+            app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+          },
+          versionHeadAutomationCheck(),
+        ],
+      });
+    if (
+      url.pathname ===
+      `${prefix}/actions/workflows/${RELEASE_AUTOMATION_CONTRACT.ciWorkflowFile}/runs`
+    )
+      return response({
+        total_count: options.listingTotalCount ?? runs.length,
+        workflow_runs: runs,
+      });
+    const jobsMatch = url.pathname.match(
+      new RegExp(`^${prefix}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)/jobs$`),
+    );
+    if (jobsMatch) {
+      const jobs = jobsByRun[Number(jobsMatch[1])] ?? [];
+      return response({ total_count: jobs.length, jobs });
+    }
+    const logMatch = url.pathname.match(new RegExp(`^${prefix}/actions/jobs/([1-9][0-9]*)/logs$`));
+    if (logMatch && options.logDelivery === "direct") {
+      const body = logsByJob[Number(logMatch[1])];
+      if (body === undefined) return new Response("missing", { status: 404 });
+      return new Response(body, { status: 200 });
+    }
+    if (logMatch)
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location:
+            options.logDelivery === "insecure-redirect"
+              ? `http://logs.example.test/job-logs/${logMatch[1]}`
+              : `${versionHeadLogHost}/job-logs/${logMatch[1]}`,
+        },
+      });
+    return response({ message: `unexpected ${method} ${url.pathname}` }, 404);
+  }
+  return { fetchImpl, requests };
+}
+
+function versionHeadEnv(overrides: Record<string, string> = {}) {
+  return approvalEnv({ SOURCE_SHA: versionHeadSourceSha, ...overrides });
+}
+
+async function admitVersionHead(
+  fixture: ReturnType<typeof versionHeadFixture>,
+  env = versionHeadEnv(),
+) {
+  return verifyApprovedMerge({ env, fetchImpl: fixture.fetchImpl, logger: { log() {} } });
+}
+
+describe("Version-head release from its merge commit", () => {
+  test("admits the exact bot Version PR head keyed to its own tree, never the merge result", async () => {
+    const fixture = versionHeadFixture();
+    const result = await admitVersionHead(fixture);
+    expect(result).toMatchObject({
+      version: 2,
+      admissionMode: "merge-version-head",
+      mergeMethod: "merge-version-head",
+      sourceSha: versionHeadSourceSha,
+      sourceTreeSha: headTreeSha,
+      sourceParents: [versionHeadBaseSha],
+      pullRequestNumber: pullNumber,
+      providerPullCommitCount: 1,
+      reviewedBaseSha: versionHeadBaseSha,
+      reviewedHeadSha: versionHeadSourceSha,
+      reviewedHeadTreeSha: headTreeSha,
+      releaseHead: {
+        name: `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${versionHeadSourceSha}`,
+        sha: versionHeadSourceSha,
+      },
+      sourceComposition: {
+        type: "version-head-released-from-merge-commit",
+        versionBaseSha: versionHeadBaseSha,
+        mergeCommitSha: versionHeadMergeSha,
+        mergeCommitTreeSha: versionHeadMergeTreeSha,
+        mergeCommitParents: [versionHeadMainParentSha, versionHeadSourceSha],
+      },
+      review: { type: "merged-source", id: pullNumber },
+      automationCi: {
+        name: RELEASE_AUTOMATION_CONTRACT.checks.automationCi,
+        sha: versionHeadSourceSha,
+        checkRunId: versionHeadAutomationCheckId,
+        externalId: versionHeadAutomationExternalId(),
+        workflowEvent: "workflow_dispatch",
+        workflowSha: versionHeadBaseSha,
+        workflowRunId: versionHeadRunId,
+        workflowRunAttempt: versionHeadRunAttempt,
+        admissionJobId: versionHeadJobIds(versionHeadRunId).admission,
+        reportJobId: versionHeadJobIds(versionHeadRunId).report,
+      },
+    });
+    // The released tree is S's own tree, distinct from the merge result's.
+    expect(result.sourceTreeSha).not.toBe(versionHeadMergeTreeSha);
+    expect(result.automationCi.reportJobLogSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.requiredSourceChecks).toEqual(
+      RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) => ({
+        name,
+        appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+        appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+        workflowRunId: versionHeadRunId,
+        workflowRunAttempt: versionHeadRunAttempt,
+        workflowJobId: versionHeadJobIds(versionHeadRunId).required[index],
+      })),
+    );
+    const paths = fixture.requests.map((request) => request.path);
+    const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
+    // M's tree, checks and push CI are never consulted as release content.
+    expect(paths).not.toContain(`${prefix}/git/trees/${versionHeadMergeTreeSha}`);
+    expect(paths).not.toContain(`${prefix}/commits/${versionHeadMergeSha}/check-runs`);
+    expect(paths).not.toContain(
+      `${prefix}/releases/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${versionHeadMergeSha}`,
+    );
+    const listing = fixture.requests.find((request) => request.path.endsWith("/runs"));
+    expect(listing?.query.get("event")).toBe("workflow_dispatch");
+    expect(listing?.query.get("head_sha")).toBe(versionHeadBaseSha);
+    expect(listing?.query.get("branch")).toBe("main");
+    // The signed log location never receives the GitHub credential.
+    const logDownloads = fixture.requests.filter((request) =>
+      request.path.startsWith("/job-logs/"),
+    );
+    expect(logDownloads).toHaveLength(1);
+    expect(logDownloads.every((request) => !request.authorized)).toBe(true);
+  });
+
+  test("admits with a retained later controller and main ahead of the merge commit", async () => {
+    const laterControllerSha = "4".repeat(40);
+    const laterMainSha = "5".repeat(40);
+    const fixture = versionHeadFixture({
+      controllerSha: laterControllerSha,
+      controllerTreeSha: "7".repeat(40),
+      initialMainSha: laterMainSha,
+      ancestry: [
+        `${versionHeadSourceSha}...${laterMainSha}`,
+        `${versionHeadMergeSha}...${laterMainSha}`,
+        `${versionHeadSourceSha}...${laterControllerSha}`,
+        `${laterControllerSha}...${laterMainSha}`,
+      ],
+    });
+    const result = await admitVersionHead(
+      fixture,
+      versionHeadEnv({
+        GITHUB_REF: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${laterControllerSha}`,
+        GITHUB_SHA: laterControllerSha,
+        GITHUB_WORKFLOW_SHA: laterControllerSha,
+        RELEASE_CONTROLLER_SHA: laterControllerSha,
+      }),
+    );
+    expect(result).toMatchObject({
+      mergeMethod: "merge-version-head",
+      sourceSha: versionHeadSourceSha,
+      sourceTreeSha: headTreeSha,
+      controller: { sha: laterControllerSha, treeSha: "7".repeat(40) },
+    });
+  });
+
+  test("keeps the existing merge-result source path unchanged", async () => {
+    const fixture = approvalFixture();
+    const result = await verifyApprovedMerge({
+      env: approvalEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    expect(result.mergeMethod).toBe("merge");
+    expect(result.sourceSha).toBe(mergeSha);
+    expect(result.admissionMode).toBeUndefined();
+    expect(result).not.toHaveProperty("automationCi");
+  });
+
+  test("skips unrelated green runs at the Version base and records the newest bound run", async () => {
+    const olderRunId = 40022525100;
+    const unrelatedRunId = 40022525200;
+    const failedReportRunId = 40022525300;
+    const newestRunId = 40022525400;
+    const runs = [
+      versionHeadRun(olderRunId),
+      versionHeadRun(unrelatedRunId),
+      versionHeadRun(failedReportRunId),
+      versionHeadRun(newestRunId),
+      versionHeadRun(40022525500, { conclusion: "failure" }),
+    ];
+    const failedReportRun = { id: failedReportRunId, run_attempt: versionHeadRunAttempt };
+    const fixture = versionHeadFixture({
+      runs,
+      jobsByRun: {
+        [failedReportRunId]: versionHeadJobs(failedReportRun, {
+          report: { conclusion: "failure" },
+        }),
+      },
+      logsByJob: {
+        [versionHeadJobIds(unrelatedRunId).report]: versionHeadReportLog({
+          head: "e1".repeat(20),
+          conclusion: "failure",
+        }),
+      },
+    });
+    const result = await admitVersionHead(fixture);
+    expect(result.automationCi.workflowRunId).toBe(newestRunId);
+    expect(result.requiredSourceChecks[0].workflowRunId).toBe(newestRunId);
+    const downloaded = fixture.requests
+      .filter((request) => request.path.startsWith("/job-logs/"))
+      .map((request) => Number(request.path.split("/").at(-1)));
+    expect(downloaded).not.toContain(versionHeadJobIds(failedReportRunId).report);
+  });
+
+  test("rejects a source that is not the second parent of the Version PR merge commit", async () => {
+    for (const mergeParents of [
+      [versionHeadSourceSha, versionHeadMainParentSha],
+      [versionHeadMainParentSha],
+      [versionHeadMainParentSha, "e2".repeat(20)],
+      [versionHeadMainParentSha, versionHeadSourceSha, "e3".repeat(20)],
+    ]) {
+      await expect(admitVersionHead(versionHeadFixture({ mergeParents }))).rejects.toThrow(
+        "release source is not the second parent of the Version PR merge commit",
+      );
+    }
+  });
+
+  test("rejects a merge commit that is not exactly this Version PR's merge result", async () => {
+    const summary = {
+      number: pullNumber,
+      merge_commit_sha: versionHeadMergeSha,
+      base: { sha: versionHeadBaseSha },
+      head: { sha: versionHeadSourceSha },
+    };
+    for (const mergeAssociations of [
+      [],
+      [summary, { ...summary, number: pullNumber + 1 }],
+      [{ ...summary, number: pullNumber + 1 }],
+      [{ ...summary, head: { sha: "e4".repeat(20) } }],
+    ]) {
+      await expect(admitVersionHead(versionHeadFixture({ mergeAssociations }))).rejects.toThrow(
+        "Version PR merge commit is not associated with exactly one pull request",
+      );
+    }
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          sourceAssociations: [summary, { ...summary, number: pullNumber + 1 }],
+        }),
+      ),
+    ).rejects.toThrow("release source is not associated with exactly one pull request");
+    await expect(admitVersionHead(versionHeadFixture({ mergeEvent: null }))).rejects.toThrow(
+      "exactly one provider merge event",
+    );
+    await expect(
+      admitVersionHead(versionHeadFixture({ pullState: "open", merged: false })),
+    ).rejects.toThrow("associated pull request is not merged");
+  });
+
+  test("rejects a merge commit that main does not retain", async () => {
+    const laterMainSha = "5".repeat(40);
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          initialMainSha: laterMainSha,
+          ancestry: [`${versionHeadSourceSha}...${laterMainSha}`],
+        }),
+      ),
+    ).rejects.toThrow("initial release main is not ahead of the Version PR merge commit");
+  });
+
+  test("rejects any pull request other than the bot Version PR, including a feature PR head", async () => {
+    const human = { login: "feature-author", id: 7654321, type: "User" };
+    for (const fixtureOptions of [
+      { author: human },
+      { headRef: "feature/release-shortcut" },
+      { author: human, headRef: "feature/release-shortcut", commitCount: 3 },
+      { author: { ...RELEASE_AUTOMATION_CONTRACT.versionAuthor, id: 1 } },
+    ]) {
+      await expect(admitVersionHead(versionHeadFixture(fixtureOptions))).rejects.toThrow(
+        "only the bot Version PR head may be released from its merge commit",
+      );
+    }
+  });
+
+  test("rejects a Version PR that is not one generated commit on its reviewed base", async () => {
+    await expect(admitVersionHead(versionHeadFixture({ commitCount: 2 }))).rejects.toThrow(
+      "not one generated commit on its Version base",
+    );
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({ sourceParents: [versionHeadBaseSha, versionHeadMainParentSha] }),
+      ),
+    ).rejects.toThrow("not one generated commit on its Version base");
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          patchComparison: {
+            status: "ahead",
+            base_commit: { sha: versionHeadBaseSha },
+            merge_base_commit: { sha: versionHeadBaseSha },
+            ahead_by: 2,
+            behind_by: 0,
+            total_commits: 2,
+            commits: [{ sha: "e5".repeat(20) }, { sha: versionHeadSourceSha }],
+          },
+        }),
+      ),
+    ).rejects.toThrow("not directly on its reviewed patch base");
+  });
+
+  test("rejects pending changesets on the Version head and allows only the README", async () => {
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          changesetEntries: [
+            { path: "README.md", mode: "100644", type: "blob", sha: "3".repeat(40) },
+            { path: "brave-lions-sing.md", mode: "100644", type: "blob", sha: "5".repeat(40) },
+          ],
+        }),
+      ),
+    ).rejects.toThrow("still contains 1 pending changeset(s)");
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          rootTreeEntries: [
+            { path: "package.json", mode: "100644", type: "blob", sha: "2".repeat(40) },
+          ],
+        }),
+      ),
+    ).resolves.toMatchObject({ mergeMethod: "merge-version-head" });
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          rootTreeEntries: [
+            { path: ".changeset", mode: "100644", type: "blob", sha: "2".repeat(40) },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(".changeset entry is not a directory");
+  });
+
+  test("requires the retained release head for the Version head", async () => {
+    await expect(admitVersionHead(versionHeadFixture({ releaseHeadRefSha: null }))).rejects.toThrow(
+      "HTTP 404",
+    );
+  });
+
+  test("rejects a missing, red, or foreign exact-head Automation PR CI check", async () => {
+    const admissionCheck = {
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      head_sha: versionHeadSourceSha,
+      status: "completed",
+      conclusion: "success",
+      app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    };
+    const cases: Array<[Array<Record<string, unknown>>, string]> = [
+      [[admissionCheck], "exact-head Automation PR CI check is missing"],
+      [
+        [admissionCheck, versionHeadAutomationCheck({ conclusion: "failure" })],
+        "canonical check did not complete successfully",
+      ],
+      [
+        [admissionCheck, versionHeadAutomationCheck({ status: "in_progress", conclusion: null })],
+        "canonical check did not complete successfully",
+      ],
+      [
+        [
+          admissionCheck,
+          versionHeadAutomationCheck({
+            external_id: versionHeadAutomationExternalId(pullNumber, "e6".repeat(20)),
+          }),
+        ],
+        "not unique or not bound to the exact Version PR head",
+      ],
+      [
+        [admissionCheck, versionHeadAutomationCheck(), versionHeadAutomationCheck({ id: 9 })],
+        "not unique or not bound to the exact Version PR head",
+      ],
+      [
+        [admissionCheck, versionHeadAutomationCheck({ head_sha: versionHeadMergeSha })],
+        "canonical check is bound to another commit",
+      ],
+      [
+        [admissionCheck, versionHeadAutomationCheck({ app: { slug: "impostor", id: 1 } })],
+        "not owned by the official GitHub Actions app",
+      ],
+    ];
+    for (const [sourceChecks, message] of cases) {
+      await expect(admitVersionHead(versionHeadFixture({ sourceChecks }))).rejects.toThrow(message);
+    }
+  });
+
+  test("rejects missing, red, or untrusted Automation PR CI runs", async () => {
+    await expect(admitVersionHead(versionHeadFixture({ runs: [] }))).rejects.toThrow(
+      "no successful Automation PR CI run exists at the Version base",
+    );
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({ runs: [versionHeadRun(versionHeadRunId, { conclusion: "failure" })] }),
+      ),
+    ).rejects.toThrow("no successful Automation PR CI run exists at the Version base");
+    await expect(admitVersionHead(versionHeadFixture({ listingTotalCount: 2 }))).rejects.toThrow(
+      "Automation PR CI run listing is incomplete",
+    );
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          runs: Array.from({ length: 11 }, (_, index) => versionHeadRun(versionHeadRunId + index)),
+        }),
+      ),
+    ).rejects.toThrow("exceed the bounded listing");
+    for (const overrides of [
+      { head_branch: RELEASE_AUTOMATION_CONTRACT.versionBranch },
+      { event: "push" },
+      { head_sha: versionHeadSourceSha },
+      { path: ".github/workflows/release.yml" },
+      { head_repository: { full_name: "attacker/opengeni" } },
+    ]) {
+      await expect(
+        admitVersionHead(
+          versionHeadFixture({ runs: [versionHeadRun(versionHeadRunId, overrides)] }),
+        ),
+      ).rejects.toThrow("not the trusted main workflow at the Version base");
+    }
+  });
+
+  test("rejects Automation PR CI that is not bound to the exact Version head", async () => {
+    const reportJob = versionHeadJobIds(versionHeadRunId).report;
+    for (const log of [
+      versionHeadReportLog({ head: "e7".repeat(20) }),
+      versionHeadReportLog({ pr: pullNumber + 1 }),
+      versionHeadReportLog({ base: "e8".repeat(20) }),
+    ]) {
+      await expect(
+        admitVersionHead(versionHeadFixture({ logsByJob: { [reportJob]: log } })),
+      ).rejects.toThrow("no successful Automation PR CI run is bound to the exact Version PR head");
+    }
+    const run = { id: versionHeadRunId, run_attempt: versionHeadRunAttempt };
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          jobsByRun: {
+            [versionHeadRunId]: versionHeadJobs(run, { report: { conclusion: "failure" } }),
+          },
+        }),
+      ),
+    ).rejects.toThrow("no successful Automation PR CI run is bound to the exact Version PR head");
+  });
+
+  test("rejects a bound Automation PR CI run that reports or contains a failure", async () => {
+    const reportJob = versionHeadJobIds(versionHeadRunId).report;
+    for (const log of [
+      versionHeadReportLog({ conclusion: "failure" }),
+      versionHeadReportLog({ kind: "source-admission" }),
+      versionHeadReportLog({ error: true }),
+    ]) {
+      await expect(
+        admitVersionHead(versionHeadFixture({ logsByJob: { [reportJob]: log } })),
+      ).rejects.toThrow("does not record a successful exact-head completion");
+    }
+    // A second bound run that reports failure is never outvoted by a green one.
+    const secondRunId = versionHeadRunId + 1;
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          runs: [versionHeadRun(), versionHeadRun(secondRunId)],
+          logsByJob: {
+            [versionHeadJobIds(secondRunId).report]: versionHeadReportLog({
+              conclusion: "failure",
+            }),
+          },
+        }),
+      ),
+    ).rejects.toThrow("does not record a successful exact-head completion");
+  });
+
+  test("rejects red, foreign, or other-attempt jobs in the bound Automation PR CI run", async () => {
+    const run = { id: versionHeadRunId, run_attempt: versionHeadRunAttempt };
+    const cases: Array<[Parameters<typeof versionHeadJobs>[1], string]> = [
+      [{ required: { conclusion: "failure" } }, "is not successfully bound"],
+      [{ required: { head_sha: versionHeadSourceSha } }, "is not successfully bound"],
+      [{ admission: { conclusion: "skipped" } }, "is not successfully bound"],
+      [{ admission: { run_attempt: 1 } }, "is not successfully bound"],
+      [{ admission: { run_id: versionHeadRunId + 1 } }, "is not successfully bound"],
+      [
+        { report: { head_branch: RELEASE_AUTOMATION_CONTRACT.versionBranch } },
+        "is not successfully bound",
+      ],
+      [{ reportSteps: [] }, "did not complete the exact-head check"],
+      [
+        {
+          reportSteps: [
+            {
+              name: RELEASE_AUTOMATION_CONTRACT.checks.automationCiReportStep,
+              status: "completed",
+              conclusion: "skipped",
+            },
+          ],
+        },
+        "did not complete the exact-head check",
+      ],
+    ];
+    for (const [overrides, message] of cases) {
+      await expect(
+        admitVersionHead(
+          versionHeadFixture({
+            jobsByRun: { [versionHeadRunId]: versionHeadJobs(run, overrides) },
+          }),
+        ),
+      ).rejects.toThrow(message);
+    }
+    const jobs = versionHeadJobs(run);
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          jobsByRun: {
+            [versionHeadRunId]: jobs.filter(
+              (job) => job.name !== RELEASE_AUTOMATION_CONTRACT.checks.requiredSource[1],
+            ),
+          },
+        }),
+      ),
+    ).rejects.toThrow("is not unique");
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({ jobsByRun: { [versionHeadRunId]: [...jobs, jobs.at(-1)!] } }),
+      ),
+    ).rejects.toThrow("is not unique");
+  });
+
+  test("rejects malformed, oversized, or ambiguous report-job logs", async () => {
+    const reportJob = versionHeadJobIds(versionHeadRunId).report;
+    const valid = versionHeadReportLog();
+    const cases: Array<[string | Uint8Array, string]> = [
+      [new Uint8Array([0xef, 0xbb, 0xbf, 0xff, 0xfe, 0x0a]), "not valid UTF-8"],
+      [`${valid}not a framed runner line\n`, "framing is invalid"],
+      [
+        valid.replace(
+          "##[group]Run node scripts/check-release-pr-automation.mjs",
+          "##[group]Run bun",
+        ),
+        "lacks one exact-head completion step",
+      ],
+      [`${valid}${valid.replace(/^\uFEFF/, "")}`, "lacks one exact-head completion step"],
+      [
+        valid.replace(
+          "  GITHUB_TOKEN: ***",
+          "  GITHUB_TOKEN: ***\r\n2026-10-23T22:14:59.1Z   AUTOMATION_HEAD_SHA: x",
+        ),
+        "environment is malformed",
+      ],
+      [
+        valid.replace("  AUTOMATION_HEAD_SHA:", "  AUTOMATION_HEAD:"),
+        "does not record an exact-head completion",
+      ],
+      [
+        "\uFEFF" + "x".repeat(RELEASE_AUTOMATION_CONTRACT.versionHead.maximumReportLogBytes + 1),
+        "exceeds its size bound",
+      ],
+      ["", "job log is empty"],
+    ];
+    for (const [log, message] of cases) {
+      await expect(
+        admitVersionHead(versionHeadFixture({ logsByJob: { [reportJob]: log } })),
+      ).rejects.toThrow(message);
+    }
+  });
+
+  test("parses the provider report-job log framing with BOM, CRLF and ANSI styling", () => {
+    const bytes = new TextEncoder().encode(versionHeadReportLog({ ansi: true }));
+    expect(automationCiReportBinding(bytes)).toMatchObject({
+      pullNumber,
+      headSha: versionHeadSourceSha,
+      baseSha: versionHeadBaseSha,
+      checkKind: "automation-ci",
+      checkConclusion: "success",
+      clean: true,
+    });
+    expect(
+      automationCiReportBinding(
+        new TextEncoder().encode(versionHeadReportLog({ bom: false, error: true })),
+      ),
+    ).toMatchObject({ clean: false });
+  });
+
+  test("reads a directly served report log and refuses a non-HTTPS log location", async () => {
+    const direct = versionHeadFixture({ logDelivery: "direct" });
+    await expect(admitVersionHead(direct)).resolves.toMatchObject({
+      mergeMethod: "merge-version-head",
+    });
+    const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
+    const logRequest = direct.requests.find(
+      (request) =>
+        request.path ===
+        `${prefix}/actions/jobs/${versionHeadJobIds(versionHeadRunId).report}/logs`,
+    );
+    expect(logRequest?.authorized).toBe(true);
+    expect(direct.requests.some((request) => request.path.startsWith("/job-logs/"))).toBe(false);
+
+    const insecure = versionHeadFixture({ logDelivery: "insecure-redirect" });
+    await expect(admitVersionHead(insecure)).rejects.toThrow("job log download must use HTTPS");
+    expect(insecure.requests.some((request) => request.path.startsWith("/job-logs/"))).toBe(false);
+  });
+
+  test("rejects a changeset tree entry without a path", async () => {
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          changesetEntries: [{ mode: "100644", type: "blob", sha: "3".repeat(40) }],
+        }),
+      ),
+    ).rejects.toThrow("Version-head .changeset entry path");
   });
 });
 
