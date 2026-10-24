@@ -165,9 +165,7 @@ function SessionRailRowMetadataFixture() {
                     className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none"
                   >
                     <SessionRowContent
-                      quickActionSlots={
-                        Number(!quickActionSession.archived) + Number(scenario.depth === 0)
-                      }
+                      quickActionSlots={Number(!quickActionSession.archived) + 1}
                       title={longTitle}
                       stateLabel="Idle"
                       depthLabel={scenario.depth > 0 ? `Level ${scenario.depth + 1}` : null}

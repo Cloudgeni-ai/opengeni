@@ -8438,6 +8438,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateSiteSidebarState",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sidebar",
+    "request": [
+      "UpdateSiteSidebarStateRequest"
+    ],
+    "response": [
+      "SiteSidebarStateResponse"
+    ]
+  },
+  {
     "id": "updateSiteSqlSettings",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/settings",

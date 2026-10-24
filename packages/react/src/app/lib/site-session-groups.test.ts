@@ -233,3 +233,47 @@ test("collapsed Site exposes only the selected descendant, matching keyboard ord
     "child",
   ]);
 });
+
+test("a pinned Site is one Pinned row across projects, ordered with pinned chats", () => {
+  const conversation = session("conversation", { channelId: "project-id" });
+  const otherConversation = session("other", {
+    metadata: { _opengeniSiteOrigin: { siteId: otherSiteId, title: "Roadmap" } },
+  });
+  const pinnedChat = session("chat", {
+    pinned: true,
+    pinnedAt: "2026-09-08T12:00:00Z",
+    metadata: {},
+  });
+  const result = buildPinnedRailSections([conversation, otherConversation, pinnedChat], undefined, {
+    siteRowsByProject: true,
+    siteGroups: [
+      siteGroup({ channelId: "project-id", conversations: 1, total: 1 }),
+      siteGroup({ channelId: null, conversations: 2, total: 2 }),
+      siteGroup({ siteId: otherSiteId, title: "Roadmap", conversations: 1, total: 1 }),
+    ].map((group) =>
+      group.siteId === siteId
+        ? { ...group, pinned: true as const, pinnedAt: "2026-09-08T13:00:00.000Z" }
+        : group,
+    ),
+  });
+  // Newest pin first; the pinned Site merges its projects into one row.
+  expect(result.pinned.map((node) => node.session.id)).toEqual([`site:${siteId}`, "chat"]);
+  const pinnedSite = result.pinned[0]!;
+  expect(pinnedSite.session.pinned).toBe(true);
+  expect(siteRowConversationCount(pinnedSite)).toBe(3);
+  expect(pinnedSite.children.map((node) => node.session.id)).toEqual(["conversation"]);
+  // It leaves the ordinary rows, with its conversation; the other Site stays.
+  const ordinary = railRoots(result).map((node) => node.session.id);
+  expect(ordinary).toEqual([`site:${otherSiteId}:default`]);
+});
+
+test("a Site archived from the sidebar leaves with its loaded conversations", () => {
+  const open = session("open-conversation");
+  const ordinary = session("chat", { metadata: {} });
+  const result = buildPinnedRailSections([open, ordinary], undefined, {
+    siteGroups: [siteGroup({ conversations: 1, total: 1 })],
+    archivedSiteIds: new Set([siteId]),
+  });
+  expect(railRoots(result).map((node) => node.session.id)).toEqual(["chat"]);
+  expect(result.pinned).toEqual([]);
+});
