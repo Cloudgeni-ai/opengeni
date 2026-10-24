@@ -232,7 +232,7 @@ describe("Live transcript", () => {
       const text = view.container.textContent ?? "";
       expect(text).toContain("Not finished yet");
       expect(text).toContain("In progress");
-      expect(text).toContain("A rough preview.");
+      expect(text).toContain("this page updates by itself");
       // Someone else's microphone isn't "You".
       expect(text).toContain("Microphone");
       expect(text).not.toContain("You0:04");

@@ -182,13 +182,13 @@ function trackLabel(source: string, systemAudioKind: MeetingRecorder["systemAudi
   return "Audio";
 }
 
-/** Who is speaking on a track, from the recording person's point of view. */
+/** Who a track's live text is from, named like its level meter. */
 export function liveSpeakerName(
   recorder: Pick<MeetingRecorder, "tracks" | "systemAudioKind">,
   trackNumber: number,
 ): string {
   const source = recorder.tracks.find((track) => track.trackNumber === trackNumber)?.source;
-  if (source === "microphone") return "You";
+  // The level meters' names: a microphone may pick up a whole room, so not "You".
   return trackLabel(source ?? "", recorder.systemAudioKind);
 }
 

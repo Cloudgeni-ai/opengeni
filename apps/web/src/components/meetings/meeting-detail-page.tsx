@@ -26,6 +26,7 @@ import type {
   RecordingTranscriptVersion,
   RecordingVisibility,
 } from "@opengeni/contracts";
+import { defaultRecordingSpeakerName } from "@opengeni/contracts";
 import {
   activeSegmentIndex,
   formatDuration,
@@ -403,8 +404,9 @@ function PhaseNotice({
     if (uploadingHere === null && recordingElsewhere) {
       return (
         <Notice tone="waiting" icon={SPINNER} title="Not finished yet" live="polite">
-          It's still being recorded or uploaded, in another tab or on another device. A rough
-          preview of what's said shows below, and the transcript starts once all the audio is in.
+          It's still being recorded or uploaded, in another tab or on another device. What's said
+          shows below as it comes in, and this page updates by itself. The transcript starts once
+          all the audio is in.
         </Notice>
       );
     }
@@ -1013,9 +1015,18 @@ export function MeetingDetailPage({
             </div>
           ) : null}
           {!showTranscript && (previewing || recordingHere) ? (
-            <div className="grid gap-2">
+            <div className="grid gap-3">
+              <p className="text-sm leading-5 text-fg-muted">
+                <span className="mr-2 inline-flex rounded-full border border-border px-1.5 text-xs leading-4 font-medium text-fg-label">
+                  Preview
+                </span>
+                {recording.state === "capturing"
+                  ? "What's said so far, as it's heard. The transcript, with each speaker told apart, replaces it after the recording ends."
+                  : "What was said, as it was heard. The transcript, with each speaker told apart, replaces it in a minute or two."}
+              </p>
               {recordingHere && recorder?.live ? (
                 <LiveTranscript
+                  heading={false}
                   lines={recorderLiveLines(recorder)}
                   partials={recorder.live.map((track) => ({
                     trackNumber: track.trackNumber,
@@ -1027,14 +1038,11 @@ export function MeetingDetailPage({
                 />
               ) : (
                 <LiveTranscript
+                  heading={false}
                   lines={savedLive.segments}
-                  speakerName={(trackNumber) => {
-                    const source = recording.tracks.find(
-                      (track) => track.trackNumber === trackNumber,
-                    )?.source;
-                    if (source === "microphone") return owner ? "You" : "Microphone";
-                    return source === "system" ? "Shared audio" : `Track ${trackNumber + 1}`;
-                  }}
+                  speakerName={(trackNumber) =>
+                    defaultRecordingSpeakerName(`track-${trackNumber}`, recording.tracks)
+                  }
                   status={
                     savedLive.error
                       ? { text: "Can't load the preview right now", tone: "waiting" }
@@ -1047,11 +1055,6 @@ export function MeetingDetailPage({
                   }
                 />
               )}
-              <p className="text-xs leading-4.5 text-fg-muted">
-                {recording.state === "capturing"
-                  ? "A rough preview. The transcript, with each speaker told apart, replaces it after the recording ends."
-                  : "A rough preview. The transcript, with each speaker told apart, replaces it in a minute or two."}
-              </p>
             </div>
           ) : !showTranscript ? (
             <p className="text-sm leading-5 text-fg-muted">

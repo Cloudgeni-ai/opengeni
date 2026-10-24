@@ -4,8 +4,10 @@
  * meeting's real transcript (with speakers told apart) replaces it once the
  * recording is done.
  */
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowDownIcon } from "lucide-react";
 
+import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { formatClock } from "@opengeni/react/recordings";
 
@@ -56,6 +58,7 @@ export function LiveTranscript({
   speakerName,
   status,
   empty,
+  heading = true,
   className,
 }: {
   lines: readonly LiveTranscriptLine[];
@@ -66,6 +69,8 @@ export function LiveTranscript({
   status?: { text: string; tone: "muted" | "waiting" } | null;
   /** Shown before anything has been said. */
   empty: string;
+  /** Show the "Live transcript · preview" heading; off where the page already has one. */
+  heading?: boolean;
   className?: string;
 }) {
   const turns = useMemo(() => groupLiveTurns(lines), [lines]);
@@ -77,11 +82,19 @@ export function LiveTranscript({
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow the newest words unless the reader scrolled up to reread.
   const following = useRef(true);
+  const [scroll, setScroll] = useState({ above: false, behind: false });
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
     const onScroll = () => {
-      following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+      const atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+      following.current = atEnd;
+      const above = element.scrollTop > 4;
+      setScroll((previous) =>
+        previous.above === above && previous.behind === !atEnd
+          ? previous
+          : { above, behind: !atEnd },
+      );
     };
     element.addEventListener("scroll", onScroll, { passive: true });
     return () => element.removeEventListener("scroll", onScroll);
@@ -91,77 +104,110 @@ export function LiveTranscript({
     .join(",")}`;
   useLayoutEffect(() => {
     const element = scrollRef.current;
-    if (element && following.current) element.scrollTop = element.scrollHeight;
+    if (!element) return;
+    if (following.current) element.scrollTop = element.scrollHeight;
+    const above = element.scrollTop > 4;
+    setScroll((previous) => (previous.above === above ? previous : { ...previous, above }));
   }, [content]);
+  const jumpToLatest = () => {
+    const element = scrollRef.current;
+    if (!element) return;
+    following.current = true;
+    element.scrollTop = element.scrollHeight;
+  };
+
+  const statusLine = status ? (
+    <p
+      className={cn(
+        "text-xs leading-4",
+        status.tone === "waiting" ? "font-medium text-fg-label" : "text-fg-muted",
+      )}
+      aria-live="polite"
+    >
+      {status.tone === "waiting" ? (
+        <span
+          aria-hidden="true"
+          className="mr-1.5 inline-block size-1.5 rounded-full bg-status-waiting align-middle"
+        />
+      ) : null}
+      {status.text}
+    </p>
+  ) : null;
 
   return (
     <section aria-label="Live transcript" className={cn("grid min-w-0 gap-2", className)}>
-      <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-xs leading-4 font-medium text-fg-label">
-          Live transcript <span className="font-normal text-fg-muted">· preview</span>
-        </h3>
-        {status ? (
-          <p
-            className={cn(
-              "text-xs leading-4",
-              status.tone === "waiting" ? "font-medium text-fg-label" : "text-fg-muted",
-            )}
-            aria-live="polite"
+      {heading ? (
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <h3 className="text-xs leading-4 font-medium text-fg-label">
+            Live transcript <span className="font-normal text-fg-muted">· preview</span>
+          </h3>
+          {statusLine}
+        </div>
+      ) : (
+        statusLine
+      )}
+      <div className="relative min-w-0 rounded-[10px] border border-border bg-surface-2/60">
+        <div
+          ref={scrollRef}
+          role="log"
+          aria-live="polite"
+          aria-label="Live transcript text"
+          tabIndex={0}
+          className={cn(
+            "max-h-64 min-h-16 overflow-y-auto rounded-[10px] px-3 py-2.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+            // Older text above fades out, so a clipped first line reads as "scroll up".
+            scroll.above && "[mask-image:linear-gradient(to_bottom,transparent,black_2.5rem)]",
+          )}
+        >
+          {turns.length === 0 && heard.length === 0 ? (
+            <p className="text-sm leading-5 text-fg-muted">{empty}</p>
+          ) : (
+            <ol className="grid gap-3">
+              {turns.map((turn, index) => (
+                <li key={turn.key} className="grid min-w-0 gap-0.5">
+                  <div className="flex items-center gap-2">
+                    <SpeakerDot slot={turn.trackNumber + 1} />
+                    <span className="text-xs leading-4 font-semibold text-fg">
+                      {speakerName(turn.trackNumber)}
+                    </span>
+                    <span className="text-xs leading-4 text-fg-muted tabular-nums">
+                      {formatClock(turn.startMilliseconds)}
+                    </span>
+                  </div>
+                  <p className="text-sm leading-5 text-pretty text-fg">
+                    {turn.texts.join(" ")}
+                    {continuing && index === turns.length - 1 ? (
+                      <span className="text-fg-muted"> {continuing.text.trim()}</span>
+                    ) : null}
+                  </p>
+                </li>
+              ))}
+              {newTurns.map((partial) => (
+                <li key={`partial:${partial.trackNumber}`} className="grid min-w-0 gap-0.5">
+                  <div className="flex items-center gap-2">
+                    <SpeakerDot slot={partial.trackNumber + 1} />
+                    <span className="text-xs leading-4 font-semibold text-fg">
+                      {speakerName(partial.trackNumber)}
+                    </span>
+                  </div>
+                  <p className="text-sm leading-5 text-fg-muted">{partial.text.trim()}</p>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+        {scroll.behind ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={jumpToLatest}
+            className="absolute right-3 bottom-2 rounded-full bg-surface shadow-[0_1px_2px_rgb(0_0_0/0.08)] pointer-coarse:h-11"
           >
-            {status.tone === "waiting" ? (
-              <span
-                aria-hidden="true"
-                className="mr-1.5 inline-block size-1.5 rounded-full bg-status-waiting align-middle"
-              />
-            ) : null}
-            {status.text}
-          </p>
+            <ArrowDownIcon aria-hidden="true" />
+            Latest
+          </Button>
         ) : null}
-      </div>
-      <div
-        ref={scrollRef}
-        role="log"
-        aria-live="polite"
-        aria-label="Live transcript text"
-        tabIndex={0}
-        className="max-h-64 min-h-16 overflow-y-auto rounded-[10px] bg-surface-2/60 px-3 py-2.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-      >
-        {turns.length === 0 && heard.length === 0 ? (
-          <p className="text-sm leading-5 text-fg-muted">{empty}</p>
-        ) : (
-          <ol className="grid gap-3">
-            {turns.map((turn, index) => (
-              <li key={turn.key} className="grid min-w-0 gap-0.5">
-                <div className="flex items-center gap-2">
-                  <SpeakerDot slot={turn.trackNumber + 1} />
-                  <span className="text-xs leading-4 font-semibold text-fg">
-                    {speakerName(turn.trackNumber)}
-                  </span>
-                  <span className="text-xs leading-4 text-fg-muted tabular-nums">
-                    {formatClock(turn.startMilliseconds)}
-                  </span>
-                </div>
-                <p className="text-sm leading-5 text-pretty text-fg">
-                  {turn.texts.join(" ")}
-                  {continuing && index === turns.length - 1 ? (
-                    <span className="text-fg-muted"> {continuing.text.trim()}…</span>
-                  ) : null}
-                </p>
-              </li>
-            ))}
-            {newTurns.map((partial) => (
-              <li key={`partial:${partial.trackNumber}`} className="grid min-w-0 gap-0.5">
-                <div className="flex items-center gap-2">
-                  <SpeakerDot slot={partial.trackNumber + 1} />
-                  <span className="text-xs leading-4 font-semibold text-fg">
-                    {speakerName(partial.trackNumber)}
-                  </span>
-                </div>
-                <p className="text-sm leading-5 text-fg-muted">{partial.text.trim()}…</p>
-              </li>
-            ))}
-          </ol>
-        )}
       </div>
     </section>
   );
