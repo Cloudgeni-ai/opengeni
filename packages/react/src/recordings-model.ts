@@ -255,6 +255,50 @@ const LANGUAGE_NAMES: Record<string, string> = {
   zh: "Chinese",
 };
 
+// Providers may report ISO 639-2 codes ("eng"). Hermes, the phone's
+// JavaScript engine, does not canonicalize them to "en", so map them here.
+const THREE_LETTER_LANGUAGES: Record<string, string> = {
+  ara: "ar",
+  ces: "cs",
+  cze: "cs",
+  dan: "da",
+  deu: "de",
+  ger: "de",
+  ell: "el",
+  gre: "el",
+  eng: "en",
+  spa: "es",
+  fin: "fi",
+  fra: "fr",
+  fre: "fr",
+  heb: "he",
+  hin: "hi",
+  hun: "hu",
+  ind: "id",
+  isl: "is",
+  ice: "is",
+  ita: "it",
+  jpn: "ja",
+  kor: "ko",
+  nob: "nb",
+  nld: "nl",
+  dut: "nl",
+  nno: "nn",
+  nor: "no",
+  pol: "pl",
+  por: "pt",
+  ron: "ro",
+  rum: "ro",
+  rus: "ru",
+  swe: "sv",
+  tha: "th",
+  tur: "tr",
+  ukr: "uk",
+  vie: "vi",
+  zho: "zh",
+  chi: "zh",
+};
+
 /** "English" for "en" or a provider's "eng"; the code itself when no name is known. */
 export function languageName(code: string): string {
   let tag = code;
@@ -263,6 +307,9 @@ export function languageName(code: string): string {
   } catch {
     // Not a well-formed tag: show it as given.
   }
+  const [primary, ...rest] = tag.split("-");
+  const twoLetter = THREE_LETTER_LANGUAGES[primary!.toLowerCase()];
+  if (twoLetter) tag = [twoLetter, ...rest].join("-");
   try {
     const name = new Intl.DisplayNames(["en"], { type: "language" }).of(tag);
     if (name && name !== tag) return name;

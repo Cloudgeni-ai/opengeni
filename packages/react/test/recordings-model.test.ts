@@ -150,15 +150,28 @@ describe("speakers", () => {
     expect(languageName("eng")).toBe("English");
     expect(languageName("zz")).toBe("zz");
     const displayNames = Intl.DisplayNames;
+    const canonical = Intl.getCanonicalLocales;
     try {
-      // Hermes, the phone's JavaScript engine, has no Intl.DisplayNames.
+      // Hermes, the phone's JavaScript engine, has no Intl.DisplayNames and
+      // leaves three-letter codes as they are.
       Reflect.deleteProperty(Intl, "DisplayNames");
+      Object.defineProperty(Intl, "getCanonicalLocales", {
+        value: (code: string) => [code],
+        configurable: true,
+        writable: true,
+      });
+      expect(languageName("eng")).toBe("English");
       expect(languageName("nob")).toBe("Norwegian Bokmål");
       expect(languageName("en-GB")).toBe("English");
       expect(languageName("zz")).toBe("zz");
     } finally {
       Object.defineProperty(Intl, "DisplayNames", {
         value: displayNames,
+        configurable: true,
+        writable: true,
+      });
+      Object.defineProperty(Intl, "getCanonicalLocales", {
+        value: canonical,
         configurable: true,
         writable: true,
       });
