@@ -1324,6 +1324,74 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("the reading after an action waits for the work it started, such as a save", async () => {
+    // Pressing Apply disables it as "Saving..." and shows "Loading…" text for
+    // two readings; the third shows the result.
+    class SavingFixture extends Fixture {
+      pressed = false;
+      busyReads = 2;
+      /** A "Loading…" text the page shows before the press, too. */
+      loadingBefore = false;
+      reads = 0;
+      override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "click") this.pressed = true;
+        const response = await super.callTool(name, argumentsJson);
+        if (name !== "get_window_state" || !args.include_accessibility_tree) return response;
+        const state = JSON.parse(response.structuredJson!);
+        const extra: Record<string, unknown>[] = [];
+        if (this.pressed) this.reads++;
+        const busy = this.pressed && this.reads <= this.busyReads;
+        if (busy) {
+          Object.assign(state.elements[0], { label: "Saving...", enabled: false });
+          extra.push({ role: "AXStaticText", label: "Loading billing details…", actions: [] });
+        } else if (this.pressed) {
+          extra.push({ role: "AXStaticText", label: "Saved: CF-1", actions: [] });
+        }
+        if (this.loadingBefore)
+          extra.push({ role: "AXStaticText", label: "Loading news…", actions: [] });
+        extra.forEach((element, index) =>
+          state.elements.push({
+            ...element,
+            element_index: 2 + index,
+            element_token: `${state.snapshot_id}:${2 + index}`,
+          }),
+        );
+        response.structuredJson = JSON.stringify(state);
+        return response;
+      }
+    }
+    const names = (observation: ComputerBackendObservation | null) =>
+      (observation?.roots ?? []).map((node) => node.name);
+
+    const fixture = new SavingFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const after = await backend.dispatch(command(await backend.observe(target.id)));
+      expect(names(after)).toContain("Saved: CF-1");
+      expect(names(after)).not.toContain("Saving...");
+      expect(fixture.reads).toBe(3);
+    } finally {
+      await backend.close();
+    }
+
+    // A sign of work the page already showed before the action does not hold
+    // the reading: an action on a page that is not busy reads it once.
+    const idle = new SavingFixture();
+    idle.busyReads = 0;
+    idle.loadingBefore = true;
+    const idleBackend = await CuaComputerBackend.open(idle, "macos");
+    try {
+      const target = (await idleBackend.targets())[0]!;
+      const after = await idleBackend.dispatch(command(await idleBackend.observe(target.id)));
+      expect(names(after)).toContain("Saved: CF-1");
+      expect(idle.reads).toBe(1);
+    } finally {
+      await idleBackend.close();
+    }
+  });
+
   test("a press macOS did not confirm, which closed its window, reads the window it opened", async () => {
     // Excel's start gallery: pressing "Blank Workbook" closes the gallery and
     // opens the workbook, and macOS answers the press with -25205.

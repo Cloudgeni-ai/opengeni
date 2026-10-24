@@ -95,6 +95,12 @@ const CURSOR_MOTION = { timing: "fixed", glide_duration_ms: 150, dwell_after_cli
  * reading straight after the input does not show it yet. */
 const INPUT_REREAD_MS = 150;
 
+/** How long the reading after an action waits for work the action started,
+ * such as a save or a load the page shows as "Saving..." or a busy element,
+ * and how often it reads the window again meanwhile. */
+const SETTLE_MAX_MS = 5_000;
+const SETTLE_POLL_MS = 250;
+
 /** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
 export class CuaComputerBackend implements ComputerBackend {
@@ -392,7 +398,7 @@ export class CuaComputerBackend implements ComputerBackend {
           throw error;
         }
       }
-      const after = await this.observeAfter(command.targetId, acted, known, report);
+      const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
       const confirmed = await this.confirmInput(after, operations);
       if (confirmed.failures.length)
@@ -429,6 +435,7 @@ export class CuaComputerBackend implements ComputerBackend {
     acted: Target,
     known: Set<string>,
     report: string,
+    before?: ComputerBackendObservation,
   ): Promise<ComputerBackendObservation | null> {
     try {
       // CUA names the windows it saw the action open. Nothing else proves
@@ -440,10 +447,35 @@ export class CuaComputerBackend implements ComputerBackend {
         const reading = await this.observeTarget(opened).catch(() => null);
         if (reading) return reading;
       }
-      return await this.observeTarget(targetId);
+      return await this.settled(await this.observeTarget(targetId), before);
     } catch {
       return null;
     }
+  }
+
+  /** The window once the work an action started there has finished: while
+   * a reading shows a sign of work in progress that the reading before the
+   * action did not (a busy or progress element, or a status, label or
+   * disabled control reading "Saving..." or "Loading…"), it reads the window
+   * again, for up to SETTLE_MAX_MS. Otherwise the first reading stands, so
+   * an action on a page that is not busy costs no extra read. */
+  private async settled(
+    reading: ComputerBackendObservation,
+    before: ComputerBackendObservation | undefined,
+  ): Promise<ComputerBackendObservation> {
+    if (!before || before.target.id !== reading.target.id) return reading;
+    const earlier = new Set(progressSigns(before.roots));
+    const busy = (observation: ComputerBackendObservation) =>
+      progressSigns(observation.roots).some((sign) => !earlier.has(sign));
+    const deadline = Date.now() + SETTLE_MAX_MS;
+    let current = reading;
+    while (busy(current) && Date.now() + SETTLE_POLL_MS < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
+      const again = await this.observeTarget(current.target.id).catch(() => null);
+      if (again?.target.id !== current.target.id) break;
+      current = again;
+    }
+    return current;
   }
 
   /** After an element action macOS did not confirm: the window's reading if
@@ -592,7 +624,7 @@ export class CuaComputerBackend implements ComputerBackend {
           standIn(used);
         }
     if (!stopped) {
-      const after = await this.observeAfter(command.targetId, acted, known, report);
+      const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
       const { after: confirmed, failures } = await this.confirmInput(after, steps);
       if (failures.length) {
@@ -2124,6 +2156,39 @@ function sameReading(
   const shape = (nodes: readonly InteractionSemanticNodeValue[]): string =>
     JSON.stringify(nodes, (key, value) => (key === "ref" ? undefined : value));
   return shape(after.roots) === shape(before.roots);
+}
+
+/** Roles whose text describes the page rather than being something to choose
+ * or type: their "Saving..." means the page is working. A menu item's
+ * "Print…" or a field's typed value does not. */
+const DESCRIPTIVE_ROLE =
+  /^(?:AX)?(?:static ?text|text|label|status|alert|heading|web ?area|document|group|cell)$/iu;
+const IN_PROGRESS_ROLE = /busy|progress/iu;
+const TRAILING_ELLIPSIS = /(?:\.\.\.|…)\s*$/u;
+
+/** The signs of work in progress a reading shows, one string per element: a
+ * busy element or a spinner (a progress element without a value; a bar
+ * showing a value can be a static meter), or a descriptive or disabled
+ * element whose text ends in an ellipsis ("Saving...", "Loading…"). */
+function progressSigns(nodes: readonly InteractionSemanticNodeValue[]): string[] {
+  const signs: string[] = [];
+  const visit = (node: InteractionSemanticNodeValue): void => {
+    if (!/menu/iu.test(node.role)) {
+      if (
+        node.states.includes("busy") ||
+        (IN_PROGRESS_ROLE.test(node.role) && node.value === undefined)
+      ) {
+        signs.push(`${node.role}\u0000${node.name ?? ""}`);
+      } else if (DESCRIPTIVE_ROLE.test(node.role) || node.states.includes("disabled")) {
+        const value = typeof node.value === "string" ? node.value : undefined;
+        for (const text of [node.name, value, node.description])
+          if (text && TRAILING_ELLIPSIS.test(text)) signs.push(`${node.role}\u0000${text}`);
+      }
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  for (const node of nodes) visit(node);
+  return signs;
 }
 
 function openedWindowsReport(text: string): string {
