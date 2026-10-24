@@ -57,6 +57,7 @@ export default defineConfig({
     "src/testing/session-scenarios.ts",
     "src/realtime.ts",
     "src/recordings.ts",
+    "src/automations.ts",
     "src/artifacts.ts",
     "src/artifacts-spreadsheet.ts",
     "src/artifacts-document.ts",
