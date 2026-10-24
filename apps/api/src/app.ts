@@ -156,6 +156,7 @@ import {
 } from "./http/request-body";
 import { invalidPathIdentifierHttpError } from "./http/path-identifier";
 import { replaceTrustedClientAddressHeader } from "./http/request-source";
+import { HTTP_REQUEST_CHILD_SPAN_LIMIT, requestSpanTraceParent } from "./http/request-trace";
 import { unmatchedRoute } from "./http/unmatched-route";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { bearerApiContractHeaderCompatibility } from "./http/api-contract-compat";
@@ -941,7 +942,14 @@ export function createAppComposition(deps: AppDependencies): {
         "http.request.method": c.req.method,
         "opengeni.route": route,
       },
-      { parent: null },
+      {
+        ...requestSpanTraceParent(
+          c.req.header("traceparent"),
+          deps.settings.observabilityTrustIncomingTraceContext === true,
+        ),
+        kind: "server",
+        childSpanLimit: HTTP_REQUEST_CHILD_SPAN_LIMIT,
+      },
     );
     return await withMcpTelemetry(observability, span.traceId, () =>
       withTraceContext(span, async () => {
