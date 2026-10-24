@@ -1000,6 +1000,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "knowledge_retain_file",
   "knowledge_retain_message",
   "knowledge_archive",
+  "meetings_search",
+  "meeting_read",
   "instruction_policy_save",
   "instruction_policy_get",
   "memory_search",

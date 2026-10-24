@@ -32,6 +32,7 @@ import {
   forgetWorkspaceRecordingVoices,
   getBrowserRecordingVideo,
   getRecording,
+  getRecordingSearchDetails,
   getRecordingTranscriptPage,
   listDeletingRecordingObjectKeys,
   listDueRecordingRetention,
@@ -1371,5 +1372,127 @@ describe("recordings", () => {
     const [rows] = await shared.admin<{ count: number }[]>`
       select count(*)::int as count from recording_live_segments where recording_id = ${recordingId}`;
     expect(rows!.count).toBe(0);
+  });
+
+  test("finding meetings by words, speaker and date, with the lines that match", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const memberActor = { workspaceId: scope.workspaceId, subjectId: scope.member };
+    async function transcribed(
+      visibility: "private" | "workspace",
+      segments: Array<{ at: number; label: string; text: string }>,
+    ) {
+      const recording = await finalizedRecording(scope, visibility);
+      const processingOwner = crypto.randomUUID();
+      await claimRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId: recording.versionId,
+        processingOwner,
+        leaseSeconds: 600,
+      });
+      await completeRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId: recording.versionId,
+        processingOwner,
+        languages: ["en"],
+        diarized: true,
+        diarization: "provider",
+        audioMilliseconds: 600_000,
+        segments: segments.map((segment) => ({
+          startMilliseconds: segment.at,
+          endMilliseconds: segment.at + 4_000,
+          trackNumber: 1,
+          speakerLabel: segment.label,
+          text: segment.text,
+        })),
+      });
+      return recording;
+    }
+    const budget = await transcribed("workspace", [
+      { at: 0, label: "speaker_0", text: "Welcome everyone." },
+      { at: 5_000, label: "speaker_1", text: "The budget for the roof is tight." },
+      { at: 60_000, label: "speaker_0", text: "Then we cut the budget elsewhere." },
+      { at: 120_000, label: "speaker_1", text: "Agreed." },
+    ]);
+    const other = await transcribed("workspace", [
+      { at: 0, label: "speaker_0", text: "Nothing about money here." },
+    ]);
+    const mine = await transcribed("private", [
+      { at: 0, label: "speaker_0", text: "My private budget notes." },
+    ]);
+    const { person } = await createRecordingPerson(db, {
+      ...budget.actor,
+      accountId: scope.accountId,
+      personId: crypto.randomUUID(),
+      displayName: "Ingrid Solberg",
+    });
+    await updateRecordingSpeakers(db, {
+      ...budget.actor,
+      recordingId: budget.recordingId,
+      assignments: [
+        { label: "speaker_0", personId: person.id },
+        { label: "speaker_1", name: "Tomas" },
+      ],
+    });
+    // A corrected line is found by its corrected words.
+    await updateRecordingSegments(db, {
+      ...budget.actor,
+      recordingId: budget.recordingId,
+      edits: [{ segmentIndex: 3, text: "Agreed, the scaffolding can wait." }],
+    });
+
+    const ids = async (input: Parameters<typeof listRecordings>[1]) =>
+      (await listRecordings(db, input)).recordings.map((recording) => recording.id).sort();
+    expect(await ids({ ...memberActor, query: "budget" })).toEqual([budget.recordingId]);
+    expect(await ids({ ...budget.actor, query: "budget" })).toEqual(
+      [budget.recordingId, mine.recordingId].sort(),
+    );
+    expect(await ids({ ...memberActor, person: "ingrid" })).toEqual([budget.recordingId]);
+    expect(await ids({ ...memberActor, person: person.id })).toEqual([budget.recordingId]);
+    expect(await ids({ ...memberActor, person: "Tom" })).toEqual([budget.recordingId]);
+    expect(await ids({ ...memberActor, person: "nobody" })).toEqual([]);
+    const now = Date.now();
+    expect(
+      await ids({
+        ...memberActor,
+        startedFrom: new Date(now - 3_600_000),
+        startedTo: new Date(now + 60_000),
+      }),
+    ).toEqual([budget.recordingId, other.recordingId].sort());
+    expect(await ids({ ...memberActor, startedFrom: new Date(now + 60_000) })).toEqual([]);
+
+    const details = await getRecordingSearchDetails(db, {
+      ...memberActor,
+      recordingIds: [budget.recordingId, other.recordingId, mine.recordingId],
+      query: "budget",
+      matchesPerRecording: 1,
+    });
+    // Someone else's Only me recording stays invisible, even by id.
+    expect(details.has(mine.recordingId)).toBe(false);
+    expect(details.get(other.recordingId)).toMatchObject({ matches: [] });
+    expect(details.get(budget.recordingId)?.speakers.map((speaker) => speaker.name)).toEqual([
+      "Ingrid Solberg",
+      "Tomas",
+    ]);
+    expect(details.get(budget.recordingId)?.matches).toEqual([
+      { startMilliseconds: 5_000, speaker: "Tomas", text: "The budget for the roof is tight." },
+    ]);
+    const corrected = await getRecordingSearchDetails(db, {
+      ...memberActor,
+      recordingIds: [budget.recordingId],
+      query: "scaffolding",
+    });
+    expect(corrected.get(budget.recordingId)?.matches).toEqual([
+      { startMilliseconds: 120_000, speaker: "Tomas", text: "Agreed, the scaffolding can wait." },
+    ]);
+
+    const stretch = await getRecordingTranscriptPage(db, {
+      ...memberActor,
+      recordingId: budget.recordingId,
+      fromMilliseconds: 6_000,
+      toMilliseconds: 120_000,
+    });
+    expect(stretch.segments.map((segment) => segment.startMilliseconds)).toEqual([5_000, 60_000]);
   });
 });

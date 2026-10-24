@@ -12,7 +12,7 @@ import {
   type RecordingPurpose,
   type RecordingVisibility,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, gt, inArray, isNotNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, ne, or, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
 import * as schema from "./schema";
 import type { RecordingWordTiming } from "./recordings-schema";
@@ -392,6 +392,15 @@ export async function getRecording(
 export type ListRecordingsInput = RecordingActor & {
   /** Words to find in titles and current transcripts. */
   query?: string | undefined;
+  /**
+   * A speaker named in the current transcript: a people-directory id, or part
+   * of a name. Names only suggested from a voice don't count.
+   */
+  person?: string | undefined;
+  /** Only recordings started at or after this instant. */
+  startedFrom?: Date | undefined;
+  /** Only recordings started before this instant. */
+  startedTo?: Date | undefined;
   externalRef?: string | undefined;
   /** Meetings unless asked otherwise: browser recordings stay out of meeting lists. */
   purpose?: RecordingPurpose | undefined;
@@ -413,6 +422,8 @@ export async function listRecordings(
       eq(schema.recordings.purpose, input.purpose ?? "meeting"),
     ];
     if (input.externalRef) conditions.push(eq(schema.recordings.externalRef, input.externalRef));
+    if (input.startedFrom) conditions.push(gte(schema.recordings.startedAt, input.startedFrom));
+    if (input.startedTo) conditions.push(lt(schema.recordings.startedAt, input.startedTo));
     if (input.before) {
       conditions.push(
         or(
@@ -426,7 +437,7 @@ export async function listRecordings(
     }
     const query = input.query?.trim();
     if (query) {
-      const pattern = `%${query.replace(/[\\%_]/gu, (match) => `\\${match}`)}%`;
+      const pattern = likePattern(query);
       const words = transcriptSearchQuery(query);
       conditions.push(
         words === null
@@ -451,6 +462,24 @@ export async function listRecordings(
             )!,
       );
     }
+    const person = input.person?.trim();
+    if (person) {
+      const personId = UUID.test(person) ? person.toLowerCase() : null;
+      conditions.push(sql`EXISTS (
+        SELECT 1 FROM recording_speaker_assignments assignment
+        JOIN recording_transcript_versions version
+          ON version.id = assignment.version_id AND version.is_current
+        LEFT JOIN recording_people person
+          ON person.workspace_id = assignment.workspace_id AND person.id = assignment.person_id
+        WHERE assignment.workspace_id = ${schema.recordings.workspaceId}
+          AND assignment.recording_id = ${schema.recordings.id}
+          AND assignment.source <> 'suggested'
+          AND (
+            ${personId}::uuid IS NOT NULL AND assignment.person_id = ${personId}::uuid
+            OR coalesce(person.display_name, assignment.display_name) ILIKE ${likePattern(person)}
+          )
+      )`);
+    }
     const rows = await tx
       .select()
       .from(schema.recordings)
@@ -466,6 +495,120 @@ export async function listRecordings(
           ? { startedAt: last.startedAt.toISOString(), id: last.id }
           : null,
     };
+  });
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/** An ILIKE pattern that finds `text` anywhere, with its wildcards taken literally. */
+function likePattern(text: string): string {
+  return `%${text.replace(/[\\%_]/gu, (match) => `\\${match}`)}%`;
+}
+
+export type RecordingSearchMatch = {
+  startMilliseconds: number;
+  /** The speaker's resolved name, or null when the model gave no label. */
+  speaker: string | null;
+  text: string;
+};
+
+/**
+ * For a page of listed recordings: each one's speakers in its current
+ * transcript and, given `query`, its first transcript segments that contain
+ * the words. Recordings without a current transcript have neither. Set-based,
+ * so a page costs the same few queries however many recordings it holds.
+ */
+export async function getRecordingSearchDetails(
+  db: Database,
+  input: RecordingActor & {
+    recordingIds: readonly string[];
+    query?: string | undefined;
+    matchesPerRecording?: number | undefined;
+  },
+): Promise<Map<string, { speakers: RecordingSpeaker[]; matches: RecordingSearchMatch[] }>> {
+  const details = new Map<
+    string,
+    { speakers: RecordingSpeaker[]; matches: RecordingSearchMatch[] }
+  >();
+  if (input.recordingIds.length === 0) return details;
+  const perRecording = Math.min(Math.max(input.matchesPerRecording ?? 3, 1), 10);
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const versions = (
+      await tx
+        .select({ version: schema.recordingTranscriptVersions })
+        .from(schema.recordingTranscriptVersions)
+        .innerJoin(
+          schema.recordings,
+          and(
+            eq(schema.recordings.workspaceId, schema.recordingTranscriptVersions.workspaceId),
+            eq(schema.recordings.id, schema.recordingTranscriptVersions.recordingId),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.recordingTranscriptVersions.workspaceId, input.workspaceId),
+            inArray(schema.recordingTranscriptVersions.recordingId, [...input.recordingIds]),
+            eq(schema.recordingTranscriptVersions.isCurrent, true),
+            ne(schema.recordings.state, "deleting"),
+          ),
+        )
+    ).map((row) => row.version);
+    if (versions.length === 0) return details;
+    const speakersByVersion = await speakersForVersions(tx, input.workspaceId, versions);
+    for (const version of versions) {
+      details.set(version.recordingId, {
+        speakers: speakersByVersion.get(version.id) ?? [],
+        matches: [],
+      });
+    }
+    const words = input.query ? transcriptSearchQuery(input.query) : null;
+    if (words === null) return details;
+    const versionIds = versions.map((version) => version.id);
+    const rows = await rawRows<{
+      recording_id: string;
+      version_id: string;
+      start_milliseconds: number;
+      speaker_label: string | null;
+      text: string;
+    }>(
+      tx,
+      sql`SELECT recording_id, version_id, start_milliseconds, speaker_label, text FROM (
+        SELECT segment.recording_id, segment.version_id, segment.start_milliseconds,
+          coalesce(edit.speaker_label, segment.speaker_label) AS speaker_label,
+          coalesce(edit.text, segment.text) AS text,
+          row_number() OVER (
+            PARTITION BY segment.version_id ORDER BY segment.segment_index
+          ) AS position
+        FROM recording_transcript_segments segment
+        LEFT JOIN recording_segment_edits edit
+          ON edit.version_id = segment.version_id AND edit.segment_index = segment.segment_index
+        WHERE segment.workspace_id = ${input.workspaceId}
+          AND segment.version_id IN (${sql.join(
+            versionIds.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )})
+          AND (
+            (edit.text IS NULL AND segment.search @@ to_tsquery('simple', ${words}))
+            OR to_tsvector('simple', coalesce(edit.text, '')) @@ to_tsquery('simple', ${words})
+          )
+      ) ranked
+      WHERE position <= ${perRecording}
+      ORDER BY recording_id, start_milliseconds`,
+    );
+    for (const row of rows) {
+      const entry = details.get(row.recording_id);
+      if (!entry) continue;
+      entry.matches.push({
+        startMilliseconds: Number(row.start_milliseconds),
+        speaker:
+          row.speaker_label === null
+            ? null
+            : (entry.speakers.find((speaker) => speaker.label === row.speaker_label)?.name ??
+              row.speaker_label),
+        text: row.text,
+      });
+    }
+    return details;
   });
 }
 
@@ -2088,22 +2231,40 @@ async function resolveVersion(
 }
 
 async function speakersFor(tx: Database, version: VersionRow): Promise<RecordingSpeaker[]> {
+  return (await speakersForVersions(tx, version.workspaceId, [version])).get(version.id) ?? [];
+}
+
+/** Each version's speakers with their resolved names, in label order. */
+async function speakersForVersions(
+  tx: Database,
+  workspaceId: string,
+  versions: readonly VersionRow[],
+): Promise<Map<string, RecordingSpeaker[]>> {
+  const versionIds = versions.map((version) => version.id);
+  const recordingIds = [...new Set(versions.map((version) => version.recordingId))];
   const [labelRows, overrideRows, assignments, tracks] = await Promise.all([
     tx
-      .selectDistinct({ label: schema.recordingTranscriptSegments.speakerLabel })
+      .selectDistinct({
+        versionId: schema.recordingTranscriptSegments.versionId,
+        label: schema.recordingTranscriptSegments.speakerLabel,
+      })
       .from(schema.recordingTranscriptSegments)
       .where(
         and(
-          eq(schema.recordingTranscriptSegments.versionId, version.id),
+          inArray(schema.recordingTranscriptSegments.versionId, versionIds),
           isNotNull(schema.recordingTranscriptSegments.speakerLabel),
         ),
       ),
     tx
-      .selectDistinct({ label: schema.recordingSegmentEdits.speakerLabel })
+      .selectDistinct({
+        versionId: schema.recordingSegmentEdits.versionId,
+        label: schema.recordingSegmentEdits.speakerLabel,
+      })
       .from(schema.recordingSegmentEdits)
-      .where(eq(schema.recordingSegmentEdits.versionId, version.id)),
+      .where(inArray(schema.recordingSegmentEdits.versionId, versionIds)),
     tx
       .select({
+        versionId: schema.recordingSpeakerAssignments.versionId,
         label: schema.recordingSpeakerAssignments.speakerLabel,
         personId: schema.recordingSpeakerAssignments.personId,
         displayName: schema.recordingSpeakerAssignments.displayName,
@@ -2119,36 +2280,51 @@ async function speakersFor(tx: Database, version: VersionRow): Promise<Recording
           eq(schema.recordingPeople.id, schema.recordingSpeakerAssignments.personId),
         ),
       )
-      .where(eq(schema.recordingSpeakerAssignments.versionId, version.id)),
+      .where(inArray(schema.recordingSpeakerAssignments.versionId, versionIds)),
     tx
       .select({
+        recordingId: schema.recordingTracks.recordingId,
         trackNumber: schema.recordingTracks.trackNumber,
         source: schema.recordingTracks.source,
       })
       .from(schema.recordingTracks)
       .where(
         and(
-          eq(schema.recordingTracks.workspaceId, version.workspaceId),
-          eq(schema.recordingTracks.recordingId, version.recordingId),
+          eq(schema.recordingTracks.workspaceId, workspaceId),
+          inArray(schema.recordingTracks.recordingId, recordingIds),
         ),
       ),
   ]);
-  const labels = new Set<string>();
-  for (const row of [...labelRows, ...overrideRows]) if (row.label) labels.add(row.label);
-  const byLabel = new Map(assignments.map((assignment) => [assignment.label, assignment]));
-  return [...labels].sort(compareSpeakerLabels).map((label) => {
-    const assignment = byLabel.get(label);
-    return {
-      label,
-      name:
-        assignment?.personName ??
-        assignment?.displayName ??
-        defaultRecordingSpeakerName(label, tracks),
-      personId: assignment?.personId ?? null,
-      source: assignment?.source ?? null,
-      confidence: assignment?.confidence ?? null,
-    };
-  });
+  const speakers = new Map<string, RecordingSpeaker[]>();
+  for (const version of versions) {
+    const labels = new Set<string>();
+    for (const row of [...labelRows, ...overrideRows]) {
+      if (row.versionId === version.id && row.label) labels.add(row.label);
+    }
+    const byLabel = new Map(
+      assignments
+        .filter((assignment) => assignment.versionId === version.id)
+        .map((assignment) => [assignment.label, assignment]),
+    );
+    const versionTracks = tracks.filter((track) => track.recordingId === version.recordingId);
+    speakers.set(
+      version.id,
+      [...labels].sort(compareSpeakerLabels).map((label) => {
+        const assignment = byLabel.get(label);
+        return {
+          label,
+          name:
+            assignment?.personName ??
+            assignment?.displayName ??
+            defaultRecordingSpeakerName(label, versionTracks),
+          personId: assignment?.personId ?? null,
+          source: assignment?.source ?? null,
+          confidence: assignment?.confidence ?? null,
+        };
+      }),
+    );
+  }
+  return speakers;
 }
 
 function compareSpeakerLabels(left: string, right: string): number {
@@ -2163,6 +2339,10 @@ export async function getRecordingTranscriptPage(
     versionId?: string | undefined;
     /** Segment index to continue after; omitted starts at the beginning. */
     after?: number | undefined;
+    /** Only segments still running at or after this point of the recording. */
+    fromMilliseconds?: number | undefined;
+    /** Only segments that start before this point of the recording. */
+    toMilliseconds?: number | undefined;
     limit?: number | undefined;
   },
 ): Promise<RecordingTranscriptPage> {
@@ -2172,6 +2352,14 @@ export async function getRecordingTranscriptPage(
     const conditions = [eq(schema.recordingTranscriptSegments.versionId, version.id)];
     if (input.after !== undefined)
       conditions.push(gt(schema.recordingTranscriptSegments.segmentIndex, input.after));
+    if (input.fromMilliseconds !== undefined)
+      conditions.push(
+        gt(schema.recordingTranscriptSegments.endMilliseconds, input.fromMilliseconds),
+      );
+    if (input.toMilliseconds !== undefined)
+      conditions.push(
+        lt(schema.recordingTranscriptSegments.startMilliseconds, input.toMilliseconds),
+      );
     const rows = await tx
       .select({
         index: schema.recordingTranscriptSegments.segmentIndex,

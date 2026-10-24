@@ -193,6 +193,7 @@ import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { vaultProviderRegistryFor } from "../routes/vault-providers";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
+import { registerMeetingTools } from "./meeting-tools";
 import { registerSecretTools } from "./secret-tools";
 import {
   attemptSecretWriteContext,
@@ -1148,6 +1149,16 @@ export function buildOpenGeniMcpServer(
   // Reading existing Knowledge and Skills remains available when authoring is Off.
   if (sessionId !== null) {
     registerKnowledgeEntryTools(server, deps, grant, sessionId);
+    // Recorded meetings, as the person this session works for (meeting-tools.ts).
+    registerMeetingTools({
+      server,
+      deps,
+      grant,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
     // secret_* (capability `secrets`): gated by permission and the signed
     // tool selection like every catalogued tool; agent attempts only.
     registerSecretTools(server, deps, grant, sessionId);
