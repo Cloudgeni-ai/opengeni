@@ -526,7 +526,7 @@ function SheetInput(props: {
       onSubmitEditing={props.onSubmit}
       style={{
         ...fontStyle(theme),
-        height: 44,
+        minHeight: 44,
         paddingHorizontal: 12,
         fontSize: 16,
         color: c.fg,

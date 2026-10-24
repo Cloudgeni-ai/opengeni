@@ -209,7 +209,7 @@ function MeetingRow(props: {
     >
       <View style={{ flex: 1, gap: 3 }}>
         <Text
-          numberOfLines={1}
+          numberOfLines={2}
           style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 20, color: c.fg }}
         >
           {recording.title || "Untitled meeting"}
@@ -219,7 +219,7 @@ function MeetingRow(props: {
             <Icon name="lock" size={11} color={c["fg-subtle"]} />
           ) : null}
           <Text
-            numberOfLines={1}
+            numberOfLines={2}
             style={{ ...fontStyle(theme), fontSize: 13, color: c["fg-muted"], flexShrink: 1 }}
           >
             {facts.join(" · ")}
@@ -367,13 +367,23 @@ function RecorderCard({ recorder }: { recorder: MeetingRecorder }) {
               alignItems: "center",
               justifyContent: "center",
               gap: 10,
-              height: 56,
+              minHeight: 56,
+              paddingHorizontal: 16,
+              paddingVertical: 12,
               borderRadius: theme.radius.lg,
               backgroundColor: pressed ? withAlpha(c.danger, 0.85) : c.danger,
             })}
           >
             <Icon name="mic" size={20} color={c["danger-fg"]} />
-            <Text style={{ ...fontStyle(theme, 600), fontSize: 17, color: c["danger-fg"] }}>
+            <Text
+              style={{
+                ...fontStyle(theme, 600),
+                fontSize: 17,
+                color: c["danger-fg"],
+                flexShrink: 1,
+                textAlign: "center",
+              }}
+            >
               Record a meeting
             </Text>
           </Pressable>
