@@ -956,6 +956,14 @@ const SettingsSchema = z.object({
     .max(7 * 24 * 60 * 60)
     .default(24 * 60 * 60),
   voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
+  /**
+   * Our own CPU speaker models for meeting recordings (apps/worker/speakers):
+   * the `opengeni-speakers` executable and the directory holding its
+   * `segmentation.onnx` and `embedding.onnx`. Without both, transcripts use
+   * the transcription model's own diarization only.
+   */
+  recordingSpeakersBinaryPath: z.string().trim().min(1).max(1024).optional(),
+  recordingSpeakerModelsDir: z.string().trim().min(1).max(1024).optional(),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Connected subscription STT is preferred by default; operators can put
   // openai/azure-openai first explicitly.
@@ -5306,6 +5314,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS",
     ),
     voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
+    recordingSpeakersBinaryPath: optional("OPENGENI_RECORDING_SPEAKERS_BINARY_PATH"),
+    recordingSpeakerModelsDir: optional("OPENGENI_RECORDING_SPEAKER_MODELS_DIR"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
     voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),

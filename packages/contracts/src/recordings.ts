@@ -63,6 +63,14 @@ export const RecordingDiarization = /* @__PURE__ */ defineSchema(() =>
 );
 export type RecordingDiarization = z.infer<typeof RecordingDiarization>;
 
+/**
+ * Who tells speakers apart: `auto` uses the model's own diarization when it
+ * has one and Opengeni's otherwise; `ours` always uses Opengeni's, for the
+ * same speakers whatever the model.
+ */
+export const RecordingDiarizer = /* @__PURE__ */ defineSchema(() => z.enum(["auto", "ours"]));
+export type RecordingDiarizer = z.infer<typeof RecordingDiarizer>;
+
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/u);
 const externalRef = z.string().trim().min(1).max(512);
 const jsonValue: z.ZodType<unknown> = z.lazy(() =>
@@ -95,6 +103,8 @@ export const RecordingTranscriptionOptions = /* @__PURE__ */ defineSchema(() =>
       maxSpeakers: z.number().int().min(1).max(32).optional(),
       /** Names and terms the model should recognize. */
       keyterms: z.array(z.string().trim().min(1).max(50)).max(100).optional(),
+      /** Who tells speakers apart; defaults to the workspace's choice, else `auto`. */
+      diarizer: RecordingDiarizer.optional(),
     })
     .strict(),
 );
@@ -116,6 +126,8 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
         })
         .strict()
         .optional(),
+      /** Who tells speakers apart in new transcripts. */
+      diarizer: RecordingDiarizer.optional(),
     })
     .strict(),
 );

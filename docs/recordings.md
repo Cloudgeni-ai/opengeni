@@ -86,6 +86,40 @@ track and stores transcript version 1.
 On a desktop recording, the microphone track is the person recording and the
 system track is everyone else, so only the system track needs diarization.
 When the chosen model can tell speakers apart, its diarization is used.
+Otherwise, or when the request or `settings.recordings.diarizer` says
+`ours`, Opengeni tells the speakers apart itself, on the worker's CPU.
+
+### Opengeni's speaker diarization
+
+`apps/worker/speakers` is a small Rust executable, `opengeni-speakers`, that
+runs two open ONNX models through ONNX Runtime: pyannote segmentation 3.0
+(MIT) finds who speaks when inside 10 second windows, and 3D-Speaker CAM++
+trained on VoxCeleb (Apache-2.0) turns each window's speakers into voice
+vectors. Vectors are clustered with average linkage at a cosine distance of
+0.55, small clusters are folded into the nearest large one, and every frame
+takes the speakers its window found. The worker image ships the executable
+in `/opt/opengeni/speakers` with both models and their licenses, pinned by
+checksum. Elsewhere, set `OPENGENI_RECORDING_SPEAKERS_BINARY_PATH` and
+`OPENGENI_RECORDING_SPEAKER_MODELS_DIR`; without them only the model's own
+diarization is available.
+
+It runs alongside transcription and only replaces the speakers on the words.
+If it fails, the transcript keeps the model's speakers and the worker logs a
+warning. The transcript version records `diarization: "ours"` when it was
+used.
+
+Measured on seven AMI meetings (headset mix, 2.5 hours, scored with no
+collar and overlapping speech included), the diarization error rate is
+about 18 percent, which is in the same range as pyannote 3.1. It uses about
+3 CPU minutes per hour of audio, so an hour of meeting takes about 30
+seconds on 8 cores.
+
+`opengeni-speakers diarize` reads 16 kHz mono f32 audio on stdin or from
+`--input` and prints `{turns, speakers}` JSON, each speaker with its total
+speech and averaged voice vector. `opengeni-speakers embed --segments FILE`
+prints the averaged voice vector of each labelled set of segments.
+`cargo run --release --example der -- REF.rttm REF.uem HYP.json` scores
+output against a reference.
 
 Transcription uses the workspace's own provider key, or its organization's.
 ElevenLabs Scribe v2 is the first provider. `GET …/recording-models` lists the

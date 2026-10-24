@@ -115,6 +115,18 @@ export type SpeakerTurn = {
   speaker: string;
 };
 
+/** A diarized speaker's voice: a unit-length embedding of what they said. */
+export type DiarizedVoice = {
+  speaker: string;
+  speechMilliseconds: number;
+  embedding: number[];
+};
+
+export type RecordingDiarizerResult = {
+  turns: SpeakerTurn[];
+  voices: DiarizedVoice[];
+};
+
 /**
  * Tells speakers apart in audio on its own, for models that cannot. Our CPU
  * diarizer implements this; GPU diarizers can later sit behind it too.
@@ -124,7 +136,7 @@ export type RecordingDiarizer = {
   diarize(
     audio: RecordingTranscriptionAudio,
     options: { maxSpeakers?: number | undefined; signal?: AbortSignal | undefined },
-  ): Promise<SpeakerTurn[]>;
+  ): Promise<RecordingDiarizerResult>;
 };
 
 /**
