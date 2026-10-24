@@ -7,20 +7,13 @@ import { Link } from "@tanstack/react-router";
  * -> an optional Name -> one closed Settings section. Knowledge source syncs
  * keep a small editor of their own.
  */
-import { useEffect, useId, useMemo, useRef, useState } from "react";
-import {
-  CircleAlertIcon,
-  LaptopIcon,
-  LockIcon,
-  MessageSquareIcon,
-  ServerIcon,
-  UsersIcon,
-} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
 import { t } from "@opengeni/react/app/lib/console-text";
 import {
-  EventTriggersField,
+  AutomationWhenField,
   emptyEventTriggersDraft,
   eventSourceChoiceOf,
   eventTriggersDraftFrom,
@@ -34,7 +27,6 @@ import { selectedConnectionAccounts } from "@opengeni/react/app/components/capab
 import { useConnectionAccounts } from "@opengeni/react/app/components/capabilities/use-connection-accounts";
 import { AgentLearningDraftEditor } from "@opengeni/react/app/components/knowledge/agent-learning-settings";
 import { Button } from "@opengeni/react/ui/button";
-import { CadencePicker } from "@opengeni/react/ui/cadence-picker";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { useVaults } from "@opengeni/react";
 import {
@@ -934,7 +926,6 @@ function AgentScheduleForm({
   ].join(" · ");
 
   const derivedName = deriveScheduleName(draft.prompt);
-  const whenLabelId = useId();
 
   const validate = (): FormErrors => {
     const next: FormErrors = {};
@@ -1381,85 +1372,28 @@ function AgentScheduleForm({
               )}
             </Disclosure>
           ) : null}
-          <div className="flex min-w-0 flex-col gap-3" role="group" aria-labelledby={whenLabelId}>
-            <p id={whenLabelId} className="m-0 text-sm leading-5 font-medium text-fg">
-              When
-            </p>
-            {draft.cadence ? (
-              <div className="flex min-w-0 flex-col gap-2">
-                <CadencePicker
-                  aria-labelledby={whenLabelId}
-                  value={draft.cadence}
-                  onChange={(cadence) => update({ cadence })}
-                  frequencies={SCHEDULE_FREQUENCIES}
-                  now={now}
-                  viewerTimeZone={viewerTimeZone()}
-                  timeZones={suggestedZones(draft.cadence.timeZone)}
-                />
-                {eventTriggers ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="self-start pointer-coarse:h-11"
-                    onClick={() => update({ cadence: null })}
-                  >
-                    Remove schedule
-                  </Button>
-                ) : null}
-              </div>
-            ) : (
-              <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-                {draft.events.triggers.length === 0 ? (
-                  <p className="m-0 text-sm leading-5 text-fg-muted">
-                    {eventTriggers
-                      ? "Runs only when someone presses Run now, until you add a schedule or an event."
-                      : "Runs only when someone presses Run now."}
-                  </p>
-                ) : null}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="pointer-coarse:h-11"
-                  onClick={() => update({ cadence: defaultCadence() })}
-                >
-                  Add a schedule
-                </Button>
-              </div>
-            )}
-            {eventTriggers ? (
-              <EventTriggersField
-                value={draft.events}
-                onChange={(events) => update({ events })}
-                sources={eventSources.sources}
-                loadEventTypes={eventSources.loadEventTypes}
-                issues={eventIssues}
-                sourceLogo={sourceLogo}
-                onAddSource={() => go.newSource(templateApp)}
-              />
-            ) : null}
+          <AutomationWhenField
+            cadence={draft.cadence}
+            onCadenceChange={(cadence) => update({ cadence })}
+            events={draft.events}
+            onEventsChange={(events) => update({ events })}
+            eventTriggers={eventTriggers}
+            sources={eventSources.sources}
+            loadEventTypes={eventSources.loadEventTypes}
+            eventIssues={eventIssues}
+            error={errors.when}
+            sourceLogo={sourceLogo}
+            onAddSource={() => go.newSource(templateApp)}
+            frequencies={SCHEDULE_FREQUENCIES}
+            now={now}
+          >
             {needsRepositories ? (
               <p className="m-0 text-xs leading-4.5 text-fg-muted">
                 Runs can only open repositories added to the message. Add the ones this automation
                 works on.
               </p>
             ) : null}
-            {draft.cadence && draft.events.triggers.length > 0 && !errors.when ? (
-              <p className="m-0 text-xs leading-4.5 text-fg-muted">
-                It runs on the schedule and whenever a matching event arrives.
-              </p>
-            ) : null}
-            {errors.when ? (
-              <p
-                role="alert"
-                className="m-0 flex min-w-0 items-start gap-1.5 text-xs leading-4.5 text-danger"
-              >
-                <CircleAlertIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-                <span className="min-w-0 break-words">{errors.when}</span>
-              </p>
-            ) : null}
-          </div>
+          </AutomationWhenField>
           <Field label="Name" optional error={errors.name} hint="Shown in the automations list.">
             <TextInput
               value={draft.name}
@@ -1723,17 +1657,4 @@ async function withFriendlyError<T>(lead: string, request: Promise<T>): Promise<
     if (isApiError(error)) throw error;
     throw new Error(`${lead} ${userErrorText(error)}`, { cause: error });
   }
-}
-
-/** The viewer's zone and the schedule's zone first; search covers the rest. */
-function suggestedZones(current: string) {
-  const zones = [...new Set([viewerTimeZone(), current, "UTC"])];
-  return zones.map((id) => {
-    const city = id === "UTC" ? "UTC" : (id.split("/").pop() ?? id).replaceAll("_", " ");
-    return {
-      id,
-      label: id === "UTC" ? "UTC" : `${city} time`,
-      shortLabel: city,
-    };
-  });
 }

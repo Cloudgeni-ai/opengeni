@@ -12,6 +12,7 @@ import {
 import { CheckIcon, CircleAlertIcon, MinusIcon } from "lucide-react";
 
 import { cn } from "../lib/cn";
+import { useOpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
    Field - one labelled control in a vertical form (brief 7.15).
@@ -95,6 +96,7 @@ export function Field({
   children: ReactNode;
 }) {
   const generatedId = useId();
+  const t = useOpenGeniText();
   const controlId = id ?? `${generatedId}-control`;
   const labelId = `${generatedId}-label`;
   const hintId = `${generatedId}-hint`;
@@ -107,7 +109,7 @@ export function Field({
     <>
       {label}
       {optional ? (
-        <span className="ml-1.5 text-xs font-normal text-fg-subtle">Optional</span>
+        <span className="ml-1.5 text-xs font-normal text-fg-subtle">{t("field.optional")}</span>
       ) : null}
     </>
   );

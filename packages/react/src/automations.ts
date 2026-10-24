@@ -1,9 +1,11 @@
-// @opengeni/react/automations: the reusable parts of event-driven automations.
-// The trigger editor (which events start a run, and only when), the event
-// source tile and words, the delivery log and event rows, and the pure models
-// behind them. A host renders these inside its own automation form and pages,
-// and passes its client's event-source reads in, so nothing here fetches on
-// its own or assumes a router.
+// @opengeni/react/automations: automations for any host. `AutomationsPanel`
+// is the drop-in: a workspace's or a chat's automations, with create, edit,
+// on and off, Run now and recent runs, read and written through the host's
+// client. The parts it is built from stay available for a host's own pages:
+// the form and its "When" (schedule and event triggers), the trigger editor,
+// the event source tile and words, the delivery log and event rows, and the
+// pure models behind them. Apart from the panel nothing here fetches on its
+// own or assumes a router.
 import type { EventDelivery } from "@opengeni/sdk";
 import { createOpenGeniText } from "./messages/runtime";
 import type { RowListColumn } from "./ui/list-row";
@@ -16,6 +18,68 @@ import {
 } from "./components/automations/event-source-model";
 import { eventCommonFields as commonFields } from "./components/automations/event-trigger-model";
 
+export {
+  AutomationsPanel,
+  type AutomationEventServer,
+  type AutomationsPanelProps,
+} from "./components/automations/automations-panel";
+export { AutomationForm, type AutomationFormProps } from "./components/automations/automation-form";
+export {
+  AUTOMATION_FREQUENCIES,
+  AutomationWhenField,
+  type AutomationWhenFieldProps,
+} from "./components/automations/automation-when-field";
+export {
+  AUTOMATION_NAME_MAX_LENGTH,
+  automationCadence,
+  automationCadenceIssue,
+  automationCadenceRepeats,
+  automationCadenceWords,
+  automationCreateRequest,
+  automationDraftFrom,
+  automationListensForEvents,
+  automationName,
+  automationNextRun,
+  automationRunEventsLabel,
+  automationRunStatusLabel,
+  automationRunTriggerLabel,
+  automationScheduleSpec,
+  automationScheduleWords,
+  automationUpdateRequest,
+  automationWhenSentence,
+  automationWhenWords,
+  defaultAutomationCadence,
+  deriveAutomationName,
+  hasAutomationDraftIssues,
+  hasEventTriggers,
+  isAgentAutomation,
+  isFinishedOnce,
+  newAutomationDraft,
+  sortAutomations,
+  validateAutomationDraft,
+  viewerTimeZone,
+} from "./components/automations/automation-model";
+export type {
+  AutomationDestination,
+  AutomationDraft,
+  AutomationDraftIssues,
+  AutomationScheduleWords,
+} from "./components/automations/automation-model";
+export {
+  EventArgumentsField,
+  type EventArgumentsFieldProps,
+} from "./components/automations/event-arguments-field";
+export {
+  eventArgumentFields,
+  eventArgumentLabel,
+  eventArgumentsForEvent,
+  eventArgumentsValue,
+  withEventArgument,
+} from "./components/automations/event-arguments-model";
+export type {
+  EventArgumentField,
+  EventArgumentOption,
+} from "./components/automations/event-arguments-model";
 export {
   DEFAULT_EVENT_RUNS_PER_HOUR,
   EVENT_CONDITION_OPERATORS,

@@ -48,6 +48,24 @@ const finishedOnce = "00000000-0000-4000-8000-000000000004";
 const visible = (page: Page, text: string) =>
   page.getByText(text).filter({ visible: true }).first();
 
+/** The panel in a chat: a new automation that waits for the host's own MCP event. */
+async function newChatAutomationOnProjectEvent(page: Page) {
+  await expect(page.getByText("Nothing picks this chat up again yet.")).toBeVisible();
+  await page.getByRole("button", { name: "New automation" }).click();
+  await page.getByLabel("Instructions").fill("Tell me what changed and whether it needs me.");
+  await page.getByRole("button", { name: "Add an event" }).click();
+  await page.getByRole("combobox").filter({ hasText: "Choose a source" }).click();
+  await page.getByRole("option", { name: /Projects/ }).click();
+  await page
+    .locator("[data-slot=select-menu-trigger]")
+    .filter({ hasText: "Choose an event" })
+    .click();
+  await page.getByRole("option", { name: /project\.updated/ }).click();
+  await expect(page.getByLabel("Project", { exact: true })).toHaveValue(
+    "9e0c4b1a-2f3d-4e5f-8a6b-7c8d9e0f1a2b",
+  );
+}
+
 // Form pages scroll inside their own container; `tall` fits the whole form in one capture.
 const pages: Array<{
   name: string;
@@ -152,6 +170,42 @@ const pages: Array<{
       await expect(page.getByText("Linear").first()).toBeVisible();
     },
   },
+  {
+    name: "panel-list",
+    path: `${workspace}/panel`,
+    check: async (page) => {
+      await expect(page.getByRole("heading", { name: "Automations" })).toBeVisible();
+      // A finished run-once automation has no switch; it shows Finished.
+      await expect(page.getByRole("switch")).toHaveCount(5);
+      await expect(visible(page, "Finished")).toBeVisible();
+    },
+  },
+  {
+    name: "panel-detail",
+    path: `${workspace}/panel`,
+    check: async (page) => {
+      await page.getByRole("button", { name: "Review new pull requests", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Recent runs" })).toBeVisible();
+      await page.getByRole("button", { name: "Run now" }).click();
+      await expect(page.getByRole("status")).toContainText("Started a run");
+    },
+  },
+  {
+    name: "panel-new-in-chat",
+    path: `${workspace}/panel?chat=1`,
+    tall: true,
+    check: newChatAutomationOnProjectEvent,
+  },
+  {
+    name: "panel-created-in-chat",
+    path: `${workspace}/panel?chat=1`,
+    check: async (page) => {
+      await newChatAutomationOnProjectEvent(page);
+      await page.getByRole("button", { name: "Create automation" }).click();
+      await expect(page.getByText("Continues this chat.")).toBeVisible();
+      await expect(page.getByText("Runs when a matching event arrives.")).toBeVisible();
+    },
+  },
 ];
 
 const only = process.env.OPENGENI_AUTOMATIONS_PREVIEW_ONLY?.split(",");
@@ -174,7 +228,14 @@ try {
         // Dark mode is checked on the main pages only.
         if (
           theme === "dark" &&
-          !["list", "detail", "new-pr-review", "source-github"].includes(entry.name)
+          ![
+            "list",
+            "detail",
+            "new-pr-review",
+            "source-github",
+            "panel-list",
+            "panel-new-in-chat",
+          ].includes(entry.name)
         )
           continue;
         const page = await context.newPage();

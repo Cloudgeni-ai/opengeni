@@ -310,6 +310,17 @@ shows what it is waiting for.
   schedule and event triggers; each run shows the events that caused it.
   Event sources have a page with their endpoint, status and delivery log. Chats
   show when they are waiting for an event or a schedule.
+- **Embeddable panel.** `AutomationsPanel` from `@opengeni/react/automations`
+  is a drop-in list, page and form for a workspace's automations or one chat's,
+  for hosts that embed chats. It takes the host's `OpenGeniClient`. In a chat,
+  new automations continue that chat with its settings; otherwise each run
+  starts a new chat with the workspace's defaults and the owner's access, so
+  nothing is scoped down. `eventServers` offers the host's own MCP servers
+  before the person has an event source for them (the source is added on first
+  use), and `argumentDefaults` fills subscription arguments such as the
+  project the chat belongs to. MCP subscription arguments are edited as fields
+  generated from the event's JSON Schema, with JSON as the fallback. The web
+  app's form and the panel share the "When" field and the automation model.
 - **Agent tools.** Reviewed separately, as one change.
 
 ## Old substrate
