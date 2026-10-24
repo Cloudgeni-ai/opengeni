@@ -6,7 +6,7 @@
  * this device, uploading, or waiting for the connection).
  */
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { CircleIcon, MicIcon, PauseIcon, PlayIcon, SquareIcon } from "lucide-react";
+import { CircleIcon, InfoIcon, MicIcon, PauseIcon, PlayIcon, SquareIcon } from "lucide-react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { Checkbox } from "@opengeni/react/ui/field";
@@ -99,7 +99,7 @@ export function uploadLine(recorder: MeetingRecorder, online: boolean): string |
     return `${capturingWhat(recorder)} ${
       recorder.systemAudioKind === "desktop"
         ? "You can keep using other apps and pages. The audio is saved as you go."
-        : "You can use other pages while it records. The audio is saved as you go, so a dropped connection loses nothing."
+        : "You can use other pages while it records. Closing or reloading this tab stops it, and everything recorded until then is kept."
     }`;
   }
   if (!upload || recorder.state === "starting") return null;
@@ -237,7 +237,11 @@ function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
   if (lines.length === 0 && live.every((track) => track.state === "unavailable")) {
     // Nothing to read, so no empty box: one line says it and that nothing is lost.
     return (
-      <p className="mt-3 text-xs leading-4.5 text-fg-muted" aria-live="polite">
+      <p
+        className="mt-3 flex items-start gap-2 rounded-[10px] border border-border bg-surface-2/60 px-3 py-2 text-xs leading-4.5 text-fg-label"
+        aria-live="polite"
+      >
+        <InfoIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-fg-muted" />
         {liveUnavailableText(live)}
       </p>
     );

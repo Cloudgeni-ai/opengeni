@@ -206,7 +206,7 @@ export function LiveTranscript({
                   <p className="text-sm leading-5 text-pretty text-fg">
                     {tidyLiveText(turn.texts)}
                     {continuing && index === turns.length - 1 ? (
-                      <span className="text-fg-muted"> {continuing.text}</span>
+                      <span className="text-fg-label"> {continuing.text}</span>
                     ) : null}
                   </p>
                 </li>
@@ -218,9 +218,15 @@ export function LiveTranscript({
                     <span className="text-xs leading-4 font-semibold text-fg">
                       {speakerName(partial.trackNumber)}
                     </span>
-                    <span className="text-xs leading-4 text-fg-muted">now</span>
+                    <span className="inline-flex items-center gap-1 text-xs leading-4 font-medium text-fg-label">
+                      <span
+                        aria-hidden="true"
+                        className="inline-block size-1.5 animate-pulse rounded-full bg-status-waiting motion-reduce:animate-none"
+                      />
+                      now
+                    </span>
                   </div>
-                  <p className="text-sm leading-5 text-fg-muted">{partial.text}</p>
+                  <p className="text-sm leading-5 text-fg-label">{partial.text}</p>
                 </li>
               ))}
             </ol>
