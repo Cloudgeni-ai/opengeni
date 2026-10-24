@@ -54,6 +54,8 @@ async function fixture() {
     unresolved: false,
     classic: false,
     queueReady: true,
+    autoEnabled: false,
+    staleAutoEvent: false,
     protected: false,
     secondRulePage: false,
     missingRunOnce: false,
@@ -118,6 +120,15 @@ async function fixture() {
               pullRequest: {
                 timelineItems: {
                   nodes: [
+                    ...(state.autoEnabled || state.staleAutoEvent
+                      ? [
+                          {
+                            __typename: "AutoMergeEnabledEvent",
+                            id: "auto-1",
+                            createdAt: "2026-10-23T00:01:00Z",
+                          },
+                        ]
+                      : []),
                     {
                       __typename: "LabeledEvent",
                       id: "ready-1",
@@ -141,7 +152,7 @@ async function fixture() {
             head: { sha, ref: "feature" },
             draft: false,
             labels: state.queueReady ? [{ name: "queue-ready" }] : [],
-            auto_merge: {},
+            auto_merge: state.autoEnabled ? {} : null,
           },
         ];
       else if (path === "branches/main") body = { protected: state.protected };
@@ -270,11 +281,21 @@ test("native ruleset and classic review requirements both apply without added re
     expect((await f.reader.ready()).ready).toHaveLength(1);
   }
 });
-test("auto-merge alone does not admit", async () => {
+test("auto-merge requires the actual enable event and exact-head CI", async () => {
   const f = await fixture();
   f.state.queueReady = false;
   expect((await f.reader.ready()).ready).toHaveLength(0);
+  f.state.autoEnabled = true;
+  expect((await f.reader.ready()).ready[0]?.binding.source).toBe("auto-merge");
+  f.state.jobCheckId = 999;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
   expect(f.state.commentsRead).toBe(false);
+});
+test("a stale timeline enable without current REST auto_merge cannot admit", async () => {
+  const f = await fixture();
+  f.state.queueReady = false;
+  f.state.staleAutoEvent = true;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
 });
 test("required workflow on second rule page cannot be ignored", async () => {
   const f = await fixture();

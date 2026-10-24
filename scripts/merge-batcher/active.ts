@@ -1,6 +1,12 @@
 import type { Effect, Executor, Transaction } from "./controller";
 import { AtomicGitWriter, GitStore, type RefUpdate } from "./git";
-import { githubCapabilities, ProviderError, type PullSnapshot } from "./github";
+import {
+  githubCapabilities,
+  ProviderError,
+  AutoMergePreSubmitError,
+  type PullSnapshot,
+  type AutoMergeState,
+} from "./github";
 import {
   bindingKey,
   digest,
@@ -20,6 +26,7 @@ import { latestRun, infrastructureRetryReason } from "./planner";
 import { latencySummary } from "./journal";
 
 export interface ActiveReads {
+  autoMergeState?(number: number): Promise<AutoMergeState>;
   openPullNumbers?(): Promise<number[]>;
   baseCI(sha: string): Promise<import("./model").BaseCiEvidence>;
   ready(): Promise<{ ready: Pull[]; excluded: { number: number; reason: string }[] }>;
@@ -31,6 +38,7 @@ export interface ActiveReads {
   findFollowup(request: FollowupRequest): Promise<FollowupPull | null>;
 }
 export interface ActiveWrites {
+  disableAutoMerge?(number: number, headSha: string, parkedAt: string): Promise<void>;
   retry(run: Run): Promise<void>;
   announce(number: number, body: string): Promise<void>;
   createFollowup(request: FollowupRequest): Promise<void>;
@@ -220,7 +228,7 @@ export class GitHubActiveExecutor implements Executor {
           ledger,
           `queued:${pull.number}:${pull.headSha}`,
           pull.number,
-          `Queued exact head ${pull.headSha} in batch ${effect.manifest.batchId}. Candidate CI: https://github.com/${this.config.repository}/actions/workflows/batch-ci.yml`,
+          `Queued exact head ${pull.headSha} for tested batch landing.`,
           now,
         );
     if (effect.kind === "retry") {
@@ -242,6 +250,22 @@ export class GitHubActiveExecutor implements Executor {
       };
     }
     if (effect.kind === "park") {
+      const parked = ledger.parked?.find((item) => item.batchId === effect.key);
+      if (parked) {
+        const disableId = digest({ kind: "disable-auto-merge", batchId: effect.key });
+        ledger.effects[disableId] ??= {
+          id: disableId,
+          kind: "disable-auto-merge",
+          number: effect.number,
+          headSha: parked.pull.headSha,
+          parkedAt: parked.parkedAt,
+          status: "pending",
+          attempts: 0,
+          checks: 0,
+          nextAt: now,
+          lastError: null,
+        };
+      }
       const id = addComment(ledger, `parking:${effect.key}`, effect.number, effect.body, now);
       ledger.parked = (ledger.parked ?? []).map((item) =>
         item.batchId === effect.key
@@ -377,6 +401,15 @@ export class GitHubActiveExecutor implements Executor {
     });
   }
   private async effectObserved(effect: DurableEffect): Promise<boolean> {
+    if (effect.kind === "disable-auto-merge") {
+      if (!this.reads.autoMergeState) throw Error("Auto-merge observation unavailable");
+      const current = await this.reads.autoMergeState(effect.number);
+      return (
+        current.enabledAt === null ||
+        current.headSha !== effect.headSha ||
+        Date.parse(current.enabledAt) > Date.parse(effect.parkedAt)
+      );
+    }
     if (effect.kind === "comment") return this.reads.hasComment(effect.number, effect.marker);
     if (effect.kind === "followup") return (await this.reads.findFollowup(effect.request)) !== null;
     const run = await this.reads.currentAttempt(effect.run);
@@ -571,10 +604,14 @@ export class GitHubActiveExecutor implements Executor {
       postStarted = true;
       if (effect.kind === "comment") await this.writes.announce(effect.number, effect.body);
       else if (effect.kind === "rerun") await this.writes.retry(effect.run);
-      else await this.writes.createFollowup(effect.request);
+      else if (effect.kind === "disable-auto-merge") {
+        if (!this.writes.disableAutoMerge) throw Error("Auto-merge mutation unavailable");
+        await this.writes.disableAutoMerge(effect.number, effect.headSha, effect.parkedAt);
+      } else await this.writes.createFollowup(effect.request);
       postStarted = false; // A later read/claim failure cannot prove this POST was rejected.
       await this.patchEffect(effect.id, {
-        status: effect.kind === "followup" ? "uncertain" : "done",
+        status:
+          effect.kind === "followup" || effect.kind === "disable-auto-merge" ? "uncertain" : "done",
         lastError:
           effect.kind === "followup"
             ? "Create accepted; awaiting exact source/marker reconciliation"
@@ -583,6 +620,8 @@ export class GitHubActiveExecutor implements Executor {
       return "durable REST effect submitted";
     } catch (error) {
       const status = error instanceof ProviderError ? error.status : null;
+      const notSubmitted =
+        effect.kind === "disable-auto-merge" && error instanceof AutoMergePreSubmitError;
       const latest = (await this.load()).ledger.effects[effect.id];
       if (!latest) throw error;
       const sent = latest.status === "submitting" || latest.status === "uncertain";
@@ -593,15 +632,18 @@ export class GitHubActiveExecutor implements Executor {
         status:
           definitive || checks >= 8
             ? "blocked"
-            : (throttled && postStarted) || !sent
+            : notSubmitted || (throttled && postStarted) || !sent
               ? "pending"
               : "uncertain",
         checks,
         nextAt: new Date(
           Date.parse(now) + Math.min(3600, 60 * 2 ** Math.min(checks, 6)) * 1000,
         ).toISOString(),
-        lastError:
-          status === null ? "Transport/observation outcome unknown" : `GitHub HTTP ${status}`,
+        lastError: notSubmitted
+          ? "Pre-submit observation failed; no mutation sent"
+          : status === null
+            ? "Transport/observation outcome unknown"
+            : `GitHub HTTP ${status}`,
       });
       return definitive
         ? "REST effect blocked by explicit provider rejection"
@@ -700,6 +742,15 @@ export class GitHubActiveExecutor implements Executor {
               ? "Newer open head is automatically eligible; merging against landed main includes only its remaining delta. It still requires its own candidate CI."
               : "Newer work remains open and tracked for automatic requeue after queue-ready plus exact-new-head required GitHub CI. No evidence was inherited from the landed head.";
         }
+      } else {
+        status = pull.merged
+          ? "native-merged"
+          : pull.state === "closed"
+            ? "closed-unmerged"
+            : "awaiting-native-merge";
+        note = pull.merged
+          ? "GitHub reports the landed PR as merged."
+          : "Tested tip is in main, but GitHub has not reported native MERGED; closure alone is not merge proof.";
       }
     } catch (error) {
       status = "provider-unavailable";
@@ -770,6 +821,7 @@ export class GitHubActiveExecutor implements Executor {
     const effect = Object.values(state.ledger.effects)
       .sort(
         (a, b) =>
+          Number(b.kind === "disable-auto-merge") - Number(a.kind === "disable-auto-merge") ||
           Number(b.kind === "followup") - Number(a.kind === "followup") ||
           Date.parse(a.nextAt) - Date.parse(b.nextAt),
       )

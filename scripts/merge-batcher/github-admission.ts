@@ -25,6 +25,7 @@ export interface GitHubAdmissionInput {
   headRef: string;
   draft: boolean;
   queueReady: boolean;
+  autoMerge?: boolean;
   events: ReadyEvent[];
   checks: HostedCheck[];
   required: RequiredCheck[];
@@ -41,15 +42,20 @@ export function admitGitHub(input: GitHubAdmissionInput): Admission {
   const no = (reason: string): Admission => ({ ready: null, reason });
   if (!SHA.test(input.headSha)) return no("invalid exact head");
   if (input.draft) return no("draft");
-  if (!input.queueReady) return no("queue-ready label required");
-  let event: ReadyEvent | undefined;
+  if (!input.queueReady && !input.autoMerge) return no("auto-merge or queue-ready required");
+  const active = new Map<ReadyEvent["source"], ReadyEvent>();
   for (const item of input.events
-    .filter((e) => e.source === "queue-ready" && Number.isFinite(Date.parse(e.at)))
+    .filter((e) => Number.isFinite(Date.parse(e.at)))
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || compareText(a.id, b.id))) {
-    if (!item.enabled) event = undefined;
-    else event ??= item;
+    if (!item.enabled) active.delete(item.source);
+    else if (!active.has(item.source)) active.set(item.source, item);
   }
-  if (!event) return no("actual queue-ready timestamp unavailable");
+  // An explicitly enabled native request is the retry identity, even when a
+  // long-lived label also exists. Disabled native requests cannot supply proof.
+  const event =
+    (input.autoMerge ? active.get("auto-merge") : undefined) ??
+    (input.queueReady ? active.get("queue-ready") : undefined);
+  if (!event) return no("actual ready timestamp unavailable");
   if (input.reviewRequired && input.reviewDecision !== "APPROVED")
     return no("existing branch-rule review requirement not satisfied");
   if (input.conversationResolutionRequired && input.unresolvedThreads)
@@ -100,7 +106,7 @@ export function admitGitHub(input: GitHubAdmissionInput): Admission {
     binding: {
       eventId: event.id,
       at: event.at,
-      source: "queue-ready",
+      source: event.source,
       evidenceId: `github-ci:${evidence.map((c) => c.id).join(",")}`,
       evidenceDigest: digest({
         schema: "github-required-ci/v1",

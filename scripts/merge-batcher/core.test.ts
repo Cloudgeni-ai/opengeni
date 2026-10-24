@@ -362,6 +362,13 @@ describe("readiness and deterministic planning", () => {
     const next = plan(o, cfg);
     expect(next.kind).toBe("build");
     if (next.kind === "build") expect(next.spec.pulls.map((p) => p.number)).toEqual([2]);
+    o.ready[0]!.binding.source = "auto-merge";
+    o.ready[0]!.binding.at = new Date(Date.parse(o.now) + 1000).toISOString();
+    const explicitlyRetried = plan(o, cfg);
+    expect(explicitlyRetried.kind).toBe("build");
+    if (explicitlyRetried.kind === "build")
+      expect(explicitlyRetried.spec.pulls.map((p) => p.number).sort()).toEqual([1, 2]);
+    o.ready[0]!.binding.at = pull(1).binding.at;
     o.ready[0]!.headSha = "c".repeat(40);
     const changed = plan(o, cfg);
     expect(changed.kind).toBe("build");

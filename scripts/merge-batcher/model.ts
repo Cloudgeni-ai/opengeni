@@ -183,6 +183,7 @@ export type DurableEffect = EffectState &
     | { kind: "rerun"; run: Run }
     | { kind: "comment"; number: number; body: string; marker: string }
     | { kind: "followup"; request: FollowupRequest }
+    | { kind: "disable-auto-merge"; number: number; headSha: string; parkedAt: string }
   );
 export interface LandedPull {
   batchId: string;
@@ -193,6 +194,9 @@ export interface LandedPull {
   status:
     | "pending"
     | "unchanged"
+    | "native-merged"
+    | "awaiting-native-merge"
+    | "closed-unmerged"
     | "requeued"
     | "awaiting-evidence"
     | "already-contained"

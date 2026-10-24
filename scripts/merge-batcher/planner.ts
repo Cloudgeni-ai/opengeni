@@ -108,10 +108,19 @@ function planCandidate(o: Observation, c: Config): Action {
   };
   const fresh = new Map(o.ready.map((p) => [p.number, bindingKey(p)]));
   const matches = (p: Pull) => fresh.get(p.number) === bindingKey(p);
-  // Readiness churn and main advancement must not automatically retry code.
-  // A genuinely different head can re-enter; preserve the old base/run evidence.
+  // Main/label churn does not retry code. A changed head or an explicit native
+  // auto-merge re-enable after parking can re-enter; retain old failure evidence.
   const parked = (p: Pull) =>
-    ledger.parked?.some((item) => item.pull.number === p.number && item.pull.headSha === p.headSha);
+    ledger.parked?.some(
+      (item) =>
+        item.pull.number === p.number &&
+        item.pull.headSha === p.headSha &&
+        !(
+          p.binding.source === "auto-merge" &&
+          p.binding.eventId !== item.pull.binding.eventId &&
+          Date.parse(p.binding.at) > Date.parse(item.parkedAt)
+        ),
+    );
   for (const item of o.candidates) {
     const id = item.manifest.batchId;
     if (item.containedInBase && !ledger.landed.includes(id)) {
