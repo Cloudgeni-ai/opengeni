@@ -22,6 +22,27 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
     ),
   ).toBe(true);
   expect(workflow("batch-ci").concurrency["cancel-in-progress"]).toBe(false);
+  // plan completes before contracts + the two unit shards; ready joins them.
+  expect(Object.keys(pr.jobs).sort()).toEqual(["contracts", "plan", "ready", "units"]);
+  expect(pr.jobs.contracts.needs).toBe("plan");
+  expect(pr.jobs.units.needs).toBe("plan");
+  expect(pr.jobs.units.strategy.matrix.include).toBe(
+    "${{ fromJSON(needs.plan.outputs.unit_matrix) }}",
+  );
+  expect(pr.jobs.plan.steps.find((s: any) => s.id === "plan").run).toContain(
+    'unit_matrix=[{"index":0,"total":2},{"index":1,"total":2}]',
+  );
+});
+
+test("Queue ready entry and labeling do not wait for PR CI", () => {
+  const queue = workflow("merge-queue");
+  expect(queue.on.pull_request.types).toContain("labeled");
+  const entry = Object.values(queue.jobs).find((j: any) =>
+    String(j.name).includes("Queue ready"),
+  ) as any;
+  expect(entry).toBeDefined();
+  expect(entry.needs).toBeUndefined();
+  expect(entry.steps.map((s: any) => s.run ?? "").join("\n")).toContain("exact-head PR CI");
 });
 
 test("required aggregate covers docs and every selected job at exact head", () => {
