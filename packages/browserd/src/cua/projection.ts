@@ -633,8 +633,13 @@ export function locate(
   locator: ComputerLocator,
 ): InteractionSemanticNodeValue {
   const found = nodes.filter((node) => {
+    // An exact name is the whole name, compared the way names are shown:
+    // trimmed, runs of whitespace as one space, and in any case.
+    const normalized = (value: string) => value.replace(/\s+/gu, " ").trim().toLowerCase();
     const match = (value: string | undefined, query: string, exact = false) =>
-      exact ? value === query : (value ?? "").toLowerCase().includes(query.toLowerCase());
+      exact
+        ? value !== undefined && normalized(value) === normalized(query)
+        : (value ?? "").toLowerCase().includes(query.toLowerCase());
     switch (locator.kind) {
       case "ref":
         return node.ref === locator.ref;

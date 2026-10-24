@@ -32,6 +32,26 @@ test("a table cell macOS repeats under its AXColumn is one element to a locator"
   );
 });
 
+test("an exact name is the whole name in any case and spacing", () => {
+  const [save, saveAs] = projectElements(
+    ["  Save  changes ", "Save changes as"].map((label, offset) => ({
+      element_index: offset + 1,
+      element_token: `snapshot:${offset + 1}`,
+      role: "AXButton",
+      label,
+      actions: ["AXPress"],
+      frame: { x: 10, y: 10 + offset * 40, w: 80, h: 20 },
+    })),
+    "macos",
+  );
+  const exact = (name: string) => ({ kind: "role", role: "button", name, exact: true }) as const;
+  expect(locate([save!, saveAs!], exact("save changes")).ref).toBe(save!.ref);
+  expect(locate([save!, saveAs!], exact("Save Changes As")).ref).toBe(saveAs!.ref);
+  expect(() => locate([save!, saveAs!], exact("Save"))).toThrow(
+    "CUA locator must resolve to exactly one observed element",
+  );
+});
+
 test("a Linux or Windows checkbox or switch reads whether it is on as its value", () => {
   const element = (role: string, selected: boolean, index: number) => ({
     element_index: index,
