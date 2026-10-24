@@ -293,6 +293,38 @@ describe("RecordingUploader", () => {
     expect((await store.listChunks(RECORDING)).length).toBe(1);
   });
 
+  test("a recording stopped before any audio is removed instead of finalized", async () => {
+    const server = fakeServer();
+    const { uploader, store } = uploaderFor(server);
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    const status = await uploader.finish(RECORDING);
+    expect(status.discarded).toBe(true);
+    expect(status.finalized).toBe(false);
+    expect(status.failed).toBeNull();
+    expect(server.state.calls).not.toContain("finalize");
+    expect(server.state.deleted).toBe(true);
+    expect(await store.getRecording(RECORDING)).toBeNull();
+  });
+
+  test("resume removes an earlier run's recording that never captured audio", async () => {
+    const server = fakeServer();
+    const store = createMemoryRecordingChunkStore();
+    const first = uploaderFor(server, store).uploader;
+    await first.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    for (let attempt = 0; attempt < 20 && server.state.created === 0; attempt += 1) {
+      await new Promise((done) => setTimeout(done, 1));
+    }
+    // The app was killed while capturing: a new run finds it still "capturing".
+    const next = uploaderFor(server, store).uploader;
+    expect(await next.resume()).toEqual([RECORDING]);
+    for (let attempt = 0; attempt < 50 && !next.status(RECORDING)?.discarded; attempt += 1) {
+      await new Promise((done) => setTimeout(done, 1));
+    }
+    expect(next.status(RECORDING)?.discarded).toBe(true);
+    expect(server.state.deleted).toBe(true);
+    expect(await store.listRecordings()).toEqual([]);
+  });
+
   test("discard removes the local copy and the server's", async () => {
     const server = fakeServer();
     const { uploader, store } = uploaderFor(server);

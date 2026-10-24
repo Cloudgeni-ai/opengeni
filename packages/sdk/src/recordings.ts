@@ -361,7 +361,11 @@ export interface RecordingChunkStore {
   /** Every stored chunk of the recording, ordered by track then chunk number. */
   listChunks(recordingId: string): Promise<StoredRecordingChunk[]>;
   /** One stored chunk's bytes; null once it is gone. */
-  readChunk(recordingId: string, trackNumber: number, chunkNumber: number): Promise<Uint8Array | null>;
+  readChunk(
+    recordingId: string,
+    trackNumber: number,
+    chunkNumber: number,
+  ): Promise<Uint8Array | null>;
   deleteChunks(recordingId: string, trackNumber: number, chunkNumbers: number[]): Promise<void>;
 }
 
@@ -377,6 +381,11 @@ export type RecordingUploadStatus = {
   /** A failure retrying cannot fix, such as the recording being deleted elsewhere. */
   failed: { code: string; message: string } | null;
   finalized: boolean;
+  /**
+   * Capture ended before any audio was recorded (stopped at once, or the app was
+   * killed first), so the empty recording was removed instead of finalized.
+   */
+  discarded: boolean;
 };
 
 const UPLOAD_BATCH = 50;
@@ -408,6 +417,7 @@ class PermanentRecordingError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly status: number | null = null,
   ) {
     super(message);
     this.name = "PermanentRecordingError";
@@ -420,6 +430,8 @@ class PermanentRecordingError extends Error {
  */
 export class RecordingUploader {
   private readonly pumps = new Map<string, Pump>();
+  /** The last metadata write per recording; each write waits for the one before. */
+  private readonly writes = new Map<string, Promise<unknown>>();
   private readonly listeners = new Set<(status: RecordingUploadStatus) => void>();
   private readonly fetchImpl: typeof fetch;
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -440,6 +452,36 @@ export class RecordingUploader {
   subscribe(listener: (status: RecordingUploadStatus) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Read, change and write one recording's stored record with no other write to
+   * it in between. Capture (chunk counts), stop (phase) and the upload pass
+   * (created) all update the same record concurrently; without this a slower
+   * write would put back a copy that loses the other's change, such as a stop.
+   */
+  private async mutate(
+    recordingId: string,
+    change: (recording: StoredRecording) => StoredRecording | null,
+  ): Promise<StoredRecording | null> {
+    const store = this.options.store;
+    const previous = this.writes.get(recordingId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const current = await store.getRecording(recordingId);
+        if (!current) return null;
+        const changed = change(current);
+        if (!changed) return current;
+        await store.putRecording(changed);
+        return changed;
+      });
+    this.writes.set(recordingId, next);
+    try {
+      return await next;
+    } finally {
+      if (this.writes.get(recordingId) === next) this.writes.delete(recordingId);
+    }
   }
 
   /** Stop background work. Stored chunks stay for a later resume(). */
@@ -470,15 +512,14 @@ export class RecordingUploader {
   async addChunk(chunk: RecordingChunk): Promise<void> {
     const store = this.options.store;
     await store.putChunk(chunk);
-    const recording = await store.getRecording(chunk.recordingId);
-    if (recording) {
+    await this.mutate(chunk.recordingId, (recording) => {
       const count = Math.max(recording.chunkCounts[chunk.trackNumber] ?? 0, chunk.chunkNumber + 1);
-      await store.putRecording({
+      return {
         ...recording,
         chunkCounts: { ...recording.chunkCounts, [chunk.trackNumber]: count },
         updatedAt: Date.now(),
-      });
-    }
+      };
+    });
     this.kick(chunk.recordingId);
   }
 
@@ -491,16 +532,16 @@ export class RecordingUploader {
     recordingId: string,
     options: { endedAt?: Date; signal?: AbortSignal } = {},
   ): Promise<RecordingUploadStatus> {
-    const store = this.options.store;
-    const recording = await store.getRecording(recordingId);
-    if (recording && recording.phase === "capturing") {
-      await store.putRecording({
-        ...recording,
-        phase: "stopped",
-        endedAt: (options.endedAt ?? new Date()).toISOString(),
-        updatedAt: Date.now(),
-      });
-    }
+    await this.mutate(recordingId, (recording) =>
+      recording.phase === "capturing"
+        ? {
+            ...recording,
+            phase: "stopped",
+            endedAt: (options.endedAt ?? new Date()).toISOString(),
+            updatedAt: Date.now(),
+          }
+        : null,
+    );
     return await this.settled(recordingId, options.signal);
   }
 
@@ -530,12 +571,16 @@ export class RecordingUploader {
     for (const recording of await store.listRecordings()) {
       if (await this.captureActive(recording.recordingId)) continue;
       if (recording.phase === "capturing") {
-        await store.putRecording({
-          ...recording,
-          phase: "stopped",
-          endedAt: new Date(recording.updatedAt).toISOString(),
-          updatedAt: Date.now(),
-        });
+        await this.mutate(recording.recordingId, (current) =>
+          current.phase === "capturing"
+            ? {
+                ...current,
+                phase: "stopped",
+                endedAt: new Date(current.updatedAt).toISOString(),
+                updatedAt: Date.now(),
+              }
+            : null,
+        );
       }
       resumed.push(recording.recordingId);
       this.kick(recording.recordingId);
@@ -559,7 +604,9 @@ export class RecordingUploader {
     const pump = this.kick(recordingId);
     for (;;) {
       signal?.throwIfAborted();
-      if (pump.status.finalized || pump.status.failed) return pump.status;
+      if (pump.status.finalized || pump.status.discarded || pump.status.failed) {
+        return pump.status;
+      }
       await new Promise<void>((done, fail) => {
         const onAbort = () => fail(signal!.reason);
         signal?.addEventListener("abort", onAbort, { once: true });
@@ -588,19 +635,25 @@ export class RecordingUploader {
           retryingAfterError: null,
           failed: null,
           finalized: false,
+          discarded: false,
         },
       };
       this.pumps.set(recordingId, pump);
     }
     pump.again = true;
     pump.wake?.();
-    if (!pump.running && !this.disposed) {
-      const current = pump;
-      current.running = this.run(recordingId, current).finally(() => {
-        current.running = null;
-      });
-    }
+    this.startPump(recordingId, pump);
     return pump;
+  }
+
+  private startPump(recordingId: string, pump: Pump): void {
+    if (pump.running || this.disposed) return;
+    pump.running = this.run(recordingId, pump).finally(() => {
+      pump.running = null;
+      // A kick that landed after the last pass decided it was done, but before
+      // this cleanup ran, found the pump still running: serve it now.
+      if (pump.again) this.startPump(recordingId, pump);
+    });
   }
 
   private update(pump: Pump, patch: Partial<RecordingUploadStatus>): void {
@@ -653,8 +706,15 @@ export class RecordingUploader {
     }
     if (!recording.created) {
       await guarded(() => client.createRecording(recording!.workspaceId, recording!.create));
-      recording = { ...recording, created: true, updatedAt: Date.now() };
-      await store.putRecording(recording);
+      recording = await this.mutate(recordingId, (current) => ({
+        ...current,
+        created: true,
+        updatedAt: Date.now(),
+      }));
+      if (!recording) {
+        this.update(pump, { pendingChunks: 0, pendingBytes: 0, uploading: false, finalized: true });
+        return true;
+      }
     }
     let chunks = await store.listChunks(recordingId);
     this.update(pump, {
@@ -687,6 +747,11 @@ export class RecordingUploader {
     this.update(pump, { uploading: false });
     recording = (await store.getRecording(recordingId)) ?? recording;
     if (recording.phase !== "stopped") return !pump.again;
+    const captured = Object.values(recording.chunkCounts).reduce((sum, count) => sum + count, 0);
+    if (captured === 0 && !alreadyFinalized) {
+      await this.removeEmpty(recording, pump);
+      return true;
+    }
     const finalized = await guarded(() =>
       client.finalizeRecording(recording!.workspaceId, recordingId, {
         ...(recording!.endedAt ? { endedAt: recording!.endedAt } : {}),
@@ -697,12 +762,35 @@ export class RecordingUploader {
       }),
     ).catch((error: unknown) => {
       if (alreadyFinalized && error instanceof PermanentRecordingError) return null;
+      if (error instanceof PermanentRecordingError && error.code === "empty_recording") {
+        return "empty" as const;
+      }
       throw error;
     });
+    if (finalized === "empty") {
+      await this.removeEmpty(recording, pump);
+      return true;
+    }
     if (finalized) this.finalized.set(recordingId, finalized);
     await store.deleteRecording(recordingId);
     this.update(pump, { pendingChunks: 0, pendingBytes: 0, finalized: true });
     return true;
+  }
+
+  /** Remove a recording that ended without any audio, on the server and here. */
+  private async removeEmpty(recording: StoredRecording, pump: Pump): Promise<void> {
+    const { client, store } = this.options;
+    if (recording.created) {
+      await guarded(() =>
+        client.deleteRecording(recording.workspaceId, recording.recordingId),
+      ).catch((error: unknown) => {
+        // Already gone (deleted elsewhere): nothing is left to remove there.
+        if (error instanceof PermanentRecordingError && error.status === 404) return;
+        throw error;
+      });
+    }
+    await store.deleteRecording(recording.recordingId);
+    this.update(pump, { pendingChunks: 0, pendingBytes: 0, discarded: true });
   }
 
   private async uploadBatch(
@@ -777,7 +865,7 @@ async function guarded<T>(work: () => Promise<T>): Promise<T> {
           : typeof (error as { code?: unknown }).code === "string"
             ? String((error as { code: string }).code)
             : `http_${status}`;
-      throw new PermanentRecordingError(code, errorMessage(error));
+      throw new PermanentRecordingError(code, errorMessage(error), status);
     }
     throw error;
   }

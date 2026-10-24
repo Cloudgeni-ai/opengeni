@@ -174,6 +174,8 @@ export function phoneUploadLine(recorder: MeetingRecorder): string | null {
   if (capturing) {
     return "Keeps recording when the screen is locked or you switch apps. Audio is saved on this phone as you go.";
   }
+  if (recorder.state === "starting") return null;
+  if (upload?.discarded) return "Nothing was recorded, so no meeting was saved.";
   if (!upload || upload.finalized) return null;
   if (upload.pendingChunks === 0) return "Finishing the upload.";
   return `Uploading ${upload.pendingChunks} ${upload.pendingChunks === 1 ? "piece" : "pieces"} of audio.`;

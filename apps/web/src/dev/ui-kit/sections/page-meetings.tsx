@@ -44,6 +44,7 @@ function fakeRecorder(mode: RecorderMode, startedAt: number): MeetingRecorder {
           retryingAfterError: mode === "offline" ? "Failed to fetch" : null,
           failed: null,
           finalized: false,
+          discarded: false,
         }
       : null,
     error: mode === "denied" ? { code: "microphone_denied", message: "Permission denied" } : null,

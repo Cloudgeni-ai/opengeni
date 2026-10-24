@@ -171,7 +171,11 @@ export type UseRecorderResult = RecorderSnapshot & {
   supported: boolean;
   /** This browser can share a tab's or the system's audio. */
   systemAudioSupported: boolean;
-  /** Recordings from an earlier page this hook is finishing in the background. */
+  /**
+   * Recordings from an earlier page or app run this hook is still finishing in
+   * the background. Each leaves the list once it is uploaded, removed for having
+   * no audio, or failed for good.
+   */
   recovered: string[];
   /** Start a new recording; per-recording options override the hook's. */
   start: (
@@ -242,6 +246,13 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
         ...(isCaptureActive ? { isCaptureActive: (id: string) => isCaptureActive(id) } : {}),
         onStatus: (status) => {
           if (status.finalized) optionsRef.current.onFinished?.(status.recordingId);
+          if (status.finalized || status.discarded || status.failed) {
+            setRecovered((previous) =>
+              previous.includes(status.recordingId)
+                ? previous.filter((id) => id !== status.recordingId)
+                : previous,
+            );
+          }
         },
       });
     }
@@ -257,7 +268,13 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       return await uploader().resume();
     })()
       .then((ids) => {
-        if (!cancelled && ids.length > 0) setRecovered(ids);
+        if (cancelled) return;
+        // Some may already be done by now: keep only those still in flight.
+        const open = ids.filter((id) => {
+          const status = uploader().status(id);
+          return !(status?.finalized || status?.discarded || status?.failed);
+        });
+        if (open.length > 0) setRecovered(open);
       })
       .catch(() => undefined);
     return () => {
@@ -311,7 +328,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       recorderRef.current = recorder;
       await recorder.start();
     },
-    [client, workspaceId, uploader],
+    [client, workspaceId, store, uploader],
   );
 
   return {
