@@ -9849,6 +9849,11 @@
       display: none;
     }
   }
+:where(.og-root).\@max-\[479px\]\/list\:inline,:where(.og-root) .\@max-\[479px\]\/list\:inline {
+    @container list (width < 479px) {
+      display: inline;
+    }
+  }
 :where(.og-root).\@max-\[34rem\]\/titlebar\:hidden\!,:where(.og-root) .\@max-\[34rem\]\/titlebar\:hidden\! {
     @container titlebar (width < 34rem) {
       display: none !important;

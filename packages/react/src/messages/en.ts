@@ -409,7 +409,7 @@ export const englishMessages = {
     "Check your connection, then try again. Your automations keep running either way.",
   "automations.panel.menu": "More actions for {name}",
   "automations.panel.new": "New automation",
-  "automations.panel.next": "Next {time}",
+  "automations.panel.next": "Next run: {time}",
   "automations.panel.openChat": "Open chat",
   "automations.panel.paused": "Paused",
   "automations.panel.runNow": "Run now",
