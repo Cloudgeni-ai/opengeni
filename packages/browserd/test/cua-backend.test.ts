@@ -1102,11 +1102,15 @@ describe("CUA desktop boundary", () => {
     try {
       const target = (await backend.targets())[0]!;
       const billing = await backend.observe(target.id);
+      // The observation names the window by the page its reading shows.
+      expect(billing.target.title).toBe("Billing - Northwind Admin");
       // An action opened another page: the window still lists the old title
       // until the windows are listed again, but the reading shows the new one.
       fixture.windowName = "Accounts - Northwind Admin";
       const opened = await backend.observe(target.id);
       expect(opened.roots[0]!.ref).not.toBe(billing.roots[0]!.ref);
+      expect(opened.target.title).toBe("Accounts - Northwind Admin");
+      expect((await backend.targets())[0]!.title).toBe("Fixture");
       fixture.title = "Accounts - Northwind Admin";
       await backend.targets();
       const relisted = await backend.observe(target.id);
@@ -1123,6 +1127,22 @@ describe("CUA desktop boundary", () => {
       expect(
         [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
       ).toMatchObject({ element_token: `s${latest}:0` });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("an observation's title is its window element's own label, clipped, or else the listed title", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      fixture.windowName = "";
+      expect((await backend.observe(target.id)).target.title).toBe("Fixture");
+      fixture.windowName = "Report ".repeat(1_000);
+      const long = await backend.observe(target.id);
+      expect(long.target.title).toHaveLength(4_096);
+      expect(long.target.title.startsWith("Report Report")).toBe(true);
     } finally {
       await backend.close();
     }
