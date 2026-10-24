@@ -419,8 +419,26 @@ describe("CUA desktop boundary", () => {
       // Without stacking, no window is marked.
       fixture.windows = [window(1, {}), window(2, { z_index: null })];
       expect(await focused()).toEqual([]);
+      // A minimized or unmapped window high in the stack is not in front.
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, is_on_screen: false })];
+      expect(await focused()).toEqual(["cua:window:42:1"]);
+      // A reading does not carry the mark, which only a listing keeps current.
+      expect((await backend.observe("cua:window:42:1")).target.focused).toBe(false);
     } finally {
       await backend.close();
+    }
+    // Windows stacks cloaked and always-on-top windows as ordinary ones.
+    class WindowsStackFixture extends WindowsFixture {
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        if (name !== "list_windows") return await super.callTool(name, argumentsJson);
+        return result({ windows: [window(1, { z_index: 3, layer: 0 })] });
+      }
+    }
+    const windows = await CuaComputerBackend.open(new WindowsStackFixture(), "windows");
+    try {
+      expect((await windows.targets()).filter((target) => target.focused)).toEqual([]);
+    } finally {
+      await windows.close();
     }
   });
 
