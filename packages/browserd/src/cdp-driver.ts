@@ -3468,19 +3468,27 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     connection: BrowserCdpConnection,
     sessionId: string,
   ): Promise<BrowserUserAgentMetadata> {
-    const evaluated = await connection.send<{
-      result?: unknown;
-      exceptionDetails?: unknown;
-    }>(
-      "Runtime.evaluate",
-      {
-        expression: USER_AGENT_METADATA_EXPRESSION,
-        awaitPromise: true,
-        returnByValue: true,
-      },
-      { sessionId },
-    );
+    let evaluated: { result?: unknown; exceptionDetails?: unknown } | null = null;
+    try {
+      evaluated = await connection.send<{
+        result?: unknown;
+        exceptionDetails?: unknown;
+      }>(
+        "Runtime.evaluate",
+        {
+          expression: USER_AGENT_METADATA_EXPRESSION,
+          awaitPromise: true,
+          returnByValue: true,
+        },
+        { sessionId },
+      );
+    } catch (error) {
+      // A page still loading after a relaunch restored it may have no
+      // JavaScript context yet; the hidden target below has its own.
+      if (!missingExecutionContext(error)) throw error;
+    }
     if (
+      evaluated &&
       !evaluated.exceptionDetails &&
       isRecord(evaluated.result) &&
       evaluated.result.value !== null &&
@@ -3876,14 +3884,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async viewport(state: TargetState): Promise<BrowserObservationValue["viewport"]> {
     if (this.engine === "lightpanda") return null;
-    const result = await this.sendTarget<{
-      result?: unknown;
-      exceptionDetails?: unknown;
-    }>(state, "Runtime.evaluate", {
-      expression:
-        "({width:innerWidth,height:innerHeight,visualWidth:visualViewport?.width??innerWidth,visualHeight:visualViewport?.height??innerHeight,deviceScaleFactor:devicePixelRatio,maxTouchPoints:navigator.maxTouchPoints??0})",
-      returnByValue: true,
-    });
+    let result: { result?: unknown; exceptionDetails?: unknown };
+    try {
+      result = await this.sendTarget<{
+        result?: unknown;
+        exceptionDetails?: unknown;
+      }>(state, "Runtime.evaluate", {
+        expression:
+          "({width:innerWidth,height:innerHeight,visualWidth:visualViewport?.width??innerWidth,visualHeight:visualViewport?.height??innerHeight,deviceScaleFactor:devicePixelRatio,maxTouchPoints:navigator.maxTouchPoints??0})",
+        returnByValue: true,
+      });
+    } catch (error) {
+      // A page between documents (a restored tab still loading) has no
+      // JavaScript context to read. The viewport is optional; the
+      // observation stays usable without it, as when the page throws.
+      if (missingExecutionContext(error)) return null;
+      throw error;
+    }
     const value = isRecord(result.result) ? result.result.value : null;
     if (result.exceptionDetails || !isRecord(value)) {
       return null;
@@ -8308,6 +8325,18 @@ function boundedPositiveInteger(value: number, maximum: number, label: string): 
     throw new Error(`browser ${label} must be a positive bounded integer`);
   }
   return value;
+}
+
+/** Chrome's answer to a Runtime call on a page that has no JavaScript context
+ * at that moment: one between documents, or one whose document was replaced
+ * while the call ran. */
+function missingExecutionContext(error: unknown): boolean {
+  return (
+    error instanceof CdpProtocolError &&
+    /(cannot find (default )?(execution )?context|execution context was destroyed)/iu.test(
+      error.message,
+    )
+  );
 }
 
 function delay(ms: number): Promise<void> {
