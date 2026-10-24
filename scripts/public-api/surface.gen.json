@@ -15154,7 +15154,7 @@
         "$.tracks[].mimeType": "string!",
         "$.tracks[].source": "ref(RecordingCaptureSource)!",
         "$.tracks[].trackNumber": "integer!",
-        "$.transcription": "ref(RecordingTranscriptionOptions)?",
+        "$.transcription": "ref(RecordingTranscriptionRequest)?",
         "$.visibility": "ref(SessionVisibility)?"
       }
     },
@@ -15164,7 +15164,7 @@
       ],
       "shape": {
         "$": "object",
-        "$.transcription": "ref(RecordingTranscriptionOptions)?"
+        "$.transcription": "ref(RecordingTranscriptionRequest)?"
       }
     },
     "CreateRecordingUploadsRequest": {
@@ -23585,7 +23585,8 @@
     },
     "RecordingDiarizer": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"auto\\\"\",\"\\\"ours\\\"\"]"
@@ -23851,7 +23852,6 @@
     },
     "RecordingTranscriptionOptions": {
       "io": [
-        "input",
         "output"
       ],
       "shape": {
@@ -23860,6 +23860,21 @@
         "$.keyterms": "array?",
         "$.keyterms[]": "string",
         "$.language": "string?",
+        "$.maxSpeakers": "integer?",
+        "$.model": "string?",
+        "$.providerId": "string?"
+      }
+    },
+    "RecordingTranscriptionRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.diarizer": "ref(RecordingDiarizer)?",
+        "$.keyterms": "array?",
+        "$.keyterms[]": "string",
+        "$.language": "string? null",
         "$.maxSpeakers": "integer?",
         "$.model": "string?",
         "$.providerId": "string?"
@@ -31814,6 +31829,7 @@
         "$": "object",
         "$.defaultVisibility": "ref(SessionVisibility)?",
         "$.diarizer": "ref(RecordingDiarizer)?",
+        "$.language": "string?",
         "$.liveTranscript": "boolean?",
         "$.retention": "ref(RecordingRetention)?",
         "$.transcription": "object?",

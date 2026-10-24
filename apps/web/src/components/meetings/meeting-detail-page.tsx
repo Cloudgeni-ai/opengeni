@@ -76,6 +76,7 @@ import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { cn } from "@opengeni/react/app/lib/utils";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
+import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
 import {
   MeetingPlayer,
   type MeetingPlayerHandle,
@@ -198,9 +199,6 @@ function RenameDialog({
   );
 }
 
-const AUTO = "auto";
-const COMMON_LANGUAGES = ["en", "nb", "sv", "da", "de", "fr", "es", "nl", "fi", "it", "pt", "pl"];
-
 function TranscribeAgainDialog({
   open,
   recording,
@@ -217,7 +215,8 @@ function TranscribeAgainDialog({
   onRun: (options: {
     providerId: string;
     model: string;
-    language?: string;
+    /** Null detects it, even when the workspace names a meeting language. */
+    language: string | null;
     maxSpeakers?: number;
   }) => Promise<void>;
 }) {
@@ -228,7 +227,9 @@ function TranscribeAgainDialog({
       ? `${defaultModel.providerId}/${defaultModel.model}`
       : "";
   const [model, setModel] = useState(initialModel);
-  const [language, setLanguage] = useState<string>(recording.transcription.language ?? AUTO);
+  const [language, setLanguage] = useState<string>(
+    recording.transcription.language ?? DETECT_LANGUAGE,
+  );
   const [speakers, setSpeakers] = useState(
     recording.transcription.maxSpeakers ? String(recording.transcription.maxSpeakers) : "",
   );
@@ -252,10 +253,7 @@ function TranscribeAgainDialog({
     selected?.usdPerHour != null && recording.durationMilliseconds > 0
       ? (selected.usdPerHour * recording.durationMilliseconds) / 3_600_000
       : null;
-  const languageOptions: SelectOption[] = [
-    { value: AUTO, label: "Detect automatically" },
-    ...COMMON_LANGUAGES.map((code) => ({ value: code, label: languageName(code) })),
-  ];
+  const languageOptions = meetingLanguageOptions(language);
   const speakerCount = speakers.trim() ? Number(speakers) : undefined;
   const speakersInvalid =
     speakerCount !== undefined &&
@@ -278,7 +276,7 @@ function TranscribeAgainDialog({
           await onRun({
             providerId: selected.providerId,
             model: selected.model,
-            ...(language !== AUTO ? { language } : {}),
+            language: language === DETECT_LANGUAGE ? null : language,
             ...(speakerCount !== undefined ? { maxSpeakers: speakerCount } : {}),
           });
         } catch (cause) {
@@ -508,18 +506,24 @@ export function MeetingDetailPage({
   workspaceId,
   recordingId,
   viewerSubjectId,
+  viewerName = "Me",
   voiceRecognition = false,
   recordings: recordingsClient,
   onBack,
+  onOpenSettings,
 }: {
   workspaceId: string;
   recordingId: string;
   viewerSubjectId: string;
+  /** The reader's name, for the people list when they name a speaker as themselves. */
+  viewerName?: string;
   /** The workspace recognizes people by voice, so speakers can be suggested and voices remembered. */
   voiceRecognition?: boolean;
   /** A recordings client to use instead of the app's, for previews. */
   recordings?: RecordingsClientOverride["recordings"];
   onBack: () => void;
+  /** Opens Meetings settings, where voice recognition is turned on. */
+  onOpenSettings?: (() => void) | undefined;
 }) {
   const override = { workspaceId, ...(recordingsClient ? { recordings: recordingsClient } : {}) };
   const meeting = useRecording(recordingId, override);
@@ -578,9 +582,51 @@ export function MeetingDetailPage({
   const rejectSuggestion = transcript.rejectSuggestion;
   const nameSpeaker = transcript.nameSpeaker;
   const transcriptSpeakers = transcript.speakers;
+  const peopleList = people.people;
+  // Without voice recognition a name is only for this meeting; say so once,
+  // the first time someone is named here.
+  const toldNotRemembered = useRef(false);
+  const tellNotRemembered = useCallback(() => {
+    if (voiceRecognition || toldNotRemembered.current) return;
+    toldNotRemembered.current = true;
+    toast("Names aren't suggested in later meetings", {
+      description:
+        "Voice recognition is off in this workspace. An admin can turn it on in Meetings settings.",
+      ...(onOpenSettings ? { action: { label: "Settings", onClick: onOpenSettings } } : {}),
+    });
+  }, [voiceRecognition, onOpenSettings]);
   const actions: TranscriptActions = useMemo(
     () => ({
-      nameSpeaker,
+      nameSpeaker: async (label, name) => {
+        await nameSpeaker(label, name);
+        if (name) tellNotRemembered();
+      },
+      viewerSubjectId,
+      nameSelf: async (label: string) => {
+        const me =
+          peopleList.find((person) => person.memberSubjectId === viewerSubjectId) ??
+          (await createPerson({ displayName: viewerName, memberSubjectId: viewerSubjectId }));
+        await nameSpeaker(label, { personId: me.id });
+        if (!voiceRecognition) {
+          tellNotRemembered();
+        } else if (!me.voice) {
+          // Naming yourself is when remembering your voice makes sense.
+          toast.success("Named you", {
+            description: "Remember your voice and later meetings suggest your name when you speak.",
+            action: {
+              label: "Remember my voice",
+              onClick: () =>
+                void rememberVoice(me.id, "self").then(
+                  () => toast.success("Your voice will be remembered"),
+                  (error: unknown) =>
+                    toast.error("Couldn't remember your voice", {
+                      description: errorText(error),
+                    }),
+                ),
+            },
+          });
+        }
+      },
       rejectSuggestion: async (label: string) => {
         const suggested = speakerIsSuggested(label, transcriptSpeakers);
         await rejectSuggestion(label);
@@ -644,6 +690,9 @@ export function MeetingDetailPage({
       createPerson,
       voiceRecognition,
       viewerSubjectId,
+      viewerName,
+      peopleList,
+      tellNotRemembered,
       rememberVoice,
       forgetVoice,
       refreshTranscript,

@@ -324,7 +324,8 @@ describe("ElevenLabs provider", () => {
       audio_format: "pcm_16000",
       commit_strategy: "vad",
       include_timestamps: "true",
-      language_code: "nb",
+      // ElevenLabs knows Norwegian as one language, so Bokmål goes as "no".
+      language_code: "no",
     });
     expect(grant.url).not.toContain("secret-key");
     expect(grant.protocol).toBe("elevenlabs.scribe_realtime");

@@ -14,6 +14,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
+import { meetingLanguage } from "../src/routes/recordings";
 
 let shared: SharedTestDatabase;
 let db: DbClient;
@@ -310,6 +311,33 @@ describe("recording routes", () => {
     expect((await scope.owner.call("DELETE", `/recordings/${recordingId}`)).status).toBe(204);
     expect(scope.started.at(-1)).toMatchObject({ kind: "deletion", recordingId, versionId: null });
     expect((await scope.owner.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
+  });
+
+  test("the workspace's meeting language, unless a recording names one or asks to detect", async () => {
+    const scope = await fixture();
+    await shared.admin`
+      update workspaces set settings = settings || '{"recordings":{"language":"no"}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const create = async (transcription?: { language: string | null }) => {
+      const recordingId = crypto.randomUUID();
+      const created = await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+        ...(transcription ? { transcription } : {}),
+      });
+      expect(created.status).toBe(201);
+      return created.body as { id: string; transcription: { language?: string | null } };
+    };
+    // None named: the workspace's, settled at the start for the live transcript.
+    expect((await create()).transcription.language).toBe("no");
+    expect((await create({ language: "en" })).transcription.language).toBe("en");
+    // Null detects it, even though the workspace names one.
+    expect((await create({ language: null })).transcription.language).toBeUndefined();
+    const settings = { language: "no" };
+    expect(meetingLanguage(null, settings)).toBeUndefined();
+    expect(meetingLanguage(undefined, settings)).toBe("no");
+    expect(meetingLanguage("en", settings)).toBe("en");
+    expect(meetingLanguage(undefined, {})).toBeUndefined();
   });
 
   test("remembering a voice needs recognition on and the person's agreement", async () => {

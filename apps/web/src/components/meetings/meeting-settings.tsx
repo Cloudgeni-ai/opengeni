@@ -14,6 +14,7 @@ import {
 } from "@opengeni/contracts";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import {
+  languageName,
   useRecordingModels,
   useRecordingPeople,
   type RecordingsClientOverride,
@@ -25,6 +26,8 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { NativeSelect, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
+
+import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
 
 const DEFAULT = "default";
 const KEEP = "keep";
@@ -201,6 +204,18 @@ export function MeetingDefaultsView({
   const noneAvailable =
     !models.loading && !models.error && !models.models.some((entry) => entry.available);
 
+  const language = current.language ?? DETECT_LANGUAGE;
+  const chooseLanguage = (value: string) => {
+    if (value === language) return;
+    const { language: _previous, ...rest } = current;
+    void save(
+      value === DETECT_LANGUAGE ? rest : { ...rest, language: value },
+      value === DETECT_LANGUAGE
+        ? "New meetings detect their language"
+        : `New meetings are transcribed in ${languageName(value)}`,
+    );
+  };
+
   const voiceprints = current.voiceprints === true;
   const [confirmingOff, setConfirmingOff] = useState(false);
   const chooseVoiceprints = (next: boolean) => {
@@ -341,6 +356,21 @@ export function MeetingDefaultsView({
             value={chosen}
             onValueChange={chooseModel}
             loading={models.loading && models.models.length === 0}
+            disabled={saving || !canManage}
+            {...(reason ? { disabledReason: reason } : {})}
+          />
+        }
+      />
+      <SettingRow
+        label="Meeting language"
+        description="New meetings are transcribed in this language, and whoever records can pick another. Detecting it works for the final transcript, but the live transcript can drift between languages, so pick one if most meetings are in it."
+        controlWidth="select"
+        control={
+          <NativeSelect
+            aria-label="Meeting language"
+            options={meetingLanguageOptions(language)}
+            value={language}
+            onValueChange={chooseLanguage}
             disabled={saving || !canManage}
             {...(reason ? { disabledReason: reason } : {})}
           />

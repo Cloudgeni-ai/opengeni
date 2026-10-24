@@ -17,6 +17,8 @@ import {
   type RecordingLiveSession,
   type RecordingTranscriptionModel,
   type RecordingTranscriptionOptions,
+  type RecordingTranscriptionRequest,
+  type WorkspaceRecordingSettings,
 } from "@opengeni/contracts";
 import {
   createRecordingTranscriptionProviderRegistry,
@@ -75,6 +77,28 @@ function preparedTrackContentType(objectKey: string): string {
 }
 
 /**
+ * A new recording's language: the request's, else the workspace's meeting
+ * language. Null asks to detect it even when the workspace names one. It is
+ * settled when recording starts, because the live transcript streams from
+ * the first second, and kept with the recording.
+ */
+export function meetingLanguage(
+  requested: string | null | undefined,
+  settings: WorkspaceRecordingSettings,
+): string | undefined {
+  if (requested === null) return undefined;
+  return requested ?? settings.language;
+}
+
+/** Options as stored: a null language (detect) is the same as none. */
+function storedTranscription(
+  requested: RecordingTranscriptionRequest,
+): RecordingTranscriptionOptions {
+  const { language, ...rest } = requested;
+  return { ...rest, ...(language ? { language } : {}) };
+}
+
+/**
  * Recordings: captured conversations made of audio tracks. Clients record
  * locally, upload chunks straight to storage with presigned URLs, then
  * finalize; the worker prepares the audio and makes transcript versions.
@@ -121,7 +145,7 @@ export function registerRecordingRoutes(
   /** The request's model, else the workspace's default, else the deployment default. */
   async function transcriptionChoice(
     workspaceId: string,
-    requested: RecordingTranscriptionOptions,
+    requested: RecordingTranscriptionRequest,
   ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
     const workspace = await getWorkspace(db, workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
@@ -137,7 +161,7 @@ export function registerRecordingRoutes(
         details: { code: "unknown_model", providerId, model: model ?? null },
       });
     }
-    const { providerId: _provider, model: _model, ...rest } = requested;
+    const { providerId: _provider, model: _model, ...rest } = storedTranscription(requested);
     const diarizer = rest.diarizer ?? settings.diarizer;
     return {
       providerId,
@@ -239,6 +263,14 @@ export function registerRecordingRoutes(
     const workspace = await getWorkspace(db, actor.workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
     if (body.transcription) await transcriptionChoice(actor.workspaceId, body.transcription);
+    const language = meetingLanguage(body.transcription?.language, settings);
+    const transcription =
+      body.transcription || language
+        ? {
+            ...storedTranscription(body.transcription ?? {}),
+            ...(language ? { language } : {}),
+          }
+        : undefined;
     const result = await guard(() =>
       createRecording(db, {
         ...actor,
@@ -249,7 +281,7 @@ export function registerRecordingRoutes(
         externalRef: body.externalRef,
         metadata: body.metadata,
         tracks: body.tracks,
-        transcription: body.transcription,
+        transcription,
       }),
     );
     return c.json(result.recording, result.created ? 201 : 200);

@@ -419,6 +419,31 @@ describe("Live transcript", () => {
     }
   });
 
+  test("the recorder starts in the workspace's meeting language, and can detect instead", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        defaultLanguage="no"
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Start recording");
+      const select = view.container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Meeting language"]',
+      );
+      expect(select?.value).toBe("no");
+      const labels = [...select!.options].map((option) => option.textContent);
+      expect(labels[0]).toBe("Detect language");
+      expect(labels).toContain("Norwegian");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("streamed pieces are joined without doubled or stray punctuation", async () => {
     const { tidyLiveText, tidyPartialText } = await import("./live-transcript");
     expect(tidyLiveText(["It's between you…", ". And the dog ."])).toBe(
