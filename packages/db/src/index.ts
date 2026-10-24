@@ -12,7 +12,7 @@ import {
   isActivityXidToken,
   normalizeActivityToken,
 } from "./session-activity-xid";
-import { syncGitHubEventRoutes } from "./event-triggers";
+import { syncGitHubEventRoutes, wakeScheduledTaskEventSubscriptions } from "./event-triggers";
 export {
   listExhaustedScheduledTasks,
   retireExhaustedScheduledTask,
@@ -19693,6 +19693,64 @@ export async function deleteScheduledTask(
       };
     });
   });
+}
+
+/**
+ * Archiving a chat pauses it, so the one-time waits that would continue it
+ * are retired with it: a run-once event automation that has not run yet, and
+ * a one-time scheduled run still ahead. Both belong to the chat (a "wake me
+ * when" from that chat or one of its sub-chats); repeating automations stay,
+ * and a run of theirs that meets the paused chat is blocked with a notice to
+ * the owner. Pass the archive transaction so the chat never ends up archived
+ * with a pending wait; any Temporal schedule is removed by the cleanup pump
+ * from the durable outbox row each deletion writes. Restore does not bring
+ * a retired wait back. Returns the retired automation ids.
+ */
+export async function retireArchivedChatWaits(
+  db: Database,
+  input: { workspaceId: string; rootSessionId: string; now?: Date },
+): Promise<string[]> {
+  const now = input.now ?? new Date();
+  const task = schema.scheduledTasks;
+  const settings = schema.scheduledTaskEventSettings;
+  const rows = await withWorkspaceRls(db, input.workspaceId, async (scoped) =>
+    scoped
+      .select({ id: task.id })
+      .from(task)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, task.workspaceId),
+          eq(schema.sessions.id, task.reusableSessionId),
+        ),
+      )
+      .leftJoin(settings, eq(settings.taskId, task.id))
+      .where(
+        and(
+          eq(task.workspaceId, input.workspaceId),
+          isNull(task.deletedAt),
+          eq(task.runMode, "existing_session"),
+          eq(schema.sessions.rootSessionId, input.rootSessionId),
+          or(
+            and(eq(settings.once, true), isNull(settings.completedAt)),
+            and(
+              isNull(settings.taskId),
+              sql`${task.schedule} ->> 'type' = 'once'`,
+              sql`(${task.schedule} ->> 'runAt')::timestamptz > ${now.toISOString()}::timestamptz`,
+            ),
+          ),
+        ),
+      )
+      .orderBy(task.id),
+  );
+  const retired: string[] = [];
+  for (const row of rows) {
+    const deletion = await deleteScheduledTask(db, input.workspaceId, row.id);
+    if (!deletion.changed) continue;
+    await wakeScheduledTaskEventSubscriptions(db, input.workspaceId, row.id);
+    retired.push(row.id);
+  }
+  return retired;
 }
 
 /** A terminal refusal is evidence, not accepted execution or permission to retry. */
