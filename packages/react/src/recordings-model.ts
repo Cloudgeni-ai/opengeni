@@ -3,12 +3,13 @@
  * times, speaker names and colors, and the transcript grouped into turns.
  * No React here, so each rule is tested on its own.
  */
-import type {
-  Recording,
-  RecordingSpeaker,
-  RecordingTrack,
-  RecordingTranscriptSegment,
-  RecordingTranscriptVersion,
+import {
+  defaultRecordingSpeakerName,
+  type Recording,
+  type RecordingSpeaker,
+  type RecordingTrack,
+  type RecordingTranscriptSegment,
+  type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
 
 /** "4:07", "1:02:09". Never negative; rounds down to the second. */
@@ -106,9 +107,6 @@ export function transcriptErrorText(code: string | null): string {
   }
 }
 
-const DIARIZED_LABEL = /^(?:(t\d+)_)?speaker_(\d+)$/u;
-const TRACK_LABEL = /^track-(\d+)$/u;
-
 /**
  * The name to show for a speaker: the person or plain name someone gave it,
  * else "Speaker 2" for a model's label, or the track's role for a track label.
@@ -120,27 +118,18 @@ export function speakerDisplayName(
 ): string {
   if (!label) return "Unknown speaker";
   const speaker = speakers.find((candidate) => candidate.label === label);
-  if (speaker && speaker.name.trim() && speaker.name !== label) return speaker.name;
+  if (speaker && speakerIsNamed(label, speakers) && speaker.name.trim()) return speaker.name;
   return defaultSpeakerName(label, tracks);
 }
 
 export function defaultSpeakerName(label: string, tracks: readonly RecordingTrack[]): string {
-  const diarized = DIARIZED_LABEL.exec(label);
-  if (diarized) return `Speaker ${Number(diarized[2]) + 1}`;
-  const track = TRACK_LABEL.exec(label);
-  if (track) {
-    const source = tracks.find((candidate) => candidate.trackNumber === Number(track[1]))?.source;
-    if (source === "microphone") return "Microphone";
-    if (source === "system") return "Shared audio";
-    return `Track ${Number(track[1]) + 1}`;
-  }
-  return label;
+  return defaultRecordingSpeakerName(label, tracks);
 }
 
-/** True when someone named this label (a person or a plain name). */
+/** True when the label has a name of its own: a person, a plain name, or a suggestion. */
 export function speakerIsNamed(label: string, speakers: readonly RecordingSpeaker[]): boolean {
   const speaker = speakers.find((candidate) => candidate.label === label);
-  return Boolean(speaker && (speaker.personId || (speaker.name && speaker.name !== label)));
+  return Boolean(speaker && (speaker.personId || speaker.source));
 }
 
 /**

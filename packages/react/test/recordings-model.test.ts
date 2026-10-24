@@ -152,7 +152,15 @@ describe("speakers", () => {
       source: "confirmed" as const,
       confidence: null,
     },
-    { label: "speaker_1", name: "speaker_1", personId: null, source: null, confidence: null },
+    // The server's default name for a label nobody named.
+    { label: "speaker_1", name: "Speaker 2", personId: null, source: null, confidence: null },
+    {
+      label: "speaker_2",
+      name: "Pilot customer",
+      personId: null,
+      source: "confirmed" as const,
+      confidence: null,
+    },
   ];
 
   test("named labels show the name; model labels count from one", () => {
@@ -168,10 +176,12 @@ describe("speakers", () => {
     expect(defaultSpeakerName("track-4", tracks)).toBe("Track 5");
   });
 
-  test("a label is named only by a person or a real name", () => {
+  test("a label is named only by a person or a name someone gave it", () => {
     expect(speakerIsNamed("speaker_0", speakers)).toBe(true);
     expect(speakerIsNamed("speaker_1", speakers)).toBe(false);
+    expect(speakerIsNamed("speaker_2", speakers)).toBe(true);
     expect(speakerIsNamed("speaker_9", speakers)).toBe(false);
+    expect(speakerDisplayName("speaker_2", speakers, tracks)).toBe("Pilot customer");
   });
 
   test("colors follow first appearance and wrap after six", () => {

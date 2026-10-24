@@ -51,6 +51,7 @@ export type RecordingTranscribedWord = {
 };
 
 export type RecordingTranscriptionResult = {
+  /** BCP 47 language tags ("en", "nb"), whatever form the provider reports them in. */
   languages: string[];
   /** Audio length the provider measured, when it says. */
   audioMilliseconds: number | null;
@@ -361,6 +362,18 @@ type ElevenLabsResponse = {
   audio_duration_secs?: unknown;
 };
 
+/**
+ * The shortest standard form of a provider's language code: ISO 639-3 "eng"
+ * and "nob" become "en" and "nb"; a code Intl can't read is kept as given.
+ */
+export function canonicalLanguageTag(code: string): string {
+  try {
+    return Intl.getCanonicalLocales(code.trim())[0] ?? code;
+  } catch {
+    return code;
+  }
+}
+
 function seconds(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.round(value * 1_000)
@@ -400,7 +413,7 @@ export function parseElevenLabsTranscript(body: unknown): RecordingTranscription
   }
   const language =
     typeof response.language_code === "string" && response.language_code
-      ? [response.language_code]
+      ? [canonicalLanguageTag(response.language_code)]
       : [];
   return {
     languages: language,

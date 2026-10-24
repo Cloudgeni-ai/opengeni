@@ -8,6 +8,7 @@ import {
   speakerIsNamed,
   transcriptErrorText,
   useRecording,
+  useRecordingModels,
   useRecordingPeople,
   useTranscript,
   versionSummary,
@@ -70,6 +71,14 @@ function Meeting({ workspaceId }: { workspaceId: string }) {
     ...scope,
     refreshKey: recording?.transcript?.id,
   });
+  const models = useRecordingModels({ ...scope, enabled: ready });
+  const version = recording?.transcript ?? null;
+  const modelName = version
+    ? (models.models.find(
+        (candidate) =>
+          candidate.providerId === version.providerId && candidate.model === version.model,
+      )?.name ?? null)
+    : null;
   const recorder = useMeetingRecorder();
   const capturingHere = isCapturing(recorder) && recorder?.recordingId === recording?.id;
   const [sheet, setSheet] = useState<Sheet>(null);
@@ -269,6 +278,7 @@ function Meeting({ workspaceId }: { workspaceId: string }) {
               <>
                 <TranscriptFacts
                   recording={recording}
+                  modelName={modelName}
                   speakers={transcript.speakers}
                   onSpeaker={(label) => setSheet({ kind: "speaker", label })}
                 />
@@ -389,6 +399,7 @@ function PhaseNote(props: { text: string; spinning?: boolean; tone?: "danger" })
 /* The model and languages, and the speakers as chips: tap one to name it. */
 function TranscriptFacts(props: {
   recording: Recording;
+  modelName: string | null;
   speakers: RecordingSpeaker[];
   onSpeaker: (label: string) => void;
 }) {
@@ -398,7 +409,7 @@ function TranscriptFacts(props: {
   return (
     <View style={{ marginTop: 20, gap: 10 }}>
       <Text style={{ ...fontStyle(theme), fontSize: 13, color: c["fg-subtle"] }}>
-        {versionSummary(version, null).join(" · ")}
+        {versionSummary(version, props.modelName).join(" · ")}
       </Text>
       {props.speakers.length > 0 ? (
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
@@ -497,6 +508,8 @@ function SheetInput(props: {
   placeholder: string;
   accessibilityLabel: string;
   onSubmit: () => void;
+  /** A person's name: capitalize each word and don't autocorrect it. */
+  personName?: boolean;
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
@@ -508,6 +521,7 @@ function SheetInput(props: {
       placeholder={props.placeholder}
       placeholderTextColor={c["fg-subtle"]}
       autoFocus
+      {...(props.personName ? { autoCapitalize: "words" as const, autoCorrect: false } : {})}
       returnKeyType="done"
       onSubmitEditing={props.onSubmit}
       style={{
@@ -624,6 +638,7 @@ function SpeakerSheet(props: {
           value={draft}
           onChangeText={setDraft}
           placeholder="Search people or type a name"
+          personName
           onSubmit={() => {
             const name = draft.trim();
             if (!name) return;
