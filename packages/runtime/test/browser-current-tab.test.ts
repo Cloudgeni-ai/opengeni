@@ -167,6 +167,11 @@ describe("current browser tab", () => {
       type: "click",
       locator: { kind: "role", role: "check box", name: "Remember me", exact: true },
     });
+    // Roles are shown in lower case; a capitalised one means the same role.
+    expect(expandRefShorthand({ type: "click", locator: "Button:Save" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "button", name: "Save", exact: true },
+    });
   });
 
   test("kind words name their locator kind where the surface has no such role", () => {

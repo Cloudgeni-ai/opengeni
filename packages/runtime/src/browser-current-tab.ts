@@ -146,7 +146,9 @@ function expandLocatorString(value: string, kindWords: LocatorKindWords): Record
   const kind = Object.hasOwn(kindWords, word.toLowerCase())
     ? kindWords[word.toLowerCase()]
     : undefined;
-  return kind ? { kind, text: name } : { kind: "role", role: word, name, exact: true };
+  return kind
+    ? { kind, text: name }
+    : { kind: "role", role: word.toLowerCase(), name, exact: true };
 }
 
 /** Locators passed as bare strings (an element ref, or `role:name`),
