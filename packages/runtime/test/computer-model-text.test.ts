@@ -148,6 +148,46 @@ describe("computerObservationText", () => {
     ]);
   });
 
+  test("lists a macOS table cell once though AXColumn repeats it", () => {
+    const at = (x: number, y: number) => ({ x, y, width: 106, height: 19 });
+    const cell = (ref: string, role: string, name: string, x: number, y: number) =>
+      ({
+        ref,
+        role,
+        name,
+        ...(role === "text" ? { value: name } : {}),
+        bounds: at(x, y),
+        states: [],
+        actions: role === "link" ? ["invoke", "focus"] : [],
+      }) satisfies ComputerTextNode;
+    const roots: ComputerTextNode[] = [
+      { ref: "e1", role: "AXTable", name: "Accounts", states: [], actions: [] },
+      { ref: "e2", role: "AXRow", states: [], actions: [] },
+      cell("e3", "link", "Juniper Dental", 200, 459),
+      cell("e4", "text", "AC-FRGA", 566, 459),
+      cell("e5", "link", "Juniper Electric", 200, 494),
+      cell("e6", "text", "AC-FRGA", 566, 494),
+      { ref: "e7", role: "AXColumn", states: [], actions: [] },
+      cell("e8", "link", "Juniper Dental", 200, 459),
+      cell("e9", "link", "Juniper Electric", 200, 494),
+      { ref: "e10", role: "AXColumn", states: [], actions: [] },
+      cell("e11", "text", "AC-FRGA", 566, 459),
+      cell("e12", "text", "AC-FRGA", 566, 494),
+      // Another element with the same label elsewhere is still listed.
+      cell("e13", "link", "Juniper Dental", 200, 900),
+    ];
+    const text = computerObservationText(observation({ kind: "snapshot", roots, nodeCount: 13 }));
+    expect(text.split("\n").slice(3)).toEqual([
+      '- AXTable "Accounts" [e1]',
+      '- link "Juniper Dental" [e3]',
+      '- text "AC-FRGA"',
+      '- link "Juniper Electric" [e5]',
+      '- text "AC-FRGA"',
+      '- link "Juniper Dental" [e13]',
+      "(7 hidden, unlabeled or repeated elements not shown)",
+    ]);
+  });
+
   test("says when the platform stopped reading the tree early", () => {
     const roots = [node("e_row", "AXRow", "bun")];
     const slow = computerObservationText(
