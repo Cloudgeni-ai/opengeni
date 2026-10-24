@@ -110,6 +110,8 @@ function updateWaitingReason(
       return t("machines.machineStatus.waitingForInteractions");
     case "update_busy_uploads":
       return t("machines.machineStatus.waitingForUploads");
+    case "update_busy_updating":
+      return t("machines.machineStatus.waitingForAnotherUpdate");
     default:
       return t("machines.machineStatus.waitingForUnspecifiedWork");
   }
