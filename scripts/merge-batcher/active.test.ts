@@ -355,12 +355,12 @@ async function mergedOriginalWithDelta() {
 describe("actual active executor with local bare Git and mocked GitHub", () => {
   async function refreshedFixture() {
     const f = await fixture();
-    const main = await f.commit({ base: "base", main: "advance" }, [f.base]);
-    await f.origin.exec(["update-ref", "refs/heads/main", main]);
+    const advancedMain = await f.commit({ base: "base", main: "advance" }, [f.base]);
+    await f.origin.exec(["update-ref", "refs/heads/main", advancedMain]);
     const manifest = await f.publish();
     const refreshed = await f.origin.commit(
-      await f.origin.mergeTree(f.head, main),
-      [f.head, main],
+      await f.origin.mergeTree(f.head, advancedMain),
+      [f.head, advancedMain],
       "Merge main",
       NOW,
     );
@@ -378,7 +378,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         },
       },
     ];
-    return { ...f, main, manifest, refreshed };
+    return { ...f, main: advancedMain, manifest, refreshed };
   }
   test("clean merge-main refresh lands same tested tree with native new-head ancestry and retained proof", async () => {
     const f = await refreshedFixture();
