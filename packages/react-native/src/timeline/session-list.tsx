@@ -38,7 +38,12 @@ import Svg, { Path } from "react-native-svg";
 import { Icon } from "./icon";
 import { useNativeTimelineMessages } from "./messages";
 import { withAlpha } from "./primitives";
-import { fontStyle, useNativeTimelineTheme, type WebColorToken } from "./theme";
+import {
+  BAR_MAX_FONT_SCALE,
+  fontStyle,
+  useNativeTimelineTheme,
+  type WebColorToken,
+} from "./theme";
 
 /* ----------------------------------------------------------------------------
    The web app's session list rows at phone width (Recent sessions on the
@@ -426,6 +431,7 @@ export function SessionHeaderTitle({
     >
       <Text
         numberOfLines={1}
+        maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
         style={{ ...fontStyle(theme, 600), fontSize: 16, lineHeight: 20, color: c.fg }}
       >
         {title}
@@ -435,6 +441,7 @@ export function SessionHeaderTitle({
           <StatusDot tone={presentation.tone} pulse={presentation.pulse} size={6} />
           <Text
             numberOfLines={1}
+            maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
             style={{
               ...fontStyle(theme, 500),
               fontSize: 12,

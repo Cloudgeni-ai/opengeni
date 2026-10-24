@@ -24,8 +24,10 @@ export {
 export { Icon } from "./icon";
 export type { NativeIconName } from "./icon";
 export {
+  BAR_MAX_FONT_SCALE,
   createNativeTimelineTheme,
   fontStyle,
+  HEADING_MAX_FONT_SCALE,
   NativeTimelineThemeProvider,
   useNativeTimelineTheme,
 } from "./theme";
