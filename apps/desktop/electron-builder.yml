@@ -57,10 +57,20 @@ mac:
   extraFiles:
     - from: build/LaunchAgents
       to: Library/LaunchAgents
+  # Privacy usage descriptions: the microphone (dictation, voice chats and
+  # meeting recordings) and system-audio recording (a meeting recording that
+  # includes the computer's audio); macOS asks about each when the person first
+  # starts one. Electron's own Info.plist also declares the camera and
+  # Bluetooth; nothing in the app uses them, the window refuses them
+  # (packages/desktop/src/main/web-permissions.ts), so a null removes each key.
+  # Screen Recording and Accessibility (App-shots, computer use) need no key and
+  # are asked for only from Settings. See apps/desktop/test/mac-privacy.test.ts.
   extendInfo:
     NSMicrophoneUsageDescription: Opengeni uses the microphone when you dictate, talk to an agent or record a meeting.
-    NSCameraUsageDescription: Opengeni uses the camera when you share a photo with an agent.
     NSAudioCaptureUsageDescription: Opengeni records your computer's audio, such as the other people in a call, when you include it in a meeting recording.
+    NSCameraUsageDescription: null
+    NSBluetoothAlwaysUsageDescription: null
+    NSBluetoothPeripheralUsageDescription: null
   notarize: true
 dmg:
   writeUpdateInfo: false

@@ -9,6 +9,16 @@ import type { UserResourceAuthoritySummary } from "./types";
 export type ThisComputerPlatform = "macos" | "windows" | "linux";
 
 /**
+ * Set by the desktop app on the agent it runs on a Mac: a directory holding
+ * one empty file per home folder (`Desktop`, `Documents`, `Downloads`) the
+ * person has allowed the app to open. The agent's automatic whole-folder
+ * walks from the home folder leave out every one of those folders without a
+ * file there, so they never put macOS's question up unasked or fail on a
+ * refused folder.
+ */
+export const MAC_FOLDERS_ALLOWED_ENV = "OPENGENI_MAC_FOLDERS_ALLOWED";
+
+/**
  * Where this computer stands for one workspace.
  *
  * - `unavailable`: the app can't connect computers on this platform.

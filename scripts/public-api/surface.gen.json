@@ -35082,6 +35082,7 @@
       "ComputerGrantRevokeClient": "type",
       "disallowAgentsOnComputer": "value",
       "ENGLISH_MAC_SYSTEM_NAMES": "value",
+      "MAC_FOLDERS_ALLOWED_ENV": "value",
       "MacSystemNameCatalog": "type",
       "macSystemNames": "value",
       "nextMissingPermission": "value",

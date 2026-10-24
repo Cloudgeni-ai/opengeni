@@ -78,6 +78,7 @@ import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./p
 import { SystemAudioCaptures } from "./system-audio";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
+import { refuseAllPermissions } from "./web-permissions";
 import { MainWindow, openExternalSafely } from "./window";
 import { completeComputerLink, computerLinkAccount } from "./computer-link";
 
@@ -361,6 +362,10 @@ export class DesktopShell {
     if (process.platform === "linux") {
       app.commandLine.appendSwitch("enable-features", "OverlayScrollbar");
     }
+    // No feature uses Web Bluetooth. Without it no page can start Bluetooth,
+    // which macOS would ask the person about (the app ships no Bluetooth
+    // usage description; see web-permissions.ts).
+    app.commandLine.appendSwitch("disable-blink-features", "WebBluetooth");
     // Without it Windows shows no notifications for the installed app.
     if (process.platform === "win32") app.setAppUserModelId(config.appId);
     if (process.defaultApp && process.argv[1]) {
@@ -385,6 +390,8 @@ export class DesktopShell {
     if (launchUrl) queued.push(launchUrl);
     void app.whenReady().then(() => {
       mark("ready");
+      // The app's own local pages run in the default session and need no permissions.
+      refuseAllPermissions(session.defaultSession);
       serveLocalPages(dirname(config.welcomePagePath));
       desktop = new DesktopShell(config);
       desktop.start();

@@ -23,7 +23,11 @@ import type {
   ThisComputerPermissionId,
   ThisComputerStatus,
 } from "@opengeni/sdk/this-computer";
-import { macSystemNames, type MacSystemNameCatalog } from "@opengeni/sdk/this-computer";
+import {
+  MAC_FOLDERS_ALLOWED_ENV,
+  macSystemNames,
+  type MacSystemNameCatalog,
+} from "@opengeni/sdk/this-computer";
 import { normalizeServerUrl } from "@opengeni/sdk/app-links";
 import {
   connectionFor,
@@ -316,12 +320,23 @@ export class ThisComputer {
   private guiding: ThisComputerPermissionId | null = null;
   /** Environment every agent command gets: the host marker and, when set, its own config. */
   private readonly agentEnv: Record<string, string>;
+  /**
+   * On a Mac, a directory with one empty file per guarded folder the app last
+   * found it could open. The agent's commands get its path
+   * (`MAC_FOLDERS_ALLOWED_ENV`) and leave every other guarded folder out of
+   * whole-folder walks: reading one not yet asked about would put macOS's
+   * question up unasked, and a refused one fails the walk.
+   */
+  private readonly allowedFoldersDir: string | null;
 
   constructor(private readonly deps: ThisComputerDeps) {
     this.installedPath = deps.agentPath ?? hostedAgentPath(deps.platform, deps.home, deps.env);
     const extensionIds = browserExtensionIdsEnv(deps.browserExtensionIds);
+    this.allowedFoldersDir =
+      deps.platform === "darwin" ? join(deps.dataDir, "mac-folders-allowed") : null;
     this.agentEnv = {
       ...(deps.agentConfigDir ? { OPENGENI_CONFIG_DIR: deps.agentConfigDir } : {}),
+      ...(this.allowedFoldersDir ? { [MAC_FOLDERS_ALLOWED_ENV]: this.allowedFoldersDir } : {}),
       ...(deps.browserExtension === false
         ? { OPENGENI_AGENT_BROWSER_EXTENSION: "off" }
         : extensionIds
@@ -910,7 +925,9 @@ export class ThisComputer {
       }
       let allowed = true;
       for (const folder of GUARDED_FOLDERS) {
-        if (!(await this.opensFolder(join(this.deps.home, folder), null))) allowed = false;
+        const opened = await this.opensFolder(join(this.deps.home, folder), null);
+        this.recordFolder(folder, opened);
+        if (!opened) allowed = false;
       }
       if (!allowed) {
         this.watchForGrants();
@@ -933,9 +950,13 @@ export class ThisComputer {
   private foldersAllowed(): Promise<boolean> {
     if (!this.state.requested.includes("files")) return Promise.resolve(false);
     this.checkingFolders ??= Promise.all(
-      GUARDED_FOLDERS.map((folder) =>
-        this.opensFolder(join(this.deps.home, folder), FOLDER_CHECK_MS),
-      ),
+      GUARDED_FOLDERS.map(async (folder) => {
+        const opened = await this.opensFolder(join(this.deps.home, folder), FOLDER_CHECK_MS);
+        // Keeps the agent's list current: a grant made later in System
+        // Settings, and an answer macOS forgot, show up here.
+        this.recordFolder(folder, opened);
+        return opened;
+      }),
     )
       .then((results) => results.every(Boolean))
       .finally(() => {
@@ -1175,6 +1196,10 @@ export class ThisComputer {
   // --- Running it -------------------------------------------------------------------------------
 
   private spawnAgent(apiUrl: string): AgentChild {
+    // Nothing else may check the folders for a while (screen control off, so
+    // no status reads them): a grant taken back in System Settings since the
+    // last check is taken back from the agent as it starts.
+    if (this.allowedFoldersDir) void this.foldersAllowed().catch(() => undefined);
     const log = this.openLog();
     try {
       const child = spawn(this.hostedPath, ["--api-url", apiUrl, "run"], {
@@ -1371,6 +1396,23 @@ export class ThisComputer {
     } catch {
       // Kept in memory; the next launch asks again.
       return false;
+    }
+  }
+
+  /** Records whether a guarded folder opens, for the agent (see `allowedFoldersDir`). */
+  private recordFolder(folder: (typeof GUARDED_FOLDERS)[number], opened: boolean): void {
+    if (!this.allowedFoldersDir) return;
+    const marker = join(this.allowedFoldersDir, folder);
+    try {
+      if (opened) {
+        if (existsSync(marker)) return;
+        mkdirSync(this.allowedFoldersDir, { recursive: true, mode: 0o700 });
+        writeFileSync(marker, "", { mode: 0o600 });
+      } else {
+        rmSync(marker, { force: true });
+      }
+    } catch {
+      // The folder stays out of whole-folder walks; nothing else changes.
     }
   }
 
