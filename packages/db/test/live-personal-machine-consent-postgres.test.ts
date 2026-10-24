@@ -18,9 +18,11 @@ import {
   transitionSessionVisibility,
   initializeSessionStartAtomically,
   isSessionEventPersistenceError,
+  issueSelfUserResourceGrant,
   recoverSessionDispatch,
   resolvePersonalMachineConnectionForAttempt,
   resolvePersonalMachineRouteForAttempt,
+  revokeSelfUserResourceGrant,
   setActiveSandbox,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
@@ -37,6 +39,9 @@ beforeAll(async () => {
   const acquired = await acquireRestrictedRuntimeTestDatabase("live-machine-consent");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
+  // The harness preinstalls pgcrypto in public; attachment digests resolve
+  // extensions in the dedicated data schema, as deployed.
+  await shared.admin.unsafe(`ALTER EXTENSION pgcrypto SET SCHEMA ${shared.schema}`);
   client = createDb(shared.appUrl, { max: 4, searchPath: shared.schema });
   app = postgres(shared.appUrl, {
     max: 2,
@@ -125,6 +130,133 @@ async function claim(workspaceId: string, sessionId: string) {
     attemptId,
     executionGeneration: result.turn.executionGeneration,
   };
+}
+
+async function rejectedClaimCause(workspaceId: string, sessionId: string) {
+  let rejected: unknown;
+  try {
+    await claim(workspaceId, sessionId);
+  } catch (error) {
+    rejected = error;
+  }
+  if (!isSessionEventPersistenceError(rejected)) throw new Error("expected claim rejection");
+  const queryError = rejected.cause as { cause: { message: string; where: string } };
+  return { ...rejected.details, message: queryError.cause.message, where: queryError.cause.where };
+}
+
+/**
+ * The owner's turn starts on one of their personal machines, then the agent
+ * moves the chat to the owner's other personal machine, which the owner allows
+ * for all chats. The turn is then forced into a replacement attempt.
+ */
+async function agentMovedTurn() {
+  const f = await fixture();
+  const [other] = await app.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${f.accountId}, true),
+      set_config('opengeni.workspace_id', ${f.workspaceId}, true), set_config('opengeni.subject_id', ${f.owner}, true)`;
+    return await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+      select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+      from finalize_scoped_enrollment(${f.accountId}::uuid, ${f.workspaceId}::uuid, 'user',
+        ${`ed25519:other-${crypto.randomUUID()}`}, true, false, 'linux', 'x86_64', 'Home server', false)`;
+  });
+  await shared.admin`update enrollments set connection_instance_id = 'connection-2',
+    connection_generation = 1, connection_lease_expires_at = now() + interval '1 hour',
+    workspace_root = '/srv/home' where id = ${other!.enrollmentId}`;
+  const session = await createSession(client.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    initialMessage: "",
+    resources: [],
+    metadata: {},
+    createdBy: { kind: "subject", subjectId: f.owner },
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  await setActiveSandbox(client.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    sessionId: session.id,
+    subjectId: f.owner,
+    expectedEpoch: session.activeEpoch,
+    targetSandboxId: f.sandboxId,
+  });
+  const [authority] = await shared.admin`select authority_epoch, visibility from sessions
+    where id = ${session.id}`;
+  // The composer attaches the machine the chat runs on to the owner's message.
+  await withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.owner, (db) =>
+    db.transaction((tx) =>
+      submitHumanPromptInTransaction(tx as unknown as typeof db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: session.id,
+        subjectId: f.owner,
+        actor: { type: "human", subjectId: f.owner },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Set up the home server",
+        resources: [],
+        reasoningEffortFallback: "medium",
+        source: "user",
+        personalResourceAttachment: {
+          mode: "session",
+          expectedAuthorityEpoch: Number(authority!.authority_epoch),
+          workspaceSharedAcknowledged: true,
+          sharedOutputWarningVersion: 1,
+        },
+      }),
+    ),
+  );
+  const first = await claim(f.workspaceId, session.id);
+  const [otherAuthority] =
+    await shared.admin`select authority_id from enrollments where id = ${other!.enrollmentId}`;
+  const grant = await issueSelfUserResourceGrant(client.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    subjectId: f.owner,
+    authorityId: otherAuthority!.authority_id,
+    resourceKind: "connected_machine",
+    mode: "always",
+    context: authority!.visibility,
+    workspaceSharedAcknowledged: true,
+  });
+  const runtime = {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    sessionId: session.id,
+    subjectId: f.owner,
+  };
+  return { f, other: other!, session, first, grant, runtime };
+}
+
+async function moveAndRecover(scenario: Awaited<ReturnType<typeof agentMovedTurn>>) {
+  const { f, other, session, first } = scenario;
+  expect(
+    await setActiveSandbox(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: session.id,
+      subjectId: f.owner,
+      expectedEpoch: session.activeEpoch + 1,
+      targetSandboxId: other.sandboxId,
+      personalMachineAttempt: { ...first, initiatingHumanSubjectId: f.owner },
+    }),
+  ).toMatchObject({ swapped: true, pointer: { activeSandboxId: other.sandboxId } });
+  await recover(f.workspaceId, session.id, first.attemptId);
+}
+
+async function recover(workspaceId: string, sessionId: string, attemptId: string) {
+  expect(
+    (
+      await recoverSessionDispatch(client.db, workspaceId, {
+        sessionId,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      })
+    ).action,
+  ).toBe("recovering");
 }
 
 describe("live personal machine consent under FORCE RLS", () => {
@@ -466,12 +598,86 @@ describe("live personal machine consent under FORCE RLS", () => {
       has_table_privilege(current_user, 'session_turn_machine_consents', 'INSERT') as turn_insert,
       has_table_privilege(current_user, 'session_attempt_machine_consents', 'INSERT') as attempt_insert,
       has_function_privilege(current_user, 'bind_session_attempt_machine_consent(uuid,uuid,uuid)', 'EXECUTE') as bind,
-      has_function_privilege(current_user, 'live_session_turn_machine_consent(uuid)', 'EXECUTE') as validate`;
+      has_function_privilege(current_user, 'live_session_turn_machine_consent(uuid)', 'EXECUTE') as validate,
+      has_function_privilege(current_user, 'carry_session_attempt_machine_authorization(uuid,uuid,uuid)', 'EXECUTE') as carry`;
     expect(privileges).toEqual({
       turn_insert: false,
       attempt_insert: false,
       bind: false,
       validate: false,
+      carry: false,
     });
   });
+});
+
+describe("an agent's move between the owner's personal machines", () => {
+  test("carries into the turn's replacement attempt", async () => {
+    const scenario = await agentMovedTurn();
+    const { f, other, session, first, grant, runtime } = scenario;
+    await moveAndRecover(scenario);
+    const second = await claim(f.workspaceId, session.id);
+    expect(second.turnId).toBe(first.turnId);
+    expect(second.attemptId).not.toBe(first.attemptId);
+    expect(
+      await resolvePersonalMachineConnectionForAttempt(client.db, {
+        ...runtime,
+        ...second,
+        enrollmentId: other.enrollmentId,
+      }),
+    ).toMatchObject({ id: other.enrollmentId, connectionInstanceId: "connection-2" });
+    const carried =
+      await shared.admin`select grant_id, initiating_human_subject_id, execution_generation
+        from session_attempt_connected_machine_authorizations where attempt_id = ${second.attemptId}`;
+    expect([...carried]).toEqual([
+      {
+        grant_id: grant.grantId,
+        initiating_human_subject_id: f.owner,
+        execution_generation: second.executionGeneration,
+      },
+    ]);
+    // The carried authorization is still the live grant, not a copy of it.
+    await revokeSelfUserResourceGrant(client.db, { ...runtime, grantId: grant.grantId });
+    await expect(
+      resolvePersonalMachineConnectionForAttempt(client.db, {
+        ...runtime,
+        ...second,
+        enrollmentId: other.enrollmentId,
+      }),
+    ).rejects.toThrow();
+  }, 120_000);
+
+  test("a revoked grant refuses the replacement attempt with the grant-required cause", async () => {
+    const scenario = await agentMovedTurn();
+    const { f, session, grant, runtime } = scenario;
+    await moveAndRecover(scenario);
+    await revokeSelfUserResourceGrant(client.db, { ...runtime, grantId: grant.grantId });
+    expect(await rejectedClaimCause(f.workspaceId, session.id)).toMatchObject({
+      stage: "session_attempts.claim",
+      sqlState: "OG002",
+      message: "matching personal-resource grant required",
+    });
+    // The owner allowing the machine again lets the same turn continue.
+    await issueSelfUserResourceGrant(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId: f.owner,
+      authorityId: grant.delegation.authorityId,
+      resourceKind: "connected_machine",
+      mode: "always",
+      context: grant.context,
+      workspaceSharedAcknowledged: true,
+    });
+    expect((await claim(f.workspaceId, session.id)).turnId).toBe(scenario.first.turnId);
+  }, 120_000);
+
+  test("a machine the turn never held is refused with the grant-required cause", async () => {
+    const { f, other, session, first } = await agentMovedTurn();
+    // The pointer moved without this turn ever being authorized for it.
+    await shared.admin`update sessions set active_sandbox_id = ${other.sandboxId},
+      active_epoch = active_epoch + 1 where id = ${session.id}`;
+    await recover(f.workspaceId, session.id, first.attemptId);
+    const cause = await rejectedClaimCause(f.workspaceId, session.id);
+    expect(cause).toMatchObject({ stage: "session_attempts.claim", sqlState: "OG002" });
+    expect(cause.where).toContain("carry_session_attempt_machine_authorization");
+  }, 120_000);
 });
