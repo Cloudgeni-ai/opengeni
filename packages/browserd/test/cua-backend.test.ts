@@ -7,7 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
-import { CuaComputerBackend, namedOperation } from "../src/cua/backend";
+import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
 import type {
@@ -3524,6 +3524,16 @@ describe("CUA desktop boundary", () => {
         } finally {
           await fourth.backend.close();
         }
+
+        // A name or window title that itself reads like a candidate number
+        // is kept as it is.
+        expect(
+          ambiguityForRefs(
+            '2 elements match button "Tab: [1] new" in window 7 "Mail: [3] unread"; add `nth` or a more exact name: nth 0: [15] AXButton "Tab: [1] new"; nth 1: [20] AXButton "Tab: [1] new" (waited 1503 ms)',
+          ),
+        ).toBe(
+          '2 elements match button "Tab: [1] new" in window 7 "Mail: [3] unread"; give a more exact name, or observe the window and act on the one meant by its ref: AXButton "Tab: [1] new"; AXButton "Tab: [1] new" (waited 1503 ms)',
+        );
       });
 
       test("the receipt names each stand-in, without a typed secret", async () => {

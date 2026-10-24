@@ -713,19 +713,9 @@ export class CuaComputerBackend implements ComputerBackend {
           outcome.message,
         )))
       : null;
-    // CUA's own lookup can take an `nth`; an action here names one element
-    // of several by its ref instead, so CUA's `nth` and element numbers are
-    // left out of the candidates.
     const reason =
       refusal?.message ??
-      (outcome.cuaCode === "ambiguous"
-        ? outcome.message
-            .replace(
-              "; add `nth` or a more exact name: ",
-              "; give a more exact name, or observe the window and act on the one meant by its ref: ",
-            )
-            .replace(/(: |; )(?:nth \d+: )?(?:\[\d+\] )?/g, "$1")
-        : outcome.message);
+      (outcome.cuaCode === "ambiguous" ? ambiguityForRefs(outcome.message) : outcome.message);
     const message = single
       ? `CUA stopped part way through the input: ${reason}`
       : `CUA stopped the batch at action ${action + 1}: ${reason}`;
@@ -2134,6 +2124,28 @@ const NAMED_STEP_FIND_MS = 1_000;
 /** Roles pressed alike: CUA's step that names one may use the one element
  * of the other with that name, once the window has settled. */
 const PRESSED_ALIKE_ROLES: ReadonlySet<string> = new Set(["button", "link"]);
+
+/** CUA's ambiguity message, worded for an action here: CUA's lookup can take
+ * an `nth`, while an action here names one element of several by its ref.
+ * CUA's `nth` and element numbers are left out of each candidate the message
+ * lists; names and window titles are kept as they are. */
+export function ambiguityForRefs(message: string): string {
+  const reworded = message.replace(
+    "; add `nth` or a more exact name: ",
+    "; give a more exact name, or observe the window and act on the one meant by its ref: ",
+  );
+  for (const lead of ["act on the one meant by its ref: ", "name the role of the one meant: "]) {
+    const at = reworded.lastIndexOf(lead);
+    if (at < 0) continue;
+    const listStart = at + lead.length;
+    const candidates = reworded
+      .slice(listStart)
+      .split("; ")
+      .map((candidate) => candidate.replace(/^(?:nth \d+: )?(?:\[\d+\] )?/, ""));
+    return reworded.slice(0, listStart) + candidates.join("; ");
+  }
+  return reworded;
+}
 
 /** Whether the first action of a batch, naming a button or link its
  * observation does not show, may mean an element shown with that name under
