@@ -452,9 +452,10 @@ a new candidate from adding to main's demand once a main run is observed; they d
 not preempt a running candidate. Invalid limit or
 allowance values reject configuration; allowance plus 18 above the limit never admits.
 
-The live batcher excludes recognized `.github/workflows/pr-ci.yml` runs triggered
-by `pull_request` or `workflow_dispatch` from this demand and scan-slot accounting.
-PR fast-check bursts are queued by GitHub rather than withholding a ready Batch
+The live batcher excludes every `.github/workflows/pr-ci.yml` run triggered
+by `pull_request` or `workflow_dispatch` from this demand and scan-slot accounting,
+regardless of its definition, including older legacy runs and heavier PR or
+dispatch-ref workflow edits. These bursts are queued by GitHub rather than withholding a ready Batch
 solely because PR jobs occupy runners. This is not a provider capacity guarantee:
 the Batch may wait for runners. Active Batch reservations, complete-inventory
 checks, unknown workflow/status handling and non-PR/main capacity holds remain.
