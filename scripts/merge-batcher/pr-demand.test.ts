@@ -39,7 +39,7 @@ test("recognized PR backlog does not consume Batch capacity or scan slots", asyn
       Array.from({ length: 65 }, (_, i) => pr(i + 1)),
       false,
     ).result,
-  ).toMatchObject({ ok: false, hold: "scan-bound" });
+  ).toMatchObject({ ok: true, otherDemand: 65, scannedRuns: 65 });
 });
 
 test("an active Batch still holds even among excluded PR runs", async () => {

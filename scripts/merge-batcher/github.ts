@@ -21,20 +21,16 @@ import {
   capacityDecision,
   type CapacityHold,
   digest,
-  MAX_RUNNER_RELEVANT_RUNS,
-  MAX_SCANNED_ACTIVE_RUNS,
   scanRunnerDemand,
   type RunnerScanHold,
 } from "./model";
 
 type Json = Record<string, any>; // Wire JSON is checked at the adapter boundary, not trusted as domain state.
 const HEADROOM_HOLD_REASONS: Record<RunnerScanHold, string> = {
-  "incomplete-runs": "Incomplete or oversized active workflow observation",
+  "incomplete-runs": "Incomplete or inconsistent active workflow observation",
   "invalid-run": "Invalid active run identity",
   "batch-slot": "Another Batch CI run occupies the single candidate slot",
-  "scan-bound": `Active workflows exceed the bounded ${MAX_SCANNED_ACTIVE_RUNS}-run job scan`,
-  "runner-run-bound": `Active workflows exceed bounded ${MAX_RUNNER_RELEVANT_RUNS}-run observation (excluding proven approval-only runs)`,
-  "incomplete-jobs": "Incomplete or oversized current job observation",
+  "incomplete-jobs": "Incomplete or inconsistent current job observation",
   "unknown-job-status": "Unrecognized job status in current job observation",
   deadline: "Active workflow observation exceeded its scan deadline",
 };
@@ -323,10 +319,14 @@ export class GitHubReader {
     });
     result.reservedMain = decision.reservedMain;
     result.capacity = decision.capacity;
-    result.allowed = decision.allowed;
-    result.reason = decision.capacity.hold
-      ? CAPACITY_HOLD_REASONS[decision.capacity.hold]
-      : "Observed jobs plus full-main reserve and 18 candidate slots fit the configured budget and hosted job limit";
+    // A complete observation and the single Batch slot are still mandatory.
+    // Valid runner-demand estimates do not withhold submission: GitHub queues
+    // the one candidate. This does not promise capacity or scheduling fairness.
+    result.capacityInformational = decision.capacity.hold !== "invalid-capacity";
+    result.allowed = result.capacityInformational;
+    result.reason = result.allowed
+      ? `Single Batch may enter the provider queue; capacity observation: ${decision.capacity.hold ? CAPACITY_HOLD_REASONS[decision.capacity.hold] : "observed demand fits configured estimates"}`
+      : CAPACITY_HOLD_REASONS["invalid-capacity"];
     return result;
   }
   async findFollowup(request: FollowupRequest): Promise<FollowupPull | null> {
