@@ -325,6 +325,70 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("on Linux and Windows set_value true or false reads a checkbox's selected state", async () => {
+    for (const [platform, role, Base] of [
+      ["linux", "check box", LinuxPermissionsFixture],
+      ["windows", "CheckBox", WindowsFixture],
+    ] as const) {
+      class SelectedFixture extends Base {
+        checked = false;
+        presses = 0;
+        async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+          if (name !== "get_window_state" && args.element_token === `s${this.snapshot}:2`) {
+            this.presses += 1;
+            this.checked = !this.checked;
+          }
+          const response = await super.callTool(name, argumentsJson);
+          if (name !== "get_window_state" || !response.structuredJson) return response;
+          const data = JSON.parse(response.structuredJson);
+          if (data.elements)
+            data.elements.push({
+              element_index: 2,
+              element_token: `s${this.snapshot}:2`,
+              role,
+              label: "Reminders",
+              selected: this.checked,
+              actions: platform === "linux" ? ["click"] : ["invoke", "toggle"],
+            });
+          response.structuredJson = JSON.stringify(data);
+          return response;
+        }
+      }
+      const fixture = new SelectedFixture();
+      const backend = await CuaComputerBackend.open(fixture, platform);
+      const clicks = () => ({ length: fixture.presses });
+      const target = (await backend.targets())[0]!;
+      const setTo = async (value: boolean) => {
+        const observation = await backend.observe(target.id);
+        const node = observation.roots.find((root) => root.name === "Reminders")!;
+        expect(node.value).toBe(fixture.checked ? "1" : "0");
+        return await backend.dispatch({
+          ...command(observation),
+          action: {
+            type: "semantic",
+            action: "set_value",
+            locator: { kind: "ref", ref: node.ref },
+            value,
+          },
+        });
+      };
+      try {
+        await setTo(true);
+        expect(fixture.checked).toBe(true);
+        expect(clicks()).toHaveLength(1);
+        // Already checked: nothing is pressed.
+        await setTo(true);
+        expect(clicks()).toHaveLength(1);
+        await setTo(false);
+        expect(fixture.checked).toBe(false);
+        expect(clicks()).toHaveLength(2);
+      } finally {
+        await backend.close();
+      }
+    }
+  });
+
   test("a checkbox named in a batch step is pressed into its state as the step runs", () => {
     const args = { pid: 42, window_id: 1 };
     const named = (locator: Record<string, unknown>, action: string, value?: unknown) =>
