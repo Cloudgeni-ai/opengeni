@@ -8750,6 +8750,47 @@ export async function getRetainedScreenshotArtifact(
   });
 }
 
+/**
+ * This session's own retained screenshots among `artifactIds`, in one query.
+ * Screenshots a fork reaches through its ancestry are left out; resolve each
+ * of those with getRetainedScreenshotArtifact, which proves the copied receipt.
+ */
+export async function getSessionRetainedScreenshotArtifacts(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  artifactIds: readonly string[],
+): Promise<Map<string, RetainedScreenshotArtifact>> {
+  const found = new Map<string, RetainedScreenshotArtifact>();
+  if (artifactIds.length === 0) return found;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        artifact: schema.retainedScreenshotArtifacts,
+        file: schema.files,
+      })
+      .from(schema.retainedScreenshotArtifacts)
+      .innerJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+          eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+          inArray(schema.retainedScreenshotArtifacts.artifactId, [...new Set(artifactIds)]),
+        ),
+      );
+    for (const row of rows) {
+      found.set(row.artifact.artifactId, mapRetainedScreenshotArtifact(row.artifact, row.file));
+    }
+    return found;
+  });
+}
+
 function retainedScreenshotSessionArtifactPredicate(
   workspaceId: string,
   sessionId: string,
