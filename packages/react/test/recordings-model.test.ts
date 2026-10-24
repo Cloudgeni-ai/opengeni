@@ -117,10 +117,10 @@ describe("formatting", () => {
   });
 
   test("durations read as seconds, minutes, then hours", () => {
-    expect(formatDuration(45_000)).toBe("45 sec");
-    expect(formatDuration(12 * 60_000)).toBe("12 min");
-    expect(formatDuration(65 * 60_000)).toBe("1 h 5 min");
-    expect(formatDuration(120 * 60_000)).toBe("2 h");
+    expect(formatDuration(45_000)).toBe("45\u00a0sec");
+    expect(formatDuration(12 * 60_000)).toBe("12\u00a0min");
+    expect(formatDuration(65 * 60_000)).toBe("1\u00a0h 5\u00a0min");
+    expect(formatDuration(120 * 60_000)).toBe("2\u00a0h");
   });
 });
 

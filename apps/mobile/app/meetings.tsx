@@ -154,6 +154,7 @@ function Meetings({ workspaceId }: { workspaceId: string }) {
                 key={recording.id}
                 recording={recording}
                 live={recording.id === capturingId}
+                paused={recorder?.state === "paused"}
                 first={index === 0}
                 onPress={() => router.push(`/meeting/${recording.id}`)}
               />
@@ -177,6 +178,7 @@ function Meetings({ workspaceId }: { workspaceId: string }) {
 function MeetingRow(props: {
   recording: Recording;
   live: boolean;
+  paused: boolean;
   first: boolean;
   onPress: () => void;
 }) {
@@ -191,7 +193,11 @@ function MeetingRow(props: {
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={[recording.title, ...facts, props.live ? "Recording now" : status?.label]
+      accessibilityLabel={[
+        recording.title,
+        ...facts,
+        props.live ? (props.paused ? "Paused" : "Recording now") : status?.label,
+      ]
         .filter(Boolean)
         .join(", ")}
       onPress={props.onPress}
@@ -227,7 +233,10 @@ function MeetingRow(props: {
         </View>
       </View>
       {props.live ? (
-        <StatusText label="Recording" color={c.danger} />
+        <StatusText
+          label={props.paused ? "Paused" : "Recording"}
+          color={props.paused ? c["fg-muted"] : c.danger}
+        />
       ) : status ? (
         <StatusText
           label={status.label}
@@ -261,13 +270,14 @@ function RecorderCard({ recorder }: { recorder: MeetingRecorder }) {
   const busy = recorder.state === "starting" || recorder.state === "stopping";
   const line = phoneUploadLine(recorder);
   const error = recorder.error ? phoneRecorderErrorText(recorder.error) : null;
+  const silent = useSilentMicrophone(recorder, recorder.state === "recording");
 
   const start = () => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     void recorder.start({ title: defaultMeetingTitle(new Date()) });
   };
   const stop = () => {
-    Alert.alert("Stop recording?", "The meeting uploads and its transcript starts.", [
+    Alert.alert("Stop recording?", "The meeting is uploaded and transcribed.", [
       { text: "Keep recording", style: "cancel" },
       {
         text: "Stop",
@@ -371,7 +381,7 @@ function RecorderCard({ recorder }: { recorder: MeetingRecorder }) {
               paddingHorizontal: 16,
               paddingVertical: 12,
               borderRadius: theme.radius.lg,
-              backgroundColor: pressed ? withAlpha(c.danger, 0.85) : c.danger,
+              backgroundColor: pressed ? withAlpha(c["danger-fill"], 0.85) : c["danger-fill"],
             })}
           >
             <Icon name="mic" size={20} color={c["danger-fg"]} />
@@ -388,8 +398,8 @@ function RecorderCard({ recorder }: { recorder: MeetingRecorder }) {
             </Text>
           </Pressable>
           <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-muted"] }}>
-            Records this phone's microphone, also with the screen locked. You get a transcript with
-            who said what when you stop.
+            Records with this phone's microphone, even when the screen is locked. When you stop,
+            you get a transcript of who said what.
           </Text>
         </>
       )}
@@ -410,6 +420,10 @@ function RecorderCard({ recorder }: { recorder: MeetingRecorder }) {
             />
           ) : null}
         </View>
+      ) : silent ? (
+        <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c.danger }}>
+          No sound is reaching the microphone. Check that it isn't muted or covered.
+        </Text>
       ) : line && (live || busy || recorder.upload) ? (
         <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-muted"] }}>
           {line}
@@ -458,6 +472,30 @@ function RecordingDot({ paused }: { paused: boolean }) {
 }
 
 /* The microphone's level, read a few times a second; a flat bar while paused. */
+// Input levels are RMS x 4. Anything a real room picks up stays well above this
+// (about -78 dBFS); a muted, blocked or broken microphone delivers silence.
+const SILENT_LEVEL = 0.0005;
+const SILENT_AFTER_MS = 10_000;
+
+/** True once a running recording has heard nothing at all for a while. */
+function useSilentMicrophone(recorder: MeetingRecorder, active: boolean): boolean {
+  const [silent, setSilent] = useState(false);
+  const levels = recorder.levels;
+  useEffect(() => {
+    if (!active) {
+      setSilent(false);
+      return;
+    }
+    let lastSound = Date.now();
+    const timer = setInterval(() => {
+      if ((levels()[0] ?? 0) > SILENT_LEVEL) lastSound = Date.now();
+      setSilent(Date.now() - lastSound > SILENT_AFTER_MS);
+    }, 500);
+    return () => clearInterval(timer);
+  }, [active, levels]);
+  return silent;
+}
+
 function LevelMeter({ recorder, active }: { recorder: MeetingRecorder; active: boolean }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;

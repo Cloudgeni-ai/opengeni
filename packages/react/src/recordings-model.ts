@@ -24,13 +24,14 @@ export function formatClock(milliseconds: number): string {
 
 /** "45 sec", "12 min", "1 h 5 min": a recording's length in a list. */
 export function formatDuration(milliseconds: number): string {
+  // Non-breaking spaces keep "23 sec" together when large text wraps a line.
   const seconds = Math.round(Math.max(0, milliseconds) / 1000);
-  if (seconds < 60) return `${seconds} sec`;
+  if (seconds < 60) return `${seconds}\u00a0sec`;
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 60) return `${minutes}\u00a0min`;
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
-  return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
+  return rest === 0 ? `${hours}\u00a0h` : `${hours}\u00a0h ${rest}\u00a0min`;
 }
 
 export type MeetingPhase =
