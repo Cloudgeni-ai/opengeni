@@ -21,20 +21,16 @@ import {
   capacityDecision,
   type CapacityHold,
   digest,
-  MAX_RUNNER_RELEVANT_RUNS,
-  MAX_SCANNED_ACTIVE_RUNS,
   scanRunnerDemand,
   type RunnerScanHold,
 } from "./model";
 
 type Json = Record<string, any>; // Wire JSON is checked at the adapter boundary, not trusted as domain state.
 const HEADROOM_HOLD_REASONS: Record<RunnerScanHold, string> = {
-  "incomplete-runs": "Incomplete or oversized active workflow observation",
+  "incomplete-runs": "Incomplete or inconsistent active workflow observation",
   "invalid-run": "Invalid active run identity",
   "batch-slot": "Another Batch CI run occupies the single candidate slot",
-  "scan-bound": `Active workflows exceed the bounded ${MAX_SCANNED_ACTIVE_RUNS}-run job scan`,
-  "runner-run-bound": `Active workflows exceed bounded ${MAX_RUNNER_RELEVANT_RUNS}-run observation (excluding proven approval-only runs)`,
-  "incomplete-jobs": "Incomplete or oversized current job observation",
+  "incomplete-jobs": "Incomplete or inconsistent current job observation",
   "unknown-job-status": "Unrecognized job status in current job observation",
   deadline: "Active workflow observation exceeded its scan deadline",
 };

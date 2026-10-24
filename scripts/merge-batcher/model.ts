@@ -265,17 +265,6 @@ export const ACTIVE_RUN_STATUSES = [
  * and callers re-read before publication.
  */
 export const RUN_LIST_PASSES = 2;
-/** Runs that hold or may imminently request runners; above this the scan holds. */
-export const MAX_RUNNER_RELEVANT_RUNS = 32;
-/**
- * Absolute per-observation job-scan bound, independent of the runner-relevant
- * cap: at most this many distinct active runs have their jobs read, so a
- * backlog of approval-waiting runs cannot turn one observation into an
- * unbounded scan. Worst case is 10 run-list requests (5 statuses, 2 passes)
- * plus this many job requests, 74 in total, per observation. Larger backlogs
- * hold.
- */
-export const MAX_SCANNED_ACTIVE_RUNS = 64;
 /** Wall-clock bound for one scan; exceeding it holds instead of admitting. */
 export const ACTIVE_RUN_SCAN_DEADLINE_MS = 120_000;
 
@@ -304,8 +293,6 @@ export type RunnerScanHold =
   | "incomplete-runs"
   | "invalid-run"
   | "batch-slot"
-  | "scan-bound"
-  | "runner-run-bound"
   | "incomplete-jobs"
   | "unknown-job-status"
   | "deadline";
@@ -355,19 +342,13 @@ export interface LatestMainObservation {
 }
 
 /**
- * Shared bounded runner-demand scan for the batcher and traffic-shadow
- * readers. It keeps the complete run inventory (every status page must be a
- * complete single page, and every status is listed `RUN_LIST_PASSES` times)
- * and reads the complete latest-job page of every
- * active run up to `MAX_SCANNED_ACTIVE_RUNS`. The live reader can explicitly
- * exclude recognized PR CI demand after complete inventory and Batch-slot
- * validation; the traffic-shadow default still observes it. Only runs proven
- * approval-only are excluded from `MAX_RUNNER_RELEVANT_RUNS`; their demand is
- * still computed from their jobs (and is zero by construction). Mixed,
- * job-less, queued, otherwise unproven runs, and runs listed with any
- * non-waiting status during the listing count toward the cap. Incomplete
- * pages, unknown statuses, a second Batch CI run, the scan bound and the
- * deadline hold. Provider errors propagate to the caller, which holds.
+ * Shared time-bounded runner-demand scan. Paginate every status and latest-job
+ * inventory to its reported total; reject inconsistent totals, short pages and
+ * duplicate identities within a listing. Two complete status passes retain runs
+ * observed across a status transition. There is no run-count admission limit.
+ * Live PR-demand exclusion follows complete inventory and Batch-slot validation;
+ * traffic-shadow still accounts for PR demand. Unknown statuses, incomplete
+ * observations and the deadline hold. Provider errors propagate to the caller.
  * Approval can still be granted after observation; callers re-read before
  * publication, as with every other observed status.
  */
@@ -380,14 +361,10 @@ export async function scanRunnerDemand(input: {
   /** Run ID validator; return null to hold, or throw. Defaults to positive safe integers. */
   runId?: (value: unknown) => number | null;
   now?: () => number;
-  maxScannedRuns?: number;
-  maxRunnerRelevantRuns?: number;
   deadlineMs?: number;
 }): Promise<RunnerScan> {
   const now = input.now ?? Date.now;
   const started = now();
-  const maxScanned = input.maxScannedRuns ?? MAX_SCANNED_ACTIVE_RUNS;
-  const maxRelevant = input.maxRunnerRelevantRuns ?? MAX_RUNNER_RELEVANT_RUNS;
   const deadline = input.deadlineMs ?? ACTIVE_RUN_SCAN_DEADLINE_MS;
   const runId =
     input.runId ??
@@ -402,31 +379,67 @@ export async function scanRunnerDemand(input: {
     approvalOnlyRuns,
   });
   const runs = new Map<number, Record<string, unknown>>();
+  // IDs are mandatory across paginated responses so overlap cannot hide a gap.
+  // Single-page job fixtures may omit IDs; run identities are always validated below.
+  async function list(path: string, key: "workflow_runs" | "jobs") {
+    const items: unknown[] = [];
+    const ids = new Set<number>();
+    let total: number | undefined;
+    for (let pageNumber = 1; ; pageNumber++) {
+      if (now() - started > deadline) return { error: "deadline" } as const;
+      const page = (await input.get(`${path}&per_page=100&page=${pageNumber}`)) as Record<
+        string,
+        unknown
+      > | null;
+      const count = page?.total_count;
+      const values = page?.[key];
+      if (
+        !page ||
+        Array.isArray(page) ||
+        !Number.isSafeInteger(count) ||
+        (count as number) < 0 ||
+        !Array.isArray(values) ||
+        (total !== undefined && count !== total)
+      )
+        return { error: "incomplete" } as const;
+      total ??= count as number;
+      if (values.length !== Math.min(100, total - items.length))
+        return { error: "incomplete" } as const;
+      for (const value of values) {
+        const id =
+          value !== null && typeof value === "object" ? (value as { id?: unknown }).id : undefined;
+        if (key === "workflow_runs" && runId(id) === null) return { error: "invalid-run" } as const;
+        if (total > 100 || id !== undefined) {
+          if (!Number.isSafeInteger(id) || (id as number) <= 0 || ids.has(id as number))
+            return { error: "incomplete" } as const;
+          ids.add(id as number);
+        }
+        items.push(value);
+      }
+      if (items.length === total) return { items };
+    }
+  }
   // Runs listed with a non-waiting status in any listing of this observation;
   // they cannot be approval-only even if their latest listing is waiting.
   const listedNotWaiting = new Set<number>();
   const listings = Array.from({ length: RUN_LIST_PASSES }, () => ACTIVE_RUN_STATUSES).flat();
   for (const status of listings) {
     if (now() - started > deadline) return hold("deadline");
-    const page = (await input.get(`actions/runs?status=${status}&per_page=100&page=1`)) as {
-      workflow_runs?: unknown;
-      total_count?: unknown;
-    } | null;
-    if (
-      page === null ||
-      typeof page !== "object" ||
-      Array.isArray(page) ||
-      !Array.isArray(page.workflow_runs) ||
-      !Number.isSafeInteger(page.total_count) ||
-      (page.total_count as number) > 100 ||
-      page.workflow_runs.length !== page.total_count
-    )
-      return hold("incomplete-runs");
-    for (const run of page.workflow_runs as unknown[]) {
+    const page = await list(`actions/runs?status=${status}`, "workflow_runs");
+    if ("error" in page) return hold(page.error === "incomplete" ? "incomplete-runs" : page.error);
+    for (const run of page.items) {
       if (run === null || typeof run !== "object") return hold("invalid-run");
       const id = runId((run as { id?: unknown }).id);
       if (id === null) return hold("invalid-run");
       const record = run as Record<string, unknown>;
+      const prior = runs.get(id);
+      if (
+        prior &&
+        ["path", "event", "head_branch", "head_sha", "run_attempt"].some(
+          (key) => prior[key] !== record[key],
+        )
+      )
+        return hold("invalid-run");
       // A run listed as completed holds no runner and is not added; an earlier
       // active listing of the same run is kept (conservative).
       if (record.status === "completed") continue;
@@ -447,7 +460,6 @@ export async function scanRunnerDemand(input: {
       }
     }
   }
-  if (runs.size > maxScanned) return hold("scan-bound");
   let mainDemand = 0,
     otherDemand = 0,
     runnerRelevantRuns = 0,
@@ -456,27 +468,15 @@ export async function scanRunnerDemand(input: {
   let latestMain: { id: number; jobs: unknown[] } | null = null;
   for (const [id, run] of runs) {
     if (now() - started > deadline) return hold("deadline");
-    const page = (await input.get(`actions/runs/${id}/jobs?filter=latest&per_page=100&page=1`)) as {
-      jobs?: unknown;
-      total_count?: unknown;
-    } | null;
-    if (
-      page === null ||
-      typeof page !== "object" ||
-      Array.isArray(page) ||
-      !Array.isArray(page.jobs) ||
-      !Number.isSafeInteger(page.total_count) ||
-      (page.total_count as number) > 100 ||
-      page.jobs.length !== page.total_count
-    )
-      return hold("incomplete-jobs");
+    const page = await list(`actions/runs/${id}/jobs?filter=latest`, "jobs");
+    if ("error" in page) return hold(page.error === "incomplete" ? "incomplete-jobs" : page.error);
     scannedRuns++;
-    const jobs = page.jobs as unknown[];
+    const jobs = page.items;
     const demand = runnerJobDemand(jobs);
     if (demand === null) return hold("unknown-job-status");
     const approvalOnly = !listedNotWaiting.has(id) && approvalOnlyRun(run, jobs);
     if (approvalOnly) approvalOnlyRuns++;
-    else if (++runnerRelevantRuns > maxRelevant) return hold("runner-run-bound");
+    else runnerRelevantRuns++;
     const isMain =
       run.path === ".github/workflows/ci.yml" &&
       run.head_branch === input.baseBranch &&

@@ -382,24 +382,25 @@ rebuilt after cache loss. The hosted runner guard permits only one Batch CI run,
 even if a higher legacy max-inflight planner setting is present.
 Full-main CI retains explicit reserved capacity, but its mere presence does not
 block progress. Before publication/retry/landing, the reader scans current
-repository runs and their latest jobs (one complete page of at most 100 entries
-per response; incomplete observations hold). Each of the five active run statuses
+repository runs and their latest jobs (100 entries per page, paginated through
+the reported total; incomplete observations hold). Each of the five active run statuses
 is listed twice, so a run whose status changes once during the listing (in either
 direction, for example `in_progress` to `waiting` while other jobs still run) is
 still listed; the latest active listing is used, and a run listed as `completed`
 is skipped. Two passes do not rule out more changes during the listing or
-provider snapshot lag. Every distinct active run's complete latest-job page is
-then read, up to an absolute bound of 64 runs per observation (at most 10
-run-list plus 64 job requests, 74 in total) and a 120-second scan deadline,
-checked before each request and after the last response; a larger backlog, an
-overrun deadline or a provider error holds. A run is **approval-only** only when
+provider snapshot lag. Every distinct relevant active run's complete latest-job
+inventory is then read. There are no 64-run or 32-run admission limits. A
+120-second scan deadline is checked before each request and after the last
+response; an overrun or provider error holds. Each listing requires a stable
+reported total, correctly sized pages and unique identities across pages;
+inconsistent pages and run identity drift hold rather than admitting partial
+demand. A run is **approval-only** only when
 every listing in the observation reports the run as `waiting` and its complete
 job page has at least one `waiting` job and otherwise only `pending` or
 `completed` jobs. Such
-runs have zero runner demand and are excluded from the **32 runner-relevant
-runs** cap; every other run, including waiting runs with any `queued`,
-`in_progress` or `requested` job and waiting runs without jobs, counts toward
-that cap, and exceeding it holds. Demand counts runner-holding jobs: `queued`,
+runs have zero runner demand. Every other relevant run, including waiting runs
+with any `queued`, `in_progress` or `requested` job and waiting runs without jobs,
+remains in the observation. Demand counts runner-holding jobs: `queued`,
 `in_progress` and `requested` (created but not yet queued; counted
 conservatively). Jobs waiting for environment approval (`waiting`) or a job
 concurrency group (`pending`), completed jobs, and runs without materialized jobs
