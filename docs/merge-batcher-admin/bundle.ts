@@ -228,7 +228,9 @@ export async function cli(args: string[]): Promise<void> {
   if (command === "receipt" && rest.length === 4) {
     const [directory, snapshot, kind, candidatePath] = rest as [string, string, string, string];
     if (kind !== "guard" && kind !== "namespace") throw new Error("Unknown receipt kind");
-    const plan = await json<Plan>(join(directory, "plan.json"));
+    const plan = await json<Plan>(
+      join(process.env.BATCHER_VERIFIED_PLAN || directory, "plan.json"),
+    );
     const candidate = await json<RuleSet>(candidatePath);
     if (candidate.source_type !== "Repository" || candidate.source !== "Cloudgeni-ai/opengeni") {
       throw new Error("Creation receipt must belong to this repository");
@@ -279,11 +281,15 @@ export async function cli(args: string[]): Promise<void> {
       throw new Error("Unknown phase");
     const receipts: { guard?: RuleSet; namespace?: RuleSet } = {};
     if (["guard", "namespace", "applied"].includes(phase))
-      receipts.guard = await json(join(directory, "guard-receipt.json"));
+      receipts.guard = await json(
+        join(process.env.BATCHER_VERIFIED_PLAN || directory, "guard-receipt.json"),
+      );
     if (["namespace", "applied"].includes(phase))
-      receipts.namespace = await json(join(directory, "namespace-receipt.json"));
+      receipts.namespace = await json(
+        join(process.env.BATCHER_VERIFIED_PLAN || directory, "namespace-receipt.json"),
+      );
     verify(
-      await json<Plan>(join(directory, "plan.json")),
+      await json<Plan>(join(process.env.BATCHER_VERIFIED_PLAN || directory, "plan.json")),
       await json<Snapshot>(snapshot),
       phase as Phase,
       receipts,

@@ -3,6 +3,7 @@ import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cli, type Snapshot } from "../docs/merge-batcher-admin/bundle";
 import manifest from "../docs/merge-batcher-admin/app-manifest.json";
 import { bindStop, verifyStop } from "../docs/merge-batcher-admin/off";
@@ -35,6 +36,69 @@ const deployment = {
   stopProof: { uid: "fixture-uid", stateSha: "a".repeat(40), outcome: "drained-state-observed" },
 };
 
+test("OFF accepts current lineage reconciliation, never an old witness relabeled as current", () => {
+  const lineage = {
+    schema: 1,
+    uid: deployment.uid,
+    generation: "32",
+    revision: "revision32",
+    stateSha: "a".repeat(40),
+    lineageDigest: "f".repeat(64),
+    rootWitness: {
+      uid: deployment.uid,
+      generation: "31",
+      mode: "active",
+      instance: "exited31",
+      controlGeneration: "stop-root",
+    },
+    controlVersion: 29,
+    controls: [
+      { version: 28, generation: "stop-root" },
+      { version: 29, generation: "stop-current" },
+    ],
+    audits: [{ insertId: "audit32", etag: "etag31", timestamp: "2026-10-24T02:48:29Z" }],
+    proof: {
+      outcome: "stable-state-observed",
+      stateSha: "a".repeat(40),
+      mainSha: "b".repeat(40),
+      effects: 0,
+      candidateRefs: [],
+      settledCandidates: true,
+    },
+  };
+  const result = {
+    ...stopped,
+    outcome: "lineage-reconciled-disabled",
+    drainProven: false,
+    idempotent: true,
+    writer: null,
+    lineageReconciliation: lineage,
+  };
+  const receipt = { ...deployment, lineageReconciliation: lineage };
+  expect(() => verifyStop(result, receipt, deployment)).not.toThrow();
+  for (const patch of [
+    { generation: "31" },
+    { uid: "other" },
+    { audits: [] },
+    { controls: [] },
+    { controlVersion: 30 },
+    { controls: [{ version: 28, generation: "start-bad" }] },
+    { proof: { ...lineage.proof, settledCandidates: false } },
+    { proof: { ...lineage.proof, stateSha: "c".repeat(40) } },
+  ]) {
+    const changed = { ...lineage, ...patch };
+    expect(() =>
+      verifyStop(
+        { ...result, lineageReconciliation: changed },
+        { ...receipt, lineageReconciliation: changed },
+        deployment,
+      ),
+    ).toThrow();
+  }
+  expect(() => verifyStop({ ...result, writer: stopped.writer }, receipt, deployment)).toThrow();
+  expect(() => verifyStop({ ...result, drainProven: true }, receipt, deployment)).toThrow();
+});
+
 async function offHarness(h: Awaited<ReturnType<typeof harness>>) {
   const runtime = join(h.root, "runtime");
   await mkdir(runtime);
@@ -44,6 +108,7 @@ async function offHarness(h: Awaited<ReturnType<typeof harness>>) {
     "service-config.ts",
     "service-limits.ts",
     "stopped-reconciliation.ts",
+    "stopped-lineage.ts",
   ])
     await writeFile(join(runtime, file), "export {};\n");
   await writeFile(
@@ -54,13 +119,23 @@ await Bun.write(process.env.FIXTURE_LOG,await Bun.file(process.env.FIXTURE_LOG).
 const result={...${JSON.stringify(stopped)},...JSON.parse(process.env.STOP_OVERRIDE||'{}')};
 console.log(JSON.stringify(result));
 if(process.env.STOP_FAILURE)process.exitCode=2;
+if(process.env.STOP_REPLACE_PLAN)await Bun.write(process.env.STOP_REPLACE_PLAN,'{}');
 `,
   );
   await bindStop(h.root, runtime);
   return {
     runtime,
     async run(extra: Record<string, string> = {}, flag = "--apply-after-go") {
-      const child = Bun.spawn(["bun", join(directory, "off.ts"), "run", h.root, flag], {
+      const args = extra.EXPECTED_PLAN
+        ? [
+            "bun",
+            "-e",
+            `import {off} from ${JSON.stringify(join(directory, "off.ts"))}; await off(process.argv[1], process.argv[2], undefined, process.env.EXPECTED_PLAN);`,
+            h.root,
+            flag,
+          ]
+        : ["bun", join(directory, "off.ts"), "run", h.root, flag];
+      const child = Bun.spawn(args, {
         env: { ...h.fixtureEnv, ...extra },
         stdout: "pipe",
         stderr: "pipe",
@@ -83,6 +158,18 @@ const args = process.argv.slice(2);
 const url = args.find(a => a.startsWith("https://api.github.com/"));
 const endpoint = url ? new URL(url).pathname : args.find(a => a.startsWith("/")) ?? (args.includes("graphql") ? "graphql" : "");
 const method = args.includes("--method") ? args[args.indexOf("--method")+1] : "GET";
+if(process.env.REPLACE_MOUNT_RECEIPTS) {
+ for(const kind of ['guard','namespace']) {
+  const path=process.env.REPLACE_MOUNT_RECEIPTS+'/'+kind+'-receipt.json';
+  const receipt=await Bun.file(path).json();
+  await Bun.write(path,JSON.stringify({...receipt,id:101}));
+ }
+}
+if(process.env.REPLACE_MOUNT_PLAN) {
+ await Bun.write(process.env.REPLACE_MOUNT_PLAN + '/plan.json', '{}');
+ await Bun.write(process.env.REPLACE_MOUNT_PLAN + '/restore.json', '{}');
+ if(method === 'PUT') await Bun.write(process.env.REPLACE_MOUNT_PLAN + '/restore-admission-attempt/request.json', '{}');
+}
 const headerArg = args.includes("--header") ? args[args.indexOf("--header")+1] : args.includes("-H") ? args[args.indexOf("-H")+1] : "";
 const header = headerArg.startsWith("@") ? (await Bun.file(headerArg.slice(1)).text()).trim() : headerArg;
 const event = { endpoint, method, bearer: header === "Authorization: Bearer fixture.jwt.value", jwtInArgv:args.some(a=>a.includes("fixture.jwt.value")), headerMode:headerArg.startsWith("@") ? statSync(headerArg.slice(1)).mode & 0o777 : null, debug:!!process.env.GH_DEBUG };
@@ -780,6 +867,65 @@ test("one-command OFF stops first, reconciles ambiguous admit, restores exact or
     const receipts = (await readdir(h.root)).filter((name) => name.startsWith("off."));
     expect(receipts.length).toBe(2);
     expect(await Bun.file(join(h.root, receipts[0]!, "off-verified.json")).exists()).toBe(true);
+  } finally {
+    await h.close();
+  }
+});
+
+test("OFF restoration consumes frozen plan and payload despite mount replacement during readback and PUT", async () => {
+  const h = await harness();
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h);
+    const expected = createHash("sha256")
+      .update(await readFile(join(h.root, "plan", "plan.json")))
+      .digest("hex");
+    const result = await operator.run({
+      REPLACE_MOUNT_PLAN: join(h.root, "plan"),
+      EXPECTED_PLAN: expected,
+    });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+    expect(await readFile(join(h.root, "plan", "plan.json"), "utf8")).toBe("{}");
+  } finally {
+    await h.close();
+  }
+});
+
+test("OFF uses the same frozen receipt for inventory verification and DELETE despite mount races", async () => {
+  const h = await harness();
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    const result = await operator.run({ REPLACE_MOUNT_RECEIPTS: join(h.root, "plan") });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+    const deletes = (await h.events()).filter((e) => e.method === "DELETE");
+    expect(deletes).toHaveLength(2);
+    expect(deletes.some((e) => e.endpoint.endsWith("/101"))).toBe(false);
+  } finally {
+    await h.close();
+  }
+});
+
+test("OFF rejects a plan replaced during STOP before any GitHub request", async () => {
+  const h = await harness();
+  try {
+    const operator = await offHarness(h);
+    const path = join(h.root, "plan", "plan.json");
+    const expected = createHash("sha256")
+      .update(await readFile(path))
+      .digest("hex");
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    const result = await operator.run({ EXPECTED_PLAN: expected, STOP_REPLACE_PLAN: path });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("Pinned OFF plan changed");
+    expect((await h.events()).map((e) => e.method)).toEqual(["STOP"]);
   } finally {
     await h.close();
   }
