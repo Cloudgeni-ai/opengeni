@@ -53,7 +53,11 @@ describe("interaction attempt tools", () => {
       expect(tool.inputSchema.type).toBe("object");
       expect(tool.inputSchema.anyOf).toBeUndefined();
       expect(tool.inputSchema.oneOf).toBeUndefined();
-      expect(tool.inputSchema.required).toContain("computerSessionId");
+      // Optional: omitted, it is the computer the agent used last.
+      expect(tool.inputSchema.required ?? []).not.toContain("computerSessionId");
+      expect(
+        (tool.inputSchema.properties as Record<string, unknown>).computerSessionId,
+      ).toBeDefined();
       expect((tool.inputSchema.properties as Record<string, unknown>).session).toBeUndefined();
       // Found under "cua" in Code Mode, next to its model name interaction__cua_<name>.
       expect(tool.codemodePath).toEqual(["interaction", "cua", tool.identity.toolName.slice(4)]);

@@ -110,6 +110,12 @@ import {
   type ResolvedBrowserTarget,
 } from "./browser-current-tab";
 import {
+  ComputerTargetResolutionError,
+  CurrentComputerWindow,
+  type ResolvedComputerSession,
+  type ResolvedComputerTarget,
+} from "./computer-current-window";
+import {
   describeInvalidToolArguments,
   interactionToolInputJsonSchema,
   browserActModelInputSchema,
@@ -870,11 +876,22 @@ const ComputerOpenInput = z
 const ComputerOpenOutput = z
   .object({ session: ComputerSession, targets: z.array(ComputerTarget) })
   .strict();
-const ComputerTargetsInput = z.object({ computerSessionId: z.string().uuid() }).strict();
+const CurrentComputerSessionId = z
+  .string()
+  .uuid()
+  .optional()
+  .describe("Omit to use the computer you used last.");
+const CurrentComputerTargetId = z
+  .string()
+  .min(1)
+  .max(512)
+  .optional()
+  .describe("Omit to use the window you used last.");
+const ComputerTargetsInput = z.object({ computerSessionId: CurrentComputerSessionId }).strict();
 const ComputerObserveInput = z
   .object({
-    computerSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    computerSessionId: CurrentComputerSessionId,
+    targetId: CurrentComputerTargetId,
   })
   .strict();
 const ComputerObserveOutput = ComputerObservation.extend({
@@ -883,7 +900,7 @@ const ComputerObserveOutput = ComputerObservation.extend({
     .strict()
     .optional(),
 }).strict();
-const ComputerClipboardInput = z.object({ computerSessionId: z.string().uuid() }).strict();
+const ComputerClipboardInput = z.object({ computerSessionId: CurrentComputerSessionId }).strict();
 /** Action types a computer_act batch runs. Each acts on the state the one
  * before it left; a pointer action needs the pixels of one exact screenshot,
  * so it is not batched. */
@@ -913,14 +930,19 @@ const ComputerActionBatch = z
   .strict();
 const ComputerActInput = z
   .object({
-    computerSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    computerSessionId: CurrentComputerSessionId,
+    targetId: CurrentComputerTargetId,
     expectedTargetGeneration: z.string().min(1).max(256).optional(),
     expectedObservationId: ComputerObservation.shape.observationId.nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
-    action: z.union([ComputerAction, ComputerActionBatch]),
+    action: z.preprocess(expandRefShorthand, z.union([ComputerAction, ComputerActionBatch])),
   })
   .strict();
+/** computer_act input with the computer and window it resolved to. */
+type ResolvedComputerActInput = Omit<
+  z.output<typeof ComputerActInput>,
+  "computerSessionId" | "targetId"
+> & { computerSessionId: string; targetId: string };
 /** What a computer_act batch did: each action's settled operation, in order,
  * up to the first one that did not complete, and the latest observation of
  * the target. */
@@ -1152,6 +1174,52 @@ export function createInteractionAttemptToolDefinitions(
     listTargets: async (browserSessionId) =>
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
   });
+  const currentComputer = new CurrentComputerWindow({
+    latestLiveSession: async () =>
+      newestRelevant(
+        (
+          await input.transport.listComputerSessions(input.workspaceId, {
+            associatedSessionId: input.sessionId,
+            includeTerminal: false,
+          })
+        ).sessions,
+        input.sessionId,
+      )?.id ?? null,
+  });
+  /** Run one call on the requested or current computer and remember it on
+   * success. */
+  const onComputer = async <T>(
+    computerSessionId: string | undefined,
+    run: (computer: ResolvedComputerSession) => Promise<T>,
+  ): Promise<T> => {
+    const computer = await currentComputer.session(computerSessionId);
+    try {
+      const output = await run(computer);
+      currentComputer.use(computer.computerSessionId);
+      return output;
+    } catch (error) {
+      if (isGoneBrowserError(error)) currentComputer.failed(computer);
+      throw error;
+    }
+  };
+  /** Run one call on the requested or current window and remember, on
+   * success, the window it leaves the agent in: the one it acted on, or the
+   * one the action opened. */
+  const onComputerWindow = async <T>(
+    value: { computerSessionId?: string | undefined; targetId?: string | undefined },
+    run: (window: ResolvedComputerTarget) => Promise<T>,
+    leftIn: (output: T) => string | null | undefined = () => null,
+  ): Promise<T> => {
+    const window = await currentComputer.target(value);
+    try {
+      const output = await run(window);
+      currentComputer.use(window.computerSessionId, leftIn(output) ?? window.targetId);
+      return output;
+    } catch (error) {
+      if (isGoneBrowserError(error)) currentComputer.failed(window);
+      throw error;
+    }
+  };
   // Every call notes the event count when it starts. A browser resumed after
   // that, or whose resume no result had shown by then, has new tab IDs and
   // reloaded pages the call's caller had not seen when it chose the call.
@@ -2339,8 +2407,17 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: true,
     modelText: computerOpenText,
-    execute: async (value, context) =>
-      await openComputer(input.transport, input.workspaceId, input.sessionId, value, context),
+    execute: async (value, context) => {
+      const opened = await openComputer(
+        input.transport,
+        input.workspaceId,
+        input.sessionId,
+        value,
+        context,
+      );
+      currentComputer.use(opened.session.id);
+      return opened;
+    },
   });
 
   add({
@@ -2355,7 +2432,11 @@ export function createInteractionAttemptToolDefinitions(
     idempotent: true,
     modelText: (output) => computerTargetsText(output.targets),
     execute: async (value) =>
-      await input.transport.listComputerTargets(input.workspaceId, value.computerSessionId),
+      await onComputer(
+        value.computerSessionId,
+        async ({ computerSessionId }) =>
+          await input.transport.listComputerTargets(input.workspaceId, computerSessionId),
+      ),
   });
 
   add({
@@ -2374,53 +2455,54 @@ export function createInteractionAttemptToolDefinitions(
         ? computerObservationText(output)
         : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`;
     },
-    execute: async (value) => {
-      // The tree and the pixels are independent reads of the same target;
-      // a generation mismatch below re-reads the tree once. An app target
-      // spans several windows, so most adapters cannot photograph it; its
-      // tree is then the whole observation instead of a failed read.
-      const capture = input.transport
-        .captureComputerTarget(input.workspaceId, value.computerSessionId, value.targetId)
-        .then(
-          (frame) => ({ frame, error: null as unknown }),
-          (error: unknown) => ({ frame: null, error }),
-        );
-      let observation = await input.transport.observeComputerTarget(
-        input.workspaceId,
-        value.computerSessionId,
-        value.targetId,
-      );
-      const { frame, error } = await capture;
-      if (frame === null) {
-        if (observation.target.kind === "app") return observation;
-        throw error;
-      }
-      if (observation.target.targetGeneration !== frame.targetGeneration) {
-        observation = await input.transport.observeComputerTarget(
+    execute: async (requested) =>
+      await onComputerWindow(requested, async (value) => {
+        // The tree and the pixels are independent reads of the same target;
+        // a generation mismatch below re-reads the tree once. An app target
+        // spans several windows, so most adapters cannot photograph it; its
+        // tree is then the whole observation instead of a failed read.
+        const capture = input.transport
+          .captureComputerTarget(input.workspaceId, value.computerSessionId, value.targetId)
+          .then(
+            (frame) => ({ frame, error: null as unknown }),
+            (error: unknown) => ({ frame: null, error }),
+          );
+        let observation = await input.transport.observeComputerTarget(
           input.workspaceId,
           value.computerSessionId,
           value.targetId,
         );
-      }
-      if (observation.target.targetGeneration !== frame.targetGeneration) {
-        throw new Error("computer target changed while its visual observation was captured");
-      }
-      const image = await compactComputerImage(frame.data, frame.mediaType);
-      return new InteractionExecutionResult(
-        {
-          ...observation,
-          frameId: frame.frameId,
-          capturedFrame: { width: frame.width, height: frame.height },
-        },
-        [
+        const { frame, error } = await capture;
+        if (frame === null) {
+          if (observation.target.kind === "app") return observation;
+          throw error;
+        }
+        if (observation.target.targetGeneration !== frame.targetGeneration) {
+          observation = await input.transport.observeComputerTarget(
+            input.workspaceId,
+            value.computerSessionId,
+            value.targetId,
+          );
+        }
+        if (observation.target.targetGeneration !== frame.targetGeneration) {
+          throw new Error("computer target changed while its visual observation was captured");
+        }
+        const image = await compactComputerImage(frame.data, frame.mediaType);
+        return new InteractionExecutionResult(
           {
-            type: "image",
-            data: Buffer.from(image.data).toString("base64"),
-            mimeType: image.mimeType,
+            ...observation,
+            frameId: frame.frameId,
+            capturedFrame: { width: frame.width, height: frame.height },
           },
-        ],
-      );
-    },
+          [
+            {
+              type: "image",
+              data: Buffer.from(image.data).toString("base64"),
+              mimeType: image.mimeType,
+            },
+          ],
+        );
+      }),
   });
 
   add({
@@ -2434,7 +2516,11 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     execute: async (value) =>
-      await input.transport.readComputerClipboard(input.workspaceId, value.computerSessionId),
+      await onComputer(
+        value.computerSessionId,
+        async ({ computerSessionId }) =>
+          await input.transport.readComputerClipboard(input.workspaceId, computerSessionId),
+      ),
   });
 
   add({
@@ -2456,71 +2542,84 @@ export function createInteractionAttemptToolDefinitions(
       const shown = base ? computerObservationDiff(base, observation) : null;
       return computerActionText(shown ? { ...receipt, observation: shown } : receipt);
     },
-    execute: async (value, context) => {
-      const action = value.action;
-      if (action.type === "batch") {
-        return await actInComputerBatch(
-          input.transport,
-          input.workspaceId,
-          value,
-          action.actions,
-          context.operationId,
-          () => supportsActionBatches(value.computerSessionId),
-        );
-      }
-      // A launch acts on no window's contents, and an action that names the
-      // observation it was read from has its content fence already: both need
-      // only the target's generation, which the target list gives without
-      // reading the window again (a fresh read would retire the refs the
-      // caller holds). A target missing from the list is read below, which
-      // explains why.
-      const listedGeneration =
-        action.type !== "launch" &&
-        (action.type === "pointer" || value.expectedObservationId == null)
-          ? undefined
-          : (value.expectedTargetGeneration ??
-            (
-              await input.transport.listComputerTargets(input.workspaceId, value.computerSessionId)
-            ).targets.find((target) => target.id === value.targetId)?.targetGeneration);
-      if (listedGeneration !== undefined) {
-        return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
-          operationId: context.operationId,
-          targetId: value.targetId,
-          expectedTargetGeneration: listedGeneration,
-          expectedObservationId: value.expectedObservationId ?? null,
-          expectedFrameId: null,
-          action,
-        });
-      }
-      const current =
-        value.expectedTargetGeneration !== undefined &&
-        (action.type === "pointer"
-          ? (value.expectedFrameId ?? action.frameId) != null
-          : value.expectedObservationId != null)
-          ? null
-          : await input.transport.observeComputerTarget(
+    execute: async (requested, context) =>
+      await onComputerWindow(
+        requested,
+        async (window) => {
+          const value: ResolvedComputerActInput = {
+            ...requested,
+            computerSessionId: window.computerSessionId,
+            targetId: window.targetId,
+          };
+          const action = value.action;
+          if (action.type === "batch") {
+            return await actInComputerBatch(
+              input.transport,
               input.workspaceId,
-              value.computerSessionId,
-              value.targetId,
+              value,
+              action.actions,
+              context.operationId,
+              () => supportsActionBatches(value.computerSessionId),
             );
-      return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
-        operationId: context.operationId,
-        targetId: value.targetId,
-        expectedTargetGeneration:
-          value.expectedTargetGeneration ?? current!.target.targetGeneration,
-        expectedObservationId:
-          value.expectedObservationId === undefined
-            ? (current?.observationId ?? null)
-            : value.expectedObservationId,
-        expectedFrameId:
-          action.type === "pointer"
-            ? value.expectedFrameId === undefined
-              ? action.frameId
-              : value.expectedFrameId
-            : null,
-        action,
-      });
-    },
+          }
+          // A launch acts on no window's contents, and an action that names the
+          // observation it was read from has its content fence already: both need
+          // only the target's generation, which the target list gives without
+          // reading the window again (a fresh read would retire the refs the
+          // caller holds). A target missing from the list is read below, which
+          // explains why.
+          const listedGeneration =
+            action.type !== "launch" &&
+            (action.type === "pointer" || value.expectedObservationId == null)
+              ? undefined
+              : (value.expectedTargetGeneration ??
+                (
+                  await input.transport.listComputerTargets(
+                    input.workspaceId,
+                    value.computerSessionId,
+                  )
+                ).targets.find((target) => target.id === value.targetId)?.targetGeneration);
+          if (listedGeneration !== undefined) {
+            return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
+              operationId: context.operationId,
+              targetId: value.targetId,
+              expectedTargetGeneration: listedGeneration,
+              expectedObservationId: value.expectedObservationId ?? null,
+              expectedFrameId: null,
+              action,
+            });
+          }
+          const current =
+            value.expectedTargetGeneration !== undefined &&
+            (action.type === "pointer"
+              ? (value.expectedFrameId ?? action.frameId) != null
+              : value.expectedObservationId != null)
+              ? null
+              : await input.transport.observeComputerTarget(
+                  input.workspaceId,
+                  value.computerSessionId,
+                  value.targetId,
+                );
+          return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
+            operationId: context.operationId,
+            targetId: value.targetId,
+            expectedTargetGeneration:
+              value.expectedTargetGeneration ?? current!.target.targetGeneration,
+            expectedObservationId:
+              value.expectedObservationId === undefined
+                ? (current?.observationId ?? null)
+                : value.expectedObservationId,
+            expectedFrameId:
+              action.type === "pointer"
+                ? value.expectedFrameId === undefined
+                  ? action.frameId
+                  : value.expectedFrameId
+                : null,
+            action,
+          });
+        },
+        (receipt) => receipt.observation?.target.id,
+      ),
   });
 
   add({
@@ -2533,10 +2632,15 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerSessionMutationResponse,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) =>
-      await input.transport.endComputerSession(input.workspaceId, value.computerSessionId, {
-        operationId: context.operationId,
-      }),
+    execute: async (value, context) => {
+      const ended = await input.transport.endComputerSession(
+        input.workspaceId,
+        value.computerSessionId,
+        { operationId: context.operationId },
+      );
+      currentComputer.forgetSession(value.computerSessionId);
+      return ended;
+    },
   });
 
   if (
@@ -2554,17 +2658,15 @@ export function createInteractionAttemptToolDefinitions(
           properties.computerSessionId = {
             type: "string",
             format: "uuid",
-            description: "CUA ComputerSession from computer_open",
+            description:
+              "CUA ComputerSession from computer_open. Omit to use the computer you used last.",
           };
           return {
             ...variantInputSchema,
             properties,
-            required: [
-              ...((variantInputSchema.required as string[] | undefined) ?? []).filter(
-                (name) => name !== "session",
-              ),
-              "computerSessionId",
-            ],
+            required: ((variantInputSchema.required as string[] | undefined) ?? []).filter(
+              (name) => name !== "session",
+            ),
           };
         }),
       );
@@ -2588,7 +2690,18 @@ export function createInteractionAttemptToolDefinitions(
         approval: "none",
         execute: async (raw, context) => {
           const { computerSessionId, ...args } = raw;
-          const id = z.string().uuid().parse(computerSessionId);
+          let computer: ResolvedComputerSession;
+          try {
+            computer = await currentComputer.session(
+              z.string().uuid().optional().parse(computerSessionId),
+            );
+          } catch (error) {
+            if (error instanceof ComputerTargetResolutionError) {
+              return interactionErrorResult(error.code, error.message);
+            }
+            throw error;
+          }
+          const id = computer.computerSessionId;
           let response: unknown;
           try {
             response = await input.transport.callNativeComputerTool!(input.workspaceId, id, {
@@ -2596,7 +2709,9 @@ export function createInteractionAttemptToolDefinitions(
               tool: tool.name,
               arguments: args,
             });
+            currentComputer.use(id);
           } catch (error) {
+            if (isGoneBrowserError(error)) currentComputer.failed(computer);
             // The API refused the call before dispatching it (a retired or
             // ended ComputerSession, a missing permission, invalid
             // arguments): a definite failure the model can act on, not an
@@ -2841,7 +2956,7 @@ function derivedOperationId(purpose: string, operationId: string, subject: strin
 async function actInComputerBatch(
   transport: InteractionTransport,
   workspaceId: string,
-  value: z.output<typeof ComputerActInput>,
+  value: ResolvedComputerActInput,
   actions: ComputerAction[],
   operationId: string,
   /** Whether the computer runs the whole batch as one operation. */
@@ -3032,7 +3147,7 @@ async function actInComputerBatch(
 async function actInComputerNativeBatch(
   transport: InteractionTransport,
   workspaceId: string,
-  value: z.output<typeof ComputerActInput>,
+  value: ResolvedComputerActInput,
   actions: ComputerAction[],
   batch: {
     operationId: string;
@@ -4334,7 +4449,10 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     if (error instanceof z.ZodError) {
       return interactionErrorResult("invalid_arguments", describeInvalidToolArguments(error));
     }
-    if (error instanceof BrowserTargetResolutionError) {
+    if (
+      error instanceof BrowserTargetResolutionError ||
+      error instanceof ComputerTargetResolutionError
+    ) {
       return interactionErrorResult(error.code, error.message);
     }
     // A failed read is still a useful tool result. Preserve the API's public
