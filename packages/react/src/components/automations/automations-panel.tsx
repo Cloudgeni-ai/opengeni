@@ -152,6 +152,8 @@ export function AutomationsPanel({
   }, []);
   const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   const [deleting, setDeleting] = useState<ScheduledTask | null>(null);
+  /** The last Run now, so the automation's recent runs can look for the run it started. */
+  const [started, setStarted] = useState<{ taskId: string; at: number } | null>(null);
 
   /* Automations. */
   const [tasks, setTasks] = useState<ScheduledTask[] | undefined>(undefined);
@@ -284,6 +286,7 @@ export function AutomationsPanel({
       upsert(
         await client.triggerScheduledTask(workspaceId, task.id, triggerId ? { triggerId } : {}),
       );
+      setStarted({ taskId: task.id, at: Date.now() });
       setNotice({ tone: "info", text: t("automations.panel.runStarted", { name: task.name }) });
     });
   const remove = async (task: ScheduledTask): Promise<boolean> => {
@@ -401,6 +404,7 @@ export function AutomationsPanel({
         sourceLogo={sourceLogo}
         onOpenSession={onOpenSession}
         busy={busy.has(viewed.id)}
+        startedAt={started?.taskId === viewed.id ? started.at : null}
         now={now}
         onBack={() => go({ kind: "list" })}
         onSetOn={(on) => void setOn(viewed, on)}
@@ -602,6 +606,7 @@ function AutomationDetail({
   sourceLogo,
   onOpenSession,
   busy,
+  startedAt,
   now,
   onBack,
   onSetOn,
@@ -618,6 +623,8 @@ function AutomationDetail({
   sourceLogo: EventSourceLogoResolver | undefined;
   onOpenSession: ((sessionId: string) => void) | undefined;
   busy: boolean;
+  /** When Run now last started this automation here. */
+  startedAt: number | null;
   now: Date;
   onBack: () => void;
   onSetOn: (on: boolean) => void;
@@ -700,6 +707,7 @@ function AutomationDetail({
         client={client}
         workspaceId={workspaceId}
         task={task}
+        startedAt={startedAt}
         onOpenSession={onOpenSession}
       />
     </div>
@@ -723,37 +731,89 @@ const RUN_STATUS: Record<ScheduledTaskRun["status"], ProductStatus> = {
   failed: "failed",
 };
 
+/** Runs the list shows at once. */
+const RUNS_SHOWN = 10;
+/** After Run now, the list looks for the new run this often, for this many reads at most. */
+const RUN_STARTED_READ_MS = 1_500;
+const RUN_STARTED_READS = 20;
+/** While a run waits in the queue, the list reads its status this often. */
+const RUN_QUEUED_READ_MS = 5_000;
+
 function AutomationRuns({
   client,
   workspaceId,
   task,
+  startedAt,
   onOpenSession,
 }: {
   client: OpenGeniClient;
   workspaceId: string;
   task: ScheduledTask;
+  startedAt: number | null;
   onOpenSession: ((sessionId: string) => void) | undefined;
 }) {
   const t = useOpenGeniText();
   const [runs, setRuns] = useState<ScheduledTaskRun[] | undefined>(undefined);
   const [failed, setFailed] = useState(false);
-  // Read again whenever the automation changes, such as after Run now.
+  // Every settled read, so the next one is scheduled from it.
+  const [reads, setReads] = useState(0);
+  const [again, setAgain] = useState(0);
+  const shown = useRef<ScheduledTaskRun[] | undefined>(undefined);
+  useEffect(() => {
+    shown.current = runs;
+  }, [runs]);
+  // Run now starts the run in the background, so the list looks for it until
+  // a run that wasn't shown when it was pressed appears. Opened after the
+  // press, the list can't tell the new run apart and looks for the rest of the
+  // window.
+  const [looking, setLooking] = useState<{
+    known: ReadonlySet<string> | null;
+    reads: number;
+  } | null>(null);
+  useEffect(() => {
+    if (startedAt === null) return;
+    const left = RUN_STARTED_READS - Math.floor((Date.now() - startedAt) / RUN_STARTED_READ_MS);
+    if (left <= 0) return;
+    const known = shown.current;
+    setLooking({ known: known ? new Set(known.map((run) => run.id)) : null, reads: left });
+  }, [startedAt]);
+  // Read again whenever the automation changes, after Run now, and on schedule.
   const revision = task.updatedAt;
   useEffect(() => {
     let live = true;
     setFailed(false);
-    client.listScheduledTaskRuns(workspaceId, task.id, { limit: 10 }).then(
+    client.listScheduledTaskRuns(workspaceId, task.id, { limit: RUNS_SHOWN }).then(
       (list) => {
-        if (live) setRuns(list);
+        if (!live) return;
+        setRuns(list);
+        setLooking((current) =>
+          !current ||
+          current.reads <= 1 ||
+          (current.known && list.some((run) => !current.known?.has(run.id)))
+            ? null
+            : { ...current, reads: current.reads - 1 },
+        );
+        setReads((count) => count + 1);
       },
       () => {
-        if (live) setFailed(true);
+        if (!live) return;
+        setFailed(true);
+        setReads((count) => count + 1);
       },
     );
     return () => {
       live = false;
     };
-  }, [client, workspaceId, task.id, revision]);
+  }, [client, workspaceId, task.id, revision, startedAt, again]);
+  const queued = runs?.some((run) => run.status === "queued") ?? false;
+  useEffect(() => {
+    if (reads === 0 || (!looking && !queued)) return;
+    const timer = setTimeout(
+      () => setAgain((count) => count + 1),
+      looking ? RUN_STARTED_READ_MS : RUN_QUEUED_READ_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [reads, looking, queued]);
   const headingId = `${task.id}-runs`;
   return (
     <section aria-labelledby={headingId} className="flex min-w-0 flex-col gap-2">
