@@ -398,8 +398,8 @@ function RecorderCard({ recorder }: { recorder: MeetingRecorder }) {
             </Text>
           </Pressable>
           <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-muted"] }}>
-            Records with this phone's microphone, even when the screen is locked. When you stop,
-            you get a transcript of who said what.
+            Records with this phone's microphone, even when the screen is locked. When you stop, you
+            get a transcript of who said what.
           </Text>
         </>
       )}
