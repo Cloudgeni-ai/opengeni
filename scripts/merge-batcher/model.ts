@@ -218,10 +218,12 @@ export interface Headroom {
   mainDemand?: number;
   reservedMain: number;
   candidateSlots: 18;
-  /** Active runs whose latest jobs were read in this observation. */
+  /** Active runs whose latest jobs were read or verified approval proof reused. */
   scannedRuns?: number;
   /** Scanned runs proven to be waiting only for approval (no runner demand). */
   approvalOnlyRuns?: number;
+  /** Reused verified main approval tails; absent if the scan was incomplete. */
+  cachedApprovalOnlyRuns?: number;
   /** Provider capacity fields; see `capacityDecision`. */
   capacity?: CapacityObservation;
   /** Live admission uses provider queueing; valid capacity holds are telemetry only. */
@@ -293,6 +295,25 @@ export function approvalOnlyRun(run: unknown, jobs: readonly unknown[]): boolean
   return waiting;
 }
 
+const APPROVAL_ONLY_CACHE_MS = 15 * 60_000;
+function publicReleaseApprovalJobs(run: unknown, jobs: unknown): jobs is unknown[] {
+  if (!Array.isArray(jobs) || !approvalOnlyRun(run, jobs)) return false;
+  const ids = new Set<number>();
+  let waiting = 0;
+  for (const raw of jobs) {
+    if (!raw || typeof raw !== "object") return false;
+    const job = raw as Record<string, unknown>;
+    if (!Number.isSafeInteger(job.id) || (job.id as number) <= 0 || ids.has(job.id as number))
+      return false;
+    ids.add(job.id as number);
+    if (job.status === "waiting") {
+      if (job.name !== "Build API workload image") return false;
+      waiting++;
+    }
+  }
+  return waiting === 1;
+}
+
 export type RunnerScanHold =
   | "incomplete-runs"
   | "invalid-run"
@@ -307,6 +328,7 @@ export type RunnerScan =
       otherDemand: number;
       scannedRuns: number;
       approvalOnlyRuns: number;
+      cachedApprovalOnlyRuns: number;
       runnerRelevantRuns: number;
       /** Newest active full-main push CI run (highest run ID), or null when none is active. */
       latestMain: LatestMainObservation | null;
@@ -366,6 +388,10 @@ export async function scanRunnerDemand(input: {
   runId?: (value: unknown) => number | null;
   now?: () => number;
   deadlineMs?: number;
+  approvalCache?: {
+    get(key: string): Promise<unknown>;
+    set(key: string, value: unknown): Promise<void>;
+  };
 }): Promise<RunnerScan> {
   const now = input.now ?? Date.now;
   const started = now();
@@ -375,7 +401,8 @@ export async function scanRunnerDemand(input: {
     ((value: unknown) =>
       Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : null);
   let scannedRuns = 0,
-    approvalOnlyRuns = 0;
+    approvalOnlyRuns = 0,
+    cachedApprovalOnlyRuns = 0;
   const hold = (reason: RunnerScanHold): RunnerScan => ({
     ok: false,
     hold: reason,
@@ -426,8 +453,10 @@ export async function scanRunnerDemand(input: {
   // Runs listed with a non-waiting status in any listing of this observation;
   // they cannot be approval-only even if their latest listing is waiting.
   const listedNotWaiting = new Set<number>();
+  const changedUpdate = new Set<number>();
+  const waitingPasses = new Map<number, Set<number>>();
   const listings = Array.from({ length: RUN_LIST_PASSES }, () => ACTIVE_RUN_STATUSES).flat();
-  for (const status of listings) {
+  for (const [listingIndex, status] of listings.entries()) {
     if (now() - started > deadline) return hold("deadline");
     const page = await list(`actions/runs?status=${status}`, "workflow_runs");
     if ("error" in page) return hold(page.error === "incomplete" ? "incomplete-runs" : page.error);
@@ -436,7 +465,13 @@ export async function scanRunnerDemand(input: {
       const id = runId((run as { id?: unknown }).id);
       if (id === null) return hold("invalid-run");
       const record = run as Record<string, unknown>;
+      if (status === "waiting" && record.status === "waiting") {
+        const passes = waitingPasses.get(id) ?? new Set<number>();
+        passes.add(Math.floor(listingIndex / ACTIVE_RUN_STATUSES.length));
+        waitingPasses.set(id, passes);
+      }
       const prior = runs.get(id);
+      if (prior && prior.updated_at !== record.updated_at) changedUpdate.add(id);
       if (
         prior &&
         ["path", "event", "head_branch", "head_sha", "run_attempt"].some(
@@ -475,6 +510,7 @@ export async function scanRunnerDemand(input: {
   // sequential and validated by list(); the shared deadline is unchanged.
   const entries = [...runs];
   const pages: Awaited<ReturnType<typeof list>>[] = new Array(entries.length);
+  const reused = new Set<number>();
   let next = 0;
   let failed = false;
   let failure: unknown;
@@ -484,10 +520,58 @@ export async function scanRunnerDemand(input: {
         const index = next++;
         if (index >= entries.length) return;
         try {
-          pages[index] = await list(
-            `actions/runs/${entries[index]![0]}/jobs?filter=latest`,
-            "jobs",
-          );
+          const [id, run] = entries[index]!;
+          const main =
+            run.path === ".github/workflows/ci.yml" &&
+            run.event === "push" &&
+            run.head_branch === input.baseBranch;
+          const identity =
+            main &&
+            typeof run.head_sha === "string" &&
+            /^[a-f0-9]{40}$/.test(run.head_sha) &&
+            Number.isSafeInteger(run.run_attempt) &&
+            (run.run_attempt as number) > 0 &&
+            typeof run.updated_at === "string" &&
+            Number.isFinite(Date.parse(run.updated_at))
+              ? `approval-main-v1:${digest([id, run.run_attempt, run.head_sha, run.path, run.event, run.head_branch, run.updated_at])}`
+              : null;
+          const eligible =
+            identity &&
+            run.status === "waiting" &&
+            waitingPasses.get(id)?.size === RUN_LIST_PASSES &&
+            !listedNotWaiting.has(id) &&
+            !changedUpdate.has(id);
+          if (input.approvalCache && identity) {
+            if (!eligible) await input.approvalCache.set(identity, null).catch(() => {});
+            else {
+              const raw = await input.approvalCache.get(identity).catch(() => null);
+              const cached =
+                raw && typeof raw === "object" ? (raw as { at?: unknown; jobs?: unknown }) : null;
+              if (
+                cached &&
+                typeof cached.at === "number" &&
+                Number.isFinite(cached.at) &&
+                now() >= cached.at &&
+                now() - cached.at <= APPROVAL_ONLY_CACHE_MS &&
+                publicReleaseApprovalJobs(run, cached.jobs)
+              ) {
+                pages[index] = { items: cached.jobs };
+                reused.add(id);
+                continue;
+              }
+            }
+          }
+          const page = await list(`actions/runs/${id}/jobs?filter=latest`, "jobs");
+          pages[index] = page;
+          if (
+            input.approvalCache &&
+            eligible &&
+            !("error" in page) &&
+            publicReleaseApprovalJobs(run, page.items)
+          )
+            await input.approvalCache
+              .set(identity, { at: now(), jobs: page.items })
+              .catch(() => {});
         } catch (error) {
           failed = true;
           failure = error;
@@ -501,6 +585,7 @@ export async function scanRunnerDemand(input: {
     const page = pages[index]!;
     if ("error" in page) return hold(page.error === "incomplete" ? "incomplete-jobs" : page.error);
     scannedRuns++;
+    if (reused.has(id)) cachedApprovalOnlyRuns++;
     const jobs = page.items;
     const demand = runnerJobDemand(jobs);
     if (demand === null) return hold("unknown-job-status");
@@ -534,6 +619,7 @@ export async function scanRunnerDemand(input: {
     otherDemand,
     scannedRuns,
     approvalOnlyRuns,
+    cachedApprovalOnlyRuns,
     runnerRelevantRuns,
     latestMain: latestMain ? observeMainQueue(latestMain.id, latestMain.jobs, finished) : null,
     mainQueuedJobs,

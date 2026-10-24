@@ -411,6 +411,18 @@ response; an overrun or provider error holds. Each listing requires a stable
 reported total, correctly sized pages and unique identities across pages;
 inconsistent pages and run identity drift hold rather than admitting partial
 demand. A run is **approval-only** only when
+the following complete-job proof establishes it. The live reader may reuse that
+proof for at most 15 minutes only for main push CI whose sole waiting job is
+`Build API workload image` and whose other jobs are completed or pending
+descendants. Reuse requires matching run ID, attempt, head, workflow, branch and
+provider update timestamp, with `waiting` in both current status passes. Any
+observed status or timestamp transition, malformed/missing/expired cache, or
+different approval gate requires fresh complete job pages. Active Batch detection
+always precedes this optimization, including waiting Batch runs. A cold cache
+also requires full verification. `cachedApprovalOnlyRuns` reports reused verified
+zero-demand observations and is absent for incomplete scans; this does not claim
+an atomic provider snapshot or rule out provider lag/changes after observation.
+Without reusable proof, a run is approval-only only when
 every listing in the observation reports the run as `waiting` and its complete
 job page has at least one `waiting` job and otherwise only `pending` or
 `completed` jobs. Such
