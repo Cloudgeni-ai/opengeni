@@ -507,6 +507,7 @@ test("inherited rules are fetched from their organization and never assumed abse
 test("identity rejects wrong App, installation, selection, suspension, permissions and repositories", async () => {
   const h = await harness();
   try {
+    expect((await h.run("identity")).code).toBe(0);
     for (const invalid of [
       { APP_OVERRIDE: JSON.stringify({ id: 999 }) },
       { APP_OVERRIDE: JSON.stringify({ owner: { login: "foreign" } }) },
@@ -514,6 +515,23 @@ test("identity rejects wrong App, installation, selection, suspension, permissio
       { INSTALLATION_OVERRIDE: JSON.stringify({ id: 888 }) },
       { INSTALLATION_OVERRIDE: JSON.stringify({ repository_selection: "all" }) },
       { INSTALLATION_OVERRIDE: JSON.stringify({ suspended_at: "2026-10-22T00:00:00Z" }) },
+      {
+        INSTALLATION_OVERRIDE: JSON.stringify({
+          permissions: {
+            ...Object.fromEntries(
+              Object.entries(manifest.default_permissions).filter(
+                ([name]) => name !== "administration",
+              ),
+            ),
+            metadata: "read",
+          },
+        }),
+      },
+      {
+        INSTALLATION_OVERRIDE: JSON.stringify({
+          permissions: { ...manifest.default_permissions, metadata: "read", members: "read" },
+        }),
+      },
       {
         INSTALLATION_OVERRIDE: JSON.stringify({
           permissions: {

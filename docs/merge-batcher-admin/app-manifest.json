@@ -4,6 +4,7 @@
   "public": false,
   "default_events": [],
   "default_permissions": {
+    "administration": "read",
     "contents": "write",
     "workflows": "write",
     "actions": "write",

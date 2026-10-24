@@ -46,25 +46,36 @@ export function writable(value: ObjectValue): ObjectValue {
 }
 // Ruleset lists are sets, including rules/bypass actors/ref patterns. Preserve
 // multiplicity so an unexpected duplicate still fails the readback comparison.
-function canonical(value: Json, rule = false): string {
+function canonical(value: Json, rule = false, bypassActor = false): string {
   if (Array.isArray(value))
     return `[${value
-      .map((item) => canonical(item, rule))
+      .map((item) => canonical(item, rule, bypassActor))
       .sort()
       .join(",")}]`;
   if (value && typeof value === "object") {
     // GitHub stores the default update rule without parameters. Normalize only
     // that exact rule shape, in rules arrays, on both comparison sides. Explicit
     // false already has this form; empty/null/extra fields must remain different.
-    const normalized: ObjectValue =
+    let normalized: ObjectValue =
       rule && value.type === "update" && Object.keys(value).length === 1
         ? { type: "update", parameters: { update_allows_fetch_and_merge: false } }
         : value;
+    // GitHub ignores OrganizationAdmin actor_id and returns null for the
+    // reviewed legacy sentinel 1. Compare only this exact bypass shape; retain
+    // all other IDs/types/modes, missing fields, extras and duplicates as drift.
+    if (
+      bypassActor &&
+      value.actor_type === "OrganizationAdmin" &&
+      value.actor_id === 1 &&
+      value.bypass_mode === "always" &&
+      Object.keys(value).length === 3
+    )
+      normalized = { ...value, actor_id: null };
     return `{${Object.keys(normalized)
       .sort()
       .map(
         (key) =>
-          `${JSON.stringify(key)}:${canonical(normalized[key]!, key === "rules" && writableKeys.every((field) => field in normalized))}`,
+          `${JSON.stringify(key)}:${canonical(normalized[key]!, key === "rules" && writableKeys.every((field) => field in normalized), key === "bypass_actors" && writableKeys.every((field) => field in normalized))}`,
       )
       .join(",")}}`;
   }

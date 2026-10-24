@@ -852,14 +852,19 @@ The required batch suite is plan/source/impact-selected units/Batch ready on the
 exact stacked candidate tree. Its verified latest-attempt success may land even
 when full-main CI is red or unknown; full main CI remains an independent backstop,
 not a candidate admission gate. Development validation is not a comment-based
-admission gate. Failed candidate code never triggers a retry:
-split the cohort and durably park failing singleton heads without blame or ejection,
+admission gate. The controller may retry a failed candidate's entire Batch CI once,
+using exact-attempt evidence classified as trusted code failure, verified
+infrastructure failure, provider cancellation, no-job-logs, or positive
+failed/timed-out job evidence.
+After a trusted second code failure, split the cohort and durably park failing
+singleton heads without blame or ejection,
 while other ready heads proceed. A new ready event or main advancement does not
 retry a parked head; a changed head may re-enter. Comparable base evidence remains
 unavailable, and full-main CI success is not a substitute. Current receipts lack
 trusted failure fingerprints, so no same-way suspected-base landing hold is claimed.
 Cancelled or infrastructure-error candidate runs are not failing PR verdicts;
-the controller owns the single unchanged-input infrastructure-only retry. Do not stack manual
+the controller owns the single unchanged-input retry; unknown evidence never
+authorizes it, and a second unknown/infrastructure outcome remains held. Do not stack manual
 or in-job retries on it, or silently resubmit an ejected unchanged head.
 Retries run the **entire** batch workflow, not GitHub's "Re-run failed jobs":
 the plan and task receipts are deliberately bound to one run attempt.
@@ -871,8 +876,8 @@ the batcher or its CI control files require an isolated batch and explicit
 independent review of those control-plane changes.
 
 Budget/threshold increases, newly skipped tests and reduced coverage must be
-explicit in the PR and evidence comment, independently confirmed by the reviewer,
-and labelled `test-policy-change`. Never conceal a failing check by weakening it.
+explicit in the PR description, labelled `test-policy-change`, and confirmed in
+independent review. Never conceal a failing check by weakening it.
 The documented `hotfix/*` → `production` incident lane stays separate; ordinary
 main changes never bypass the queue. See the incident and rollback steps in the
 queue runbook before any exceptional main action.
