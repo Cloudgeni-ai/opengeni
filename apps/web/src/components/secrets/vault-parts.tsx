@@ -119,12 +119,10 @@ function healthReason(vault: VaultSummary, health: VaultHealth): string | undefi
         ? "The 1Password service account token expired. Reconnect to keep syncing."
         : `${Home} no longer accepts ${provider ? PROVIDERS[provider].credential : "its access"}. Reconnect to keep syncing.`;
     case "locked":
-      return provider === "bitwarden"
-        ? "Bitwarden is locked on the bridge. Agents can't read these items until it's unlocked."
-        : `${Home} is locked. Agents can't read these items until it's unlocked.`;
+      return `${Home} is locked. Agents can't read these items until it's unlocked.`;
     case "unavailable":
       return isSelfHosted(provider)
-        ? `Opengeni can't reach ${provider === "bitwarden" ? "your Bitwarden bridge" : "your vault service"}.`
+        ? "Opengeni can't reach your vault service."
         : `${Home} isn't responding.`;
     case "incomplete":
       return `Not every item in ${home} could be listed, so some may be missing.`;
@@ -188,7 +186,7 @@ function renewSentence(provider: VaultProviderId | null): string {
     case "keeper":
       return "Keeper no longer accepts this device. Reconnect with a new one-time access token to keep this vault in sync.";
     case "bitwarden":
-      return "The bridge no longer accepts Opengeni's signing secret. Update the bridge to keep this vault in sync.";
+      return "Bitwarden no longer accepts this connection. Reconnect with the account's API key and master password to keep this vault in sync.";
     case "external":
       return "Your vault service no longer accepts Opengeni's signing secret. Update the service to keep this vault in sync.";
     default:
@@ -299,9 +297,7 @@ export function VaultSyncNotice({
           actionLayout="responsive"
           action={checkAgain("Check again")}
         >
-          {provider === "bitwarden"
-            ? "Bitwarden is locked on the bridge, so agents can't read these items. Unlock it there; syncing picks up on its own."
-            : `${Home} is locked, so agents can't read these items. Unlock it; syncing picks up on its own.`}
+          {`${Home} is locked, so agents can't read these items. Unlock it; syncing picks up on its own.`}
           <MirrorLine vault={vault} />
         </Notice>
       );
@@ -313,11 +309,9 @@ export function VaultSyncNotice({
           actionLayout="responsive"
           action={checkAgain("Check again")}
         >
-          {provider === "bitwarden"
-            ? "Opengeni can't reach your Bitwarden bridge. Check that it's running."
-            : provider === "external"
-              ? "Opengeni can't reach your vault service. Check that it's running."
-              : `${Home} isn't responding, so agents can't read these items right now.`}
+          {provider === "external"
+            ? "Opengeni can't reach your vault service. Check that it's running."
+            : `${Home} isn't responding, so agents can't read these items right now.`}
           <MirrorLine vault={vault} />
         </Notice>
       );
@@ -346,20 +340,16 @@ export function VaultSyncNotice({
 }
 
 /**
- * Where the items come from when the source serves a copy: a Bitwarden bridge
- * reads its own synced vault, so its last sync with Bitwarden is a fact worth
- * one quiet line. Nothing for live sources.
+ * Where the items come from when the source serves a copy: a remote service
+ * that reads its own synced store says when it last synced, worth one quiet
+ * line. Nothing for live sources.
  */
 export function SourceCopyLine({ vault }: { vault: VaultSummary }) {
   const freshness = vault.freshness;
   if (!freshness || freshness.source !== "cache" || !freshness.sourceSyncedAt) return null;
-  const provider = providerOfVault(vault);
   return (
     <p className="m-0 text-sm leading-5 text-fg-muted">
-      {provider === "bitwarden"
-        ? "Your bridge last synced with Bitwarden"
-        : "The source last synced"}{" "}
-      <RelativeTime date={freshness.sourceSyncedAt} inSentence />.
+      The source last synced <RelativeTime date={freshness.sourceSyncedAt} inSentence />.
     </p>
   );
 }

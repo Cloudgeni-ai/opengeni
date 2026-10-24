@@ -14,7 +14,7 @@ import { FLUSH_DETAIL_PAGE_CLASS, FlushFormPage } from "@opengeni/react/ui/flush
 import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { Notice } from "@opengeni/react/ui/notice";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
-import { userErrorText } from "@opengeni/react/ui/api-error";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 
 import { FinishConnectingNotice } from "./provider-connections";
 import { ProviderTile } from "./provider-marks";
@@ -48,8 +48,9 @@ import {
    The picker (S17) lists every provider as a row: logo, name, what it needs.
    A row opens that provider's own steps. 1Password keeps its own page; the
    others share three steps on one form page:
-   1. Who can use it and the provider's access (a token, a one-time token, or
-      a bridge address and signing secret). Secrets never sit in React state.
+   1. Who can use it and the provider's access (a token, a one-time token, an
+      API key and master password, or a service address and signing secret).
+      Secrets never sit in React state.
    2. Pick a mode per vault (or Keeper shared folder).
    3. What was linked, then Done.
    An existing connection renews its access on its own page.
@@ -114,6 +115,7 @@ export function ConnectPickerPage({
 const DOCS: Partial<Record<ExternalVaultProviderKind, string>> = {
   protonpass: "https://proton.me/support/pass-access-tokens",
   keeper: "https://docs.keeper.io/en/keeperpam/secrets-manager/quick-start-guide",
+  bitwarden: "https://bitwarden.com/help/personal-api-key/",
 };
 
 /** Keeper regions, for one-time tokens that don't start with one. */
@@ -125,6 +127,15 @@ const KEEPER_REGIONS: { value: string; label: string }[] = [
   { value: "keepersecurity.ca", label: "Canada" },
   { value: "keepersecurity.jp", label: "Japan" },
   { value: "govcloud.keepersecurity.us", label: "US government" },
+];
+
+/** Bitwarden's cloud regions, or any other server (self-hosted Bitwarden, Vaultwarden). */
+const BITWARDEN_US = "https://vault.bitwarden.com";
+const BITWARDEN_SELF_HOSTED = "self-hosted";
+const BITWARDEN_SERVERS: { value: string; label: string }[] = [
+  { value: BITWARDEN_US, label: "bitwarden.com" },
+  { value: "https://vault.bitwarden.eu", label: "bitwarden.eu" },
+  { value: BITWARDEN_SELF_HOSTED, label: "Self-hosted or Vaultwarden" },
 ];
 
 function DocsLink({ href, children }: { href: string; children: ReactNode }) {
@@ -141,7 +152,14 @@ function DocsLink({ href, children }: { href: string; children: ReactNode }) {
   );
 }
 
-type FieldErrors = { secret?: string; endpoint?: string; label?: string };
+type FieldErrors = {
+  secret?: string;
+  endpoint?: string;
+  label?: string;
+  server?: string;
+  clientId?: string;
+  masterPassword?: string;
+};
 
 const DESCRIPTION: Record<ExternalVaultProviderKind, string> = {
   protonpass:
@@ -149,7 +167,7 @@ const DESCRIPTION: Record<ExternalVaultProviderKind, string> = {
   keeper:
     "Link shared folders from Keeper Secrets Manager. Values stay in Keeper; agents read them when they run.",
   bitwarden:
-    "Link vaults through a bridge you run next to the Bitwarden CLI. Your master password and unlocked vault stay on your machine.",
+    "Link your vault and organization collections from Bitwarden or Vaultwarden. Values stay in Bitwarden; agents read them when they run.",
   external:
     "Link vaults from a service your product runs. Opengeni signs every request; your service checks who is asking and what they may see.",
 };
@@ -235,12 +253,95 @@ function CredentialFields({
           </Notice>
         </>
       );
-    case "bitwarden":
-    case "external": {
-      const bridge = provider === "bitwarden";
+    case "bitwarden": {
+      const server = region || BITWARDEN_US;
+      const selfHosted = server === BITWARDEN_SELF_HOSTED;
       return (
         <>
-          {provider === "external" && !renewing ? (
+          <Field
+            label="Server"
+            hint="Where the account lives."
+            error={selfHosted ? undefined : errors.server}
+          >
+            <SelectMenu
+              aria-label="Bitwarden server"
+              options={BITWARDEN_SERVERS}
+              value={server}
+              onValueChange={(next) => {
+                onRegionChange(next);
+                onEdit("server");
+              }}
+              className="w-64"
+            />
+          </Field>
+          {selfHosted ? (
+            <Field
+              label="Server address"
+              hint="The address you open the web vault at."
+              error={errors.server}
+            >
+              <TextInput
+                name="serverUrl"
+                type="url"
+                inputMode="url"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="https://vault.example.com"
+                suppressAutofill
+                data-autofocus
+                onChange={() => onEdit("server")}
+              />
+            </Field>
+          ) : null}
+          <Field
+            label="API key client ID"
+            hint={
+              <>
+                In the Bitwarden web vault, open Settings, Security, Keys and choose View API key.{" "}
+                <DocsLink href={DOCS.bitwarden!}>Where to find it</DocsLink>
+              </>
+            }
+            error={errors.clientId}
+          >
+            <TextInput
+              name="clientId"
+              mono
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="user.…"
+              suppressAutofill
+              data-autofocus={selfHosted ? undefined : true}
+              onChange={() => onEdit("clientId")}
+            />
+          </Field>
+          <Field label="API key client secret" error={errors.secret}>
+            {secretInput()}
+          </Field>
+          <Field
+            label="Master password"
+            hint="Used once to unlock the vault. Opengeni keeps the vault's encryption key, encrypted, and never the password."
+            error={errors.masterPassword}
+          >
+            <TextInput
+              name="masterPassword"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              suppressAutofill
+              onChange={() => onEdit("masterPassword")}
+            />
+          </Field>
+          <Notice tone="muted">
+            Agents can use everything this account can open. Give them an account of their own and
+            share only the collections they need with it.
+          </Notice>
+        </>
+      );
+    }
+    case "external": {
+      return (
+        <>
+          {!renewing ? (
             <Field
               label="Name"
               optional
@@ -258,12 +359,8 @@ function CredentialFields({
             </Field>
           ) : null}
           <Field
-            label={bridge ? "Bridge address" : "Service address"}
-            hint={
-              bridge
-                ? "The HTTPS address of the Opengeni bridge you run next to the Bitwarden CLI."
-                : "The HTTPS endpoint that answers Opengeni's vault requests."
-            }
+            label="Service address"
+            hint="The HTTPS endpoint that answers Opengeni's vault requests."
             error={errors.endpoint}
           >
             <TextInput
@@ -272,29 +369,18 @@ function CredentialFields({
               inputMode="url"
               autoComplete="off"
               spellCheck={false}
-              placeholder={
-                bridge
-                  ? "https://bitwarden-bridge.example.com"
-                  : "https://vaults.example.com/opengeni"
-              }
+              placeholder="https://vaults.example.com/opengeni"
               suppressAutofill
-              data-autofocus={bridge ? true : undefined}
               onChange={() => onEdit("endpoint")}
             />
           </Field>
           <Field
             label="Signing secret"
-            hint={`The secret ${bridge ? "the bridge" : "your service"} was set up with, at least 32 characters. Opengeni signs every request with it.`}
+            hint="The secret your service was set up with, at least 32 characters. Opengeni signs every request with it."
             error={errors.secret}
           >
             {secretInput()}
           </Field>
-          {bridge ? (
-            <Notice tone="muted">
-              Opengeni never asks for your master password. Keep Bitwarden unlocked on the bridge;
-              while it's locked, agents can't read its items.
-            </Notice>
-          ) : null}
         </>
       );
     }
@@ -318,7 +404,33 @@ function readCredentials(
       return {
         credentials: { provider, oneTimeToken: secret, ...(region ? { hostname: region } : {}) },
       };
-    case "bitwarden":
+    case "bitwarden": {
+      const choice = region || BITWARDEN_US;
+      const serverUrl =
+        choice === BITWARDEN_SELF_HOSTED ? String(data.get("serverUrl") ?? "").trim() : choice;
+      const clientId = String(data.get("clientId") ?? "").trim();
+      const masterPassword = String(data.get("masterPassword") ?? "");
+      const errors: FieldErrors = {};
+      if (!serverUrl) errors.server = "Enter the server address.";
+      else if (
+        !isWebAddress(
+          /^[a-z][a-z0-9+.-]*:\/\//i.test(serverUrl) ? serverUrl : `https://${serverUrl}`,
+        )
+      )
+        errors.server = "Enter the address you open the web vault at.";
+      if (!clientId) errors.clientId = "Paste the client ID, which looks like user.1a2b3c…";
+      else if (/^organization\./i.test(clientId))
+        errors.clientId = "That's an organization key. Use the account's personal API key instead.";
+      else if (!/^user\./i.test(clientId))
+        errors.clientId = "A personal API key's client ID looks like user.1a2b3c…";
+      if (!secret) errors.secret = "Paste the client secret.";
+      if (!masterPassword) errors.masterPassword = "Enter the master password.";
+      if (errors.server || errors.clientId || errors.secret || errors.masterPassword)
+        return { errors };
+      return {
+        credentials: { provider, serverUrl, clientId, clientSecret: secret, masterPassword },
+      };
+    }
     case "external": {
       const endpoint = String(data.get("endpoint") ?? "").trim();
       const label = String(data.get("label") ?? "").trim();
@@ -355,8 +467,9 @@ function routeCredentialError(
   const error = causeOf(caught);
   const code = vaultErrorCode(error);
   const name = PROVIDERS[provider].name;
-  const remote = provider === "bitwarden" || provider === "external";
-  const machine = provider === "bitwarden" ? "the bridge" : "your service";
+  if (provider === "bitwarden") return routeBitwardenError(error, code);
+  const remote = provider === "external";
+  const machine = "your service";
   switch (code) {
     case "provider_auth_invalid":
     case "provider_auth_expired":
@@ -394,6 +507,67 @@ function routeCredentialError(
 
 function capitalized(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * Bitwarden names what it refused: the API key, the master password, or the
+ * server (unreachable, not a Bitwarden server, or not allowed from here).
+ * Refusals share a code and an HTTP status (401 is not "your session ended"
+ * here), so the server's own sentence says which field it is about.
+ */
+function routeBitwardenError(
+  error: unknown,
+  code: string | null | undefined,
+): { fields: FieldErrors; form: string | null } {
+  const said = apiErrorFacts(error).serverMessage ?? "";
+  switch (code) {
+    case "provider_auth_invalid":
+    case "provider_auth_expired":
+      if (/master password/i.test(said)) {
+        return {
+          fields: { masterPassword: "This master password doesn't open the account." },
+          form: null,
+        };
+      }
+      if (/organization API key/i.test(said)) {
+        return {
+          fields: {
+            clientId: "That's an organization key. Use the account's personal API key instead.",
+          },
+          form: null,
+        };
+      }
+      if (/server/i.test(said) && /https|address/i.test(said)) {
+        return {
+          fields: { server: "Enter the server's address, starting with https://." },
+          form: null,
+        };
+      }
+      return {
+        fields: {
+          secret:
+            "Bitwarden didn't accept this API key. Check the client ID and secret, then paste them again.",
+        },
+        form: null,
+      };
+    case "provider_conflict":
+      return { fields: { secret: userErrorText(error) }, form: null };
+    case "provider_unavailable":
+      // Unreachable, not a Bitwarden server, an API on another site, or an
+      // unsupported account format: the server's sentence names which.
+      return {
+        fields: {
+          server: said
+            ? /[.!?]$/.test(said)
+              ? said
+              : `${said}.`
+            : "Opengeni couldn't reach a Bitwarden server at this address.",
+        },
+        form: null,
+      };
+    default:
+      return { fields: {}, form: vaultErrorText(error, undefined, "Bitwarden") };
+  }
 }
 
 function useCredentialForm(provider: ExternalVaultProviderKind) {
@@ -471,7 +645,7 @@ export function ConnectProviderPage({
 }) {
   const info = PROVIDERS[provider];
   const [connection, setConnection] = useState<InstallVaultProviderResponse | null>(null);
-  // A Bitwarden account is one person's vault, unlocked on their machine: Only me first.
+  // A Bitwarden account is usually one person's vault: Only me first.
   const [owner, setOwner] = useState<ConnectionOwner>(() =>
     initialOwner(owners, defaultOwner ?? (provider === "bitwarden" ? "user" : undefined)),
   );
@@ -486,7 +660,7 @@ export function ConnectProviderPage({
         title={provider === "external" ? "Connect your vault service" : `Connect ${info.name}`}
         description={DESCRIPTION[provider]}
         submitLabel="Connect"
-        pendingLabel={provider === "bitwarden" ? "Checking bridge…" : "Checking access…"}
+        pendingLabel="Checking access…"
         error={form.formError}
         onSubmit={async (event) => {
           event.preventDefault();
@@ -579,7 +753,7 @@ const RENEW_DESCRIPTION: Record<ExternalVaultProviderKind, (name: string) => str
   keeper: (name) =>
     `Add a new device to the same Keeper application and paste its one-time access token. ${name}'s linked folders keep working.`,
   bitwarden: (name) =>
-    `Change where ${name}'s bridge runs or the secret it signs with. Linked vaults keep working.`,
+    `Enter ${name}'s API key and master password again, for example after rotating the account's encryption key. Linked vaults and collections keep working.`,
   external: (name) =>
     `Change where ${name} runs or the secret it signs with. Linked vaults keep working.`,
 };
@@ -605,7 +779,7 @@ export function RenewCredentialsPage({
       title={info.renewLabel}
       description={RENEW_DESCRIPTION[provider](name)}
       submitLabel={info.renewLabel}
-      pendingLabel={provider === "bitwarden" ? "Checking bridge…" : "Checking access…"}
+      pendingLabel="Checking access…"
       error={form.formError}
       onSubmit={async (event) => {
         event.preventDefault();

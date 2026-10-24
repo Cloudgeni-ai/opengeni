@@ -178,6 +178,9 @@ describe("organization MCP action catalog", () => {
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
         // a task's usage limit bounds agent spending; agents never change it.
         "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
+        // approval for each secret use guards agents; agents never change it.
+        "PUT /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
+        "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval/grants/:grantId/revoke",
       ].sort(),
     );
     // Every rule still names a real action.

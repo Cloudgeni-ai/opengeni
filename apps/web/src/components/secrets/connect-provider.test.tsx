@@ -152,3 +152,91 @@ describe("Keeper setup that saved its device but didn't finish", () => {
     await cleanUp();
   });
 });
+
+describe("Bitwarden setup refusals", () => {
+  async function submitBitwarden(error: OpenGeniApiError) {
+    const sent: unknown[] = [];
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <TooltipProvider>
+          <ConnectProviderPage
+            provider="bitwarden"
+            owners={["user"]}
+            organizationName="Acme"
+            onClose={() => undefined}
+            actions={
+              {
+                install: async (request) => {
+                  sent.push(request);
+                  throw error;
+                },
+              } as Partial<Actions> as Actions
+            }
+          />
+        </TooltipProvider>,
+      ),
+    );
+    await flush();
+    const field = (name: string) => {
+      const input = container.querySelector<HTMLInputElement>(`input[name="${name}"]`);
+      if (!input) throw new Error(`Missing ${name}`);
+      return input;
+    };
+    field("clientId").value = "user.6f1c3c1e-2b1a-4c55-9d1e-0a0b0c0d0e0f";
+    field("secret").value = "client-secret-0123456789";
+    field("masterPassword").value = "not the password";
+    await act(async () => {
+      field("secret")
+        .closest("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await flush();
+    const text = container.textContent ?? "";
+    await act(async () => root.unmount());
+    container.remove();
+    return { sent, text };
+  }
+
+  const refusal = (status: number, code: string, message: string) =>
+    new OpenGeniApiError(status, JSON.stringify({ error: code, message }), { mutation: true });
+
+  test("a wrong master password is said on its field, not as a signed-out session", async () => {
+    const { sent, text } = await submitBitwarden(
+      refusal(
+        401,
+        "provider_auth_invalid",
+        "The master password does not open this Bitwarden account",
+      ),
+    );
+    expect(sent).toEqual([
+      {
+        ownership: "user",
+        credentials: {
+          provider: "bitwarden",
+          serverUrl: "https://vault.bitwarden.com",
+          clientId: "user.6f1c3c1e-2b1a-4c55-9d1e-0a0b0c0d0e0f",
+          clientSecret: "client-secret-0123456789",
+          masterPassword: "not the password",
+        },
+      },
+    ]);
+    expect(text).toContain("This master password doesn't open the account.");
+    expect(text).not.toContain("session");
+  });
+
+  test("a refused API key and an unreachable server name their own fields", async () => {
+    const key = await submitBitwarden(refusal(401, "provider_auth_invalid", "invalid_client"));
+    expect(key.text).toContain("Bitwarden didn't accept this API key.");
+    const server = await submitBitwarden(
+      refusal(
+        503,
+        "provider_unavailable",
+        "https://vault.bitwarden.com points its API at another site (api.example.net); Opengeni only sends the API key to the server you entered",
+      ),
+    );
+    expect(server.text).toContain("points its API at another site");
+  });
+});

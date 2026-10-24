@@ -14,8 +14,7 @@ This package owns:
 - `createProviderCallBudget`, the per-attempt provider call budget;
 - `createRemoteVaultProvider`, the adapter for vaults served over Opengeni's
   signed remote protocol (`opengeni.vault.v1`): an embedder's receiver built
-  with `@opengeni/sdk/external-vault-receiver`, or the customer-run
-  `@opengeni/vaults-bitwarden-bridge`. The caller supplies the bounded HTTP
+  with `@opengeni/sdk/external-vault-receiver`. The caller supplies the bounded HTTP
   transport (`createFetchRemoteVaultTransport` adapts a pinned fetch) and the
   trusted `ctx.authority`;
 - the shell splice contract (`spliceShellCommand`, `dialectFromShell`) used

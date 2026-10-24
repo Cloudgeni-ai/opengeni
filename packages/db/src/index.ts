@@ -31,6 +31,7 @@ import {
   type ModelCallTiming,
 } from "./model-call-timing";
 export * from "./human-input-secret-answers";
+export * from "./secret-use-approvals";
 export * from "./connected-machine-audience";
 import { type ActiveSandboxPointer } from "./active-sandbox";
 import { sessionRetentionFromRow } from "./session-archive";
@@ -43,6 +44,11 @@ import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
 } from "./human-input-secret-answers";
+import {
+  decideSecretUseApprovalTx,
+  secretUseApprovalsForSessionTx,
+  secretUseApprovalView,
+} from "./secret-use-approvals";
 import type { VaultDbContext } from "./vaults";
 import { browserDeadlineCheckpoint } from "./browser-deadline-checkpoints";
 import {
@@ -938,6 +944,10 @@ import {
   OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
   HumanInputQuestion as HumanInputQuestionContract,
   canonicalSkillReviewQuestion,
+  secretUseApprovalHumanInput,
+  secretUseApprovalIdFromQuestionId,
+  SECRET_USE_APPROVAL_DECISIONS,
+  type SecretUseApprovalDecision,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
   CodexCredentialPolicySnapshotV1,
@@ -39515,6 +39525,12 @@ export async function acceptSessionHumanInputResponse(
     respondedBy: string;
     /** API-owned verified managed/local browser stamp, never a submitted principal shape. */
     canonicalHumanSession?: boolean;
+    /**
+     * API-owned: the response comes from the person's own Opengeni sign-in
+     * (browser, desktop or phone app), not an agent, personal key or
+     * integration acting as them. Secret approval cards require it.
+     */
+    personSignedIn?: boolean;
     /** Bounded responder kind for the parent's resolution notice; derived from `respondedBy` when omitted. */
     respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
@@ -39841,6 +39857,75 @@ export async function acceptSessionHumanInputResponse(
             "Choose Save or Don't save for this Skill review.",
           );
         }
+        // Secret approval cards: only the person the run acts for decides,
+        // signed in themselves, with one of the card's own choices. The only
+        // other answer is the system denying on a scheduled run's timeout.
+        const secretApprovalAnswers: Array<{
+          approvalId: string;
+          decision: SecretUseApprovalDecision;
+        }> = [];
+        const boundApprovals = expired
+          ? new Map()
+          : await secretUseApprovalsForSessionTx(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              ids: request.questions.flatMap((question) => {
+                const id = secretUseApprovalIdFromQuestionId(question.id);
+                return id === null ? [] : [id];
+              }),
+            });
+        if (boundApprovals.size > 0) {
+          const responderKind = childRequiresActionRespondedByKindFor(
+            input.respondedBy,
+            input.respondedByKind,
+          );
+          const answered = response.outcome === "answered" ? response.answers : null;
+          const systemDenial =
+            responderKind === "system" &&
+            answered !== null &&
+            [...boundApprovals.keys()].every((approvalId) =>
+              answered.some(
+                (answer) =>
+                  secretUseApprovalIdFromQuestionId(answer.questionId) === approvalId &&
+                  answer.values.length === 1 &&
+                  answer.values[0] === "deny",
+              ),
+            );
+          for (const approval of boundApprovals.values()) {
+            if (
+              !systemDenial &&
+              (responderKind !== "human" ||
+                input.personSignedIn !== true ||
+                input.respondedBy !== approval.approverSubjectId)
+            ) {
+              throw new HumanInputResponseValidationError(
+                "HUMAN_AUTH_REQUIRED",
+                "Only the person this agent works for can allow it to use this secret, signed in to Opengeni themselves.",
+              );
+            }
+          }
+          if (response.outcome === "answered") {
+            for (const answer of response.answers) {
+              const approvalId = secretUseApprovalIdFromQuestionId(answer.questionId);
+              if (approvalId === null || !boundApprovals.has(approvalId)) continue;
+              const decision = answer.values[0];
+              if (
+                answer.values.length !== 1 ||
+                Boolean(answer.other?.trim()) ||
+                !(SECRET_USE_APPROVAL_DECISIONS as readonly string[]).includes(decision ?? "")
+              ) {
+                throw new HumanInputResponseValidationError(
+                  "INVALID_RESPONSE",
+                  "Choose one of the card's options to allow or deny this secret.",
+                );
+              }
+              secretApprovalAnswers.push({
+                approvalId,
+                decision: decision as SecretUseApprovalDecision,
+              });
+            }
+          }
+        }
         if (response.outcome === "answered" && secretAnswers.length > 0) {
           if (
             secretAnswers.some((answer) => answer.saveTo === "user") &&
@@ -39913,6 +39998,16 @@ export async function acceptSessionHumanInputResponse(
             workspaceId: input.workspaceId,
             subjectId: input.respondedBy,
             requestId: request.id,
+          });
+        }
+        for (const answer of secretApprovalAnswers) {
+          await decideSecretUseApprovalTx(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            approvalId: answer.approvalId,
+            decision: answer.decision,
+            subjectId: input.respondedBy,
+            now,
           });
         }
         await applySessionResponseMcpCredentialUpdatesInTransaction(
@@ -81617,9 +81712,23 @@ export async function applySessionTurnSettlement(
         return { action: "pending_steer_withdrawn" as const, events: [] as [] };
       }
 
-      const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => ({
-        ...request,
-        questions: request.questions.map((question) => {
+      // A secret approval card is bound to its stored request by question id;
+      // the host's own text replaces whatever the agent sent, so the person
+      // always sees what is really being approved.
+      const secretApprovals = await secretUseApprovalsForSessionTx(tx as unknown as Database, {
+        workspaceId,
+        sessionId: input.sessionId,
+        ids: (input.runState?.humanInputRequests ?? []).flatMap((request) =>
+          request.questions.flatMap((question) => {
+            const id = secretUseApprovalIdFromQuestionId(question.id);
+            return id === null ? [] : [id];
+          }),
+        ),
+      });
+      const approvalCardRequestIds = new Set<string>();
+      const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => {
+        let approvalCard = false;
+        const questions = request.questions.map((question) => {
           const parsed = HumanInputQuestionContract.parse(question);
           if (parsed.skillReview) {
             const canonical = canonicalSkillReviewQuestion(question);
@@ -81628,11 +81737,19 @@ export async function applySessionTurnSettlement(
             }
             return canonical;
           }
+          const approvalId = secretUseApprovalIdFromQuestionId(parsed.id);
+          const approval = approvalId === null ? undefined : secretApprovals.get(approvalId);
+          if (approval) {
+            approvalCard = true;
+            return secretUseApprovalHumanInput(secretUseApprovalView(approval)).questions[0]!;
+          }
           return parsed.kind === "text" || parsed.allowOther
             ? parsed
             : { ...parsed, allowOther: true };
-        }),
-      }));
+        });
+        if (approvalCard) approvalCardRequestIds.add(request.id);
+        return { ...request, questions, ...(approvalCard ? { allowSkip: false } : {}) };
+      });
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
@@ -82142,13 +82259,50 @@ export async function applySessionTurnSettlement(
           };
         }
       }
+      // The requested event feeds push, chat integrations and timelines, so
+      // an approval card's event carries the same host text as its row.
+      const canonicalApprovalRequests = new Map(
+        humanInputRequests
+          .filter((request) => approvalCardRequestIds.has(request.id))
+          .map((request) => [request.id, request]),
+      );
+      const turnEvents =
+        canonicalApprovalRequests.size === 0
+          ? input.events
+          : input.events.map((event) => {
+              if (event.type !== "session.humanInput.requested") return event;
+              const payload =
+                event.payload && typeof event.payload === "object"
+                  ? (event.payload as Record<string, unknown>)
+                  : null;
+              const request =
+                payload?.request && typeof payload.request === "object"
+                  ? (payload.request as Record<string, unknown>)
+                  : null;
+              const canonical =
+                typeof request?.id === "string"
+                  ? canonicalApprovalRequests.get(request.id)
+                  : undefined;
+              if (!payload || !request || !canonical) return event;
+              return {
+                ...event,
+                payload: {
+                  ...payload,
+                  request: {
+                    ...request,
+                    questions: canonical.questions,
+                    allowSkip: canonical.allowSkip,
+                  },
+                },
+              };
+            });
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
         ...terminalHumanInputEvents,
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
-        ...input.events,
+        ...turnEvents,
         ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
       ];
       const values = settlementEvents.map((event) => {
@@ -87531,7 +87685,11 @@ async function scheduledHumanWaitTargetInRlsContext(
   scopedDb: Database,
   workspaceId: string,
   turn: { id: string; sessionId: string; executionGeneration: number },
-): Promise<{ kind: "approval"; approvalId: string } | { kind: "input"; requestId: string } | null> {
+): Promise<
+  | { kind: "approval"; approvalId: string }
+  | { kind: "input"; requestId: string; denyQuestionIds: string[] | null }
+  | null
+> {
   const [runState] = await scopedDb
     .select({
       pendingApprovals: schema.agentRunStates.pendingApprovals,
@@ -87577,7 +87735,17 @@ async function scheduledHumanWaitTargetInRlsContext(
   const request = requests.find(
     (candidate) => !candidate.questions.some((question) => question.skillReview != null),
   );
-  return request ? { kind: "input", requestId: request.id } : null;
+  if (!request) return null;
+  // Secret approval cards can't be skipped; the timeout denies them, as it
+  // rejects a tool approval.
+  const approvalCards = request.questions.every(
+    (question) => secretUseApprovalIdFromQuestionId(question.id) !== null,
+  );
+  return {
+    kind: "input",
+    requestId: request.id,
+    denyQuestionIds: approvalCards ? request.questions.map((question) => question.id) : null,
+  };
 }
 
 /**
@@ -87694,7 +87862,15 @@ export async function expireScheduledRunHumanWait(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     requestId: target.requestId,
-    response: { outcome: "skipped" },
+    response: target.denyQuestionIds
+      ? {
+          outcome: "answered",
+          answers: target.denyQuestionIds.map((questionId) => ({
+            questionId,
+            values: ["deny"],
+          })),
+        }
+      : { outcome: "skipped" },
     respondedBy: "system:scheduled-approval-timeout",
     respondedByKind: "system",
     clientEventId,

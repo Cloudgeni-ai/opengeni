@@ -18,7 +18,7 @@ import {
 } from "./contract";
 import { FILE_FIELD_PREFIX, type MappedField, type MappedItem, mapItem } from "./mapping";
 import { nameKey, safeSecretName, totpUri } from "./naming";
-import { restrictToOperations } from "./operations";
+import { restrictToOperations } from "@opengeni/vaults";
 import {
   FullItemList,
   ITEM_HAS_FILES,

@@ -282,9 +282,7 @@ function providerCopy(code: VaultErrorCode, home: string | null): string | undef
     case "provider_conflict":
       return `This item changed in ${where}. Sync, then try again.`;
     case "provider_locked":
-      return home === "Bitwarden"
-        ? "Bitwarden is locked on the bridge. Unlock it there, then try again."
-        : `${Where} is locked. Unlock it, then try again.`;
+      return `${Where} is locked. Unlock it, then try again.`;
     case "provider_inventory_incomplete":
       return `Not every item in ${where} could be listed. Try again in a moment.`;
     case "provider_outcome_unknown":

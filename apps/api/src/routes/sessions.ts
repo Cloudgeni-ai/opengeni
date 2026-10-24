@@ -4263,6 +4263,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             authorization.canonicalManagedHumanSession ||
             authorization.canonicalLocalHumanSession ||
             isVerifiedDelegatedHumanAuthorization(authorization),
+          // An agent or personal key acting as the person is not the person
+          // for a secret approval card.
+          personSignedIn:
+            authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
           mcpCredentialUpdates,
