@@ -193,11 +193,16 @@ describe("file recording store", () => {
       ),
       whole,
     );
-    await writeFile(join(folder, "t0-c000002-s5043.part"), concat([whole, adtsFrame().slice(0, 9)]));
+    await writeFile(
+      join(folder, "t0-c000002-s5043.part"),
+      concat([whole, adtsFrame().slice(0, 9)]),
+    );
     await writeFile(join(folder, "t0-c000003-s5086.part"), new Uint8Array([0xff]));
     await store.recover();
     const chunks = await store.listChunks(RECORDING);
-    expect(chunks.map((chunk) => [chunk.chunkNumber, chunk.startMilliseconds, chunk.byteLength])).toEqual([
+    expect(
+      chunks.map((chunk) => [chunk.chunkNumber, chunk.startMilliseconds, chunk.byteLength]),
+    ).toEqual([
       [1, 5_000, 54],
       [2, 5_043, 54],
     ]);
@@ -296,7 +301,11 @@ function fakeServer() {
       state.created = request;
       return { id: request.recordingId } as never;
     },
-    async createRecordingUploads(_workspaceId, _recordingId, request: CreateRecordingUploadsRequest) {
+    async createRecordingUploads(
+      _workspaceId,
+      _recordingId,
+      request: CreateRecordingUploadsRequest,
+    ) {
       return {
         uploads: request.chunks.map((chunk) => ({
           chunkNumber: chunk.chunkNumber,

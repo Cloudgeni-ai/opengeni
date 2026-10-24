@@ -8,7 +8,12 @@ export const hasFfmpeg = spawnSync(ffmpegPath, ["-version"]).status === 0;
 
 /** A WebM/Opus tone, the way a browser MediaRecorder would produce it. */
 export function opusWebm(seconds: number, frequency = 440): Uint8Array {
-  return tone(seconds, frequency, ["-c:a", "libopus", "-b:a", "32k", "-ac", "1", "-f", "webm"], "webm");
+  return tone(
+    seconds,
+    frequency,
+    ["-c:a", "libopus", "-b:a", "32k", "-ac", "1", "-f", "webm"],
+    "webm",
+  );
 }
 
 /** An ADTS AAC tone, the stream a phone recorder writes. */
