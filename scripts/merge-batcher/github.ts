@@ -302,6 +302,7 @@ export class GitHubReader {
       get: (path) => this.get(path),
       batchWorkflow: this.config.workflow,
       baseBranch: this.config.baseBranch,
+      excludePrCiDemand: true,
     });
     result.scannedRuns = scan.scannedRuns;
     result.approvalOnlyRuns = scan.approvalOnlyRuns;
