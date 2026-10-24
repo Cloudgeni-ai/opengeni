@@ -38,7 +38,7 @@ describe("parseElevenLabsTranscript", () => {
         { text: "ja", type: "word", start: "bad", end: 1.6 },
       ],
     });
-    expect(result.languages).toEqual(["nor"]);
+    expect(result.languages).toEqual(["no"]);
     expect(result.audioMilliseconds).toBe(4250);
     expect(result.diarized).toBe(true);
     expect(result.words).toEqual([

@@ -36,6 +36,10 @@
       "types": "./src/expo.ts",
       "default": "./src/expo.ts"
     },
+    "./recordings": {
+      "types": "./src/recordings/index.ts",
+      "default": "./src/recordings/index.ts"
+    },
     "./ui": {
       "types": "./src/ui/index.ts",
       "default": "./src/ui/index.ts"

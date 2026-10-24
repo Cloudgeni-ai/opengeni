@@ -10,8 +10,10 @@
  *
  * - {@link createBrowserRecorder} captures the microphone and, where the
  *   browser can share it, a tab's or the system's audio, as separate tracks.
- * - Other hosts (React Native, desktop shells) feed their own encoded chunks
- *   to a {@link RecordingUploader} with {@link RecordingUploader.addChunk}.
+ * - Other hosts (React Native, desktop shells) implement {@link Recorder} on
+ *   their own capture and feed its encoded chunks to a {@link RecordingUploader}
+ *   with {@link RecordingUploader.addChunk}; a {@link RecorderPlatform} hands
+ *   such a recorder to the React hooks.
  */
 import type {
   CompleteRecordingChunksRequest,
@@ -325,6 +327,9 @@ export type RecordingChunk = {
   durationMilliseconds: number;
 };
 
+/** A chunk the local store holds, without its bytes (read them with `readChunk`). */
+export type StoredRecordingChunk = Omit<RecordingChunk, "bytes"> & { byteLength: number };
+
 /** What the local store knows about a recording until the server has all of it. */
 export type StoredRecording = {
   workspaceId: string;
@@ -340,7 +345,12 @@ export type StoredRecording = {
   updatedAt: number;
 };
 
-/** Durable local storage for chunks that are not confirmed by the server yet. */
+/**
+ * Durable local storage for chunks that are not confirmed by the server yet.
+ * Listing returns chunk details only, so a long recording that waited
+ * offline is never read into memory at once; bytes are read one chunk at a
+ * time as they are sent.
+ */
 export interface RecordingChunkStore {
   putRecording(recording: StoredRecording): Promise<void>;
   getRecording(recordingId: string): Promise<StoredRecording | null>;
@@ -349,12 +359,20 @@ export interface RecordingChunkStore {
   deleteRecording(recordingId: string): Promise<void>;
   putChunk(chunk: RecordingChunk): Promise<void>;
   /** Every stored chunk of the recording, ordered by track then chunk number. */
-  listChunks(recordingId: string): Promise<RecordingChunk[]>;
+  listChunks(recordingId: string): Promise<StoredRecordingChunk[]>;
+  /** One stored chunk's bytes; null once it is gone. */
+  readChunk(
+    recordingId: string,
+    trackNumber: number,
+    chunkNumber: number,
+  ): Promise<Uint8Array | null>;
   deleteChunks(recordingId: string, trackNumber: number, chunkNumbers: number[]): Promise<void>;
 }
 
 export type RecordingUploadStatus = {
   recordingId: string;
+  /** The server has the recording, so it shows in recording lists. */
+  created: boolean;
   /** Chunks stored locally and not confirmed by the server yet. */
   pendingChunks: number;
   pendingBytes: number;
@@ -365,6 +383,11 @@ export type RecordingUploadStatus = {
   /** A failure retrying cannot fix, such as the recording being deleted elsewhere. */
   failed: { code: string; message: string } | null;
   finalized: boolean;
+  /**
+   * Capture ended before any audio was recorded (stopped at once, or the app was
+   * killed first), so the empty recording was removed instead of finalized.
+   */
+  discarded: boolean;
 };
 
 const UPLOAD_BATCH = 50;
@@ -396,6 +419,7 @@ class PermanentRecordingError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly status: number | null = null,
   ) {
     super(message);
     this.name = "PermanentRecordingError";
@@ -408,6 +432,8 @@ class PermanentRecordingError extends Error {
  */
 export class RecordingUploader {
   private readonly pumps = new Map<string, Pump>();
+  /** The last metadata write per recording; each write waits for the one before. */
+  private readonly writes = new Map<string, Promise<unknown>>();
   private readonly listeners = new Set<(status: RecordingUploadStatus) => void>();
   private readonly fetchImpl: typeof fetch;
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -428,6 +454,36 @@ export class RecordingUploader {
   subscribe(listener: (status: RecordingUploadStatus) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Read, change and write one recording's stored record with no other write to
+   * it in between. Capture (chunk counts), stop (phase) and the upload pass
+   * (created) all update the same record concurrently; without this a slower
+   * write would put back a copy that loses the other's change, such as a stop.
+   */
+  private async mutate(
+    recordingId: string,
+    change: (recording: StoredRecording) => StoredRecording | null,
+  ): Promise<StoredRecording | null> {
+    const store = this.options.store;
+    const previous = this.writes.get(recordingId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const current = await store.getRecording(recordingId);
+        if (!current) return null;
+        const changed = change(current);
+        if (!changed) return current;
+        await store.putRecording(changed);
+        return changed;
+      });
+    this.writes.set(recordingId, next);
+    try {
+      return await next;
+    } finally {
+      if (this.writes.get(recordingId) === next) this.writes.delete(recordingId);
+    }
   }
 
   /** Stop background work. Stored chunks stay for a later resume(). */
@@ -458,15 +514,14 @@ export class RecordingUploader {
   async addChunk(chunk: RecordingChunk): Promise<void> {
     const store = this.options.store;
     await store.putChunk(chunk);
-    const recording = await store.getRecording(chunk.recordingId);
-    if (recording) {
+    await this.mutate(chunk.recordingId, (recording) => {
       const count = Math.max(recording.chunkCounts[chunk.trackNumber] ?? 0, chunk.chunkNumber + 1);
-      await store.putRecording({
+      return {
         ...recording,
         chunkCounts: { ...recording.chunkCounts, [chunk.trackNumber]: count },
         updatedAt: Date.now(),
-      });
-    }
+      };
+    });
     this.kick(chunk.recordingId);
   }
 
@@ -479,16 +534,16 @@ export class RecordingUploader {
     recordingId: string,
     options: { endedAt?: Date; signal?: AbortSignal } = {},
   ): Promise<RecordingUploadStatus> {
-    const store = this.options.store;
-    const recording = await store.getRecording(recordingId);
-    if (recording && recording.phase === "capturing") {
-      await store.putRecording({
-        ...recording,
-        phase: "stopped",
-        endedAt: (options.endedAt ?? new Date()).toISOString(),
-        updatedAt: Date.now(),
-      });
-    }
+    await this.mutate(recordingId, (recording) =>
+      recording.phase === "capturing"
+        ? {
+            ...recording,
+            phase: "stopped",
+            endedAt: (options.endedAt ?? new Date()).toISOString(),
+            updatedAt: Date.now(),
+          }
+        : null,
+    );
     return await this.settled(recordingId, options.signal);
   }
 
@@ -518,12 +573,16 @@ export class RecordingUploader {
     for (const recording of await store.listRecordings()) {
       if (await this.captureActive(recording.recordingId)) continue;
       if (recording.phase === "capturing") {
-        await store.putRecording({
-          ...recording,
-          phase: "stopped",
-          endedAt: new Date(recording.updatedAt).toISOString(),
-          updatedAt: Date.now(),
-        });
+        await this.mutate(recording.recordingId, (current) =>
+          current.phase === "capturing"
+            ? {
+                ...current,
+                phase: "stopped",
+                endedAt: new Date(current.updatedAt).toISOString(),
+                updatedAt: Date.now(),
+              }
+            : null,
+        );
       }
       resumed.push(recording.recordingId);
       this.kick(recording.recordingId);
@@ -547,7 +606,9 @@ export class RecordingUploader {
     const pump = this.kick(recordingId);
     for (;;) {
       signal?.throwIfAborted();
-      if (pump.status.finalized || pump.status.failed) return pump.status;
+      if (pump.status.finalized || pump.status.discarded || pump.status.failed) {
+        return pump.status;
+      }
       await new Promise<void>((done, fail) => {
         const onAbort = () => fail(signal!.reason);
         signal?.addEventListener("abort", onAbort, { once: true });
@@ -570,25 +631,32 @@ export class RecordingUploader {
         waiters: [],
         status: {
           recordingId,
+          created: false,
           pendingChunks: 0,
           pendingBytes: 0,
           uploading: false,
           retryingAfterError: null,
           failed: null,
           finalized: false,
+          discarded: false,
         },
       };
       this.pumps.set(recordingId, pump);
     }
     pump.again = true;
     pump.wake?.();
-    if (!pump.running && !this.disposed) {
-      const current = pump;
-      current.running = this.run(recordingId, current).finally(() => {
-        current.running = null;
-      });
-    }
+    this.startPump(recordingId, pump);
     return pump;
+  }
+
+  private startPump(recordingId: string, pump: Pump): void {
+    if (pump.running || this.disposed) return;
+    pump.running = this.run(recordingId, pump).finally(() => {
+      pump.running = null;
+      // A kick that landed after the last pass decided it was done, but before
+      // this cleanup ran, found the pump still running: serve it now.
+      if (pump.again) this.startPump(recordingId, pump);
+    });
   }
 
   private update(pump: Pump, patch: Partial<RecordingUploadStatus>): void {
@@ -641,13 +709,21 @@ export class RecordingUploader {
     }
     if (!recording.created) {
       await guarded(() => client.createRecording(recording!.workspaceId, recording!.create));
-      recording = { ...recording, created: true, updatedAt: Date.now() };
-      await store.putRecording(recording);
+      recording = await this.mutate(recordingId, (current) => ({
+        ...current,
+        created: true,
+        updatedAt: Date.now(),
+      }));
+      if (!recording) {
+        this.update(pump, { pendingChunks: 0, pendingBytes: 0, uploading: false, finalized: true });
+        return true;
+      }
     }
+    if (!pump.status.created) this.update(pump, { created: true });
     let chunks = await store.listChunks(recordingId);
     this.update(pump, {
       pendingChunks: chunks.length,
-      pendingBytes: chunks.reduce((sum, chunk) => sum + chunk.bytes.byteLength, 0),
+      pendingBytes: chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
       uploading: chunks.length > 0,
     });
     let alreadyFinalized = false;
@@ -669,12 +745,17 @@ export class RecordingUploader {
       chunks = await store.listChunks(recordingId);
       this.update(pump, {
         pendingChunks: chunks.length,
-        pendingBytes: chunks.reduce((sum, chunk) => sum + chunk.bytes.byteLength, 0),
+        pendingBytes: chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
       });
     }
     this.update(pump, { uploading: false });
     recording = (await store.getRecording(recordingId)) ?? recording;
     if (recording.phase !== "stopped") return !pump.again;
+    const captured = Object.values(recording.chunkCounts).reduce((sum, count) => sum + count, 0);
+    if (captured === 0 && !alreadyFinalized) {
+      await this.removeEmpty(recording, pump);
+      return true;
+    }
     const finalized = await guarded(() =>
       client.finalizeRecording(recording!.workspaceId, recordingId, {
         ...(recording!.endedAt ? { endedAt: recording!.endedAt } : {}),
@@ -685,15 +766,41 @@ export class RecordingUploader {
       }),
     ).catch((error: unknown) => {
       if (alreadyFinalized && error instanceof PermanentRecordingError) return null;
+      if (error instanceof PermanentRecordingError && error.code === "empty_recording") {
+        return "empty" as const;
+      }
       throw error;
     });
+    if (finalized === "empty") {
+      await this.removeEmpty(recording, pump);
+      return true;
+    }
     if (finalized) this.finalized.set(recordingId, finalized);
     await store.deleteRecording(recordingId);
     this.update(pump, { pendingChunks: 0, pendingBytes: 0, finalized: true });
     return true;
   }
 
-  private async uploadBatch(recording: StoredRecording, batch: RecordingChunk[]): Promise<void> {
+  /** Remove a recording that ended without any audio, on the server and here. */
+  private async removeEmpty(recording: StoredRecording, pump: Pump): Promise<void> {
+    const { client, store } = this.options;
+    if (recording.created) {
+      await guarded(() =>
+        client.deleteRecording(recording.workspaceId, recording.recordingId),
+      ).catch((error: unknown) => {
+        // Already gone (deleted elsewhere): nothing is left to remove there.
+        if (error instanceof PermanentRecordingError && error.status === 404) return;
+        throw error;
+      });
+    }
+    await store.deleteRecording(recording.recordingId);
+    this.update(pump, { pendingChunks: 0, pendingBytes: 0, discarded: true });
+  }
+
+  private async uploadBatch(
+    recording: StoredRecording,
+    batch: StoredRecordingChunk[],
+  ): Promise<void> {
     const { client, store } = this.options;
     const trackNumber = batch[0]!.trackNumber;
     const { uploads } = await guarded(() =>
@@ -701,7 +808,7 @@ export class RecordingUploader {
         trackNumber,
         chunks: batch.map((chunk) => ({
           chunkNumber: chunk.chunkNumber,
-          byteLength: chunk.bytes.byteLength,
+          byteLength: chunk.byteLength,
           sha256: chunk.sha256,
           startMilliseconds: Math.max(0, Math.round(chunk.startMilliseconds)),
           durationMilliseconds: Math.max(0, Math.round(chunk.durationMilliseconds)),
@@ -717,10 +824,13 @@ export class RecordingUploader {
         put.push(upload.chunkNumber);
         continue;
       }
+      const bytes = await store.readChunk(recording.recordingId, trackNumber, chunk.chunkNumber);
+      // Gone since the listing (another uploader confirmed it): the next pass lists again.
+      if (!bytes) continue;
       const response = await this.fetchImpl(upload.url, {
         method: "PUT",
         headers: upload.headers,
-        body: chunk.bytes as unknown as BodyInit,
+        body: bytes as unknown as BodyInit,
       });
       if (!response.ok) {
         // An expired or refused URL: the next pass reserves again and gets a fresh one.
@@ -745,13 +855,26 @@ export class RecordingUploader {
 }
 
 /** Turn API refusals that retrying cannot fix into a permanent error. */
+/**
+ * Refusals that time or a fresh credential fix: an expired or not yet loaded
+ * sign-in, a timeout, and rate limiting. The recording itself is fine, so
+ * these are retried with backoff instead of failing the upload.
+ */
+const RETRYABLE_REFUSALS = new Set([401, 408, 425, 429]);
+
 async function guarded<T>(work: () => Promise<T>): Promise<T> {
   try {
     return await work();
   } catch (error) {
     const status = (error as { status?: unknown }).status;
     const retryable = (error as { retryable?: unknown }).retryable;
-    if (typeof status === "number" && status >= 400 && status < 500 && retryable !== true) {
+    if (
+      typeof status === "number" &&
+      status >= 400 &&
+      status < 500 &&
+      retryable !== true &&
+      !RETRYABLE_REFUSALS.has(status)
+    ) {
       const details = (error as { details?: { code?: unknown } }).details;
       const code =
         typeof details?.code === "string"
@@ -759,7 +882,7 @@ async function guarded<T>(work: () => Promise<T>): Promise<T> {
           : typeof (error as { code?: unknown }).code === "string"
             ? String((error as { code: string }).code)
             : `http_${status}`;
-      throw new PermanentRecordingError(code, errorMessage(error));
+      throw new PermanentRecordingError(code, errorMessage(error), status);
     }
     throw error;
   }
@@ -798,7 +921,11 @@ export function createMemoryRecordingChunkStore(): RecordingChunkStore {
     async listChunks(recordingId) {
       return [...chunks.values()]
         .filter((chunk) => chunk.recordingId === recordingId)
-        .sort((a, b) => a.trackNumber - b.trackNumber || a.chunkNumber - b.chunkNumber);
+        .sort((a, b) => a.trackNumber - b.trackNumber || a.chunkNumber - b.chunkNumber)
+        .map(({ bytes, ...chunk }) => ({ ...chunk, byteLength: bytes.byteLength }));
+    },
+    async readChunk(recordingId, trackNumber, chunkNumber) {
+      return chunks.get(key(recordingId, trackNumber, chunkNumber))?.bytes ?? null;
     },
     async deleteChunks(recordingId, trackNumber, chunkNumbers) {
       for (const chunk of chunkNumbers) chunks.delete(key(recordingId, trackNumber, chunk));
@@ -806,7 +933,8 @@ export function createMemoryRecordingChunkStore(): RecordingChunkStore {
   };
 }
 
-const IDB_VERSION = 1;
+// Version 2 keeps chunk bytes apart from chunk details, so listing never reads audio.
+const IDB_VERSION = 2;
 
 /**
  * A browser store in IndexedDB that survives reloads, crashes and closed tabs.
@@ -823,7 +951,7 @@ export function createIndexedDbRecordingChunkStore(
   const open = () =>
     (opening ??= new Promise<IDBDatabase>((resolve, reject) => {
       const request = factory.open(name, IDB_VERSION);
-      request.onupgradeneeded = () => {
+      request.onupgradeneeded = (event) => {
         const db = request.result;
         if (!db.objectStoreNames.contains("recordings")) {
           db.createObjectStore("recordings", { keyPath: "recordingId" });
@@ -833,6 +961,25 @@ export function createIndexedDbRecordingChunkStore(
             keyPath: ["recordingId", "trackNumber", "chunkNumber"],
           });
           chunks.createIndex("recordingId", "recordingId");
+        }
+        if (!db.objectStoreNames.contains("chunkBytes")) {
+          db.createObjectStore("chunkBytes");
+        }
+        if (event.oldVersion === 1) {
+          // Version 1 kept the bytes on the chunk record: move them out.
+          const tx = request.transaction!;
+          const bytesStore = tx.objectStore("chunkBytes");
+          const cursor = tx.objectStore("chunks").openCursor();
+          cursor.onsuccess = () => {
+            const current = cursor.result;
+            if (!current) return;
+            const { bytes, ...chunk } = current.value as RecordingChunk;
+            if (bytes) {
+              bytesStore.put(bytes, [chunk.recordingId, chunk.trackNumber, chunk.chunkNumber]);
+              current.update({ ...chunk, byteLength: bytes.byteLength });
+            }
+            current.continue();
+          };
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -872,28 +1019,50 @@ export function createIndexedDbRecordingChunkStore(
       );
     },
     async deleteRecording(recordingId) {
-      await run(["recordings", "chunks"], "readwrite", (tx) => {
+      await run(["recordings", "chunks", "chunkBytes"], "readwrite", (tx) => {
         const chunks = tx.objectStore("chunks");
+        const bytes = tx.objectStore("chunkBytes");
         const keys = chunks.index("recordingId").getAllKeys(recordingId);
         keys.onsuccess = () => {
-          for (const key of keys.result) chunks.delete(key);
+          for (const key of keys.result) {
+            chunks.delete(key);
+            bytes.delete(key);
+          }
         };
         tx.objectStore("recordings").delete(recordingId);
       });
     },
     async putChunk(chunk) {
-      await run(["chunks"], "readwrite", (tx) => tx.objectStore("chunks").put(chunk));
+      const { bytes, ...details } = chunk;
+      await run(["chunks", "chunkBytes"], "readwrite", (tx) => {
+        tx.objectStore("chunkBytes").put(bytes, [
+          chunk.recordingId,
+          chunk.trackNumber,
+          chunk.chunkNumber,
+        ]);
+        tx.objectStore("chunks").put({ ...details, byteLength: bytes.byteLength });
+      });
     },
     async listChunks(recordingId) {
       // The index orders equal keys by primary key: track number, then chunk number.
-      return await run<RecordingChunk[]>(["chunks"], "readonly", (tx) =>
+      return await run<StoredRecordingChunk[]>(["chunks"], "readonly", (tx) =>
         tx.objectStore("chunks").index("recordingId").getAll(recordingId),
       );
     },
+    async readChunk(recordingId, trackNumber, chunkNumber) {
+      const found = await run<Uint8Array | undefined>(["chunkBytes"], "readonly", (tx) =>
+        tx.objectStore("chunkBytes").get([recordingId, trackNumber, chunkNumber]),
+      );
+      return found ?? null;
+    },
     async deleteChunks(recordingId, trackNumber, chunkNumbers) {
-      await run(["chunks"], "readwrite", (tx) => {
+      await run(["chunks", "chunkBytes"], "readwrite", (tx) => {
         const chunks = tx.objectStore("chunks");
-        for (const chunk of chunkNumbers) chunks.delete([recordingId, trackNumber, chunk]);
+        const bytes = tx.objectStore("chunkBytes");
+        for (const chunk of chunkNumbers) {
+          chunks.delete([recordingId, trackNumber, chunk]);
+          bytes.delete([recordingId, trackNumber, chunk]);
+        }
       });
     },
   };
@@ -933,9 +1102,9 @@ function holdRecordingLock(recordingId: string): { release: () => void } {
   return { release: () => release() };
 }
 
-// --- Browser capture -------------------------------------------------------------
+// --- Capture -------------------------------------------------------------------
 
-export type BrowserRecorderState =
+export type RecorderState =
   | "idle"
   | "starting"
   | "recording"
@@ -944,17 +1113,23 @@ export type BrowserRecorderState =
   | "stopped"
   | "failed";
 
-export type BrowserRecorderSnapshot = {
-  state: BrowserRecorderState;
+export type RecorderSnapshot = {
+  state: RecorderState;
   recordingId: string | null;
   /** Recorded time, excluding pauses. */
   elapsedMilliseconds: number;
+  /**
+   * Why capture is paused: the person paused it, or the system took the
+   * microphone (a phone call, another app), in which case capture resumes by
+   * itself when it can. Null or absent while not paused.
+   */
+  pauseReason?: "person" | "interruption" | null;
   tracks: Array<{ trackNumber: number; source: RecordingTrackSource; label: string }>;
   upload: RecordingUploadStatus | null;
-  error: { code: BrowserRecorderErrorCode; message: string } | null;
+  error: { code: RecorderErrorCode; message: string } | null;
 };
 
-export type BrowserRecorderErrorCode =
+export type RecorderErrorCode =
   | "microphone_denied"
   | "microphone_unavailable"
   | "system_audio_unavailable"
@@ -963,7 +1138,7 @@ export type BrowserRecorderErrorCode =
   | "capture_failed"
   | "upload_failed";
 
-export type BrowserRecorderOptions = {
+export type RecorderOptions = {
   client: RecordingTransport;
   workspaceId: string;
   /** Defaults to IndexedDB, so nothing is lost on reload. */
@@ -983,11 +1158,11 @@ export type BrowserRecorderOptions = {
   timesliceMilliseconds?: number;
   /** Keep the screen awake while recording on phones. Default: on. */
   keepAwake?: boolean;
-  onChange?: (snapshot: BrowserRecorderSnapshot) => void;
+  onChange?: (snapshot: RecorderSnapshot) => void;
 };
 
-export type BrowserRecorder = {
-  readonly snapshot: BrowserRecorderSnapshot;
+export type Recorder = {
+  readonly snapshot: RecorderSnapshot;
   start(): Promise<void>;
   pause(): void;
   resume(): void;
@@ -998,6 +1173,37 @@ export type BrowserRecorder = {
   /** Current input level per track, 0 to 1, for a meter. */
   levels(): Record<number, number>;
 };
+
+/**
+ * One platform's capture for the recorder hooks: the browser's by default
+ * ({@link browserRecorderPlatform}); a native app passes its own.
+ */
+export type RecorderPlatform = {
+  /** This device can record audio at all. */
+  supported: boolean;
+  /** This device can record a tab's or the system's audio as its own track. */
+  systemAudioSupported: boolean;
+  createRecorder(options: RecorderOptions): Recorder;
+  /** Used for the presigned uploads. Defaults to the global fetch. */
+  fetch?: typeof fetch;
+  /** The local store chunks wait in until the server has them. */
+  createStore(): RecordingChunkStore;
+  /** Recordings a live recorder in this app still owns, which resuming leaves alone. */
+  isCaptureActive?(recordingId: string): Promise<boolean>;
+  /** Save what a capture cut short (a crash, a killed app) left half-written, before resuming. */
+  recover?(store: RecordingChunkStore): Promise<void>;
+};
+
+/** @deprecated Use {@link RecorderState}. */
+export type BrowserRecorderState = RecorderState;
+/** @deprecated Use {@link RecorderSnapshot}. */
+export type BrowserRecorderSnapshot = RecorderSnapshot;
+/** @deprecated Use {@link RecorderErrorCode}. */
+export type BrowserRecorderErrorCode = RecorderErrorCode;
+/** @deprecated Use {@link RecorderOptions}. */
+export type BrowserRecorderOptions = RecorderOptions;
+/** @deprecated Use {@link Recorder}. */
+export type BrowserRecorder = Recorder;
 
 const PREFERRED_MIME_TYPES = [
   "audio/webm;codecs=opus",
@@ -1047,8 +1253,8 @@ type TrackCapture = {
  * browser, each as its own track, saving every few seconds locally and
  * uploading in the background.
  */
-export function createBrowserRecorder(options: BrowserRecorderOptions): BrowserRecorder {
-  let snapshot: BrowserRecorderSnapshot = {
+export function createBrowserRecorder(options: RecorderOptions): Recorder {
+  let snapshot: RecorderSnapshot = {
     state: "idle",
     recordingId: null,
     elapsedMilliseconds: 0,
@@ -1056,7 +1262,7 @@ export function createBrowserRecorder(options: BrowserRecorderOptions): BrowserR
     upload: null,
     error: null,
   };
-  const emit = (patch: Partial<BrowserRecorderSnapshot>) => {
+  const emit = (patch: Partial<RecorderSnapshot>) => {
     snapshot = { ...snapshot, ...patch };
     options.onChange?.(snapshot);
   };
@@ -1095,7 +1301,7 @@ export function createBrowserRecorder(options: BrowserRecorderOptions): BrowserR
     }
   };
 
-  const fail = (code: BrowserRecorderErrorCode, message: string) => {
+  const fail = (code: RecorderErrorCode, message: string) => {
     emit({ state: "failed", error: { code, message } });
   };
 
@@ -1327,7 +1533,7 @@ export function createBrowserRecorder(options: BrowserRecorderOptions): BrowserR
       for (const capture of captures)
         if (capture.recorder.state === "recording") capture.recorder.pause();
       pausedAt = performance.now();
-      emit({ state: "paused", elapsedMilliseconds: elapsed() });
+      emit({ state: "paused", pauseReason: "person", elapsedMilliseconds: elapsed() });
     },
 
     resume() {
@@ -1336,7 +1542,7 @@ export function createBrowserRecorder(options: BrowserRecorderOptions): BrowserR
       pausedAt = null;
       for (const capture of captures)
         if (capture.recorder.state === "paused") capture.recorder.resume();
-      emit({ state: "recording" });
+      emit({ state: "recording", pauseReason: null });
     },
 
     async stop(stopOptions = {}) {
@@ -1401,10 +1607,22 @@ export function createBrowserRecorder(options: BrowserRecorderOptions): BrowserR
 
 class CaptureError extends Error {
   constructor(
-    readonly code: BrowserRecorderErrorCode,
+    readonly code: RecorderErrorCode,
     message: string,
   ) {
     super(message);
     this.name = "CaptureError";
   }
+}
+
+/** The browser's capture: MediaRecorder, IndexedDB and cross-tab capture locks. */
+export function browserRecorderPlatform(): RecorderPlatform {
+  const browser = typeof window !== "undefined";
+  return {
+    supported: browser && preferredRecordingMimeType() !== null,
+    systemAudioSupported: browser && canCaptureSystemAudio(),
+    createRecorder: createBrowserRecorder,
+    createStore: () => createIndexedDbRecordingChunkStore(),
+    isCaptureActive: recordingLockHeld,
+  };
 }

@@ -1,14 +1,15 @@
-import type {
-  Recording,
-  RecordingDiarization,
-  RecordingPerson,
-  RecordingSpeaker,
-  RecordingTrack,
-  RecordingTranscriptionOptions,
-  RecordingTranscriptPage,
-  RecordingTranscriptSegment,
-  RecordingTranscriptVersion,
-  RecordingVisibility,
+import {
+  defaultRecordingSpeakerName,
+  type Recording,
+  type RecordingDiarization,
+  type RecordingPerson,
+  type RecordingSpeaker,
+  type RecordingTrack,
+  type RecordingTranscriptionOptions,
+  type RecordingTranscriptPage,
+  type RecordingTranscriptSegment,
+  type RecordingTranscriptVersion,
+  type RecordingVisibility,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, inArray, isNotNull, lt, ne, or, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
@@ -1566,7 +1567,7 @@ async function resolveVersion(
 }
 
 async function speakersFor(tx: Database, version: VersionRow): Promise<RecordingSpeaker[]> {
-  const [labelRows, overrideRows, assignments] = await Promise.all([
+  const [labelRows, overrideRows, assignments, tracks] = await Promise.all([
     tx
       .selectDistinct({ label: schema.recordingTranscriptSegments.speakerLabel })
       .from(schema.recordingTranscriptSegments)
@@ -1598,15 +1599,30 @@ async function speakersFor(tx: Database, version: VersionRow): Promise<Recording
         ),
       )
       .where(eq(schema.recordingSpeakerAssignments.versionId, version.id)),
+    tx
+      .select({
+        trackNumber: schema.recordingTracks.trackNumber,
+        source: schema.recordingTracks.source,
+      })
+      .from(schema.recordingTracks)
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, version.workspaceId),
+          eq(schema.recordingTracks.recordingId, version.recordingId),
+        ),
+      ),
   ]);
   const labels = new Set<string>();
   for (const row of [...labelRows, ...overrideRows]) if (row.label) labels.add(row.label);
   const byLabel = new Map(assignments.map((assignment) => [assignment.label, assignment]));
-  return [...labels].sort(compareSpeakerLabels).map((label, index) => {
+  return [...labels].sort(compareSpeakerLabels).map((label) => {
     const assignment = byLabel.get(label);
     return {
       label,
-      name: assignment?.personName ?? assignment?.displayName ?? `Speaker ${index + 1}`,
+      name:
+        assignment?.personName ??
+        assignment?.displayName ??
+        defaultRecordingSpeakerName(label, tracks),
       personId: assignment?.personId ?? null,
       source: assignment?.source ?? null,
       confidence: assignment?.confidence ?? null,

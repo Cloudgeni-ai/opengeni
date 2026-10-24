@@ -13,12 +13,13 @@ import {
   formatClock,
   formatDuration,
   groupTranscriptTurns,
+  languageName,
   meetingPhase,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
   transcriptErrorText,
-} from "./meeting-model";
+} from "../src/recordings-model";
 
 function segment(
   index: number,
@@ -116,10 +117,10 @@ describe("formatting", () => {
   });
 
   test("durations read as seconds, minutes, then hours", () => {
-    expect(formatDuration(45_000)).toBe("45 sec");
-    expect(formatDuration(12 * 60_000)).toBe("12 min");
-    expect(formatDuration(65 * 60_000)).toBe("1 h 5 min");
-    expect(formatDuration(120 * 60_000)).toBe("2 h");
+    expect(formatDuration(45_000)).toBe("45\u00a0sec");
+    expect(formatDuration(12 * 60_000)).toBe("12\u00a0min");
+    expect(formatDuration(65 * 60_000)).toBe("1\u00a0h 5\u00a0min");
+    expect(formatDuration(120 * 60_000)).toBe("2\u00a0h");
   });
 });
 
@@ -144,6 +145,39 @@ describe("meetingPhase", () => {
 });
 
 describe("speakers", () => {
+  test("language names read the same with or without Intl.DisplayNames", () => {
+    expect(languageName("en")).toBe("English");
+    expect(languageName("eng")).toBe("English");
+    expect(languageName("zz")).toBe("zz");
+    const displayNames = Intl.DisplayNames;
+    const canonical = Intl.getCanonicalLocales;
+    try {
+      // Hermes, the phone's JavaScript engine, has no Intl.DisplayNames and
+      // leaves three-letter codes as they are.
+      Reflect.deleteProperty(Intl, "DisplayNames");
+      Object.defineProperty(Intl, "getCanonicalLocales", {
+        value: (code: string) => [code],
+        configurable: true,
+        writable: true,
+      });
+      expect(languageName("eng")).toBe("English");
+      expect(languageName("nob")).toBe("Norwegian Bokmål");
+      expect(languageName("en-GB")).toBe("English");
+      expect(languageName("zz")).toBe("zz");
+    } finally {
+      Object.defineProperty(Intl, "DisplayNames", {
+        value: displayNames,
+        configurable: true,
+        writable: true,
+      });
+      Object.defineProperty(Intl, "getCanonicalLocales", {
+        value: canonical,
+        configurable: true,
+        writable: true,
+      });
+    }
+  });
+
   const speakers = [
     {
       label: "speaker_0",
@@ -152,7 +186,15 @@ describe("speakers", () => {
       source: "confirmed" as const,
       confidence: null,
     },
-    { label: "speaker_1", name: "speaker_1", personId: null, source: null, confidence: null },
+    // The server's default name for a label nobody named.
+    { label: "speaker_1", name: "Speaker 2", personId: null, source: null, confidence: null },
+    {
+      label: "speaker_2",
+      name: "Pilot customer",
+      personId: null,
+      source: "confirmed" as const,
+      confidence: null,
+    },
   ];
 
   test("named labels show the name; model labels count from one", () => {
@@ -168,10 +210,12 @@ describe("speakers", () => {
     expect(defaultSpeakerName("track-4", tracks)).toBe("Track 5");
   });
 
-  test("a label is named only by a person or a real name", () => {
+  test("a label is named only by a person or a name someone gave it", () => {
     expect(speakerIsNamed("speaker_0", speakers)).toBe(true);
     expect(speakerIsNamed("speaker_1", speakers)).toBe(false);
+    expect(speakerIsNamed("speaker_2", speakers)).toBe(true);
     expect(speakerIsNamed("speaker_9", speakers)).toBe(false);
+    expect(speakerDisplayName("speaker_2", speakers, tracks)).toBe("Pilot customer");
   });
 
   test("colors follow first appearance and wrap after six", () => {

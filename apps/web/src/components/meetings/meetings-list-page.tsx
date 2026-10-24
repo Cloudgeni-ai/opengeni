@@ -7,6 +7,9 @@ import { useEffect, useRef, useState } from "react";
 import { AudioLinesIcon, LockIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import type { Recording } from "@opengeni/contracts";
 import {
+  formatDuration,
+  meetingPhase,
+  meetingStatusLabel,
   useRecordings,
   useRecordingsClient,
   type RecordingsClientOverride,
@@ -27,7 +30,6 @@ import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
-import { formatDuration, meetingPhase, meetingStatusLabel } from "./meeting-model";
 import { RecorderPanel } from "./recorder-panel";
 import { useMeetingRecorder } from "./recorder-context";
 
@@ -88,8 +90,8 @@ export function MeetingsListPage({
   useEffect(() => {
     if (finishedCount > 0) void refresh();
   }, [finishedCount, refresh]);
-  // A recording that just started shows up in the list right away.
-  const liveId = recorder?.recordingId ?? null;
+  // A recording that just started shows up in the list as soon as the server has it.
+  const liveId = recorder?.upload?.created ? recorder.recordingId : null;
   const lastLiveId = useRef<string | null>(null);
   useEffect(() => {
     if (liveId && liveId !== lastLiveId.current) {

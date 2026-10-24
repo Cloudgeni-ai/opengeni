@@ -232,6 +232,21 @@ describe("RecordingUploader", () => {
     expect(server.stored.has("0/0")).toBe(true);
   });
 
+  test("the status says when the server has the recording, before any audio is sent", async () => {
+    const server = fakeServer();
+    const { uploader } = uploaderFor(server);
+    const createdBeforeAudio: boolean[] = [];
+    uploader.subscribe((status) => {
+      if (status.created && server.stored.size === 0) createdBeforeAudio.push(true);
+    });
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    expect(uploader.status(RECORDING)?.created).toBe(false);
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    const status = await uploader.finish(RECORDING);
+    expect(status.created).toBe(true);
+    expect(createdBeforeAudio.length).toBeGreaterThan(0);
+  });
+
   test("resume() finishes a recording an earlier page left behind", async () => {
     const server = fakeServer();
     const store = createMemoryRecordingChunkStore();
@@ -293,6 +308,64 @@ describe("RecordingUploader", () => {
     expect((await store.listChunks(RECORDING)).length).toBe(1);
   });
 
+  test("a sign-in that is not valid yet is retried, not failed", async () => {
+    const server = fakeServer();
+    server.state.refuse = { status: 401, code: "unauthorized" };
+    // Backoff has to yield here, or retrying the refusal would never let the test run.
+    const uploader = new RecordingUploader({
+      client: server.client,
+      store: createMemoryRecordingChunkStore(),
+      fetch: server.fetchImpl,
+      sleep: () => new Promise((done) => setTimeout(done, 1)),
+      isCaptureActive: async () => false,
+    });
+    const seen: Array<string | null> = [];
+    uploader.subscribe((status) => seen.push(status.retryingAfterError));
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    for (let attempt = 0; attempt < 50 && !seen.some(Boolean); attempt += 1) {
+      await new Promise((done) => setTimeout(done, 1));
+    }
+    // The app signs in again (or its token loads): the same upload carries on.
+    server.state.refuse = null;
+    const status = await uploader.finish(RECORDING);
+    expect(seen.some((error) => error?.includes("unauthorized"))).toBe(true);
+    expect(status.failed).toBeNull();
+    expect(status.finalized).toBe(true);
+  });
+
+  test("a recording stopped before any audio is removed instead of finalized", async () => {
+    const server = fakeServer();
+    const { uploader, store } = uploaderFor(server);
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    const status = await uploader.finish(RECORDING);
+    expect(status.discarded).toBe(true);
+    expect(status.finalized).toBe(false);
+    expect(status.failed).toBeNull();
+    expect(server.state.calls).not.toContain("finalize");
+    expect(server.state.deleted).toBe(true);
+    expect(await store.getRecording(RECORDING)).toBeNull();
+  });
+
+  test("resume removes an earlier run's recording that never captured audio", async () => {
+    const server = fakeServer();
+    const store = createMemoryRecordingChunkStore();
+    const first = uploaderFor(server, store).uploader;
+    await first.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    for (let attempt = 0; attempt < 20 && server.state.created === 0; attempt += 1) {
+      await new Promise((done) => setTimeout(done, 1));
+    }
+    // The app was killed while capturing: a new run finds it still "capturing".
+    const next = uploaderFor(server, store).uploader;
+    expect(await next.resume()).toEqual([RECORDING]);
+    for (let attempt = 0; attempt < 50 && !next.status(RECORDING)?.discarded; attempt += 1) {
+      await new Promise((done) => setTimeout(done, 1));
+    }
+    expect(next.status(RECORDING)?.discarded).toBe(true);
+    expect(server.state.deleted).toBe(true);
+    expect(await store.listRecordings()).toEqual([]);
+  });
+
   test("discard removes the local copy and the server's", async () => {
     const server = fakeServer();
     const { uploader, store } = uploaderFor(server);
@@ -333,7 +406,9 @@ describe("RecordingUploader", () => {
       "0/1",
       "1/0",
     ]);
-    expect(new TextDecoder().decode(chunks[0]!.bytes)).toBe("m0");
+    expect(chunks[0]).not.toHaveProperty("bytes");
+    expect(chunks[0]!.byteLength).toBe(2);
+    expect(new TextDecoder().decode((await reopened.readChunk(RECORDING, 0, 0))!)).toBe("m0");
     expect((await reopened.getRecording(RECORDING))?.chunkCounts).toEqual({ 0: 2, 1: 1 });
 
     const { uploader } = uploaderFor(server, reopened);
@@ -341,5 +416,53 @@ describe("RecordingUploader", () => {
     expect((await uploader.finish(RECORDING)).finalized).toBe(true);
     expect(await reopened.listRecordings()).toEqual([]);
     expect(await reopened.listChunks(RECORDING)).toEqual([]);
+    expect(await reopened.readChunk(RECORDING, 0, 0)).toBeNull();
+  });
+
+  test("an IndexedDB store from the first version keeps its chunks after the upgrade", async () => {
+    const factory = new IDBFactory();
+    // The first version's layout: chunk records carried their bytes.
+    await new Promise<void>((resolve, reject) => {
+      const request = factory.open("old", 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        db.createObjectStore("recordings", { keyPath: "recordingId" });
+        db.createObjectStore("chunks", {
+          keyPath: ["recordingId", "trackNumber", "chunkNumber"],
+        }).createIndex("recordingId", "recordingId");
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction(["chunks"], "readwrite");
+        tx.objectStore("chunks").put({
+          recordingId: RECORDING,
+          trackNumber: 0,
+          chunkNumber: 0,
+          bytes: new TextEncoder().encode("old"),
+          sha256: "x",
+          startMilliseconds: 0,
+          durationMilliseconds: 5_000,
+        });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
+    const store = createIndexedDbRecordingChunkStore({ indexedDB: factory, databaseName: "old" });
+    expect(await store.listChunks(RECORDING)).toEqual([
+      {
+        recordingId: RECORDING,
+        trackNumber: 0,
+        chunkNumber: 0,
+        byteLength: 3,
+        sha256: "x",
+        startMilliseconds: 0,
+        durationMilliseconds: 5_000,
+      },
+    ]);
+    expect(new TextDecoder().decode((await store.readChunk(RECORDING, 0, 0))!)).toBe("old");
   });
 });

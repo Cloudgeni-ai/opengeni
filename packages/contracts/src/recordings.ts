@@ -11,6 +11,23 @@ export const RECORDING_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
 export const RECORDING_MAX_DURATION_MILLISECONDS = 10 * 60 * 60 * 1_000;
 export const RECORDING_UPLOAD_BATCH_MAX = 50;
 
+/**
+ * The audio containers a track can be captured in: WebM or Ogg Opus and MP4
+ * AAC from browsers, and an ADTS AAC stream from phones, whose frames
+ * concatenate across chunks the way WebM clusters do.
+ */
+export type RecordingAudioContainer = "webm" | "mp4" | "ogg" | "aac";
+
+/** The container a track's MIME type names, or null when recordings cannot use it. */
+export function recordingAudioContainer(mimeType: string): RecordingAudioContainer | null {
+  const base = mimeType.split(";")[0]!.trim().toLowerCase();
+  if (base === "audio/webm" || base === "video/webm") return "webm";
+  if (base === "audio/mp4" || base === "video/mp4" || base === "audio/x-m4a") return "mp4";
+  if (base === "audio/ogg" || base === "application/ogg") return "ogg";
+  if (base === "audio/aac" || base === "audio/aacp" || base === "audio/x-aac") return "aac";
+  return null;
+}
+
 export const RecordingVisibility = /* @__PURE__ */ defineSchema(() =>
   z.enum(["private", "workspace"]),
 );
@@ -133,7 +150,15 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
                 .min(0)
                 .max(RECORDING_MAX_TRACKS - 1),
               source: RecordingTrackSource,
-              mimeType: z.string().trim().min(1).max(128),
+              mimeType: z
+                .string()
+                .trim()
+                .min(1)
+                .max(128)
+                .refine(
+                  (mimeType) => recordingAudioContainer(mimeType) !== null,
+                  "mimeType must be audio/webm, audio/ogg, audio/mp4 or audio/aac",
+                ),
             })
             .strict(),
         )
@@ -449,14 +474,45 @@ export type ListRecordingPeopleResponse = z.infer<typeof ListRecordingPeopleResp
 export const RecordingSpeaker = /* @__PURE__ */ defineSchema(() =>
   z.object({
     label: z.string(),
-    /** Resolved display name: the person's name, the plain name, or the label. */
+    /**
+     * Resolved display name: the person's name or the plain name someone gave
+     * the label, else its default (see defaultRecordingSpeakerName).
+     */
     name: z.string(),
     personId: z.string().nullable(),
+    /** How the label got its name; null when nobody named it and `name` is the default. */
     source: RecordingSpeakerSource.nullable(),
     confidence: z.number().nullable(),
   }),
 );
 export type RecordingSpeaker = z.infer<typeof RecordingSpeaker>;
+
+const DIARIZED_SPEAKER_LABEL = /^(?:t\d+_)?speaker_(\d+)$/u;
+const TRACK_SPEAKER_LABEL = /^track-(\d+)$/u;
+
+/**
+ * The name a speaker label has until someone names it: "Speaker 2" for a
+ * diarizer's `speaker_1` (or `t0_speaker_1` when several tracks were
+ * diarized), and the track's role for a whole-track label such as `track-0`.
+ * Servers and clients both use this, so the same voice reads the same
+ * everywhere.
+ */
+export function defaultRecordingSpeakerName(
+  label: string,
+  tracks: readonly { trackNumber: number; source: RecordingTrackSource }[],
+): string {
+  const diarized = DIARIZED_SPEAKER_LABEL.exec(label);
+  if (diarized) return `Speaker ${Number(diarized[1]) + 1}`;
+  const track = TRACK_SPEAKER_LABEL.exec(label);
+  if (track) {
+    const trackNumber = Number(track[1]);
+    const source = tracks.find((candidate) => candidate.trackNumber === trackNumber)?.source;
+    if (source === "microphone") return "Microphone";
+    if (source === "system") return "Shared audio";
+    return `Track ${trackNumber + 1}`;
+  }
+  return label;
+}
 
 export const UpdateRecordingSpeakersResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ speakers: z.array(RecordingSpeaker) }),

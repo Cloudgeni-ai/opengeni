@@ -443,7 +443,12 @@ describe("recordings", () => {
       personId: person.id,
       source: "carried_over",
     });
-    expect(current.speakers.find((speaker) => speaker.label === "speaker_4")?.personId).toBeNull();
+    // A label nobody named gets the default name every client also shows.
+    expect(current.speakers.find((speaker) => speaker.label === "speaker_4")).toMatchObject({
+      name: "Speaker 5",
+      personId: null,
+      source: null,
+    });
     const first = await getRecordingTranscriptPage(db, {
       ...recording.actor,
       recordingId: recording.recordingId,

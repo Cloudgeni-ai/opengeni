@@ -26,6 +26,14 @@ import type {
   RecordingVisibility,
 } from "@opengeni/contracts";
 import {
+  activeSegmentIndex,
+  formatDuration,
+  languageName,
+  meetingPhase,
+  speakerColorSlots,
+  speakerDisplayName,
+  speakerIsNamed,
+  transcriptErrorText,
   useRecording,
   useRecordingModels,
   useRecordingPeople,
@@ -63,16 +71,6 @@ import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
-import {
-  activeSegmentIndex,
-  formatDuration,
-  languageName,
-  meetingPhase,
-  speakerColorSlots,
-  speakerDisplayName,
-  speakerIsNamed,
-  transcriptErrorText,
-} from "./meeting-model";
 import {
   MeetingPlayer,
   type MeetingPlayerHandle,

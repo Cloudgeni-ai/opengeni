@@ -2,6 +2,9 @@ import { spawn } from "node:child_process";
 import { mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { recordingAudioContainer, type RecordingAudioContainer } from "@opengeni/contracts";
+
+export { recordingAudioContainer, type RecordingAudioContainer };
 
 /**
  * Turning a track's uploaded chunks into one seekable audio file.
@@ -11,6 +14,10 @@ import { join } from "node:path";
  * file. A reload, a crash or a device switch starts a new session with a new
  * header. Each session becomes one "run"; runs are placed on the recording's
  * timeline by their first chunk's start time.
+ *
+ * A phone writes an ADTS AAC stream: every frame carries its own header, so
+ * any chunk concatenates onto the one before. There a run ends where the
+ * timeline jumps (a capture that started again after the app was stopped).
  */
 
 export type RecordingAudioChunk = {
@@ -24,16 +31,6 @@ export type RecordingAudioRun = {
   startMilliseconds: number;
   chunks: RecordingAudioChunk[];
 };
-
-export type RecordingAudioContainer = "webm" | "mp4" | "ogg";
-
-export function recordingAudioContainer(mimeType: string): RecordingAudioContainer | null {
-  const base = mimeType.split(";")[0]!.trim().toLowerCase();
-  if (base === "audio/webm" || base === "video/webm") return "webm";
-  if (base === "audio/mp4" || base === "video/mp4" || base === "audio/x-m4a") return "mp4";
-  if (base === "audio/ogg" || base === "application/ogg") return "ogg";
-  return null;
-}
 
 /** Whether a chunk begins a new container: an EBML, MP4 `ftyp` or Ogg header. */
 export function startsContainer(bytes: Uint8Array): boolean {
@@ -67,6 +64,27 @@ export function startsContainer(bytes: Uint8Array): boolean {
   );
 }
 
+/** Whether bytes begin with an ADTS frame header (12-bit sync, layer 0). */
+export function startsAdtsFrame(bytes: Uint8Array): boolean {
+  return bytes.length >= 7 && bytes[0] === 0xff && (bytes[1]! & 0xf6) === 0xf0;
+}
+
+/** How far an ADTS chunk may start from where the one before ended and still continue it. */
+const ADTS_CONTINUITY_MILLISECONDS = 1_000;
+
+/** Whether a chunk starts a new run: a container header, or for ADTS a jump in the timeline. */
+function startsRun(
+  container: RecordingAudioContainer,
+  bytes: Uint8Array,
+  previous: RecordingAudioChunk | null,
+  chunk: RecordingAudioChunk,
+): boolean {
+  if (container !== "aac") return startsContainer(bytes);
+  if (!previous) return true;
+  const expected = previous.startMilliseconds + previous.durationMilliseconds;
+  return Math.abs(chunk.startMilliseconds - expected) > ADTS_CONTINUITY_MILLISECONDS;
+}
+
 /** The prepared file's container, extension and MIME type for a source container. */
 export function preparedAudioFormat(container: RecordingAudioContainer): {
   extension: string;
@@ -74,9 +92,9 @@ export function preparedAudioFormat(container: RecordingAudioContainer): {
   muxer: string;
   codec: string;
 } {
-  // MP4 sources (Safari) are AAC; everything else is Opus. Keep the codec so
-  // a single run is only remuxed, never re-encoded.
-  return container === "mp4"
+  // MP4 (Safari) and ADTS (phones) sources are AAC; everything else is Opus.
+  // Keep the codec so a single run is only remuxed, never re-encoded.
+  return container === "mp4" || container === "aac"
     ? { extension: "m4a", mimeType: "audio/mp4", muxer: "ipod", codec: "aac" }
     : { extension: "webm", mimeType: "audio/webm", muxer: "webm", codec: "libopus" };
 }
@@ -171,6 +189,7 @@ export async function prepareRecordingTrackAudio(input: {
   try {
     const runs: Array<{ startMilliseconds: number; path: string }> = [];
     let handle: Awaited<ReturnType<typeof open>> | null = null;
+    let previous: RecordingAudioChunk | null = null;
     try {
       for (const chunk of ordered) {
         input.signal?.throwIfAborted();
@@ -178,10 +197,13 @@ export async function prepareRecordingTrackAudio(input: {
         if (!bytes) {
           throw new RecordingAudioError(`Chunk ${chunk.chunkNumber} is missing`, "missing_chunk");
         }
-        if (!handle || startsContainer(bytes)) {
-          if (!handle && !startsContainer(bytes)) {
+        if (!handle || startsRun(container, bytes, previous, chunk)) {
+          const header = container === "aac" ? startsAdtsFrame(bytes) : startsContainer(bytes);
+          if (!header) {
             throw new RecordingAudioError(
-              "The first chunk of the track has no container header",
+              container === "aac"
+                ? `Chunk ${chunk.chunkNumber} does not start with an AAC frame`
+                : "The first chunk of the track has no container header",
               "invalid_audio",
             );
           }
@@ -191,6 +213,7 @@ export async function prepareRecordingTrackAudio(input: {
           runs.push({ startMilliseconds: chunk.startMilliseconds, path });
         }
         await handle.write(bytes);
+        previous = chunk;
         input.onProgress?.();
       }
     } finally {
@@ -248,7 +271,7 @@ export async function prepareRecordingTrackAudio(input: {
           "-c:a",
           format.codec,
           "-b:a",
-          container === "mp4" ? "64k" : "32k",
+          format.codec === "aac" ? "64k" : "32k",
           "-ac",
           "1",
           "-f",

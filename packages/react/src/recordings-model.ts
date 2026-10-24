@@ -1,14 +1,15 @@
 /**
- * Plain helpers for the Meetings pages: words for a recording's state, clock
+ * Plain helpers for meeting UIs (web, phone, embedders): words for a recording's state, clock
  * times, speaker names and colors, and the transcript grouped into turns.
  * No React here, so each rule is tested on its own.
  */
-import type {
-  Recording,
-  RecordingSpeaker,
-  RecordingTrack,
-  RecordingTranscriptSegment,
-  RecordingTranscriptVersion,
+import {
+  defaultRecordingSpeakerName,
+  type Recording,
+  type RecordingSpeaker,
+  type RecordingTrack,
+  type RecordingTranscriptSegment,
+  type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
 
 /** "4:07", "1:02:09". Never negative; rounds down to the second. */
@@ -23,13 +24,14 @@ export function formatClock(milliseconds: number): string {
 
 /** "45 sec", "12 min", "1 h 5 min": a recording's length in a list. */
 export function formatDuration(milliseconds: number): string {
+  // Non-breaking spaces keep "23 sec" together when large text wraps a line.
   const seconds = Math.round(Math.max(0, milliseconds) / 1000);
-  if (seconds < 60) return `${seconds} sec`;
+  if (seconds < 60) return `${seconds}\u00a0sec`;
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 60) return `${minutes}\u00a0min`;
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
-  return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
+  return rest === 0 ? `${hours}\u00a0h` : `${hours}\u00a0h ${rest}\u00a0min`;
 }
 
 export type MeetingPhase =
@@ -106,9 +108,6 @@ export function transcriptErrorText(code: string | null): string {
   }
 }
 
-const DIARIZED_LABEL = /^(?:(t\d+)_)?speaker_(\d+)$/u;
-const TRACK_LABEL = /^track-(\d+)$/u;
-
 /**
  * The name to show for a speaker: the person or plain name someone gave it,
  * else "Speaker 2" for a model's label, or the track's role for a track label.
@@ -120,27 +119,18 @@ export function speakerDisplayName(
 ): string {
   if (!label) return "Unknown speaker";
   const speaker = speakers.find((candidate) => candidate.label === label);
-  if (speaker && speaker.name.trim() && speaker.name !== label) return speaker.name;
+  if (speaker && speakerIsNamed(label, speakers) && speaker.name.trim()) return speaker.name;
   return defaultSpeakerName(label, tracks);
 }
 
 export function defaultSpeakerName(label: string, tracks: readonly RecordingTrack[]): string {
-  const diarized = DIARIZED_LABEL.exec(label);
-  if (diarized) return `Speaker ${Number(diarized[2]) + 1}`;
-  const track = TRACK_LABEL.exec(label);
-  if (track) {
-    const source = tracks.find((candidate) => candidate.trackNumber === Number(track[1]))?.source;
-    if (source === "microphone") return "Microphone";
-    if (source === "system") return "Shared audio";
-    return `Track ${Number(track[1]) + 1}`;
-  }
-  return label;
+  return defaultRecordingSpeakerName(label, tracks);
 }
 
-/** True when someone named this label (a person or a plain name). */
+/** True when the label has a name of its own: a person, a plain name, or a suggestion. */
 export function speakerIsNamed(label: string, speakers: readonly RecordingSpeaker[]): boolean {
   const speaker = speakers.find((candidate) => candidate.label === label);
-  return Boolean(speaker && (speaker.personId || (speaker.name && speaker.name !== label)));
+  return Boolean(speaker && (speaker.personId || speaker.source));
 }
 
 /**
@@ -231,13 +221,103 @@ export function versionSummary(
   return parts;
 }
 
+/** English names for common languages, for runtimes without Intl.DisplayNames (Hermes). */
+const LANGUAGE_NAMES: Record<string, string> = {
+  ar: "Arabic",
+  cs: "Czech",
+  da: "Danish",
+  de: "German",
+  el: "Greek",
+  en: "English",
+  es: "Spanish",
+  fi: "Finnish",
+  fr: "French",
+  he: "Hebrew",
+  hi: "Hindi",
+  hu: "Hungarian",
+  id: "Indonesian",
+  is: "Icelandic",
+  it: "Italian",
+  ja: "Japanese",
+  ko: "Korean",
+  nb: "Norwegian Bokmål",
+  nl: "Dutch",
+  nn: "Norwegian Nynorsk",
+  no: "Norwegian",
+  pl: "Polish",
+  pt: "Portuguese",
+  ro: "Romanian",
+  ru: "Russian",
+  sv: "Swedish",
+  th: "Thai",
+  tr: "Turkish",
+  uk: "Ukrainian",
+  vi: "Vietnamese",
+  zh: "Chinese",
+};
+
+// Providers may report ISO 639-2 codes ("eng"). Hermes, the phone's
+// JavaScript engine, does not canonicalize them to "en", so map them here.
+const THREE_LETTER_LANGUAGES: Record<string, string> = {
+  ara: "ar",
+  ces: "cs",
+  cze: "cs",
+  dan: "da",
+  deu: "de",
+  ger: "de",
+  ell: "el",
+  gre: "el",
+  eng: "en",
+  spa: "es",
+  fin: "fi",
+  fra: "fr",
+  fre: "fr",
+  heb: "he",
+  hin: "hi",
+  hun: "hu",
+  ind: "id",
+  isl: "is",
+  ice: "is",
+  ita: "it",
+  jpn: "ja",
+  kor: "ko",
+  nob: "nb",
+  nld: "nl",
+  dut: "nl",
+  nno: "nn",
+  nor: "no",
+  pol: "pl",
+  por: "pt",
+  ron: "ro",
+  rum: "ro",
+  rus: "ru",
+  swe: "sv",
+  tha: "th",
+  tur: "tr",
+  ukr: "uk",
+  vie: "vi",
+  zho: "zh",
+  chi: "zh",
+};
+
+/** "English" for "en" or a provider's "eng"; the code itself when no name is known. */
 export function languageName(code: string): string {
+  let tag = code;
   try {
-    const names = new Intl.DisplayNames(["en"], { type: "language" });
-    return names.of(code) ?? code;
+    tag = Intl.getCanonicalLocales(code)[0] ?? code;
   } catch {
-    return code;
+    // Not a well-formed tag: show it as given.
   }
+  const [primary, ...rest] = tag.split("-");
+  const twoLetter = THREE_LETTER_LANGUAGES[primary!.toLowerCase()];
+  if (twoLetter) tag = [twoLetter, ...rest].join("-");
+  try {
+    const name = new Intl.DisplayNames(["en"], { type: "language" }).of(tag);
+    if (name && name !== tag) return name;
+  } catch {
+    // No Intl.DisplayNames here.
+  }
+  return LANGUAGE_NAMES[tag] ?? LANGUAGE_NAMES[tag.split("-")[0]!] ?? tag;
 }
 
 /** A short, readable default title for a new recording: "Meeting, Oct 23, 14:05". */

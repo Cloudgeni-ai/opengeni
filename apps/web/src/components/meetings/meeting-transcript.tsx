@@ -45,7 +45,7 @@ import {
   speakerDisplayName,
   speakerIsNamed,
   type TranscriptTurn,
-} from "./meeting-model";
+} from "@opengeni/react/recordings";
 
 /** The chart palette, one hue per voice. Text stays in fg; only the dot carries color. */
 const SPEAKER_DOT: Record<number, string> = {

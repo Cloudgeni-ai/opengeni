@@ -12,15 +12,14 @@ import type {
   UpdateRecordingRequest,
 } from "@opengeni/contracts";
 import {
-  canCaptureSystemAudio,
-  createBrowserRecorder,
-  createIndexedDbRecordingChunkStore,
+  browserRecorderPlatform,
   OpenGeniRecordingsClient,
-  preferredRecordingMimeType,
   RecordingUploader,
-  type BrowserRecorder,
-  type BrowserRecorderSnapshot,
+  type Recorder,
+  type RecorderPlatform,
+  type RecorderSnapshot,
   type RecordingChunkStore,
+  type RecordingTransport,
   type OpenGeniRecordingsTransport,
 } from "@opengeni/sdk/recordings";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
@@ -155,7 +154,12 @@ export type UseRecorderOptions = RecordingsClientOverride & {
   systemAudio?: boolean;
   timesliceMilliseconds?: number;
   keepAwake?: boolean;
-  /** Local storage for chunks not uploaded yet. Default: IndexedDB. */
+  /**
+   * Where capture runs. Default: the browser (MediaRecorder and IndexedDB).
+   * React Native passes `useNativeRecorderPlatform()` from `@opengeni/react-native/recordings`.
+   */
+  platform?: RecorderPlatform;
+  /** Local storage for chunks not uploaded yet. Default: the platform's (IndexedDB in browsers). */
   store?: RecordingChunkStore;
   /** Finish recordings an earlier page left behind when the hook mounts. Default: on. */
   resumePending?: boolean;
@@ -163,12 +167,16 @@ export type UseRecorderOptions = RecordingsClientOverride & {
   onFinished?: (recordingId: string) => void;
 };
 
-export type UseRecorderResult = BrowserRecorderSnapshot & {
+export type UseRecorderResult = RecorderSnapshot & {
   /** This browser can record audio at all. */
   supported: boolean;
   /** This browser can share a tab's or the system's audio. */
   systemAudioSupported: boolean;
-  /** Recordings from an earlier page this hook is finishing in the background. */
+  /**
+   * Recordings from an earlier page or app run this hook is still finishing in
+   * the background. Each leaves the list once it is uploaded, removed for having
+   * no audio, or failed for good.
+   */
   recovered: string[];
   /** Start a new recording; per-recording options override the hook's. */
   start: (
@@ -182,7 +190,7 @@ export type UseRecorderResult = BrowserRecorderSnapshot & {
   levels: () => Record<number, number>;
 };
 
-const IDLE_SNAPSHOT: BrowserRecorderSnapshot = {
+const IDLE_SNAPSHOT: RecorderSnapshot = {
   state: "idle",
   recordingId: null,
   elapsedMilliseconds: 0,
@@ -212,47 +220,83 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
   );
   const optionsRef = useRef(options);
   optionsRef.current = options;
-  const [snapshot, setSnapshot] = useState<BrowserRecorderSnapshot>(IDLE_SNAPSHOT);
+  // The uploader outlives client changes (a sign-in token that loads late or is
+  // refreshed, a switched account), so it calls through to the latest client
+  // instead of keeping the one it was created with.
+  const clientRef = useRef(client);
+  clientRef.current = client;
+  const transport = useMemo<RecordingTransport>(
+    () => ({
+      createRecording: (...args) => clientRef.current.createRecording(...args),
+      createRecordingUploads: (...args) => clientRef.current.createRecordingUploads(...args),
+      completeRecordingChunks: (...args) => clientRef.current.completeRecordingChunks(...args),
+      finalizeRecording: (...args) => clientRef.current.finalizeRecording(...args),
+      deleteRecording: (...args) => clientRef.current.deleteRecording(...args),
+    }),
+    [],
+  );
+  const [snapshot, setSnapshot] = useState<RecorderSnapshot>(IDLE_SNAPSHOT);
   const [recovered, setRecovered] = useState<string[]>([]);
-  const recorderRef = useRef<BrowserRecorder | null>(null);
+  const recorderRef = useRef<Recorder | null>(null);
   const uploaderRef = useRef<RecordingUploader | null>(null);
-  const support = useMemo(
-    () =>
-      typeof window === "undefined"
-        ? { supported: false, systemAudio: false }
-        : {
-            supported: preferredRecordingMimeType() !== null,
-            systemAudio: canCaptureSystemAudio(),
-          },
+  const defaultPlatform = useMemo(() => browserRecorderPlatform(), []);
+  const platform = options.platform ?? defaultPlatform;
+  const platformRef = useRef(platform);
+  platformRef.current = platform;
+  const support = { supported: platform.supported, systemAudio: platform.systemAudioSupported };
+  const storeRef = useRef<RecordingChunkStore | null>(null);
+  const store = useCallback(
+    (): RecordingChunkStore =>
+      optionsRef.current.store ?? (storeRef.current ??= platformRef.current.createStore()),
     [],
   );
 
   const uploader = useCallback((): RecordingUploader => {
     if (!uploaderRef.current) {
+      const isCaptureActive = platformRef.current.isCaptureActive;
+      const platformFetch = platformRef.current.fetch;
       uploaderRef.current = new RecordingUploader({
-        client,
-        store: optionsRef.current.store ?? createIndexedDbRecordingChunkStore(),
+        client: transport,
+        store: store(),
+        ...(platformFetch ? { fetch: platformFetch } : {}),
+        ...(isCaptureActive ? { isCaptureActive: (id: string) => isCaptureActive(id) } : {}),
         onStatus: (status) => {
           if (status.finalized) optionsRef.current.onFinished?.(status.recordingId);
+          if (status.finalized || status.discarded || status.failed) {
+            setRecovered((previous) =>
+              previous.includes(status.recordingId)
+                ? previous.filter((id) => id !== status.recordingId)
+                : previous,
+            );
+          }
         },
       });
     }
     return uploaderRef.current;
-  }, [client]);
+  }, [transport, store]);
 
   useEffect(() => {
     if (!support.supported || optionsRef.current.resumePending === false) return;
     let cancelled = false;
-    void uploader()
-      .resume()
+    void (async () => {
+      // Save what a capture cut short left half-written, then finish everything.
+      await platformRef.current.recover?.(store()).catch(() => undefined);
+      return await uploader().resume();
+    })()
       .then((ids) => {
-        if (!cancelled && ids.length > 0) setRecovered(ids);
+        if (cancelled) return;
+        // Some may already be done by now: keep only those still in flight.
+        const open = ids.filter((id) => {
+          const status = uploader().status(id);
+          return !(status?.finalized || status?.discarded || status?.failed);
+        });
+        if (open.length > 0) setRecovered(open);
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [support.supported, uploader]);
+  }, [support.supported, uploader, store]);
 
   useEffect(
     () => () => {
@@ -279,9 +323,13 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
         return;
       }
       const merged = { ...optionsRef.current, ...overrides };
-      const recorder = createBrowserRecorder({
-        client,
+      // Earlier recorders stay subscribed to the shared uploader for their own
+      // recording; only the current one may change what the hook shows.
+      let recorder: Recorder | null = null;
+      recorder = platformRef.current.createRecorder({
+        client: transport,
         workspaceId,
+        store: store(),
         uploader: uploader(),
         ...(merged.title ? { title: merged.title } : {}),
         ...(merged.visibility ? { visibility: merged.visibility } : {}),
@@ -294,12 +342,14 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
           ? { timesliceMilliseconds: merged.timesliceMilliseconds }
           : {}),
         ...(merged.keepAwake !== undefined ? { keepAwake: merged.keepAwake } : {}),
-        onChange: setSnapshot,
+        onChange: (next) => {
+          if (recorderRef.current === recorder) setSnapshot(next);
+        },
       });
       recorderRef.current = recorder;
       await recorder.start();
     },
-    [client, workspaceId, uploader],
+    [transport, workspaceId, store, uploader],
   );
 
   return {

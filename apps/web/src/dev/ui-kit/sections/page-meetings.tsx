@@ -38,12 +38,14 @@ function fakeRecorder(mode: RecorderMode, startedAt: number): MeetingRecorder {
     upload: live
       ? {
           recordingId: "preview-live",
+          created: mode !== "offline",
           pendingChunks: mode === "offline" ? 7 : 1,
           pendingBytes: 120_000,
           uploading: mode !== "offline",
           retryingAfterError: mode === "offline" ? "Failed to fetch" : null,
           failed: null,
           finalized: false,
+          discarded: false,
         }
       : null,
     error: mode === "denied" ? { code: "microphone_denied", message: "Permission denied" } : null,

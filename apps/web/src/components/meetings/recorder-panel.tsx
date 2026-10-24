@@ -13,7 +13,7 @@ import { Input } from "@opengeni/react/ui/input";
 import { Notice } from "@opengeni/react/ui/notice";
 import { cn } from "@opengeni/react/app/lib/utils";
 
-import { formatClock } from "./meeting-model";
+import { formatClock } from "@opengeni/react/recordings";
 import type { MeetingRecorder } from "./recorder-context";
 
 type RecorderError = NonNullable<MeetingRecorder["error"]>;
@@ -62,6 +62,7 @@ export function uploadLine(recorder: MeetingRecorder, online: boolean): string |
   const capturing = recorder.state === "recording" || recorder.state === "paused";
   if (upload?.failed) return `Upload failed: ${upload.failed.message}`;
   if (upload?.finalized) return "Uploaded";
+  if (upload?.discarded) return "Nothing was recorded, so no meeting was saved.";
   if (!online || upload?.retryingAfterError) {
     return capturing
       ? "Not uploading: no connection. Recording continues, and the audio is kept on this device until it uploads."
@@ -71,7 +72,7 @@ export function uploadLine(recorder: MeetingRecorder, online: boolean): string |
   if (capturing) {
     return "You can use other pages while it records. The audio is saved as you go, so a dropped connection loses nothing.";
   }
-  if (!upload) return null;
+  if (!upload || recorder.state === "starting") return null;
   if (upload.pendingChunks === 0) return "Finishing the upload.";
   return `Uploading ${upload.pendingChunks} ${upload.pendingChunks === 1 ? "piece" : "pieces"} of audio.`;
 }
@@ -79,7 +80,7 @@ export function uploadLine(recorder: MeetingRecorder, online: boolean): string |
 /** True while audio is waiting on this device because the connection is down. */
 export function uploadStalled(recorder: MeetingRecorder, online: boolean): boolean {
   const upload = recorder.upload;
-  if (upload?.failed || upload?.finalized) return false;
+  if (upload?.failed || upload?.finalized || upload?.discarded) return false;
   return !online || Boolean(upload?.retryingAfterError);
 }
 
