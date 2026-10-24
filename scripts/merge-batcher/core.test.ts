@@ -1374,6 +1374,32 @@ describe("integration boundaries and queue-only shadow CI", () => {
     c.runs = [run(c, "success")];
     expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
   });
+  test("latency alert cannot trap failed roots behind red or unknown base holds after withdrawal", () => {
+    for (const status of ["red", "unknown"] as const) {
+      const c = candidate([pull(5436), pull(5439)]);
+      c.runs = [run(c, "code_failure", 2)];
+      const o = observation(c.manifest.pulls, [c]);
+      o.baseCI!.status = status;
+      o.telemetry = {
+        status: "stop",
+        p95ReadyToCiSeconds: 3989,
+        samples: 2,
+        coverageSince: NOW,
+        completeWindow: false,
+      };
+      expect(plan(o, cfg).kind).toBe("wait");
+      const withdrawn = plan({ ...o, ready: [] }, cfg);
+      expect(withdrawn.kind).toBe("record");
+      if (withdrawn.kind !== "record") throw Error("expected supported invalidation");
+      expect(withdrawn.ledger.invalidated).toContain(c.manifest.batchId);
+      expect(withdrawn.ledger.ejected).toEqual([]);
+      expect(withdrawn.ledger.recovery).toEqual([]);
+      const next = plan({ ...o, ready: [pull(5929)], ledger: withdrawn.ledger }, cfg);
+      expect(next.kind).toBe("build");
+      if (next.kind === "build") expect(next.publish).toBe(true);
+      expect(plan({ ...o, baseSha: "f".repeat(40) }, cfg).kind).toBe("record");
+    }
+  });
   test("batch retry eligibility rejects ambiguous, second-attempt, Version and unrelated runs", () => {
     const c = candidate();
     const good = run(c, "infrastructure");
@@ -2243,7 +2269,11 @@ describe("review regressions: observation, admission and telemetry", () => {
     c.runs = [run(c, "code_failure")];
     expect(plan(o, cfg).kind).toBe("retry");
     c.runs = [run(c, "code_failure", 2)];
-    expect(plan(o, cfg).kind).toBe("record");
+    const parked = plan(o, cfg);
+    expect(parked.kind).toBe("record");
+    if (parked.kind === "record") {
+      expect(plan({ ...o, ledger: parked.ledger }, cfg).kind).toBe("park");
+    }
     c.runs = [run(c, "success", 1, false)];
     expect(plan(o, cfg).kind).toBe("wait");
     c.runs = [run(c, "success"), { ...run(c, "unknown", 2), status: "in_progress" }];
