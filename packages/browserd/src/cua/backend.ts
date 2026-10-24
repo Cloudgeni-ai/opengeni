@@ -1243,7 +1243,13 @@ export class CuaComputerBackend implements ComputerBackend {
     const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {
       observationId: `${this.session}:${state.snapshot_id}`,
-      target: { ...target.native, bounds: state.window_bounds ?? target.native.bounds },
+      // Named as the reading shows the window: its listed title is the one it
+      // had when the windows were last listed, the page before an action.
+      target: {
+        ...target.native,
+        title: shownWindowTitle(projected) ?? target.native.title,
+        bounds: state.window_bounds ?? target.native.bounds,
+      },
       frameId:
         [...this.frames.entries()]
           .reverse()
@@ -2382,8 +2388,13 @@ function inProgressText(text: string): boolean {
  * listed title is the one it had when the windows were last listed, so after
  * an action that opened another page it still names the page before. */
 function documentTitle(nodes: readonly InteractionSemanticNodeValue[], listed: string): string {
-  const window = nodes.find((node) => node.role === "window" && node.name);
-  return window ? `window\u0000${window.name}` : listed;
+  const shown = shownWindowTitle(nodes);
+  return shown !== undefined ? `window\u0000${shown}` : listed;
+}
+
+/** The title of the window element a reading carries, when it has one. */
+function shownWindowTitle(nodes: readonly InteractionSemanticNodeValue[]): string | undefined {
+  return nodes.find((node) => node.role === "window" && node.name)?.name || undefined;
 }
 
 /** A button among the rows CUA leaves unindexed: on macOS a disabled button
