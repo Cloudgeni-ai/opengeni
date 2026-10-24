@@ -11,7 +11,7 @@ export type Snapshot = {
   classic: { nodes: Json[]; pageInfo: { hasNextPage: boolean } };
 };
 export type Plan = {
-  schemaVersion: 3;
+  schemaVersion: 3 | 4;
   appId: number;
   installationId: number;
   before: Snapshot;
@@ -25,6 +25,7 @@ export type Phase = "original" | "guard" | "namespace" | "applied" | "restored";
 const writableKeys = ["name", "target", "enforcement", "bypass_actors", "conditions", "rules"];
 const guardName = "Opengeni batcher immutable refs";
 const namespaceName = "Merges go through the batcher: add the queue-ready label";
+export const appOnlyCheckName = "merge-batcher: run gh pr merge --auto (or add queue-ready)";
 const refs = ["refs/heads/queue/live/**", "refs/heads/batcher-state"];
 
 function object(value: Json | undefined): ObjectValue {
@@ -204,11 +205,38 @@ export function verify(
   for (const [id, payload] of expected) equal(actual.get(id)!, payload, `Ruleset ${id}`);
 }
 
+/** Explicit new policy; legacy plans and their exact restore payload remain unchanged. */
+export function prepareAppOnly(before: Snapshot, appId: number, installationId: number): Plan {
+  const legacy = prepare(before, appId, installationId);
+  const bypass = [{ actor_id: appId, actor_type: "Integration", bypass_mode: "always" }];
+  return {
+    ...legacy,
+    schemaVersion: 4,
+    admission: {
+      ...legacy.admission,
+      bypass_actors: bypass,
+      rules: [
+        ...(legacy.admission.rules as Json[]),
+        {
+          type: "required_status_checks",
+          parameters: {
+            required_status_checks: [{ context: appOnlyCheckName, integration_id: appId }],
+            strict_required_status_checks_policy: false,
+          },
+        },
+      ],
+    },
+    namespace: { ...legacy.namespace, bypass_actors: bypass },
+  };
+}
+
 /** Older plans have different bypass policy; never silently upgrade them. */
 export function validatePlan(plan: Plan): void {
-  if (plan.schemaVersion !== 3)
-    throw new Error("Emergency-admin rollout requires a newly reviewed version 3 plan");
-  const expected = prepare(plan.before, plan.appId, plan.installationId);
+  if (plan.schemaVersion !== 3 && plan.schemaVersion !== 4)
+    throw new Error("Rollout requires a reviewed version 3 or version 4 plan");
+  const expected = (plan.schemaVersion === 4 ? prepareAppOnly : prepare)(
+    plan.before, plan.appId, plan.installationId,
+  );
   equal(plan as unknown as Json, expected as unknown as Json, "Prepared exclusive-main plan");
 }
 
@@ -256,9 +284,11 @@ export async function cli(args: string[]): Promise<void> {
     console.log(`Verified and retained ${kind} receipt; no API writes.`);
     return;
   }
-  if (command === "prepare" && rest.length === 4) {
+  if ((command === "prepare" || command === "prepare-app-only") && rest.length === 4) {
     const [snapshot, app, installation, output] = rest as [string, string, string, string];
-    const plan = prepare(await json<Snapshot>(snapshot), Number(app), Number(installation));
+    const plan = (command === "prepare-app-only" ? prepareAppOnly : prepare)(
+      await json<Snapshot>(snapshot), Number(app), Number(installation),
+    );
     await mkdir(output, { recursive: false, mode: 0o700 });
     for (const [name, value] of Object.entries({
       plan,
@@ -300,7 +330,7 @@ export async function cli(args: string[]): Promise<void> {
     return;
   }
   throw new Error(
-    "Usage: bundle.ts prepare SNAPSHOT APP_ID INSTALLATION_ID NEW_OUTPUT_DIRECTORY | verify OUTPUT_DIRECTORY CURRENT_SNAPSHOT original|guard|namespace|applied|restored | receipt OUTPUT_DIRECTORY CURRENT_SNAPSHOT guard|namespace CANDIDATE_JSON",
+    "Usage: bundle.ts prepare|prepare-app-only SNAPSHOT APP_ID INSTALLATION_ID NEW_OUTPUT_DIRECTORY | verify OUTPUT_DIRECTORY CURRENT_SNAPSHOT original|guard|namespace|applied|restored | receipt OUTPUT_DIRECTORY CURRENT_SNAPSHOT guard|namespace CANDIDATE_JSON",
   );
 }
 if (import.meta.main) await cli(process.argv.slice(2));
