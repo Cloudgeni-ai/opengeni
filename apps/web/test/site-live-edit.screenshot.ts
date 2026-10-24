@@ -3,7 +3,9 @@
 // publishes a new version and the preview beside it reloads in place, the
 // chip shows the history and Undo puts the previous version back, a version
 // published elsewhere shows within seconds, and Edit with Opengeni (`?new`)
-// opens a new conversation with its composer focused. Light and dark, plus a
+// opens a new conversation with its composer focused. On a Site published to
+// the web, Updating shows beside the header's link and the link's tooltips
+// work in full screen. Light and dark, plus a
 // screen recording of the edit going live. Start the server first:
 //   bunx vite --config test/session-sidebar-preview.vite.config.ts --port 4292
 import { mkdir, readdir, rename } from "node:fs/promises";
@@ -53,9 +55,9 @@ async function capture(page: Page, name: string) {
 }
 
 /** Open the usage Site from its sidebar row, with its newest conversation beside it. */
-async function openSite(page: Page, theme: "light" | "dark") {
+async function openSite(page: Page, theme: "light" | "dark", extra = "") {
   await page.goto(
-    `${baseUrl}/test/session-sidebar-preview.html?scenario=sites&publish=1&theme=${theme}`,
+    `${baseUrl}/test/session-sidebar-preview.html?scenario=sites&publish=1&theme=${theme}${extra}`,
   );
   await sidebar(page)
     .getByRole("link", { name: /^Open Opengeni usage\. Site/u })
@@ -128,6 +130,63 @@ async function fullScreenMenu(page: Page, name: string) {
   await page.locator("dialog[data-artifact-fullscreen]").waitFor({ state: "detached" });
 }
 
+/**
+ * A Site on the web: the header's link to the published Site stands in for
+ * Live, Updating shows beside it while a new version loads, and the link's
+ * tooltips work in full screen.
+ */
+async function publishedHeader(page: Page, theme: "light" | "dark") {
+  await openSite(page, theme, "&published=1&htmlDelay=1500");
+  const link = page.locator("[data-site-public-link] a");
+  await link.waitFor();
+  check(
+    (await link.getAttribute("href")) === "https://usage.sites.opengeni.ai/",
+    "the header doesn't link to the published Site",
+  );
+  check((await liveLabel(page).count()) === 0, "a published Site shows a second Live label");
+  const composer = panel(page).getByRole("textbox").first();
+  await composer.click();
+  await composer.pressSequentially("Make the header blue", { delay: 20 });
+  await page.keyboard.press("Enter");
+  await waitUntil(
+    async () => (await liveLabel(page).textContent()) === "Updating",
+    "Updating didn't show beside the published link",
+  );
+  check(await link.isVisible(), "the published link went away while updating");
+  await capture(page, `site-live-updating-published-${theme}`);
+  await waitUntil(
+    async () => (await headerBackground(page)) === blue,
+    "the preview didn't reload with the published version",
+  );
+  await waitUntil(
+    async () => (await liveLabel(page).count()) === 0,
+    "Updating didn't clear once the version loaded",
+  );
+  await page.getByRole("button", { name: "Open Site full screen" }).click();
+  await page.locator("dialog[data-artifact-fullscreen]").waitFor();
+  await page.getByRole("button", { name: "Copy link" }).hover();
+  const tooltip = page
+    .locator("[data-radix-popper-content-wrapper]")
+    .filter({ hasText: "Copy link" });
+  await tooltip.waitFor();
+  check(
+    await tooltip.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return (
+        element.closest("dialog[data-artifact-fullscreen]") !== null &&
+        hit !== null &&
+        element.contains(hit)
+      );
+    }),
+    "the published link's tooltip is hidden in full screen",
+  );
+  await capture(page, `site-live-fullscreen-link-${theme}`);
+  await page.mouse.move(700, 600);
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await page.locator("dialog[data-artifact-fullscreen]").waitFor({ state: "detached" });
+}
+
 try {
   for (const theme of ["light", "dark"] as const) {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -176,6 +235,12 @@ try {
     );
     await capture(page, `site-live-new-${theme}`);
     await page.close();
+
+    const published = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await published.emulateMedia({ colorScheme: theme });
+    published.on("pageerror", (error) => errors.push(`${theme} published: ${error.message}`));
+    await publishedHeader(published, theme);
+    await published.close();
   }
 
   // A short recording of an edit going live, then Undo.

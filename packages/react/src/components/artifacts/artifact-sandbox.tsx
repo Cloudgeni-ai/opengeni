@@ -22,7 +22,7 @@ import {
  * versions: showing the current version, loading a newer one, or unable to
  * check for them.
  */
-export type SiteLiveStatus = "live" | "updating" | "reconnecting";
+export type SiteLiveState = "live" | "updating" | "reconnecting";
 
 export type ArtifactSandboxProps = {
   html: string;
@@ -44,7 +44,7 @@ export type ArtifactSandboxProps = {
    * versions. `updating` and `reconnecting` show beside the Live indicator
    * (or the host's replacement); without it the plain "Live" badge shows.
    */
-  liveState?: SiteLiveStatus | undefined;
+  liveState?: SiteLiveState | undefined;
   versionLabel?: string | undefined;
   className?: string | undefined;
   editDisabled?: boolean | undefined;
@@ -207,12 +207,16 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
             </ArtifactButton>
           ) : null}
           {props.showLiveStatus !== false && props.liveStatus !== undefined ? (
-            <>
-              {props.liveState === "updating" || props.liveState === "reconnecting" ? (
-                <LiveLabel status={props.liveState} labels={labels} />
+            // The host's replacement (a link to the published Site) draws its
+            // tooltips inside the full-screen frame too.
+            <PortalContainerProvider
+              container={focused && frameElement ? frameElement : inheritedPortal}
+            >
+              {props.liveState !== undefined ? (
+                <LiveStateBeside status={props.liveState} labels={labels} />
               ) : null}
               {props.liveStatus}
-            </>
+            </PortalContainerProvider>
           ) : null}
           {props.showLiveStatus !== false && props.liveStatus === undefined && (
             <LiveLabel status={props.liveState} labels={labels} />
@@ -259,6 +263,51 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
 }
 
 /**
+ * Beside a host's replacement for Live: only Updating or Reconnecting shows.
+ * The status region stays mounted and only its text changes, so screen
+ * readers announce each change.
+ */
+function LiveStateBeside({
+  status,
+  labels,
+}: {
+  status: SiteLiveState;
+  labels: ReturnType<typeof useArtifactLabels>;
+}) {
+  const busy = status === "updating" || status === "reconnecting";
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      data-live-state-region=""
+      data-live-status={busy ? status : undefined}
+      className={
+        busy
+          ? "mr-1 inline-flex items-center gap-1.5 text-2xs font-medium text-fg-muted"
+          : "sr-only"
+      }
+    >
+      {busy ? (
+        <>
+          <span
+            aria-hidden="true"
+            className={cn(
+              "size-1.5 rounded-full",
+              status === "updating"
+                ? "bg-status-running ring-4 ring-status-running/15 motion-safe:animate-pulse"
+                : "bg-status-waiting ring-4 ring-status-waiting/15",
+            )}
+          />
+          <span className="max-sm:sr-only">
+            {status === "updating" ? labels.liveUpdating : labels.liveReconnecting}
+          </span>
+        </>
+      ) : null}
+    </span>
+  );
+}
+
+/**
  * Live, or what the host watching the Site knows: a newer version loading,
  * or no way to check for one right now. Announced politely when it changes;
  * on a narrow screen only its dot shows, and it is still announced.
@@ -267,7 +316,7 @@ function LiveLabel({
   status,
   labels,
 }: {
-  status: SiteLiveStatus | undefined;
+  status: SiteLiveState | undefined;
   labels: ReturnType<typeof useArtifactLabels>;
 }) {
   const text =

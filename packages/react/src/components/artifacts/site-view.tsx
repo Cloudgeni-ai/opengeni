@@ -9,7 +9,7 @@ import {
   useArtifactLabels,
 } from "./artifact-chrome";
 import { ArtifactSandbox } from "./artifact-sandbox";
-import type { SiteLiveStatus } from "./artifact-sandbox";
+import type { SiteLiveState } from "./artifact-sandbox";
 import type { SiteSnapshotClient, SiteToolBridgeFactory } from "./chat-interactive-block";
 import { useOpenGeniText } from "../../messages/runtime";
 
@@ -188,7 +188,7 @@ export function SiteView({
     return (
       <div className="p-4 text-sm text-fg-muted">{archivedMessage ?? labels.siteArchived}</div>
     );
-  const liveState: SiteLiveStatus | undefined =
+  const liveState: SiteLiveState | undefined =
     versionId === undefined && watch === undefined
       ? undefined
       : refresh === "loading" || (versionId && versionId !== shownVersion && refresh !== "failed")

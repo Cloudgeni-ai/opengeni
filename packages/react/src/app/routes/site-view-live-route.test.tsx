@@ -208,8 +208,12 @@ test("a published Site keeps its link in the header and says so when an update f
     await settle();
     const link = () => container.querySelector("[data-site-public-link] a");
     expect(link()?.getAttribute("href")).toBe("https://usage.sites.example.test/");
-    // While the Site on screen is the live one, the link is the Live label.
+    // While the Site on screen is the live one, the link is the Live label;
+    // the status region beside it stays mounted, empty, to announce changes.
     expect(label(container)).toBeUndefined();
+    const region = () => container.querySelector("[data-live-state-region]");
+    expect(region()?.getAttribute("role")).toBe("status");
+    expect(region()?.textContent).toBe("");
 
     // A publish from the chat whose new version can't be loaded: the old
     // version stays on screen, the link stays, and the header says so.
@@ -220,6 +224,7 @@ test("a published Site keeps its link in the header and says so when an update f
     await settle();
     expect(preview(container)).toContain("background:white");
     expect(label(container)).toBe("Reconnecting");
+    expect(region()?.textContent).toBe("Reconnecting");
     expect(link()?.getAttribute("href")).toBe("https://usage.sites.example.test/");
   } finally {
     server.failHtml = false;

@@ -700,6 +700,12 @@ if (sitesScenario) {
   const siteClient = siteViewPreviewClient({
     workspaceId,
     rows,
+    // `?published=1`: the usage Site is on the web, so the header links to it.
+    // `?htmlDelay=<ms>`: loading a version takes that long, to show Updating.
+    publishedHost: previewParameters.has("published")
+      ? (siteId) => (siteId === usageSiteId ? "usage.sites.opengeni.ai" : "")
+      : undefined,
+    htmlDelayMs: Number(previewParameters.get("htmlDelay") ?? 0) || undefined,
     // "Make the header blue": the agent publishes the Site with a blue header.
     edit: (text) =>
       /blue/iu.test(text)

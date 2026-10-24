@@ -36434,7 +36434,7 @@
       "SessionArtifactViewer": "value",
       "SessionArtifactViewerLabels": "type",
       "SessionArtifactViewerProps": "type",
-      "SiteLiveStatus": "type",
+      "SiteLiveState": "type",
       "SiteSnapshotClient": "type",
       "SiteToolBridgeFactory": "type",
       "SiteToolScope": "type",

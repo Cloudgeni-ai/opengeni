@@ -59,6 +59,10 @@ export function siteViewPreviewClient(options: {
   history: PreviewHistory;
   /** The agent's edit for a message, or null to answer nothing. */
   edit?: ((text: string) => PreviewEdit | null) | undefined;
+  /** Each Site's published address; without it the API has no publishing. */
+  publishedHost?: ((siteId: string) => string) | undefined;
+  /** How long loading a version's page takes, to show Updating. */
+  htmlDelayMs?: number | undefined;
 }) {
   const { workspaceId } = options;
   const versionId = (siteId: string, revision: number) =>
@@ -276,11 +280,14 @@ export function siteViewPreviewClient(options: {
       _workspace: string,
       siteId: string,
       request: { versionId?: string } = {},
-    ) =>
-      (
+    ) => {
+      const html = (
         versionsOf(siteId).find((version) => version.id === request.versionId) ??
         liveVersion(siteId)
-      ).html,
+      ).html;
+      if (options.htmlDelayMs) await pause(options.htmlDelayMs);
+      return html;
+    },
     rollbackWorkspaceArtifact: async (
       _workspace: string,
       siteId: string,
@@ -297,10 +304,12 @@ export function siteViewPreviewClient(options: {
     /** Preview control: publish a version as someone else would, elsewhere. */
     publishPreviewVersion: (siteId: string, html: (current: string) => string) =>
       publish(siteId, html(liveVersion(siteId).html)),
-    // The header's published-link read. Without the route the header keeps
-    // its plain "Live", which is what these previews show.
-    getSitePublicationLink: async () => {
-      throw new OpenGeniApiError(404, "{}");
+    // The header's published-link read. Without a published address the
+    // route is missing (404) and the header keeps its plain "Live".
+    getSitePublicationLink: async (_workspace: string, siteId: string) => {
+      const hostname = options.publishedHost?.(siteId);
+      if (!hostname) throw new OpenGeniApiError(404, "{}");
+      return { siteId, hostname, url: `https://${hostname}/`, status: "active" as const };
     },
     listEvents: async (
       _workspace: string,
