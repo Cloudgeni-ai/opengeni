@@ -1207,10 +1207,19 @@ export function createInteractionAttemptToolDefinitions(
         ),
         input.sessionId,
       )?.id ?? null,
-    currentTarget: async (computerSessionId) =>
-      (
-        await input.transport.listComputerTargets(input.workspaceId, computerSessionId)
-      ).targets.find((target) => target.current)?.id ?? null,
+    currentTarget: async (computerSessionId) => {
+      try {
+        return (
+          (
+            await input.transport.listComputerTargets(input.workspaceId, computerSessionId)
+          ).targets.find((target) => target.current)?.id ?? null
+        );
+      } catch (error) {
+        // The computer itself is gone: resolve afresh next time.
+        if (isGoneBrowserError(error)) currentComputer.forgetSession(computerSessionId);
+        throw error;
+      }
+    },
   });
   /** Run one call on the requested or current computer and remember it on
    * success. */

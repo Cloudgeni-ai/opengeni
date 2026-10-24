@@ -119,7 +119,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
     try {
       return this.typedSecrets.redact(
         (await this.readWithRecovery(async (client) => await client.targets())).map((target) =>
-          this.projectTarget(target),
+          // Only the listing marks the current target; observations and
+          // receipts name their own.
+          this.projectTarget(target, target.id === this.current),
         ),
       );
     } catch (error) {
@@ -439,10 +441,10 @@ export class ComputerDriver implements ComputerInteractionDriver {
       throw new UnsettledCleanupError(failures, "computer driver cleanup failed");
   }
 
-  private projectTarget(target: ComputerBackendTarget): ComputerTargetValue {
+  private projectTarget(target: ComputerBackendTarget, current = false): ComputerTargetValue {
     return ComputerTarget.parse({
       ...target,
-      ...(target.id === this.current ? { current: true } : {}),
+      ...(current ? { current: true } : {}),
       computerSessionId: this.computerSessionId,
       controllerGeneration: this.controllerGeneration,
     });

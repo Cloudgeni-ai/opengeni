@@ -259,6 +259,7 @@ describe("ComputerDriver", () => {
         state: "completed",
         observation: { observationId: "observation-2" },
       });
+      expect(receipt.observation?.target?.current).toBeUndefined();
       expect(transport.validated).toMatchObject({
         targetId: "window-1",
         expectedObservationId: "observation-1",

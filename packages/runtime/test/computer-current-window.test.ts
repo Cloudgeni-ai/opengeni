@@ -179,6 +179,36 @@ describe("computer tools without identifiers", () => {
     expect(targets).toEqual(["window-2"]);
   });
 
+  test("a computer found gone while looking up its current window is forgotten", async () => {
+    const other = randomUUID();
+    const listed: string[] = [];
+    const tools = definitions({
+      listComputerSessions: async () => ({
+        revision: 1,
+        sessions: [{ ...computerSession(), id: other }],
+      }),
+      getComputerSession: async () => computerSession() as never,
+      listComputerTargets: async (_workspace, computer) => {
+        listed.push(computer);
+        if (computer === computerSessionId)
+          throw new OpenGeniApiError(404, JSON.stringify({ message: "ComputerSession not found" }));
+        return { computerSessionId: computer, targets: [] } as never;
+      },
+    });
+    await tools.computer_open!.execute(
+      { computerSessionId },
+      { operationId: randomUUID(), caller: model },
+    );
+    const acted = await tools.computer_act!.execute(
+      { action: { type: "keyboard", action: "press", value: "Enter" } },
+      { operationId: randomUUID(), caller: model },
+    );
+    expect(acted.isError).toBe(true);
+    listed.length = 0;
+    await tools.computer_targets!.execute({}, { operationId: randomUUID(), caller: model });
+    expect(listed).toEqual([other]);
+  });
+
   test("observe then act on the current window, with a bare ref inside a batch", async () => {
     const target = computerTarget("window-1");
     const requests: ComputerActionRequest[] = [];
