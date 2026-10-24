@@ -357,6 +357,20 @@ major. PR Review moves to an automation with a GitHub pull-request trigger.
   on, Plugins offers the automation instead of a new Lens setup and still shows
   an existing setup, with a notice, until it is retired.
 
+## Rollout
+
+- **Flag.** Event triggers stay off until `OPENGENI_EVENT_TRIGGERS_ENABLED` is
+  set. Schedules, the Automations pages and the embeddable panel work either
+  way; with the flag off, "When" offers only a schedule, and nothing polls,
+  subscribes or accepts deliveries for triggers.
+- **Database grants.** The runtime calls the dispatcher's security-definer
+  functions and writes `event_ingress_routes`. Those grants follow the
+  two-release rule in `docs/migrations-expand-contract.md`: 0937 withholds
+  them, and a later rolling migration grants them once a release containing
+  0937 is the previous production release. Until then the event paths fail
+  for lack of privilege, so turn the flag on only where the grants exist. The
+  retention pass runs regardless of the flag and skips quietly until then.
+
 ## Delivery
 
 1. This design.
