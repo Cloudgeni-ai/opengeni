@@ -93,17 +93,18 @@ export function browserActModelInputSchema(schema: AttemptToolJsonSchema): Attem
 }
 
 /**
- * computer_act's model view: a batch item takes the same fields as action,
- * described once, with only the action types a batch runs.
+ * computer_act's model view: ref shorthand, and a batch item takes the same
+ * fields as action, described once, with only the action types a batch runs.
  */
 export function computerActModelInputSchema(schema: AttemptToolJsonSchema): AttemptToolJsonSchema {
-  const top = isNode(schema.properties) ? schema.properties : null;
+  const shorthand = withRefShorthandLocators(schema);
+  const top = isNode(shorthand.properties) ? shorthand.properties : null;
   const action = top && isNode(top.action) ? top.action : null;
   const fields = action && isNode(action.properties) ? action.properties : null;
   const actions = fields && isNode(fields.actions) ? fields.actions : null;
-  if (!top || !action || !fields || !actions) return schema;
+  if (!top || !action || !fields || !actions) return shorthand as AttemptToolJsonSchema;
   return {
-    ...schema,
+    ...shorthand,
     properties: {
       ...top,
       action: {
