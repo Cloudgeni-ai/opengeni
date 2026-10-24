@@ -38,11 +38,30 @@ export const RecordingState = /* @__PURE__ */ defineSchema(() =>
 );
 export type RecordingState = z.infer<typeof RecordingState>;
 
-/** microphone: the person recording; system: the computer's audio (the other side). */
-export const RecordingTrackSource = /* @__PURE__ */ defineSchema(() =>
+/**
+ * What a recorder can capture into a track. microphone: the person
+ * recording; system: the computer's audio (the other side).
+ */
+export const RecordingCaptureSource = /* @__PURE__ */ defineSchema(() =>
   z.enum(["microphone", "system", "mixed", "upload"]),
 );
+export type RecordingCaptureSource = z.infer<typeof RecordingCaptureSource>;
+
+/** Where a track came from: a recorder's capture, or a browser tab an agent recorded. */
+export const RecordingTrackSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["microphone", "system", "mixed", "upload", "browser_tab"]),
+);
 export type RecordingTrackSource = z.infer<typeof RecordingTrackSource>;
+
+export const RecordingTrackKind = /* @__PURE__ */ defineSchema(() => z.enum(["audio", "video"]));
+export type RecordingTrackKind = z.infer<typeof RecordingTrackKind>;
+
+/**
+ * meeting: a recorded conversation, listed in Meetings. browser: an agent's
+ * browser recording, a video of the tab with a log of what the agent did.
+ */
+export const RecordingPurpose = /* @__PURE__ */ defineSchema(() => z.enum(["meeting", "browser"]));
+export type RecordingPurpose = z.infer<typeof RecordingPurpose>;
 
 export const RecordingTranscriptVersionState = /* @__PURE__ */ defineSchema(() =>
   z.enum(["queued", "processing", "complete", "failed"]),
@@ -176,7 +195,7 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
                 .int()
                 .min(0)
                 .max(RECORDING_MAX_TRACKS - 1),
-              source: RecordingTrackSource,
+              source: RecordingCaptureSource,
               mimeType: z
                 .string()
                 .trim()
@@ -425,7 +444,7 @@ export type CreateRecordingPersonRequest = z.infer<typeof CreateRecordingPersonR
 export const RecordingTrack = /* @__PURE__ */ defineSchema(() =>
   z.object({
     trackNumber: z.number().int(),
-    kind: z.literal("audio"),
+    kind: RecordingTrackKind,
     source: RecordingTrackSource,
     mimeType: z.string(),
     chunkCount: z.number().int(),
@@ -433,6 +452,14 @@ export const RecordingTrack = /* @__PURE__ */ defineSchema(() =>
     durationMilliseconds: z.number().int(),
     /** The worker has prepared one seekable file for this track. */
     playable: z.boolean(),
+    /** A video track's picture, once its video is prepared; null otherwise. */
+    video: z
+      .object({
+        width: z.number().int(),
+        height: z.number().int(),
+        frameCount: z.number().int(),
+      })
+      .nullable(),
     /** The live transcript streamed for this track, or null when none was. */
     live: z
       .object({
@@ -480,7 +507,10 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     ownerSubjectId: z.string(),
     visibility: RecordingVisibility,
     title: z.string(),
+    purpose: RecordingPurpose,
     state: RecordingState,
+    /** Why a browser recording's video could not be made, when it failed. */
+    errorCode: z.string().nullable(),
     startedAt: z.string(),
     captureEndedAt: z.string().nullable(),
     durationMilliseconds: z.number().int(),

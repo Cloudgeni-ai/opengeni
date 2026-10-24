@@ -349,6 +349,21 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
+    startBrowserRecordingVideo: async (input) => {
+      try {
+        await temporal.workflow.start("browserRecordingVideoWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `recording-browser-video:${input.recordingId}`,
+          // A rerun after a finished one finds the recording made and stops,
+          // and one after its deletion makes it again from the bundle.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
     scheduleTransientObjectDeletion: async ({ workspaceId, objectKeys, deleteAfter }) => {
       const keys = [...new Set(objectKeys)].sort();
       if (keys.length === 0) return;

@@ -71,10 +71,12 @@ function recordingWith(
     ownerSubjectId: "user:1",
     visibility: "private",
     title: "Sync",
+    purpose: "meeting",
     state,
     startedAt: "2026-10-23T10:00:00Z",
     captureEndedAt: null,
     durationMilliseconds: 0,
+    errorCode: null,
     externalRef: null,
     metadata: {},
     transcription: {},
@@ -95,6 +97,7 @@ const tracks: RecordingTrack[] = [
     totalBytes: 1,
     durationMilliseconds: 1,
     playable: true,
+    video: null,
     live: null,
   },
   {
@@ -106,6 +109,7 @@ const tracks: RecordingTrack[] = [
     totalBytes: 1,
     durationMilliseconds: 1,
     playable: true,
+    video: null,
     live: null,
   },
 ];

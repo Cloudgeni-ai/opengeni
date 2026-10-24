@@ -125,6 +125,21 @@ export type SessionWorkflowClient = {
     versionId: string | null;
     ownerSubjectId: string;
   }) => Promise<void>;
+  /**
+   * Record an agent's browser recording whose frame bundle is uploaded and
+   * make its video. Starting it again for the same recording while it runs,
+   * or after it finished, does nothing.
+   */
+  startBrowserRecordingVideo?: (input: {
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    ownerSubjectId: string;
+    visibility: "private" | "workspace";
+    startedAt: string;
+    durationMilliseconds: number;
+    bundle: { byteLength: number; sha256: string };
+  }) => Promise<void>;
   check?: () => Promise<void>;
 };
 

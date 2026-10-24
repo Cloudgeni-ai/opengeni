@@ -1940,12 +1940,13 @@ export const BrowserRecordingSaveResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type BrowserRecordingSaveResponse = z.infer<typeof BrowserRecordingSaveResponse>;
 
-/** A save that is still moving the recording off its browser host (HTTP 202).
+/** A save still in progress (HTTP 202): `uploading` while the recording
+ * moves off its browser host, `encoding` while the worker makes its video.
  * Repeat the same request, with the same operationId, after `retryAfterMs`. */
 export const BrowserRecordingSaveProgress = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      state: z.literal("uploading"),
+      state: z.enum(["uploading", "encoding"]),
       recording: BrowserRecordingSummary,
       retryAfterMs: z.number().int().positive().max(60_000),
     })
