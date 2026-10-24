@@ -101,6 +101,7 @@ const pages: Array<{
     check: async (page) => {
       await expect(page.getByRole("heading", { name: "New automation" })).toBeVisible();
       await expect(page.getByText("pull_request.opened").first()).toBeVisible();
+      await expect(page.getByLabel("Field for condition 1")).toHaveValue("data.pull_request.draft");
     },
   },
   {

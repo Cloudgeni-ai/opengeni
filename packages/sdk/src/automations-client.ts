@@ -13,6 +13,15 @@ import type { OpenGeniClient as OpenGeniCoreClient } from "./client";
 
 export type OpenGeniAutomationsTransport = Pick<OpenGeniCoreClient, "requestJson">;
 
+/**
+ * The first automation API: webhook sources, triggers and runs.
+ *
+ * @deprecated Automations are scheduled tasks with event triggers now. Create an
+ * event source with `createEventSource` and pass `events` to
+ * `createScheduledTask`. These routes answer until their Sunset date and are
+ * removed in the next major.
+ * See https://docs.opengeni.ai/integrate/background-agents#moving-from-the-first-automation-api
+ */
 export class OpenGeniAutomationsClient {
   constructor(private readonly client: OpenGeniAutomationsTransport) {}
 

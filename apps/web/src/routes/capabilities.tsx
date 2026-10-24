@@ -125,6 +125,7 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { cn } from "@opengeni/react/app/lib/utils";
+import { PrReviewAutomationCard } from "@/components/capabilities/pr-review-automation-card";
 import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
@@ -274,6 +275,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const context = useAppContext();
 
   const client = context.client;
+  // Where event triggers run, pull-request review is an automation.
+  const eventTriggersEnabled = context.clientConfig.eventTriggers?.enabled === true;
   const onRuntimeChanged = useCallback(
     () => void context.refreshWorkspaceMcpServers(workspaceId),
     [context, workspaceId],
@@ -2232,10 +2235,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       }}
                     />
                     {activeTab === "plugins" ? (
-                      <div className="mt-6">
+                      <div className="mt-6 grid gap-4">
+                        {eventTriggersEnabled ? (
+                          <PrReviewAutomationCard workspaceId={workspaceId} />
+                        ) : null}
                         <PrReviewSetupCard
                           client={client}
                           workspaceId={workspaceId}
+                          retiring={eventTriggersEnabled}
                           canManage={
                             canManageApiIntegrationInstances &&
                             hasWorkspacePermission(

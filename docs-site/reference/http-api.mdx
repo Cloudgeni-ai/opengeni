@@ -26,8 +26,9 @@ Opengeni's public API is a workspace-scoped HTTP API. Most integrations should u
 | Live stream           | `GET .../sessions/:sessionId/events/stream` (Server-Sent Events, resumable by sequence)                                               |
 | Goals                 | `GET`, `PATCH`, and `DELETE` on `.../sessions/:sessionId/goal`                                                                        |
 | Files                 | Upload begin and complete, download URLs                                                                                              |
-| Scheduled tasks       | `/v1/workspaces/:workspaceId/scheduled-tasks/...`                                                                                     |
-| Automations           | `/v1/workspaces/:workspaceId/automations/...`, and the public `POST /v1/webhooks/automations/:endpointId`                             |
+| Scheduled tasks       | `/v1/workspaces/:workspaceId/scheduled-tasks/...`, including their event triggers                                                     |
+| Event sources         | `/v1/workspaces/:workspaceId/event-sources/...`, and the public webhook URL each source returns                                       |
+| Automations           | Deprecated: `/v1/workspaces/:workspaceId/automations/...` and `POST /v1/webhooks/automations/:endpointId`                             |
 | Integrations          | `/v1/workspaces/:workspaceId/integrations/...` (preview, install, uninstall)                                                          |
 | Connected Machines    | `/v1/workspaces/:workspaceId/enrollments/...`                                                                                         |
 | Webhooks, credentials | `/v1/workspaces/:workspaceId/webhooks/...` and `.../credential-provider`, plus the same under `/v1/organizations/:organizationId/...` |

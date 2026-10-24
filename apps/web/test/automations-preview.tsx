@@ -32,7 +32,7 @@ document.documentElement.dataset.ogTheme = theme;
 const text = (value: unknown) => (typeof value === "string" ? value : undefined);
 const root = createRootRoute({
   component: () => (
-    <OpenGeniProvider client={previewClient as never} workspaceId={workspaceId}>
+    <OpenGeniProvider client={previewClient as never} workspaceId={previewWorkspaceId}>
       <TooltipProvider>
         <main className="min-h-dvh min-w-0 bg-bg text-fg">
           <Toaster />
