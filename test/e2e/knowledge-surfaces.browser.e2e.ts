@@ -156,7 +156,11 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         timeoutMs: 45_000,
       },
     );
-    browser = await chromium.launch();
+    browser = await chromium.launch(
+      process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+        ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
+        : undefined,
+    );
   }, 180_000);
 
   afterAll(async () => {
@@ -366,7 +370,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         );
       // Each schedule is its own page; Edit is a form page whose Agent learning
       // controls live under Settings.
-      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/schedules`);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/automations`);
       await page.getByRole("link", { name: task.name, exact: true }).waitFor();
       await page
         .getByRole("button", { name: `More actions for ${task.name}`, exact: true })
@@ -374,7 +378,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
       const knowledgeMode = page.getByRole("combobox", { name: "Knowledge", exact: true });
       const openLearning = async () => {
-        await page.getByRole("heading", { level: 1, name: "Edit schedule", exact: true }).waitFor();
+        await page.getByRole("heading", { level: 1, name: "Edit automation", exact: true }).waitFor();
         await page.getByRole("button", { name: /^Settings / }).click();
       };
       await openLearning();
@@ -1414,14 +1418,14 @@ async function expectSchedulesScroll(
   workspaceId: string,
   tailTask: SeededScheduledTask,
 ): Promise<void> {
-  await page.goto(`${baseUrl}/workspaces/${workspaceId}/schedules`);
-  await page.getByRole("heading", { level: 1, name: "Schedules", exact: true }).waitFor();
+  await page.goto(`${baseUrl}/workspaces/${workspaceId}/automations`);
+  await page.getByRole("heading", { level: 1, name: "Automations", exact: true }).waitFor();
   // One flat list; every schedule is a row that links to its own page.
-  const schedules = page.getByRole("list", { name: "Schedules", exact: true });
+  const schedules = page.getByRole("list", { name: "Automations", exact: true });
   const tailRow = schedules.getByRole("listitem").last();
   await tailRow.getByRole("link", { name: tailTask.name, exact: true }).waitFor();
   expect(await tailRow.getByRole("link").getAttribute("href")).toBe(
-    `/workspaces/${workspaceId}/schedules/${tailTask.id}`,
+    `/workspaces/${workspaceId}/automations/${tailTask.id}`,
   );
   const scrollOwner = page.locator('[data-workspace-scroll-owner="page"]');
   expect(await scrollOwner.count()).toBe(1);

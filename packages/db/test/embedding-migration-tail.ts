@@ -394,4 +394,12 @@ export const embeddingMigrationTail = [
   "0925_membership_fences_allow_key_checks.sql",
   // Rewrites keys on the withheld Knowledge tables by name; replay last.
   ...workspaceDeletionMigrationTail,
+  // 0929 patches the scheduled occurrence validator from withheld 0275 by its
+  // anchor and builds its policies on the withheld 0345 fence helpers; 0932,
+  // 0935, 0937 and 0938 build on 0929. Replay them after all of those.
+  "0929_event_triggers.sql",
+  "0932_mcp_event_subscriptions.sql",
+  "0935_event_source_feeds.sql",
+  "0937_definer_runtime_grants_deferred.sql",
+  "0938_event_source_awaiting_secret.sql",
 ];
