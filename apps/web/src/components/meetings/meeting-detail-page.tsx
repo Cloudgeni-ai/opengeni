@@ -576,17 +576,33 @@ export function MeetingDetailPage({
   const { rememberVoice, forgetVoice } = people;
   const refreshTranscript = transcript.refresh;
   const rejectSuggestion = transcript.rejectSuggestion;
+  const nameSpeaker = transcript.nameSpeaker;
   const transcriptSpeakers = transcript.speakers;
   const actions: TranscriptActions = useMemo(
     () => ({
-      nameSpeaker: transcript.nameSpeaker,
+      nameSpeaker,
       rejectSuggestion: async (label: string) => {
         const suggested = speakerIsSuggested(label, transcriptSpeakers);
         await rejectSuggestion(label);
+        const personId = suggested?.personId;
         toast.success(
           suggested
             ? `Left unnamed. ${suggested.name} won't be suggested for this voice again`
             : "Left unnamed",
+          suggested && personId
+            ? {
+                // A mis-tap on "Not them" is easy; naming them puts it right.
+                action: {
+                  label: "Undo",
+                  onClick: () =>
+                    void nameSpeaker(label, { personId }).catch((error: unknown) =>
+                      toast.error("Couldn't name this speaker", {
+                        description: errorText(error),
+                      }),
+                    ),
+                },
+              }
+            : undefined,
         );
       },
       moveSegment: transcript.moveSegment,
@@ -620,7 +636,7 @@ export function MeetingDetailPage({
         : null,
     }),
     [
-      transcript.nameSpeaker,
+      nameSpeaker,
       rejectSuggestion,
       transcriptSpeakers,
       transcript.moveSegment,

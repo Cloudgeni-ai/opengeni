@@ -197,6 +197,24 @@ export function recorderLiveLines(recorder: Pick<MeetingRecorder, "live">): Live
   return (recorder.live ?? []).flatMap((track) => track.segments);
 }
 
+/** Why live text stopped, in the recorder's terms, from the first track's reason. */
+export function liveUnavailableText(
+  tracks: readonly { error: { code: string; message: string } | null }[],
+): string {
+  const code = tracks.find((track) => track.error)?.error?.code;
+  const reason =
+    code === "quota_exceeded"
+      ? "The live transcription account has no credit left, so ask an admin to top it up."
+      : code === "auth_error"
+        ? "The live transcription provider refused this workspace's key, so ask an admin to check the connection."
+        : code === "credential_unavailable"
+          ? "No live transcription provider is connected to this workspace, so ask an admin to connect one."
+          : code === "rate_limited" || code === "resource_exhausted" || code === "queue_overflow"
+            ? "The live transcription provider is busy right now."
+            : null;
+  return `Live text isn't available for this recording.${reason ? ` ${reason}` : ""} Nothing is lost: the meeting is still recorded and transcribed after you stop.`;
+}
+
 function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
   const live = recorder.live;
   const lines = useMemo(() => recorderLiveLines({ live }), [live]);
@@ -206,8 +224,7 @@ function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
     // Nothing to read, so no empty box: one line says it and that nothing is lost.
     return (
       <p className="mt-3 text-xs leading-4.5 text-fg-muted" aria-live="polite">
-        Live text isn't available right now. The meeting is still recorded and transcribed after you
-        stop.
+        {liveUnavailableText(live)}
       </p>
     );
   }
@@ -237,7 +254,7 @@ export function RecorderPanel({
   /** After Stop, with the recording to open. */
   onStopped?: ((recordingId: string) => void) | undefined;
   /** Offer the live transcript preview; null when the workspace has no live model. */
-  liveTranscript?: { defaultOn: boolean } | null;
+  liveTranscript?: { defaultOn: boolean; usdPerHour?: number | null } | null;
 }) {
   const titleId = useId();
   const tabAudioId = useId();
@@ -365,6 +382,12 @@ export function RecorderPanel({
 
   const starting = state === "starting";
   const error = recorder?.error && !errorDismissed ? recorder.error : null;
+  const startHint = recorderHint({
+    desktopAudio,
+    starting,
+    tabAudio,
+    systemAudioSupported: Boolean(recorder?.systemAudioSupported),
+  });
   const start = async () => {
     if (!recorder) return;
     setErrorDismissed(false);
@@ -449,22 +472,44 @@ export function RecorderPanel({
         </Notice>
       ) : null}
       <p className="px-1 text-xs leading-4.5 text-fg-muted" aria-live="polite">
-        {desktopAudio
-          ? starting
-            ? "Starting. Allow the microphone, and recording computer audio, if your computer asks."
-            : tabAudio
-              ? "Records your microphone and everything your computer plays, including the call, music and alerts. Tell everyone on the call you're recording."
-              : "Microphone only, so people on the call won't be heard. Tell everyone on the call you're recording."
-          : starting
-            ? tabAudio
-              ? "Starting. Allow the microphone if your browser asks, then pick the meeting tab and turn on Share tab audio."
-              : "Starting. Allow the microphone if your browser asks."
-            : tabAudio
-              ? "Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio."
-              : recorder?.systemAudioSupported
-                ? "Records your microphone. For a call in another browser tab, such as Meet, Teams or Zoom on the web, include its audio to hear everyone. Tell everyone on the call you're recording."
-                : "Records your microphone. Tell everyone you're recording."}
+        {startHint}
+        {liveOn && !starting ? ` ${liveCostHint(liveTranscript?.usdPerHour ?? null)}` : null}
       </p>
     </section>
   );
+}
+
+/** The live preview is billed on top of the transcript, so say so where it's switched on. */
+export function liveCostHint(usdPerHour: number | null): string {
+  return usdPerHour !== null
+    ? `The live transcript adds about $${usdPerHour.toFixed(2)} per hour of audio.`
+    : "The live transcript uses extra transcription credit.";
+}
+
+function recorderHint({
+  desktopAudio,
+  starting,
+  tabAudio,
+  systemAudioSupported,
+}: {
+  desktopAudio: boolean;
+  starting: boolean;
+  tabAudio: boolean;
+  systemAudioSupported: boolean;
+}): string {
+  return desktopAudio
+    ? starting
+      ? "Starting. Allow the microphone, and recording computer audio, if your computer asks."
+      : tabAudio
+        ? "Records your microphone and everything your computer plays, including the call, music and alerts. Tell everyone on the call you're recording."
+        : "Microphone only, so people on the call won't be heard. Tell everyone on the call you're recording."
+    : starting
+      ? tabAudio
+        ? "Starting. Allow the microphone if your browser asks, then pick the meeting tab and turn on Share tab audio."
+        : "Starting. Allow the microphone if your browser asks."
+      : tabAudio
+        ? "Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio."
+        : systemAudioSupported
+          ? "Records your microphone. For a call in another browser tab, such as Meet, Teams or Zoom on the web, include its audio to hear everyone. Tell everyone on the call you're recording."
+          : "Records your microphone. Tell everyone you're recording.";
 }
