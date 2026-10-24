@@ -1332,6 +1332,12 @@ describe("CUA desktop boundary", () => {
       busyReads = 2;
       /** A "Loading…" text the page shows before the press, too. */
       loadingBefore = false;
+      /** How the save shows: the button's own label, or (as Chrome on macOS
+       * does) a disabled button folded into the web area with the others the
+       * save disables, so the web area reads "Saving... | Delete". */
+      shows: "label" | "folded" = "label";
+      /** The press reveals a long preview cut short with "…" instead. */
+      preview = false;
       reads = 0;
       override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
         const args = JSON.parse(argumentsJson) as Record<string, unknown>;
@@ -1342,7 +1348,18 @@ describe("CUA desktop boundary", () => {
         const extra: Record<string, unknown>[] = [];
         if (this.pressed) this.reads++;
         const busy = this.pressed && this.reads <= this.busyReads;
-        if (busy) {
+        if (this.preview) {
+          if (this.pressed)
+            extra.push({
+              role: "AXStaticText",
+              label: "Quarterly report: revenue grew in every region and…",
+              actions: [],
+            });
+        } else if (busy && this.shows === "folded") {
+          extra.push({ role: "AXWebArea", label: "Billing", actions: [] });
+          state.tree_markdown =
+            '- [2] AXWebArea "Billing"\n  - AXButton "Saving..."\n  - AXButton "Delete"\n';
+        } else if (busy) {
           Object.assign(state.elements[0], { label: "Saving...", enabled: false });
           extra.push({ role: "AXStaticText", label: "Loading billing details…", actions: [] });
         } else if (this.pressed) {
@@ -1389,6 +1406,35 @@ describe("CUA desktop boundary", () => {
       expect(idle.reads).toBe(1);
     } finally {
       await idleBackend.close();
+    }
+
+    // Chrome on macOS folds the disabled "Saving..." button, and the other
+    // buttons the save disables, into the page's web area: its description
+    // reads "Saving... | Delete".
+    const folded = new SavingFixture();
+    folded.shows = "folded";
+    const foldedBackend = await CuaComputerBackend.open(folded, "macos");
+    try {
+      const target = (await foldedBackend.targets())[0]!;
+      const after = await foldedBackend.dispatch(command(await foldedBackend.observe(target.id)));
+      expect(names(after)).toContain("Saved: CF-1");
+      expect(folded.reads).toBe(3);
+    } finally {
+      await foldedBackend.close();
+    }
+
+    // A long text cut short with "…" is content, not work in progress: the
+    // press that reveals it reads the window once.
+    const preview = new SavingFixture();
+    preview.preview = true;
+    const previewBackend = await CuaComputerBackend.open(preview, "macos");
+    try {
+      const target = (await previewBackend.targets())[0]!;
+      const after = await previewBackend.dispatch(command(await previewBackend.observe(target.id)));
+      expect(names(after)).toContain("Quarterly report: revenue grew in every region and…");
+      expect(preview.reads).toBe(1);
+    } finally {
+      await previewBackend.close();
     }
   });
 

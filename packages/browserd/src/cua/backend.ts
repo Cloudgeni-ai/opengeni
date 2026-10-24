@@ -2165,11 +2165,27 @@ const DESCRIPTIVE_ROLE =
   /^(?:AX)?(?:static ?text|text|label|status|alert|heading|web ?area|document|group|cell)$/iu;
 const IN_PROGRESS_ROLE = /busy|progress/iu;
 const TRAILING_ELLIPSIS = /(?:\.\.\.|…)\s*$/u;
+/** A message of work in progress is short ("Saving...", "Loading your
+ * accounts…"); a longer text ending in an ellipsis is content cut short, such
+ * as a preview or a snippet, which stays on the page. */
+const MAX_PROGRESS_WORDS = 6;
+
+/** Whether one text reads as work in progress: a short text ending in an
+ * ellipsis. */
+function inProgressText(text: string): boolean {
+  if (!TRAILING_ELLIPSIS.test(text)) return false;
+  const words = text.replace(TRAILING_ELLIPSIS, "").trim().split(/\s+/u).filter(Boolean);
+  return words.length > 0 && words.length <= MAX_PROGRESS_WORDS;
+}
 
 /** The signs of work in progress a reading shows, one string per element: a
  * busy element or a spinner (a progress element without a value; a bar
  * showing a value can be a static meter), or a descriptive or disabled
- * element whose text ends in an ellipsis ("Saving...", "Loading…"). */
+ * element with a short text ending in an ellipsis ("Saving...", "Loading…").
+ * A description joins the texts of the rows folded into an element with
+ * " | " (on macOS a disabled button, such as one reading "Saving...", is
+ * folded into the page's web area), so each of its parts is read on its own:
+ * "Saving... | Delete" shows a save in progress. */
 function progressSigns(nodes: readonly InteractionSemanticNodeValue[]): string[] {
   const signs: string[] = [];
   const visit = (node: InteractionSemanticNodeValue): void => {
@@ -2182,7 +2198,8 @@ function progressSigns(nodes: readonly InteractionSemanticNodeValue[]): string[]
       } else if (DESCRIPTIVE_ROLE.test(node.role) || node.states.includes("disabled")) {
         const value = typeof node.value === "string" ? node.value : undefined;
         for (const text of [node.name, value, node.description])
-          if (text && TRAILING_ELLIPSIS.test(text)) signs.push(`${node.role}\u0000${text}`);
+          for (const part of text?.split(" | ") ?? [])
+            if (inProgressText(part)) signs.push(`${node.role}\u0000${part.trim()}`);
       }
     }
     for (const child of node.children ?? []) visit(child);
