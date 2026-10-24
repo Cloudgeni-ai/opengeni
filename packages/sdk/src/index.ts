@@ -580,6 +580,7 @@ export type {
   WorkspaceArtifactVisibility,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactEvent,
   WorkspaceArtifactListOptions,

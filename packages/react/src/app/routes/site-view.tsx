@@ -1,5 +1,9 @@
-import { SITE_ID_HEADER, SITE_VERSION_HEADER } from "@opengeni/contracts/site-session-http";
-import type { Session, SessionListResponse } from "@opengeni/sdk";
+import {
+  SITE_ID_HEADER,
+  SITE_VERSION_HEADER,
+  siteConversationContext,
+} from "@opengeni/contracts/site-session-http";
+import type { Session, SessionEvent, SessionListResponse } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   InfoIcon,
@@ -21,6 +25,7 @@ import {
   type RefObject,
 } from "react";
 import { SiteView } from "../../artifacts";
+import { SiteVersionMenu } from "../components/artifacts/site-version-menu";
 import { NewConversation } from "../../components/new-conversation";
 import type {
   CreatedConversation,
@@ -56,6 +61,7 @@ import {
   useSiteChatPanelLayout,
 } from "../lib/site-chat-panel";
 import { useRecordSiteOpened } from "../lib/site-opened";
+import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
 
@@ -66,7 +72,13 @@ const WIDTH_VARIABLE = "--og-site-chat-width";
 type SiteState =
   | { status: "loading" }
   | { status: "error" }
-  | { status: "ready"; title: string; versionId: string | null; archived: boolean };
+  | {
+      status: "ready";
+      title: string;
+      versionId: string | null;
+      revision: number | null;
+      archived: boolean;
+    };
 
 /**
  * A Site with its chat beside it. The Site fills the page; the panel shows
@@ -75,16 +87,24 @@ type SiteState =
  * Site's conversations, so the panel doesn't repeat them. The panel can be
  * resized and hidden; both are remembered per person, and choosing a
  * conversation brings a hidden panel back.
+ *
+ * Edits go live: the Site is watched for new versions (its conversation's
+ * tool calls, and a check every few seconds for anyone else's), the preview
+ * reloads in place when one is published or restored, and the version chip
+ * in its header offers the history and one-click Undo.
  */
 export function SiteViewRoute({
   workspaceId,
   siteId,
   conversation,
+  startNew = false,
 }: {
   workspaceId: string;
   siteId: string;
   /** The conversation open in the panel; the newest when omitted. */
   conversation?: string | undefined;
+  /** Open with a new conversation in the panel, its composer focused (Edit with Opengeni). */
+  startNew?: boolean | undefined;
 }) {
   const { client, accessContext } = useAppContext();
   const viewer = useConsoleSiteViewer();
@@ -93,51 +113,85 @@ export function SiteViewRoute({
   const canPublish = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
   const publicationLink = useSitePublicationLink({ client, workspaceId, siteId });
   const toolBridge = useConsoleSiteToolBridge(workspaceId);
-  const [site, setSite] = useState<SiteState>({ status: "loading" });
-  const [siteAttempt, setSiteAttempt] = useState(0);
   useRecordSiteOpened(client, workspaceId, siteId);
-  useEffect(() => {
-    const abort = new AbortController();
-    setSite({ status: "loading" });
-    client
-      .getWorkspaceArtifact(workspaceId, siteId, { signal: abort.signal })
-      .then(({ artifact }) => {
-        if (abort.signal.aborted) return;
-        setSite({
-          status: "ready",
-          title: artifact.title,
-          versionId: artifact.currentVersion?.id ?? null,
-          archived: artifact.status === "archived",
-        });
-      })
-      .catch(() => {
-        if (!abort.signal.aborted) setSite({ status: "error" });
-      });
-    return () => abort.abort();
-  }, [client, siteAttempt, siteId, workspaceId]);
+  const live = useSiteLiveVersion(client, workspaceId, siteId);
+  const artifact = live.detail?.artifact;
+  const site = useMemo<SiteState>(
+    () =>
+      artifact
+        ? {
+            status: "ready",
+            title: artifact.title,
+            versionId: artifact.currentVersion?.id ?? null,
+            revision: artifact.currentVersion?.revision ?? null,
+            archived: artifact.status === "archived",
+          }
+        : live.failed
+          ? { status: "error" }
+          : { status: "loading" },
+    [artifact, live.failed],
+  );
+  const { check } = live;
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 max-lg:flex-col"
       data-workspace-scroll-owner="self-managed"
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <SiteView
-          client={client}
-          workspaceId={workspaceId}
-          siteId={siteId}
-          toolBridge={toolBridge}
-          viewer={viewer}
-          liveStatus={siteLiveStatus(publicationLink, canPublish, workspaceId, siteId)}
-          archivedMessage="This Site is archived. Restore it from Site details."
-        />
+        {artifact?.status === "archived" ? (
+          <p className="p-4 text-sm text-fg-muted">
+            This Site is archived.{" "}
+            <Link
+              to="/workspaces/$workspaceId/artifacts/$artifactId"
+              params={{ workspaceId, artifactId: siteId }}
+              search={{ tab: "settings" }}
+              className="font-medium text-fg underline underline-offset-2"
+            >
+              {canPublish ? "Restore it from Site details" : "View Site details"}
+            </Link>
+          </p>
+        ) : (
+          <SiteView
+            client={client}
+            workspaceId={workspaceId}
+            siteId={siteId}
+            toolBridge={toolBridge}
+            viewer={viewer}
+            liveStatus={siteLiveStatus(publicationLink, canPublish, workspaceId, siteId)}
+            versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
+            watch={live.watch}
+            versionControl={
+              live.detail ? (
+                <SiteVersionMenu
+                  workspaceId={workspaceId}
+                  siteId={siteId}
+                  detail={live.detail}
+                  canPublish={canPublish}
+                  onRestored={check}
+                />
+              ) : undefined
+            }
+            archivedMessage={
+              canPublish
+                ? "This Site is archived. Restore it from Site details."
+                : "This Site is archived."
+            }
+          />
+        )}
       </div>
       <SiteChatPanel
         key={`${workspaceId}:${siteId}`}
         workspaceId={workspaceId}
         siteId={siteId}
         site={site}
-        retrySite={() => setSiteAttempt((attempt) => attempt + 1)}
+        retrySite={live.retry}
+        canPublish={canPublish}
         conversation={conversation}
+        startNew={startNew}
+        onEvent={(event) => {
+          // A publish or restore from this conversation shows at once.
+          if (siteMayHaveChanged(event)) check();
+        }}
       />
     </div>
   );
@@ -231,13 +285,21 @@ function SiteChatPanel({
   siteId,
   site,
   retrySite,
+  canPublish,
   conversation,
+  startNew: startNewRequested,
+  onEvent,
 }: {
   workspaceId: string;
   siteId: string;
   site: SiteState;
   retrySite: () => void;
+  /** Whether this person may publish the Site, and so edit it from here. */
+  canPublish: boolean;
   conversation?: string | undefined;
+  startNew: boolean;
+  /** Each new event in the open conversation, so the Site can follow its edits. */
+  onEvent: (event: SessionEvent) => void;
 }) {
   const context = useAppContext();
   const api = useAppApi();
@@ -366,6 +428,10 @@ function SiteChatPanel({
     ready !== null &&
     ready.versionId !== null &&
     !ready.archived;
+  // The composer mounts once the Site has loaded; focus it then too.
+  useEffect(() => {
+    if (composing && canCreate) setFocusRequest((request) => request + 1);
+  }, [canCreate, composing]);
   const selectedId = composing ? null : (conversation ?? pinned);
   const showComposer = composing || (list.loaded && selectedId === null);
   const startNew = () => {
@@ -377,6 +443,24 @@ function SiteChatPanel({
       toSite({});
     }
   };
+  // Edit with Opengeni opens the Site this way: a new conversation, shown
+  // even if the panel was hidden, its composer focused once it can be used.
+  // The address drops the request so going back or reloading doesn't repeat it.
+  // Once per request, also when the Site is already open: the host's
+  // navigate (and so `toSite`) may change identity on every render.
+  const startNewHandled = useRef(false);
+  useEffect(() => {
+    if (!startNewRequested) {
+      startNewHandled.current = false;
+      return;
+    }
+    if (startNewHandled.current) return;
+    startNewHandled.current = true;
+    setComposing(true);
+    updateLayout({ collapsed: false });
+    if (conversation) startingNew.current = true;
+    toSite({}, true);
+  }, [conversation, startNewRequested, toSite, updateLayout]);
   // Created like the Site's own chats: private to this person and listed
   // under the Site. The API refuses anything else a Site may not set.
   const versionId = ready?.versionId ?? null;
@@ -406,6 +490,23 @@ function SiteChatPanel({
     [api, siteId, versionId, workspaceId],
   );
   const handedOff = handoff !== null && handoff.sessionId === selectedId ? handoff : null;
+  // For someone who may publish the Site, every message says which Site and
+  // version "the Site" is; the API names it on the first one when it creates
+  // the conversation. Others get no editing context, as from the API.
+  const siteContext = useRef<string | null>(null);
+  siteContext.current =
+    canPublish && ready?.versionId && ready.revision !== null
+      ? siteConversationContext({
+          siteId,
+          title: ready.title,
+          versionId: ready.versionId,
+          revision: ready.revision,
+        })
+      : null;
+  const sendExtras = useCallback(
+    () => (siteContext.current ? { modelContext: siteContext.current } : {}),
+    [],
+  );
   // The handoff is for the conversation's first open only.
   useEffect(() => {
     if (handoff && selectedId !== null && selectedId !== handoff.sessionId) setHandoff(null);
@@ -507,6 +608,10 @@ function SiteChatPanel({
                 <Link
                   to="/workspaces/$workspaceId/artifacts/$artifactId"
                   params={{ workspaceId, artifactId: siteId }}
+                  // Its details are by tab; without one the address opens
+                  // the Site view again. Settings shows Versions to people
+                  // who can't manage it.
+                  search={{ tab: "settings" }}
                 >
                   <InfoIcon aria-hidden="true" />
                   Site details
@@ -575,7 +680,11 @@ function SiteChatPanel({
               {...(handedOff?.initialMessage
                 ? { pendingPrompt: { text: handedOff.initialMessage, sentAt: handedOff.sentAt } }
                 : {})}
-              {...(handedOff ? { composerOptions: { initialDraft: handedOff.draft } } : {})}
+              composerOptions={{
+                ...(handedOff ? { initialDraft: handedOff.draft } : {}),
+                sendExtras,
+              }}
+              onEvent={onEvent}
               onOpenSession={(sessionId) =>
                 void navigate({
                   to: "/workspaces/$workspaceId/sessions/$sessionId",

@@ -16,7 +16,7 @@ import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
-import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import {
   requireWorkspace,
   sessionScheduleTargets,
@@ -41,7 +41,11 @@ import {
 import type { CreditDebitAttribution, SessionForkPointRefusal } from "@opengeni/db";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
-import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
+import {
+  resolveSiteSessionOrigin,
+  siteViewConversationContext,
+  withOptionalSiteCommandOrigin,
+} from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
 import { SandboxRecoveryConflictError } from "@opengeni/db";
@@ -804,6 +808,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         // additionally restricts that execution to the parent's real owner.
         if (grant.principalKind !== "agent_attempt")
           (payload as Record<string, unknown>).visibility = "private";
+        // Started beside the Site in the console's Site view (its id and
+        // version without a frame marker: not Site code, which the bridge
+        // always marks), by someone who may publish it: the first message
+        // says which Site "the Site" is. Later messages carry the console's
+        // own context. Server-authored; the caller's context was refused above.
+        if (
+          siteOrigin.siteId &&
+          c.req.header(SITE_FRAME_HEADER) === undefined &&
+          hasPermission(grant.permissions, "artifacts:publish", grant.permissionMode) &&
+          typeof (payload as { initialMessage?: unknown }).initialMessage === "string"
+        ) {
+          const context = await siteViewConversationContext(db, grant, siteOrigin);
+          if (context) (payload as Record<string, unknown>).modelContext = context;
+        }
       }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);

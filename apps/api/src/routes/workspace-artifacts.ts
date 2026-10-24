@@ -12,6 +12,7 @@ import {
   UpdateWorkspaceArtifactVisibilityResponse,
   WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
   WorkspaceArtifactContentResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListQuery,
   WorkspaceArtifactListResponse,
@@ -36,6 +37,7 @@ import {
   duplicateWorkspaceArtifact,
   getWorkspaceArtifact,
   getWorkspaceArtifactContentRef,
+  getWorkspaceArtifactCurrent,
   listWorkspaceArtifacts,
   recordSiteOpened,
   setSiteSidebarState,
@@ -63,6 +65,7 @@ import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
   redactWorkspaceArtifactListProvenance,
+  redactWorkspaceArtifactProvenance,
 } from "../workspace-artifact-provenance";
 
 import {
@@ -405,6 +408,29 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
             canReadProvenanceSession(deps, grant, sessionId),
           ),
         ),
+      );
+    } catch (error) {
+      return workspaceArtifactErrorResponse(context, error);
+    }
+  });
+
+  // The Site and its current version without its history, for a view that
+  // checks every few seconds whether a new version is live. Provenance is
+  // left out, as in lists, so the check needs no session reads.
+  app.get(`${base}/:artifactId/current`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    try {
+      const artifact = await getWorkspaceArtifactCurrent(
+        deps.db,
+        workspaceId,
+        await siteViewerForGrant(deps.db, grant),
+        artifactId(context),
+      );
+      return context.json(
+        WorkspaceArtifactCurrentResponse.parse({
+          artifact: redactWorkspaceArtifactProvenance(artifact),
+        }),
       );
     } catch (error) {
       return workspaceArtifactErrorResponse(context, error);

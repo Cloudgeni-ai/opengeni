@@ -46,6 +46,8 @@ export const englishMessages = {
   "artifacts.artifactChrome.itMayHaveBeenRemoved":
     "It may have been removed, or you may not have access.",
   "artifacts.artifactChrome.live": "Live",
+  "artifacts.artifactChrome.liveReconnecting": "Reconnecting",
+  "artifacts.artifactChrome.liveUpdating": "Updating",
   "artifacts.artifactChrome.loadingSite": "Loading Site…",
   "artifacts.artifactChrome.loadPreview": "Load preview",
   "artifacts.artifactChrome.loadSitePreview": "Load Site preview",
