@@ -138,6 +138,7 @@ export function cadenceWords(cadence: CadenceValue, now: Date): ScheduleWords {
   const words = describeCadence(cadence.rule, {
     timeZone: cadence.timeZone,
     now,
+    text: t,
   });
   return { short: words.short, sentence: words.sentence };
 }
@@ -199,7 +200,7 @@ export function automationWhenSentence(
 
 /** "Mon 28 Sep, 08:00" or "Today, 14:00" in the viewer's zone. */
 export function runTimeLabel(date: Date, now: Date): string {
-  return formatRunTime(date, { timeZone: viewerTimeZone(), now });
+  return formatRunTime(date, { timeZone: viewerTimeZone(), now, text: t });
 }
 
 /**
@@ -217,7 +218,9 @@ export function runEventsLabel(run: Pick<ScheduledTaskRun, "eventOccurrence">): 
 
 export function cadenceIssue(cadence: CadenceValue | null, now: Date): string | null {
   if (!cadence) return null;
-  return validateCadence(cadence.rule, { timeZone: cadence.timeZone, now })?.message ?? null;
+  return (
+    validateCadence(cadence.rule, { timeZone: cadence.timeZone, now, text: t })?.message ?? null
+  );
 }
 
 /** The cadence runs more than once; a run-once automation can't have one. */
@@ -498,6 +501,7 @@ export function templateCadenceLabel(template: ScheduleTemplate, now: Date): str
   return describeCadence(template.cadence, {
     timeZone: viewerTimeZone(),
     now,
+    text: t,
   }).short.replace(/ · .*$/, "");
 }
 
