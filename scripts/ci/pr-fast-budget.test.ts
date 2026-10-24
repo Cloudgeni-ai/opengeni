@@ -147,3 +147,42 @@ test("incomplete inventory cannot turn into a timeout capacity waiver", async ()
     ),
   ).rejects.toThrow("budget did not clear");
 });
+test("workflow-source404 retires only a freshly proven terminal run", async () => {
+  for (const terminal of [false, true]) {
+    let now = 0;
+    const transport = (async (input: any) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes("/contents/"))
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      if (url.pathname.endsWith("/actions/runs/1"))
+        return Response.json({ id: 1, status: terminal ? "completed" : "in_progress" });
+      const rows =
+        url.searchParams.get("status") === "in_progress"
+          ? [
+              {
+                id: 1,
+                path: ".github/workflows/pr-ci.yml",
+                head_sha: "a".repeat(40),
+                status: "in_progress",
+                run_attempt: 1,
+              },
+            ]
+          : [];
+      return Response.json({ workflow_runs: rows, total_count: rows.length });
+    }) as typeof fetch;
+    const operation = runPrCiCommand(
+      "admit-fast",
+      { GITHUB_REPOSITORY: "owner/repo", GITHUB_TOKEN: "fixture", GITHUB_RUN_ID: "99" },
+      transport,
+      undefined,
+      {
+        now: () => now,
+        sleep: async () => {
+          now += 6 * 60 * 60 * 1000;
+        },
+      },
+    );
+    if (terminal) await operation;
+    else await expect(operation).rejects.toThrow("budget did not clear");
+  }
+});

@@ -2,6 +2,14 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { classifyPrWorkflow, fastBudget, type FastObservation } from "./pr-fast-budget";
 
 class IncompleteInventory extends Error {}
+class GitHubReadError extends Error {
+  constructor(
+    readonly status: number,
+    readonly path: string,
+  ) {
+    super(`GitHub GET ${status}: ${path}`);
+  }
+}
 
 type Run = {
   id: number;
@@ -137,7 +145,10 @@ export async function runPrCiCommand(
         );
         continue; // authenticated reads only; never replay a mutation
       }
-      if (!r.ok) throw Error(`GitHub ${method} ${r.status}`);
+      if (!r.ok) {
+        if (method === "GET") throw new GitHubReadError(r.status, path);
+        throw Error(`GitHub ${method} ${r.status}`);
+      }
       return r.status === 204 ? null : r.json();
     }
   }
@@ -197,7 +208,17 @@ export async function runPrCiCommand(
             if (!/^[a-f0-9]{40}$/.test(run.head_sha))
               throw new IncompleteInventory("Invalid PR source identity");
             if (!definitions.has(run.head_sha)) {
-              const source = await api(`contents/.github/workflows/pr-ci.yml?ref=${run.head_sha}`);
+              let source;
+              try {
+                source = await api(`contents/.github/workflows/pr-ci.yml?ref=${run.head_sha}`);
+              } catch (error) {
+                if (!(error instanceof GitHubReadError) || error.status !== 404) throw error;
+                const current = await api(`actions/runs/${run.id}`);
+                if (current.id === run.id && current.status === "completed") continue;
+                throw new IncompleteInventory(
+                  `Workflow source unavailable for active run ${run.id} head ${run.head_sha}; ${error.message}`,
+                );
+              }
               if (source.encoding !== "base64" || source.size > 100000)
                 throw new IncompleteInventory("Unbounded workflow source");
               definitions.set(
