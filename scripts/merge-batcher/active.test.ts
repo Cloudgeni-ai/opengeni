@@ -149,6 +149,9 @@ async function fixture() {
       this.onSnapshot?.();
       return { ...this.snapshot };
     }
+    override async autoMergeState(_number: number) {
+      return { id: "PR_fixture", headSha: this.snapshot.headSha, enabledAt: null };
+    }
     override async findFollowup(request: FollowupRequest) {
       const matches = this.followups.filter(
         (p) => p.sourceRepository === request.sourceRepository && p.sourceRef === request.sourceRef,
@@ -612,13 +615,28 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(f.api.calls).toHaveLength(0);
     expect((await f.git.remoteRefs(f.origin.dir)).has(f.cfg.stateRef)).toBe(false);
   });
+  test.each([false, true])("native MERGED is distinct from CLOSED (merged=%s)", async (merged) => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    f.api.snapshot.state = "closed";
+    f.api.snapshot.merged = merged;
+    f.advance();
+    await f.executor().maintain();
+    expect((await f.state()).ledger.landings[`${m.batchId}:1`]?.status).toBe(
+      merged ? "native-merged" : "closed-unmerged",
+    );
+  });
   test("publishes create-only, lands exact tested tip, reconstructs without duplicate landing", async () => {
     const f = await fixture(),
       m = await f.publish();
     f.verdict(m);
     expect((await f.controller().step()).action.kind).toBe("land");
     expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
-    expect((await f.state()).ledger.landings[`${m.batchId}:1`]?.status).toBe("unchanged");
+    expect((await f.state()).ledger.landings[`${m.batchId}:1`]?.status).toBe(
+      "awaiting-native-merge",
+    );
     expect(f.api.comments[0]).toContain(f.head);
     expect(f.api.comments[0]).toContain(m.tipSha);
     expect((await f.controller().step()).action.kind).toBe("wait");
@@ -1194,8 +1212,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect((await f.controller().step()).action.kind).toBe("park");
       expect(f.api.calls).toEqual([]);
       await f.controller().step();
+      await f.executor().maintain(); // Reconcile native disable before the parking comment.
       expect(f.api.comments).toHaveLength(1);
-      expect(f.api.comments[0]).toContain("not a culprit attribution");
+      expect(f.api.comments[0]).toContain("singleton Batch CI failed");
       await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
       f.api.baseStatus = "green";
       expect((await f.controller().step()).action.kind).toBe("wait");
@@ -1220,6 +1239,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     f.verdict(m, "code_failure").attempt = 2;
     await f.controller().step();
     expect((await f.controller().step()).action.kind).toBe("park");
+    await f.executor().maintain(); // Already-disabled native request is reconciled first.
     f.api.response = "lost";
     await f.executor().maintain();
     expect(f.api.calls).toHaveLength(1);
