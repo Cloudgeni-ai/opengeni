@@ -261,30 +261,119 @@ test("short provider inventory holds then rescans without admitting partial dema
   expect(paths.every((path) => path.includes("/workflows/"))).toBe(true);
 });
 
-test("persistent incomplete priority inventory expires held without a write", async () => {
-  let now = 0,
-    calls = 0;
-  const transport = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-    calls++;
-    expect(init?.method).toBe("GET");
-    return Response.json({ total_count: 1, workflow_runs: [] });
-  }) as typeof fetch;
-  await expect(
-    runPrCiCommand(
-      "priority",
-      { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture" },
-      transport,
-      "batch",
-      {
-        now: () => now,
-        sleep: async (ms) => {
-          now += ms;
+test.each(["pr", "batch"] as const)(
+  "persistent incomplete %s priority inventory expires held without a write",
+  async (lane) => {
+    let now = 0,
+      calls = 0;
+    const transport = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls++;
+      expect(init?.method).toBe("GET");
+      return Response.json({ total_count: 1, workflow_runs: [] });
+    }) as typeof fetch;
+    await expect(
+      runPrCiCommand(
+        "priority",
+        { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture" },
+        transport,
+        lane,
+        {
+          now: () => now,
+          sleep: async (ms) => {
+            now += ms;
+          },
         },
+      ),
+    ).rejects.toThrow("did not clear");
+    expect(calls).toBe(60);
+    expect(now).toBe(5 * 60 * 60 * 1000);
+  },
+);
+
+test("continuous new main pushes cannot reset the PR priority yield deadline", async () => {
+  let now = 0;
+  const sleeps: number[] = [];
+  const observedRuns: number[] = [];
+  const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    expect(init?.method).toBe("GET");
+    const url = new URL(String(input));
+    const active =
+      url.pathname.includes("/ci.yml/runs") && url.searchParams.get("status") === "in_progress";
+    const id = 100 + now / 300000;
+    if (active) observedRuns.push(id);
+    return Response.json({
+      total_count: active ? 1 : 0,
+      workflow_runs: active
+        ? [
+            {
+              id,
+              path: ".github/workflows/ci.yml",
+              event: "push",
+              head_branch: "main",
+              head_sha: head,
+              status: "in_progress",
+              run_attempt: 1,
+            },
+          ]
+        : [],
+    });
+  }) as typeof fetch;
+  await runPrCiCommand(
+    "priority",
+    { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture" },
+    transport,
+    "pr",
+    {
+      now: () => now,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        now += ms;
       },
-    ),
-  ).rejects.toThrow("did not clear");
-  expect(calls).toBe(60);
-  expect(now).toBe(5 * 60 * 60 * 1000);
+    },
+  );
+  expect(now).toBe(15 * 60 * 1000);
+  expect(sleeps).toEqual([300000, 300000, 300000]);
+  expect(observedRuns).toEqual([100, 101, 102, 103]);
+});
+
+test("PR cap cannot admit an incomplete snapshot at the deadline", async () => {
+  let now = 0;
+  const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    expect(init?.method).toBe("GET");
+    const url = new URL(String(input));
+    if (now >= 900000 && now < 1200000) return Response.json({ total_count: 1, workflow_runs: [] });
+    const active =
+      url.pathname.includes("/ci.yml/runs") && url.searchParams.get("status") === "in_progress";
+    return Response.json({
+      total_count: active ? 1 : 0,
+      workflow_runs: active
+        ? [
+            {
+              id: 7,
+              path: ".github/workflows/ci.yml",
+              event: "push",
+              head_branch: "main",
+              head_sha: head,
+              status: "in_progress",
+              run_attempt: 1,
+            },
+          ]
+        : [],
+    });
+  }) as typeof fetch;
+  await runPrCiCommand(
+    "priority",
+    { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture" },
+    transport,
+    "pr",
+    {
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms;
+      },
+    },
+  );
+  expect(now).toBe(1200000);
 });
 
 test("incomplete supersession inventory still fails before any mutation", async () => {

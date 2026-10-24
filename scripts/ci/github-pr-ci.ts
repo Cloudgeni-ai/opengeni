@@ -96,7 +96,9 @@ export async function runPrCiCommand(
   const repo = env.GITHUB_REPOSITORY,
     token = env.GITHUB_TOKEN;
   if (!repo || !token) throw Error("Repository and GitHub token required");
-  const deadline = timing.now() + 5 * 60 * 60 * 1000;
+  const admissionStartedAt = timing.now();
+  const deadline = admissionStartedAt + 5 * 60 * 60 * 1000;
+  const prPriorityYieldDeadline = admissionStartedAt + 15 * 60 * 1000;
   let readAfter = 0;
   async function api(path: string, method = "GET", body?: unknown): Promise<any> {
     for (;;) {
@@ -213,6 +215,14 @@ export async function runPrCiCommand(
       const hold = priorityHold(lane, observations, Number(env.GITHUB_RUN_ID));
       if (!hold) {
         console.log("Higher-priority observed demand clear; repository admission granted");
+        return;
+      }
+      // PR CI already serializes one complete fast fanout. Main priority is a
+      // bounded courtesy, not a provider scheduling guarantee: continuous main
+      // pushes must not starve the PRs that repair main. Only a complete known
+      // inventory reaches this branch; unknown demand still holds above.
+      if (lane === "pr" && timing.now() >= prPriorityYieldDeadline) {
+        console.log("PR priority yield reached 15 minutes; admitting one serialized fast fanout");
         return;
       }
       console.log(hold);
