@@ -4310,6 +4310,8 @@ export const englishMessages = {
   "timeline.toolStep.checkDocuments.running": "Checking documents",
   "timeline.toolStep.checkModels.done": "Checked available models",
   "timeline.toolStep.checkModels.running": "Checking available models",
+  "timeline.toolStep.checkMeetings.done": "Checked meetings",
+  "timeline.toolStep.checkMeetings.running": "Checking meetings",
   "timeline.toolStep.checkNotes.done": "Checked notes",
   "timeline.toolStep.checkNotes.running": "Checking notes",
   "timeline.toolStep.checkProgress.done": "Checked progress",

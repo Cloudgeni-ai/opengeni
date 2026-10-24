@@ -80,7 +80,14 @@ export class OpenGeniRecordingsClient {
   async listRecordings(
     workspaceId: string,
     options: {
+      /** Words in titles and current transcripts. */
       query?: string;
+      /** A named speaker: a people-directory id, or part of their name. */
+      person?: string;
+      /** Started at or after this ISO date and time. */
+      startedFrom?: string;
+      /** Started before this ISO date and time. */
+      startedTo?: string;
       externalRef?: string;
       before?: { startedAt: string; id: string };
       limit?: number;
@@ -93,6 +100,9 @@ export class OpenGeniRecordingsClient {
       undefined,
       {
         ...(options.query ? { query: options.query } : {}),
+        ...(options.person ? { person: options.person } : {}),
+        ...(options.startedFrom ? { startedFrom: options.startedFrom } : {}),
+        ...(options.startedTo ? { startedTo: options.startedTo } : {}),
         ...(options.externalRef ? { externalRef: options.externalRef } : {}),
         ...(options.before
           ? {

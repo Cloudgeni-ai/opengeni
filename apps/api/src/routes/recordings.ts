@@ -210,11 +210,22 @@ export function registerRecordingRoutes(
     }
     const query = c.req.query("query")?.slice(0, 200);
     const externalRef = c.req.query("externalRef")?.slice(0, 512);
+    const person = c.req.query("person")?.slice(0, 200);
+    const instant = (name: string): Date | undefined => {
+      const value = c.req.query(name);
+      if (!value) return undefined;
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) throw invalid(`${name} must be a date and time`);
+      return parsed;
+    };
     return c.json(
       await listRecordings(db, {
         workspaceId: actor.workspaceId,
         subjectId: actor.subjectId,
         query: query || undefined,
+        person: person || undefined,
+        startedFrom: instant("startedFrom"),
+        startedTo: instant("startedTo"),
         externalRef: externalRef || undefined,
         before,
         limit: Number.isFinite(limit) ? limit : 50,

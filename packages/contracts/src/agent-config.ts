@@ -305,6 +305,9 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   knowledge_browse: "knowledge",
   knowledge_save: "knowledge",
   knowledge_retain_file: "knowledge",
+  // Recorded meetings are part of what the workspace knows.
+  meetings_search: "knowledge",
+  meeting_read: "knowledge",
   knowledge_retain_message: "knowledge",
   knowledge_archive: "knowledge",
   instruction_policy_save: "knowledge",
