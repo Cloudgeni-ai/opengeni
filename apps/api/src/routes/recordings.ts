@@ -112,9 +112,8 @@ export function registerRecordingRoutes(
     requested: RecordingTranscriptionOptions,
   ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
     const workspace = await getWorkspace(db, workspaceId);
-    const defaults =
-      resolveWorkspaceRecordingSettings(workspace?.settings).transcription ??
-      DEFAULT_RECORDING_TRANSCRIPTION;
+    const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
+    const defaults = settings.transcription ?? DEFAULT_RECORDING_TRANSCRIPTION;
     const providerId = requested.providerId ?? defaults.providerId;
     const model = requested.model ?? (requested.providerId ? undefined : defaults.model);
     const found = model ? findRecordingTranscriptionModel(registry, providerId, model) : null;
@@ -127,7 +126,12 @@ export function registerRecordingRoutes(
       });
     }
     const { providerId: _provider, model: _model, ...rest } = requested;
-    return { providerId, model: found.spec.model, options: rest };
+    const diarizer = rest.diarizer ?? settings.diarizer;
+    return {
+      providerId,
+      model: found.spec.model,
+      options: { ...rest, ...(diarizer ? { diarizer } : {}) },
+    };
   }
 
   async function startTranscript(

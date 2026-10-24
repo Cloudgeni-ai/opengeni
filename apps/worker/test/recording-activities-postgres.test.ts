@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   createRecordingTranscriptionProviderRegistry,
   RecordingTranscriptionError,
+  type RecordingDiarizer,
   type RecordingTranscriptionProvider,
   type RecordingTranscriptionRequest,
 } from "@opengeni/core";
@@ -176,6 +177,7 @@ function activities(
   storage: ReturnType<typeof memoryStorage>,
   provider: RecordingTranscriptionProvider,
   apiKey: string | null = "key",
+  diarizer: RecordingDiarizer | null = null,
 ) {
   const warnings: string[] = [];
   const services = async () =>
@@ -193,6 +195,7 @@ function activities(
       loadApiKey: async () => apiKey,
       heartbeat: () => undefined,
       cancellationSignal: () => undefined,
+      diarizer: () => diarizer,
     }),
   };
 }
@@ -294,6 +297,97 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       }),
     ).toEqual({ outcome: "complete" });
     expect(calls).toHaveLength(4);
+  });
+
+  test("our diarizer names the speakers when asked, and the model's stay if it fails", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    const word = (text: string, start: number, speaker: string | null) => ({
+      text,
+      startMilliseconds: start,
+      endMilliseconds: start + 200,
+      speaker,
+      spaceBefore: true,
+    });
+    const provider = fakeProvider(async (request) => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: request.diarize,
+      words:
+        request.audio.fileName === "track-0.webm"
+          ? [word("Hello", 100, null)]
+          : [word("Hi", 900, "speaker_0"), word("Yes", 1_300, "speaker_0")],
+    }));
+    const diarized: string[] = [];
+    const ours: RecordingDiarizer = {
+      id: "test",
+      diarize: async (audio) => {
+        diarized.push(audio.fileName);
+        return {
+          turns: [
+            { startMilliseconds: 800, endMilliseconds: 1_200, speaker: "S0" },
+            { startMilliseconds: 1_250, endMilliseconds: 1_600, speaker: "S1" },
+          ],
+          voices: [],
+        };
+      },
+    };
+    const version = async (diarizer: "ours") => {
+      const versionId = crypto.randomUUID();
+      await createRecordingTranscriptVersion(client!.db, {
+        ...recording.actor,
+        recordingId: recording.input.recordingId,
+        versionId,
+        transcription: { providerId: "elevenlabs", model: "scribe_v2", options: { diarizer } },
+      });
+      return { ...recording.input, versionId, processingOwner: versionId };
+    };
+    const page = async (versionId: string) =>
+      await getRecordingTranscriptPage(client!.db, {
+        ...recording.actor,
+        recordingId: recording.input.recordingId,
+        versionId,
+      });
+
+    // `auto` (the default) with a model that diarizes leaves ours unused.
+    await activities(storage, provider, "key", ours).activities.transcribeRecordingVersion(
+      recording.input,
+    );
+    expect(diarized).toEqual([]);
+    expect((await page(recording.input.versionId)).version.diarization).toBe("provider");
+
+    // Asked for ours: only the diarized track goes through it.
+    const first = await version("ours");
+    expect(
+      await activities(storage, provider, "key", ours).activities.transcribeRecordingVersion(first),
+    ).toEqual({ outcome: "complete" });
+    expect(diarized).toEqual(["track-1.webm"]);
+    const mine = await page(first.versionId);
+    expect(mine.version.diarization).toBe("ours");
+    expect(mine.segments.map((segment) => [segment.speakerLabel, segment.text])).toEqual([
+      ["track-0", "Hello"],
+      ["speaker_0", "Hi"],
+      ["speaker_1", "Yes"],
+    ]);
+
+    // Ours failing falls back to the model's own speakers.
+    const broken: RecordingDiarizer = {
+      id: "broken",
+      diarize: async () => {
+        throw new Error("no models");
+      },
+    };
+    const third = await version("ours");
+    const run = activities(storage, provider, "key", broken);
+    expect(await run.activities.transcribeRecordingVersion(third)).toEqual({ outcome: "complete" });
+    expect(run.warnings).toContain("our diarizer failed; using the model's speakers");
+    const fallback = await page(third.versionId);
+    expect(fallback.version.diarization).toBe("provider");
+    expect(fallback.segments.map((segment) => segment.speakerLabel)).toEqual([
+      "track-0",
+      "speaker_0",
+    ]);
   });
 
   test("a missing key fails the version; a provider outage is retried", async () => {

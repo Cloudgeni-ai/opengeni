@@ -23473,6 +23473,14 @@
         "$": "enum=[\"\\\"none\\\"\",\"\\\"ours\\\"\",\"\\\"provider\\\"\",\"\\\"tracks\\\"\"]"
       }
     },
+    "RecordingDiarizer": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"auto\\\"\",\"\\\"ours\\\"\"]"
+      }
+    },
     "RecordingMode": {
       "io": [
         "output"
@@ -23669,6 +23677,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.diarizer": "ref(RecordingDiarizer)?",
         "$.keyterms": "array?",
         "$.keyterms[]": "string",
         "$.language": "string?",
@@ -31604,6 +31613,7 @@
       "shape": {
         "$": "object",
         "$.defaultVisibility": "ref(SessionVisibility)?",
+        "$.diarizer": "ref(RecordingDiarizer)?",
         "$.transcription": "object?",
         "$.transcription.model": "string!",
         "$.transcription.providerId": "string!"

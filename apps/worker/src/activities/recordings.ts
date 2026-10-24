@@ -4,9 +4,11 @@ import {
   createRecordingTranscriptionProviderRegistry,
   estimateRecordingTranscriptionCostMicros,
   findRecordingTranscriptionModel,
+  labelWordsFromTurns,
   planRecordingTracks,
   recordingDiarizationKind,
   RecordingTranscriptionError,
+  type RecordingDiarizer,
   type RecordingTranscribedWord,
   type RecordingTranscriptionProviderRegistry,
   type RecordingTrackWords,
@@ -38,6 +40,7 @@ import {
   RecordingAudioError,
 } from "./recording-audio";
 import type { ControlActivityServices } from "./types";
+import { createLocalDiarizer, recordingSpeakersConfig } from "./recording-speakers";
 
 /** One recording's work: a transcript version, or the recording's deletion. */
 export type RecordingWorkInput = {
@@ -71,6 +74,8 @@ export type RecordingActivityOptions = {
   ) => Promise<string | null>;
   heartbeat?: (details?: unknown) => void;
   cancellationSignal?: () => AbortSignal | undefined;
+  /** Our own diarizer; defaults to the configured CPU speaker models, if any. */
+  diarizer?: (settings: Settings) => RecordingDiarizer | null;
 };
 
 /** The workspace's own key for the provider, else its organization's. */
@@ -125,6 +130,15 @@ export function createRecordingActivities(
 ) {
   const registry = options.registry ?? createRecordingTranscriptionProviderRegistry();
   const loadApiKey = options.loadApiKey ?? loadRecordingProviderApiKey;
+  let defaultDiarizer: { settings: Settings; diarizer: RecordingDiarizer | null } | null = null;
+  const diarizerFor = (settings: Settings): RecordingDiarizer | null => {
+    if (options.diarizer) return options.diarizer(settings);
+    if (defaultDiarizer?.settings !== settings) {
+      const config = recordingSpeakersConfig(settings);
+      defaultDiarizer = { settings, diarizer: config ? createLocalDiarizer(config) : null };
+    }
+    return defaultDiarizer.diarizer;
+  };
   const heartbeat = (details?: unknown) => {
     if (options.heartbeat) options.heartbeat(details);
     else activityContext()?.heartbeat(details);
@@ -187,8 +201,10 @@ export function createRecordingActivities(
       const signal = cancellation();
       const trackWords: RecordingTrackWords[] = [];
       let providerDiarized = false;
+      let ourDiarized = false;
       let audioMilliseconds = 0;
       const languages = new Set<string>();
+      const ourDiarizer = diarizerFor(settings);
       for (const plan of plans) {
         const track = job.recording.tracks.find((item) => item.trackNumber === plan.trackNumber)!;
         const chunks = job.chunks.filter((chunk) => chunk.trackNumber === plan.trackNumber);
@@ -208,36 +224,70 @@ export function createRecordingActivities(
           signal,
         });
         heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber });
+        // The model's own diarization is still requested when it has one, so
+        // a failure of ours falls back to it.
         const diarize = plan.diarize && capabilities.diarization;
-        const result = await withHeartbeat(() =>
-          found.provider.transcribe(
-            {
-              audio: {
-                bytes: audio.bytes,
-                mimeType: audio.mimeType,
-                fileName: `track-${plan.trackNumber}.${audio.extension}`,
+        const useOurs =
+          plan.diarize &&
+          ourDiarizer !== null &&
+          (requested.diarizer === "ours" || !capabilities.diarization);
+        const trackAudio = {
+          bytes: audio.bytes,
+          mimeType: audio.mimeType,
+          fileName: `track-${plan.trackNumber}.${audio.extension}`,
+        };
+        const [result, ours] = await withHeartbeat(() =>
+          Promise.all([
+            found.provider.transcribe(
+              {
+                audio: trackAudio,
+                model: found.spec.model,
+                language: requested.language,
+                diarize,
+                maxSpeakers: requested.maxSpeakers,
+                keyterms: capabilities.keyterms ? requested.keyterms : undefined,
+                signal,
               },
-              model: found.spec.model,
-              language: requested.language,
-              diarize,
-              maxSpeakers: requested.maxSpeakers,
-              keyterms: capabilities.keyterms ? requested.keyterms : undefined,
-              signal,
-            },
-            { apiKey },
-          ),
+              { apiKey },
+            ),
+            useOurs
+              ? ourDiarizer
+                  .diarize(trackAudio, { maxSpeakers: requested.maxSpeakers, signal })
+                  .catch((error: unknown) => {
+                    if (signal?.aborted) throw error;
+                    observability.warn("our diarizer failed; using the model's speakers", {
+                      workspaceId: input.workspaceId,
+                      recordingId: input.recordingId,
+                      versionId: input.versionId,
+                      trackNumber: plan.trackNumber,
+                      error: error instanceof Error ? error.message : String(error),
+                    });
+                    return null;
+                  })
+              : Promise.resolve(null),
+          ]),
         );
-        if (diarize && result.diarized) providerDiarized = true;
+        let words = result.words;
+        if (ours) {
+          words = labelWordsFromTurns(result.words, ours.turns);
+          ourDiarized = true;
+        } else if (diarize && result.diarized) {
+          providerDiarized = true;
+        }
         for (const language of result.languages) languages.add(language);
         audioMilliseconds += result.audioMilliseconds ?? audio.durationMilliseconds;
         trackWords.push({
           trackNumber: plan.trackNumber,
           fixedLabel: plan.fixedLabel,
-          words: shiftWords(result.words, offsetMilliseconds),
+          words: shiftWords(words, offsetMilliseconds),
         });
       }
       const segments = buildRecordingSegments(trackWords);
-      const diarization = recordingDiarizationKind({ plans, providerDiarized, ourDiarizer: false });
+      const diarization = recordingDiarizationKind({
+        plans,
+        providerDiarized,
+        ourDiarizer: ourDiarized,
+      });
       const costUsdMicros = estimateRecordingTranscriptionCostMicros(
         found.spec,
         audioMilliseconds,
