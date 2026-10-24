@@ -120,6 +120,11 @@ export function siteViewPreviewClient(options: {
     getWorkspaceModelCatalog: async () => ({ models: [] }),
     getWorkspaceArtifact: async (_workspace: string, siteId: string) => detail(siteId),
     getWorkspaceArtifactHtml: async (_workspace: string, siteId: string) => site(siteId).html,
+    // The header's published-link read. Without the route the header keeps
+    // its plain "Live", which is what these previews show.
+    getSitePublicationLink: async () => {
+      throw new OpenGeniApiError(404, "{}");
+    },
     listEvents: async (
       _workspace: string,
       sessionId: string,

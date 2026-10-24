@@ -499,6 +499,23 @@ export const SitePublication = /* @__PURE__ */ defineSchema(() =>
 );
 export type SitePublication = z.infer<typeof SitePublication>;
 
+/**
+ * GET /v1/workspaces/:ws/published-artifacts/:siteId/publication/link
+ *
+ * Where a published Site lives, for anyone who can open the Site in the app:
+ * its primary public URL and whether it is on the web now. Managing the
+ * publication (access, limits, moderation) stays with `SitePublication`.
+ */
+export const SitePublicationLink = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    siteId: z.string().uuid(),
+    hostname: z.string(),
+    url: z.string().url(),
+    status: SitePublicationStatus,
+  }),
+);
+export type SitePublicationLink = z.infer<typeof SitePublicationLink>;
+
 /** PUT /v1/workspaces/:ws/published-artifacts/:siteId/publication */
 export const UpsertSitePublicationRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({

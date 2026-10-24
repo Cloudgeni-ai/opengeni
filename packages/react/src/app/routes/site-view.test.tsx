@@ -43,6 +43,11 @@ const client = {
     return session;
   },
   getWorkspaceArtifact: async () => await siteDetails(),
+  // The header's published-link read; these tests are about the chat panel,
+  // so the link stays the plain "Live" an API without the route gives.
+  getSitePublicationLink: async () => {
+    throw new OpenGeniApiError(404, "");
+  },
 };
 mock.module("../app-context", () => ({
   useAppContext: () => ({

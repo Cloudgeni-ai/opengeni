@@ -37,6 +37,11 @@ import {
 import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
 import { useAppContext } from "../app-context";
+import {
+  SitePublicLink,
+  useSitePublicationLink,
+  type SitePublicationLinkLoad,
+} from "../components/artifacts/site-public-link";
 import { useAppApi } from "../lib/app-api";
 import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
 import { Link, useNavigate } from "../lib/navigation";
@@ -81,8 +86,12 @@ export function SiteViewRoute({
   /** The conversation open in the panel; the newest when omitted. */
   conversation?: string | undefined;
 }) {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
   const viewer = useConsoleSiteViewer();
+  // Anyone who can open the Site gets its published address in the header;
+  // Publish is offered only to people who can publish.
+  const canPublish = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
+  const publicationLink = useSitePublicationLink({ client, workspaceId, siteId });
   const toolBridge = useConsoleSiteToolBridge(workspaceId);
   const [site, setSite] = useState<SiteState>({ status: "loading" });
   const [siteAttempt, setSiteAttempt] = useState(0);
@@ -118,6 +127,7 @@ export function SiteViewRoute({
           siteId={siteId}
           toolBridge={toolBridge}
           viewer={viewer}
+          liveStatus={siteLiveStatus(publicationLink, canPublish, workspaceId, siteId)}
           archivedMessage="This Site is archived. Restore it from Site details."
         />
       </div>
@@ -597,6 +607,23 @@ function SiteChatPanel({
         </div>
       ) : null}
     </>
+  );
+}
+
+/** The header's publication control, or undefined for the plain "Live". */
+function siteLiveStatus(
+  load: SitePublicationLinkLoad,
+  canPublish: boolean,
+  workspaceId: string,
+  siteId: string,
+) {
+  // Nothing until the answer, so an unpublished Site never flashes "Live".
+  if (load.state === "loading") return null;
+  // No Sites domain, no access to the address, or a failed read: the plain "Live".
+  if (load.state === "unavailable" || load.state === "forbidden" || load.state === "error")
+    return undefined;
+  return (
+    <SitePublicLink load={load} workspaceId={workspaceId} siteId={siteId} canPublish={canPublish} />
   );
 }
 
