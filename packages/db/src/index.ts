@@ -77728,8 +77728,20 @@ export async function peekSessionWork(
     const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
       lock: "share",
     });
+    // This is an advisory control observation, not a session/configuration
+    // read. Do not transfer frozen prompts, tool catalogs or other payloads
+    // that none of the decisions below consumes.
     const [session] = await scopedDb
-      .select()
+      .select({
+        accountId: schema.sessions.accountId,
+        status: schema.sessions.status,
+        activeTurnId: schema.sessions.activeTurnId,
+        lastSequence: schema.sessions.lastSequence,
+        admissionBlock: schema.sessions.admissionBlock,
+        compactRequested: schema.sessions.compactRequested,
+        inputWaitTurnId: schema.sessions.inputWaitTurnId,
+        inputWaitUntil: schema.sessions.inputWaitUntil,
+      })
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
@@ -77740,7 +77752,7 @@ export async function peekSessionWork(
     let admissionSequence = session.lastSequence;
     if (includeAdmissionFence) {
       const [cursor] = await scopedDb
-        .select()
+        .select({ lastSequence: schema.sessionEventCursors.lastSequence })
         .from(schema.sessionEventCursors)
         .where(
           and(
@@ -77857,7 +77869,16 @@ export async function peekSessionWork(
 
     if (session.activeTurnId) {
       const [turn] = await scopedDb
-        .select()
+        .select({
+          id: schema.sessionTurns.id,
+          sessionId: schema.sessionTurns.sessionId,
+          status: schema.sessionTurns.status,
+          metadata: schema.sessionTurns.metadata,
+          triggerEventId: schema.sessionTurns.triggerEventId,
+          executionGeneration: schema.sessionTurns.executionGeneration,
+          activeAttemptId: schema.sessionTurns.activeAttemptId,
+          scheduledTaskRunId: schema.sessionTurns.scheduledTaskRunId,
+        })
         .from(schema.sessionTurns)
         .where(
           and(
@@ -78067,7 +78088,13 @@ export async function peekSessionWork(
       if (turn.status === "running") {
         if (observerAccountId && turn.activeAttemptId) {
           const [attempt] = await scopedDb
-            .select()
+            .select({
+              id: schema.sessionTurnAttempts.id,
+              temporalWorkflowId: schema.sessionTurnAttempts.temporalWorkflowId,
+              temporalWorkflowRunId: schema.sessionTurnAttempts.temporalWorkflowRunId,
+              temporalActivityId: schema.sessionTurnAttempts.temporalActivityId,
+              quiescedAt: schema.sessionTurnAttempts.quiescedAt,
+            })
             .from(schema.sessionTurnAttempts)
             .where(
               and(

@@ -161,6 +161,10 @@ projections use identical locks and admission decisions in the same transaction.
 Generic event appends (including explicit field updates), history checkpoints,
 open-suffix attachment and transport/token markers use that narrow projection
 too; none needs frozen session or attempt configuration to perform its write.
+Advisory `peekSessionWork` reads also select only their consumed control fields,
+without transferring unused prompts or frozen configuration. Query order,
+freshness, scope and later claim revalidation remain unchanged; see
+[observer measurements](session-work-peek-resources.md).
 
 Unread/tree attention use `packages/db/src/session-meaningful-events.ts`'s indexed
 non-bookkeeping frontier. Claimed lifecycle/exact parent reads acknowledge only
