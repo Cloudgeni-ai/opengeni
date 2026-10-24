@@ -1,5 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import { admitGitHub, type GitHubAdmissionInput, type HostedCheck } from "./github-admission";
+import {
+  admitGitHub,
+  appOnlyGuidanceContext,
+  type GitHubAdmissionInput,
+  type HostedCheck,
+} from "./github-admission";
 const head = "a".repeat(40);
 const check: HostedCheck = {
   id: 100,
@@ -30,6 +35,34 @@ const input = (): GitHubAdmissionInput => ({
   conversationResolutionRequired: false,
 });
 describe("GitHub-only admission", () => {
+  test("only the exact configured App guidance pair is a routing fence, never CI proof", () => {
+    const value = input();
+    value.expectedBatcherAppId = 5425399;
+    value.required = [{ context: appOnlyGuidanceContext, integrationId: 5425399 }];
+    expect(admitGitHub(value).ready).not.toBeNull();
+    expect(admitGitHub(value).ready?.binding.evidenceId).toBe("github-ci:100");
+    value.checks[0]!.conclusion = "failure";
+    expect(admitGitHub(value).ready).toBeNull();
+  });
+  test("unknown context, wrong App and unbound guidance requirements remain required", () => {
+    for (const requirement of [
+      { context: `${appOnlyGuidanceContext}!`, integrationId: 5425399 },
+      { context: appOnlyGuidanceContext, integrationId: 123 },
+      { context: appOnlyGuidanceContext, integrationId: null },
+      { context: appOnlyGuidanceContext, integrationId: -1 },
+    ]) {
+      const value = input();
+      value.expectedBatcherAppId = 5425399;
+      value.required = [requirement];
+      expect(admitGitHub(value).ready).toBeNull();
+    }
+    for (const expectedBatcherAppId of [undefined, 0, -1, NaN]) {
+      const value = input();
+      value.expectedBatcherAppId = expectedBatcherAppId;
+      value.required = [{ context: appOnlyGuidanceContext, integrationId: 5425399 }];
+      expect(admitGitHub(value).ready).toBeNull();
+    }
+  });
   test("label and hosted exact-head CI suffice without comments, VM evidence or reviewer IDs", () => {
     const admitted = admitGitHub(input());
     expect(admitted.ready?.headSha).toBe(head);

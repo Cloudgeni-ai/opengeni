@@ -88,6 +88,11 @@ export class GitHubAuth {
     private readonly env: Record<string, string | undefined>,
     private readonly transport: typeof fetch = fetch,
   ) {}
+  configuredAppId(): number | undefined {
+    const value = this.env.GITHUB_APP_ID;
+    const id = value && /^\d+$/.test(value) ? Number(value) : NaN;
+    return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+  }
   async token(): Promise<string> {
     if (this.env.GH_TOKEN) return this.env.GH_TOKEN;
     if (this.env.GITHUB_TOKEN) return this.env.GITHUB_TOKEN;
@@ -497,6 +502,7 @@ export class GitHubReader {
         [file.filename, file.previous_filename].some(isControlPlanePath),
       );
       const admission = admitGitHub({
+        expectedBatcherAppId: this.auth.configuredAppId(),
         controlPlane,
         number,
         headSha: pull.head?.sha ?? "",
