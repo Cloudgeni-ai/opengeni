@@ -744,7 +744,21 @@ export class RecordingUploader {
       }
     }
     if (!pump.status.created) this.update(pump, { created: true });
-    let chunks = await store.listChunks(recordingId);
+    // A native recorder writes each chunk file where the store keeps it before
+    // capture counts it. While capturing, send only counted chunks: otherwise a
+    // chunk could be uploaded and removed before capture reads it, and the
+    // recording would be finalized without it. The record is read before each
+    // listing, so a stopped recording's listing holds everything it captured.
+    const pending = async () => {
+      const current: StoredRecording = (await store.getRecording(recordingId)) ?? recording!;
+      recording = current;
+      const listed = await store.listChunks(recordingId);
+      if (current.phase !== "capturing") return listed;
+      return listed.filter(
+        (chunk) => chunk.chunkNumber < (current.chunkCounts[chunk.trackNumber] ?? 0),
+      );
+    };
+    let chunks = await pending();
     this.update(pump, {
       pendingChunks: chunks.length,
       pendingBytes: chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
@@ -766,14 +780,13 @@ export class RecordingUploader {
         }
         throw error;
       }
-      chunks = await store.listChunks(recordingId);
+      chunks = await pending();
       this.update(pump, {
         pendingChunks: chunks.length,
         pendingBytes: chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
       });
     }
     this.update(pump, { uploading: false });
-    recording = (await store.getRecording(recordingId)) ?? recording;
     if (recording.phase !== "stopped") return !pump.again;
     const captured = Object.values(recording.chunkCounts).reduce((sum, count) => sum + count, 0);
     if (captured === 0 && !alreadyFinalized) {
