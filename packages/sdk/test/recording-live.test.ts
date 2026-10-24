@@ -228,6 +228,51 @@ describe("live transcriber", () => {
       error: { code: "quota_exceeded" },
     });
   });
+
+  test("sessions refused right after they start back off longer each time", async () => {
+    FakeSocket.opened = [];
+    const api = client();
+    const live = createLiveTranscriber({
+      client: api,
+      workspaceId: "w",
+      recordingId: "r",
+      trackNumber: 0,
+      WebSocket: FakeSocket,
+    });
+    // What a provider at its limit of parallel sessions does.
+    const refuse = (socket: FakeSocket) => {
+      socket.open();
+      socket.receive({ message_type: "rate_limited", error: "Too many concurrent requests" });
+      socket.close();
+    };
+    let at = 0;
+    const tick = async (milliseconds: number) => {
+      await new Promise((done) => setTimeout(done, milliseconds));
+      at += 100;
+      live.push(tenth(), 16_000, at);
+      await settle();
+    };
+    live.push(tenth(), 16_000, 0);
+    await settle();
+    refuse(FakeSocket.opened[0]!);
+    expect(live.snapshot).toMatchObject({ state: "reconnecting", error: { code: "rate_limited" } });
+    await tick(1_050);
+    expect(FakeSocket.opened).toHaveLength(2);
+    refuse(FakeSocket.opened[1]!);
+    // The second wait is twice as long, although the session had started.
+    await tick(1_050);
+    expect(FakeSocket.opened).toHaveLength(2);
+    await tick(1_000);
+    expect(FakeSocket.opened).toHaveLength(3);
+    // Text proves a session works, so a later drop retries quickly again.
+    const third = FakeSocket.opened[2]!;
+    third.open();
+    third.receive({ message_type: "partial_transcript", text: "Hello" });
+    third.close();
+    await tick(1_050);
+    expect(FakeSocket.opened).toHaveLength(4);
+    live.abort();
+  });
 });
 
 describe("resamplePcm16", () => {
