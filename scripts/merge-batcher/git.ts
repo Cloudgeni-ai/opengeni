@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { markFailurePhase } from "./diagnostics";
+import { writeAttempted, writeResolved } from "./cycle-outcome";
 import {
   assertSha,
   canonical,
@@ -280,6 +281,8 @@ export class AtomicGitWriter {
     const current = await this.git.remoteRefs(this.remote);
     if (updates.some((u) => (current.get(u.ref) ?? null) !== u.expected))
       throw new Error("Stale remote ref snapshot");
+    const outcomeKey = `git:${fence.next}`;
+    writeAttempted(outcomeKey);
     await this.git
       .exec([
         "push",
@@ -298,5 +301,6 @@ export class AtomicGitWriter {
       .catch((error) => {
         throw markFailurePhase(error, "atomic-push");
       });
+    writeResolved(outcomeKey);
   }
 }
