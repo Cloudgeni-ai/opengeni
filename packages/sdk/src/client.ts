@@ -2148,8 +2148,9 @@ export class OpenGeniClient {
   }
 
   /**
-   * Record that this person opened a Site, which orders its sidebar row like
-   * session activity. Personal; needs `artifacts:read`.
+   * Record that this person opened a Site, which lists it in their sidebar.
+   * Opening is not activity, so it does not move the row. Personal; needs
+   * `artifacts:read`.
    */
   async recordSiteOpened(workspaceId: string, siteId: string): Promise<SiteOpenedResponse> {
     return this.requestJson(

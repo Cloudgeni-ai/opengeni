@@ -192,7 +192,7 @@ test("a Site without conversations is a plain row in its creating chat's project
   expect(site.children).toEqual([]);
   expect(siteRowConversationCount(site)).toBe(0);
   expect(summarizeRailNodes([site])).toMatchObject({ total: 0 });
-  // Opening it later is newer activity, so it moves above the chat.
+  // Newer activity on it (a new version, or use of its chats) moves it above the chat.
   const opened = buildPinnedRailSections([chat, older], new Date("2026-09-08T13:00:00Z"), {
     siteGroups: [{ ...created, updatedAt: "2026-09-08T12:30:00Z" }],
     siteRowsByProject: true,

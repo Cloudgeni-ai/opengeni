@@ -16363,7 +16363,7 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     title: z.string(),
     /** Root conversations in the group; 0 for a Site with none yet. */
     conversations: z.number().int().nonnegative(),
-    /** Latest activity: its conversations, its newest published version, or the viewer opening it. */
+    /** Latest activity: its conversations, its newest published version, or the chats that published it. Opening it is not activity. */
     updatedAt: z.string().datetime(),
     /** Creation time of the group's newest conversation, else of the Site. */
     createdAt: z.string().datetime(),

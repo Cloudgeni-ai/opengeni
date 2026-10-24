@@ -42,7 +42,8 @@ function rememberOpenedOnThisPage(siteId: string, entry: string | undefined): vo
 }
 
 /**
- * Opening a Site in the app counts as activity on its sidebar row, once per
+ * Record that this person opened a Site in the app, which lists the Site in
+ * their sidebar (it does not move the row: opening is not activity), once per
  * page the person goes to. A new client for the same person doesn't open it
  * again, a hidden page counts once it is shown, and a reload, a restored tab
  * or coming back to a page where the open was already recorded doesn't count.
