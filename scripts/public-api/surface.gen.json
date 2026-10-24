@@ -15391,6 +15391,7 @@
         "$.archived": "boolean!",
         "$.archivedAt": "string! null",
         "$.attentionVersion": "integer!",
+        "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.bundledSkillIds": "unknown?",
         "$.channelId": "string! null",
@@ -25334,6 +25335,7 @@
         "$.archived": "boolean!",
         "$.archivedAt": "string! null",
         "$.attentionVersion": "integer!",
+        "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.bundledSkillIds": "unknown?",
         "$.channelId": "string! null",
@@ -25475,6 +25477,22 @@
         "$.reason": "enum!=[\"\\\"database_claim_rejected\\\"\",\"\\\"initiator_membership_required\\\"\",\"\\\"personal_resource_grant_required\\\"\"]",
         "$.retryPolicy": "const!=[\"\\\"explicit_recheck\\\"\"]",
         "$.sqlState": "string! null"
+      }
+    },
+    "SessionAutomationWaitSummary": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.automations": "integer!",
+        "$.event": "object! null",
+        "$.event.eventTypes": "array!",
+        "$.event.eventTypes[]": "string",
+        "$.event.source": "object! null",
+        "$.event.source.kind": "ref(EventSourceKind)!",
+        "$.event.source.name": "string!",
+        "$.nextRunAt": "string! null"
       }
     },
     "SessionBackgroundCommand": {
@@ -25923,6 +25941,7 @@
         "$.children[].children": "array!",
         "$.children[].children[]": "ref(__schema0)",
         "$.children[].session": "ref(Session)!",
+        "$.sessionAutomationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.sessionHasSchedules": "boolean?",
         "$.sessionHasUpcomingSchedules": "boolean?",
         "$.sessionWaitingForEvents": "boolean?",
@@ -25942,6 +25961,7 @@
         "$.archived": "boolean!",
         "$.archivedAt": "string! null",
         "$.attentionVersion": "integer!",
+        "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.channelId": "string! null",
         "$.createdAt": "string!",
@@ -33670,6 +33690,7 @@
       "SessionAdminAccess": "type",
       "SessionAdmissionBlock": "type",
       "SessionApprovalRequest": "type",
+      "SessionAutomationWaitSummary": "type",
       "SessionBackgroundCommand": "type",
       "SessionBackgroundCommandActivity": "type",
       "SessionBackgroundCommandListResponse": "type",
@@ -36733,6 +36754,8 @@
       "sessionAutomationWait": "value",
       "SessionAutomationWait": "type",
       "sessionAutomationWaitLabel": "value",
+      "sessionAutomationWaitWords": "value",
+      "SessionAutomationWaitWords": "type",
       "sortAutomations": "value",
       "useEventTypes": "value",
       "validateAutomationDraft": "value",

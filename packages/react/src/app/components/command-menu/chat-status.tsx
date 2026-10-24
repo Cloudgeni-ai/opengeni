@@ -33,6 +33,7 @@ export function ChatStatusMarks({ status }: { status: ChatStatus | null }) {
       <RailTrailingMetadata
         summary={summary}
         automationWait={status.automationWait}
+        automationWaitLabel={status.automationWaitLabel ?? undefined}
         creator={status.creator}
       />
     </>

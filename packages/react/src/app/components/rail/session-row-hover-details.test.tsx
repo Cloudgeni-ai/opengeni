@@ -272,6 +272,22 @@ describe("SessionRowHoverDetails", () => {
         }),
       ).textContent,
     ).toContain("Waiting for an event");
+    // With the details, it says which event, from where, and the next run.
+    expect(
+      render(
+        entry({
+          waitingForEvents: true,
+          automationWait: {
+            nextRunAt: null,
+            event: {
+              source: { kind: "github", name: "GitHub" },
+              eventTypes: ["pull_request.opened"],
+            },
+            automations: 1,
+          },
+        }),
+      ).textContent,
+    ).toContain("Waiting for pull_request.opened from GitHub");
     // A paused schedule, or a one-time schedule whose time passed, is not upcoming.
     expect(
       render(entry({ hasSchedules: true, hasUpcomingSchedules: false })).textContent,

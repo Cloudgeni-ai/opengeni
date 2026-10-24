@@ -364,6 +364,8 @@ if (previewParameters.get("scenario") === "hover") {
       primaryBlocker: parent.effectiveControl.primaryBlocker,
     },
   });
+  const nextRun = new Date(Date.now() + 20 * 60 * 60_000);
+  nextRun.setMinutes(0, 0, 0);
   const finished = hoverRow(
     3006,
     "Quarterly cloud cost report",
@@ -373,11 +375,25 @@ if (previewParameters.get("scenario") === "hover") {
       unread: true,
       hasSchedules: true,
       hasUpcomingSchedules: true,
+      automationWait: { nextRunAt: nextRun.toISOString(), event: null, automations: 1 },
       model: "codex/gpt-6-astra",
       reasoningEffort: "medium",
     },
     jamie,
   );
+  // A "wake me when" from the chat: it waits for an app's event.
+  const wakeOnEvent = hoverRow(3008, "Ship the billing migration", 90, {
+    status: "idle",
+    hasSchedules: true,
+    waitingForEvents: true,
+    automationWait: {
+      nextRunAt: null,
+      event: { source: { kind: "github", name: "GitHub" }, eventTypes: ["check_suite.completed"] },
+      automations: 1,
+    },
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "high",
+  });
   // Targeted only by a paused or already-past one-time schedule: no clock icon.
   const lapsedSchedule = hoverRow(3007, "Release stabilization checkpoint", 300, {
     status: "idle",
@@ -395,6 +411,7 @@ if (previewParameters.get("scenario") === "hover") {
     parent,
     pausedChild,
     finished,
+    wakeOnEvent,
     lapsedSchedule,
   );
 }
@@ -894,6 +911,8 @@ const context = {
 } as unknown as AppContextValue;
 
 export const useAppContext = () => context;
+// The session header reads the context optionally; the sidebar preview always provides it.
+export const useOptionalAppContext = () => context;
 export const useRail = () => ({
   workspaceId,
   isMobile: window.innerWidth < 768,

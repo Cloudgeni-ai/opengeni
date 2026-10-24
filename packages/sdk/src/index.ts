@@ -42,6 +42,7 @@ export type {
   ScheduledTaskRunEventOccurrence,
   SendTestEventRequest,
   SendTestEventResponse,
+  SessionAutomationWaitSummary,
   UpdateEventSourceRequest,
   WebhookEventAdapter,
 } from "@opengeni/contracts";

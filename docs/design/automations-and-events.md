@@ -339,10 +339,18 @@ the owner is told. Hide for me changes nothing for the chat's waits.
   list deliveries and replay one, list recent events, and list the event types a
   source offers. `clientConfig.eventTriggers.enabled` tells clients whether the
   deployment has them on (`OPENGENI_EVENT_TRIGGERS_ENABLED`, default off).
+  Session reads and list entries carry `automationWait` (the lineage read
+  carries `sessionAutomationWait`) for readers who may see schedules: the next
+  run, the event and source the earliest listening automation waits for, and
+  how many automations wait. It counts only automations the reader can see,
+  and leaves out a source that is private to someone else.
 - **UI.** Schedules become Automations. The editor has a "When" section with a
   schedule and event triggers; each run shows the events that caused it.
   Event sources have a page with their endpoint, status and delivery log. Chats
-  show when they are waiting for an event or a schedule.
+  show what they are waiting for: the chat row's mark and hover card, the
+  command menu and the chat header name the event and its source ("Waiting
+  for deploy.finished from Deploys") or the next run ("Next run: Tomorrow,
+  09:00") in the viewer's language and time zone.
 - **Embeddable panel.** `AutomationsPanel` from `@opengeni/react/automations`
   is a drop-in list, page and form for a workspace's automations or one chat's,
   for hosts that embed chats. It takes the host's `OpenGeniClient`. In a chat,
