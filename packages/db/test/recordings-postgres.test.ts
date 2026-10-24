@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
-  acquireSharedTestDatabase,
+  acquireRestrictedRuntimeTestDatabase,
   grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
+  type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import {
   acceptOrganizationInvitation,
@@ -34,18 +34,19 @@ import {
   updateRecordingSpeakers,
   type DbClient,
 } from "../src";
-import { migrate } from "../src/migrate";
 
-let shared: SharedTestDatabase | null = null;
+// The production posture: a NOSUPERUSER NOBYPASSRLS migration owner and FORCE
+// RLS, so the owner-run recovery inventory is bound by row security exactly as
+// deployed. A superuser-owned database would hide a missing owner policy.
+let shared: RestrictedRuntimeTestDatabase | null = null;
 let client: DbClient | null = null;
 const workspaceIds: string[] = [];
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("recordings-postgres");
+  shared = await acquireRestrictedRuntimeTestDatabase("recordings-postgres");
   if (!shared) return;
-  await migrate(shared.adminUrl);
   await grantDeferredRuntimeAccess(shared.admin);
-  client = createDb(shared.appUrl);
+  client = createDb(shared.appUrl, { searchPath: shared.schema });
 }, 180_000);
 
 afterAll(async () => {
