@@ -378,7 +378,9 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
       const knowledgeMode = page.getByRole("combobox", { name: "Knowledge", exact: true });
       const openLearning = async () => {
-        await page.getByRole("heading", { level: 1, name: "Edit automation", exact: true }).waitFor();
+        await page
+          .getByRole("heading", { level: 1, name: "Edit automation", exact: true })
+          .waitFor();
         await page.getByRole("button", { name: /^Settings / }).click();
       };
       await openLearning();
