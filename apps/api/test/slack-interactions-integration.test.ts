@@ -7423,7 +7423,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     const [route] = await interactions(value.owner.workspaceId);
     expect(acknowledgement.text).toContain("Opengeni task status:");
     expect(acknowledgement.text).toContain(
-      `<https://app.example.test/workspaces/${value.owner.workspaceId}/schedules?sourceSessionId=${route!.session_id}|Make recurring>`,
+      `<https://app.example.test/workspaces/${value.owner.workspaceId}/automations?sourceSessionId=${route!.session_id}|Make recurring>`,
     );
   }, 60_000);
 
@@ -7506,7 +7506,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     // New Slack tasks get the scheduling tool by default, and this requester
     // may use it, so both routes are named. No Status button is.
     expect(scheduledBody.text).toContain(
-      `• *Repeat a task on a schedule:* ask Opengeni in its thread, or open <https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/schedules|Schedules>.`,
+      `• *Repeat a task on a schedule:* ask Opengeni in its thread, or open <https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/automations|Automations>.`,
     );
     expect(scheduledBody.text).not.toContain("Make recurring");
 
@@ -7535,7 +7535,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     );
     const withoutToolBody = (await withoutTool.json()) as { text: string };
     expect(withoutToolBody.text).toContain(
-      `• *Repeat a task on a schedule:* open <https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/schedules|Schedules>.`,
+      `• *Repeat a task on a schedule:* open <https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/automations|Automations>.`,
     );
     expect(withoutToolBody.text).not.toContain("ask Opengeni in its thread");
   }, 60_000);

@@ -6183,7 +6183,7 @@ async function slackInfoCommandResponse(
   const canControl = hasPermission(grant.permissions, "sessions:control");
   const canCreate = hasPermission(grant.permissions, "sessions:create");
   const canSchedule = hasPermission(grant.permissions, "scheduled_tasks:manage");
-  const schedules = canSchedule ? slackSchedulesUrl(deps, installation.workspaceId) : null;
+  const schedules = canSchedule ? slackAutomationsUrl(deps, installation.workspaceId) : null;
   // Asking Opengeni in a task's thread to repeat it needs the scheduling tool in
   // new Slack tasks here, `scheduled_tasks:manage` for the tool, and
   // `sessions:control` for the thread reply itself.
@@ -6216,7 +6216,7 @@ async function slackInfoCommandResponse(
       ? [
           `• *Repeat a task on a schedule:* ${[
             ...(agentSchedules ? ["ask Opengeni in its thread"] : []),
-            ...(schedules ? [`open <${schedules}|Schedules>`] : []),
+            ...(schedules ? [`open <${schedules}|Automations>`] : []),
           ].join(", or ")}.`,
         ]
       : []),
@@ -6327,17 +6327,17 @@ function makeRecurringText(
   workspaceId: string,
   sessionId: string,
 ): string | null {
-  // Unchanged deep-link contract: the schedules editor plus the exact source
+  // Unchanged deep-link contract: the Automations page plus the exact source
   // session UUID, and nothing copied out of Slack. A deployment without an
   // absolute web base URL simply omits the action instead of failing a card.
-  const base = slackSchedulesUrl(deps, workspaceId);
+  const base = slackAutomationsUrl(deps, workspaceId);
   if (!base) return null;
   const url = new URL(base);
   url.searchParams.set("sourceSessionId", sessionId);
   return `<${url.toString()}|Make recurring>`;
 }
 
-function slackSchedulesUrl(deps: ApiRouteDeps, workspaceId: string): string | null {
+function slackAutomationsUrl(deps: ApiRouteDeps, workspaceId: string): string | null {
   return safeSlackActionUrl(deps, `/workspaces/${encodeURIComponent(workspaceId)}/automations`);
 }
 
