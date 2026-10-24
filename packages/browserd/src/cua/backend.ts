@@ -40,6 +40,7 @@ import {
   opensOnInvoke,
   parseDateValue,
   projectElements,
+  TOGGLE_ROLES,
   unindexedRows,
   unindexedTextByElement,
   type DateSegment,
@@ -2267,15 +2268,6 @@ function selectsByPressing(
     action === "select" && node.actions.includes("invoke") && PRESS_TO_SELECT_ROLES.has(node.role)
   );
 }
-
-/** Checkbox and switch roles as observations show them on each platform. */
-const TOGGLE_ROLES: ReadonlySet<string> = new Set([
-  "checkbox",
-  "check box",
-  "switch",
-  "toggle button",
-  "check menu item",
-]);
 
 const CHECKED_WORDS: Readonly<Record<string, boolean>> = {
   true: true,

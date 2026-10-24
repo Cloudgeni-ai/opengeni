@@ -13,6 +13,7 @@ import {
   type DesktopAppShotStatus,
   type DesktopBridge,
   type DesktopCommand,
+  type DesktopComputerCapabilities,
   type DesktopMenuAction,
   type DesktopPlatform,
   type DesktopSystemAudioError,
@@ -91,6 +92,7 @@ if (origin && window.location.origin === origin) {
       "menuActions",
       "updates",
       ...(systemAudio ? (["systemAudio"] as const) : []),
+      "computerCapabilities",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
     accounts: {
@@ -202,6 +204,20 @@ if (origin && window.location.origin === origin) {
           },
         }
       : {}),
+    computerCapabilities: {
+      status: () =>
+        ipcRenderer.invoke(DESKTOP_IPC.capabilitiesStatus) as Promise<DesktopComputerCapabilities>,
+      update: (change) =>
+        ipcRenderer.invoke(
+          DESKTOP_IPC.capabilitiesUpdate,
+          change,
+        ) as Promise<DesktopComputerCapabilities>,
+      requestMicrophone: () =>
+        ipcRenderer.invoke(
+          DESKTOP_IPC.capabilitiesRequestMicrophone,
+        ) as Promise<DesktopComputerCapabilities>,
+      onChange: (listener) => subscribe(DESKTOP_IPC.capabilitiesChanged, () => listener()),
+    },
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);
 }

@@ -53,6 +53,8 @@ export const Element = z.object({
   value: z.union([text, z.number().finite(), z.boolean()]).optional(),
   enabled: z.boolean().optional(),
   focused: z.boolean().optional(),
+  // Whether a checkbox, switch, radio, tab or row is on or selected.
+  selected: z.boolean().optional(),
   frame: ElementRect.optional(),
   actions: z.array(text).max(64).default([]),
 });

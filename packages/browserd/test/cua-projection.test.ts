@@ -32,6 +32,34 @@ test("a table cell macOS repeats under its AXColumn is one element to a locator"
   );
 });
 
+test("a Linux or Windows checkbox or switch reads whether it is on as its value", () => {
+  const element = (role: string, selected: boolean, index: number) => ({
+    element_index: index,
+    element_token: `snapshot:${index}`,
+    role,
+    label: `Option ${index}`,
+    selected,
+    actions: ["click"],
+  });
+  const linux = projectElements(
+    [
+      element("check box", true, 1),
+      element("check box", false, 2),
+      element("switch", true, 3),
+      element("radio button", true, 4),
+    ],
+    "linux",
+  );
+  expect(linux.map((node) => node.value)).toEqual(["1", "0", "1", undefined]);
+  const [windows] = projectElements([element("CheckBox", false, 5)], "windows");
+  expect(windows).toMatchObject({ role: "checkbox", value: "0" });
+  const [mac] = projectElements(
+    [{ ...element("AXCheckBox", false, 6), value: "1", actions: ["AXPress"] }],
+    "macos",
+  );
+  expect(mac!.value).toBe("1");
+});
+
 test("desktop elements with document-sized labels and values still form valid nodes", () => {
   const [node] = projectElements(
     [

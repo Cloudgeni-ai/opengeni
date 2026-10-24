@@ -99,3 +99,22 @@ describe("the app's own local pages", () => {
     expect(handlers.device!()).toBe(false);
   });
 });
+
+describe("the microphone turned off on the This computer page", () => {
+  test("refuses every media request and check, and nothing else", () => {
+    const off = { microphone: false };
+    expect(grantsPermissionRequest(true, "media", { mediaTypes: ["audio"], ...off })).toBe(false);
+    expect(grantsPermissionCheck(true, "media", { mediaType: "audio", ...off })).toBe(false);
+    expect(grantsPermissionRequest(true, "clipboard-read", off)).toBe(true);
+    expect(grantsPermissionCheck(true, "fullscreen", off)).toBe(true);
+  });
+
+  test("on, or not said, the microphone works as before", () => {
+    expect(
+      grantsPermissionRequest(true, "media", { mediaTypes: ["audio"], microphone: true }),
+    ).toBe(true);
+    expect(grantsPermissionCheck(true, "media", { mediaType: "audio", microphone: true })).toBe(
+      true,
+    );
+  });
+});

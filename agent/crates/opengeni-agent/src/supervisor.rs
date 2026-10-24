@@ -833,6 +833,11 @@ pub struct Supervisor<P: Platform> {
     metrics: Arc<std::sync::RwLock<v1::MetricsSample>>,
     /// Live attached-browser inventory shared by every workspace link.
     browser_bridge: Option<BrowserBridgeInventory>,
+    /// Screen control is turned off on this computer (the desktop app's
+    /// switch): every link reports no screen-control consent and no macOS
+    /// permission states, and refuses computer-use input, whatever its
+    /// enrollment says.
+    screen_control_off: bool,
     /// Latched once a clean shutdown (SIGINT/SIGTERM) is requested.
     shutdown: ShutdownSignal,
     /// Asks every link to reconnect at once (a compute sandbox whose host lost
@@ -944,6 +949,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             started: Instant::now(),
             metrics: Arc::new(std::sync::RwLock::new(v1::MetricsSample::default())),
             browser_bridge: None,
+            screen_control_off: false,
             shutdown: ShutdownSignal::default(),
             reconnect: ReconnectSignal::default(),
             update_drain: Arc::new(UpdateDrain::default()),
@@ -970,6 +976,13 @@ impl<P: Platform + 'static> Supervisor<P> {
     #[must_use]
     pub fn with_browser_bridge(mut self, browser_bridge: BrowserBridgeInventory) -> Self {
         self.browser_bridge = Some(browser_bridge);
+        self
+    }
+
+    /// Screen control is turned off on this computer; see `screen_control_off`.
+    #[must_use]
+    pub fn with_screen_control_turned_off(mut self) -> Self {
+        self.screen_control_off = true;
         self
     }
 
@@ -2719,11 +2732,15 @@ impl<P: Platform + 'static> Supervisor<P> {
         // (both are synchronous OS calls): a display can physically exist while the OS
         // withholds the screen-capture grant (macOS Screen Recording / TCC), in which
         // case capture would yield nothing and the model would see a blank.
+        let screen_control_off = self.screen_control_off;
         let (display, capture_blocked, mac_permissions) = tokio::task::spawn_blocking(move || {
             (
                 desktop.probe(),
                 desktop.capture_blocked_reason(),
-                mac_desktop_permissions(),
+                // Nothing to ask for while screen control is off.
+                (!screen_control_off)
+                    .then(mac_desktop_permissions)
+                    .flatten(),
             )
         })
         .await
@@ -2744,7 +2761,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             pty: has_relay,
             desktop: has_relay && can_capture,
             consented_whole_machine: link.creds.consented_whole_machine,
-            consented_screen_control: link.creds.consented_screen_control,
+            consented_screen_control: link.creds.consented_screen_control
+                && !self.screen_control_off,
             display,
             desktop_unavailable_reason: capture_blocked.unwrap_or_default(),
             // The op engine is wired: OpStart/OpCancel/OpQuery/OpAttach are
@@ -2780,7 +2798,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             started: self.started,
             // The computer-use input consent gate reads the SAME enrollment grant
             // the relay pump's `allow_input` uses.
-            consented_screen_control: link.creds.consented_screen_control,
+            consented_screen_control: link.creds.consented_screen_control
+                && !self.screen_control_off,
             max_reply_bytes,
         }
     }
@@ -6722,6 +6741,35 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn machine_transactional_write_full_wire_round_trip() {
         transactional_write_wire_round_trip(0).await;
+    }
+
+    /// The desktop app's switch wins over the enrollment: no consent is
+    /// reported or used for computer-use input, and no macOS permission state.
+    #[tokio::test]
+    async fn screen_control_turned_off_overrides_the_enrollment_consent() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let dir = tempfile::tempdir().expect("synthetic directory");
+        let mut credentials = it::test_credentials("nats://127.0.0.1:9");
+        credentials.consented_screen_control = true;
+        let definition = SupervisorLink::new(
+            "screen-control-off-test",
+            Arc::new(NativePlatform::with_root(dir.path())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let link = WorkspaceLink::from_definition(definition.clone());
+
+        let on = Supervisor::new_links(std::slice::from_ref(&definition), "test-0.0.0");
+        assert!(on.capabilities(&link).await.consented_screen_control);
+        assert!(on.ctx(&link, 1024).consented_screen_control);
+
+        let off = Supervisor::new_links(std::slice::from_ref(&definition), "test-0.0.0")
+            .with_screen_control_turned_off();
+        let capabilities = off.capabilities(&link).await;
+        assert!(!capabilities.consented_screen_control);
+        assert!(capabilities.mac_permissions.is_none());
+        assert!(!off.ctx(&link, 1024).consented_screen_control);
     }
 
     #[cfg(target_os = "linux")]
