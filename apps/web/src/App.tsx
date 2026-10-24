@@ -160,6 +160,10 @@ const LazyConnectAgentRoute = lazyRouteComponent(
 );
 const LazySecretsRoute = lazyRouteComponent(() => import("@/routes/secrets"), "SecretsRoute");
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
+const LazyComputerUseRoute = lazyRouteComponent(
+  () => import("@/routes/computer-use"),
+  "ComputerUseRoute",
+);
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
@@ -609,6 +613,11 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+const workspaceComputerUseRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "computer-use",
+  component: LazyComputerUseRoute,
+});
 // Mirrors the UsageSearch keys in components/insights/usage-search.ts (kept here
 // so the route table doesn't import the lazy Insights chunk).
 const INSIGHTS_SEARCH_KEYS = [
@@ -1035,6 +1044,7 @@ const routeTree = rootRoute.addChildren([
     workspaceReadOnlyChatsRoute,
     workspaceInboxRoute,
     workspaceMachinesRoute,
+    workspaceComputerUseRoute,
     workspaceInsightsRoute,
     workspaceCapabilitiesRoute,
     workspaceLegacyCapabilitiesRoute,

@@ -43,6 +43,11 @@ describe("agent command line", () => {
       granted: { screenRecording: true, accessibility: false, inputMonitoring: true },
     });
     expect(parsePermissions('{"required":false}')).toEqual({ required: false });
+    // Agents that honour the desktop app's screen-control switch say so.
+    expect(parsePermissions('{"required":false,"screenControlSwitch":true}')).toEqual({
+      required: false,
+      screenControlSwitch: true,
+    });
     expect(parsePermissions("error: unrecognized subcommand 'permissions'")).toBeNull();
     expect(parsePermissions('{"required":true,"screenRecording":true}')).toBeNull();
   });
