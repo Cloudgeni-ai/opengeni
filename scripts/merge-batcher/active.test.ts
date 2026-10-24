@@ -19,8 +19,6 @@ import {
   config,
   digest,
   emptyLedger,
-  MAX_RUNNER_RELEVANT_RUNS,
-  MAX_SCANNED_ACTIVE_RUNS,
   runnerJobDemand,
   scanRunnerDemand,
   type Ledger,
@@ -517,7 +515,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await expect(f.publish()).rejects.toThrow();
     expect((await f.state()).sha).toBe(f.initializedSha);
   });
-  test("main headroom blocks hosted publication, retry and landing", async () => {
+  test("blocking reader evidence prevents hosted publication, retry and landing", async () => {
+    // This stub models incomplete/unknown evidence or an occupied Batch slot.
+    // Valid numeric/main-capacity estimates are informational in the live reader.
     const f = await fixture();
     f.api.busy = true;
     const local = await f.controller().step();
@@ -535,6 +535,60 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect((await f.controller().step()).action.kind).toBe("wait");
     expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
   });
+  test.each(["publish", "retry", "land"] as const)(
+    "live capacity observation permits %s while preserving executor checks",
+    async (phase) => {
+      const f = await fixture();
+      const live = new GitHubReader(
+        config({ BATCHER_MODE: "active", BATCHER_RUNNER_BUDGET: "52", BATCHER_MAIN_RESERVE: "30" }),
+        new GitHubAuth({}),
+        (async (url: string | URL | Request) => {
+          const path = String(url);
+          if (path.includes("/jobs?"))
+            return Response.json({
+              total_count: 4,
+              jobs: [
+                { status: "queued" },
+                ...Array.from({ length: 3 }, () => ({ status: "completed" })),
+              ],
+            });
+          const status = new URL(path).searchParams.get("status");
+          const runs =
+            status === "in_progress"
+              ? [
+                  {
+                    id: 900,
+                    status,
+                    path: ".github/workflows/ci.yml",
+                    head_branch: "main",
+                    event: "push",
+                  },
+                ]
+              : [];
+          return Response.json({ total_count: runs.length, workflow_runs: runs });
+        }) as typeof fetch,
+      );
+      f.api.mainBusy = () => live.mainBusy();
+      const m = await f.publish();
+      if (phase === "retry") {
+        f.verdict(m, "infrastructure");
+        f.advance(61);
+        expect((await f.controller().step()).action.kind).toBe("retry");
+        await f.executor().maintain();
+        expect(f.api.calls).toHaveLength(1);
+        expect(f.api.calls[0]).toEndWith("/rerun");
+      } else if (phase === "land") {
+        f.verdict(m);
+        expect((await f.controller().step()).action.kind).toBe("land");
+        expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
+      }
+      expect(live.lastHeadroom).toMatchObject({
+        allowed: true,
+        capacityInformational: true,
+        capacity: { hold: "main-queued", mainQueuedJobs: 1 },
+      });
+    },
+  );
   test("whole-run retry lost response is observed by attempt after restart, never duplicated", async () => {
     const f = await fixture(),
       m = await f.publish();
@@ -1094,7 +1148,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         return Response.json({ total_count: runs.length, workflow_runs: runs });
       }) as typeof fetch;
       const reader = new GitHubReader(cfg, new GitHubAuth({}), transport);
-      expect(await reader.mainBusy()).toBe(held);
+      expect(await reader.mainBusy()).toBe(false);
+      expect(Boolean(reader.lastHeadroom?.capacity?.hold)).toBe(held);
       expect(reader.lastHeadroom?.reservedMain).toBe(Math.max(40, mainJobs));
       expect(reader.lastHeadroom?.occupied).toBe(mainJobs + otherJobs);
       expect(reader.lastHeadroom?.candidateSlots).toBe(18);
@@ -1176,9 +1231,11 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       ],
     ] as const)("%s", async (_name, statuses, demand, allowed) => {
       const r = reader([{ id: 2, status: "queued", ...OTHER }], { 2: page(jobs(...statuses)) });
-      expect(await r.mainBusy()).toBe(!allowed);
+      expect(await r.mainBusy()).toBe(false);
+      expect(Boolean(r.lastHeadroom?.capacity?.hold)).toBe(!allowed);
       expect(r.lastHeadroom).toMatchObject({
-        allowed,
+        allowed: true,
+        capacityInformational: true,
         occupied: demand,
         reservedMain: 40,
         candidateSlots: 18,
@@ -1211,7 +1268,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(await fits.mainBusy()).toBe(false);
       expect(fits.lastHeadroom).toMatchObject({ occupied: 48, reservedMain: 45 });
       const tight = busy("65");
-      expect(await tight.mainBusy()).toBe(true);
+      expect(await tight.mainBusy()).toBe(false);
       expect(tight.lastHeadroom).toMatchObject({ occupied: 48, reservedMain: 45 });
       // An idle main run never shrinks the configured reserve.
       const quiet = reader(
@@ -1244,7 +1301,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(r.lastHeadroom?.reason).toContain(reason);
       expect(r.lastHeadroom?.allowed).toBe(false);
     });
-    test("run scan boundaries still hold with idle jobs", async () => {
+    test("idle run volume is allowed but malformed inventories still hold", async () => {
       const idle = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [i + 1, page([])]));
       const many = Array.from({ length: 33 }, (_, i) => ({
         id: i + 1,
@@ -1252,8 +1309,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ...OTHER,
       }));
       const tooMany = reader(many, idle, "1000");
-      expect(await tooMany.mainBusy()).toBe(true);
-      expect(tooMany.lastHeadroom?.reason).toContain("32-run");
+      expect(await tooMany.mainBusy()).toBe(false);
+      expect(tooMany.lastHeadroom?.scannedRuns).toBe(33);
       const invalid = reader([{ id: 0, status: "queued", ...OTHER }], idle, "1000");
       expect(await invalid.mainBusy()).toBe(true);
       expect(invalid.lastHeadroom?.reason).toContain("Invalid active run");
@@ -1265,7 +1322,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         workflow_runs: Array.from({ length: 101 }, (_, i) => ({ id: i + 1, status: "queued" })),
       }));
       expect(await oversized.mainBusy()).toBe(true);
-      expect(oversized.lastHeadroom?.reason).toContain("oversized");
+      expect(oversized.lastHeadroom?.reason).toContain("Incomplete");
       const batch = reader(
         [{ id: 7, status: "waiting", ...OTHER, path: ".github/workflows/batch-ci.yml" }],
         { 7: page([]) },
@@ -1362,7 +1419,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ...idleOther(21),
       ];
       // Negative control: the previous readers held on 37 distinct active runs before reading jobs.
-      expect(fixtures.length).toBeGreaterThan(MAX_RUNNER_RELEVANT_RUNS);
+      expect(fixtures.length).toBeGreaterThan(32);
       const fits = reader(fixtures);
       expect(await fits.github.mainBusy()).toBe(false);
       expect(fits.github.lastHeadroom).toMatchObject({
@@ -1384,18 +1441,18 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ...busyOther(5),
         ...idleOther(20),
       ]);
-      expect(await tight.github.mainBusy()).toBe(true);
+      expect(await tight.github.mainBusy()).toBe(false);
       expect(tight.github.lastHeadroom).toMatchObject({
-        allowed: false,
+        allowed: true,
+        capacityInformational: true,
         occupied: 5,
         approvalOnlyRuns: 12,
       });
-      // Runner-relevant runs still cap at 32 even beside approval-only runs.
+      // More than 32 idle non-approval runs do not create a volume-only hold.
       nextId = 1;
       const crossing = reader([...approvalMain(10), ...approvalOther(2), ...idleOther(33)], "1000");
-      expect(await crossing.github.mainBusy()).toBe(true);
-      expect(crossing.github.lastHeadroom?.reason).toContain("32-run");
-      expect(crossing.github.lastHeadroom?.reason).toContain("approval-only");
+      expect(await crossing.github.mainBusy()).toBe(false);
+      expect(crossing.github.lastHeadroom).toMatchObject({ scannedRuns: 45, occupied: 0 });
       nextId = 1;
       const atCap = reader([...approvalMain(10), ...approvalOther(2), ...idleOther(32)], "1000");
       expect(await atCap.github.mainBusy()).toBe(false);
@@ -1412,19 +1469,18 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         scannedRuns: 40,
         approvalOnlyRuns: 40,
       });
-      // The absolute scan bound admits exactly MAX_SCANNED_ACTIVE_RUNS runs with 10 + 64 requests.
+      // Former 64-run boundary is not an admission limit.
       nextId = 1;
-      const bound = reader(approvalMain(MAX_SCANNED_ACTIVE_RUNS));
+      const bound = reader(approvalMain(64));
       expect(await bound.github.mainBusy()).toBe(false);
       expect(bound.github.lastHeadroom?.approvalOnlyRuns).toBe(64);
-      expect(bound.requests.length).toBe(10 + MAX_SCANNED_ACTIVE_RUNS);
-      // One more distinct active run holds before any job page is read.
+      expect(bound.requests.length).toBe(10 + 64);
+      // Every one of 65 runs is observed, rather than holding before job reads.
       nextId = 1;
-      const over = reader(approvalMain(MAX_SCANNED_ACTIVE_RUNS + 1));
-      expect(await over.github.mainBusy()).toBe(true);
-      expect(over.github.lastHeadroom).toMatchObject({ allowed: false, scannedRuns: 0 });
-      expect(over.github.lastHeadroom?.reason).toContain("64-run job scan");
-      expect(over.requests.length).toBe(10);
+      const over = reader(approvalMain(65));
+      expect(await over.github.mainBusy()).toBe(false);
+      expect(over.github.lastHeadroom).toMatchObject({ allowed: true, scannedRuns: 65 });
+      expect(over.requests.length).toBe(75);
     });
     test("an approval-waiting run that becomes queued counts toward demand and the cap", async () => {
       nextId = 1;
@@ -1444,17 +1500,17 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       // Approval granted: the run status may still read waiting while jobs queue.
       approved = true;
       const after = reader(fixtures, "1000");
-      expect(await after.github.mainBusy()).toBe(true);
-      expect(after.github.lastHeadroom?.reason).toContain("32-run");
+      expect(await after.github.mainBusy()).toBe(false);
+      expect(after.github.lastHeadroom?.capacity?.hold).toBe("main-queued");
       // With room under the cap, the queued main jobs are main demand, and
       // because they wait for runners on the newest main run, admission holds.
       const roomy = reader([transition, ...idleOther(3)], "1000");
-      expect(await roomy.github.mainBusy()).toBe(true);
+      expect(await roomy.github.mainBusy()).toBe(false);
       expect(roomy.github.lastHeadroom).toMatchObject({ occupied: 2, approvalOnlyRuns: 0 });
       expect(roomy.github.lastHeadroom?.capacity?.hold).toBe("main-queued");
       transition.run.status = "queued";
       const queued = reader([transition, ...idleOther(3)], "1000");
-      expect(await queued.github.mainBusy()).toBe(true);
+      expect(await queued.github.mainBusy()).toBe(false);
       expect(queued.github.lastHeadroom).toMatchObject({ occupied: 2, approvalOnlyRuns: 0 });
       expect(queued.github.lastHeadroom?.capacity?.latestMain).toMatchObject({
         runId: 1000,
@@ -1487,7 +1543,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           name,
           { occupied: demand, approvalOnlyRuns: 5, scannedRuns: 37 },
         ]);
-        // With 32 other runner-relevant runs the subject crosses the cap.
+        // With 32 other idle runs, the subject's demand is still accounted for.
         nextId = 1;
         const over = reader(
           [
@@ -1497,10 +1553,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           ],
           "1000",
         );
-        expect([name, await over.github.mainBusy()]).toEqual([name, true]);
-        expect([name, over.github.lastHeadroom?.reason]).toEqual([
+        expect([name, await over.github.mainBusy()]).toEqual([name, false]);
+        expect([name, over.github.lastHeadroom]).toMatchObject([
           name,
-          expect.stringContaining("32-run"),
+          { occupied: demand, approvalOnlyRuns: 5, scannedRuns: 38 },
         ]);
       }
     });
@@ -1590,9 +1646,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       // the run entirely (waiting read too early, in_progress read too late).
       const running = page(jobs(...Array(20).fill("in_progress"), "waiting"));
       const other = flipping("in_progress", "waiting", "waiting", OTHER, running);
-      expect(await other.github.mainBusy()).toBe(true);
+      expect(await other.github.mainBusy()).toBe(false);
       expect(other.github.lastHeadroom).toMatchObject({
-        allowed: false,
+        allowed: true,
+        capacityInformational: true,
         occupied: 20,
         reservedMain: 30,
         scannedRuns: 1,
@@ -1607,7 +1664,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         MAIN,
         page(jobs(...Array(35).fill("in_progress"), "waiting")),
       );
-      expect(await mainRun.github.mainBusy()).toBe(true);
+      expect(await mainRun.github.mainBusy()).toBe(false);
       expect(mainRun.github.lastHeadroom).toMatchObject({ occupied: 35, reservedMain: 35 });
       // queued -> waiting and in_progress -> queued flips are observed too.
       for (const [from, to] of [
@@ -1615,7 +1672,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ["in_progress", "queued"],
       ] as const) {
         const flip = flipping(from, to, to, OTHER, running);
-        expect([from, to, await flip.github.mainBusy()]).toEqual([from, to, true]);
+        expect([from, to, await flip.github.mainBusy()]).toEqual([from, to, false]);
         expect(flip.github.lastHeadroom).toMatchObject({ occupied: 20, scannedRuns: 1 });
       }
       // Approval to queued during the listing: demand is counted.
@@ -1626,7 +1683,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         OTHER,
         page(jobs(...Array(5).fill("queued"), "completed")),
       );
-      expect(await approved.github.mainBusy()).toBe(true);
+      expect(await approved.github.mainBusy()).toBe(false);
       expect(approved.github.lastHeadroom).toMatchObject({ occupied: 5, approvalOnlyRuns: 0 });
       // A run listed with a non-waiting status in any listing is never
       // approval-only, even when its later listing and job page look idle.
@@ -1641,8 +1698,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         "30",
         idleOther(32),
       );
-      expect(await settling.github.mainBusy()).toBe(true);
-      expect(settling.github.lastHeadroom?.reason).toContain("32-run");
+      expect(await settling.github.mainBusy()).toBe(false);
+      expect(settling.github.lastHeadroom).toMatchObject({ approvalOnlyRuns: 0, scannedRuns: 33 });
       nextId = 1;
       const steady = flipping(
         "waiting",
@@ -1746,14 +1803,6 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         mainQueuedJobs: 0,
         preFanoutMainRuns: [],
       });
-      // A smaller explicit scan bound holds before reading jobs.
-      const bounded = listed({ waiting });
-      expect(await scan(bounded.get, { maxScannedRuns: 9 })).toMatchObject({
-        ok: false,
-        hold: "scan-bound",
-        scannedRuns: 0,
-      });
-      expect(bounded.requests.length).toBe(10);
       // The wall-clock deadline holds mid-scan instead of admitting partial demand.
       let clock = 0;
       const slow = listed({ waiting });

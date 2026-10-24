@@ -968,8 +968,8 @@ describe("traffic recovery and bounded reads", () => {
         ...OTHER,
       }));
       const tooMany = await readHeadroom(scan(many, idle), 1000, 40);
-      expect(tooMany.allowed).toBe(false);
-      expect(tooMany.reason).toContain("Too many");
+      expect(tooMany.allowed).toBe(true);
+      expect(tooMany.scannedRuns).toBe(33);
       const truncated = await readHeadroom(
         scan([], idle, () => ({ total_count: 1, workflow_runs: [] })),
         1000,
@@ -989,7 +989,7 @@ describe("traffic recovery and bounded reads", () => {
       );
       expect(oversized).toMatchObject({
         allowed: false,
-        reason: expect.stringContaining("exceeds bounded scan"),
+        reason: expect.stringContaining("incomplete"),
       });
       const batch = await readHeadroom(
         scan([{ id: 7, status: "waiting", ...OTHER, path: ".github/workflows/batch-ci.yml" }], {
@@ -1056,11 +1056,11 @@ describe("traffic recovery and bounded reads", () => {
         nextId = 1;
         const crossing = combine(approvalMain(10), approvalOther(2), idleOther(33));
         expect(await readHeadroom(crossing, 1000, 30)).toMatchObject({
-          allowed: false,
-          reason: expect.stringContaining("Too many active workflows"),
+          allowed: true,
+          scannedRuns: 45,
         });
       });
-      test("approval-only accumulation is bounded by the absolute scan", async () => {
+      test("approval-only accumulation has no count-based admission limit", async () => {
         nextId = 1;
         expect(await readHeadroom(combine(approvalMain(40)), 52, 30)).toMatchObject({
           allowed: true,
@@ -1070,11 +1070,10 @@ describe("traffic recovery and bounded reads", () => {
         nextId = 1;
         const over = combine(approvalMain(65));
         expect(await readHeadroom(over, 52, 30)).toMatchObject({
-          allowed: false,
-          scannedRuns: 0,
-          reason: expect.stringContaining("bounded scan of 64"),
+          allowed: true,
+          scannedRuns: 65,
         });
-        expect(over.requests.length).toBe(10);
+        expect(over.requests.length).toBe(75);
       });
       const flipping = (
         from: string,
@@ -1175,7 +1174,7 @@ describe("traffic recovery and bounded reads", () => {
           const mixed = combine(runSet(1, "waiting", OTHER, statuses), idleOther(32));
           expect([statuses, await readHeadroom(mixed, 1000, 30)]).toMatchObject([
             statuses,
-            { allowed: false, reason: expect.stringContaining("Too many active workflows") },
+            { allowed: true, approvalOnlyRuns: 0, scannedRuns: 33 },
           ]);
         }
         nextId = 1;

@@ -9,6 +9,7 @@ import {
   automationDraftFrom,
   automationName,
   automationNextRun,
+  automationRunErrorText,
   automationRunEventsLabel,
   automationScheduleSpec,
   automationUpdateRequest,
@@ -149,6 +150,64 @@ describe("automation words", () => {
     expect(automationRunEventsLabel(t, run(1))).toBe("Order 42 created");
     expect(automationRunEventsLabel(t, run(3))).toContain("Order 42 created");
     expect(automationRunEventsLabel(t, run(3))).toContain("2");
+  });
+
+  test("a run's recorded reason reads as a sentence, never as its code", () => {
+    expect(automationRunErrorText(t, "scheduled_turn_failed")).toBe(
+      t("automations.run.error.turnFailed"),
+    );
+    expect(automationRunErrorText(t, " scheduled_session_not_idle ")).toBe(
+      t("automations.run.error.chatBusy"),
+    );
+    // Refusals before a run starts share the words of the codes they mean.
+    expect(automationRunErrorText(t, "machine_enrollment_inactive")).toBe(
+      automationRunErrorText(t, "scheduled_machine_unavailable"),
+    );
+    expect(automationRunErrorText(t, "model is not available: gpt-6-luna")).toBe(
+      t("automations.run.error.modelUnavailable"),
+    );
+    // A code this version doesn't know, or an inherited key name, is not shown.
+    for (const unknown of ["scheduled_something_new", "constructor", ""]) {
+      expect(automationRunErrorText(t, unknown)).toBe(t("automations.run.error.unknown"));
+    }
+    expect(automationRunErrorText(t, "  Sandbox capacity is unavailable.  ")).toBe(
+      "Sandbox capacity is unavailable.",
+    );
+  });
+
+  test("every reason the scheduler records has its own words", () => {
+    const codes = [
+      "scheduled_turn_failed",
+      "scheduled_turn_cancelled",
+      "scheduled_turn_superseded",
+      "scheduled_turn_withdrawn_for_edit",
+      "scheduled_update_failed",
+      "scheduled_session_not_idle",
+      "scheduled_session_paused",
+      "session_cancelled",
+      "scheduled_target_session_unavailable",
+      "scheduled_target_execution_changed",
+      "scheduled_workspace_paused",
+      "scheduled_task_paused_before_claim",
+      "scheduled_machine_unavailable",
+      "scheduled_authority_unavailable",
+      "scheduled_authority_exhausted",
+      "connection_account_unavailable",
+      "scheduled_model_unavailable",
+      "machine_target_unavailable",
+      "variable_set_unavailable",
+      "rig_version_unavailable",
+      "insufficient_credits",
+      "allowance_exhausted",
+      "monthly_model_cost_limit",
+      "monthly_agent_run_limit",
+      "session_usage_limit",
+    ];
+    for (const code of codes) {
+      const text = automationRunErrorText(t, code);
+      expect(text).not.toBe(t("automations.run.error.unknown"));
+      expect(text).not.toContain("_");
+    }
   });
 
   test("names come from the instructions when none is typed", () => {

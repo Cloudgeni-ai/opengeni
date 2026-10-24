@@ -40,6 +40,7 @@ export {
   automationListensForEvents,
   automationName,
   automationNextRun,
+  automationRunErrorText,
   automationRunEventsLabel,
   automationRunStatusLabel,
   automationRunTriggerLabel,

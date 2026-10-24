@@ -467,6 +467,40 @@ export const englishMessages = {
   "automations.rows.sentAgain_one": "Sent again once",
   "automations.rows.sentAgain_other": "Sent again {count} times",
   "automations.rows.type": "Type",
+  "automations.run.error.accessUnavailable": "The access it was set up with is no longer valid.",
+  "automations.run.error.accountUnavailable":
+    "A connected account it needs can no longer be used. Reconnect that account.",
+  "automations.run.error.allowanceUsed": "The usage allowance is used up.",
+  "automations.run.error.automationInactive":
+    "The automation was paused or deleted before the run started.",
+  "automations.run.error.chatBusy": "Skipped because the chat was still busy with earlier work.",
+  "automations.run.error.chatChanged":
+    "The chat's tools or settings changed after the automation was set up.",
+  "automations.run.error.chatEnded": "Its chat has ended, so the run couldn't start there.",
+  "automations.run.error.chatGone": "The chat it runs in no longer exists.",
+  "automations.run.error.chatPaused":
+    "Skipped because the chat was paused. Resume the chat to let later runs start; skipped runs aren't replayed.",
+  "automations.run.error.machineUnavailable":
+    "The machine it runs on isn't available. Reconnect it or choose another machine.",
+  "automations.run.error.modelUnavailable":
+    "Its model is no longer available. Edit the automation and choose another model.",
+  "automations.run.error.monthlyCostLimit": "The monthly model cost limit was reached.",
+  "automations.run.error.monthlyRunLimit": "The monthly run limit was reached.",
+  "automations.run.error.outOfCredits": "The workspace is out of credits.",
+  "automations.run.error.rigUnavailable": "Its rig has no usable version.",
+  "automations.run.error.turnFailed":
+    "The agent ran into an error. Open the chat to see what happened.",
+  "automations.run.error.turnInterrupted": "A newer message in the chat interrupted the run.",
+  "automations.run.error.turnStopped": "The run was stopped before it finished.",
+  "automations.run.error.turnWithdrawn":
+    "The run was taken out of the chat's queue before it started.",
+  "automations.run.error.unknown": "Something went wrong with this run.",
+  "automations.run.error.usageLimit":
+    "It reached its usage limit. Raise or remove the limit to let later runs start.",
+  "automations.run.error.variableSetUnavailable":
+    "A variable set it uses no longer exists or can't be used.",
+  "automations.run.error.workspacePaused":
+    "Skipped because agent activity in this workspace was paused. Skipped runs aren't replayed.",
   "automations.run.status.dispatched": "Started",
   "automations.run.status.failed": "Failed",
   "automations.run.status.queued": "Queued",
@@ -1824,6 +1858,8 @@ export const englishMessages = {
   "machineInputDisplay.agentUpdate": "Agent update",
   "machineInputDisplay.agentUpdatesCount_other": "{count} agent updates",
   "machineInputDisplay.agentWaitingForCapacity": "Agent waiting for capacity",
+  "machineInputDisplay.automationRun": "Automation run",
+  "machineInputDisplay.automationRunsCount_other": "{count} automation runs",
   "machineInputDisplay.commandResultReceived": "Command result received",
   "machineInputDisplay.commandResultsReceivedCount_other": "{count} command results received",
   "machineInputDisplay.countTimesLabel": "{count}× {label}",
@@ -1842,8 +1878,6 @@ export const englishMessages = {
   "machineInputDisplay.pausedByValue": "Paused by {value}",
   "machineInputDisplay.progressFromName": "Progress from {name}",
   "machineInputDisplay.resultFromName": "Result from {name}",
-  "machineInputDisplay.scheduledUpdate": "Scheduled update",
-  "machineInputDisplay.scheduledUpdatesCount_other": "{count} scheduled updates",
   "machineInputDisplay.updateFromName": "Update from {name}",
   "machineInputDisplay.updates": "Updates",
   "machineInputDisplay.updatesFromAgents_one": "{count} update from {agents} agents",
@@ -3243,6 +3277,7 @@ export const englishMessages = {
   "sessionChrome.activity": "Activity",
   "sessionChrome.autocontinuationsConsecutiveUnattendedContinues":
     "{autoContinuations} consecutive unattended continues",
+  "sessionChrome.automation": "Automation",
   "sessionChrome.blocked": "Blocked",
   "sessionChrome.blockedBySessionFailure": "Blocked by session failure",
   "sessionChrome.childNeedsInput": "Child needs input",
@@ -3341,7 +3376,6 @@ export const englishMessages = {
   "sessionChrome.resumeGoal": "Resume goal",
   "sessionChrome.retry": "Retry",
   "sessionChrome.running": "Running",
-  "sessionChrome.schedule": "Schedule",
   "sessionChrome.sessionActivity": "Session activity",
   "sessionChrome.singleSendDeleteThisMessage": "Delete this message",
   "sessionChrome.singleSendDismissUnconfirmed": "Dismiss unconfirmed message",

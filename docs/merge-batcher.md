@@ -380,26 +380,30 @@ successor **locally**, based on the predecessor tip, without publishing it and
 starting another CI run. A speculative candidate is deterministic and can be
 rebuilt after cache loss. The hosted runner guard permits only one Batch CI run,
 even if a higher legacy max-inflight planner setting is present.
-Full-main CI retains explicit reserved capacity, but its mere presence does not
-block progress. Before publication/retry/landing, the reader scans current
-repository runs and their latest jobs (one complete page of at most 100 entries
-per response; incomplete observations hold). Each of the five active run statuses
+Full-main capacity estimates remain observable rather than reserving runners.
+Before publication, the existing single trusted retry, and landing, the reader scans current
+repository runs and their latest jobs (100 entries per page, paginated through
+the reported total; incomplete observations hold). Each of the five active run statuses
 is listed twice, so a run whose status changes once during the listing (in either
 direction, for example `in_progress` to `waiting` while other jobs still run) is
 still listed; the latest active listing is used, and a run listed as `completed`
 is skipped. Two passes do not rule out more changes during the listing or
-provider snapshot lag. Every distinct active run's complete latest-job page is
-then read, up to an absolute bound of 64 runs per observation (at most 10
-run-list plus 64 job requests, 74 in total) and a 120-second scan deadline,
-checked before each request and after the last response; a larger backlog, an
-overrun deadline or a provider error holds. A run is **approval-only** only when
+provider snapshot lag or same-total substitutions. GitHub's status-filtered
+listing can itself cap accessible results at 1000; an inaccessible remainder
+holds as incomplete, so pagination does not promise unlimited inventory.
+Every distinct relevant active run's complete latest-job
+inventory is then read. There are no 64-run or 32-run admission limits. A
+120-second scan deadline is checked before each request and after the last
+response; an overrun or provider error holds. Each listing requires a stable
+reported total, correctly sized pages and unique identities across pages;
+inconsistent pages and run identity drift hold rather than admitting partial
+demand. A run is **approval-only** only when
 every listing in the observation reports the run as `waiting` and its complete
 job page has at least one `waiting` job and otherwise only `pending` or
 `completed` jobs. Such
-runs have zero runner demand and are excluded from the **32 runner-relevant
-runs** cap; every other run, including waiting runs with any `queued`,
-`in_progress` or `requested` job and waiting runs without jobs, counts toward
-that cap, and exceeding it holds. Demand counts runner-holding jobs: `queued`,
+runs have zero runner demand. Every other relevant run, including waiting runs
+with any `queued`, `in_progress` or `requested` job and waiting runs without jobs,
+remains in the observation. Demand counts runner-holding jobs: `queued`,
 `in_progress` and `requested` (created but not yet queued; counted
 conservatively). Jobs waiting for environment approval (`waiting`) or a job
 concurrency group (`pending`), completed jobs, and runs without materialized jobs
@@ -412,9 +416,45 @@ slot. Missing budget/reserve or any unrecognized or missing job status holds
 rather than inventing capacity. Waiting, pending and job-less runs can start
 requesting runners after observation.
 
-Further checks protect the organization's shared hosted pool. They do not
-change the 52/30/18 allocation, and the two main holds apply before any
-arithmetic:
+PR CI uses per-PR concurrency with cancellation enabled: a newer run supersedes
+the same PR, not an unrelated PR, main or Batch run. Explicit dispatch uses its
+PR-number input for the same group. Planning, one fast-check job and the final
+aggregate run sequentially; the fast-check job has a hard 15-minute timeout and
+covers lint, impacted types and at most
+40 unit files from directly touched workspace packages, not transitive dependents.
+Changed unit files are prioritized, then paths are ordered deterministically.
+Broad workflow/root/toolchain impact explicitly selects no admission units and
+defers full coverage to Batch CI. Release-note `.changeset/` files alone do not
+trigger this deferral: the selector re-plans without them to confirm no other
+broad fence is hidden, then selects the capped direct-package units. The original
+impact planner and Batch plan remain unchanged. The retained PR plan records the selection
+reason and original, direct, selected and deferred counts; intentional deferral
+is not a claim that those tests passed. All selected tests must execute successfully
+for the fast job and required aggregate to pass. A failed selected test is never
+converted into an intentional skip. Type selection is unchanged. Full guards
+and the full suite remain in Batch CI, whose impact plan is not capped.
+
+There is no global PR admission lock, permit system or synthetic runner reserve.
+GitHub queues bursts under its hosted capacity limits. Keep the fast gate small;
+add a global cap only if measured main/Batch starvation justifies it. The live
+Batch policy below also delegates runner scheduling to GitHub. Already-created runs retain their scheduled
+definition, so backlog recovery must use current exact-head checks, not a false
+success or blanket cancellation of main, Batch, Version or unrelated work.
+
+The following capacity observations remain visible but are **informational for
+live Batch submission, the existing single trusted retry, and landing**. After a
+complete valid inventory with no active Batch reservation, one ready candidate
+may enter GitHub's queue; a tested candidate need not wait for main capacity to
+land. `capacityInformational`
+marks this policy; `capacity.hold` retains the historical capacity heuristic for
+diagnostics, not an admission rejection. Invalid capacity configuration and
+incomplete/unknown evidence still hold. Traffic-shadow capacity comparisons
+retain their existing conservative decisions.
+
+The exact tested tree, lease/CAS, provenance, max-inflight1 and unknown-outcome
+checks still apply to those actions. Historical latency credit for a blocked
+main-capacity wait no longer accrues when capacity is informational; latency
+comparisons across this policy change are therefore not like-for-like.
 
 - **Main before fan-out.** `ci.yml` first creates only automation-admission,
   merge-content and plan; every other job needs plan and appears together, about
@@ -422,20 +462,31 @@ arithmetic:
   An active full-main push run whose complete job list has at most those 3 jobs
   (any status, including a just-pushed run without jobs or a run held by its
   concurrency group) is pre-fan-out: its observed demand understates what it is
-  about to request, so no new candidate is admitted until its fan-out exists.
+  about to request; this is reported without withholding a ready candidate.
   A drained run still lists its completed fan-out jobs, so it is not pre-fan-out.
   A run proven approval-only (an old rerun waiting for environment approval) is
-  idle and never freezes admission; once approved, a later observation sees it
-  queue and holds. A job-less waiting or pending main run fails closed until it
-  materializes. A test checks the 3-job constant against `ci.yml`.
+  idle; once approved, a later observation sees its demand. A job-less waiting
+  or pending main run is reported as pre-fan-out. A test checks the 3-job constant
+  against `ci.yml`.
 - **Main jobs waiting for runners.** If any active full-main push CI run, newest
-  or an older rerun, has a `queued` or `requested` job, no new candidate is
-  admitted. Main CI itself is never gated, cancelled or skipped.
+  or an older rerun, has a `queued` or `requested` job, its count and oldest wait
+  are retained. Main CI itself is never gated, cancelled or skipped.
 - **Provider pool fit.** Observed repository demand (main + other) plus
-  `BATCHER_OTHER_REPOSITORY_ALLOWANCE` plus the 18 candidate slots must fit
+  `BATCHER_OTHER_REPOSITORY_ALLOWANCE` plus the 18 candidate slots is compared with
   `BATCHER_PROVIDER_JOB_LIMIT`. With the defaults, 60 - 28 - 18 = 14 observed
   repository jobs at most. Combined with 52/30/18 (other + max(30, main) + 18 <= 52,
-  so other <= 4 while main <= 30), admission needs other <= 4 and main + other <= 14.
+  so other <= 4 while main <= 30), the historical estimate fits at other <= 4 and
+  main + other <= 14. Exceeding these estimates no longer withholds live submission.
+
+The per-PR fast workflow does not impose a global PR concurrency cap. Live Batch
+admission excludes exact `pr-ci.yml` pull-request and workflow-dispatch runs from
+PR demand, including legacy definitions, so five or more PR jobs do not withhold
+submission. Non-PR demand remains measured and completeness safeguards still
+apply. GitHub queues submitted work when provider capacity is busy; neither
+capacity nor fairness is guaranteed. Preserve max-inflight1, exact tree/provenance,
+CAS and unknown-effect holds. Measure actual Batch wait from run creation to the
+first runner job start, separately from CI execution and landing; do not report
+submission as execution or a landing.
 
 The batcher's App is installed only on this repository, so it cannot read other
 repositories' jobs and does not try. The allowance replaces that observation. It is
@@ -451,6 +502,16 @@ that starts after admission can exceed 60. The pre-fan-out and main-queued holds
 a new candidate from adding to main's demand once a main run is observed; they do
 not preempt a running candidate. Invalid limit or
 allowance values reject configuration; allowance plus 18 above the limit never admits.
+
+The live batcher excludes every `.github/workflows/pr-ci.yml` run triggered
+by `pull_request` or `workflow_dispatch` from this demand and scan-slot accounting,
+regardless of its definition, including older legacy runs and heavier PR or
+dispatch-ref workflow edits. These bursts are queued by GitHub rather than withholding a ready Batch
+solely because PR jobs occupy runners. This is not a provider capacity guarantee:
+the Batch may wait for runners. Active Batch reservations, complete-inventory
+checks, unknown workflow/status handling and non-PR/main capacity holds remain.
+The traffic-shadow reader keeps its original all-workflow accounting. Observe
+actual run/job creation and start timestamps to measure provider queue delay.
 
 `stage.json` headroom now also records `capacity`: the configured limit and
 allowance, `providerRequired`, the hold reason, `mainQueuedJobs` (queued or
