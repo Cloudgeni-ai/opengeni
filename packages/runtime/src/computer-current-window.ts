@@ -55,12 +55,16 @@ export class CurrentComputerWindow {
     if (this.current?.computerSessionId === computerSessionId) this.current = null;
   }
 
-  /** A call that relied on remembered identifiers found its computer or
-   * window gone. A remembered window is the likelier one to have closed, so
-   * only it is forgotten; a remembered computer used with a named window is
-   * forgotten, to resolve afresh next time. */
-  failed(resolved: ResolvedComputerSession & { implicitTarget?: boolean }): void {
-    if (resolved.implicitTarget) {
+  /** A call found its window or its computer gone. A gone computer is
+   * forgotten, to resolve afresh next time. A gone window that came from
+   * memory is forgotten and its computer kept; a named window gone from a
+   * computer that came from memory forgets that computer. */
+  failed(
+    resolved: ResolvedComputerSession & { implicitTarget?: boolean },
+    gone: "window" | "computer",
+  ): void {
+    if (gone === "computer") this.forgetSession(resolved.computerSessionId);
+    else if (resolved.implicitTarget) {
       if (this.current?.computerSessionId === resolved.computerSessionId) {
         this.current = { computerSessionId: resolved.computerSessionId, targetId: null };
       }

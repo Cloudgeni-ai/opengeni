@@ -1220,7 +1220,7 @@ export function createInteractionAttemptToolDefinitions(
       currentComputer.use(computer.computerSessionId);
       return output;
     } catch (error) {
-      if (isGoneBrowserError(error)) currentComputer.failed(computer);
+      if (isGoneBrowserError(error)) currentComputer.failed(computer, goneComputerPart(error));
       throw error;
     }
   };
@@ -1238,7 +1238,7 @@ export function createInteractionAttemptToolDefinitions(
       currentComputer.use(window.computerSessionId, leftIn(output) ?? window.targetId);
       return output;
     } catch (error) {
-      if (isGoneBrowserError(error)) currentComputer.failed(window);
+      if (isGoneBrowserError(error)) currentComputer.failed(window, goneComputerPart(error));
       throw error;
     }
   };
@@ -2738,7 +2738,8 @@ export function createInteractionAttemptToolDefinitions(
             });
             currentComputer.use(id);
           } catch (error) {
-            if (isGoneBrowserError(error)) currentComputer.failed(computer);
+            if (isGoneBrowserError(error))
+              currentComputer.failed(computer, goneComputerPart(error));
             // The API refused the call before dispatching it (a retired or
             // ended ComputerSession, a missing permission, invalid
             // arguments): a definite failure the model can act on, not an
@@ -4597,6 +4598,18 @@ function browserToolImageContent(
 /** The remembered browser or tab no longer exists. */
 function isGoneBrowserError(error: unknown): boolean {
   return error instanceof OpenGeniApiError && (error.status === 404 || error.status === 410);
+}
+
+/** What a computer call's 404 or 410 found gone: the computer itself (a 410,
+ * or a 404 saying its session was not found or is not active) or else the
+ * window it named, which the controller reports in many words ("computer
+ * target … does not exist", "CUA window is no longer present"). */
+function goneComputerPart(error: unknown): "window" | "computer" {
+  return error instanceof OpenGeniApiError &&
+    error.status === 404 &&
+    !/session (?:operation )?(?:not found|is not active)/iu.test(error.message)
+    ? "window"
+    : "computer";
 }
 
 /** The API refused the call before running it, possibly because its browser

@@ -71,14 +71,28 @@ describe("current computer window", () => {
   test("a remembered computer that is gone is resolved afresh", async () => {
     const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
     current.use("c-1", "w-1");
-    current.failed(await current.session(undefined));
+    current.failed(await current.session(undefined), "computer");
+    expect(await current.session(undefined)).toEqual({ computerSessionId: "c-2", implicit: true });
+  });
+
+  test("a remembered computer gone under its remembered window is resolved afresh", async () => {
+    const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
+    current.use("c-1", "w-1");
+    current.failed(await current.target({}), "computer");
+    expect(await current.session(undefined)).toEqual({ computerSessionId: "c-2", implicit: true });
+  });
+
+  test("an explicitly named computer that is gone is forgotten too", async () => {
+    const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
+    current.use("c-1", "w-1");
+    current.failed(await current.target({ computerSessionId: "c-1" }), "computer");
     expect(await current.session(undefined)).toEqual({ computerSessionId: "c-2", implicit: true });
   });
 
   test("a remembered window that is gone is forgotten, its computer kept", async () => {
     const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
     current.use("c-1", "w-1");
-    current.failed(await current.target({}));
+    current.failed(await current.target({}), "window");
     expect(await current.session(undefined)).toEqual({ computerSessionId: "c-1", implicit: true });
     await expect(current.target({})).rejects.toMatchObject({ code: "computer_target_required" });
   });
@@ -86,7 +100,7 @@ describe("current computer window", () => {
   test("a remembered window that is gone keeps its explicitly named computer", async () => {
     const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
     current.use("c-1", "w-1");
-    current.failed(await current.target({ computerSessionId: "c-1" }));
+    current.failed(await current.target({ computerSessionId: "c-1" }), "window");
     expect(await current.session(undefined)).toEqual({ computerSessionId: "c-1", implicit: true });
     await expect(current.target({})).rejects.toMatchObject({ code: "computer_target_required" });
   });
@@ -193,6 +207,105 @@ describe("computer tools without identifiers", () => {
         retryable: false,
       },
     });
+  });
+
+  test("a computer found gone under its remembered window is not kept as current", async () => {
+    const other = randomUUID();
+    const listed: string[] = [];
+    let gone = false;
+    const tools = definitions({
+      listComputerSessions: async () => ({
+        revision: 1,
+        sessions: [{ ...computerSession(), id: other }],
+      }),
+      getComputerSession: async () => computerSession() as never,
+      observeComputerTarget: async () => {
+        if (gone)
+          throw new OpenGeniApiError(404, JSON.stringify({ message: "ComputerSession not found" }));
+        return observation(computerTarget("window-1"));
+      },
+      actInComputer: async (_workspace, _computer, value) => {
+        if (gone)
+          throw new OpenGeniApiError(404, JSON.stringify({ message: "ComputerSession not found" }));
+        return receipt(value.operationId, observation(computerTarget("window-1")));
+      },
+      listComputerTargets: async (_workspace, computer) => {
+        listed.push(computer);
+        return { computerSessionId: computer, targets: [] } as never;
+      },
+    });
+    await tools.computer_open!.execute(
+      { computerSessionId },
+      { operationId: randomUUID(), caller: model },
+    );
+    const invoke = (fields: Record<string, unknown>) =>
+      tools.computer_act!.execute(
+        {
+          ...fields,
+          expectedObservationId: randomUUID(),
+          action: { type: "semantic", locator: "e1", action: "invoke" },
+        },
+        { operationId: randomUUID(), caller: model },
+      );
+    expect((await invoke({ targetId: "window-1" })).isError).not.toBe(true);
+    gone = true;
+    // The remembered window's computer has ended: the next call without
+    // identifiers resolves the computer afresh instead of asking for a window.
+    expect((await invoke({})).isError).toBe(true);
+    listed.length = 0;
+    await tools.computer_targets!.execute({}, { operationId: randomUUID(), caller: model });
+    expect(listed).toEqual([other]);
+  });
+
+  test("a remembered window found gone keeps its computer", async () => {
+    let gone = false;
+    const listed: string[] = [];
+    const missing = () =>
+      new OpenGeniApiError(
+        404,
+        JSON.stringify({ code: "not_found", message: 'computer target "window-1" does not exist' }),
+      );
+    const tools = definitions({
+      listComputerSessions: async () => ({
+        revision: 1,
+        sessions: [{ ...computerSession(), id: randomUUID() }],
+      }),
+      getComputerSession: async () => computerSession() as never,
+      observeComputerTarget: async () => {
+        if (gone) throw missing();
+        return observation(computerTarget("window-1"));
+      },
+      actInComputer: async (_workspace, _computer, value) => {
+        if (gone) throw missing();
+        return receipt(value.operationId, observation(computerTarget("window-1")));
+      },
+      listComputerTargets: async (_workspace, computer) => {
+        listed.push(computer);
+        return { computerSessionId: computer, targets: [] } as never;
+      },
+    });
+    await tools.computer_open!.execute(
+      { computerSessionId },
+      { operationId: randomUUID(), caller: model },
+    );
+    const invoke = (fields: Record<string, unknown>) =>
+      tools.computer_act!.execute(
+        {
+          ...fields,
+          expectedObservationId: randomUUID(),
+          action: { type: "semantic", locator: "e1", action: "invoke" },
+        },
+        { operationId: randomUUID(), caller: model },
+      );
+    expect((await invoke({ targetId: "window-1" })).isError).not.toBe(true);
+    gone = true;
+    expect((await invoke({})).isError).toBe(true);
+    // Its computer stays current, so the next call asks only for a window.
+    const next = await invoke({});
+    expect(next.structuredContent).toMatchObject({ error: { code: "computer_target_required" } });
+    listed.length = 0;
+    await tools.computer_targets!.execute({}, { operationId: randomUUID(), caller: model });
+    expect(listed).toEqual([computerSessionId]);
   });
 
   test("computer_targets uses the computer computer_open returned", async () => {
