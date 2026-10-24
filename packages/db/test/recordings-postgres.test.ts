@@ -7,8 +7,14 @@ import {
 import {
   acceptOrganizationInvitation,
   appendRecordingLiveSegments,
+  browserRecordingActionLogObjectKey,
+  browserRecordingBundleObjectKey,
+  browserRecordingVideoObjectKey,
+  claimBrowserRecordingVideo,
   claimRecordingTranscriptVersion,
+  completeBrowserRecordingVideo,
   completeRecordingTranscriptVersion,
+  createBrowserRecording,
   createDb,
   createOrganizationInvitation,
   createRecording,
@@ -16,10 +22,13 @@ import {
   createRecordingTranscriptVersion,
   deleteWorkspace,
   ensureManagedAccessForUser,
+  failBrowserRecordingVideo,
   failRecordingTranscriptVersion,
   finalizeRecording,
+  findBrowserRecording,
   forgetRecordingPersonVoice,
   forgetWorkspaceRecordingVoices,
+  getBrowserRecordingVideo,
   getRecording,
   getRecordingTranscriptPage,
   listDeletingRecordingObjectKeys,
@@ -850,6 +859,179 @@ describe("recordings", () => {
         (select count(*)::int from recordings where id = ${recording.recordingId}) as recordings,
         (select count(*)::int from recording_events where recording_id = ${recording.recordingId}) as events`;
     expect(rows).toEqual({ recordings: 0, events: 0 });
+  });
+
+  test("a browser recording: one video track from its bundle, kept out of meetings", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const recordingId = crypto.randomUUID();
+    const input = {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      visibility: "workspace" as const,
+      startedAt: new Date("2026-10-24T08:00:00.000Z"),
+      durationMilliseconds: 12_345.6,
+      bundle: { byteLength: 4_096, sha256: sha("e") },
+    };
+    expect(await findBrowserRecording(db, { ...actor, recordingId })).toBeNull();
+    const created = await createBrowserRecording(db, input);
+    expect(created.created).toBe(true);
+    expect(created.recording).toMatchObject({
+      purpose: "browser",
+      state: "processing",
+      visibility: "workspace",
+      durationMilliseconds: 12_346,
+      errorCode: null,
+      captureEndedAt: "2026-10-24T08:00:12.346Z",
+    });
+    expect(created.recording.tracks).toEqual([
+      expect.objectContaining({
+        trackNumber: 0,
+        kind: "video",
+        source: "browser_tab",
+        chunkCount: 1,
+        totalBytes: 4_096,
+        video: null,
+      }),
+    ]);
+    // Creating it again changes nothing; another bundle under the same id is refused.
+    expect((await createBrowserRecording(db, input)).created).toBe(false);
+    await expect(
+      createBrowserRecording(db, { ...input, bundle: { byteLength: 4_096, sha256: sha("f") } }),
+    ).rejects.toMatchObject({ code: "recording_id_taken" });
+    // Meeting lists and transcripts are for meetings only.
+    expect((await listRecordings(db, actor)).recordings).toHaveLength(0);
+    expect(
+      (await listRecordings(db, { ...actor, purpose: "browser" })).recordings.map(
+        (recording) => recording.id,
+      ),
+    ).toEqual([recordingId]);
+    await expect(
+      createRecordingTranscriptVersion(db, {
+        ...actor,
+        recordingId,
+        versionId: crypto.randomUUID(),
+        transcription,
+      }),
+    ).rejects.toMatchObject({ code: "not_a_meeting" });
+
+    const job = await claimBrowserRecordingVideo(db, { ...actor, recordingId });
+    expect(job?.bundle).toEqual({
+      objectKey: browserRecordingBundleObjectKey({ ...actor, recordingId, sha256: sha("e") }),
+      sha256: sha("e"),
+    });
+    expect(await getBrowserRecordingVideo(db, { ...actor, recordingId })).toBeNull();
+    const videoKey = browserRecordingVideoObjectKey({ ...actor, recordingId });
+    const video = {
+      objectKey: videoKey,
+      bytes: 2_000,
+      sha256: sha("a"),
+      durationMilliseconds: 12_000,
+      width: 1280,
+      height: 720,
+      frameCount: 60,
+    };
+    expect(await completeBrowserRecordingVideo(db, { ...actor, recordingId, video })).toBe(true);
+    expect(await completeBrowserRecordingVideo(db, { ...actor, recordingId, video })).toBe(false);
+    expect(await claimBrowserRecordingVideo(db, { ...actor, recordingId })).toBeNull();
+    expect(await getBrowserRecordingVideo(db, { ...actor, recordingId })).toEqual({
+      objectKey: videoKey,
+      actionLogObjectKey: browserRecordingActionLogObjectKey({ ...actor, recordingId }),
+      bytes: 2_000,
+      sha256: sha("a"),
+      durationMilliseconds: 12_000,
+      width: 1280,
+      height: 720,
+      frameCount: 60,
+    });
+    const ready = await findBrowserRecording(db, {
+      workspaceId: scope.workspaceId,
+      subjectId: scope.member,
+      recordingId,
+    });
+    expect(ready?.recording.state).toBe("ready");
+    expect(ready?.recording.tracks[0]).toMatchObject({
+      kind: "video",
+      playable: true,
+      video: { width: 1280, height: 720, frameCount: 60 },
+    });
+
+    await markRecordingDeleting(db, { ...actor, recordingId });
+    expect((await listDeletingRecordingObjectKeys(db, { ...actor, recordingId }))?.sort()).toEqual(
+      [
+        browserRecordingBundleObjectKey({ ...actor, recordingId, sha256: sha("e") }),
+        videoKey,
+        browserRecordingActionLogObjectKey({ ...actor, recordingId }),
+      ].sort(),
+    );
+  });
+
+  test("a browser recording whose video failed says why", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const recordingId = crypto.randomUUID();
+    await createBrowserRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      visibility: "private",
+      startedAt: new Date(),
+      durationMilliseconds: 1_000,
+      bundle: { byteLength: 10, sha256: sha("c") },
+    });
+    const message = "the recording captured no frames; the page may not have been visible";
+    expect(
+      await failBrowserRecordingVideo(db, {
+        ...actor,
+        recordingId,
+        errorCode: "no_frames",
+        errorMessage: message,
+      }),
+    ).toBe(true);
+    expect(
+      await failBrowserRecordingVideo(db, {
+        ...actor,
+        recordingId,
+        errorCode: "encode_failed",
+        errorMessage: "late",
+      }),
+    ).toBe(false);
+    const failed = await findBrowserRecording(db, { ...actor, recordingId });
+    expect(failed?.recording).toMatchObject({ state: "failed", errorCode: "no_frames" });
+    expect(failed?.errorMessage).toBe(message);
+    // Only me: the member cannot see it.
+    expect(
+      await findBrowserRecording(db, {
+        workspaceId: scope.workspaceId,
+        subjectId: scope.member,
+        recordingId,
+      }),
+    ).toBeNull();
+  });
+
+  test("deleting the workspace removes its browser recordings too", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    const recordingId = crypto.randomUUID();
+    await createBrowserRecording(client.db, {
+      workspaceId: scope.workspaceId,
+      subjectId: scope.owner,
+      accountId: scope.accountId,
+      recordingId,
+      visibility: "workspace",
+      startedAt: new Date(),
+      durationMilliseconds: 1_000,
+      bundle: { byteLength: 10, sha256: sha("d") },
+    });
+    await deleteWorkspace(client.db, scope.workspaceId);
+    const [rows] = await shared.admin<{ recordings: number }[]>`
+      select (select count(*)::int from recordings where id = ${recordingId}) as recordings`;
+    expect(rows).toEqual({ recordings: 0 });
   });
 
   test("the live preview: only the recorder streams, everyone who can see it reads, a transcript ends it", async () => {

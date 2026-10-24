@@ -25,7 +25,17 @@ export const recordingStateValues = [
   "failed",
   "deleting",
 ] as const;
-export const recordingTrackSourceValues = ["microphone", "system", "mixed", "upload"] as const;
+export const recordingTrackSourceValues = [
+  "microphone",
+  "system",
+  "mixed",
+  "upload",
+  // Migration 0945. A browser tab an agent recorded.
+  "browser_tab",
+] as const;
+export const recordingTrackKindValues = ["audio", "video"] as const;
+// Migration 0945. "browser": an agent's browser recording, kept out of meeting lists.
+export const recordingPurposeValues = ["meeting", "browser"] as const;
 export const recordingChunkStateValues = ["pending", "uploaded"] as const;
 export const recordingTranscriptVersionStateValues = [
   "queued",
@@ -66,6 +76,10 @@ export const recordings = pgTable(
       .notNull()
       .default("user_private"),
     title: text("title").notNull(),
+    purpose: text("purpose", { enum: recordingPurposeValues }).notNull().default("meeting"),
+    // Migration 0945. Why a browser recording's video could not be made.
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
     state: text("state", { enum: recordingStateValues }).notNull().default("capturing"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     captureEndedAt: timestamp("capture_ended_at", { withTimezone: true }),
@@ -92,9 +106,7 @@ export const recordingTracks = pgTable(
     workspaceId: uuid("workspace_id").notNull(),
     recordingId: uuid("recording_id").notNull(),
     trackNumber: integer("track_number").notNull(),
-    kind: text("kind", { enum: ["audio"] })
-      .notNull()
-      .default("audio"),
+    kind: text("kind", { enum: recordingTrackKindValues }).notNull().default("audio"),
     source: text("source", { enum: recordingTrackSourceValues }).notNull(),
     mimeType: text("mime_type").notNull(),
     chunkCount: integer("chunk_count").notNull().default(0),
@@ -102,6 +114,11 @@ export const recordingTracks = pgTable(
     durationMilliseconds: integer("duration_milliseconds").notNull().default(0),
     preparedObjectKey: text("prepared_object_key"),
     preparedBytes: bigint("prepared_bytes", { mode: "number" }),
+    // Migration 0945.
+    preparedSha256: text("prepared_sha256"),
+    videoWidth: integer("video_width"),
+    videoHeight: integer("video_height"),
+    videoFrameCount: integer("video_frame_count"),
     // Migration 0942. The live transcript streamed for this track, if any.
     liveProviderId: text("live_provider_id"),
     liveModel: text("live_model"),

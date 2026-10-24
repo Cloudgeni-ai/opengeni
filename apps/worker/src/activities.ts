@@ -145,6 +145,10 @@ export const transcribeRecordingVersion = defaultControlActivities.transcribeRec
 export const failRecordingTranscript = defaultControlActivities.failRecordingTranscript;
 export const deleteRecordingMedia = defaultControlActivities.deleteRecordingMedia;
 export const recoverRecordingWorkflows = defaultControlActivities.recoverRecordingWorkflows;
+export const createBrowserRecordingFromBundle =
+  defaultControlActivities.createBrowserRecordingFromBundle;
+export const encodeBrowserRecordingVideo = defaultControlActivities.encodeBrowserRecordingVideo;
+export const failBrowserRecording = defaultControlActivities.failBrowserRecording;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
 export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;

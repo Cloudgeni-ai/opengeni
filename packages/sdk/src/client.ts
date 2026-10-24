@@ -4739,9 +4739,9 @@ export class OpenGeniClient {
 
   /** Stops a recording and saves it as an MP4 plus an action log in the
    * browser's source session workspace; the MP4 is also a retained artifact.
-   * While the recording is still moving off a slow browser host, the request
-   * is repeated with the same operationId until the save completes or
-   * `options.signal` aborts. */
+   * While the recording is still moving off a slow browser host, or its
+   * video is being made, the request is repeated with the same operationId
+   * until the save completes or `options.signal` aborts. */
   async saveBrowserRecording(
     workspaceId: string,
     browserSessionId: string,

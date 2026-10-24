@@ -47,10 +47,13 @@ export {
 } from "./workflows/video-generation";
 export { sessionTitleWorkflow } from "./workflows/session-title";
 export {
+  browserRecordingVideoWorkflow,
+  browserRecordingVideoWorkflowId,
   recordingDeletionWorkflow,
   recordingDeletionWorkflowId,
   recordingTranscriptWorkflow,
   recordingTranscriptWorkflowId,
+  type BrowserRecordingVideoWorkflowInput,
   type RecordingDeletionWorkflowInput,
   type RecordingTranscriptWorkflowInput,
 } from "./workflows/recordings";

@@ -7,7 +7,7 @@ import {
   encodeBrowserRecording,
   jpegSize,
   parseBrowserRecordingBundle,
-} from "../src/browser-recording-video";
+} from "../src/activities/browser-recording-video";
 
 const ffmpeg = process.env.OPENGENI_TEST_FFMPEG ?? Bun.which("ffmpeg");
 const ffprobe = ffmpeg ? (Bun.which("ffprobe") ?? ffmpeg.replace(/ffmpeg$/u, "ffprobe")) : null;

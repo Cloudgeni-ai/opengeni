@@ -35,8 +35,8 @@ import type {
   Recording,
   RecordingLiveSession,
   RecordingPerson,
+  RecordingCaptureSource,
   RecordingTrackAudio,
-  RecordingTrackSource,
   RecordingTranscriptPage,
   RecordingTranscriptionOptions,
   RecordingTranscriptVersion,
@@ -1278,7 +1278,7 @@ export type RecorderSnapshot = {
   pauseReason?: "person" | "interruption" | null;
   tracks: Array<{
     trackNumber: number;
-    source: RecordingTrackSource;
+    source: RecordingCaptureSource;
     label: string;
   }>;
   upload: RecordingUploadStatus | null;
@@ -1583,7 +1583,7 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 type TrackCapture = {
   trackNumber: number;
-  source: RecordingTrackSource;
+  source: RecordingCaptureSource;
   label: string;
   stream: MediaStream;
   /** Ends a capture that stopping its tracks alone doesn't (the desktop app's). */
