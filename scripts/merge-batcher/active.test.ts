@@ -2062,7 +2062,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect((await controller.journal.records(NOW)).stages[manifest.batchId]?.landedAt).toBeNull();
     expect((await f.state()).ledger.stages[manifest.batchId]?.landedAt).toBeNull();
   });
-  test("latency stop signal also holds an already-durable whole-run retry intent", async () => {
+  test("latency alert does not hold an already-durable whole-run retry intent", async () => {
     const f = await fixture(),
       manifest = await f.publish();
     f.verdict(manifest, "infrastructure");
@@ -2073,8 +2073,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     });
     f.advance(3601);
     await f.executor().maintain();
-    expect(f.api.calls).toHaveLength(0);
-    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("pending");
+    expect(f.api.calls).toHaveLength(1);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("done");
   });
   test("auto-merged original gets one durable follow-up, with no inherited evidence or readiness", async () => {
     const f = await mergedOriginalWithDelta();

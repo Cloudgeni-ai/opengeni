@@ -17,7 +17,6 @@ import {
   type FollowupPull,
 } from "./model";
 import { latestRun, infrastructureRetryReason } from "./planner";
-import { latencySummary } from "./journal";
 
 export interface ActiveReads {
   openPullNumbers?(): Promise<number[]>;
@@ -473,13 +472,12 @@ export class GitHubActiveExecutor implements Executor {
         if (
           current.attempt !== effect.run.attempt ||
           current.status !== "completed" ||
-          (latencySummary(state.ledger.stages, now).p95 ?? 0) > 1800 ||
           (await this.reads.mainBusy())
         ) {
           await this.patchEffect(effect.id, {
             nextAt: new Date(Date.parse(now) + 60_000).toISOString(),
           });
-          return "whole-workflow retry waits for exact completed attempt, latency stop clearance and main headroom";
+          return "whole-workflow retry waits for exact completed attempt and complete available Batch-slot evidence";
         }
         await this.git.fetch(this.writer.remote, [effect.run.headSha]);
         const manifest = await this.git.inspect(effect.run.headSha);
