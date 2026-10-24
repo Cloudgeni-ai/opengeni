@@ -124,6 +124,13 @@ const subscriptionCoreMigrations = [
   "0907_subscription_connection_one_owner.sql",
   // Rewrites the withheld 0732 probes and claim bodies after their originals exist.
   ...strictOwnerMaintenanceMigrationTail,
+  // 0929 redefines the exhausted-task predicate withheld 0761 creates; 0932,
+  // 0935, 0937 and 0938 build on 0929. Replay them after 0761.
+  "0929_event_triggers.sql",
+  "0932_mcp_event_subscriptions.sql",
+  "0935_event_source_feeds.sql",
+  "0937_definer_runtime_grants_deferred.sql",
+  "0938_event_source_awaiting_secret.sql",
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.
