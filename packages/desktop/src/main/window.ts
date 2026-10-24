@@ -161,8 +161,25 @@ export class MainWindow {
       this.window.on(event as "maximize", () => this.scheduleSave());
     }
     this.window.on("move", () => this.scheduleSave());
-    this.window.on("focus", () => this.events.focused());
+    this.window.on("focus", () => this.windowFocused());
     this.window.on("closed", () => this.events.closed());
+  }
+
+  private windowFocused(): void {
+    this.focusShownPage();
+    this.events.focused();
+  }
+
+  /**
+   * Give the shown page keyboard focus. When the window becomes active again
+   * (after the app was hidden, or the display slept), macOS doesn't hand focus
+   * back to the child view, so the page's first keystrokes would be lost: a
+   * held Control+Tab, for one, arrives as a lone Control release.
+   */
+  private focusShownPage(): void {
+    const contents = this.shown?.webContents;
+    if (!contents || contents.isDestroyed() || contents.isFocused()) return;
+    contents.focus();
   }
 
   /** Show the window right away; the theme background is already painted. */
@@ -179,6 +196,7 @@ export class MainWindow {
       this.maximizeOnReveal = false;
     }
     this.window.focus();
+    this.focusShownPage();
   }
 
   get accountId(): string | null {
