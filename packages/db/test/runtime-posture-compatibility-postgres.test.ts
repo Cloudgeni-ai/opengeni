@@ -3,7 +3,6 @@ import { resolve } from "node:path";
 import type postgres from "postgres";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  grantDeferredRuntimeAccess,
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import { createDb, type DbClient } from "../src/database";
@@ -363,7 +362,7 @@ realTest(
 );
 
 realTest(
-  "this binary requires the grants 0947 makes and accepts 0946's deferred one either way",
+  "this binary requires the definer and table grants 0947 and 0950 make",
   async () => {
     const admin = database!.admin;
     const current = async () =>
@@ -373,8 +372,11 @@ realTest(
       );
     expect(await current()).toEqual([]);
     try {
-      await grantDeferredRuntimeAccess(admin);
-      expect(await current()).toEqual([]);
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)",
+      );
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
       await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) FROM opengeni_app`;
       expect(await current()).toContain(
         "runtime role lacks EXECUTE on private routine list_stalled_recording_work_v1(integer)",
@@ -386,7 +388,7 @@ realTest(
     } finally {
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app`;
       await admin`GRANT DELETE ON TABLE event_ingress_routes TO opengeni_app`;
-      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) FROM opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
     }
     expect(await current()).toEqual([]);
   },

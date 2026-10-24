@@ -67,12 +67,11 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * does not know a definer rejects a runtime EXECUTE grant on it, so the grant
  * (and provisioning) waits until a binary that knows it is the previous
  * release; until then readiness accepts the routine with or without runtime
- * EXECUTE. 0937 withheld the first five and 0947 grants them; 0946 withholds
- * the recording retention inventory until its own follow-up release.
+ * EXECUTE. 0937 withheld the first five and 0947 granted them; 0946 withheld
+ * the recording retention inventory and 0950 granted it. None is withheld now.
  */
-export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
-  "list_due_recording_retention_v1(integer)",
-] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
+export const DEFERRED_RUNTIME_PRIVATE_ROUTINES =
+  [] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
  * The tables each runtime definer reads or writes as its owner. Once they all
