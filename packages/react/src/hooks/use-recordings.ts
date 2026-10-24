@@ -6,7 +6,7 @@ import type {
   RecordingPerson,
   RecordingVoiceprintConsent,
   RecordingSpeaker,
-  RecordingTranscriptionOptions,
+  RecordingTranscriptionRequest,
   RecordingTranscriptPage,
   RecordingTranscriptSegment,
   RecordingTranscriptVersion,
@@ -155,7 +155,7 @@ export type UseRecorderOptions = RecordingsClientOverride & {
   /** Your own id for what this recording belongs to, to find it again with `useRecordings`. */
   externalRef?: string;
   metadata?: Record<string, unknown>;
-  transcription?: RecordingTranscriptionOptions;
+  transcription?: RecordingTranscriptionRequest;
   /** Microphone constraints; false records no microphone. Default: on. */
   microphone?: boolean | MediaTrackConstraints;
   /** Also record shared tab or system audio as its own track (Chromium). Default: off. */
@@ -201,7 +201,7 @@ export type UseRecorderResult = RecorderSnapshot & {
   start: (
     overrides?: Pick<
       UseRecorderOptions,
-      "title" | "systemAudio" | "microphone" | "visibility" | "liveTranscript"
+      "title" | "systemAudio" | "microphone" | "visibility" | "liveTranscript" | "transcription"
     >,
   ) => Promise<void>;
   pause: () => void;
@@ -364,7 +364,15 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       ) {
         return;
       }
-      const merged = { ...optionsRef.current, ...overrides };
+      const merged = {
+        ...optionsRef.current,
+        ...overrides,
+        // A start can set one transcription option, such as the language, and
+        // keep the rest the hook was given.
+        ...(overrides.transcription
+          ? { transcription: { ...optionsRef.current.transcription, ...overrides.transcription } }
+          : {}),
+      };
       // Earlier recorders stay subscribed to the shared uploader for their own
       // recording; only the current one may change what the hook shows.
       let recorder: Recorder | null = null;
@@ -540,7 +548,7 @@ export type UseRecordingResult = {
   refresh: () => Promise<void>;
   update: (request: UpdateRecordingRequest) => Promise<Recording>;
   /** Transcribe again, optionally with another model, as a new version. */
-  rerun: (transcription?: RecordingTranscriptionOptions) => Promise<RecordingTranscriptVersion>;
+  rerun: (transcription?: RecordingTranscriptionRequest) => Promise<RecordingTranscriptVersion>;
   setCurrentVersion: (versionId: string) => Promise<void>;
   remove: () => Promise<void>;
 };
@@ -596,7 +604,7 @@ export function useRecording(
       [client, workspaceId, recordingId, refresh],
     ),
     rerun: useCallback(
-      async (transcription?: RecordingTranscriptionOptions) => {
+      async (transcription?: RecordingTranscriptionRequest) => {
         const version = await client.createRecordingTranscript(
           workspaceId,
           require(),

@@ -12,6 +12,7 @@ import {
   ChevronDownIcon,
   MoreHorizontalIcon,
   PencilIcon,
+  UserIcon,
   UserPlusIcon,
   UsersIcon,
   XIcon,
@@ -80,6 +81,13 @@ export type TranscriptActions = {
   /** Turn down a name suggested from a voice. */
   rejectSuggestion: (label: string) => Promise<void>;
   createPerson: (displayName: string) => Promise<RecordingPerson>;
+  /**
+   * Name a speaker as the person reading, linked to their account so their
+   * own voice can be remembered. Null when there is no signed-in member.
+   */
+  nameSelf: ((label: string) => Promise<void>) | null;
+  /** Who is reading, to tell their own entry in the people list apart. */
+  viewerSubjectId: string | null;
   moveSegment: (segmentIndex: number, label: string) => Promise<void>;
   editSegment: (segmentIndex: number, text: string | null) => Promise<void>;
   /** Null when the workspace doesn't recognize people by voice. */
@@ -135,6 +143,7 @@ export function SpeakerNameMenu({
   onAddNew,
   children,
   align = "start",
+  defaultOpen,
 }: {
   label: string;
   displayName: string;
@@ -144,6 +153,8 @@ export function SpeakerNameMenu({
   onAddNew: (label: string) => void;
   children: React.ReactNode;
   align?: "start" | "end";
+  /** Open on first render, for previews. */
+  defaultOpen?: boolean;
 }) {
   const current = speakers.find((speaker) => speaker.label === label);
   const named = speakerIsNamed(label, speakers);
@@ -156,23 +167,43 @@ export function SpeakerNameMenu({
     );
     return people.filter((person) => ids.has(person.id) && person.id !== current?.personId);
   }, [people, speakers, label, current?.personId]);
+  const viewerSubjectId = actions.viewerSubjectId;
   const others = useMemo(
     () =>
       people
-        // A suggested person is already the first choice above.
+        // A suggested person is already the first choice above, and the
+        // reader is "It's me".
         .filter(
           (person) =>
             !inMeeting.includes(person) &&
-            !(current?.source === "suggested" && person.id === current.personId),
+            !(current?.source === "suggested" && person.id === current.personId) &&
+            !(viewerSubjectId && person.memberSubjectId === viewerSubjectId),
         )
         .sort((a, b) => a.displayName.localeCompare(b.displayName))
         .slice(0, 12),
-    [people, inMeeting, current?.source, current?.personId],
+    [people, inMeeting, current?.source, current?.personId, viewerSubjectId],
   );
   const pick = (person: RecordingPerson) =>
     void withToast("Couldn't name this speaker", () =>
       actions.nameSpeaker(label, { personId: person.id }),
     );
+  const nameSelf = actions.nameSelf;
+  const isSelf = Boolean(
+    viewerSubjectId &&
+    current?.personId &&
+    people.some(
+      (person) => person.id === current.personId && person.memberSubjectId === viewerSubjectId,
+    ),
+  );
+  const selfItem =
+    nameSelf && !isSelf ? (
+      <DropdownMenuItem
+        onSelect={() => void withToast("Couldn't name this speaker", () => nameSelf(label))}
+      >
+        <UserIcon aria-hidden="true" />
+        It's me
+      </DropdownMenuItem>
+    ) : null;
   const currentPerson = current?.personId
     ? (people.find((candidate) => candidate.id === current.personId) ?? null)
     : null;
@@ -181,7 +212,7 @@ export function SpeakerNameMenu({
       ? voiceMenuItem(currentPerson, actions.voices)
       : null;
   return (
-    <DropdownMenu>
+    <DropdownMenu {...(defaultOpen ? { defaultOpen } : {})}>
       <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
       <DropdownMenuContent align={align} className="max-h-80 min-w-56">
         {suggested ? (
@@ -221,6 +252,8 @@ export function SpeakerNameMenu({
         ) : (
           <DropdownMenuLabel>Who is {displayName}?</DropdownMenuLabel>
         )}
+        {selfItem}
+        {selfItem && inMeeting.length + others.length > 0 ? <DropdownMenuSeparator /> : null}
         {inMeeting.map((person) => (
           <DropdownMenuItem key={person.id} onSelect={() => pick(person)}>
             <span className="min-w-0 flex-1 truncate">Same person as {person.displayName}</span>

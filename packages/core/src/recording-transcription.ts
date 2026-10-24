@@ -451,6 +451,14 @@ type ElevenLabsResponse = {
  * The shortest standard form of a provider's language code: ISO 639-3 "eng"
  * and "nob" become "en" and "nb"; a code Intl can't read is kept as given.
  */
+/**
+ * ElevenLabs knows Norwegian as one language ("no", "nor"), so Bokmål and
+ * Nynorsk are sent as Norwegian.
+ */
+export function elevenLabsLanguage(code: string): string {
+  return code === "nb" || code === "nn" || code === "nob" || code === "nno" ? "no" : code;
+}
+
 export function canonicalLanguageTag(code: string): string {
   try {
     return Intl.getCanonicalLocales(code.trim())[0] ?? code;
@@ -601,7 +609,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
       url.searchParams.set("audio_format", `pcm_${LIVE_SAMPLE_RATE}`);
       url.searchParams.set("commit_strategy", "vad");
       url.searchParams.set("include_timestamps", "true");
-      if (input.language) url.searchParams.set("language_code", input.language);
+      if (input.language) url.searchParams.set("language_code", elevenLabsLanguage(input.language));
       return {
         protocol: "elevenlabs.scribe_realtime",
         url: url.toString(),
@@ -620,7 +628,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
       form.append("timestamps_granularity", "word");
       form.append("tag_audio_events", "false");
       form.append("diarize", input.diarize ? "true" : "false");
-      if (input.language) form.append("language_code", input.language);
+      if (input.language) form.append("language_code", elevenLabsLanguage(input.language));
       if (input.diarize && input.maxSpeakers) {
         form.append("num_speakers", String(Math.min(32, Math.max(1, input.maxSpeakers))));
       }

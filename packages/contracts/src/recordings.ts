@@ -130,6 +130,21 @@ export const RecordingTranscriptionOptions = /* @__PURE__ */ defineSchema(() =>
 export type RecordingTranscriptionOptions = z.infer<typeof RecordingTranscriptionOptions>;
 
 /**
+ * How to transcribe, as asked for. A new recording that names no language
+ * takes the workspace's meeting language; `null` detects it even then.
+ */
+export const RecordingTranscriptionRequest = /* @__PURE__ */ defineSchema(() =>
+  RecordingTranscriptionOptions.extend({
+    language: z
+      .string()
+      .regex(/^[a-z]{2,3}$/u)
+      .nullable()
+      .optional(),
+  }).strict(),
+);
+export type RecordingTranscriptionRequest = z.infer<typeof RecordingTranscriptionRequest>;
+
+/**
  * How long a workspace keeps meetings, in days after they were recorded.
  * Audio can go sooner than the transcript, never later.
  */
@@ -184,6 +199,16 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
         .optional(),
       /** Who tells speakers apart in new transcripts. */
       diarizer: RecordingDiarizer.optional(),
+      /**
+       * The language new meetings are in, as an ISO 639-1 or 639-3 code,
+       * when a recording names none. Unset detects it. A live transcript
+       * hears only a few seconds at a time, so detecting can drift between
+       * languages there; naming one keeps it steady.
+       */
+      language: z
+        .string()
+        .regex(/^[a-z]{2,3}$/u)
+        .optional(),
       /**
        * Recognize people by voice. Off by default. While on, Opengeni keeps
        * each diarized speaker's voice vector with the transcript and
@@ -259,7 +284,7 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
           (tracks) => new Set(tracks.map((track) => track.trackNumber)).size === tracks.length,
           "track numbers must be unique",
         ),
-      transcription: RecordingTranscriptionOptions.optional(),
+      transcription: RecordingTranscriptionRequest.optional(),
     })
     .strict(),
 );
@@ -382,7 +407,7 @@ export type UpdateRecordingRequest = z.infer<typeof UpdateRecordingRequest>;
 export const CreateRecordingTranscriptRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      transcription: RecordingTranscriptionOptions.optional(),
+      transcription: RecordingTranscriptionRequest.optional(),
     })
     .strict(),
 );

@@ -21,11 +21,13 @@ import { Button } from "@opengeni/react/ui/button";
 import { Checkbox } from "@opengeni/react/ui/field";
 import { Input } from "@opengeni/react/ui/input";
 import { Notice } from "@opengeni/react/ui/notice";
+import { NativeSelect } from "@opengeni/react/ui/select-menu";
 import { cn } from "@opengeni/react/app/lib/utils";
 
 import { formatClock } from "@opengeni/react/recordings";
 import type { MeetingRecorder } from "./recorder-context";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
+import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
 
 type RecorderError = NonNullable<MeetingRecorder["error"]>;
 
@@ -368,6 +370,7 @@ export function RecorderPanel({
   recorder,
   onStopped,
   liveTranscript = null,
+  defaultLanguage = null,
 }: {
   /** Null while the capture code loads. */
   recorder: MeetingRecorder | null;
@@ -375,11 +378,15 @@ export function RecorderPanel({
   onStopped?: ((recordingId: string) => void) | undefined;
   /** Offer the live transcript preview; null when the workspace has no live model. */
   liveTranscript?: { defaultOn: boolean; usdPerHour?: number | null } | null;
+  /** The workspace's meeting language; null detects it. */
+  defaultLanguage?: string | null | undefined;
 }) {
   const titleId = useId();
   const tabAudioId = useId();
   const liveId = useId();
   const [title, setTitle] = useState("");
+  const [languageChoice, setLanguage] = useState<string | null>(null);
+  const language = languageChoice ?? defaultLanguage ?? DETECT_LANGUAGE;
   const desktopAudio = recorder?.systemAudioKind === "desktop";
   // In the desktop app computer audio is on unless turned off; a browser's
   // share prompt is something to opt into.
@@ -516,6 +523,8 @@ export function RecorderPanel({
       ...(title.trim() ? { title: title.trim() } : {}),
       systemAudio: tabAudio,
       ...(liveOn ? { liveTranscript: true } : {}),
+      // Sent even when it's the workspace's, so this meeting keeps it.
+      transcription: { language: language === DETECT_LANGUAGE ? null : language },
     });
   };
   return (
@@ -574,6 +583,15 @@ export function RecorderPanel({
             Live transcript
           </label>
         ) : null}
+        <div className="w-40 shrink-0 max-sm:w-full">
+          <NativeSelect
+            aria-label="Meeting language"
+            options={meetingLanguageOptions(language, "Detect language")}
+            value={language}
+            onValueChange={setLanguage}
+            disabled={starting}
+          />
+        </div>
         <Button
           type="submit"
           disabled={!recorder || starting}

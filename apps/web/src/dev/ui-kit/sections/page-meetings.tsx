@@ -235,6 +235,7 @@ export default function PageMeetingsSection() {
                 workspaceId={fixture.workspaceId}
                 recordings={fixture.client}
                 liveTranscriptDefault={settings.liveTranscript === true}
+                defaultLanguage={settings.language ?? null}
                 meetingHref={(id) => `#meeting-${id}`}
                 onOpen={(id) => {
                   setOpenId(id);
@@ -247,7 +248,9 @@ export default function PageMeetingsSection() {
                 workspaceId={fixture.workspaceId}
                 recordingId={openId}
                 viewerSubjectId={fixture.viewerSubjectId}
+                viewerName="Ingrid Solberg"
                 voiceRecognition={settings.voiceprints === true}
+                onOpenSettings={() => setView("settings")}
                 recordings={fixture.client}
                 onBack={() => setView("list")}
               />

@@ -38,7 +38,7 @@ import type {
   RecordingCaptureSource,
   RecordingTrackAudio,
   RecordingTranscriptPage,
-  RecordingTranscriptionOptions,
+  RecordingTranscriptionRequest,
   RecordingTranscriptVersion,
   RecordingVisibility,
   RememberRecordingPersonVoiceRequest,
@@ -1372,7 +1372,7 @@ export type RecorderOptions = {
   visibility?: RecordingVisibility;
   externalRef?: string;
   metadata?: CreateRecordingRequest["metadata"];
-  transcription?: RecordingTranscriptionOptions;
+  transcription?: RecordingTranscriptionRequest;
   /** Microphone constraints; false records no microphone. Default: on. */
   microphone?: boolean | MediaTrackConstraints;
   /**

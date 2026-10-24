@@ -19,13 +19,14 @@ export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
   const { workspaces } = useAppContext();
   const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
-  const liveTranscript =
-    resolveWorkspaceRecordingSettings(workspace?.settings).liveTranscript === true;
+  const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
+  const liveTranscript = settings.liveTranscript === true;
   return (
     <ContentPage width="standard" className="pt-6">
       <MeetingsListPage
         workspaceId={workspaceId}
         liveTranscriptDefault={liveTranscript}
+        defaultLanguage={settings.language ?? null}
         meetingHref={(recordingId) => meetingPath(workspaceId, recordingId)}
         onOpen={(recordingId) =>
           void navigate({
@@ -57,9 +58,17 @@ export function MeetingDetailRoute({
         workspaceId={workspaceId}
         recordingId={recordingId}
         viewerSubjectId={accessContext.subjectId}
+        viewerName={accessContext.subjectLabel?.trim() || "Me"}
         voiceRecognition={voiceRecognition}
         onBack={() =>
           void navigate({ to: "/workspaces/$workspaceId/meetings", params: { workspaceId } })
+        }
+        onOpenSettings={() =>
+          void navigate({
+            to: "/workspaces/$workspaceId/settings",
+            params: { workspaceId },
+            search: { section: "general" },
+          })
         }
       />
     </ContentPage>

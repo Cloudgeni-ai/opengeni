@@ -510,47 +510,47 @@ export function AutomationsPanel({
         className={cn("og-root og-automations flex min-w-0 flex-col gap-4", className)}
       >
         <StandaloneOverlayRoot source={root}>
-        {view.kind === "list" && (title !== null || (tasks?.length ?? 0) > 0) ? (
-          <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-4 gap-y-2">
-            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              {title !== null ? (
-                <h2 className="m-0 text-base leading-6 font-semibold text-fg">{title}</h2>
-              ) : null}
+          {view.kind === "list" && (title !== null || (tasks?.length ?? 0) > 0) ? (
+            <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-4 gap-y-2">
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                {title !== null ? (
+                  <h2 className="m-0 text-base leading-6 font-semibold text-fg">{title}</h2>
+                ) : null}
+                {(tasks?.length ?? 0) > 0 ? (
+                  <p className="m-0 text-sm leading-5 text-fg-muted">
+                    {sessionId
+                      ? t("automations.panel.descriptionChat")
+                      : t("automations.panel.description")}
+                  </p>
+                ) : null}
+              </div>
               {(tasks?.length ?? 0) > 0 ? (
-                <p className="m-0 text-sm leading-5 text-fg-muted">
-                  {sessionId
-                    ? t("automations.panel.descriptionChat")
-                    : t("automations.panel.description")}
-                </p>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => go({ kind: "form", taskId: null })}
+                  className="pointer-coarse:h-11"
+                >
+                  <PlusIcon aria-hidden="true" />
+                  {t("automations.panel.new")}
+                </Button>
               ) : null}
             </div>
-            {(tasks?.length ?? 0) > 0 ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => go({ kind: "form", taskId: null })}
-                className="pointer-coarse:h-11"
-              >
-                <PlusIcon aria-hidden="true" />
-                {t("automations.panel.new")}
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
-        {view.kind === "list" ? noticeLine : null}
-        {body}
-        <ConfirmDialog
-          open={deleting !== null}
-          onOpenChange={(open) => {
-            if (!open) setDeleting(null);
-          }}
-          title={t("automations.panel.deleteTitle", { name: deleting?.name ?? "" })}
-          description={t("automations.panel.deleteBody")}
-          confirmLabel={t("automations.panel.deleteConfirm")}
-          pendingLabel={t("automations.panel.deleting")}
-          cancelLabel={t("automations.form.cancel")}
-          onConfirm={() => (deleting ? remove(deleting) : true)}
-        />
+          ) : null}
+          {view.kind === "list" ? noticeLine : null}
+          {body}
+          <ConfirmDialog
+            open={deleting !== null}
+            onOpenChange={(open) => {
+              if (!open) setDeleting(null);
+            }}
+            title={t("automations.panel.deleteTitle", { name: deleting?.name ?? "" })}
+            description={t("automations.panel.deleteBody")}
+            confirmLabel={t("automations.panel.deleteConfirm")}
+            pendingLabel={t("automations.panel.deleting")}
+            cancelLabel={t("automations.form.cancel")}
+            onConfirm={() => (deleting ? remove(deleting) : true)}
+          />
         </StandaloneOverlayRoot>
       </section>
     </TooltipProvider>

@@ -67,6 +67,7 @@ function useNarrow(): boolean {
 export function MeetingsListPage({
   workspaceId,
   liveTranscriptDefault = false,
+  defaultLanguage = null,
   recordings: recordingsClient,
   meetingHref,
   onOpen,
@@ -74,6 +75,8 @@ export function MeetingsListPage({
   workspaceId: string;
   /** Whether the workspace shows a live transcript while recording by default. */
   liveTranscriptDefault?: boolean;
+  /** The workspace's meeting language; null detects it. */
+  defaultLanguage?: string | null;
   /** A recordings client to use instead of the app's, for previews. */
   recordings?: RecordingsClientOverride["recordings"];
   meetingHref: (recordingId: string) => string;
@@ -120,6 +123,7 @@ export function MeetingsListPage({
         <RecorderPanel
           recorder={recorder}
           onStopped={onOpen}
+          defaultLanguage={defaultLanguage}
           liveTranscript={
             liveModel
               ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }
