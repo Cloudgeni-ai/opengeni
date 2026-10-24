@@ -415,8 +415,16 @@ requesting runners after observation.
 PR CI uses per-PR concurrency with cancellation enabled: a newer run supersedes
 the same PR, not an unrelated PR, main or Batch run. Explicit dispatch uses its
 PR-number input for the same group. Planning, one fast-check job and the final
-aggregate run sequentially; fast checks cover lint, impacted types and impacted
-unit files. Full guards and the full suite remain in Batch CI.
+aggregate run sequentially; fast checks cover lint, impacted types and at most
+40 unit files from directly touched workspace packages, not transitive dependents.
+Changed unit files are prioritized, then paths are ordered deterministically.
+Broad workflow/root/toolchain impact explicitly selects no admission units and
+defers full coverage to Batch CI. The retained PR plan records the selection
+reason and original, direct, selected and deferred counts; intentional deferral
+is not a claim that those tests passed. All selected tests must execute successfully
+for the fast job and required aggregate to pass. A failed selected test is never
+converted into an intentional skip. Type selection is unchanged. Full guards
+and the full suite remain in Batch CI, whose impact plan is not capped.
 
 There is no global PR admission lock, permit system or synthetic runner reserve.
 GitHub queues bursts under its hosted capacity limits. Keep the fast gate small;

@@ -4,6 +4,23 @@ import { readFileSync } from "node:fs";
 const workflow = (name: string) =>
   Bun.YAML.parse(readFileSync(`.github/workflows/${name}.yml`, "utf8")) as any;
 
+test("PR-only capped selection precedes unit count; selected failures still fail aggregate", () => {
+  const { jobs } = workflow("pr-ci");
+  const plan = jobs.plan.steps.find((step: any) => step.id === "plan").run as string;
+  expect(plan).toContain(
+    'pr-fast-plan.ts --plan "$RUNNER_TEMP/pr-impact.json" --output "$RUNNER_TEMP/pr-plan.json"',
+  );
+  expect(plan.indexOf("pr-fast-plan.ts")).toBeLessThan(plan.indexOf("unit_count="));
+  const units = jobs.fast.steps.find((step: any) => step.name === "Test every selected unit file");
+  expect(units.if).toBe(
+    "${{ needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.unit_count != '0' }}",
+  );
+  expect(units["continue-on-error"]).toBeUndefined();
+  expect(units.run).toContain("set -euo pipefail");
+  expect(jobs.ready.steps[0].run).toContain('test "$FAST" = success');
+  expect(JSON.stringify(workflow("batch-ci"))).not.toContain("pr-fast-plan.ts");
+});
+
 test("PR CI reserves a bounded PR lane without cancelling main or batch", () => {
   const pr = workflow("pr-ci");
   expect(pr.concurrency.queue).toBeUndefined();

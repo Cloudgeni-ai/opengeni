@@ -56,7 +56,8 @@ jobs:
           HEAD_SHA: ${{ steps.identity.outputs.head }}
         run: |
           set -euo pipefail
-          bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output "$RUNNER_TEMP/pr-plan.json"
+          bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output "$RUNNER_TEMP/pr-impact.json"
+          bun scripts/ci/pr-fast-plan.ts --plan "$RUNNER_TEMP/pr-impact.json" --output "$RUNNER_TEMP/pr-plan.json"
           echo "unit_count=$(jq '.unitTests | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.1
         with:
