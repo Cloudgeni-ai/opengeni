@@ -86,36 +86,67 @@ export function supersededVersionValidationRuns(
     .map((r) => r.id);
 }
 
+// A provider gateway error or a dropped connection on a read is transient: the
+// same read can be repeated. Mutations are never repeated (their outcome is unknown).
+const TRANSIENT_READ_STATUSES = new Set([502, 503, 504]);
+const TRANSIENT_READ_RETRIES = 5;
+export function transientReadDelay(retry: number, random: () => number): number {
+  // 2 s doubling to at most 30 s, with up to half of it as jitter.
+  const base = Math.min(30000, 2000 * 2 ** retry);
+  return Math.round(base / 2 + (base / 2) * random());
+}
+
 export async function runPrCiCommand(
   action = process.argv[2],
   env: Record<string, string | undefined> = process.env,
   transport: typeof fetch = fetch,
   laneArgument = process.argv[3],
-  timing = { now: Date.now, sleep: (ms: number) => Bun.sleep(ms) },
+  timing: { now: () => number; sleep: (ms: number) => Promise<unknown>; random?: () => number } = {
+    now: Date.now,
+    sleep: (ms: number) => Bun.sleep(ms),
+  },
 ) {
   const repo = env.GITHUB_REPOSITORY,
     token = env.GITHUB_TOKEN;
   if (!repo || !token) throw Error("Repository and GitHub token required");
+  const random = timing.random ?? Math.random;
   const admissionStartedAt = timing.now();
   const deadline = admissionStartedAt + 5 * 60 * 60 * 1000;
   const prPriorityYieldDeadline = admissionStartedAt + 15 * 60 * 1000;
   let readAfter = 0;
   async function api(path: string, method = "GET", body?: unknown): Promise<any> {
+    let transientRetries = 0;
+    // Waits before repeating a read after a transient failure, or reports that
+    // the bounded retries are spent.
+    const retryTransientRead = async (): Promise<boolean> => {
+      if (method !== "GET" || transientRetries >= TRANSIENT_READ_RETRIES) return false;
+      const delay = transientReadDelay(transientRetries++, random);
+      if (timing.now() + delay >= deadline) return false;
+      await timing.sleep(delay);
+      return true;
+    };
     for (;;) {
       if (method === "GET" && readAfter > timing.now()) {
         if (readAfter >= deadline) throw Error("Provider rate budget exceeds admission deadline");
         await timing.sleep(readAfter - timing.now());
       }
-      const r = await transport(`https://api.github.com/repos/${repo}/${path}`, {
-        method,
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-          "content-type": "application/json",
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(30000),
-      });
+      let r: Response;
+      try {
+        r = await transport(`https://api.github.com/repos/${repo}/${path}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "content-type": "application/json",
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          signal: AbortSignal.timeout(30000),
+        });
+      } catch (error) {
+        // A network error or the 30 s timeout.
+        if (await retryTransientRead()) continue;
+        throw error;
+      }
       const remaining = r.headers.get("x-ratelimit-remaining"),
         reset = Number(r.headers.get("x-ratelimit-reset")) * 1000;
       const retry = Number(r.headers.get("retry-after")) * 1000;
@@ -136,6 +167,7 @@ export async function runPrCiCommand(
         );
         continue; // authenticated reads only; never replay a mutation
       }
+      if (TRANSIENT_READ_STATUSES.has(r.status) && (await retryTransientRead())) continue;
       if (!r.ok) throw Error(`GitHub ${method} ${r.status}`);
       return r.status === 204 ? null : r.json();
     }
