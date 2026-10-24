@@ -120,6 +120,17 @@ describe("account keys", () => {
     expect(reason(() => decryptUserKey(protectedKey, other))).toBe("wrong_key");
   });
 
+  test("a newer-format user key is unsupported, not a wrong password", async () => {
+    const masterKey = await deriveMasterKey("pw", "a@example.test", {
+      type: "pbkdf2",
+      iterations: 5_000,
+    });
+    // An XChaCha20 user key is a CBOR-encoded key, not 64 raw bytes.
+    const coseKey = new Uint8Array(randomBytes(77));
+    const protectedKey = encryptBytes(coseKey, stretchMasterKey(masterKey));
+    expect(reason(() => decryptUserKey(protectedKey, masterKey))).toBe("unsupported");
+  });
+
   test("opens a pre-2019 type 0 user key directly under the master key", async () => {
     const masterKey = await deriveMasterKey("pw", "a@example.test", {
       type: "pbkdf2",

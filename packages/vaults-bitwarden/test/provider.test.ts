@@ -69,6 +69,25 @@ function itemNamed(items: { name: string; externalItemId: string }[], name: stri
   return found;
 }
 
+/** A non-login item in My vault, written as clients write it. */
+function typedCipher(
+  fake: FakeBitwarden,
+  type: 2 | 3 | 4 | 5,
+  name: string,
+  values: Record<string, string>,
+) {
+  const section = { 2: "secureNote", 3: "card", 4: "identity", 5: "sshKey" }[type];
+  const body: Record<string, any> = { ...fake.login(name, {}), type, login: null };
+  body[section] =
+    type === 2
+      ? { type: 0 }
+      : Object.fromEntries(
+          Object.entries(values).map(([key, value]) => [key, encryptString(value, fake.userKey)]),
+        );
+  if (type === 2 && values.notes) body.notes = encryptString(values.notes, fake.userKey);
+  return body;
+}
+
 beforeEach(() => resetBitwardenTokens());
 
 runVaultProviderContractSuite("Bitwarden adapter (wire fake)", async () => {
@@ -308,6 +327,226 @@ describe("Bitwarden adapter beyond the contract", () => {
       }),
       "provider_conflict",
     );
+  });
+
+  test("updates and removes a card's and an identity's own fields", async () => {
+    const fake = await FakeBitwarden.create();
+    const cardId = fake.addCipher(
+      typedCipher(fake, 3, "Company card", {
+        cardholderName: "A Person",
+        number: "4111111111111111",
+        code: "123",
+      }),
+    );
+    const identityId = fake.addCipher(
+      typedCipher(fake, 4, "Me", { firstName: "A", email: "a@example.test", phone: "+1 555 0100" }),
+    );
+    const { provider } = await connect(fake);
+    const ctx = context();
+    const items = await provider.listItems(ctx, PERSONAL_VAULT_ID);
+    const card = itemNamed(items, "Company card");
+    const identity = itemNamed(items, "Me");
+
+    await provider.writeItem(ctx, PERSONAL_VAULT_ID, {
+      externalItemId: card.externalItemId,
+      name: "Company card",
+      type: "note",
+      websites: [],
+      fields: [
+        {
+          externalFieldId: "card.number",
+          name: "number",
+          kind: "concealed",
+          value: "5555555555554444",
+        },
+        { externalFieldId: "card.code", name: "security code", kind: "concealed", remove: true },
+        { name: "expiry month", kind: "text", value: "07" },
+      ],
+    });
+    await provider.writeItem(ctx, PERSONAL_VAULT_ID, {
+      externalItemId: identity.externalItemId,
+      name: "Me",
+      type: "note",
+      websites: [],
+      fields: [
+        { externalFieldId: "identity.email", name: "email", kind: "text", value: "b@example.test" },
+        { externalFieldId: "identity.phone", name: "phone", kind: "text", remove: true },
+      ],
+    });
+
+    const storedCard = fake.ciphers.get(cardId)!;
+    expect(storedCard.type).toBe(3);
+    expect(storedCard.card.code).toBeNull();
+    const cardValues = await provider.readFields(ctx, PERSONAL_VAULT_ID, card.externalItemId, [
+      "card.number",
+      "card.expMonth",
+      "card.cardholderName",
+    ]);
+    expect(cardValues.map((value) => value.material)).toEqual([
+      { type: "text", value: "5555555555554444" },
+      { type: "text", value: "07" },
+      { type: "text", value: "A Person" },
+    ]);
+
+    const storedIdentity = fake.ciphers.get(identityId)!;
+    expect(storedIdentity.identity.phone).toBeNull();
+    const identityValues = await provider.readFields(
+      ctx,
+      PERSONAL_VAULT_ID,
+      identity.externalItemId,
+      ["identity.email", "identity.firstName"],
+    );
+    expect(identityValues.map((value) => value.material)).toEqual([
+      { type: "text", value: "b@example.test" },
+      { type: "text", value: "A" },
+    ]);
+  });
+
+  test("an update keeps passkeys, match rules, linked fields, history and settings it does not model", async () => {
+    const fake = await FakeBitwarden.create();
+    const enc = (value: string) => encryptString(value, fake.userKey);
+    const body = fake.login("Everything", {
+      username: "user",
+      password: "old-password",
+      uri: "https://example.test/login",
+    });
+    const passkey = {
+      credentialId: enc("credential-id"),
+      keyType: enc("public-key"),
+      keyAlgorithm: enc("ECDSA"),
+      keyCurve: enc("P-256"),
+      keyValue: enc("private-key-value"),
+      rpId: enc("example.test"),
+      counter: enc("0"),
+      discoverable: enc("true"),
+      creationDate: "2026-09-01T00:00:00.000Z",
+    };
+    body.login.fido2Credentials = [passkey];
+    body.login.uris[0].match = 3;
+    body.fields = [{ name: enc("login name"), value: null, type: 3, linkedId: 100 }];
+    body.passwordHistory = [{ password: enc("older"), lastUsedDate: "2026-08-01T00:00:00.000Z" }];
+    body.favorite = true;
+    body.reprompt = 1;
+    body.folderId = "3c4a5b6c-0000-4000-8000-000000000001";
+    const id = fake.addCipher(body);
+    fake.addAttachment(id, "notes.txt", new TextEncoder().encode("hello"), fake.userKey);
+    const attachments = fake.ciphers.get(id)!.attachments;
+    const { provider } = await connect(fake);
+    const item = itemNamed(await provider.listItems(context(), PERSONAL_VAULT_ID), "Everything");
+
+    await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      externalItemId: item.externalItemId,
+      name: "Everything",
+      type: "login",
+      websites: ["https://example.test/login"],
+      fields: [
+        {
+          externalFieldId: "login.password",
+          name: "password",
+          kind: "concealed",
+          value: "new-password",
+        },
+      ],
+    });
+
+    const stored = fake.ciphers.get(id)!;
+    expect(stored.login.fido2Credentials).toEqual([passkey]);
+    expect(stored.login.uris).toEqual(body.login.uris);
+    expect(stored.fields).toEqual(body.fields);
+    expect(stored.attachments).toEqual(attachments);
+    expect(stored.favorite).toBe(true);
+    expect(stored.reprompt).toBe(1);
+    expect(stored.folderId).toBe(body.folderId);
+    expect(stored.passwordHistory).toHaveLength(2);
+    expect(stored.passwordHistory[0].password).toBe(body.login.password);
+    expect(stored.passwordHistory[1]).toEqual(body.passwordHistory[0]);
+  });
+
+  test("an SSH key's own fields are changed in Bitwarden, but its name and notes can change here", async () => {
+    const fake = await FakeBitwarden.create();
+    const id = fake.addCipher(
+      typedCipher(fake, 5, "Deploy key", {
+        privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+        publicKey: "ssh-ed25519 AAAA example",
+        keyFingerprint: "SHA256:abc",
+      }),
+    );
+    const sshKey = { ...fake.ciphers.get(id)!.sshKey };
+    const { provider } = await connect(fake);
+    const item = itemNamed(await provider.listItems(context(), PERSONAL_VAULT_ID), "Deploy key");
+    const error = await refusal(
+      provider.writeItem(context(), PERSONAL_VAULT_ID, {
+        externalItemId: item.externalItemId,
+        name: "Deploy key",
+        type: "note",
+        websites: [],
+        fields: [
+          {
+            externalFieldId: "sshKey.privateKey",
+            name: "private key",
+            kind: "concealed",
+            value: "x",
+          },
+        ],
+      }),
+      "provider_permission_denied",
+    );
+    expect(error.message).toContain("SSH");
+    await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      externalItemId: item.externalItemId,
+      name: "Deploy key (old)",
+      type: "note",
+      websites: [],
+      fields: [{ name: "notes", kind: "text", value: "rotated" }],
+    });
+    const stored = fake.ciphers.get(id)!;
+    expect(stored.type).toBe(5);
+    expect(stored.sshKey).toEqual(sshKey);
+  });
+
+  test("an item's type can't change", async () => {
+    const fake = await FakeBitwarden.create();
+    fake.addCipher(typedCipher(fake, 2, "Plain note", { notes: "text" }));
+    const { provider } = await connect(fake);
+    const item = itemNamed(await provider.listItems(context(), PERSONAL_VAULT_ID), "Plain note");
+    await refusal(
+      provider.writeItem(context(), PERSONAL_VAULT_ID, {
+        externalItemId: item.externalItemId,
+        name: "Plain note",
+        type: "login",
+        websites: [],
+        fields: [],
+      }),
+      "provider_conflict",
+    );
+  });
+
+  test("an update to a shared item keeps its organization and collections", async () => {
+    const fake = await FakeBitwarden.create();
+    const team = fake.addCollection("Team");
+    const other = fake.addCollection("Other");
+    const id = fake.addCipher(
+      fake.login("Team login", { password: "t" }, fake.orgKey, fake.orgId),
+      [team, other],
+    );
+    const { provider } = await connect(fake);
+    const item = itemNamed(await provider.listItems(context(), team), "Team login");
+    await provider.writeItem(context(), team, {
+      externalItemId: item.externalItemId,
+      name: "Team login",
+      type: "login",
+      websites: [],
+      fields: [
+        { externalFieldId: "login.password", name: "password", kind: "concealed", value: "u" },
+      ],
+    });
+    const stored = fake.ciphers.get(id)!;
+    expect(stored.organizationId).toBe(fake.orgId);
+    expect(stored.collectionIds).toEqual([team, other]);
+    const [value] = await provider.readFields(context(), other, item.externalItemId, [
+      "login.password",
+    ]);
+    expect(value!.material).toEqual({ type: "text", value: "u" });
   });
 
   test("reads an attachment as bytes", async () => {

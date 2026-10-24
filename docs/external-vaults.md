@@ -15,7 +15,7 @@ execution time. Connection credentials are encrypted separately from the mirror.
 | 1Password | Service-account token and official SDK | Existing connection routes remain supported. |
 | Proton Pass | Scoped personal access token and operator-installed official CLI | Create supported items and move them to Trash; no updates, field removal, vault creation or file uploads. |
 | Keeper Secrets Manager | One-time token exchanged for bound SDK configuration | Shared folders are vaults; create and update supported records; no Archive or permanent-delete action. |
-| Bitwarden Password Manager (bitwarden.com, bitwarden.eu, self-hosted, Vaultwarden) | The account's personal API key plus its master password once, over the server's client API; decrypted inside Opengeni | My vault and each organization collection the account can open are vaults; create and update logins and notes, move items to Trash; no file uploads. Not Bitwarden Secrets Manager. |
+| Bitwarden Password Manager (bitwarden.com, bitwarden.eu, self-hosted, Vaultwarden) | The account's personal API key plus its master password once, over the server's client API; decrypted inside Opengeni | My vault and each organization collection the account can open are vaults; read every item type; create logins and notes; update logins, notes, cards and identities; move items to Trash; no file uploads. Not Bitwarden Secrets Manager. |
 | External vault | Signed remote provider implemented by the embedding product | One connection can expose several vaults, with explicit operation capabilities. |
 | In-process host | Existing `connectionCredentials.vaultProvider` port | Remains supported; no remote endpoint is required. |
 
@@ -55,18 +55,73 @@ the way the official apps do and decrypts items itself:
   decrypts only the requested fields. Listing uses one encrypted sync per
   attempt. Access tokens are reused per process until shortly before they
   expire, because servers rate-limit logins.
-- **Writes** create logins and secure notes, update fields (keeping password
-  history and refusing a stale revision), remove fields and move items to
-  Trash, where they can be restored. Attachments and one-time passwords are
-  readable.
+- **Item types.** Logins, secure notes, cards, identities and SSH keys are all
+  readable. A login is an Opengeni login with its websites, username, password
+  and one-time password; the other types are Opengeni notes whose fields are
+  the type's own (a card's number and security code, an identity's email or
+  passport number, an SSH key's private key, public key and fingerprint),
+  followed by notes, custom fields and attachments. Concealed Bitwarden values
+  stay concealed. Linked custom fields hold no value of their own and are not
+  listed.
+- **Writes** create logins and secure notes, update any item's name, notes and
+  custom fields, update and remove the own fields of logins, cards and
+  identities, and move items to Trash, where they can be restored. A new field
+  named like an empty built-in one (for example `security code` on a card)
+  fills it. Every update starts from the item's current encrypted copy and
+  sends back what it does not change as the same ciphertext, so passkeys,
+  attachments, password history, website match rules, linked fields, folder,
+  favorite and master-password re-prompt survive; a changed password is added
+  to the password history. The update names the revision it started from, and
+  the server refuses it if the item changed in between. An item keeps its
+  owner: an organization item stays in its organization and collections, and
+  a new item in a collection is created there under the organization's key.
+  An SSH key's own fields, an item's type and attachments are changed in
+  Bitwarden itself (Bitwarden derives an SSH key's public key and fingerprint
+  from its private key).
+- **Changes made elsewhere.** Values are read live, so a changed password is
+  used on the next call. Names and fields follow the
+  [freshness rules](#freshness-three-different-things): a cheap revision check
+  refreshes them when browsing or searching after ten minutes, after two
+  minutes when a reference finds nothing, and at once on Refresh.
 - **Self-hosted servers** on a private network address need
   `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true` in both API and
   worker; every request is otherwise DNS-pinned to public addresses. The
   server's `/api/config` may name API and identity hosts only on the same
   site as the address entered.
 
-Give agents an account of their own and share only the collections they need
-with it: they can use everything that account can open.
+Give agents an account of their own: they can use everything the connected
+account can open. Invite that account to an organization, share only the
+collections agents need with it, and connect it, not a person's account. A
+collection shared with "hide passwords" lets agents use usernames but not
+passwords or one-time passwords; read-only collections refuse writes; and
+items or fields marked "ask me each time" in Opengeni need the owner's
+approval on every use (see [Approval for each use](secrets.md#approval-for-each-use)).
+Removing the account from a collection takes effect at the next refresh;
+values from it stop resolving at once.
+
+Not supported yet, and why:
+
+- **Bitwarden Secrets Manager** (machine accounts and access tokens) is a
+  separate product with its own API and data model. It would be a separate
+  provider; this one covers Password Manager accounts.
+- **Accounts without a master password** (single sign-on with trusted devices
+  or Key Connector) cannot be opened with an API key, because the user key is
+  never derivable from a password.
+- **Accounts on Bitwarden's newer XChaCha20 key format** are refused at setup
+  with a clear message. Servers and clients have not rolled it out widely, and
+  supporting it needs a vetted XChaCha20-Poly1305 implementation.
+- **Keeping the unlocked vault on a person's own machine**, with Opengeni
+  asking that machine for each value, would avoid giving Opengeni the master
+  password once. It needs a local agent that stays unlocked and online, so it
+  is left for a later provider; a dedicated agent account shared through
+  collections covers unattended agents today.
+- **Push updates** from the server's notification hub would show changes made
+  elsewhere within seconds instead of minutes. They need a long-lived socket
+  per connection; values are already read live, so only names and new items
+  wait for the next refresh.
+- **Creating cards, identities and SSH keys, and uploading attachments.**
+  Opengeni has no card, identity or SSH key item type to create from, and
+  attachments are uploaded in Bitwarden itself.
 
 ## Connection lifecycle
 

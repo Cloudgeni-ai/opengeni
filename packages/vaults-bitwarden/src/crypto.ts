@@ -342,7 +342,9 @@ export function stretchMasterKey(masterKey: Uint8Array): SymmetricKey {
 /**
  * Opens the account's 64-byte user key. Type 2 keys use the stretched master
  * key; accounts from before 2019 may still have a type 0 key under the master
- * key itself.
+ * key itself. A key that opens with a valid MAC but is not a 64-byte key is
+ * the newer XChaCha20 (COSE) user key: the password was right, the format is
+ * unsupported.
  */
 export function decryptUserKey(protectedKey: string, masterKey: Uint8Array): SymmetricKey {
   const parsed = parseEncString(protectedKey);
@@ -350,13 +352,25 @@ export function decryptUserKey(protectedKey: string, masterKey: Uint8Array): Sym
     parsed.type === ENC_AES_CBC_256
       ? { encKey: masterKey, macKey: null }
       : stretchMasterKey(masterKey);
+  let bytes: Uint8Array;
   try {
-    return symmetricKeyFromBytes(decryptBytes(parsed, opener));
+    bytes = decryptBytes(parsed, opener);
   } catch (error) {
     if (error instanceof BitwardenCryptoError && error.reason !== "unsupported") {
       throw new BitwardenCryptoError("wrong_key", "the master password does not open this account");
     }
     throw error;
+  }
+  if (parsed.type !== ENC_AES_CBC_256 && bytes.length !== 64) {
+    throw new BitwardenCryptoError(
+      "unsupported",
+      "this account uses Bitwarden's newer XChaCha20 key format, which is not supported yet",
+    );
+  }
+  try {
+    return symmetricKeyFromBytes(bytes);
+  } catch {
+    throw new BitwardenCryptoError("wrong_key", "the master password does not open this account");
   }
 }
 

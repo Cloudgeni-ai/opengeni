@@ -456,10 +456,17 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+const SSH_KEY_REFUSAL =
+  "Bitwarden derives an SSH key's public key and fingerprint from its private key, so change SSH keys in Bitwarden itself";
+
 /**
  * Applies an Opengeni write to the current encrypted cipher and returns the
- * full `PUT /ciphers/{id}` body. Unchanged values are sent back as the same
- * encrypted strings; `lastKnownRevisionDate` makes the server refuse the
+ * full `PUT /ciphers/{id}` body, for every item type: the name, notes, custom
+ * fields and the type's own fields (a login's username, password and
+ * one-time password, a card's or an identity's fields). Unchanged values are
+ * sent back as the same encrypted strings, so passkeys, attachments, password
+ * history, address match rules, linked fields and anything this mapping does
+ * not model survive. `lastKnownRevisionDate` makes the server refuse the
  * update if the item changed in between.
  */
 export function updateRequest(
@@ -468,27 +475,46 @@ export function updateRequest(
   write: ProviderWriteItem,
   encryptedFor: string,
 ): Json {
-  const expected =
-    write.type === "login" ? CIPHER_LOGIN : write.type === "note" ? CIPHER_SECURE_NOTE : null;
-  if (expected === null || cipher.type !== expected) {
-    throw new WriteRefused(
-      "provider_permission_denied",
-      "Only Bitwarden logins and secure notes can be changed from Opengeni; edit this item in Bitwarden",
-    );
-  }
   const key = itemKey(cipher, ownerKey);
   const mapped = mapCipher(cipher, ownerKey);
+  if (write.type !== mapped.meta.type) {
+    throw new WriteRefused(
+      "provider_conflict",
+      `This Bitwarden item is stored as a ${mapped.meta.type}; its type can't change`,
+    );
+  }
+  const slots = builtIns(cipher.type);
+  const sections = new Map<BuiltIn["section"], Json>();
+  const section = (part: BuiltIn["section"]): Json => {
+    let copy = sections.get(part);
+    if (!copy) {
+      copy = { ...(json(cipher[part]) ?? {}) };
+      sections.set(part, copy);
+    }
+    return copy;
+  };
+  const login = cipher.type === CIPHER_LOGIN ? section("login") : null;
   const byId = new Map(mapped.fields.map((field) => [field.id, field]));
   const custom = new Map(customFields(cipher, key).map((field) => [field.id, field]));
   const names = new Set(mapped.fields.map((field) => nameKey(field.name)));
-  const login: Json | null =
-    cipher.type === CIPHER_LOGIN ? { ...(json(cipher.login) ?? {}) } : null;
   let notes: unknown = cipher.notes ?? null;
   const fields = list(cipher.fields).map((field) => ({ ...field }));
   const removed = new Set<number>();
   const history = list(cipher.passwordHistory);
   const now = new Date().toISOString();
   let name: unknown = cipher.name;
+
+  const setSlot = (slot: BuiltIn, value: string | null) => {
+    if (slot.section === "sshKey")
+      throw new WriteRefused("provider_permission_denied", SSH_KEY_REFUSAL);
+    const target = section(slot.section);
+    if (slot.id === "login.password" && encrypted(target.password)) {
+      history.unshift({ password: target.password, lastUsedDate: now });
+    }
+    target[slot.key] =
+      value === null ? null : encryptString(slot.kind === "totp" ? checkTotp(value) : value, key);
+    if (slot.id === "login.password" && value !== null) target.passwordRevisionDate = now;
+  };
 
   if (decryptOptional(cipher.name, key) !== write.name) name = encryptString(write.name, key);
   if (login) {
@@ -516,29 +542,25 @@ export function updateRequest(
         );
       }
       names.add(wanted);
-      if (login && field.kind === "totp") {
-        if (encrypted(login.totp)) {
-          throw new WriteRefused(
-            "provider_conflict",
-            "This Bitwarden login already has a one-time password",
-          );
-        }
-        login.totp = encryptString(checkTotp(field.value), key);
+      // A new field fills the type's own empty field of the same name and kind
+      // (a login's one-time password is the only TOTP field).
+      const slot = slots.find((candidate) =>
+        field.kind === "totp"
+          ? candidate.kind === "totp"
+          : candidate.kind === field.kind &&
+            (nameKey(candidate.name) === wanted || nameKey(candidate.key) === wanted),
+      );
+      if (slot && !encrypted(json(cipher[slot.section])?.[slot.key])) {
+        setSlot(slot, field.value ?? "");
         continue;
       }
-      if (login && wanted === "username" && field.kind === "text" && !encrypted(login.username)) {
-        login.username = encryptString(field.value ?? "", key);
-        continue;
-      }
-      if (
-        login &&
-        wanted === "password" &&
-        field.kind === "concealed" &&
-        !encrypted(login.password)
-      ) {
-        login.password = encryptString(field.value ?? "", key);
-        login.passwordRevisionDate = now;
-        continue;
+      if (field.kind === "totp") {
+        throw new WriteRefused(
+          "provider_conflict",
+          login
+            ? "This Bitwarden login already has a one-time password"
+            : "Only a Bitwarden login holds a one-time password",
+        );
       }
       if ((wanted === "note" || wanted === "notes") && field.kind === "text" && !encrypted(notes)) {
         notes = encryptString(field.value ?? "", key);
@@ -552,31 +574,16 @@ export function updateRequest(
       });
       continue;
     }
-    const target = byId.get(id);
     if (id.startsWith(ATTACHMENT_FIELD_PREFIX)) {
       throw new WriteRefused(
         "provider_permission_denied",
         "Attachments are changed in Bitwarden itself",
       );
     }
-    if (id.startsWith("login.")) {
-      if (!login) throw new WriteRefused("provider_not_found", `The item has no field ${id}`);
-      const slot = id.slice("login.".length);
-      if (slot !== "username" && slot !== "password" && slot !== "totp") {
-        throw new WriteRefused("provider_not_found", `The item has no field ${id}`);
-      }
-      if (field.remove) {
-        if (slot === "password" && encrypted(login.password)) {
-          history.unshift({ password: login.password, lastUsedDate: now });
-        }
-        login[slot] = null;
-      } else if (field.value !== undefined) {
-        if (slot === "password" && encrypted(login.password)) {
-          history.unshift({ password: login.password, lastUsedDate: now });
-        }
-        login[slot] = encryptString(slot === "totp" ? checkTotp(field.value) : field.value, key);
-        if (slot === "password") login.passwordRevisionDate = now;
-      }
+    const slot = slots.find((candidate) => candidate.id === id);
+    if (slot) {
+      if (field.remove) setSlot(slot, null);
+      else if (field.value !== undefined) setSlot(slot, field.value);
       continue;
     }
     if (id === NOTES_FIELD_ID) {
@@ -584,6 +591,7 @@ export function updateRequest(
       else if (field.value !== undefined) notes = encryptString(field.value, key);
       continue;
     }
+    const target = byId.get(id);
     const existing = custom.get(id);
     if (!existing || !target || target.source.type !== "custom") {
       throw new WriteRefused("provider_not_found", `The item has no field ${id}`);
@@ -608,6 +616,8 @@ export function updateRequest(
     if (field.value !== undefined) entry.value = encryptString(field.value, key);
   }
 
+  const sectionBody = (part: BuiltIn["section"] | "secureNote") =>
+    (part !== "secureNote" ? sections.get(part) : undefined) ?? cipher[part] ?? null;
   return {
     type: cipher.type,
     organizationId: cipher.organizationId ?? null,
@@ -620,11 +630,11 @@ export function updateRequest(
     notes,
     fields: fields.filter((_, index) => !removed.has(index)),
     passwordHistory: history.slice(0, PASSWORD_HISTORY_KEEP),
-    login,
-    secureNote: cipher.secureNote ?? null,
-    card: cipher.card ?? null,
-    identity: cipher.identity ?? null,
-    sshKey: cipher.sshKey ?? null,
+    login: sectionBody("login"),
+    secureNote: sectionBody("secureNote"),
+    card: sectionBody("card"),
+    identity: sectionBody("identity"),
+    sshKey: sectionBody("sshKey"),
     lastKnownRevisionDate: revisionOf(cipher),
   };
 }
