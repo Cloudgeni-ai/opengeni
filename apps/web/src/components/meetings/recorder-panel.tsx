@@ -6,7 +6,16 @@
  * this device, uploading, or waiting for the connection).
  */
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { CircleIcon, InfoIcon, MicIcon, PauseIcon, PlayIcon, SquareIcon } from "lucide-react";
+import {
+  CircleIcon,
+  InfoIcon,
+  MicIcon,
+  PauseIcon,
+  PencilIcon,
+  PlayIcon,
+  SquareIcon,
+} from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@opengeni/react/ui/button";
 import { Checkbox } from "@opengeni/react/ui/field";
@@ -229,6 +238,99 @@ export function liveUnavailableText(
   return `Live text isn't available for this recording.${reason ? ` ${reason}` : ""} Nothing is lost: the meeting is still recorded and transcribed after you stop.`;
 }
 
+/** The meeting's name while it records, and renaming it without stopping. */
+function RecordingTitle({ recorder }: { recorder: MeetingRecorder }) {
+  const inputId = useId();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const title = recorder.title?.trim() || null;
+  if (editing) {
+    const save = async () => {
+      const next = draft.trim();
+      if (!next || next === title) {
+        setEditing(false);
+        return;
+      }
+      setSaving(true);
+      try {
+        await recorder.rename(next);
+        setEditing(false);
+      } catch (error) {
+        toast.error("Couldn't rename this meeting", {
+          description: error instanceof Error ? error.message : undefined,
+        });
+      } finally {
+        setSaving(false);
+      }
+    };
+    return (
+      <form
+        className="mb-4 flex items-center gap-2 max-sm:flex-wrap"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        <label htmlFor={inputId} className="sr-only">
+          Meeting title
+        </label>
+        <Input
+          id={inputId}
+          autoFocus
+          value={draft}
+          maxLength={300}
+          placeholder="Name this meeting"
+          disabled={saving}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setEditing(false);
+          }}
+          className="h-9 min-w-0 flex-1 max-sm:basis-full"
+        />
+        <Button type="submit" size="sm" disabled={saving} className="pointer-coarse:h-11">
+          {saving ? "Saving…" : "Save"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={saving}
+          onClick={() => setEditing(false)}
+          className="pointer-coarse:h-11"
+        >
+          Cancel
+        </Button>
+      </form>
+    );
+  }
+  return (
+    <div className="mb-4 flex min-w-0 items-center gap-1">
+      <p
+        className={cn(
+          "min-w-0 truncate text-sm leading-5 font-medium",
+          title ? "text-fg" : "text-fg-muted",
+        )}
+      >
+        {title ?? "No name yet"}
+      </p>
+      <Button
+        type="button"
+        size="xs"
+        variant="ghost"
+        onClick={() => {
+          setDraft(title ?? "");
+          setEditing(true);
+        }}
+        className="shrink-0 text-fg-label pointer-coarse:h-11"
+      >
+        <PencilIcon aria-hidden="true" />
+        {title ? "Rename" : "Name it"}
+      </Button>
+    </div>
+  );
+}
+
 function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
   const live = recorder.live;
   const lines = useMemo(() => recorderLiveLines({ live }), [live]);
@@ -308,6 +410,7 @@ export function RecorderPanel({
         aria-label="Recording"
         className="rounded-[14px] border border-border bg-surface p-5 shadow-[0_1px_2px_rgb(0_0_0/0.04)] max-sm:p-4"
       >
+        <RecordingTitle recorder={recorder} />
         <div className="flex flex-wrap items-center gap-x-6 gap-y-4">
           <div className="flex min-w-0 items-center gap-3">
             <span className="relative flex size-3 shrink-0" aria-hidden="true">

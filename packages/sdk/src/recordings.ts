@@ -411,6 +411,8 @@ export type RecordingTransport = Pick<
   | "finalizeRecording"
   | "deleteRecording"
 > &
+  /** Needed to rename a recording once the server has it. */
+  Partial<Pick<OpenGeniRecordingsClient, "updateRecording">> &
   Partial<LiveTranscriptTransport>;
 
 /** One encoded piece of one track, as captured. */
@@ -443,6 +445,8 @@ export type StoredRecording = {
   endedAt: string | null;
   /** Chunks captured so far per track number. */
   chunkCounts: Record<number, number>;
+  /** A title given after the server had the recording, still to be sent. */
+  pendingTitle?: string;
   updatedAt: number;
 };
 
@@ -616,6 +620,30 @@ export class RecordingUploader {
       updatedAt: Date.now(),
     });
     this.kick(recording.recordingId);
+  }
+
+  /**
+   * Give a recording a new title. Before the server has the recording, the
+   * title goes out when it is created; after, with the next upload pass, so a
+   * dropped connection only delays it. Once the recording is finalized and its
+   * local copy is gone, the server is updated directly.
+   */
+  async rename(workspaceId: string, recordingId: string, title: string): Promise<void> {
+    const stored = await this.mutate(recordingId, (recording) => ({
+      ...recording,
+      create: { ...recording.create, title },
+      ...(recording.created ? { pendingTitle: title } : {}),
+      updatedAt: Date.now(),
+    }));
+    if (stored) {
+      this.kick(recordingId);
+      return;
+    }
+    const client = this.options.client;
+    if (!client.updateRecording) {
+      throw new Error("This recordings client can't rename a recording (no updateRecording).");
+    }
+    await client.updateRecording(workspaceId, recordingId, { title });
   }
 
   /** Store one captured chunk locally, then upload it in the background. */
@@ -828,10 +856,15 @@ export class RecordingUploader {
     }
     if (!recording.created) {
       const workspaceId = recording.workspaceId;
-      await guarded(() => client.createRecording(workspaceId, recording!.create));
+      const sent = recording.create;
+      await guarded(() => client.createRecording(workspaceId, sent));
       recording = await this.mutate(recordingId, (current) => ({
         ...current,
         created: true,
+        // Renamed while the server was creating it: send the newer title too.
+        ...(current.create.title !== sent.title && current.create.title !== undefined
+          ? { pendingTitle: current.create.title }
+          : {}),
         updatedAt: Date.now(),
       }));
       if (!recording) {
@@ -853,6 +886,23 @@ export class RecordingUploader {
       }
     }
     if (!pump.status.created) this.update(pump, { created: true });
+    if (recording.pendingTitle !== undefined) {
+      const title = recording.pendingTitle;
+      const workspaceId = recording.workspaceId;
+      const update = client.updateRecording?.bind(client);
+      // A title the server refuses for good is dropped; it never holds up the audio.
+      if (update) {
+        await guarded(() => update(workspaceId, recordingId, { title })).catch((error: unknown) => {
+          if (!(error instanceof PermanentRecordingError)) throw error;
+        });
+      }
+      recording =
+        (await this.mutate(recordingId, (current) => {
+          if (current.pendingTitle !== title) return null;
+          const { pendingTitle: _sent, ...rest } = current;
+          return { ...rest, updatedAt: Date.now() };
+        })) ?? recording;
+    }
     // A native recorder writes each chunk file where the store keeps it before
     // capture counts it. While capturing, send only counted chunks: otherwise a
     // chunk could be uploaded and removed before capture reads it, and the
@@ -1268,6 +1318,8 @@ export type RecorderState =
 export type RecorderSnapshot = {
   state: RecorderState;
   recordingId: string | null;
+  /** The title given at start or by {@link Recorder.rename}; null or absent when none was. */
+  title?: string | null;
   /** Recorded time, excluding pauses. */
   elapsedMilliseconds: number;
   /**
@@ -1347,6 +1399,11 @@ export type Recorder = {
   stop(options?: { signal?: AbortSignal }): Promise<RecordingUploadStatus | null>;
   /** Stop and throw everything away, local and on the server's side of the upload. */
   discard(): Promise<void>;
+  /**
+   * Rename the recording being made, also while offline: the title reaches
+   * the server with the upload.
+   */
+  rename(title: string): Promise<void>;
   /** Current input level per track, 0 to 1, for a meter. */
   levels(): Record<number, number>;
 };
@@ -1921,7 +1978,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       }
       const recordedType = captures[0]!.recorder.mimeType || mimeType || "audio/webm";
       watchUploads();
-      emit({ recordingId });
+      emit({ recordingId, title: options.title ?? null });
       await uploader.begin({
         workspaceId: options.workspaceId,
         recordingId,
@@ -2073,6 +2130,13 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         upload: null,
         live: null,
       });
+    },
+
+    async rename(title: string) {
+      const recordingId = snapshot.recordingId;
+      if (!recordingId) throw new Error("Nothing is being recorded to rename.");
+      await uploader.rename(options.workspaceId, recordingId, title);
+      if (snapshot.recordingId === recordingId) emit({ title });
     },
 
     levels() {

@@ -63,6 +63,7 @@ function fakeRecorder(
         ? "failed"
         : "idle",
     recordingId: live ? "preview-live" : null,
+    title: live ? "Platform standup" : null,
     elapsedMilliseconds: live ? Date.now() - startedAt : 0,
     tracks: live
       ? [
@@ -102,6 +103,7 @@ function fakeRecorder(
     resume: () => {},
     stop: async () => {},
     discard: async () => {},
+    rename: async () => {},
     levels: () => {
       const t = Date.now() / 180;
       return {

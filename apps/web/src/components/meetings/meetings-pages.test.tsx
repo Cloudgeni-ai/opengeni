@@ -255,6 +255,60 @@ describe("Recorder errors", () => {
 });
 
 describe("Live transcript", () => {
+  test("a meeting can be named while it records", async () => {
+    const { RecorderPanel } = await import("./recorder-panel");
+    const renamed: string[] = [];
+    const recorder = {
+      state: "recording",
+      recordingId: "r1",
+      title: null,
+      elapsedMilliseconds: 61_000,
+      tracks: [],
+      upload: null,
+      error: null,
+      live: null,
+      supported: true,
+      systemAudioSupported: false,
+      systemAudioKind: null,
+      recovered: [],
+      start: async () => {},
+      pause: () => {},
+      resume: () => {},
+      stop: async () => {},
+      discard: async () => {},
+      rename: async (title: string) => {
+        renamed.push(title);
+      },
+      levels: () => ({}),
+    } as unknown as Parameters<typeof RecorderPanel>[0]["recorder"];
+    const view = await render(<RecorderPanel recorder={recorder} />);
+    try {
+      expect(view.container.textContent).toContain("No name yet");
+      const nameIt = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Name it",
+      )!;
+      await act(async () => nameIt.click());
+      const input = view.container.querySelector<HTMLInputElement>("input")!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(
+          input,
+          "  Customer call  ",
+        );
+        input.dispatchEvent(new window.Event("input", { bubbles: true }));
+        // react-dom loads before the DOM here, so it reads typing from key events.
+        input.dispatchEvent(new window.KeyboardEvent("keyup", { bubbles: true }));
+      });
+      const save = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Save",
+      )!;
+      await act(async () => save.click());
+      await settle(50);
+      expect(renamed).toEqual(["Customer call"]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a meeting recorded elsewhere shows the saved live text as a preview", async () => {
     const { LIVE_RECORDING_ID } = await import("../../dev/ui-kit/pages/meetings/fixture");
     const fixture = createMeetingsFixture();

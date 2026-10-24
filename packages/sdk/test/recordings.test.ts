@@ -34,6 +34,8 @@ function fakeServer() {
     dropStorageOnce: false,
     refuse: null as null | { status: number; code: string },
     calls: [] as string[],
+    createdTitle: undefined as string | undefined,
+    titles: [] as string[],
   };
   const key = (track: number, chunk: number) => `${track}/${chunk}`;
   const refusal = () => {
@@ -50,6 +52,7 @@ function fakeServer() {
       state.calls.push("create");
       refusal();
       state.created += 1;
+      state.createdTitle = request.title;
       return { id: request.recordingId } as never;
     },
     async createRecordingUploads(
@@ -125,6 +128,11 @@ function fakeServer() {
     async deleteRecording() {
       state.calls.push("delete");
       state.deleted = true;
+    },
+    async updateRecording(_workspaceId: string, _recordingId: string, request: { title?: string }) {
+      state.calls.push("update");
+      if (request.title !== undefined) state.titles.push(request.title);
+      return { id: RECORDING } as never;
     },
   };
   const fetchImpl = (async (url: string, init: RequestInit) => {
@@ -488,6 +496,63 @@ describe("RecordingUploader", () => {
     expect(server.state.created).toBe(1);
     expect(server.state.deleted).toBe(true);
     expect(await store.listRecordings()).toEqual([]);
+  });
+
+  test("a rename while the server creates the recording follows it there", async () => {
+    const server = fakeServer();
+    let finishCreate: (() => void) | null = null;
+    let createStarted: (() => void) | null = null;
+    const started = new Promise<void>((done) => (createStarted = done));
+    const create0 = server.client.createRecording.bind(server.client);
+    server.client.createRecording = async (...args: Parameters<typeof create0>) => {
+      createStarted!();
+      await new Promise<void>((done) => (finishCreate = done));
+      return await create0(...args);
+    };
+    const { uploader } = uploaderFor(server);
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await started;
+    await uploader.rename(WORKSPACE, RECORDING, "Customer call");
+    finishCreate!();
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    const status = await uploader.finish(RECORDING);
+    expect(status.finalized).toBe(true);
+    expect(server.state.createdTitle).toBeUndefined();
+    expect(server.state.titles).toEqual(["Customer call"]);
+    expect(server.state.calls.indexOf("update")).toBeGreaterThan(
+      server.state.calls.indexOf("create"),
+    );
+  });
+
+  test("a rename after the server has the recording waits out a dropped connection", async () => {
+    const server = fakeServer();
+    const { uploader, store } = uploaderFor(server);
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    for (let attempt = 0; attempt < 50 && !uploader.status(RECORDING)?.created; attempt += 1) {
+      await new Promise((done) => setTimeout(done, 1));
+    }
+    const update0 = server.client.updateRecording!.bind(server.client);
+    let failures = 2;
+    server.client.updateRecording = async (...args: Parameters<typeof update0>) => {
+      if (failures-- > 0) throw new TypeError("network down");
+      return await update0(...args);
+    };
+    await uploader.rename(WORKSPACE, RECORDING, "Weekly sync");
+    expect((await store.getRecording(RECORDING))?.pendingTitle).toBe("Weekly sync");
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    await uploader.finish(RECORDING);
+    expect(server.state.titles).toEqual(["Weekly sync"]);
+    expect(await store.listRecordings()).toEqual([]);
+  });
+
+  test("a rename once the recording is finalized goes straight to the server", async () => {
+    const server = fakeServer();
+    const { uploader } = uploaderFor(server);
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    await uploader.finish(RECORDING);
+    await uploader.rename(WORKSPACE, RECORDING, "Retro");
+    expect(server.state.titles).toEqual(["Retro"]);
   });
 
   test("the IndexedDB store survives a reopen and keeps chunks in order", async () => {
