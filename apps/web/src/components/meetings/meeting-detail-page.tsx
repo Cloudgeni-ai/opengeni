@@ -632,11 +632,10 @@ export function MeetingDetailPage({
         await rejectSuggestion(label);
         const personId = suggested?.personId;
         toast.success(
-          suggested
-            ? `${suggested.name} won't be suggested for this speaker again`
-            : "Left unnamed",
+          suggested ? "Suggestion dismissed" : "Left unnamed",
           suggested && personId
             ? {
+                description: `This speaker is unnamed again. Pick a name from its menu.`,
                 // A mis-tap on "Not them" is easy; naming them puts it right.
                 action: {
                   label: "Undo",
