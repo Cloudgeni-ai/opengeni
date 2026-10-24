@@ -21,7 +21,7 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { plan, infrastructureRetryReason, type Action } from "./planner";
+import { plan, latestRun, infrastructureRetryReason, type Action } from "./planner";
 import { DiskCache } from "./cache";
 import { ObservationJournal } from "./journal";
 
@@ -177,9 +177,20 @@ export class LiveReader implements Reader {
       observationWarnings.push(
         `Historical CI scan sampled ${selected.size}/${historical.length} refs; deferred unknown/running candidates retain capacity until terminal evidence or explicit infrastructure release`,
       );
+    const failedRoot = candidates.some((candidate) => {
+      const run = latestRun(candidate, this.config);
+      return (
+        !archivedIds.has(candidate.manifest.batchId) &&
+        candidate.manifest.baseSha === baseSha &&
+        run?.status === "completed" &&
+        run.trusted &&
+        run.outcome === "code_failure"
+      );
+    });
     return {
       now: new Date().toISOString(),
       baseSha,
+      ...(failedRoot ? { baseCI: await this.github.baseCI(baseSha) } : {}),
       // Do not make full-main-CI observation availability a hidden admission
       // gate. Exact candidate receipts are verified separately at landing.
       ...admission,

@@ -366,7 +366,16 @@ failed/timed-out job evidence may request one
 whole-workflow retry; main, Version and release runs are excluded. The exact
 run/attempt, request time and reason are durably recorded in Git and stage evidence.
 Ambiguous or partial receipts hold rather than authorize a retry or blame a PR.
-A trusted second code failure splits the cohort or parks a failing singleton;
+A trusted failed candidate waits for a conclusive exact-base comparison before
+retry, splitting or parking. A complete verified Batch receipt identifies its
+failed classes: `source` maps only to main's `Source and type contracts`, and
+`unit-*` maps to the complete main `Unit tests (shard N/M)` set. A red or unknown
+relevant class holds; an unrelated browser/image/release failure does not hold
+when every relevant class is conclusively green. Unknown/running/error evidence,
+missing failure classes, duplicate jobs and incomplete shard sets do not release
+the hold. A verified full-green base also clears it. This is class relevance,
+not a same-assertion fingerprint proof, requeue operation or green-test waiver.
+Otherwise a trusted second code failure splits the cohort or parks a failing singleton;
 a second infrastructure or unknown outcome holds. Invalidated, landed or obsolete-base
 candidates cannot submit pending retries: the candidate must still be rooted in
 current main or an exact live predecessor chain, checked before and after the
@@ -548,7 +557,17 @@ audit history, not green-candidate admission gates.
 
 A trusted candidate code failure is **not** proof that a member caused it. Until
 the separate producer/consumer contract supplies comparable same-job base batch-suite
-evidence, failed cohorts split sequentially and failed singleton heads are durably
+evidence, a failed candidate with red or unknown relevant exact-base classes stays held.
+This observation is requested only for a terminal trusted failed root; ordinary
+building and tested-green landing remain independent of main CI availability.
+The hold can stall other ready work while that failed root remains live. It ends
+when the latest exact-base comparison becomes conclusively green for the failed
+classes, main advances (normal obsolete-candidate invalidation), or readiness is
+withdrawn (normal binding invalidation). This patch adds no timer, regrouping,
+label mutation or operator override. Unknown evidence during a base rerun or API
+failure never releases the cohort into durable splitting/parking. Independent
+admission backpressure, including latency policy, still applies to those exits.
+Other failed cohorts split sequentially and failed singleton heads are durably
 parked, never blamed or ejected. Each parking record binds the PR head, tested base,
 batch, original cohort, run and attempt, with a durable non-blaming PR comment.
 Other ready heads proceed. Readiness churn and main advancement do not retry a

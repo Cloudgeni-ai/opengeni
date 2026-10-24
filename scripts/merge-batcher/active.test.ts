@@ -928,7 +928,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("done");
     expect(f.api.calls).toHaveLength(1);
   });
-  test.each(["red", "unknown", "green"] as const)(
+  test.each(["green"] as const)(
     "inherited #5243-style singleton is parked without blame on %s main; new base does not retry it",
     async (status) => {
       const f = await fixture();
@@ -1004,6 +1004,27 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(f.api.calls.every((call) => call.endsWith("/comments"))).toBe(true);
     },
   );
+  test("real reader observes exact red base before retrying or parking a failed batch", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    f.api.baseStatus = "red";
+    for (const [attempt, status] of [
+      [1, "red"],
+      [2, "unknown"],
+      [2, "red"],
+    ] as const) {
+      f.api.baseStatus = status;
+      f.verdict(m, "code_failure").attempt = attempt;
+      const result = await f.controller().step();
+      expect(result.action.kind).toBe("wait");
+      expect(result.reason).toContain("no retry, split or parking");
+      const ledger = (await f.state()).ledger;
+      expect(ledger.retries).toEqual({});
+      expect(ledger.recovery).toEqual([]);
+      expect(ledger.parked ?? []).toEqual([]);
+      expect(ledger.invalidated).not.toContain(m.batchId);
+    }
+  });
   test("legacy pending code-failure comment holds even with green full-main CI", async () => {
     const f = await fixture();
     await f.seed((l) => {

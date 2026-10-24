@@ -12,6 +12,7 @@ import {
   type Pull,
   type Run,
 } from "./model";
+import { failedBaseHold } from "./base-failure";
 
 export type Action =
   | { kind: "wait"; reason: string }
@@ -179,6 +180,13 @@ function planCandidate(o: Observation, c: Config): Action {
               reason: "full-main CI has priority; tested candidate retained without cancellation",
             }
           : { kind: "land", candidate: root };
+      // A red exact base is not proof that members caused this failure. Hold
+      // before retry/splitting, retaining the failed candidate and all evidence.
+      // This does not claim identical fingerprints or authorize a green result.
+      if (run.trusted && run.outcome === "code_failure") {
+        const reason = failedBaseHold(run, root.manifest.baseSha, o.baseCI);
+        if (reason) return { kind: "wait", reason };
+      }
       // A failed exact candidate gets one flake allowance before any split or
       // singleton parking. The durable retry intent prevents duplicate requests.
       if (run.attempt === 1 && infrastructureRetryReason(root, run, c)) {
