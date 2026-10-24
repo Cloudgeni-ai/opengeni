@@ -182,6 +182,122 @@ function command(observation: ComputerBackendObservation): ComputerBackendAction
 }
 
 describe("CUA desktop boundary", () => {
+  test("set_value true or false presses a checkbox only when it reads the other state", async () => {
+    class CheckboxFixture extends Fixture {
+      checked = false;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "click" && args.element_token === `s${this.snapshot}:2`)
+          this.checked = !this.checked;
+        const response = await super.callTool(name, argumentsJson);
+        if (name !== "get_window_state" || !response.structuredJson) return response;
+        const data = JSON.parse(response.structuredJson);
+        if (data.elements)
+          data.elements.push(
+            {
+              ...data.elements[0],
+              element_index: 2,
+              element_token: `s${this.snapshot}:2`,
+              role: "AXCheckBox",
+              label: "Reminders",
+              value: this.checked ? "1" : "0",
+            },
+            {
+              ...data.elements[0],
+              element_index: 3,
+              element_token: `s${this.snapshot}:3`,
+              role: "AXCheckBox",
+              label: "Unread",
+            },
+          );
+        response.structuredJson = JSON.stringify(data);
+        return response;
+      }
+    }
+    const fixture = new CheckboxFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    const clicks = () => fixture.calls.filter((call) => call.name === "click");
+    const toggle = async (
+      action: "set_value" | "select" | "deselect",
+      value?: string | boolean,
+      label = "Reminders",
+    ) => {
+      const observation = await backend.observe(target.id);
+      const node = observation.roots.find((root) => root.name === label)!;
+      return await backend.dispatch({
+        ...command(observation),
+        action: {
+          type: "semantic",
+          action,
+          locator: { kind: "ref", ref: node.ref },
+          ...(value === undefined ? {} : { value }),
+        },
+      });
+    };
+    const target = (await backend.targets())[0]!;
+    try {
+      await toggle("set_value", true);
+      expect(clicks().at(-1)?.args).toMatchObject({ element_token: "s1:2", button: "left" });
+      expect(fixture.checked).toBe(true);
+      // Already checked: nothing is pressed, and the state is read back.
+      const after = await toggle("set_value", "on");
+      expect(clicks()).toHaveLength(1);
+      expect(after?.roots.find((node) => node.name === "Reminders")?.value).toBe("1");
+      await toggle("select");
+      expect(clicks()).toHaveLength(1);
+      await toggle("deselect");
+      expect(clicks()).toHaveLength(2);
+      expect(fixture.checked).toBe(false);
+      await toggle("set_value", false);
+      expect(clicks()).toHaveLength(2);
+      await expect(toggle("set_value", "maybe")).rejects.toMatchObject({
+        code: "unsupported",
+        message: "A checkbox or switch takes set_value true (checked) or false (not checked)",
+      });
+      // A checkbox whose state the window does not show cannot be set
+      // without the batches that read it as the step runs.
+      await expect(toggle("set_value", true, "Unread")).rejects.toMatchObject({
+        code: "unsupported",
+        message:
+          "This window does not show whether this element is checked, so it cannot be set to checked or not: invoke it to toggle it",
+      });
+      expect(clicks()).toHaveLength(2);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("a checkbox named in a batch step is pressed into its state as the step runs", () => {
+    const args = { pid: 42, window_id: 1 };
+    const named = (locator: Record<string, unknown>, action: string, value?: unknown) =>
+      namedOperation(
+        "macos",
+        args,
+        {
+          type: "semantic",
+          locator,
+          action,
+          ...(value === undefined ? {} : { value }),
+        } as never,
+        null,
+      );
+    const checkbox = { kind: "role", role: "checkbox", name: "Reminders", exact: true };
+    expect(named(checkbox, "set_value", true)).toMatchObject({
+      name: "click",
+      args: { role: "checkbox", name: "Reminders", exact: true, button: "left" },
+      stepOptions: { toggle_to: true },
+    });
+    expect(named(checkbox, "set_value", "off")?.stepOptions?.toggle_to).toBe(false);
+    expect(named({ kind: "label", text: "Reminders" }, "set_value", false)).toMatchObject({
+      name: "click",
+      stepOptions: { toggle_to: false },
+    });
+    // A text field keeps its text, even when it reads like a state.
+    const field = named({ kind: "role", role: "textbox", name: "Note" }, "set_value", "on");
+    expect(field).toMatchObject({ name: "set_value", args: { value: "on" } });
+    expect(field?.stepOptions).not.toHaveProperty("toggle_to");
+  });
+
   test("select presses a radio button, and is still refused on a plain button", async () => {
     class RadioFixture extends Fixture {
       async callTool(name: string, argumentsJson: string): Promise<ToolResult> {

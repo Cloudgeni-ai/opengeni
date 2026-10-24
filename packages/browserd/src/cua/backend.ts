@@ -84,8 +84,10 @@ type Operation = {
    * cannot submit or clear another field. */
   fillsField?: true;
   /** run_steps options of a step that names its element instead of carrying
-   * a token: how long CUA waits for it, and the check that holds first. */
-  stepOptions?: { timeout_ms: number; wait_for: Record<string, unknown> };
+   * a token: how long CUA waits for it, the check that holds first, and for
+   * a checkbox or switch the checked state it is pressed into when it reads
+   * the other one. */
+  stepOptions?: { timeout_ms: number; wait_for: Record<string, unknown>; toggle_to?: boolean };
 };
 
 /** Every CUA action waits for the agent cursor to reach its target, and the
@@ -342,9 +344,10 @@ export class CuaComputerBackend implements ComputerBackend {
           );
       }
       const operations = await this.operations(command);
-      // Filling a date field takes several steps: run them as one batch.
+      // Filling a date field takes several steps, and a checkbox found by
+      // name reads its state as its step runs: run them as one batch.
       if (
-        operations.length > 1 &&
+        (operations.length > 1 || operations.some((operation) => operation.stepOptions)) &&
         command.action.type === "semantic" &&
         this.initialCapabilities.actionBatches
       )
@@ -1658,7 +1661,44 @@ export class CuaComputerBackend implements ComputerBackend {
         if (!named) throw error;
         return [named];
       }
-      if (!node.actions.includes(action.action) && !selectsByPressing(node, action.action)) {
+      // set_value true or false (or select, deselect) on a checkbox or switch
+      // presses it only when it is not in that state already.
+      const wanted = toggleWanted(node.role, action);
+      if (wanted !== null && !afterNamed) {
+        if (!laterInBatch && node.states.includes("disabled"))
+          throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
+        const state = checkedState(node);
+        if (state === wanted) return [];
+        if (state !== undefined)
+          return await this.operations(
+            {
+              ...command,
+              action: { type: "semantic", locator: action.locator, action: "invoke" },
+            },
+            laterInBatch,
+            afterNamed,
+            inBatch,
+          );
+        // Its state is not in the observation: CUA reads it when the step
+        // runs, which needs the element's own label to find it by.
+        const token = this.elementToken(command.targetId, node.ref);
+        const findable =
+          node.name !== undefined &&
+          node.name === this.ownLabels.get(command.targetId)?.get(token) &&
+          observed.roots.filter((other) => other.role === node.role && other.name === node.name)
+            .length === 1;
+        const named = findable ? namedOperation(this.identity.platform, args, action, node) : null;
+        if (!named || !this.initialCapabilities.actionBatches)
+          throw unsupported(
+            "This window does not show whether this element is checked, so it cannot be set to checked or not: invoke it to toggle it",
+          );
+        return [named];
+      }
+      if (
+        wanted === null &&
+        !node.actions.includes(action.action) &&
+        !selectsByPressing(node, action.action)
+      ) {
         const field = this.dateFieldOf(command.targetId, node.ref);
         if (field)
           throw unsupported(
@@ -2125,6 +2165,15 @@ export function namedOperation(
     ...(name !== undefined && name !== "" ? { name, ...(exact ? { exact: true } : {}) } : {}),
   };
   if (!("name" in selector) && (byLocator ? !("role" in selector) : true)) return null;
+  // A checkbox or switch set to a state is pressed only when CUA reads it
+  // in the other one as the step runs. An element named by label or text
+  // alone is taken as one when the value is true or false.
+  const toggleTo =
+    role !== undefined
+      ? toggleWanted(role, action)
+      : action.action === "set_value" && typeof action.value === "boolean"
+        ? action.value
+        : null;
   // The check waits for the element; the lookup after it finds it at once.
   const stepOptions = {
     timeout_ms: NAMED_STEP_FIND_MS,
@@ -2135,8 +2184,9 @@ export function namedOperation(
       enabled: true,
       timeout_ms: NAMED_STEP_WAIT_MS,
     },
+    ...(toggleTo !== null ? { toggle_to: toggleTo } : {}),
   };
-  if (action.action === "set_value")
+  if (action.action === "set_value" && toggleTo === null)
     return {
       name: "set_value",
       args: { ...args, ...selector, value: String(action.value) },
@@ -2164,6 +2214,52 @@ function selectsByPressing(
   return (
     action === "select" && node.actions.includes("invoke") && PRESS_TO_SELECT_ROLES.has(node.role)
   );
+}
+
+/** Checkbox and switch roles as observations show them on each platform. */
+const TOGGLE_ROLES: ReadonlySet<string> = new Set([
+  "checkbox",
+  "check box",
+  "switch",
+  "toggle button",
+  "check menu item",
+]);
+
+const CHECKED_WORDS: Readonly<Record<string, boolean>> = {
+  true: true,
+  on: true,
+  checked: true,
+  yes: true,
+  "1": true,
+  false: false,
+  off: false,
+  unchecked: false,
+  no: false,
+  "0": false,
+};
+
+/** The checked state an action asks of a checkbox or switch: set_value true
+ * or false (or on, off, checked, 1, 0...), select or deselect. Null when the
+ * element is no checkbox or switch, or the action asks no state. */
+export function toggleWanted(role: string, action: SemanticAction): boolean | null {
+  if (!TOGGLE_ROLES.has(role)) return null;
+  if (action.action === "select") return true;
+  if (action.action === "deselect") return false;
+  if (action.action !== "set_value" || action.value === undefined) return null;
+  const wanted =
+    typeof action.value === "boolean"
+      ? action.value
+      : CHECKED_WORDS[String(action.value).trim().toLowerCase()];
+  if (wanted === undefined)
+    throw unsupported("A checkbox or switch takes set_value true (checked) or false (not checked)");
+  return wanted;
+}
+
+/** Whether an observed checkbox or switch reads checked, when its value says. */
+function checkedState(node: InteractionSemanticNodeValue): boolean | undefined {
+  return typeof node.value === "string"
+    ? CHECKED_WORDS[node.value.trim().toLowerCase()]
+    : undefined;
 }
 /** The app name CUA's worker process lists its own overlay windows under. */
 const CUA_WORKER_APP = "cua-driver";
