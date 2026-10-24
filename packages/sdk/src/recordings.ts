@@ -1796,12 +1796,19 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       const live = capture.live;
       if (!live) continue;
       const node = new AudioWorkletNode(context, "opengeni-live-pcm");
+      // Where this track's live audio sits in the recording, counted in the
+      // audio's own samples like the recording itself. The wall clock drifts
+      // from the audio clock, and messages arrive late when the page is busy,
+      // so it would make continuous audio look like a pause.
+      let clock: number | null = null;
       node.port.onmessage = (event: MessageEvent<Int16Array>) => {
         // Paused audio is not recorded, so it is not transcribed either.
         if (snapshot.state !== "recording") return;
         const samples = event.data;
-        const at = elapsed() - (samples.length / context.sampleRate) * 1_000;
-        live.push(samples, context.sampleRate, Math.max(0, at));
+        const duration = (samples.length / context.sampleRate) * 1_000;
+        clock ??= Math.max(0, elapsed() - duration);
+        live.push(samples, context.sampleRate, clock);
+        clock += duration;
       };
       context.createMediaStreamSource(capture.stream).connect(node);
       // A node nobody listens to may not run; its output is silence.

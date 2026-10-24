@@ -93,6 +93,8 @@ const HOLD_MILLISECONDS = 15_000;
 const SAVE_DELAY_MILLISECONDS = 1_500;
 const MIN_BACKOFF_MILLISECONDS = 1_000;
 const MAX_BACKOFF_MILLISECONDS = 30_000;
+/** A session that stays up this long without text (silence) still counts as working. */
+const PROVEN_SESSION_MILLISECONDS = 30_000;
 /** How long to wait for the last words after asking the provider to finish. */
 const CLOSE_WAIT_MILLISECONDS = 3_000;
 /** A plain commit not followed by its timed copy within this long is kept as is. */
@@ -183,6 +185,12 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
   let connecting = false;
   let backoff = MIN_BACKOFF_MILLISECONDS;
   let retryAt = 0;
+  /** When the current session started, until it has proven itself. */
+  let provingSince: number | null = null;
+  const proven = () => {
+    backoff = MIN_BACKOFF_MILLISECONDS;
+    provingSince = null;
+  };
   let closed = false;
   /** Audio not yet sent, in send order. */
   let pending: Pending[] = [];
@@ -268,11 +276,15 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
     const type = typeof message.message_type === "string" ? message.message_type : "";
     const text = typeof message.text === "string" ? message.text : "";
     if (type === "session_started") {
-      backoff = MIN_BACKOFF_MILLISECONDS;
+      // A provider can start a session and refuse it at once (too many at a
+      // time), so only text, or a session that lasts, resets the backoff.
+      provingSince = Date.now();
       emit({ state: "live", error: null });
     } else if (type === "partial_transcript") {
+      proven();
       emit({ partial: text.trim() });
     } else if (type === "committed_transcript_with_timestamps") {
+      proven();
       if (untimed) clearTimeout(untimed.timer);
       untimed = null;
       const words = (Array.isArray(message.words) ? message.words : []) as ProviderWord[];
@@ -286,6 +298,7 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
       addSegment(text, start, end);
       finished?.();
     } else if (type === "committed_transcript") {
+      proven();
       // The timed copy normally follows at once; keep this one if it doesn't.
       if (untimed) clearTimeout(untimed.timer);
       const end = sessionNow();
@@ -333,6 +346,10 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
     session = null;
     sessionOffset = null;
     sessionSamples = 0;
+    if (provingSince !== null && Date.now() - provingSince >= PROVEN_SESSION_MILLISECONDS) {
+      proven();
+    }
+    provingSince = null;
     if (closed) return;
     retryAt = Date.now() + backoff;
     backoff = Math.min(MAX_BACKOFF_MILLISECONDS, backoff * 2);
