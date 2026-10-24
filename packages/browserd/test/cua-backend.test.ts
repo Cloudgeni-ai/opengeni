@@ -3458,7 +3458,7 @@ describe("CUA desktop boundary", () => {
               code: "ambiguous",
               phase: "find",
               message:
-                '2 elements match link "Juniper Printing" in window 7; add `nth` or a more exact name: nth 0: link "Juniper Printing"; nth 1: link "Juniper Printing"',
+                '2 elements match link "Juniper Printing" in window 7; add `nth` or a more exact name: nth 0: [15] AXLink "Juniper Printing"; nth 1: [20] AXLink "Juniper Printing"',
             },
           ],
         };
@@ -3476,9 +3476,9 @@ describe("CUA desktop boundary", () => {
           expect(failure).toMatchObject({ code: "locator_ambiguous" });
           const message = (failure as Error).message;
           expect(message).toContain(
-            "give a more exact name, or observe the window and act on the one meant by its ref",
+            'give a more exact name, or observe the window and act on the one meant by its ref: AXLink "Juniper Printing"; AXLink "Juniper Printing"',
           );
-          expect(message).not.toContain("nth`");
+          expect(message).not.toContain("nth");
         } finally {
           await third.backend.close();
         }

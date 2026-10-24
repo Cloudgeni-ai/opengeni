@@ -714,14 +714,17 @@ export class CuaComputerBackend implements ComputerBackend {
         )))
       : null;
     // CUA's own lookup can take an `nth`; an action here names one element
-    // of several by its ref instead.
+    // of several by its ref instead, so CUA's `nth` and element numbers are
+    // left out of the candidates.
     const reason =
       refusal?.message ??
       (outcome.cuaCode === "ambiguous"
-        ? outcome.message.replace(
-            "; add `nth` or a more exact name: ",
-            "; give a more exact name, or observe the window and act on the one meant by its ref: ",
-          )
+        ? outcome.message
+            .replace(
+              "; add `nth` or a more exact name: ",
+              "; give a more exact name, or observe the window and act on the one meant by its ref: ",
+            )
+            .replace(/nth \d+: (\[\d+\] )?/g, "")
         : outcome.message);
     const message = single
       ? `CUA stopped part way through the input: ${reason}`
