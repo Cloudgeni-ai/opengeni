@@ -2488,10 +2488,15 @@ export class BrowserSupervisor {
       let driverClosed = driver === null;
       let restoredProfileRemoved = false;
       // A launch from an adopted copy started a new process; it is closed,
-      // never detached, so the copy is provably unused again.
+      // never detached, so the copy is provably unused again. So is a
+      // recovery that relaunched the profile because its recorded browser had
+      // exited: detaching would leave that new browser running with nothing
+      // tracking it, and every later recovery refused because the profile
+      // could not be proven unused. Once it is closed, the next recovery
+      // reinstates the receipt it started from and relaunches the profile.
       const adoptedLaunch = recoveredReceipt?.intent === "adopt";
       try {
-        if (recoveredReceipt && !adoptedLaunch) await driver?.detach?.();
+        if (recoveredReceipt && !adoptedLaunch && !relaunchesProfile) await driver?.detach?.();
         else await driver?.close();
         driverClosed = true;
       } catch (cleanupError) {
@@ -2572,7 +2577,9 @@ export class BrowserSupervisor {
           failures.push(cleanupError);
         }
       }
-      if (recoveredReceipt && !adoptedLaunch && !driverClosed)
+      // A relaunch whose browser would not close is caught by the next
+      // recovery's own check that no process still uses the profile.
+      if (recoveredReceipt && !adoptedLaunch && !driverClosed && !relaunchesProfile)
         this.recoveryTransportsUncertain.add(options.browserSessionId);
       if (workingReceipt) {
         console.error("browser launch failed before its working-runtime receipt completed", {
