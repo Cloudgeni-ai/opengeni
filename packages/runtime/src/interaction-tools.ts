@@ -4600,12 +4600,14 @@ function isGoneBrowserError(error: unknown): boolean {
   return error instanceof OpenGeniApiError && (error.status === 404 || error.status === 410);
 }
 
-/** What a computer call's 404 or 410 found gone: the window it named
- * ("computer target not found", target_not_found) or the computer itself. */
+/** What a computer call's 404 or 410 found gone: the computer itself (a 410,
+ * or a 404 saying its session was not found or is not active) or else the
+ * window it named, which the controller reports in many words ("computer
+ * target … does not exist", "CUA window is no longer present"). */
 function goneComputerPart(error: unknown): "window" | "computer" {
   return error instanceof OpenGeniApiError &&
     error.status === 404 &&
-    (error.code === "target_not_found" || /\btarget\b/iu.test(error.message))
+    !/session (?:operation )?(?:not found|is not active)/iu.test(error.message)
     ? "window"
     : "computer";
 }

@@ -257,6 +257,57 @@ describe("computer tools without identifiers", () => {
     expect(listed).toEqual([other]);
   });
 
+  test("a remembered window found gone keeps its computer", async () => {
+    let gone = false;
+    const listed: string[] = [];
+    const missing = () =>
+      new OpenGeniApiError(
+        404,
+        JSON.stringify({ code: "not_found", message: 'computer target "window-1" does not exist' }),
+      );
+    const tools = definitions({
+      listComputerSessions: async () => ({
+        revision: 1,
+        sessions: [{ ...computerSession(), id: randomUUID() }],
+      }),
+      getComputerSession: async () => computerSession() as never,
+      observeComputerTarget: async () => {
+        if (gone) throw missing();
+        return observation(computerTarget("window-1"));
+      },
+      actInComputer: async (_workspace, _computer, value) => {
+        if (gone) throw missing();
+        return receipt(value.operationId, observation(computerTarget("window-1")));
+      },
+      listComputerTargets: async (_workspace, computer) => {
+        listed.push(computer);
+        return { computerSessionId: computer, targets: [] } as never;
+      },
+    });
+    await tools.computer_open!.execute(
+      { computerSessionId },
+      { operationId: randomUUID(), caller: model },
+    );
+    const invoke = (fields: Record<string, unknown>) =>
+      tools.computer_act!.execute(
+        {
+          ...fields,
+          expectedObservationId: randomUUID(),
+          action: { type: "semantic", locator: "e1", action: "invoke" },
+        },
+        { operationId: randomUUID(), caller: model },
+      );
+    expect((await invoke({ targetId: "window-1" })).isError).not.toBe(true);
+    gone = true;
+    expect((await invoke({})).isError).toBe(true);
+    // Its computer stays current, so the next call asks only for a window.
+    const next = await invoke({});
+    expect(next.structuredContent).toMatchObject({ error: { code: "computer_target_required" } });
+    listed.length = 0;
+    await tools.computer_targets!.execute({}, { operationId: randomUUID(), caller: model });
+    expect(listed).toEqual([computerSessionId]);
+  });
+
   test("computer_targets uses the computer computer_open returned", async () => {
     const listed: string[] = [];
     const other = randomUUID();
