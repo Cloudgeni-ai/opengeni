@@ -34898,10 +34898,14 @@
       "createBrowserRecorder": "value",
       "createIndexedDbRecordingChunkStore": "value",
       "createMemoryRecordingChunkStore": "value",
+      "defaultSystemAudioSource": "value",
+      "desktopSystemAudioSource": "value",
+      "displaySystemAudioSource": "value",
       "OpenGeniRecordingsClient": "value",
       "OpenGeniRecordingsTransport": "type",
       "preferredRecordingMimeType": "value",
       "Recorder": "type",
+      "RecorderCaptureError": "value",
       "RecorderErrorCode": "type",
       "RecorderOptions": "type",
       "RecorderPlatform": "type",
@@ -34915,7 +34919,10 @@
       "RecordingUploadStatus": "type",
       "sha256Hex": "value",
       "StoredRecording": "type",
-      "StoredRecordingChunk": "type"
+      "StoredRecordingChunk": "type",
+      "SystemAudioCapture": "type",
+      "SystemAudioKind": "type",
+      "SystemAudioSource": "type"
     },
     "@opengeni/sdk/session-history-import": {
       "appendArchivedSessionEvents": "value",
@@ -53426,6 +53433,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateRecordingSpeakersRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateRecordingSpeakersResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ]
     },
+    "@opengeni/sdk/recordings:RecorderCaptureError": {},
     "@opengeni/sdk/recordings:RecordingUploader": {
       "addChunk": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingChunk\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
