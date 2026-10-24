@@ -440,6 +440,14 @@ describe("browser analytics configuration", () => {
     ).toBe(true);
   });
 
+  test("agent profiles flag defaults off and parses", () => {
+    expect(withEnv({}, () => getSettings()).agentProfilesEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_AGENT_PROFILES_ENABLED: "true" }, () => getSettings())
+        .agentProfilesEnabled,
+    ).toBe(true);
+  });
+
   test("configured host MCP refs are rejected", () => {
     const mcpServers = JSON.stringify([
       {

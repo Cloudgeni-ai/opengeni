@@ -7,6 +7,7 @@ export {
   type DirectModelAccessCredential,
 } from "./domain/direct-model-provider";
 export * from "./domain/skills";
+export * from "./domain/agent-profiles";
 export * from "./domain/mcp-account-bindings";
 export * from "./domain/mcp-streamable-http-client";
 export * from "./domain/mcp-account-routes";

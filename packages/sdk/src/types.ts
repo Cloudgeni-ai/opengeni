@@ -1890,6 +1890,8 @@ export type Session = {
    * behavior). Omitted by older servers.
    */
   agent?: ResolvedAgentConfig | null | undefined;
+  /** The identity this chat's agent wears (agent profiles). Display only. */
+  agentProfile?: SessionAgentProfile | null | undefined;
   /** Capability-level view of what a configured session can use; null for legacy. */
   effectiveTools?: AgentEffectiveTools | null | undefined;
   mcpServers: SessionMcpServerMetadata[];
@@ -2032,6 +2034,7 @@ export type SessionListEntry = Pick<
   | "titleSource"
   | "createdBy"
   | "channelId"
+  | "agentProfile"
   | "parentSessionId"
   | "rootSessionId"
   | "effectiveControl"
@@ -3926,6 +3929,11 @@ export type CreateSessionRequest = {
    * Children may only narrow. Requires the server's admission switch.
    */
   agent?: AgentConfigRequest | undefined;
+  /**
+   * Start from a saved agent profile (agent profiles flag). Its current
+   * version fills every field this request omits; explicit fields win.
+   */
+  agentProfileId?: string | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
@@ -5555,6 +5563,8 @@ export type ClientConfig = {
    * the webhook intake and event runs. Omitted by older servers.
    */
   eventTriggers?: { enabled: boolean } | undefined;
+  /** Whether agent profiles are on. Omitted by older servers. */
+  agentProfiles?: { enabled: boolean } | undefined;
   /** Agent configuration rollout and per-capability availability. */
   agentConfig?: ClientAgentConfig | undefined;
   productAccessMode: ProductAccessMode;
@@ -8016,6 +8026,117 @@ export type ReorderChannelsRequest = {
 /** Re-files one session; null moves it back to the unfiled inbox. */
 export type UpdateSessionChannelRequest = {
   channelId: string | null;
+};
+
+/** Curated agent avatar icons; mirror of contracts AGENT_AVATAR_ICONS. */
+export type AgentAvatarIcon =
+  | "bot"
+  | "bug"
+  | "mail"
+  | "git-pull-request"
+  | "telescope"
+  | "chart-line"
+  | "file-text"
+  | "shield-check"
+  | "wrench"
+  | "search"
+  | "calendar-clock"
+  | "megaphone"
+  | "receipt"
+  | "rocket"
+  | "database"
+  | "code"
+  | "briefcase"
+  | "book-open"
+  | "flask-conical"
+  | "globe"
+  | "headset"
+  | "pen-tool"
+  | "users"
+  | "sparkles";
+
+/** An agent's tile: one emoji, a curated icon, or one or two letters, on a hue. */
+export type AgentAvatar =
+  | { kind: "emoji"; emoji: string; hue: number }
+  | { kind: "icon"; icon: AgentAvatarIcon; hue: number }
+  | { kind: "letters"; letters: string; hue: number };
+
+/** What a saved agent profile applies. Omitted fields keep the default. */
+export type AgentProfileConfig = {
+  agent?: Omit<AgentConfigRequest, "vaultPolicy"> | undefined;
+  model?: string | undefined;
+  reasoningEffort?: ReasoningEffort | undefined;
+  installedSkillIds?: string[] | undefined;
+  tools?: ToolRef[] | undefined;
+};
+
+export type AgentProfileStatus = "active" | "archived";
+
+/** A named, workspace-shared agent preset (agent profiles flag). */
+export type AgentProfile = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  role: string | null;
+  avatar: AgentAvatar;
+  config: AgentProfileConfig;
+  version: number;
+  status: AgentProfileStatus;
+  createdBy: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
+
+/** One immutable revision of an agent profile. */
+export type AgentProfileVersion = {
+  profileId: string;
+  version: number;
+  name: string;
+  role: string | null;
+  avatar: AgentAvatar;
+  config: AgentProfileConfig;
+  createdBy: string | null;
+  createdAt: string;
+};
+
+export type AgentProfileListResponse = { profiles: AgentProfile[] };
+export type AgentProfileVersionListResponse = { versions: AgentProfileVersion[] };
+
+export type CreateAgentProfileRequest = {
+  name: string;
+  role?: string | undefined;
+  avatar: AgentAvatar;
+  config?: AgentProfileConfig | undefined;
+};
+
+export type UpdateAgentProfileRequest = {
+  expectedVersion: number;
+  name?: string | undefined;
+  role?: string | null | undefined;
+  avatar?: AgentAvatar | undefined;
+  config?: AgentProfileConfig | undefined;
+};
+
+/** The identity a chat's agent wears; profile fields are null for a named-only chat. */
+export type SessionAgentProfile = {
+  profileId: string | null;
+  profileVersion: number | null;
+  name: string;
+  role: string | null;
+  avatar: AgentAvatar;
+};
+
+export type UpdateSessionAgentIdentityRequest = {
+  identity: { name: string; role?: string | null | undefined; avatar: AgentAvatar } | null;
+};
+
+export type ApplySessionAgentProfileRequest = {
+  agentProfileId: string;
+  /** The session's current `toolPolicyVersion`. */
+  expectedVersion: number;
 };
 
 export type Rig = {

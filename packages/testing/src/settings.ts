@@ -167,6 +167,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     usageLimitsMode: "none",
     usageAllowancesEnabled: false,
     sessionUsageLimitsEnabled: false,
+    agentProfilesEnabled: false,
     staticEntitlementsJson: "{}",
     staticUsageLimitsJson: "{}",
     delegationSecret: "test-delegation-secret",

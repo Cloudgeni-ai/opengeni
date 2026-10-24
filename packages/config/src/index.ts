@@ -803,6 +803,15 @@ const SettingsSchema = z.object({
   // pauses event dispatch; stored sources, triggers and events are kept.
   // Env: OPENGENI_EVENT_TRIGGERS_ENABLED.
   eventTriggersEnabled: EnvBoolean.default(false),
+  // Agent profiles: named, workspace-shared agent presets (name, avatar,
+  // instructions, capabilities, model, Skills, tools) that a session can start
+  // from or switch to, plus a per-session display identity. Off (default)
+  // answers the profile routes with 404, rejects profile references on session
+  // create, and hides the UI; stored profiles and session identities are kept.
+  // A profile is only a preset: applying one still resolves through ordinary
+  // session authorization, so it never grants the applier more than they hold.
+  // Env: OPENGENI_AGENT_PROFILES_ENABLED.
+  agentProfilesEnabled: EnvBoolean.default(false),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -5422,6 +5431,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sessionUsageLimitsEnabled: optional("OPENGENI_SESSION_USAGE_LIMITS_ENABLED"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     eventTriggersEnabled: optional("OPENGENI_EVENT_TRIGGERS_ENABLED"),
+    agentProfilesEnabled: optional("OPENGENI_AGENT_PROFILES_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),

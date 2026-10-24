@@ -237,6 +237,13 @@ export const EVENT_TRIGGERS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_WEBHOOK_BASE_URL",
 ];
 
+/** Agent profiles (API only). Default off in @opengeni/config; a valueEnv
+ * passthrough emitted only when set. Enable after the API and web images that
+ * carry the agent-profile migration and routes are deployed. */
+export const AGENT_PROFILES_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_AGENT_PROFILES_ENABLED",
+];
+
 /** Agent configuration rollout switches (sessions.agent_config, migration
  * 0559). Both default off in @opengeni/config; valueEnv passthroughs emitted
  * only when set. Enable admission only after every worker runs a 0559-aware
@@ -3111,6 +3118,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of EVENT_TRIGGERS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of AGENT_PROFILES_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of AGENT_CONFIG_PASSTHROUGH_ENV) {

@@ -3041,6 +3041,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Standalone inline MCP credential rotation | `packages/core/src/application/session-mcp-credential-rotation.ts`, `packages/db/src/session-mcp-credential-rotation.ts` | [`session-mcp-servers.md`](session-mcp-servers.md#standalone-inline-credential-rotation) |
 | Web search (hosted vs provider), search adapters, or their billing | `packages/config/src/web-search.ts`, `packages/runtime/src/web-search/`, `apps/worker/src/activities/agent-turn/web-search.ts`, `packages/core/src/domain/web-search-billing.ts` | [`web-search.md`](web-search.md) |
 | Capabilities or integration definitions | `packages/capabilities/`, `packages/core/src/domain/capabilities.ts` | [`capabilities.md`](capabilities.md) |
+| Agent profiles or a chat's agent identity | `packages/core/src/domain/agent-profiles.ts`, `packages/db/src/agent-profiles.ts`, `apps/api/src/routes/agent-profiles.ts` | [`agent-profiles.md`](agent-profiles.md) |
 | Sandbox backend or provider registry | `packages/runtime/src/sandbox/providers/`, `packages/contracts/src/index.ts` | §3.9 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes |
 | Lease, snapshot, reaper, or active target | `apps/worker/src/activities/sandbox-lease.ts`, `packages/runtime/src/sandbox/routing/` | §8 and [`connected-machines.md`](connected-machines.md) |
 | Connected Machine agent or protocol | `agent/`, `agent/proto/opengeni_agent.proto`, `packages/runtime/src/sandbox/selfhosted/` | [`connected-machines.md`](connected-machines.md) |

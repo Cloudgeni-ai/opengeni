@@ -47,6 +47,7 @@ export default defineConfig({
     "src/artifacts.ts",
     "src/memory-slack.ts",
     "src/automations.ts",
+    "src/agent-profiles.ts",
     "src/pr-review.ts",
     "src/organization-private-session-settings.ts",
     "src/organization-integration-policy.ts",

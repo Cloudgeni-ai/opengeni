@@ -73,6 +73,7 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
     createdBy: session.createdBy,
     channelId: session.channelId,
+    ...(session.agentProfile ? { agentProfile: session.agentProfile } : {}),
     parentSessionId: session.parentSessionId,
     rootSessionId: session.rootSessionId,
     effectiveControl: session.effectiveControl,

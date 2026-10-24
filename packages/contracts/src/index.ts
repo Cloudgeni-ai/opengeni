@@ -11971,6 +11971,254 @@ export const UpdateSessionChannelRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type UpdateSessionChannelRequest = z.infer<typeof UpdateSessionChannelRequest>;
 
+// --- Agent profiles -------------------------------------------------------
+// A named, workspace-shared agent preset: a visual identity (name, role line,
+// avatar) plus the agent configuration a chat starts from or switches to.
+// A profile is only a preset. Applying it resolves through the ordinary
+// session create/update authorization, so it never grants anyone more than
+// they already hold, and a running chat records the exact version it used.
+// Gated by the deployment flag `agentProfilesEnabled`.
+
+export const AGENT_PROFILE_NAME_MAX_CHARS = 60;
+export const AGENT_PROFILE_ROLE_MAX_CHARS = 160;
+/** Soft cap per workspace, counting active and archived profiles. */
+export const AGENT_PROFILES_PER_WORKSPACE_MAX = 500;
+
+/** Curated icon names (the web maps each to a Lucide glyph). */
+export const AGENT_AVATAR_ICONS = [
+  "bot",
+  "bug",
+  "mail",
+  "git-pull-request",
+  "telescope",
+  "chart-line",
+  "file-text",
+  "shield-check",
+  "wrench",
+  "search",
+  "calendar-clock",
+  "megaphone",
+  "receipt",
+  "rocket",
+  "database",
+  "code",
+  "briefcase",
+  "book-open",
+  "flask-conical",
+  "globe",
+  "headset",
+  "pen-tool",
+  "users",
+  "sparkles",
+] as const;
+export const AgentAvatarIcon = /* @__PURE__ */ defineSchema(() => z.enum(AGENT_AVATAR_ICONS));
+export type AgentAvatarIcon = z.infer<typeof AgentAvatarIcon>;
+
+const AGENT_AVATAR_EMOJI_PATTERN = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
+
+/** True when `value` is exactly one user-perceived character that is an emoji. */
+export function isSingleAgentAvatarEmoji(value: string): boolean {
+  if (!AGENT_AVATAR_EMOJI_PATTERN.test(value)) return false;
+  const segmenter =
+    typeof Intl !== "undefined" && "Segmenter" in Intl
+      ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+      : null;
+  if (!segmenter) return [...value].length <= 8;
+  let count = 0;
+  for (const _segment of segmenter.segment(value)) {
+    count += 1;
+    if (count > 1) return false;
+  }
+  return count === 1;
+}
+
+/** Hue (0-359) of the avatar's low-chroma tile gradient. */
+export const AgentAvatarHue = /* @__PURE__ */ defineSchema(() => z.number().int().min(0).max(359));
+
+export const AgentAvatar = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z
+      .object({
+        kind: z.literal("emoji"),
+        emoji: z
+          .string()
+          .min(1)
+          .max(32)
+          .refine(isSingleAgentAvatarEmoji, { message: "emoji must be a single emoji" }),
+        hue: AgentAvatarHue,
+      })
+      .strict(),
+    z.object({ kind: z.literal("icon"), icon: AgentAvatarIcon, hue: AgentAvatarHue }).strict(),
+    z
+      .object({
+        kind: z.literal("letters"),
+        letters: z
+          .string()
+          .regex(/^[\p{L}\p{N}]{1,2}$/u, {
+            message: "letters must be one or two letters or digits",
+          }),
+        hue: AgentAvatarHue,
+      })
+      .strict(),
+  ]),
+);
+export type AgentAvatar = z.infer<typeof AgentAvatar>;
+
+const AgentProfileName = /* @__PURE__ */ defineSchema(() =>
+  z.string().trim().min(1).max(AGENT_PROFILE_NAME_MAX_CHARS),
+);
+const AgentProfileRole = /* @__PURE__ */ defineSchema(() =>
+  z.string().trim().min(1).max(AGENT_PROFILE_ROLE_MAX_CHARS),
+);
+
+/**
+ * What a profile applies. Every field is optional: an omitted field leaves the
+ * workspace default (on create) or the chat's current value (on switch).
+ * `agent` is the ordinary session agent configuration without `vaultPolicy`,
+ * which stays a per-session decision.
+ */
+export const AgentProfileConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      agent: AgentConfigRequest.omit({ vaultPolicy: true }).optional(),
+      model: z.string().trim().min(1).max(200).optional(),
+      reasoningEffort: ReasoningEffort.optional(),
+      installedSkillIds: z.array(z.string().uuid()).max(32).optional(),
+      tools: z.array(ToolRef).max(64).optional(),
+    })
+    .strict(),
+);
+export type AgentProfileConfig = z.infer<typeof AgentProfileConfig>;
+
+export const AgentProfileStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "archived"]),
+);
+export type AgentProfileStatus = z.infer<typeof AgentProfileStatus>;
+
+export const AgentProfile = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    name: z.string(),
+    role: z.string().nullable(),
+    avatar: AgentAvatar,
+    config: AgentProfileConfig,
+    /** Increments on every content change; chats record the version they used. */
+    version: z.number().int().positive(),
+    status: AgentProfileStatus,
+    createdBy: z.string().nullable(),
+    updatedBy: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    archivedAt: z.string().nullable(),
+  }),
+);
+export type AgentProfile = z.infer<typeof AgentProfile>;
+
+/** One immutable, append-only revision of a profile's content. */
+export const AgentProfileVersion = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    profileId: z.string().uuid(),
+    version: z.number().int().positive(),
+    name: z.string(),
+    role: z.string().nullable(),
+    avatar: AgentAvatar,
+    config: AgentProfileConfig,
+    createdBy: z.string().nullable(),
+    createdAt: z.string(),
+  }),
+);
+export type AgentProfileVersion = z.infer<typeof AgentProfileVersion>;
+
+export const AgentProfileListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ profiles: z.array(AgentProfile) }),
+);
+export type AgentProfileListResponse = z.infer<typeof AgentProfileListResponse>;
+
+export const AgentProfileVersionListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ versions: z.array(AgentProfileVersion) }),
+);
+export type AgentProfileVersionListResponse = z.infer<typeof AgentProfileVersionListResponse>;
+
+export const CreateAgentProfileRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: AgentProfileName,
+      role: AgentProfileRole.optional(),
+      avatar: AgentAvatar,
+      config: AgentProfileConfig.default({}),
+    })
+    .strict(),
+);
+export type CreateAgentProfileRequest = z.infer<typeof CreateAgentProfileRequest>;
+
+/** Replaces the supplied fields and records a new version. */
+export const UpdateAgentProfileRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      expectedVersion: z.number().int().positive(),
+      name: AgentProfileName.optional(),
+      role: AgentProfileRole.nullable().optional(),
+      avatar: AgentAvatar.optional(),
+      config: AgentProfileConfig.optional(),
+    })
+    .strict(),
+);
+export type UpdateAgentProfileRequest = z.infer<typeof UpdateAgentProfileRequest>;
+
+/**
+ * The identity a chat's agent wears: a display snapshot frozen on the session.
+ * `profileId`/`profileVersion` are set when the chat started from or switched
+ * to a saved profile, and null when a person only named this chat's agent.
+ * Purely presentational: it never changes execution by itself.
+ */
+export const SessionAgentProfile = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      profileId: z.string().uuid().nullable(),
+      profileVersion: z.number().int().positive().nullable(),
+      name: z.string().min(1).max(AGENT_PROFILE_NAME_MAX_CHARS),
+      role: z.string().max(AGENT_PROFILE_ROLE_MAX_CHARS).nullable(),
+      avatar: AgentAvatar,
+    })
+    .strict(),
+);
+export type SessionAgentProfile = z.infer<typeof SessionAgentProfile>;
+
+/** Names only this chat's agent (null clears it). Changes nothing else. */
+export const UpdateSessionAgentIdentityRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      identity: z
+        .object({
+          name: AgentProfileName,
+          role: AgentProfileRole.nullable().optional(),
+          avatar: AgentAvatar,
+        })
+        .strict()
+        .nullable(),
+    })
+    .strict(),
+);
+export type UpdateSessionAgentIdentityRequest = z.infer<typeof UpdateSessionAgentIdentityRequest>;
+
+/**
+ * Switches a running chat to a saved profile, from its next message: the
+ * profile's agent configuration and model replace the chat's, then the chat
+ * wears the profile's identity. `expectedVersion` is the session's
+ * `toolPolicyVersion`, the same concurrency token as `PUT .../agent`.
+ */
+export const ApplySessionAgentProfileRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      agentProfileId: z.string().uuid(),
+      expectedVersion: z.number().int().positive(),
+    })
+    .strict(),
+);
+export type ApplySessionAgentProfileRequest = z.infer<typeof ApplySessionAgentProfileRequest>;
+
 // setup_append: the exact command that already worked (+ an optional note).
 export const RigSetupAppendPayload = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -16508,6 +16756,9 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Frozen agent configuration (migration 0559). null = a legacy session
     // with byte-identical historical behavior.
     agent: ResolvedAgentConfig.nullable().default(null),
+    // The identity this chat's agent wears (agent profiles). Display only;
+    // null or omitted when the chat uses the default agent identity.
+    agentProfile: SessionAgentProfile.nullable().optional(),
     // Capability-level projection of what a configured session can use.
     // Omitted by internal readers; null for legacy sessions.
     effectiveTools: AgentEffectiveTools.nullable().optional(),
@@ -16781,6 +17032,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     titleSource: true,
     createdBy: true,
     channelId: true,
+    agentProfile: true,
     parentSessionId: true,
     rootSessionId: true,
     effectiveControl: true,
@@ -20026,6 +20278,11 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // renderer. Omission keeps today's behavior (or inherits a configured
       // parent). Children may only narrow.
       agent: AgentConfigRequest.optional(),
+      // Start from a saved agent profile (agent profiles flag). The profile's
+      // current version fills every field this request omits (agent, model,
+      // reasoningEffort, installedSkillIds, tools); explicit fields win. The
+      // chat records the profile version and wears its identity.
+      agentProfileId: z.string().uuid().optional(),
       // Which vaults this session's agent may resolve secret references from.
       // Intersected with `agent.vaultPolicy`; a child is further narrowed by
       // its ancestors' policies whenever it resolves. The task vault is always
@@ -22716,6 +22973,11 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
      * sources, the webhook intake and event runs. Omitted by older servers.
      */
     eventTriggers: z.object({ enabled: z.boolean() }).strict().optional(),
+    /**
+     * Whether agent profiles are on: saved, reusable agents and per-chat agent
+     * identity. Omitted by older servers, which offer neither.
+     */
+    agentProfiles: z.object({ enabled: z.boolean() }).strict().optional(),
     // Whether this deployment offers the Jev-backed code_search agent tool and
     // whether workspaces without their own setting get it.
     codeSearch: z

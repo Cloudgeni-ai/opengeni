@@ -24,6 +24,7 @@ export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
+export * from "./agent-profiles";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";
@@ -541,6 +542,7 @@ import {
   type SessionMessageSearchResponse,
 } from "@opengeni/contracts";
 import { ResolvedAgentConfig } from "@opengeni/contracts";
+import type { SessionAgentProfile } from "@opengeni/contracts";
 import { scanSessionMessages } from "./session-message-search";
 import { excludeUnclaimedHumanPromptEventFilter } from "./session-prompt-visibility";
 import { withDatabaseStatementTimeout } from "./database";
@@ -29971,6 +29973,8 @@ export type SessionCreateInput = {
    * legacy session. When provided it also participates in keyed-create replay.
    */
   agentConfig?: ResolvedAgentConfig | null;
+  /** Identity the chat's agent wears (migration 0981). Display only. */
+  agentProfile?: SessionAgentProfile | null;
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
   selectedInstalledSkillIds?: string[];
@@ -30978,6 +30982,7 @@ async function createSessionInTransaction(
             : "portable"),
         codeSearchEnabled,
         agentConfig: input.agentConfig ?? null,
+        ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
         // Creation reserves identity, not runnable work. The atomic start
         // transaction installs queued status together with its turn/wake.
         status: "idle",
@@ -90613,6 +90618,9 @@ function mapSession(
         : "portable",
     codeSearchEnabled: row.codeSearchEnabled === true,
     agent: parseStoredSessionAgentConfig(row.agentConfig),
+    // Agent identity (migration 0981). Omitted when unset so default-agent
+    // payloads stay byte-identical to older servers.
+    ...(row.agentProfile ? { agentProfile: row.agentProfile } : {}),
     ...pin,
     ...attention,
     ...archive,

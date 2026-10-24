@@ -122,6 +122,10 @@
       "types": "./src/automations.ts",
       "default": "./src/automations.ts"
     },
+    "./agent-profiles": {
+      "types": "./src/agent-profiles.ts",
+      "default": "./src/agent-profiles.ts"
+    },
     "./pr-review": {
       "types": "./src/pr-review.ts",
       "default": "./src/pr-review.ts"

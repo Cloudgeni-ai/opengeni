@@ -84,6 +84,7 @@ import {
   type AgentConfigCreator,
   type ResolvedAgentCapabilities,
   type ResolvedAgentConfig,
+  type SessionAgentProfile,
   type UpdateSessionAgentRequest,
   type VaultPolicy,
 } from "@opengeni/contracts";
@@ -226,6 +227,7 @@ import {
 } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
+import { expandCreateSessionPayloadWithAgentProfile } from "./agent-profiles";
 import { externalCreationMetadata } from "./external-creation-attribution";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
@@ -1059,6 +1061,8 @@ export async function createAndStartSessionWithOutcome(input: {
   // Frozen agent configuration (migration 0559), already resolved and written
   // through to tools/firstPartyMcpTools by the caller. Omitted/null = legacy.
   agentConfig?: ResolvedAgentConfig | null;
+  /** Identity the chat's agent wears (agent profiles). Display only. */
+  agentProfile?: SessionAgentProfile | null;
   // Vault narrowing for this session (0739), already intersected with the
   // agent configuration's policy. Omitted = no narrowing.
   vaultPolicy?: VaultPolicy;
@@ -1321,6 +1325,7 @@ export async function createAndStartSessionWithOutcome(input: {
           firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
           firstPartyMcpTools: input.firstPartyMcpTools,
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+          ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
           instructions: input.instructions ?? null,
           ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
           policyRole: input.policyRole ?? null,
@@ -1434,6 +1439,7 @@ export async function createAndStartSessionWithOutcome(input: {
         firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
         firstPartyMcpTools: input.firstPartyMcpTools,
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+        ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
         instructions: input.instructions ?? null,
         ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
         policyRole: input.policyRole ?? null,
@@ -2598,6 +2604,14 @@ async function createSessionForRequestInFileScope(
   agentChildPresentation?: AgentChildSessionCreatePresentation,
   requestOptions: SessionCreateRequestOptions = {},
 ): Promise<CreateSessionRequestOutcome> {
+  // A saved agent profile fills the fields this request omits before parsing,
+  // so its values behave exactly like caller-supplied ones.
+  const profileExpansion = await expandCreateSessionPayloadWithAgentProfile(
+    unresolvedDeps,
+    workspaceId,
+    rawPayload,
+  );
+  rawPayload = profileExpansion.rawPayload;
   const payload = CreateSessionRequest.parse(rawPayload);
 
   // A tool whose backing workload this deployment does not run is dropped, not
@@ -4165,6 +4179,7 @@ async function createSessionForRequestInFileScope(
       rigId: frozenRigId,
       rigVersionId: frozenRigVersionId,
       channelId,
+      agentProfile: profileExpansion.agentProfile,
       goal: effectiveGoal ?? null,
       initialAutomaticTitle,
       // Per-session persona instructions (already trimmed/validated by the

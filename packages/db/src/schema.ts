@@ -7,6 +7,9 @@ import {
   meaningfulSessionEventSql,
 } from "./session-meaningful-events";
 import type {
+  AgentAvatar,
+  AgentProfileConfig,
+  SessionAgentProfile,
   OrganizationAccessPolicy,
   SandboxProviderCommand,
   CommandSupervisionReceipt,
@@ -5054,6 +5057,62 @@ export const channels = pgTable(
   }),
 );
 
+// Agent profiles (migration 0981): named, workspace-shared agent presets.
+// Configuration preset and display metadata only; applying one resolves
+// through ordinary session authorization. Archived, never deleted.
+export const agentProfiles = pgTable(
+  "agent_profiles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    role: text("role"),
+    avatar: jsonb("avatar").$type<AgentAvatar>().notNull(),
+    config: jsonb("config").$type<AgentProfileConfig>().notNull().default({}),
+    version: integer("version").notNull().default(1),
+    status: text("status").$type<"active" | "archived">().notNull().default("active"),
+    createdBy: text("created_by"),
+    updatedBy: text("updated_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+  },
+  (table) => ({
+    // The migration owns the partial lower(name) uniqueness for active rows.
+    workspaceIdentity: uniqueIndex("agent_profiles_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+  }),
+);
+
+// Immutable, append-only revisions of an agent profile's content.
+export const agentProfileVersions = pgTable(
+  "agent_profile_versions",
+  {
+    profileId: uuid("profile_id").notNull(),
+    version: integer("version").notNull(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    name: text("name").notNull(),
+    role: text("role"),
+    avatar: jsonb("avatar").$type<AgentAvatar>().notNull(),
+    config: jsonb("config").$type<AgentProfileConfig>().notNull(),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.profileId, table.version] }),
+  }),
+);
+
 export const sessions = pgTable(
   "sessions",
   {
@@ -5362,6 +5421,9 @@ export const sessions = pgTable(
     // Frozen agent configuration (migration 0559); NULL means a legacy
     // session. Mid-session updates share the tool_policy_version CAS.
     agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
+    // The identity this chat's agent wears (migration 0981, agent profiles).
+    // Display snapshot only; NULL is the default agent identity.
+    agentProfile: jsonb("agent_profile").$type<SessionAgentProfile>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Top-level xid, assigned by a BEFORE trigger in the original row write.

@@ -180,6 +180,8 @@ import {
   type TerminalPtyStartedPayload,
   type VaultApiError,
   VAULT_ERROR_HTTP_STATUS,
+  ApplySessionAgentProfileRequest,
+  UpdateSessionAgentIdentityRequest,
 } from "@opengeni/contracts";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
@@ -390,6 +392,9 @@ import {
   previewManagedHumanSessionVisibilityChange,
   updateSessionToolPolicy,
   updateSessionAgent,
+  applyAgentProfileToSession,
+  requireAgentProfilesEnabled,
+  updateSessionAgentIdentity,
   updateSessionSkills,
   updateSessionTitle,
   setSessionRetention,
@@ -3011,6 +3016,55 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     try {
       const session = await updateSessionAgent(deps, grant, sessionId, payload);
+      return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    } catch (error) {
+      if (error instanceof SessionToolPolicyVersionConflictError) {
+        return c.json(
+          {
+            code: error.code,
+            message: error.message,
+            currentVersion: error.currentVersion,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
+  // Agent profiles: name only this chat's agent (display only, like a rename).
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/agent-identity", async (c) => {
+    requireAgentProfilesEnabled(deps.settings);
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.title.write",
+      surface: "http",
+    });
+    const payload = await parseRequestJson(c, UpdateSessionAgentIdentityRequest);
+    const session = await updateSessionAgentIdentity(deps, grant, sessionId, payload);
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
+  // Agent profiles: switch this chat to a saved profile from its next message.
+  // Shares the tool-policy version CAS with PUT .../agent.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/agent-profile", async (c) => {
+    requireAgentProfilesEnabled(deps.settings);
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.tool_policy.write",
+      surface: "http",
+    });
+    const payload = await parseRequestJson(c, ApplySessionAgentProfileRequest);
+    try {
+      const session = await applyAgentProfileToSession(deps, grant, sessionId, payload);
       return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
     } catch (error) {
       if (error instanceof SessionToolPolicyVersionConflictError) {
@@ -5745,6 +5799,8 @@ export function sessionAuthorizationOperationForHttp(
   // Stands in for the person's own next message, so it needs the same access.
   if (suffix === "/capability-continuations" && verb === "POST") return "session.append";
   if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/agent-profile" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/agent-identity" && verb === "PUT") return "session.title.write";
   if (suffix === "/skills" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/admin-access") {
     if (verb === "GET") return "session.read";

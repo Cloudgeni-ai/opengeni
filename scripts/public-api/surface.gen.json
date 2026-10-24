@@ -1877,6 +1877,89 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/agent-profiles",
+      "sdk": [
+        "OpenGeniAgentProfilesClient.listAgentProfiles"
+      ],
+      "request": [
+        "AgentProfileStatus"
+      ],
+      "response": [
+        "AgentProfileListResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/agent-profiles",
+      "sdk": [
+        "OpenGeniAgentProfilesClient.createAgentProfile"
+      ],
+      "request": [
+        "CreateAgentProfileRequest"
+      ],
+      "response": [
+        "AgentProfile"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId",
+      "sdk": [
+        "OpenGeniAgentProfilesClient.getAgentProfile"
+      ],
+      "request": [],
+      "response": [
+        "AgentProfile"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId",
+      "sdk": [
+        "OpenGeniAgentProfilesClient.updateAgentProfile"
+      ],
+      "request": [
+        "UpdateAgentProfileRequest"
+      ],
+      "response": [
+        "AgentProfile"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/archive",
+      "sdk": [
+        "OpenGeniAgentProfilesClient.archiveAgentProfile"
+      ],
+      "request": [],
+      "response": [
+        "AgentProfile"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/restore",
+      "sdk": [
+        "OpenGeniAgentProfilesClient.restoreAgentProfile"
+      ],
+      "request": [],
+      "response": [
+        "AgentProfile"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/versions",
+      "sdk": [
+        "OpenGeniAgentProfilesClient.listAgentProfileVersions"
+      ],
+      "request": [],
+      "response": [
+        "AgentProfileVersionListResponse"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/agent-topology",
       "sdk": [
         "OpenGeniClient.listAgentTopology"
@@ -7778,6 +7861,32 @@
     },
     {
       "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/agent-identity",
+      "sdk": [
+        "OpenGeniAgentProfilesClient.updateSessionAgentIdentity"
+      ],
+      "request": [
+        "UpdateSessionAgentIdentityRequest"
+      ],
+      "response": [
+        "Session"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/agent-profile",
+      "sdk": [
+        "OpenGeniAgentProfilesClient.applySessionAgentProfile"
+      ],
+      "request": [
+        "ApplySessionAgentProfileRequest"
+      ],
+      "response": [
+        "Session"
+      ]
+    },
+    {
+      "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/archive",
       "sdk": [
         "OpenGeniClient.updateSessionArchive"
@@ -10598,6 +10707,35 @@
         "$.role": "string?"
       }
     },
+    "AgentAvatar": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"kind=emoji\",\"kind=icon\",\"kind=letters\"]",
+        "$|kind=emoji": "object",
+        "$|kind=emoji.emoji": "string!",
+        "$|kind=emoji.hue": "integer!",
+        "$|kind=emoji.kind": "const!=[\"\\\"emoji\\\"\"]",
+        "$|kind=icon": "object",
+        "$|kind=icon.hue": "integer!",
+        "$|kind=icon.icon": "ref(AgentAvatarIcon)!",
+        "$|kind=icon.kind": "const!=[\"\\\"icon\\\"\"]",
+        "$|kind=letters": "object",
+        "$|kind=letters.hue": "integer!",
+        "$|kind=letters.kind": "const!=[\"\\\"letters\\\"\"]",
+        "$|kind=letters.letters": "string!"
+      }
+    },
+    "AgentAvatarIcon": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"book-open\\\"\",\"\\\"bot\\\"\",\"\\\"briefcase\\\"\",\"\\\"bug\\\"\",\"\\\"calendar-clock\\\"\",\"\\\"chart-line\\\"\",\"\\\"code\\\"\",\"\\\"database\\\"\",\"\\\"file-text\\\"\",\"\\\"flask-conical\\\"\",\"\\\"git-pull-request\\\"\",\"\\\"globe\\\"\",\"\\\"headset\\\"\",\"\\\"mail\\\"\",\"\\\"megaphone\\\"\",\"\\\"pen-tool\\\"\",\"\\\"receipt\\\"\",\"\\\"rocket\\\"\",\"\\\"search\\\"\",\"\\\"shield-check\\\"\",\"\\\"sparkles\\\"\",\"\\\"telescope\\\"\",\"\\\"users\\\"\",\"\\\"wrench\\\"\"]"
+      }
+    },
     "AgentCapabilities": {
       "io": [
         "input"
@@ -10793,6 +10931,92 @@
         "$.ownerKey": "string!",
         "$.settings": "ref(AgentLearningOverrides)!",
         "$.version": "integer!"
+      }
+    },
+    "AgentProfile": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.archivedAt": "string! null",
+        "$.avatar": "ref(AgentAvatar)!",
+        "$.config": "ref(AgentProfileConfig)!",
+        "$.createdAt": "string!",
+        "$.createdBy": "string! null",
+        "$.id": "string!",
+        "$.name": "string!",
+        "$.role": "string! null",
+        "$.status": "ref(TaskNoteStatus)!",
+        "$.updatedAt": "string!",
+        "$.updatedBy": "string! null",
+        "$.version": "integer!",
+        "$.workspaceId": "string!"
+      }
+    },
+    "AgentProfileConfig": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.agent": "object?",
+        "$.agent.capabilities": "ref(AgentCapabilities)?",
+        "$.agent.identity": "string? null",
+        "$.agent.instructions": "string?",
+        "$.agent.renderer": "ref(AgentRenderer)?",
+        "$.installedSkillIds": "array?",
+        "$.installedSkillIds[]": "string",
+        "$.model": "string?",
+        "$.reasoningEffort": "ref(ReasoningEffort)?",
+        "$.tools": "array?",
+        "$.tools[]": "ref(ToolRef)"
+      }
+    },
+    "AgentProfileListResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.profiles": "array!",
+        "$.profiles[]": "ref(AgentProfile)"
+      }
+    },
+    "AgentProfileStatus": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"active\\\"\",\"\\\"archived\\\"\"]"
+      }
+    },
+    "AgentProfileVersion": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.avatar": "ref(AgentAvatar)!",
+        "$.config": "ref(AgentProfileConfig)!",
+        "$.createdAt": "string!",
+        "$.createdBy": "string! null",
+        "$.name": "string!",
+        "$.profileId": "string!",
+        "$.role": "string! null",
+        "$.version": "integer!"
+      }
+    },
+    "AgentProfileVersionListResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.versions": "array!",
+        "$.versions[]": "ref(AgentProfileVersion)"
       }
     },
     "AgentPromptModuleId": {
@@ -11128,6 +11352,16 @@
         "$.segments[].text": "string!",
         "$.streamedMilliseconds": "integer!",
         "$.trackNumber": "integer!"
+      }
+    },
+    "ApplySessionAgentProfileRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.agentProfileId": "string!",
+        "$.expectedVersion": "integer!"
       }
     },
     "ApplySessionGoalRevisionRequest": {
@@ -13377,6 +13611,7 @@
         "$.agentConfig.capabilities[].reason": "string?",
         "$.agentConfig.defaultForNewSessions": "boolean!",
         "$.agentConfig.enabled": "boolean!",
+        "$.agentProfiles": "ref(SiteSqlSettingsRequest)?",
         "$.allowedModels": "array!",
         "$.allowedModels[]": "string",
         "$.allowedReasoningEfforts": "array!",
@@ -14873,6 +15108,29 @@
         "$.workspaceId": "string!"
       }
     },
+    "CreateAgentProfileRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.avatar": "ref(AgentAvatar)!",
+        "$.config": "object?",
+        "$.config.agent": "object?",
+        "$.config.agent.capabilities": "ref(AgentCapabilities)?",
+        "$.config.agent.identity": "string? null",
+        "$.config.agent.instructions": "string?",
+        "$.config.agent.renderer": "ref(AgentRenderer)?",
+        "$.config.installedSkillIds": "array?",
+        "$.config.installedSkillIds[]": "string",
+        "$.config.model": "string?",
+        "$.config.reasoningEffort": "ref(ReasoningEffort)?",
+        "$.config.tools": "array?",
+        "$.config.tools[]": "ref(ToolRef)",
+        "$.name": "string!",
+        "$.role": "string?"
+      }
+    },
     "CreateApiKeyRequest": {
       "io": [
         "input"
@@ -15568,6 +15826,7 @@
         "$.agent": "ref(AgentConfigRequest)?",
         "$.agentAccess": "enum?=[\"\\\"session\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
         "$.agentLearning": "ref(AgentLearningOverrides)?",
+        "$.agentProfileId": "string?",
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
         "$.channelId": "string? null",
@@ -15646,6 +15905,7 @@
         "$.admissionBlock": "ref(SessionAdmissionBlock)? null",
         "$.agent": "ref(ResolvedAgentConfig)! null",
         "$.agentAccess": "enum!=[\"\\\"session\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
+        "$.agentProfile": "ref(SessionAgentProfile)? null",
         "$.archiveVersion": "integer!",
         "$.archived": "boolean!",
         "$.archivedAt": "string! null",
@@ -25812,6 +26072,7 @@
         "$.admissionBlock": "ref(SessionAdmissionBlock)? null",
         "$.agent": "ref(ResolvedAgentConfig)! null",
         "$.agentAccess": "enum!=[\"\\\"session\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
+        "$.agentProfile": "ref(SessionAgentProfile)? null",
         "$.archiveVersion": "integer!",
         "$.archived": "boolean!",
         "$.archivedAt": "string! null",
@@ -25958,6 +26219,19 @@
         "$.reason": "enum!=[\"\\\"database_claim_rejected\\\"\",\"\\\"initiator_membership_required\\\"\",\"\\\"personal_resource_grant_required\\\"\"]",
         "$.retryPolicy": "const!=[\"\\\"explicit_recheck\\\"\"]",
         "$.sqlState": "string! null"
+      }
+    },
+    "SessionAgentProfile": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.avatar": "ref(AgentAvatar)!",
+        "$.name": "string!",
+        "$.profileId": "string! null",
+        "$.profileVersion": "integer! null",
+        "$.role": "string! null"
       }
     },
     "SessionAutomationWaitSummary": {
@@ -26446,6 +26720,7 @@
         "$.accountId": "string!",
         "$.activelyWorking": "boolean!",
         "$.admissionBlock": "ref(SessionAdmissionBlock)? null",
+        "$.agentProfile": "ref(SessionAgentProfile)? null",
         "$.archiveVersion": "integer!",
         "$.archived": "boolean!",
         "$.archivedAt": "string! null",
@@ -29580,6 +29855,19 @@
         "$.status": "enum!=[\"\\\"not_installed\\\"\",\"\\\"retained_by_other_owners\\\"\",\"\\\"uninstalled\\\"\"]"
       }
     },
+    "UpdateAgentProfileRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.avatar": "ref(AgentAvatar)?",
+        "$.config": "ref(AgentProfileConfig)?",
+        "$.expectedVersion": "integer!",
+        "$.name": "string?",
+        "$.role": "string? null"
+      }
+    },
     "UpdateAutomationSourceRequest": {
       "io": [
         "input"
@@ -30198,6 +30486,18 @@
         "$.variableSetId": "string? null",
         "$.vaultPolicy": "ref(VaultPolicy)?",
         "$.visibility": "ref(SessionVisibility)?"
+      }
+    },
+    "UpdateSessionAgentIdentityRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.identity": "object! null",
+        "$.identity.avatar": "ref(AgentAvatar)!",
+        "$.identity.name": "string!",
+        "$.identity.role": "string? null"
       }
     },
     "UpdateSessionAgentRequest": {
@@ -33018,6 +33318,8 @@
       "ActivateWorkspaceLearningPolicyRevisionRequest": "type",
       "AddDocumentRequest": "type",
       "AddWorkspaceMemberRequest": "type",
+      "AgentAvatar": "type",
+      "AgentAvatarIcon": "type",
       "AgentCapabilities": "type",
       "AgentCapabilityId": "type",
       "AgentCapabilityToggles": "type",
@@ -33037,6 +33339,12 @@
       "AgentLearningOverrides": "type",
       "AgentLearningSettingsRecord": "type",
       "AgentMessageCompletedPayload": "type",
+      "AgentProfile": "type",
+      "AgentProfileConfig": "type",
+      "AgentProfileListResponse": "type",
+      "AgentProfileStatus": "type",
+      "AgentProfileVersion": "type",
+      "AgentProfileVersionListResponse": "type",
       "AgentPromptModuleId": "type",
       "AgentRenderer": "type",
       "AgentSkillsCapability": "type",
@@ -33055,6 +33363,7 @@
       "ApiIntegrationUninstallPreview": "type",
       "ApiKey": "type",
       "ApiKeyConnectionCredential": "type",
+      "ApplySessionAgentProfileRequest": "type",
       "applyUrlRotation": "value",
       "ApplyWorkspaceSkillRevisionRequest": "type",
       "ApproveSlackUserLinkAccessRequest": "type",
@@ -33362,6 +33671,7 @@
       "ContinueAfterCapabilitySetupRequest": "type",
       "ContinueAfterCapabilitySetupResponse": "type",
       "CorrectPreferenceRegistryRequest": "type",
+      "CreateAgentProfileRequest": "type",
       "CreateApiKeyRequest": "type",
       "CreateApiKeyResponse": "type",
       "CreateAutomationTemplateRequest": "type",
@@ -34324,6 +34634,7 @@
       "SESSION_SEQUENCE_HEADER": "value",
       "SessionAdminAccess": "type",
       "SessionAdmissionBlock": "type",
+      "SessionAgentProfile": "type",
       "SessionApprovalRequest": "type",
       "SessionAutomationWaitSummary": "type",
       "SessionBackgroundCommand": "type",
@@ -34668,6 +34979,7 @@
       "UninstallPluginResult": "type",
       "UninstallSkillRequest": "type",
       "UninstallSkillResult": "type",
+      "UpdateAgentProfileRequest": "type",
       "UpdateAutomationTemplateRequest": "type",
       "UpdateBrowserIdentityRequest": "type",
       "UpdateChannelRequest": "type",
@@ -34702,6 +35014,7 @@
       "UpdatePrReviewRepositoryBindingRequest": "type",
       "UpdateRigRequest": "type",
       "UpdateScheduledTaskRequest": "type",
+      "UpdateSessionAgentIdentityRequest": "type",
       "UpdateSessionAgentRequest": "type",
       "UpdateSessionArchiveRequest": "type",
       "UpdateSessionAttentionRequest": "type",
@@ -34945,6 +35258,23 @@
       "ManagedAuthSessionSetProjection": "type",
       "ResolveManagedAuthDeepLinkRequest": "type",
       "SelectManagedAuthLoginSlotRequest": "type"
+    },
+    "@opengeni/sdk/agent-profiles": {
+      "AgentAvatar": "type",
+      "AgentAvatarIcon": "type",
+      "AgentProfile": "type",
+      "AgentProfileConfig": "type",
+      "AgentProfileListResponse": "type",
+      "AgentProfileStatus": "type",
+      "AgentProfileVersion": "type",
+      "AgentProfileVersionListResponse": "type",
+      "ApplySessionAgentProfileRequest": "type",
+      "CreateAgentProfileRequest": "type",
+      "OpenGeniAgentProfilesClient": "value",
+      "OpenGeniAgentProfilesTransport": "type",
+      "SessionAgentProfile": "type",
+      "UpdateAgentProfileRequest": "type",
+      "UpdateSessionAgentIdentityRequest": "type"
     },
     "@opengeni/sdk/allowance-refusal": {
       "allowanceExhaustedMessage": "value",
@@ -39653,6 +39983,17 @@
       "source",
       "workspaceId",
       "workspaceIdFor"
+    ],
+    "OpenGeniAgentProfilesClient": [
+      "applySessionAgentProfile",
+      "archiveAgentProfile",
+      "createAgentProfile",
+      "getAgentProfile",
+      "listAgentProfileVersions",
+      "listAgentProfiles",
+      "restoreAgentProfile",
+      "updateAgentProfile",
+      "updateSessionAgentIdentity"
     ],
     "OpenGeniAllowanceExhaustedError": [
       "body",
@@ -45014,6 +45355,35 @@
       ],
       "startSocialTransaction": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"StartManagedAuthSocialTransactionRequestType\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":null}"
+      ]
+    },
+    "@opengeni/sdk/agent-profiles:OpenGeniAgentProfilesClient": {
+      "applySessionAgentProfile": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ApplySessionAgentProfileRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Session\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "archiveAgentProfile": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentProfile\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createAgentProfile": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateAgentProfileRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentProfile\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getAgentProfile": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentProfile\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listAgentProfiles": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"status\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"all\"},\"type\":\"TSLiteralType\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentProfileStatus\",\"optional\":false,\"type\":\"Identifier\"}}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentProfileListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listAgentProfileVersions": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentProfileVersionListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "restoreAgentProfile": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentProfile\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateAgentProfile": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateAgentProfileRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentProfile\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateSessionAgentIdentity": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateSessionAgentIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Session\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ]
     },
     "@opengeni/sdk/artifacts:OpenGeniClient": {

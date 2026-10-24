@@ -350,6 +350,7 @@ import { registerAutomationRoutes } from "./routes/automations";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
 import { registerChannelRoutes } from "./routes/channels";
+import { registerAgentProfileRoutes } from "./routes/agent-profiles";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerEventSourceRoutes } from "./routes/event-sources";
@@ -1644,6 +1645,7 @@ export function createAppComposition(deps: AppDependencies): {
           enabled: sessionUsageLimitsProducerEnabled(deps.settings),
         },
         eventTriggers: { enabled: eventTriggersEnabled(deps.settings) },
+        agentProfiles: { enabled: deps.settings.agentProfilesEnabled },
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -2394,6 +2396,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerVariableSetsRemovedRoutes(app);
   registerVaultRoutes(app, routeDeps);
   registerChannelRoutes(app, routeDeps);
+  registerAgentProfileRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerAutomationRoutes(app, routeDeps);
   registerPrReviewRoutes(app, routeDeps);
