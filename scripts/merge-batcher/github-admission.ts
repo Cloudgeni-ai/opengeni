@@ -1,6 +1,10 @@
 import { compareText, digest, SHA, type Pull } from "./model";
 import type { ReadyEvent, Admission } from "./evidence";
 
+// Exact companion to the reviewed App-only ruleset. This is a routing fence,
+// never a hosted test result; all actual CI requirements remain mandatory.
+export const appOnlyGuidanceContext = "merge-batcher: run gh pr merge --auto (or add queue-ready)";
+
 export interface RequiredCheck {
   context: string;
   integrationId?: number | null;
@@ -28,6 +32,7 @@ export interface GitHubAdmissionInput {
   events: ReadyEvent[];
   checks: HostedCheck[];
   required: RequiredCheck[];
+  expectedBatcherAppId?: number | undefined;
   reviewRequired: boolean;
   reviewDecision: string | null;
   unresolvedThreads: boolean;
@@ -57,6 +62,13 @@ export function admitGitHub(input: GitHubAdmissionInput): Admission {
   const required = [{ context: "PR CI", integrationId: 15368 }, ...input.required];
   const proofs: HostedCheck[] = [];
   for (const requirement of required) {
+    if (
+      requirement.context === appOnlyGuidanceContext &&
+      Number.isSafeInteger(input.expectedBatcherAppId) &&
+      input.expectedBatcherAppId! > 0 &&
+      requirement.integrationId === input.expectedBatcherAppId
+    )
+      continue;
     const candidates = input.checks.filter(
       (c) =>
         c.name === requirement.context &&
