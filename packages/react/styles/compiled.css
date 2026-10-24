@@ -1035,6 +1035,9 @@
 :where(.og-root).order-last,:where(.og-root) .order-last {
     order: 9999;
   }
+:where(.og-root).col-span-1,:where(.og-root) .col-span-1 {
+    grid-column: span 1 / span 1;
+  }
 :where(.og-root).col-span-2,:where(.og-root) .col-span-2 {
     grid-column: span 2 / span 2;
   }
@@ -1184,6 +1187,9 @@
   }
 :where(.og-root).mt-6,:where(.og-root) .mt-6 {
     margin-top: calc(var(--spacing) * 6);
+  }
+:where(.og-root).mt-7,:where(.og-root) .mt-7 {
+    margin-top: calc(var(--spacing) * 7);
   }
 :where(.og-root).mt-8,:where(.og-root) .mt-8 {
     margin-top: calc(var(--spacing) * 8);
@@ -9042,6 +9048,11 @@
       left: calc(var(--spacing) * 6);
     }
   }
+:where(.og-root).sm\:order-last,:where(.og-root) .sm\:order-last {
+    @media (width >= 40rem) {
+      order: 9999;
+    }
+  }
 :where(.og-root).sm\:col-span-1,:where(.og-root) .sm\:col-span-1 {
     @media (width >= 40rem) {
       grid-column: span 1 / span 1;
@@ -9170,6 +9181,11 @@
       max-width: var(--container-5xl);
     }
   }
+:where(.og-root).sm\:max-w-80,:where(.og-root) .sm\:max-w-80 {
+    @media (width >= 40rem) {
+      max-width: calc(var(--spacing) * 80);
+    }
+  }
 :where(.og-root).sm\:max-w-\[32rem\],:where(.og-root) .sm\:max-w-\[32rem\] {
     @media (width >= 40rem) {
       max-width: 32rem;
@@ -9285,6 +9301,11 @@
 :where(.og-root).sm\:grid-cols-\[auto_auto_minmax\(0\,1fr\)_auto\],:where(.og-root) .sm\:grid-cols-\[auto_auto_minmax\(0\,1fr\)_auto\] {
     @media (width >= 40rem) {
       grid-template-columns: auto auto minmax(0,1fr) auto;
+    }
+  }
+:where(.og-root).sm\:grid-cols-\[minmax\(0\,1\.2fr\)_9\.5rem_minmax\(0\,1fr\)_auto\],:where(.og-root) .sm\:grid-cols-\[minmax\(0\,1\.2fr\)_9\.5rem_minmax\(0\,1fr\)_auto\] {
+    @media (width >= 40rem) {
+      grid-template-columns: minmax(0,1.2fr) 9.5rem minmax(0,1fr) auto;
     }
   }
 :where(.og-root).sm\:grid-cols-\[minmax\(0\,1\.2fr\)_minmax\(0\,1fr\)_11rem\],:where(.og-root) .sm\:grid-cols-\[minmax\(0\,1\.2fr\)_minmax\(0\,1fr\)_11rem\] {
