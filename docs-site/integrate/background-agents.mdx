@@ -46,17 +46,58 @@ Each run uses that chat's own model and tools and runs as the schedule owner. Up
 
 ## From your product's events
 
-An automation turns a signed HTTP event into an agent session. With `OpenGeniAutomationsClient` from `@opengeni/sdk/automations`, create a **source** (a webhook endpoint and signing secret) and a **trigger** (which events start which session). Then post events:
+A scheduled task can also run when something happens: give it `events`, and each event that matches one of its triggers starts a run. Events come from an **event source**:
 
-```bash
-POST /v1/webhooks/automations/<endpoint id>
-x-opengeni-signature-256: sha256=<HMAC-SHA256 of the raw body>
-x-opengeni-delivery-id: <optional, for deduplication>
+| Source                                               | Events come from                                                                                                                      |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `{ kind: "mcp", serverId }`                          | An MCP connection whose server offers [MCP Events](https://modelcontextprotocol.io). Opengeni subscribes while an automation listens. |
+| `{ kind: "webhook", adapter: "standard" }`           | Your backend, signed with [Standard Webhooks](https://www.standardwebhooks.com). Opengeni generates the secret.                       |
+| `{ kind: "webhook", adapter: "linear" \| "sentry" }` | Linear or Sentry, with the URL and signing secret pasted in once.                                                                     |
+| `{ kind: "github" }`, `{ kind: "slack" }`            | The deployment's GitHub App or Slack bot, set up automatically.                                                                       |
+| `{ kind: "gmail" }`                                  | A person's Gmail connection, read while an automation listens.                                                                        |
 
-{ "type": "ticket.created", "id": "evt_123", "data": { "ticketId": "T-42" } }
+Event triggers are on when `clientConfig.eventTriggers.enabled` is true (`OPENGENI_EVENT_TRIGGERS_ENABLED` on the deployment).
+
+```ts
+const { source, signingSecret } = await og.createEventSource(workspaceId, {
+  kind: "webhook",
+  adapter: "standard",
+  name: "Acme",
+  visibility: "workspace",
+});
+// signingSecret is shown once: store it with your backend, which posts events to source.webhookUrl.
+
+await og.createScheduledTask(workspaceId, {
+  name: "Triage urgent tickets",
+  schedule: { type: "manual" }, // events only; a calendar schedule also works
+  runMode: "new_session_per_run",
+  agentConfig: { prompt: "Triage the ticket from the event and tag its owner." },
+  events: {
+    triggers: [
+      {
+        sourceId: source.id,
+        eventTypes: ["ticket.created"], // or "ticket.*"
+        conditions: [{ field: "data.priority", op: "in", value: ["high", "urgent"] }],
+      },
+    ],
+  },
+});
 ```
 
-Redelivered events are deduplicated. The agent treats event data as untrusted input. See the [automations reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/automations.md).
+Your backend sends `{ "type": "ticket.created", "timestamp": "…", "data": { … } }` with the `webhook-id`, `webhook-timestamp` and `webhook-signature` headers; any Standard Webhooks library signs it. Each run gets the events that started it. Redelivered events (same `webhook-id`) are ignored, and the agent treats event data as untrusted input.
+
+- `events.once: true` finishes the task after its first run, for "tell me when this happens".
+- `events.maxRunsPerHour` (default 30) holds back a burst; held events are batched into the next run, and the owner is told once.
+- Events made by Opengeni's own bots don't fire a trigger unless it sets `includeOwnEvents: true`.
+- `listEventDeliveries`, `replayEventDelivery` and `sendTestEvent` show what arrived, process a delivery again, and send a test event. `listEventSourceTypes` lists the event types a trigger can name.
+
+### Moving from the first automation API
+
+`@opengeni/sdk/automations`, `@opengeni/sdk/pr-review`, the `/v1/workspaces/:workspaceId/automations/*` and `/pr-review/*` routes, and `POST /v1/webhooks/automations/:endpointId` are deprecated. Their responses carry `Deprecation` and `Sunset` headers; they keep working until January 25, 2027 and are removed in the next major SDK.
+
+- A `signed-json.v1` source becomes a `{ kind: "webhook", adapter: "standard" }` event source. Senders sign with Standard Webhooks and the new secret instead of `x-opengeni-signature-256`.
+- A trigger becomes a scheduled task with `events`: its event types carry over, and its session template becomes the task's `agentConfig`.
+- Pull-request review becomes a scheduled task on the GitHub source, for `pull_request.opened` and `pull_request.ready_for_review`, with the repositories to review in `agentConfig.resources`. In the web app, **Automations › New › Review new pull requests** sets it up.
 
 ## Work until done
 

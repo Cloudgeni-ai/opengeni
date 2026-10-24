@@ -319,6 +319,24 @@ The `/v1/workspaces/:workspaceId/automations/*` routes, the
 are deprecated under the API compatibility policy and removed in the next SDK
 major. PR Review moves to an automation with a GitHub pull-request trigger.
 
+- **Deprecation.** Those routes and the PR Review management routes
+  (`/pr-review/registrations`, `/pr-review/repositories`, `/pr-review/github`)
+  are in `DEPRECATED_ROUTES`, deprecated on 2026-10-24 with a Sunset of
+  2027-01-25. `@opengeni/sdk/automations` and `@opengeni/sdk/pr-review` are
+  marked `@deprecated`. The old behaviour keeps working until removal.
+- **PR Review as an automation.** The "Review new pull requests" template
+  listens on the GitHub source for `pull_request.opened` and
+  `pull_request.ready_for_review`, skips drafts with a `data.pull_request.draft`
+  condition, and carries the review instructions as its message. A run opens
+  only the repositories added to the message, so the form says so when a
+  GitHub trigger has none. The run reviews and posts with the deployment's
+  GitHub App, like any chat with those repositories.
+- **Existing setups are not migrated.** They used the separate Opengeni Lens
+  App, so moving them would need the deployment's GitHub App installed on the
+  same repositories, which only the installer can do. Where event triggers are
+  on, Plugins offers the automation instead of a new Lens setup and still shows
+  an existing setup, with a notice, until it is retired.
+
 ## Delivery
 
 1. This design.

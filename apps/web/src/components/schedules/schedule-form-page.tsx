@@ -491,6 +491,16 @@ function AgentScheduleForm({
       ? templateById(mode.template, eventTriggers)?.event?.choice
       : undefined;
   const loadedSources = eventSources.sources;
+  // A GitHub event names a repository, but a run can only open the
+  // repositories its message carries.
+  const needsRepositories =
+    eventTriggers &&
+    !inheritsChatSettings &&
+    !draft.resources.some((resource) => resource.kind === "repository") &&
+    draft.events.triggers.some(
+      (trigger) =>
+        loadedSources?.find((source) => source.id === trigger.sourceId)?.kind === "github",
+    );
   useEffect(() => {
     if (!templateApp || !loadedSources) return;
     const match = loadedSources.find(
@@ -1427,6 +1437,12 @@ function AgentScheduleForm({
                 sourceLogo={sourceLogo}
                 onAddSource={() => go.newSource(templateApp)}
               />
+            ) : null}
+            {needsRepositories ? (
+              <p className="m-0 text-xs leading-4.5 text-fg-muted">
+                Runs can only open repositories added to the message. Add the ones this automation
+                works on.
+              </p>
             ) : null}
             {draft.cadence && draft.events.triggers.length > 0 && !errors.when ? (
               <p className="m-0 text-xs leading-4.5 text-fg-muted">

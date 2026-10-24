@@ -12,6 +12,7 @@ import {
   cadenceOfSchedule,
   createRequestFromDraft,
   deriveScheduleName,
+  draftFromTemplate,
   mergeSchedulePinnedAccounts,
   newScheduleDraft,
   nextRunOf,
@@ -19,9 +20,11 @@ import {
   scheduleErrorText,
   scheduleInheritsChatSettings,
   scheduleConnectionAccountIntent,
+  scheduleTemplates,
   scheduleWords,
   sortSchedulesForList,
   specFromCadence,
+  templateById,
   updateRequestFromDraft,
   type ScheduleDraft,
 } from "./schedule-model";
@@ -129,6 +132,39 @@ describe("schedule names", () => {
     );
     expect(long.length).toBeLessThanOrEqual(61);
     expect(long.endsWith("…")).toBe(true);
+  });
+});
+
+describe("schedule templates", () => {
+  test("event templates are offered only where event triggers run", () => {
+    expect(scheduleTemplates(false).some((template) => template.event)).toBe(false);
+    expect(templateById("pr-review", false)).toBeUndefined();
+    expect(templateById("pr-review", true)?.event?.choice).toBe("github");
+  });
+
+  test("the pull request review runs on events only and skips drafts until they are ready", () => {
+    const template = templateById("pr-review")!;
+    const draft = draftFromTemplate(template, { includeOpenGeniTool: false }, "Europe/Oslo");
+    expect(draft.cadence).toBeNull();
+    const sourceId = "00000000-0000-4000-8000-000000000001";
+    const request = createRequestFromDraft(
+      {
+        ...draft,
+        events: {
+          ...draft.events,
+          triggers: draft.events.triggers.map((trigger) => ({ ...trigger, sourceId })),
+        },
+      },
+      { now: NOW, learningScope: "personal" },
+    );
+    expect(request.schedule).toEqual({ type: "manual" });
+    expect("events" in request ? request.events?.triggers : undefined).toEqual([
+      expect.objectContaining({
+        sourceId,
+        eventTypes: ["pull_request.opened", "pull_request.ready_for_review"],
+        conditions: [{ field: "data.pull_request.draft", op: "equals", value: false }],
+      }),
+    ]);
   });
 });
 

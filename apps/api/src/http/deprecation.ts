@@ -31,7 +31,43 @@ export type RouteDeprecation = {
  * server-side half of a deprecation; the breaking change itself still needs an
  * entry in scripts/public-api-breaking-changes.json and a new major.
  */
-export const DEPRECATED_ROUTES: readonly RouteDeprecation[] = [];
+export const DEPRECATED_ROUTES: readonly RouteDeprecation[] = [
+  // The first automation API (sources, triggers, runs and its webhook) and
+  // PR Review, which was built on it. Automations are now scheduled tasks
+  // with event triggers on event sources; pull-request review is one of them.
+  ...(
+    [
+      ["GET", "/v1/workspaces/:workspaceId/automations/sources"],
+      ["POST", "/v1/workspaces/:workspaceId/automations/sources"],
+      ["PATCH", "/v1/workspaces/:workspaceId/automations/sources/:sourceId"],
+      ["DELETE", "/v1/workspaces/:workspaceId/automations/sources/:sourceId"],
+      ["POST", "/v1/workspaces/:workspaceId/automations/sources/:sourceId/events"],
+      ["GET", "/v1/workspaces/:workspaceId/automations/triggers"],
+      ["POST", "/v1/workspaces/:workspaceId/automations/triggers"],
+      ["PATCH", "/v1/workspaces/:workspaceId/automations/triggers/:triggerId"],
+      ["DELETE", "/v1/workspaces/:workspaceId/automations/triggers/:triggerId"],
+      ["GET", "/v1/workspaces/:workspaceId/automations/runs"],
+      ["POST", "/v1/webhooks/automations/:endpointId"],
+      ["GET", "/v1/workspaces/:workspaceId/pr-review/registrations"],
+      ["POST", "/v1/workspaces/:workspaceId/pr-review/registrations"],
+      ["PATCH", "/v1/workspaces/:workspaceId/pr-review/registrations/:registrationId"],
+      ["DELETE", "/v1/workspaces/:workspaceId/pr-review/registrations/:registrationId"],
+      ["POST", "/v1/workspaces/:workspaceId/pr-review/repositories"],
+      ["PATCH", "/v1/workspaces/:workspaceId/pr-review/repositories/:bindingId"],
+      ["DELETE", "/v1/workspaces/:workspaceId/pr-review/repositories/:bindingId"],
+      ["GET", "/v1/workspaces/:workspaceId/pr-review/github"],
+    ] as const
+  ).map(
+    ([method, path]): RouteDeprecation => ({
+      method,
+      path,
+      deprecatedAt: "2026-10-24T00:00:00Z",
+      sunset: "2027-01-25T00:00:00Z",
+      link: "https://docs.opengeni.ai/integrate/background-agents#moving-from-the-first-automation-api",
+      successor: "https://docs.opengeni.ai/integrate/background-agents#from-your-products-events",
+    }),
+  ),
+];
 
 const MINIMUM_NOTICE_MS = 90 * 24 * 60 * 60 * 1000;
 
