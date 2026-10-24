@@ -928,7 +928,7 @@ describe("scheduleAgentOpeningMessage", () => {
       "Europe/Oslo",
     );
     expect(message).toBe(
-      "Help me create a schedule in this workspace.\n\nEvery weekday morning, summarize new Sentry errors and post them to #eng\n\nMy time zone is Europe/Oslo.",
+      "Help me create an automation in this workspace.\n\nEvery weekday morning, summarize new Sentry errors and post them to #eng\n\nMy time zone is Europe/Oslo.",
     );
   });
 });

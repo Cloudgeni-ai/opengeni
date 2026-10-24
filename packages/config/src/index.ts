@@ -5908,12 +5908,21 @@ export type FirstPartyMcpToolPolicy = {
 
 export type FirstPartyMcpToolPolicySettings = Pick<
   Settings,
-  "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools" | "artifactMaterializerDeployed"
+  | "defaultFirstPartyMcpTools"
+  | "allowedFirstPartyMcpTools"
+  | "artifactMaterializerDeployed"
+  | "eventTriggersEnabled"
 >;
 
 const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "editable_artifact_export",
   "editable_artifact_export_status",
+];
+
+/** Tools that read event sources and events; they exist only where event triggers run. */
+const EVENT_TRIGGER_TOOLS: readonly FirstPartyMcpToolNameType[] = [
+  "event_sources_list",
+  "events_get",
 ];
 
 /**
@@ -5922,9 +5931,12 @@ const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
  * is dropped rather than rejected: it is a deployment fact, not a caller error.
  */
 export function deploymentUnavailableFirstPartyMcpTools(
-  settings: Pick<Settings, "artifactMaterializerDeployed">,
+  settings: Pick<Settings, "artifactMaterializerDeployed" | "eventTriggersEnabled">,
 ): ReadonlySet<FirstPartyMcpToolNameType> {
-  return new Set(settings.artifactMaterializerDeployed ? [] : EDITABLE_ARTIFACT_EXPORT_TOOLS);
+  return new Set([
+    ...(settings.artifactMaterializerDeployed ? [] : EDITABLE_ARTIFACT_EXPORT_TOOLS),
+    ...(settings.eventTriggersEnabled ? [] : EVENT_TRIGGER_TOOLS),
+  ]);
 }
 
 /** Resolve the deployment's session-tool defaults and hard execution ceiling. */

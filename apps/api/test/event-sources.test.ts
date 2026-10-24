@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, createHmac, randomBytes } from "node:crypto";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { ScheduledTask } from "@opengeni/contracts";
 import type { EventOccurrenceToStart } from "@opengeni/db";
-import { eventRouteSecret, signStandardWebhook, type SessionWorkflowClient } from "@opengeni/core";
+import {
+  eventRouteSecret,
+  signStandardWebhook,
+  type ApiRouteDeps,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
 import {
   bindAuthorizedGitHubInstallationRepositories,
   createConnection,
@@ -11,7 +19,10 @@ import {
   deleteGitHubInstallationBinding,
   encryptEnvironmentValue,
   ensureExternalIdentity,
+  eventOccurrenceProducerKey,
+  getScheduledTask,
   githubInstallationRouteKey,
+  markEventOccurrenceStarted,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -25,6 +36,7 @@ import {
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { dispatchDueEventTriggers } from "../src/event-trigger-dispatch";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { pumpDueEventSourceFeeds, pumpDueMcpEventSubscriptions } from "@opengeni/core";
 
 let shared: SharedTestDatabase;
@@ -98,7 +110,7 @@ async function fixture(options: {
       : {}),
   });
   const bus = new MemoryEventBus();
-  const app = createApp({
+  const dependencies = {
     db: db.db,
     bus,
     settings,
@@ -115,7 +127,8 @@ async function fixture(options: {
     managedAuth: null,
     ...(options.github ? { githubAppApi: options.github.api } : {}),
     ...(options.eventSourceFetch ? { eventSourceFetch: options.eventSourceFetch } : {}),
-  } as unknown as AppDependencies);
+  } as unknown as AppDependencies;
+  const app = createApp(dependencies);
   const source = "example:instance";
   const service = { authorization: `Bearer ${token}`, "content-type": "application/json" };
   const person = async (permissions: string[]) => {
@@ -185,6 +198,7 @@ async function fixture(options: {
     });
   return {
     app,
+    dependencies,
     bus,
     settings,
     workspace,
@@ -630,6 +644,220 @@ describe("event sources", () => {
     });
   });
 });
+
+describe("agent tools", () => {
+  type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+  async function agent(f: Fixture, subjectId: string, metadata: Record<string, unknown> = {}) {
+    const server = buildOpenGeniMcpServer(f.dependencies as unknown as ApiRouteDeps, {
+      accountId: f.workspace.accountId,
+      workspaceId: f.workspace.id,
+      subjectId,
+      permissions: ["scheduled_tasks:manage", "scheduled_tasks:run"],
+      metadata,
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "event-agent-tools-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const result = (await client.callTool({ name, arguments: args })) as {
+        isError?: boolean;
+        content: Array<{ text?: string }>;
+      };
+      const text = result.content.map((item) => item.text ?? "").join("\n");
+      if (result.isError) return { error: text };
+      return JSON.parse(text) as Record<string, any>;
+    };
+    return { client, call, close: () => Promise.all([client.close(), server.close()]) };
+  }
+
+  const separateAgent = {
+    runMode: "new_session_per_run",
+    agentConfig: { prompt: "Summarize the new order", resources: [], metadata: {} },
+  };
+
+  test("the tools and the events field exist only where event triggers run and the session selects them", async () => {
+    const on = await fixture({ enabled: true });
+    const cases = [
+      { f: await fixture({ enabled: false }), metadata: {}, enabled: false },
+      { f: on, metadata: {}, enabled: true },
+      {
+        f: on,
+        metadata: {
+          sessionId: crypto.randomUUID(),
+          firstPartyMcpTools: ["scheduled_tasks_create", "scheduled_tasks_update"],
+        },
+        enabled: false,
+      },
+    ];
+    for (const { f, metadata, enabled } of cases) {
+      const { client, close } = await agent(f, f.owner.subjectId, metadata);
+      const { tools } = await client.listTools();
+      const names = tools.map((tool) => tool.name);
+      const create = tools.find((tool) => tool.name === "scheduled_tasks_create")!;
+      const update = tools.find((tool) => tool.name === "scheduled_tasks_update")!;
+      expect(names.includes("event_sources_list")).toBe(enabled);
+      expect(names.includes("events_get")).toBe(enabled);
+      expect("events" in (create.inputSchema.properties ?? {})).toBe(enabled);
+      expect("events" in (update.inputSchema.properties ?? {})).toBe(enabled);
+      expect(create.inputSchema.required?.includes("schedule") ?? false).toBe(!enabled);
+      expect(create.description?.includes("event_sources_list")).toBe(enabled);
+      await close();
+    }
+  });
+
+  test("an agent finds a source, sets up a trigger without a schedule, and reads what a run carried", async () => {
+    const f = await fixture({ enabled: true });
+    const { source, signingSecret } = await f.json(
+      await f.app.request(f.sources, {
+        method: "POST",
+        headers: f.owner.headers,
+        body: JSON.stringify({ kind: "webhook", adapter: "standard", name: "Orders" }),
+      }),
+    );
+    expect(
+      (
+        await f.deliver(
+          source.webhookUrl,
+          signingSecret,
+          JSON.stringify({ type: "order.created", data: { id: "ord_0", total: 1 } }),
+        )
+      ).status,
+    ).toBe(200);
+    const owner = await agent(f, f.owner.subjectId);
+
+    expect(await owner.call("event_sources_list", {})).toEqual({
+      sources: [
+        {
+          id: source.id,
+          name: "Orders",
+          kind: "webhook",
+          adapter: "standard",
+          status: "active",
+          lastEventAt: expect.any(String),
+        },
+      ],
+    });
+    const described = await owner.call("event_sources_list", { sourceId: source.id });
+    expect(described.eventTypes.map((type: { type: string }) => type.type)).toEqual([
+      "order.created",
+    ]);
+
+    expect(
+      await owner.call("scheduled_tasks_create", { name: "Orders", ...separateAgent }),
+    ).toEqual({ error: expect.stringContaining("Add a schedule, or event triggers") });
+    const created = await owner.call("scheduled_tasks_create", {
+      name: "New orders",
+      ...separateAgent,
+      events: {
+        triggers: [
+          {
+            sourceId: source.id,
+            eventTypes: ["order.created"],
+            conditions: [{ field: "data.total", op: "exists" }],
+          },
+        ],
+      },
+    });
+    expect(created.outcome).toBe("created");
+    const taskId = created.resource.id as string;
+    const got = await owner.call("scheduled_tasks_get", { id: taskId });
+    expect(got.schedule).toEqual({ type: "manual" });
+    expect(got.events).toMatchObject({
+      once: false,
+      maxRunsPerHour: 30,
+      triggers: [
+        {
+          sourceId: source.id,
+          eventTypes: ["order.created"],
+          conditions: [{ field: "data.total", op: "exists" }],
+          includeOwnEvents: false,
+          status: "active",
+        },
+      ],
+    });
+
+    // Another member sees neither the private source nor its events.
+    const other = await agent(f, f.other.subjectId);
+    expect(await other.call("event_sources_list", {})).toMatchObject({ sources: [] });
+    expect(await other.call("event_sources_list", { sourceId: source.id })).toEqual({
+      error: expect.stringContaining("Event source not found"),
+    });
+
+    const body = JSON.stringify({
+      type: "order.created",
+      data: { id: "ord_1", total: 129, title: "Order 1" },
+    });
+    expect((await f.deliver(source.webhookUrl, signingSecret, body)).status).toBe(200);
+    const started: EventOccurrenceToStart[] = [];
+    await makeDue(f.workspace.id);
+    await dispatchDueEventTriggers({
+      db: db.db,
+      settings: f.settings,
+      bus: f.bus,
+      startRun: async (occurrence) => {
+        if (occurrence.taskId === taskId) started.push(occurrence);
+      },
+    });
+    expect(started).toHaveLength(1);
+    await markEventOccurrenceStarted(db.db, f.workspace.id, started[0]!.id);
+    const task = await getScheduledTask(db.db, f.workspace.id, taskId);
+    const run = await eventRun(task!, eventOccurrenceProducerKey(started[0]!.id));
+
+    const runs = await owner.call("scheduled_task_runs_list", { taskId });
+    expect(runs.runs[0].eventOccurrence).toEqual({
+      triggerIds: [got.events.triggers[0].id],
+      eventCount: 1,
+    });
+    const carried = await owner.call("events_get", { scheduledTaskRunId: run.id });
+    expect(carried).toMatchObject({
+      scheduledTaskRunId: run.id,
+      eventCount: 1,
+      events: [{ type: "order.created", subject: "ord_1", summary: "Order 1" }],
+    });
+    expect(carried.nextOffset).toBeUndefined();
+    const eventId = carried.events[0].id as string;
+    expect(await owner.call("events_get", { eventId })).toMatchObject({
+      event: { id: eventId, type: "order.created", data: { id: "ord_1", total: 129 } },
+    });
+    expect(await other.call("events_get", { eventId })).toEqual({
+      error: expect.stringContaining(`Event not found: ${eventId}`),
+    });
+    expect(await owner.call("events_get", {})).toEqual({
+      error: expect.stringContaining("Pass either eventId or scheduledTaskRunId"),
+    });
+
+    // events replaces every trigger; an empty list removes them.
+    const cleared = await owner.call("scheduled_tasks_update", {
+      id: taskId,
+      events: { triggers: [] },
+    });
+    expect(cleared.outcome).toBe("updated");
+    expect((await owner.call("scheduled_tasks_get", { id: taskId })).events).toBeUndefined();
+    await Promise.all([owner.close(), other.close()]);
+  });
+});
+
+/**
+ * A finished run for an occurrence. Only its link to the occurrence matters
+ * here, so it skips the admission the worker goes through.
+ */
+async function eventRun(task: ScheduledTask, producerKey: string) {
+  return await shared.admin.begin(async (sql) => {
+    await sql`set local session_replication_role = replica`;
+    const [run] = await sql<{ id: string }[]>`
+      insert into scheduled_task_runs (
+        id, account_id, workspace_id, task_id, task_authority_revision, task_execution_digest,
+        trigger_type, producer_key, fired_at, status, action_kind, completed_at
+      ) values (
+        ${crypto.randomUUID()}, ${task.accountId}, ${task.workspaceId}, ${task.id},
+        ${task.authorityRevision}, ${task.executionDigest}, 'event', ${producerKey}, now(),
+        'succeeded', 'agent_turn', now()
+      ) returning id`;
+    return run!;
+  });
+}
 
 const TICKET_CREATED: FakeMcpEventType = {
   name: "ticket.created",

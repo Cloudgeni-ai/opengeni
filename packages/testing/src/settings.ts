@@ -165,12 +165,12 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     usageLimitsMode: "none",
     usageAllowancesEnabled: false,
     sessionUsageLimitsEnabled: false,
-    eventTriggersEnabled: false,
     staticEntitlementsJson: "{}",
     staticUsageLimitsJson: "{}",
     delegationSecret: "test-delegation-secret",
-    // Tests model a complete deployment; the production default is false.
+    // Tests model a complete deployment; the production defaults are false.
     artifactMaterializerDeployed: true,
+    eventTriggersEnabled: true,
     streamTokenSecret: undefined,
     streamControlEnabled: false,
     workDiscoveryEnabled: true,

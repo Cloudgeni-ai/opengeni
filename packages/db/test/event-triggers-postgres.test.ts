@@ -19,6 +19,7 @@ import {
   eventOccurrenceProducerKey,
   findAppEventSource,
   getEventOccurrenceForRun,
+  getEventRunOccurrence,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTask,
   getScheduledTaskEvents,
@@ -498,6 +499,12 @@ describe("dispatch", () => {
       eventRun.id,
     ]);
     expect(carried.get(eventRun.id)?.events.map((summary) => summary.type)).toEqual(["a", "b"]);
+    expect(await getEventRunOccurrence(client.db, space.workspaceId, eventRun.id)).toMatchObject({
+      taskId: automation.id,
+      occurrence: { eventCount: 2, events: [{ type: "a" }, { type: "b" }] },
+    });
+    const clockRun = await run(automation, "scheduled", `scheduled-${crypto.randomUUID()}`);
+    expect(await getEventRunOccurrence(client.db, space.workspaceId, clockRun.id)).toBeNull();
   });
 
   test("a failed start is retried later", async () => {

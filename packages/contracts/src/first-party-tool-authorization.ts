@@ -237,6 +237,12 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   scheduled_task_runs_list: {
     anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
   },
+  event_sources_list: {
+    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
+  },
+  events_get: {
+    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
+  },
   slack_bot_list_channels: { allOf: ["connections:read"] },
   slack_bot_search: { allOf: ["connections:read"] },
   slack_bot_channel_history: { allOf: ["connections:read"] },
