@@ -137,6 +137,15 @@ describe("Meeting page", () => {
       expect(text).toContain("Speaker 2");
       expect(text).toContain("Version 1");
       expect(text).toContain("4 speakers");
+      // Speakers still to name sit at the top of the transcript, and each
+      // unnamed turn says it can be named.
+      const review = view.container.querySelector('[aria-label="Speakers to review"]');
+      expect(review?.textContent).toContain("Speaker 2");
+      expect(review?.textContent).not.toContain("Tomas Eriksen");
+      expect(text).toContain("Who spoke? 1 speaker to name, 1 name to confirm.");
+      expect(
+        view.container.querySelectorAll('ol [aria-label="Speaker 2, name this speaker"]').length,
+      ).toBeGreaterThan(0);
       // The owner controls who can see it.
       expect(view.container.querySelector('[aria-label^="Who can see this"]')).not.toBeNull();
     } finally {
@@ -169,6 +178,7 @@ describe("Meeting page", () => {
       const after = view.container.textContent ?? "";
       expect(after).not.toContain("Suggested from their voice");
       expect(after).toContain("Speaker 3");
+      expect(after).toContain("Who spoke? 2 speakers have no name yet.");
     } finally {
       await view.unmount();
     }
