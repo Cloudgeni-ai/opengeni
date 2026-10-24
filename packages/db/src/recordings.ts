@@ -78,6 +78,16 @@ function trackView(row: TrackRow): RecordingTrack {
     totalBytes: Number(row.totalBytes),
     durationMilliseconds: row.durationMilliseconds,
     playable: row.preparedObjectKey !== null,
+    live:
+      row.liveProviderId !== null && row.liveModel !== null
+        ? {
+            providerId: row.liveProviderId,
+            model: row.liveModel,
+            streamedMilliseconds: row.liveStreamedMilliseconds,
+            costUsd:
+              row.liveCostUsdMicros === null ? null : Number(row.liveCostUsdMicros) / 1_000_000,
+          }
+        : null,
   };
 }
 
@@ -1534,6 +1544,15 @@ export async function completeRecordingTranscriptVersion(
     if (assignments.size > 0) {
       await tx.insert(schema.recordingSpeakerAssignments).values([...assignments.values()]);
     }
+    // The live preview has done its job once a transcript is ready.
+    await tx
+      .delete(schema.recordingLiveSegments)
+      .where(
+        and(
+          eq(schema.recordingLiveSegments.workspaceId, input.workspaceId),
+          eq(schema.recordingLiveSegments.recordingId, recording.id),
+        ),
+      );
     const [ready] = await tx
       .update(schema.recordings)
       .set({

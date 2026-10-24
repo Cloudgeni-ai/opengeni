@@ -5,7 +5,7 @@
  * clock, a level meter per track, Pause and Stop, and where the audio is (on
  * this device, uploading, or waiting for the connection).
  */
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { CircleIcon, MicIcon, PauseIcon, PlayIcon, SquareIcon } from "lucide-react";
 
 import { Button } from "@opengeni/react/ui/button";
@@ -16,6 +16,7 @@ import { cn } from "@opengeni/react/app/lib/utils";
 
 import { formatClock } from "@opengeni/react/recordings";
 import type { MeetingRecorder } from "./recorder-context";
+import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
 
 type RecorderError = NonNullable<MeetingRecorder["error"]>;
 
@@ -181,23 +182,74 @@ function trackLabel(source: string, systemAudioKind: MeetingRecorder["systemAudi
   return "Audio";
 }
 
+/** Who a track's live text is from, named like its level meter. */
+export function liveSpeakerName(
+  recorder: Pick<MeetingRecorder, "tracks" | "systemAudioKind">,
+  trackNumber: number,
+): string {
+  const source = recorder.tracks.find((track) => track.trackNumber === trackNumber)?.source;
+  // The level meters' names: a microphone may pick up a whole room, so not "You".
+  return trackLabel(source ?? "", recorder.systemAudioKind);
+}
+
+/** The live text the recorder has heard, as lines for {@link LiveTranscript}. */
+export function recorderLiveLines(recorder: Pick<MeetingRecorder, "live">): LiveTranscriptLine[] {
+  return (recorder.live ?? []).flatMap((track) => track.segments);
+}
+
+function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
+  const live = recorder.live;
+  const lines = useMemo(() => recorderLiveLines({ live }), [live]);
+  if (!live || live.length === 0) return null;
+  const status = liveStatus(live);
+  if (lines.length === 0 && live.every((track) => track.state === "unavailable")) {
+    // Nothing to read, so no empty box: one line says it and that nothing is lost.
+    return (
+      <p className="mt-3 text-xs leading-4.5 text-fg-muted" aria-live="polite">
+        Live text isn't available right now. The meeting is still recorded and transcribed after you
+        stop.
+      </p>
+    );
+  }
+  return (
+    <LiveTranscript
+      className="mt-4 border-t border-border pt-4"
+      lines={lines}
+      partials={live.map((track) => ({ trackNumber: track.trackNumber, text: track.partial }))}
+      speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber)}
+      status={status}
+      empty={
+        recorder.state === "paused"
+          ? "Paused. Nothing is heard until you resume."
+          : "Listening. What's said shows up here within a few seconds."
+      }
+    />
+  );
+}
+
 export function RecorderPanel({
   recorder,
   onStopped,
+  liveTranscript = null,
 }: {
   /** Null while the capture code loads. */
   recorder: MeetingRecorder | null;
   /** After Stop, with the recording to open. */
   onStopped?: ((recordingId: string) => void) | undefined;
+  /** Offer the live transcript preview; null when the workspace has no live model. */
+  liveTranscript?: { defaultOn: boolean } | null;
 }) {
   const titleId = useId();
   const tabAudioId = useId();
+  const liveId = useId();
   const [title, setTitle] = useState("");
   const desktopAudio = recorder?.systemAudioKind === "desktop";
   // In the desktop app computer audio is on unless turned off; a browser's
   // share prompt is something to opt into.
   const [tabAudioChoice, setTabAudio] = useState<boolean | null>(null);
   const tabAudio = tabAudioChoice ?? desktopAudio;
+  const [liveChoice, setLiveChoice] = useState<boolean | null>(null);
+  const liveOn = liveTranscript ? (liveChoice ?? liveTranscript.defaultOn) : false;
   const [errorDismissed, setErrorDismissed] = useState(false);
   const online = useOnline();
   const state = recorder?.state ?? "idle";
@@ -306,6 +358,7 @@ export function RecorderPanel({
             {line}
           </p>
         ) : null}
+        <RecorderLiveTranscript recorder={recorder} />
       </section>
     );
   }
@@ -318,6 +371,7 @@ export function RecorderPanel({
     await recorder.start({
       ...(title.trim() ? { title: title.trim() } : {}),
       systemAudio: tabAudio,
+      ...(liveOn ? { liveTranscript: true } : {}),
     });
   };
   return (
@@ -359,6 +413,21 @@ export function RecorderPanel({
               onCheckedChange={setTabAudio}
             />
             {desktopAudio ? "Include computer audio" : "Include a tab's audio"}
+          </label>
+        ) : null}
+        {liveTranscript ? (
+          <label
+            htmlFor={liveId}
+            className="flex shrink-0 cursor-pointer items-center gap-2 text-sm leading-5 text-fg-label select-none pointer-coarse:min-h-11 max-sm:self-start"
+            title="Shows what's said as it's said. The final transcript still comes after you stop."
+          >
+            <Checkbox
+              id={liveId}
+              checked={liveOn}
+              disabled={starting}
+              onCheckedChange={setLiveChoice}
+            />
+            Live transcript
           </label>
         ) : null}
         <Button

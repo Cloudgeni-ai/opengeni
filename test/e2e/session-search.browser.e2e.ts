@@ -1407,7 +1407,7 @@ function commandMenu(page: Page): Locator {
 
 async function expectCommandMenuFocused(page: Page): Promise<void> {
   const input = commandMenu(page).getByRole("combobox", {
-    name: "Search chats and actions",
+    name: "Search chats, Sites and actions",
     exact: true,
   });
   await input.waitFor();

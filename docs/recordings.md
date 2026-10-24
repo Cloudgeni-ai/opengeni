@@ -77,6 +77,49 @@ segment to another speaker and text edits), `useRecordingPeople` and
 `recordings` client such as a host proxy that implements only the methods the
 mounted hooks call.
 
+## Live transcript preview
+
+While a meeting is recorded, each track can also be streamed to a live speech
+model, so the person recording (and anyone watching the meeting from another
+device) can read along. It is a preview: it has no speakers told apart beyond
+the tracks, and the recording's transcript replaces it when it is ready. The
+recording itself never depends on it; if the preview can't start or drops,
+capture and upload carry on unchanged.
+
+`settings.recordings.liveTranscript: true` turns it on by default for the
+workspace's recorders; the person recording can still turn it off. It needs a
+model with the `live` capability (`GET …/recording-models` lists them; today
+ElevenLabs Scribe v2 Realtime at $0.39 an hour of streamed audio, billed by
+the provider on top of the transcript itself).
+
+The audio goes straight from the device to the provider, never through
+Opengeni, and the workspace's provider key never reaches the device:
+
+1. `POST …/recordings/:id/live-session` with `{ trackNumber }` returns a
+   short-lived grant for one track: a `url` holding a single-use token, the
+   `protocol` (`elevenlabs.scribe_realtime`), the audio format to send
+   (16-bit mono PCM at `audio.sampleRate`) and `expiresAt`. Only the person
+   recording can ask, and only while the recording is `capturing`. It answers
+   409 `credential_unavailable` when the workspace has no key for the model.
+2. The device opens the WebSocket and sends audio in tenths of a second. A
+   dropped connection asks for a new grant; up to 15 seconds of audio is held
+   meanwhile and sent once it is back.
+3. Finished stretches of text are saved with `POST …/live-segments`
+   (`{ trackNumber, streamedMilliseconds, segments }`, at most 100 per call).
+   A segment number sent again keeps its first copy, and the streamed time
+   (only ever raised) prices the track's `live.costUsd`.
+4. Other viewers read them with `GET …/live-segments?after=<sequence>`, which
+   returns the new segments, the `after` to pass next time, and `ended` once
+   the transcript is ready. The saved live text is deleted then.
+
+`createBrowserRecorder({ liveTranscript: true })` and
+`useRecorder({ liveTranscript: true })` do all of this and expose the text as
+it arrives in `snapshot.live`: per track, its `state` (`connecting`, `live`,
+`reconnecting`, `unavailable` or `closed`), the finished `segments` and the
+`partial` words still being heard. `createLiveTranscriber` is the same engine
+for any other capture source: push 16-bit PCM to it. `useLiveTranscript`
+follows a recording from another device.
+
 ## Processing
 
 All processing runs in the background worker. It joins each track's chunks

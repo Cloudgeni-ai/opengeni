@@ -36,6 +36,8 @@ class Fixture implements CuaDesktopRuntime {
   applyLabel = "Apply";
   fieldLabel = "Password";
   title = "Fixture";
+  /** The name of the window element the reading carries, when it has one. */
+  windowName?: string;
   mutation = result({ effect: "confirmed", route: "accessibility" });
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     const args = JSON.parse(argumentsJson) as Record<string, unknown>;
@@ -88,6 +90,9 @@ class Fixture implements CuaDesktopRuntime {
               value: "must-not-leak",
               actions: [],
             },
+            ...(this.windowName === undefined
+              ? []
+              : [{ element_index: 2, role: "AXWindow", label: this.windowName, actions: [] }]),
           ],
         });
       }
@@ -846,6 +851,39 @@ describe("CUA desktop boundary", () => {
       await expect(backend.dispatch(command(observation))).rejects.toMatchObject({
         code: "target_stale",
       });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("refs carry over between readings of the document a window shows, even when its listed title is stale", async () => {
+    const fixture = new Fixture();
+    fixture.windowName = "Billing - Northwind Admin";
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const billing = await backend.observe(target.id);
+      // An action opened another page: the window still lists the old title
+      // until the windows are listed again, but the reading shows the new one.
+      fixture.windowName = "Accounts - Northwind Admin";
+      const opened = await backend.observe(target.id);
+      expect(opened.roots[0]!.ref).not.toBe(billing.roots[0]!.ref);
+      fixture.title = "Accounts - Northwind Admin";
+      await backend.targets();
+      const relisted = await backend.observe(target.id);
+      expect(relisted.roots[0]!.ref).toBe(opened.roots[0]!.ref);
+      const latest = fixture.snapshot;
+      await backend.dispatch({
+        ...command(relisted),
+        action: {
+          type: "semantic",
+          locator: { kind: "ref", ref: opened.roots[0]!.ref },
+          action: "invoke",
+        },
+      });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
+      ).toMatchObject({ element_token: `s${latest}:0` });
     } finally {
       await backend.close();
     }

@@ -16,8 +16,10 @@
  *   such a recorder to the React hooks.
  */
 import type {
+  AppendRecordingLiveSegmentsRequest,
   CompleteRecordingChunksRequest,
   CompleteRecordingChunksResponse,
+  CreateRecordingLiveSessionRequest,
   CreateRecordingPersonRequest,
   CreateRecordingRequest,
   CreateRecordingTranscriptRequest,
@@ -26,10 +28,12 @@ import type {
   FinalizeRecordingRequest,
   FinalizeRecordingResponse,
   ListRecordingModelsResponse,
+  ListRecordingLiveSegmentsResponse,
   ListRecordingPeopleResponse,
   ListRecordingsResponse,
   ListRecordingTranscriptVersionsResponse,
   Recording,
+  RecordingLiveSession,
   RecordingPerson,
   RecordingTrackAudio,
   RecordingTrackSource,
@@ -46,6 +50,15 @@ import type {
 } from "@opengeni/contracts";
 import type { OpenGeniClient } from "./client";
 import { type DesktopBridge, getDesktopBridge } from "./desktop-bridge";
+import {
+  createLiveTranscriber,
+  type LiveTranscriber,
+  type LiveTranscriptTrackSnapshot,
+  type LiveTranscriptTransport,
+  type LiveWebSocketConstructor,
+} from "./recording-live";
+
+export * from "./recording-live";
 
 /** What {@link OpenGeniRecordingsClient} needs from the core client. */
 export type OpenGeniRecordingsTransport = Pick<OpenGeniClient, "requestJson">;
@@ -341,9 +354,55 @@ export class OpenGeniRecordingsClient {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recording-models`,
     );
   }
+
+  /**
+   * A grant to stream one track of a recording being captured to a live
+   * model, for the live transcript preview. Only the person recording may.
+   */
+  async createRecordingLiveSession(
+    workspaceId: string,
+    recordingId: string,
+    request: CreateRecordingLiveSessionRequest,
+  ): Promise<RecordingLiveSession> {
+    return await this.client.requestJson<RecordingLiveSession>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/${encodeURIComponent(recordingId)}/live-session`,
+      request,
+    );
+  }
+
+  /** Save finished live text for one track; a segment number sent again keeps its first copy. */
+  async appendRecordingLiveSegments(
+    workspaceId: string,
+    recordingId: string,
+    request: AppendRecordingLiveSegmentsRequest,
+  ): Promise<{ saved: number; ended: boolean }> {
+    return await this.client.requestJson<{ saved: number; ended: boolean }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/${encodeURIComponent(recordingId)}/live-segments`,
+      request,
+    );
+  }
+
+  /** Live text saved after `after` (a sequence number), oldest first. */
+  async listRecordingLiveSegments(
+    workspaceId: string,
+    recordingId: string,
+    options: { after?: number } = {},
+  ): Promise<ListRecordingLiveSegmentsResponse> {
+    return await this.client.requestJson<ListRecordingLiveSegmentsResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/${encodeURIComponent(recordingId)}/live-segments`,
+      undefined,
+      options.after ? { after: String(options.after) } : {},
+    );
+  }
 }
 
-/** The client calls a recorder needs. An {@link OpenGeniRecordingsClient} satisfies it. */
+/**
+ * The client calls a recorder needs. An {@link OpenGeniRecordingsClient}
+ * satisfies it; the live calls are needed only for `liveTranscript`.
+ */
 export type RecordingTransport = Pick<
   OpenGeniRecordingsClient,
   | "createRecording"
@@ -351,7 +410,8 @@ export type RecordingTransport = Pick<
   | "completeRecordingChunks"
   | "finalizeRecording"
   | "deleteRecording"
->;
+> &
+  Partial<LiveTranscriptTransport>;
 
 /** One encoded piece of one track, as captured. */
 export type RecordingChunk = {
@@ -1223,6 +1283,11 @@ export type RecorderSnapshot = {
   }>;
   upload: RecordingUploadStatus | null;
   error: { code: RecorderErrorCode; message: string } | null;
+  /**
+   * The live transcript per track while `liveTranscript` is on, else null
+   * or absent. A preview only; it never affects the recording.
+   */
+  live?: readonly LiveTranscriptTrackSnapshot[] | null;
 };
 
 export type RecorderErrorCode =
@@ -1262,6 +1327,14 @@ export type RecorderOptions = {
   timesliceMilliseconds?: number;
   /** Keep the screen awake while recording on phones. Default: on. */
   keepAwake?: boolean;
+  /**
+   * Also stream each track to the workspace's live speech model and show
+   * what is said in `snapshot.live` as it is said. The provider bills the
+   * streamed audio. Needs the client's live calls. Default: off.
+   */
+  liveTranscript?: boolean;
+  /** The WebSocket the live transcript connects with. Defaults to the global one. */
+  liveWebSocket?: LiveWebSocketConstructor;
   onChange?: (snapshot: RecorderSnapshot) => void;
 };
 
@@ -1520,7 +1593,49 @@ type TrackCapture = {
   nextChunk: number;
   chunkStartedAt: number;
   writes: Promise<void>;
+  /** The live transcript of this track, while `liveTranscript` is on. */
+  live?: LiveTranscriber;
+  pcm?: AudioWorkletNode;
 };
+
+/**
+ * An audio worklet that hands the main thread a tenth of a second of 16-bit
+ * mono PCM at a time, for the live transcript.
+ */
+const LIVE_PCM_WORKLET = `
+class OpenGeniLivePcm extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.size = Math.round(sampleRate / 10);
+    this.buffer = new Int16Array(this.size);
+    this.filled = 0;
+  }
+  process(inputs) {
+    const channels = inputs[0];
+    if (!channels || channels.length === 0) return true;
+    const length = channels[0].length;
+    for (let index = 0; index < length; index++) {
+      let sample = 0;
+      for (const channel of channels) sample += channel[index];
+      sample = Math.max(-1, Math.min(1, sample / channels.length));
+      this.buffer[this.filled++] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      if (this.filled === this.size) {
+        this.port.postMessage(this.buffer, [this.buffer.buffer]);
+        this.buffer = new Int16Array(this.size);
+        this.filled = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("opengeni-live-pcm", OpenGeniLivePcm);
+`;
+
+function liveTransport(client: RecordingTransport): LiveTranscriptTransport | null {
+  return client.createRecordingLiveSession && client.appendRecordingLiveSegments
+    ? (client as LiveTranscriptTransport)
+    : null;
+}
 
 /**
  * Record the microphone and, optionally, shared tab or system audio in the
@@ -1584,7 +1699,71 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
     emit({ state: "failed", error: { code, message } });
   };
 
+  const liveSnapshot = () =>
+    captures.flatMap((capture) => (capture.live ? [capture.live.snapshot] : []));
+
+  /** Tap each track's audio for the live transcript. Recording never waits on it. */
+  const startLive = async (recordingId: string) => {
+    const transport = liveTransport(options.client);
+    if (!options.liveTranscript || !transport) return;
+    for (const capture of captures) {
+      capture.live = createLiveTranscriber({
+        client: transport,
+        workspaceId: options.workspaceId,
+        recordingId,
+        trackNumber: capture.trackNumber,
+        ...(options.liveWebSocket ? { WebSocket: options.liveWebSocket } : {}),
+        onChange: () => emit({ live: liveSnapshot() }),
+      });
+    }
+    emit({ live: liveSnapshot() });
+    const context = audioContext;
+    if (!context?.audioWorklet || typeof AudioWorkletNode === "undefined") {
+      for (const capture of captures) capture.live?.abort();
+      emit({ live: null });
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([LIVE_PCM_WORKLET], { type: "text/javascript" }));
+    try {
+      await context.audioWorklet.addModule(url);
+    } catch {
+      for (const capture of captures) capture.live?.abort();
+      emit({ live: null });
+      return;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    if (context !== audioContext) return;
+    if (context.state === "suspended") void context.resume().catch(() => undefined);
+    for (const capture of captures) {
+      const live = capture.live;
+      if (!live) continue;
+      const node = new AudioWorkletNode(context, "opengeni-live-pcm");
+      node.port.onmessage = (event: MessageEvent<Int16Array>) => {
+        // Paused audio is not recorded, so it is not transcribed either.
+        if (snapshot.state !== "recording") return;
+        const samples = event.data;
+        const at = elapsed() - (samples.length / context.sampleRate) * 1_000;
+        live.push(samples, context.sampleRate, Math.max(0, at));
+      };
+      context.createMediaStreamSource(capture.stream).connect(node);
+      // A node nobody listens to may not run; its output is silence.
+      node.connect(context.destination);
+      capture.pcm = node;
+    }
+  };
+
+  const stopLiveTaps = () => {
+    for (const capture of captures) {
+      if (!capture.pcm) continue;
+      capture.pcm.port.onmessage = null;
+      capture.pcm.disconnect();
+      delete capture.pcm;
+    }
+  };
+
   const cleanupMedia = () => {
+    stopLiveTaps();
     for (const capture of captures) {
       for (const track of capture.stream.getTracks()) track.stop();
       capture.release?.();
@@ -1704,6 +1883,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         error: null,
         upload: null,
         elapsedMilliseconds: 0,
+        live: null,
       });
       let streams: Awaited<ReturnType<typeof openStreams>>;
       try {
@@ -1805,6 +1985,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           label,
         })),
       });
+      void startLive(recordingId).catch(() => undefined);
     },
 
     pause() {
@@ -1847,6 +2028,9 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         ),
       );
       await Promise.all(captures.map((capture) => capture.writes));
+      // The live transcript finishes its last words while the upload completes.
+      stopLiveTaps();
+      const liveClosed = Promise.all(captures.map((capture) => capture.live?.close()));
       cleanupMedia();
       lock?.release();
       lock = null;
@@ -1854,6 +2038,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         ...stopOptions,
         endedAt: new Date(),
       });
+      await liveClosed.catch(() => undefined);
       emit({
         state: status.failed ? "failed" : "stopped",
         upload: status,
@@ -1874,6 +2059,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       for (const capture of captures) {
         capture.recorder.ondataavailable = null;
         if (capture.recorder.state !== "inactive") capture.recorder.stop();
+        capture.live?.abort();
       }
       cleanupMedia();
       lock?.release();
@@ -1885,6 +2071,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         elapsedMilliseconds: 0,
         tracks: [],
         upload: null,
+        live: null,
       });
     },
 

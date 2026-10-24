@@ -6,8 +6,10 @@
 // output tokens dominate a step's model latency. The remembered window lives
 // for one turn attempt. A call that omits computerSessionId before any
 // computer call in that attempt uses this session's most recently used live
-// ComputerSession; a computer has no selected window, so omitting targetId
-// then needs a window this attempt has already used.
+// ComputerSession, and one that omits targetId before this attempt used a
+// window of that computer uses the window the computer was last observed or
+// acted on in (its current target), so a later turn keeps working where the
+// one before left off.
 
 export class ComputerTargetResolutionError extends Error {
   constructor(
@@ -22,6 +24,9 @@ export class ComputerTargetResolutionError extends Error {
 export type CurrentComputerWindowDeps = {
   /** This agent session's most recently used live ComputerSession, if any. */
   latestLiveSession: () => Promise<string | null>;
+  /** The window this computer was last observed or acted on in, if it is
+   * still there. */
+  currentTarget: (computerSessionId: string) => Promise<string | null>;
 };
 
 export type ResolvedComputerSession = {
@@ -95,9 +100,11 @@ export class CurrentComputerWindow {
     if (this.current?.computerSessionId === session.computerSessionId && this.current.targetId) {
       return { ...session, targetId: this.current.targetId, implicitTarget: true };
     }
+    const current = await this.deps.currentTarget(session.computerSessionId);
+    if (current) return { ...session, targetId: current, implicitTarget: true };
     throw new ComputerTargetResolutionError(
       "computer_target_required",
-      "No window of this computer has been used yet in this turn. Pass targetId from computer_open or computer_targets.",
+      "No window of this computer has been used yet. Pass targetId from computer_open or computer_targets.",
     );
   }
 }

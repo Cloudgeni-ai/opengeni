@@ -213,3 +213,68 @@ describe("Recorder errors", () => {
     });
   });
 });
+
+describe("Live transcript", () => {
+  test("a meeting recorded elsewhere shows the saved live text as a preview", async () => {
+    const { LIVE_RECORDING_ID } = await import("../../dev/ui-kit/pages/meetings/fixture");
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={LIVE_RECORDING_ID}
+        viewerSubjectId="user:someone-else"
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Let's keep this one short.");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Not finished yet");
+      expect(text).toContain("In progress");
+      expect(text).toContain("this page updates by itself");
+      // Someone else's microphone isn't "You".
+      expect(text).toContain("Microphone");
+      expect(text).not.toContain("You0:04");
+      expect(view.container.querySelector('[role="log"]')).not.toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the recorder offers live text when the workspace has a live model", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        liveTranscriptDefault
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Live transcript");
+      const box = [
+        ...view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+      ].find((element) => element.closest("label")?.textContent?.includes("Live transcript"));
+      expect(box?.checked).toBe(true);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("turns from one track read as one turn, in time order", async () => {
+    const { groupLiveTurns } = await import("./live-transcript");
+    const turns = groupLiveTurns([
+      { trackNumber: 1, startMilliseconds: 9_000, text: "Morning." },
+      { trackNumber: 0, startMilliseconds: 4_000, text: "Hi all." },
+      { trackNumber: 1, startMilliseconds: 12_000, text: "Release went out." },
+      { trackNumber: 1, startMilliseconds: 14_000, text: "  " },
+    ]);
+    expect(turns.map((turn) => [turn.trackNumber, turn.texts.join(" ")])).toEqual([
+      [0, "Hi all."],
+      [1, "Morning. Release went out."],
+    ]);
+  });
+});

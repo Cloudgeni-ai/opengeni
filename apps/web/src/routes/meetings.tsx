@@ -17,10 +17,15 @@ function meetingPath(workspaceId: string, recordingId: string): string {
 
 export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
+  const { workspaces } = useAppContext();
+  const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+  const liveTranscript =
+    resolveWorkspaceRecordingSettings(workspace?.settings).liveTranscript === true;
   return (
     <ContentPage width="standard" className="pt-6">
       <MeetingsListPage
         workspaceId={workspaceId}
+        liveTranscriptDefault={liveTranscript}
         meetingHref={(recordingId) => meetingPath(workspaceId, recordingId)}
         onOpen={(recordingId) =>
           void navigate({

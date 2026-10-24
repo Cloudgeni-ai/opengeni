@@ -12,15 +12,46 @@ import type { WorkspaceRecordingSettings } from "@opengeni/contracts";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 
 import { KitBlock, KitCanvas, KitSection } from "../kit";
-import { createMeetingsFixture } from "../pages/meetings/fixture";
+import { createMeetingsFixture, LIVE_LINES, LIVE_RECORDING_ID } from "../pages/meetings/fixture";
 
 type View = "list" | "meeting" | "settings";
 type RecorderMode = "idle" | "recording" | "paused" | "offline" | "denied";
+type LivePreview = "off" | "on" | "reconnecting" | "unavailable";
+
+/** The live preview as the recorder holds it: four lines heard, one still being heard. */
+function fakeLive(preview: LivePreview): MeetingRecorder["live"] {
+  if (preview === "off") return null;
+  const heard = preview === "unavailable" ? [] : LIVE_LINES.slice(0, 4);
+  return [0, 1].map((trackNumber) => ({
+    trackNumber,
+    state:
+      preview === "unavailable"
+        ? "unavailable"
+        : preview === "reconnecting" && trackNumber === 1
+          ? "reconnecting"
+          : "live",
+    partial: preview === "on" && trackNumber === 1 ? "Only the review on the schema" : "",
+    segments: heard
+      .map(([track, seconds, text], index) => ({
+        trackNumber: track,
+        segmentNumber: index,
+        startMilliseconds: seconds * 1000,
+        endMilliseconds: seconds * 1000 + 3500,
+        text,
+      }))
+      .filter((segment) => segment.trackNumber === trackNumber),
+    error:
+      preview === "unavailable"
+        ? { code: "credential_unavailable", message: "No speech provider key" }
+        : null,
+  }));
+}
 
 function fakeRecorder(
   mode: RecorderMode,
   startedAt: number,
   audio: "desktop" | "display",
+  preview: LivePreview = "off",
 ): MeetingRecorder {
   const live = mode === "recording" || mode === "paused" || mode === "offline";
   return {
@@ -61,6 +92,7 @@ function fakeRecorder(
         }
       : null,
     error: mode === "denied" ? { code: "microphone_denied", message: "Permission denied" } : null,
+    live: live ? fakeLive(preview) : null,
     supported: true,
     systemAudioSupported: true,
     systemAudioKind: audio,
@@ -90,10 +122,16 @@ export default function PageMeetingsSection() {
         : "list",
   );
   const [settings, setSettings] = useState<WorkspaceRecordingSettings>(
-    initial.get("voices") === "off" ? {} : { voiceprints: true },
+    initial.get("voices") === "off"
+      ? { liveTranscript: true }
+      : { voiceprints: true, liveTranscript: true },
   );
   const [mode, setMode] = useState<RecorderMode>(
     (initial.get("recorder") as RecorderMode | null) ?? "idle",
+  );
+  // ?live=on|reconnecting|unavailable shows the live transcript while recording.
+  const [preview, setPreview] = useState<LivePreview>(
+    (initial.get("live") as LivePreview | null) ?? "off",
   );
   const [data, setData] = useState<"ready" | "empty">(
     initial.get("data") === "empty" ? "empty" : "ready",
@@ -104,12 +142,18 @@ export default function PageMeetingsSection() {
   // ?audio=desktop previews the desktop app, which records other apps' audio.
   const audio = initial.get("audio") === "desktop" ? "desktop" : "display";
   useEffect(() => {
-    store.set(fakeRecorder(mode, startedAt, audio));
+    store.set(fakeRecorder(mode, startedAt, audio, preview));
     if (mode !== "recording") return;
-    const timer = window.setInterval(() => store.set(fakeRecorder(mode, startedAt, audio)), 250);
+    const timer = window.setInterval(
+      () => store.set(fakeRecorder(mode, startedAt, audio, preview)),
+      250,
+    );
     return () => window.clearInterval(timer);
-  }, [mode, startedAt, store, audio]);
-  const [openId, setOpenId] = useState(fixture.readyId);
+  }, [mode, startedAt, store, audio, preview]);
+  // ?open=live opens the meeting someone else is recording.
+  const [openId, setOpenId] = useState(
+    initial.get("open") === "live" ? LIVE_RECORDING_ID : fixture.readyId,
+  );
 
   return (
     <KitSection sectionKey="page-meetings">
@@ -144,11 +188,23 @@ export default function PageMeetingsSection() {
           />
           <SegmentedControl
             size="sm"
+            aria-label="Live transcript"
+            value={preview}
+            onValueChange={(value) => setPreview(value as LivePreview)}
+            options={[
+              { value: "off", label: "No live text" },
+              { value: "on", label: "Live text" },
+              { value: "reconnecting", label: "Reconnecting" },
+              { value: "unavailable", label: "Unavailable" },
+            ]}
+          />
+          <SegmentedControl
+            size="sm"
             aria-label="Data"
             value={data}
             onValueChange={(value) => setData(value as "ready" | "empty")}
             options={[
-              { value: "ready", label: "5 meetings" },
+              { value: "ready", label: "6 meetings" },
               { value: "empty", label: "Empty" },
             ]}
           />
@@ -176,6 +232,7 @@ export default function PageMeetingsSection() {
                 key={data}
                 workspaceId={fixture.workspaceId}
                 recordings={fixture.client}
+                liveTranscriptDefault={settings.liveTranscript === true}
                 meetingHref={(id) => `#meeting-${id}`}
                 onOpen={(id) => {
                   setOpenId(id);
