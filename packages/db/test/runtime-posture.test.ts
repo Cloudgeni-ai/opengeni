@@ -1782,7 +1782,7 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
-          // 0937 event source feeds: full DML and FORCE RLS.
+          // 0935 event source feeds: full DML and FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -1855,7 +1855,7 @@ describe("runtime database posture evaluator", () => {
         8 + // 0929 event triggers: seven full-DML FORCE-RLS tables and one routing table.
         9 + // 0930 meeting recordings: FORCE-RLS; eight full-DML, one read and insert.
         1 + // 0932 MCP Events subscriptions: full-DML, FORCE-RLS.
-        1; // 0937 event source feeds: full-DML, FORCE-RLS.
+        1; // 0935 event source feeds: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");

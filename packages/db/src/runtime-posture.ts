@@ -47,9 +47,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * SECURITY DEFINER routines in `opengeni_private` whose runtime EXECUTE is
  * withheld for one release: the event trigger dispatcher's identity-only due
  * inventory and intake retention pass (0929), the recording recovery sweep's
- * stalled-work inventory (0930), and the MCP Events subscription pump's due
- * inventory (0932), and the source feed pump's due inventory (0935). Each is owned by its tables' owner,
- * never PUBLIC, with a pinned search_path. The release that knew none of them
+ * stalled-work inventory (0930), the MCP Events subscription pump's due
+ * inventory (0932) and the source feed pump's due inventory (0935). Each is
+ * owned by its tables' owner, never PUBLIC, with a pinned search_path. The release that knew none of them
  * rejects a runtime EXECUTE grant on an unknown definer, so 0937 withholds the
  * grant (and provisioning keeps it withheld) until this binary is the previous
  * release. Until then readiness accepts each routine with or without runtime

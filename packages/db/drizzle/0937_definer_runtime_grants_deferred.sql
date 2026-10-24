@@ -1,14 +1,15 @@
 -- deployment-mode: rolling
 -- 0929 granted the runtime role EXECUTE on two new SECURITY DEFINER routines
--- and DML on the new non-RLS table event_ingress_routes; 0930 and 0932 each
--- granted EXECUTE on one more definer, and so did 0935. The previous release's readiness check
--- rejects them (an unknown definer the runtime can call; unknown non-RLS
--- table grants), so a rolling deploy would take the old fleet out of service.
--- Withhold them until the release that knows these objects (runtime-posture
--- DEFERRED_RUNTIME_PRIVATE_ROUTINES and RUNTIME_DEFERRED_FULL_DML_TABLES) is
--- the previous release; a later migration grants them back. Event triggers
--- and the MCP Events and source feed pumps are off by default (OPENGENI_EVENT_TRIGGERS_ENABLED),
--- and the recording recovery sweep skips its pass while EXECUTE is withheld.
+-- and DML on the new non-RLS table event_ingress_routes; 0930, 0932 and 0935
+-- each granted EXECUTE on one more definer. The previous release's readiness
+-- check rejects them (an unknown definer the runtime can call; unknown
+-- non-RLS table grants), so a rolling deploy would take the old fleet out of
+-- service. Withhold them until the release that knows these objects
+-- (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES and
+-- RUNTIME_DEFERRED_FULL_DML_TABLES) is the previous release; a later
+-- migration grants them back. Event triggers and the MCP Events and source
+-- feed pumps are off by default (OPENGENI_EVENT_TRIGGERS_ENABLED), and the
+-- recording recovery sweep skips its pass while EXECUTE is withheld.
 --
 -- Every non-owner grantee loses them, not only opengeni_app: embedded
 -- deployments provision their own runtime role. Grants passed on through
