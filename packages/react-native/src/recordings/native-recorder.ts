@@ -192,7 +192,7 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
             : {}),
         });
       });
-      emit({ recordingId });
+      emit({ recordingId, title: options.title ?? null });
       await uploader.begin({
         workspaceId: options.workspaceId,
         recordingId,
@@ -316,6 +316,13 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
         tracks: [],
         upload: null,
       });
+    },
+
+    async rename(title: string) {
+      const recordingId = snapshot.recordingId;
+      if (!recordingId) throw new Error("Nothing is being recorded to rename.");
+      await uploader.rename(options.workspaceId, recordingId, title);
+      if (snapshot.recordingId === recordingId) emit({ title });
     },
 
     levels(): Record<number, number> {

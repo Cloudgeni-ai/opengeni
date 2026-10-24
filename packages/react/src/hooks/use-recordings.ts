@@ -208,6 +208,8 @@ export type UseRecorderResult = RecorderSnapshot & {
   resume: () => void;
   stop: () => Promise<void>;
   discard: () => Promise<void>;
+  /** Rename the recording being made; the title reaches the server with the upload. */
+  rename: (title: string) => Promise<void>;
   /** Input level per track number, 0 to 1. Read it from an animation frame for a meter. */
   levels: () => Record<number, number>;
 };
@@ -255,6 +257,9 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       completeRecordingChunks: (...args) => clientRef.current.completeRecordingChunks(...args),
       finalizeRecording: (...args) => clientRef.current.finalizeRecording(...args),
       deleteRecording: (...args) => clientRef.current.deleteRecording(...args),
+      ...(typeof methods.updateRecording === "function"
+        ? { updateRecording: (...args) => clientRef.current.updateRecording(...args) }
+        : {}),
       // Only a client that has the live calls can show a live transcript.
       ...(typeof methods.createRecordingLiveSession === "function" &&
       typeof methods.appendRecordingLiveSegments === "function"
@@ -404,6 +409,11 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
     }, []),
     discard: useCallback(async () => {
       await recorderRef.current?.discard();
+    }, []),
+    rename: useCallback(async (title: string) => {
+      const recorder = recorderRef.current;
+      if (!recorder) throw new Error("Nothing is being recorded to rename.");
+      await recorder.rename(title);
     }, []),
     levels: useCallback(() => recorderRef.current?.levels() ?? {}, []),
   };
