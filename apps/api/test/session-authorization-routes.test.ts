@@ -1047,6 +1047,7 @@ describe("embedding host session authorization routes", () => {
       truncated: false,
       sessionHasSchedules: false,
       sessionHasUpcomingSchedules: false,
+      sessionWaitingForEvents: false,
     });
 
     await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, (scoped) =>
