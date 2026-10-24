@@ -101,6 +101,53 @@ describe("interaction attempt tools", () => {
       },
     });
   });
+  test("a nested step field one platform lacks merges into the steps instead of an anyOf", () => {
+    const steps = (extra: Record<string, unknown>, required: string[]) => ({
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            required,
+            additionalProperties: true,
+            properties: { tool: { type: "string" }, ...extra },
+          },
+        },
+      },
+    });
+    const merged = nativeCuaSchema([
+      steps({ toggle_to: { type: "boolean" } }, ["tool"]),
+      steps({}, ["tool"]),
+      steps({ timeout_ms: { type: "integer" } }, ["tool", "timeout_ms"]),
+    ]);
+    expect(merged).toEqual({
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            required: ["tool"],
+            additionalProperties: true,
+            properties: {
+              tool: { type: "string" },
+              toggle_to: { type: "boolean" },
+              timeout_ms: { type: "integer" },
+            },
+          },
+        },
+      },
+    });
+    // A real constraint difference around the nested fields still keeps both.
+    const differing = nativeCuaSchema([
+      steps({ toggle_to: { type: "boolean" } }, ["tool"]),
+      { type: "object", properties: { steps: { type: "array", maxItems: 8, items: {} } } },
+    ]);
+    expect((differing.properties as any).steps.anyOf).toHaveLength(2);
+  });
   test.each(["browser_read", "browser_act"] as const)(
     "%s preserves the definite tab diagnosis at the model boundary",
     async (tool) => {

@@ -2804,32 +2804,15 @@ export function createInteractionAttemptToolDefinitions(
  * (a top-level anyOf is rejected or ignored, so the model loses every argument
  * type). Properties are the union across platforms; a property whose platform
  * schemas differ in more than wording keeps those alternatives at property
- * level. Only properties every platform requires stay required. The session's
- * CUA worker still validates arguments against its own exact platform schema.
+ * level, unless they differ only in their nested properties (a step field one
+ * platform lacks), which merge the same way. Only properties every platform
+ * requires stay required. The session's CUA worker still validates arguments
+ * against its own exact platform schema.
  */
 export function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
   const unique = [...new Map(variants.map((schema) => [JSON.stringify(schema), schema])).values()];
   if (unique.length === 1) return unique[0] as AttemptToolJsonSchema;
-  const properties: Record<string, unknown> = {};
-  const names = [...new Set(unique.flatMap((schema) => Object.keys(objectProperties(schema))))];
-  for (const name of names) {
-    const alternatives = unique
-      .map((schema) => objectProperties(schema)[name])
-      .filter((value): value is Record<string, unknown> => isJsonObject(value));
-    // The first platform's wording wins for constraint-identical schemas.
-    const distinct = new Map<string, Record<string, unknown>>();
-    for (const schema of alternatives) {
-      const key = JSON.stringify(withoutWording(schema));
-      if (!distinct.has(key)) distinct.set(key, schema);
-    }
-    const options = [...distinct.values()];
-    properties[name] = options.length === 1 ? options[0] : { anyOf: options };
-  }
-  const required = names.filter((name) =>
-    unique.every((schema) =>
-      Array.isArray(schema.required) ? schema.required.includes(name) : false,
-    ),
-  );
+  const { properties, required } = mergedProperties(unique);
   return {
     type: "object",
     properties,
@@ -2838,6 +2821,70 @@ export function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToo
       ? { additionalProperties: false }
       : {}),
   } as AttemptToolJsonSchema;
+}
+
+/** The union of the schemas' properties; required only where all require it. */
+function mergedProperties(schemas: Record<string, unknown>[]): {
+  properties: Record<string, unknown>;
+  required: string[];
+} {
+  const properties: Record<string, unknown> = {};
+  const names = [...new Set(schemas.flatMap((schema) => Object.keys(objectProperties(schema))))];
+  for (const name of names)
+    properties[name] = mergedProperty(
+      schemas
+        .map((schema) => objectProperties(schema)[name])
+        .filter((value): value is Record<string, unknown> => isJsonObject(value)),
+    );
+  const required = names.filter((name) =>
+    schemas.every((schema) =>
+      Array.isArray(schema.required) ? schema.required.includes(name) : false,
+    ),
+  );
+  return { properties, required };
+}
+
+function mergedProperty(alternatives: Record<string, unknown>[]): Record<string, unknown> {
+  // The first platform's wording wins for constraint-identical schemas.
+  const distinct = new Map<string, Record<string, unknown>>();
+  for (const schema of alternatives) {
+    const key = JSON.stringify(withoutWording(schema));
+    if (!distinct.has(key)) distinct.set(key, schema);
+  }
+  const options = [...distinct.values()];
+  if (options.length === 1) return options[0]!;
+  return mergedShape(options) ?? { anyOf: options };
+}
+
+const NESTED_KEYS = new Set(["properties", "required", "items"]);
+
+/**
+ * One schema for alternatives that agree on everything but their nested
+ * properties or items, or undefined when they differ anywhere else.
+ */
+function mergedShape(options: Record<string, unknown>[]): Record<string, unknown> | undefined {
+  const shell = (schema: Record<string, unknown>) =>
+    JSON.stringify(
+      withoutWording(
+        Object.fromEntries(Object.entries(schema).filter(([key]) => !NESTED_KEYS.has(key))),
+      ),
+    );
+  const first = options[0]!;
+  if (options.some((schema) => shell(schema) !== shell(first))) return undefined;
+  const merged: Record<string, unknown> = { ...first };
+  if (options.some((schema) => "items" in schema)) {
+    const items = options.map((schema) => schema.items);
+    if (!items.every(isJsonObject)) return undefined;
+    merged.items = mergedProperty(items);
+  }
+  if (options.some((schema) => "properties" in schema || "required" in schema)) {
+    if (!options.every((schema) => isJsonObject(schema.properties))) return undefined;
+    const { properties, required } = mergedProperties(options);
+    merged.properties = properties;
+    if (required.length > 0) merged.required = required;
+    else delete merged.required;
+  }
+  return merged;
 }
 
 function objectProperties(schema: Record<string, unknown>): Record<string, unknown> {
