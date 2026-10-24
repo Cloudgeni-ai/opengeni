@@ -44,6 +44,24 @@ test("Batch plan no longer has a five-hour priority timeout exemption", () => {
   ).toEqual([]);
 });
 
+test("PR CI plan has no five-hour priority timeout exemption", () => {
+  const source = (timeout: number) =>
+    `name: PR CI\non: pull_request\njobs:\n  plan:\n    timeout-minutes: ${timeout}\n    steps:\n      - name: Priority fixture\n        run: bun scripts/ci/github-pr-ci.ts priority pr\n`;
+  expect(
+    inspectWorkflowExecutionSources({
+      ".github/workflows/pr-ci.yml": source(320),
+    }).violations.join("\n"),
+  ).toContain("job timeout-minutes must be a static integer in 1..120");
+  expect(
+    inspectWorkflowExecutionSources({ ".github/workflows/pr-ci.yml": source(15) }).violations,
+  ).toEqual([]);
+  // Version validation keeps its single bounded admission yield.
+  const version = `name: CI\non: workflow_dispatch\njobs:\n  automation-admission:\n    timeout-minutes: 320\n    steps:\n      - name: Yield fixture\n        run: bun scripts/ci/github-pr-ci.ts priority pr\n`;
+  expect(
+    inspectWorkflowExecutionSources({ ".github/workflows/ci.yml": version }).violations,
+  ).toEqual([]);
+});
+
 const minimalWorkflow = [
   "name: Fixture",
   "on: push",

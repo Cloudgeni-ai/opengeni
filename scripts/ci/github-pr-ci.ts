@@ -14,7 +14,7 @@ type Run = {
   run_attempt: number;
   display_title?: string;
 };
-type Job = { status: string; conclusion: string | null; name: string };
+type Job = { status: string; conclusion: string | null; name: string; id?: number };
 export function supersededPrRuns(
   runs: Run[],
   number: number,
@@ -37,6 +37,29 @@ export function supersededPrRuns(
     )
     .map((r) => r.id);
 }
+/**
+ * Main push CI whose only waiting job is the public-release approval for
+ * `Build API workload image`, with every other job completed or pending, holds
+ * no runner (the merge-batcher main approval-only rule). In ci.yml every job not
+ * downstream of that approval has its prerequisites completed when it waits, so
+ * such a job is queued, running (both hold) or finished, never pending. Unique
+ * positive job IDs are required; anything else is not proof of zero demand.
+ */
+export function mainReleaseApprovalOnly(run: Run, jobs: Job[]): boolean {
+  if (run.status !== "waiting") return false;
+  const ids = new Set<number>();
+  let waiting = 0;
+  for (const job of jobs) {
+    const id = job.id;
+    if (id === undefined || !Number.isSafeInteger(id) || id <= 0 || ids.has(id)) return false;
+    ids.add(id);
+    if (job.status === "waiting") {
+      if (job.name !== "Build API workload image") return false;
+      waiting++;
+    } else if (job.status !== "pending" && job.status !== "completed") return false;
+  }
+  return waiting === 1;
+}
 export function priorityHold(
   lane: "pr" | "batch",
   runs: { run: Run; jobs: Job[] }[],
@@ -52,6 +75,7 @@ export function priorityHold(
       run.event === "push" &&
       run.head_branch.startsWith("queue/");
     if (!main && !(lane === "pr" && batch)) continue;
+    if (main && mainReleaseApprovalOnly(run, jobs)) continue;
     // Completed testing plus only environment-approval waits is not runner demand.
     // An empty/pre-fanout or unknown job observation is not proof of spare capacity.
     if (!jobs.length || jobs.some((j) => !["completed", "waiting"].includes(j.status)))

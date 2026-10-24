@@ -429,10 +429,11 @@ function scanWorkflow(
       continue;
     }
 
-    const lane = new Map([
-      [".github/workflows/ci.yml:automation-admission", "pr"],
-      [".github/workflows/pr-ci.yml:plan", "pr"],
-    ]).get(`${path}:${jobKey}`);
+    // Only Version validation still yields to main/Batch demand; PR CI admission
+    // has no priority wait and keeps the ordinary job timeout bound.
+    const lane = new Map([[".github/workflows/ci.yml:automation-admission", "pr"]]).get(
+      `${path}:${jobKey}`,
+    );
     const boundedAdmission =
       lane !== undefined &&
       rawJob["timeout-minutes"] === 320 &&

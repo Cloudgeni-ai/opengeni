@@ -459,6 +459,20 @@ for the fast job and required aggregate to pass. A failed selected test is never
 converted into an intentional skip. Type selection is unchanged. Full guards
 and the full suite remain in Batch CI, whose impact plan is not capped.
 
+PR CI has no priority wait: no provider demand read can hold or fail PR
+admission. Only Version validation (`ci.yml` `automation-admission`) still runs
+the bounded `github-pr-ci.ts priority pr` yield, so only that job keeps the
+320-minute timeout exemption. The yield holds for queued or running main push CI
+and Batch CI. A waiting run whose jobs are only completed or waiting for
+approval does not hold it. Main push CI whose sole waiting job is
+`Build API workload image` (public-release approval), with every other job
+completed or `pending` and unique positive job IDs, also has zero runner demand.
+This relies on the current `ci.yml` job order: when the approval waits, every
+job not downstream of it already has its prerequisites completed, so it is
+queued, running or finished (never `pending`); a queued or running job holds.
+The yield never approves or cancels that release. Batch runs get no such
+exemption.
+
 Batch CI does not wait inside its planning job for main CI demand to clear. After
 checkout and Bun setup it verifies the immutable candidate and plans the complete
 combined tree, with a 20-minute planning-job timeout. GitHub schedules the resulting
