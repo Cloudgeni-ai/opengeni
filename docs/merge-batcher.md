@@ -450,6 +450,13 @@ arithmetic:
   repository jobs at most. Combined with 52/30/18 (other + max(30, main) + 18 <= 52,
   so other <= 4 while main <= 30), admission needs other <= 4 and main + other <= 14.
 
+The per-PR fast workflow does not impose a global PR concurrency cap. With the
+currently deployed 52/30/60/28 Batch capacity settings, five or more observed PR
+jobs therefore still hold new Batch submission. Removing global PR serialization
+does not remove that separate Batch hold; a focused follow-up will address Batch
+submission independently. GitHub provider queue wait is not eliminated by the
+smaller PR gate.
+
 The batcher's App is installed only on this repository, so it cannot read other
 repositories' jobs and does not try. The allowance replaces that observation. It is
 the maximum of one measured window (October 22, 2026, 02:00–08:40 UTC, every
