@@ -430,7 +430,6 @@ function scanWorkflow(
     }
 
     const lane = new Map([
-      [".github/workflows/batch-ci.yml:plan", "batch"],
       [".github/workflows/ci.yml:automation-admission", "pr"],
       [".github/workflows/pr-ci.yml:plan", "pr"],
     ]).get(`${path}:${jobKey}`);

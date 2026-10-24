@@ -22,7 +22,7 @@ jobs:
   plan:
     name: Batch impact
     runs-on: ubuntu-latest
-    timeout-minutes: 320
+    timeout-minutes: 20
     outputs:
       batch_id: ${{ steps.plan.outputs.batch_id }}
       base_sha: ${{ steps.plan.outputs.base_sha }}
@@ -37,10 +37,6 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - name: Yield candidate fan-out to full main CI
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bun scripts/ci/github-pr-ci.ts priority batch
       - id: plan
         name: Verify candidate provenance and plan the complete combined tree
         run: |
