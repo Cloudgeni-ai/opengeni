@@ -2,6 +2,12 @@ import { createContext, useContext, useSyncExternalStore } from "react";
 
 import { ReasonTooltip } from "./disabled-reason";
 import { cn } from "../lib/cn";
+import {
+  createOpenGeniText,
+  useOpenGeniText,
+  type OpenGeniMessageKey,
+  type OpenGeniText,
+} from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
    RelativeTime (design brief, "Also build").
@@ -17,6 +23,10 @@ import { cn } from "../lib/cn";
    - exact (tooltip): "Wed 23 Sep 2026, 11:12 Oslo time".
    Never seconds, never ISO. The explicit UTC variant is for Insights, where
    times are compared across people: "Wed 23 Sep 2026, 09:12 UTC".
+
+   Every word and layout comes from the host's message catalog (`time.*`):
+   the component reads `useOpenGeniText()`, and the pure functions take it as
+   `text` in their options, English when omitted. Clock times stay 24-hour.
    -------------------------------------------------------------------------- */
 
 export type RelativeTimeFormat = "relative" | "absolute" | "date";
@@ -30,18 +40,55 @@ export interface TimeFormatOptions {
   timeZone?: string | undefined;
   /** Show and compute times in UTC, and say so. */
   utc?: boolean | undefined;
+  /** The host's words, from `useOpenGeniText()`. English when omitted. */
+  text?: OpenGeniText | undefined;
 }
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const WEEKDAYS: Record<string, string> = {
-  Mon: "Mon",
-  Tue: "Tue",
-  Wed: "Wed",
-  Thu: "Thu",
-  Fri: "Fri",
-  Sat: "Sat",
-  Sun: "Sun",
-};
+const ENGLISH = createOpenGeniText();
+
+const MONTH_KEYS = [
+  "time.month.jan",
+  "time.month.feb",
+  "time.month.mar",
+  "time.month.apr",
+  "time.month.may",
+  "time.month.jun",
+  "time.month.jul",
+  "time.month.aug",
+  "time.month.sep",
+  "time.month.oct",
+  "time.month.nov",
+  "time.month.dec",
+] as const satisfies readonly OpenGeniMessageKey[];
+
+/** Keyed by the stable en-US short weekday the parts formatter returns. */
+const WEEKDAY_KEYS = {
+  Mon: "time.weekday.mon",
+  Tue: "time.weekday.tue",
+  Wed: "time.weekday.wed",
+  Thu: "time.weekday.thu",
+  Fri: "time.weekday.fri",
+  Sat: "time.weekday.sat",
+  Sun: "time.weekday.sun",
+} as const satisfies Record<string, OpenGeniMessageKey>;
+
+type WeekdayKey = (typeof WEEKDAY_KEYS)[keyof typeof WEEKDAY_KEYS];
+
+/** Names that open a label and keep their case inside a sentence. */
+const NAME_KEYS: readonly (WeekdayKey | (typeof MONTH_KEYS)[number])[] = [
+  ...MONTH_KEYS,
+  ...Object.values(WEEKDAY_KEYS),
+];
+
+/** Past and future phrase keys for each relative unit. */
+const RELATIVE_KEYS = {
+  minute: ["time.minutesAgo", "time.inMinutes"],
+  hour: ["time.hoursAgo", "time.inHours"],
+  day: ["time.daysAgo", "time.inDays"],
+  week: ["time.weeksAgo", "time.inWeeks"],
+  month: ["time.monthsAgo", "time.inMonths"],
+  year: ["time.yearsAgo", "time.inYears"],
+} as const satisfies Record<string, readonly [OpenGeniMessageKey, OpenGeniMessageKey]>;
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -52,6 +99,7 @@ interface WallClock {
   /** 1-12. */
   month: number;
   day: number;
+  /** en-US short weekday ("Mon"), a lookup key rather than display text. */
   weekday: string;
   hour: number;
   minute: number;
@@ -63,7 +111,7 @@ function formatterFor(timeZone: string | undefined): Intl.DateTimeFormat {
   const key = timeZone ?? "";
   let formatter = partsFormatters.get(key);
   if (!formatter) {
-    // en-US parts are stable (no "Sept"); labels are composed below.
+    // en-US parts are stable; display words come from the message catalog.
     formatter = new Intl.DateTimeFormat("en-US", {
       timeZone,
       year: "numeric",
@@ -83,6 +131,10 @@ function zoneOf(options: TimeFormatOptions): string | undefined {
   return options.utc ? "UTC" : options.timeZone;
 }
 
+function textOf(options: TimeFormatOptions): OpenGeniText {
+  return options.text ?? ENGLISH;
+}
+
 function wallClock(date: Date, timeZone: string | undefined): WallClock {
   const parts: Record<string, string> = {};
   for (const part of formatterFor(timeZone).formatToParts(date)) parts[part.type] = part.value;
@@ -90,7 +142,7 @@ function wallClock(date: Date, timeZone: string | undefined): WallClock {
     year: Number(parts.year),
     month: Number(parts.month),
     day: Number(parts.day),
-    weekday: WEEKDAYS[parts.weekday ?? ""] ?? parts.weekday ?? "",
+    weekday: parts.weekday ?? "",
     hour: Number(parts.hour) % 24,
     minute: Number(parts.minute),
   };
@@ -115,16 +167,38 @@ function clockTime(wall: WallClock): string {
   return `${pad(wall.hour)}:${pad(wall.minute)}`;
 }
 
-function plural(count: number, unit: string): string {
-  return `${count} ${unit}${count === 1 ? "" : "s"}`;
+function weekdayName(wall: WallClock, text: OpenGeniText): string {
+  const keys: Readonly<Record<string, WeekdayKey | undefined>> = WEEKDAY_KEYS;
+  const key = keys[wall.weekday];
+  return key ? text(key) : wall.weekday;
+}
+
+function monthName(wall: WallClock, text: OpenGeniText): string {
+  return text(MONTH_KEYS[wall.month - 1] ?? "time.month.jan");
+}
+
+/** The calendar parts the date templates interpolate. */
+function dateParts(wall: WallClock, text: OpenGeniText) {
+  return {
+    weekday: weekdayName(wall, text),
+    day: wall.day,
+    month: monthName(wall, text),
+    year: wall.year,
+    time: clockTime(wall),
+  };
+}
+
+/** UTC times say so: "Today, 14:00 UTC". */
+function inZone(label: string, options: TimeFormatOptions, text: OpenGeniText): string {
+  return options.utc ? text("time.inUtc", { label }) : label;
 }
 
 /** A readable name for a time zone: "Oslo time", "UTC". */
-export function timeZoneLabel(timeZone: string | undefined): string {
+export function timeZoneLabel(timeZone: string | undefined, text: OpenGeniText = ENGLISH): string {
   const zone = timeZone ?? new Intl.DateTimeFormat().resolvedOptions().timeZone;
-  if (!zone || zone === "UTC" || zone === "Etc/UTC") return "UTC";
+  if (!zone || zone === "UTC" || zone === "Etc/UTC") return text("time.utc");
   const city = zone.split("/").pop()?.replaceAll("_", " ");
-  return city ? `${city} time` : zone;
+  return city ? text("time.zoneTime", { city }) : zone;
 }
 
 /**
@@ -134,24 +208,26 @@ export function timeZoneLabel(timeZone: string | undefined): string {
  * use `inSentence` to lowercase the leading word.
  */
 export function formatRelativeTime(input: DateInput, options: TimeFormatOptions = {}): string {
+  const text = textOf(options);
   const date = toDate(input);
   const now = toDate(options.now ?? Date.now());
   const elapsed = now.getTime() - date.getTime();
   const future = elapsed < 0;
   const distance = Math.abs(elapsed);
-  const phrase = (text: string) => (future ? `In ${text}` : `${text} ago`);
+  const phrase = (unit: keyof typeof RELATIVE_KEYS, count: number) =>
+    text(RELATIVE_KEYS[unit][future ? 1 : 0], { count });
 
-  if (distance < MINUTE) return "Just now";
-  if (distance < HOUR) return phrase(`${Math.floor(distance / MINUTE)} min`);
-  if (distance < DAY) return phrase(plural(Math.floor(distance / HOUR), "hour"));
+  if (distance < MINUTE) return text("time.justNow");
+  if (distance < HOUR) return phrase("minute", Math.floor(distance / MINUTE));
+  if (distance < DAY) return phrase("hour", Math.floor(distance / HOUR));
 
   const zone = zoneOf(options);
   const days = Math.abs(calendarDays(wallClock(date, zone), wallClock(now, zone)));
-  if (days <= 1) return future ? "Tomorrow" : "Yesterday";
-  if (days < 14) return phrase(`${days} days`);
-  if (days < 30) return phrase(plural(Math.floor(days / 7), "week"));
-  if (days < 365) return phrase(plural(Math.max(1, Math.floor(days / 30)), "month"));
-  return phrase(plural(Math.floor(days / 365), "year"));
+  if (days <= 1) return text(future ? "time.tomorrow" : "time.yesterday");
+  if (days < 14) return phrase("day", days);
+  if (days < 30) return phrase("week", Math.floor(days / 7));
+  if (days < 365) return phrase("month", Math.max(1, Math.floor(days / 30)));
+  return phrase("year", Math.floor(days / 365));
 }
 
 /**
@@ -160,36 +236,59 @@ export function formatRelativeTime(input: DateInput, options: TimeFormatOptions 
  * the year: "Tue 30 Mar 2027, 09:00". UTC times end in " UTC".
  */
 export function formatAbsoluteTime(input: DateInput, options: TimeFormatOptions = {}): string {
+  const text = textOf(options);
   const zone = zoneOf(options);
   const wall = wallClock(toDate(input), zone);
   const today = wallClock(toDate(options.now ?? Date.now()), zone);
   const offset = calendarDays(today, wall);
-  const suffix = options.utc ? " UTC" : "";
-  if (offset === 0) return `Today, ${clockTime(wall)}${suffix}`;
-  if (offset === 1) return `Tomorrow, ${clockTime(wall)}${suffix}`;
-  if (offset === -1) return `Yesterday, ${clockTime(wall)}${suffix}`;
-  const year = wall.year === today.year ? "" : ` ${wall.year}`;
-  return `${wall.weekday} ${wall.day} ${MONTHS[wall.month - 1]}${year}, ${clockTime(wall)}${suffix}`;
+  const time = clockTime(wall);
+  const label =
+    offset === 0
+      ? text("time.todayAt", { time })
+      : offset === 1
+        ? text("time.tomorrowAt", { time })
+        : offset === -1
+          ? text("time.yesterdayAt", { time })
+          : wall.year === today.year
+            ? text("time.dateTime", dateParts(wall, text))
+            : text("time.dateTimeWithYear", dateParts(wall, text));
+  return inZone(label, options, text);
 }
-
-const SENTENCE_WORDS = /^(Just|In|Today|Tomorrow|Yesterday)\b/;
 
 /**
  * Lowercases the leading word of a label for use inside a sentence:
  * "Yesterday" becomes "yesterday", "Today, 14:00" becomes "today, 14:00".
- * Weekdays, months and numbers keep their case.
+ * Weekdays, months and numbers keep their case. Pass the same `text` the
+ * label was formatted with, so its weekday and month names are recognized.
  */
-export function inSentence(label: string): string {
-  return label.replace(SENTENCE_WORDS, (word) => word.toLocaleLowerCase());
+export function inSentence(label: string, text: OpenGeniText = ENGLISH): string {
+  const codePoint = label.codePointAt(0);
+  if (codePoint === undefined) return label;
+  const first = String.fromCodePoint(codePoint);
+  const lower = lowerCase(first, text.locale);
+  if (lower === first) return label;
+  for (const key of NAME_KEYS) {
+    if (label.startsWith(text(key))) return label;
+  }
+  return lower + label.slice(first.length);
+}
+
+function lowerCase(value: string, locale: string | undefined): string {
+  try {
+    return value.toLocaleLowerCase(locale);
+  } catch {
+    return value.toLowerCase();
+  }
 }
 
 /** A date without the time: "14 Aug", or "31 Mar 2027" in another year. */
 export function formatDate(input: DateInput, options: TimeFormatOptions = {}): string {
+  const text = textOf(options);
   const zone = zoneOf(options);
   const wall = wallClock(toDate(input), zone);
   const today = wallClock(toDate(options.now ?? Date.now()), zone);
-  const year = wall.year === today.year ? "" : ` ${wall.year}`;
-  return `${wall.day} ${MONTHS[wall.month - 1]}${year}`;
+  const parts = dateParts(wall, text);
+  return wall.year === today.year ? text("time.date", parts) : text("time.dateWithYear", parts);
 }
 
 /**
@@ -199,22 +298,25 @@ export function formatDate(input: DateInput, options: TimeFormatOptions = {}): s
  * `formatAbsoluteTime` wherever there is room for the full label.
  */
 export function formatShortTime(input: DateInput, options: TimeFormatOptions = {}): string {
+  const text = textOf(options);
   const zone = zoneOf(options);
   const wall = wallClock(toDate(input), zone);
   const today = wallClock(toDate(options.now ?? Date.now()), zone);
   const offset = calendarDays(today, wall);
-  const suffix = options.utc ? " UTC" : "";
-  if (offset === 0) return `${clockTime(wall)}${suffix}`;
-  if (offset > 0 && offset < 7) return `${wall.weekday} ${clockTime(wall)}${suffix}`;
+  if (offset === 0) return inZone(clockTime(wall), options, text);
+  if (offset > 0 && offset < 7) {
+    return inZone(text("time.weekdayTime", dateParts(wall, text)), options, text);
+  }
   return formatDate(input, options);
 }
 
 /** The exact time for tooltips, always with the year and zone: "Wed 23 Sep 2026, 11:12 Oslo time". */
 export function formatExactTime(input: DateInput, options: TimeFormatOptions = {}): string {
+  const text = textOf(options);
   const zone = zoneOf(options);
   const wall = wallClock(toDate(input), zone);
-  const label = options.utc ? "UTC" : timeZoneLabel(zone);
-  return `${wall.weekday} ${wall.day} ${MONTHS[wall.month - 1]} ${wall.year}, ${clockTime(wall)} ${label}`;
+  const label = options.utc ? text("time.utc") : timeZoneLabel(zone, text);
+  return text("time.exact", { ...dateParts(wall, text), zone: label });
 }
 
 /* ----------------------------------------------------------------------------
@@ -266,7 +368,7 @@ export const RelativeTimeDefaultsContext = createContext<{ focusable: boolean }>
   focusable: true,
 });
 
-export interface RelativeTimeProps extends TimeFormatOptions {
+export interface RelativeTimeProps extends Omit<TimeFormatOptions, "text"> {
   /** The moment to show. */
   date: DateInput;
   /** "relative" (default), "absolute" or "date". The tooltip always shows the exact time. */
@@ -301,6 +403,7 @@ export function RelativeTime({
   className,
 }: RelativeTimeProps) {
   const defaults = useContext(RelativeTimeDefaultsContext);
+  const words = useOpenGeniText();
   // A fixed `now` needs no clock; otherwise re-render once a minute.
   useSyncExternalStore(
     now === undefined ? subscribeClock : noSubscription,
@@ -310,7 +413,7 @@ export function RelativeTime({
   const moment = toDate(date);
   if (Number.isNaN(moment.getTime())) return null;
 
-  const options: TimeFormatOptions = { now, timeZone, utc };
+  const options: TimeFormatOptions = { now, timeZone, utc, text: words };
   const text =
     format === "absolute"
       ? formatAbsoluteTime(moment, options)
@@ -319,7 +422,7 @@ export function RelativeTime({
         : formatRelativeTime(moment, options);
   const exact = formatExactTime(moment, options);
   const midSentence = inSentenceProp ?? Boolean(prefix);
-  const phrase = midSentence ? inSentence(text) : text;
+  const phrase = midSentence ? inSentence(text, words) : text;
   const label = prefix ? `${prefix} ${phrase}` : phrase;
   const focusable = tooltip && (focusableProp ?? defaults.focusable);
 

@@ -570,6 +570,7 @@ function SiteChatPanel({
               sessionId={selectedId}
               // As in a regular chat: choose the model and attach files.
               modelPicker
+              viewerSubjectId={context.accessContext.subjectId}
               // The first prompt and anything typed meanwhile carry over.
               {...(handedOff?.initialMessage
                 ? { pendingPrompt: { text: handedOff.initialMessage, sentAt: handedOff.sentAt } }

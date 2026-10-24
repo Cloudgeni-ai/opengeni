@@ -573,6 +573,8 @@ export type {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   SiteOpenedResponse,
+  SiteSidebarStateResponse,
+  UpdateSiteSidebarStateRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifactVisibility,

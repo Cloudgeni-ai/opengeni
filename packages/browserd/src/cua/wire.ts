@@ -118,6 +118,8 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   write_not_applied: "driver_failed",
   // A step that sets a checked state found an element that has none.
   not_a_toggle: "invalid_action",
+  // A step's name fits several elements once the window settled; nothing ran.
+  ambiguous: "locator_ambiguous",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can

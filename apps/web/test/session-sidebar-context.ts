@@ -17,6 +17,10 @@ export const subjectId = "sidebar-preview";
 export const redesignId = "00000000-0000-4000-8000-000000000001";
 export const bugfixesId = "00000000-0000-4000-8000-000000000002";
 const previewParameters = new URLSearchParams(window.location.search);
+// Row actions build on the Sites data: Site rows, a workstream with a spawned
+// chat, and pin and archive on every row.
+const rowActionsScenario = previewParameters.get("scenario") === "row-actions";
+const sitesScenario = previewParameters.get("scenario") === "sites" || rowActionsScenario;
 const now = Date.now();
 const alex = { kind: "subject", subjectId, label: "Alex Morgan" } as const;
 const jamie = { kind: "subject", subjectId: "jamie-preview", label: "Jamie Chen" } as const;
@@ -194,7 +198,9 @@ const createdSites: Array<{
   channelId: string | null;
   updatedAt: string;
 }> = [];
-if (previewParameters.get("scenario") === "sites") {
+/** This person's Site sidebar state: pinned, or archived from their sidebar. */
+const siteSidebar = new Map<string, { pinnedAt: string | null; archived: boolean }>();
+if (sitesScenario) {
   const siteConversation = (
     number: number,
     title: string,
@@ -241,6 +247,16 @@ if (previewParameters.get("scenario") === "sites") {
       updatedAt: timeBefore(2880),
     },
   );
+  if (rowActionsScenario) {
+    // A workstream whose agent spawned a chat, nested under it in the rail.
+    const parent = rows.find((row) => row.title === "Slack community connection test")!;
+    parent.treeStats = { directChildren: 1, totalDescendants: 1, truncated: false } as never;
+    rows.push({
+      ...session(11, "Check Slack bot scopes", null, 58),
+      parentSessionId: parent.id,
+      rootSessionId: parent.id,
+    } as Session);
+  }
 }
 
 if (previewParameters.get("scenario") === "hover") {
@@ -402,6 +418,8 @@ export type SessionSidebarEvidence = {
   }[];
   /** Sites this person opened, in order. */
   siteOpens: string[];
+  /** Site sidebar changes, in order. */
+  siteSidebarCalls: { siteId: string; pinned?: boolean; archived?: boolean }[];
   failChannelId: string | null;
   failCursor: string | null;
   failTodayCursor: string | null;
@@ -419,6 +437,7 @@ export const evidence: SessionSidebarEvidence = {
   listCalls: [],
   archiveCalls: [],
   siteOpens: [],
+  siteSidebarCalls: [],
   failChannelId: previewParameters.get("fail") === "bugfixes" ? bugfixesId : null,
   failCursor: null,
   failTodayCursor: null,
@@ -519,6 +538,9 @@ function previewSiteGroups(options: SessionListPageOptions): SiteConversationGro
       activeWork: 0,
     });
   }
+  // Archived Sites leave this person's sidebar with their conversations.
+  for (const [key, group] of groups)
+    if (siteSidebar.get(group.siteId)?.archived) groups.delete(key);
   const listed = new Set([...groups.values()].map((group) => group.siteId));
   if (!options.needsYouOnly && options.archiveStatus !== "archived")
     for (const created of createdSites) {
@@ -543,7 +565,13 @@ function previewSiteGroups(options: SessionListPageOptions): SiteConversationGro
         activeWork: 0,
       });
     }
-  return [...groups.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return [...groups.values()]
+    .filter((group) => !siteSidebar.get(group.siteId)?.archived)
+    .map((group) => {
+      const pinnedAt = siteSidebar.get(group.siteId)?.pinnedAt;
+      return pinnedAt ? { ...group, pinned: true as const, pinnedAt } : group;
+    })
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export const client = {
@@ -604,8 +632,18 @@ export const client = {
       throw new Error("Preview project page failed once");
     }
     if (options.pinsOnly)
-      return { sessions: [], pinned: [], nextCursor: null, filtersApplied: true };
-    const selected = filteredRows(options);
+      return {
+        sessions: [],
+        pinned: structuredClone(
+          filteredRows({ ...options, parentSessionId: undefined, siteConversations: "include" })
+            .filter((row) => row.pinned)
+            .sort((a, b) => (b.pinnedAt ?? "").localeCompare(a.pinnedAt ?? "")),
+        ),
+        nextCursor: null,
+        filtersApplied: true,
+      };
+    // Pinned rows are returned separately, never as ordinary rows.
+    const selected = filteredRows(options).filter((row) => !row.pinned);
     const offset = Number(options.cursor ?? 0);
     const limit = options.limit ?? 50;
     if (!Number.isInteger(offset) || offset < 0) throw new Error("Invalid preview cursor");
@@ -658,7 +696,7 @@ client.listSessionSummaryPage = async (workspace, options) => {
 };
 
 // The Site view: each Site's page and its conversations' history.
-if (previewParameters.get("scenario") === "sites") {
+if (sitesScenario) {
   Object.assign(
     client,
     siteViewPreviewClient({
@@ -711,7 +749,29 @@ if (previewParameters.get("scenario") === "sites") {
     {
       recordSiteOpened: async (_workspace: string, siteId: string) => {
         evidence.siteOpens.push(siteId);
+        // Opening a Site again restores it to the sidebar.
+        const state = siteSidebar.get(siteId);
+        if (state) state.archived = false;
         return { openedAt: new Date().toISOString() };
+      },
+      updateSiteSidebarState: async (
+        _workspace: string,
+        siteId: string,
+        request: { pinned?: boolean; archived?: boolean },
+      ) => {
+        evidence.siteSidebarCalls.push({ siteId, ...request });
+        const state = siteSidebar.get(siteId) ?? { pinnedAt: null, archived: false };
+        if (request.pinned !== undefined)
+          state.pinnedAt = request.pinned ? (state.pinnedAt ?? new Date().toISOString()) : null;
+        if (request.archived !== undefined) state.archived = request.archived;
+        siteSidebar.set(siteId, state);
+        return {
+          siteId,
+          pinned: state.pinnedAt !== null,
+          pinnedAt: state.pinnedAt,
+          archived: state.archived,
+          archivedAt: state.archived ? new Date().toISOString() : null,
+        };
       },
       tools: {
         forWorkspace: () => ({
@@ -771,13 +831,21 @@ const context = {
   // In the Sites scenario the session route supplies the open session, as in
   // the app; the rail injects it. Other scenarios keep no open session.
   get session() {
-    if (previewParameters.get("scenario") !== "sites") return null;
+    if (!sitesScenario) return null;
     const id = /\/sessions\/([^/]+)/u.exec(window.location.pathname)?.[1];
     return (id && rows.find((row) => row.id === id)) || null;
   },
   accessContext: {
     subjectId,
-    workspaceGrants: [{ workspaceId, permissions: ["sessions:create", "artifacts:read"] }],
+    workspaceGrants: [
+      {
+        workspaceId,
+        // Row actions run as a controller, so archive pauses rather than hides.
+        permissions: rowActionsScenario
+          ? ["sessions:create", "sessions:control", "artifacts:read"]
+          : ["sessions:create", "artifacts:read"],
+      },
+    ],
   },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
   clientConfig: {},
@@ -785,6 +853,14 @@ const context = {
   ownsWorkspaceInvocation: (_workspace: string, accepted: unknown) => accepted === invocation,
   setSession: () => {},
   resetSessionView: () => {},
+  updateSessionPin: async (_workspace: string, id: string, pinned: boolean) => {
+    const row = rows.find((candidate) => candidate.id === id);
+    if (!row) return null;
+    row.pinned = pinned;
+    row.pinnedAt = pinned ? new Date().toISOString() : null;
+    row.pinVersion = (row.pinVersion ?? 0) + 1;
+    return structuredClone(row);
+  },
 } as unknown as AppContextValue;
 
 export const useAppContext = () => context;

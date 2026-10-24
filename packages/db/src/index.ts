@@ -33256,7 +33256,7 @@ async function sessionListTotalsInScope(
   // A grouped rail counts Site conversations in its project totals and gets
   // their Site rows here; its ordinary rows still omit them.
   const siteConversations = options.siteConversations ? "include" : undefined;
-  // Sites this person opened join the rows only in the plain view: a root
+  // Sites this person opened or pinned join the rows only in the plain view: a root
   // filter (Mine, search, creator, dates, archived content, another person's
   // scope) or an agent caller lists only Sites its listed chats created.
   const withOpenedSites =
@@ -33284,6 +33284,11 @@ async function sessionListTotalsInScope(
     ...(archiveStatus === "all"
       ? []
       : [sql`coalesce(root_archive.archived, false) = ${archiveStatus === "archived"}`]),
+    // A Site this person archived from their sidebar hides its conversations
+    // with its row, as an archived chat hides its tree.
+    ...(archiveStatus === "active" && siteConversations
+      ? archivedSiteConversationFilters({ ...options, siteConversations })
+      : []),
   );
   const rows = await rawRows<{
     needsYouCount: number;
@@ -33495,11 +33500,17 @@ async function sessionListTotalsInScope(
             and filed.channel_id is not distinct from creator.channel_id)
         and (exists (select 1 from roots listed where listed.id = creator.id)
           ${
+            // Opens and pins are this person's own plain-view state: a root
+            // filter or an agent caller lists only Sites its chats created.
             withOpenedSites
               ? sql`or exists (
             select 1 from ${schema.siteOpens} opened
             where opened.workspace_id = ${workspaceId}
-              and opened.subject_id = ${options.subjectId} and opened.site_id = artifact.id)`
+              and opened.subject_id = ${options.subjectId} and opened.site_id = artifact.id)
+          or exists (
+            select 1 from ${schema.siteSidebarStates} pin
+            where pin.workspace_id = ${workspaceId} and pin.subject_id = ${options.subjectId}
+              and pin.site_id = artifact.id and pin.pinned_at is not null)`
               : sql``
           })
     ), site_keys as (
@@ -33522,7 +33533,8 @@ async function sessionListTotalsInScope(
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
         greatest(key.updated_at, site.published_at, site.edited_at) as "updatedAt",
-        coalesce(key.created_at, site.created_at) as "createdAt"
+        coalesce(key.created_at, site.created_at) as "createdAt",
+        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt"
       from site_keys key
       left join lateral (
         select artifact.title, artifact.status, artifact.created_at,
@@ -33541,9 +33553,15 @@ async function sessionListTotalsInScope(
           and (artifact.visibility = 'workspace_shared'
             or artifact.owner_subject_id = ${options.subjectId})
       ) site on true
-      where (key.conversations > 0 or site.status = 'active')
+      left join lateral (
+        select state.pinned_at, state.archived_at from ${schema.siteSidebarStates} state
+        where state.workspace_id = ${workspaceId} and state.subject_id = ${options.subjectId}
+          and state.site_id = key.site_id
+      ) sidebar on true
+      -- This person's archived Sites leave their sidebar; pinned ones lead.
+      where (key.conversations > 0 or site.status = 'active') and sidebar.archived_at is null
         ${options.channelId !== undefined ? sql`and key.channel_id is not distinct from ${options.channelId}::uuid` : sql``}
-      order by 5 desc, 1, 2
+      order by 7 desc, 5 desc, 1, 2
       limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
@@ -33586,11 +33604,13 @@ async function sessionListTotalsInScope(
       ...group,
       attentionSince: iso(group.attentionSince),
     })),
-    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map((site) => ({
+    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map(({ pinned, pinnedAt, ...site }) => ({
       ...site,
       updatedAt: iso(site.updatedAt)!,
       createdAt: iso(site.createdAt)!,
       attentionSince: iso(site.attentionSince),
+      // Only a pinned row carries pin fields, so unpinned rows keep their shape.
+      ...(pinned ? { pinned: true, pinnedAt: iso(pinnedAt ?? null) } : {}),
     })),
     sitesTruncated: sites.length > SITE_CONVERSATION_GROUP_LIMIT,
   };
@@ -33601,6 +33621,34 @@ async function sessionListTotalsInScope(
  * for a long time fall past it; the Artifacts page lists every Site.
  */
 export const SITE_CONVERSATION_GROUP_LIMIT = 200;
+
+/**
+ * A Site this person archived from their sidebar hides its conversations from
+ * every view of their sidebar (grouped, flat and search), as an archived chat
+ * hides its tree. Only the console's opt-in listing of Site conversations is
+ * affected; a Site's own conversation list and agent callers are not.
+ */
+function archivedSiteConversationFilters(
+  options: Pick<
+    ListSessionsForSubjectOptions,
+    "authorizationScope" | "subjectId" | "originSiteId" | "siteAccessId" | "siteConversations"
+  >,
+): SQL[] {
+  if (
+    !options.siteConversations ||
+    options.originSiteId ||
+    options.siteAccessId ||
+    options.authorizationScope?.agentAccessViewer
+  )
+    return [];
+  return [
+    sql`not (${schema.sessions.siteAccessRootId} is not null and exists (
+      select 1 from ${schema.siteSidebarStates} hidden
+      where hidden.workspace_id = ${schema.sessions.workspaceId}
+        and hidden.subject_id = ${options.subjectId}
+        and hidden.site_id = ${schema.sessions.siteId} and hidden.archived_at is not null))`,
+  ];
+}
 
 function sessionFilters(
   options: Pick<
@@ -33675,6 +33723,7 @@ function sessionFilters(
   if (archiveStatus !== "all") {
     filters.push(archiveStatus === "archived" ? archivedRoot : sql`not (${archivedRoot})`);
   }
+  if (archiveStatus === "active") filters.push(...archivedSiteConversationFilters(options));
   if (options.authorizationScope) {
     filters.push(
       options.parentSessionId === null
@@ -77728,8 +77777,20 @@ export async function peekSessionWork(
     const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
       lock: "share",
     });
+    // This is an advisory control observation, not a session/configuration
+    // read. Do not transfer frozen prompts, tool catalogs or other payloads
+    // that none of the decisions below consumes.
     const [session] = await scopedDb
-      .select()
+      .select({
+        accountId: schema.sessions.accountId,
+        status: schema.sessions.status,
+        activeTurnId: schema.sessions.activeTurnId,
+        lastSequence: schema.sessions.lastSequence,
+        admissionBlock: schema.sessions.admissionBlock,
+        compactRequested: schema.sessions.compactRequested,
+        inputWaitTurnId: schema.sessions.inputWaitTurnId,
+        inputWaitUntil: schema.sessions.inputWaitUntil,
+      })
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
@@ -77740,7 +77801,7 @@ export async function peekSessionWork(
     let admissionSequence = session.lastSequence;
     if (includeAdmissionFence) {
       const [cursor] = await scopedDb
-        .select()
+        .select({ lastSequence: schema.sessionEventCursors.lastSequence })
         .from(schema.sessionEventCursors)
         .where(
           and(
@@ -77857,7 +77918,16 @@ export async function peekSessionWork(
 
     if (session.activeTurnId) {
       const [turn] = await scopedDb
-        .select()
+        .select({
+          id: schema.sessionTurns.id,
+          sessionId: schema.sessionTurns.sessionId,
+          status: schema.sessionTurns.status,
+          metadata: schema.sessionTurns.metadata,
+          triggerEventId: schema.sessionTurns.triggerEventId,
+          executionGeneration: schema.sessionTurns.executionGeneration,
+          activeAttemptId: schema.sessionTurns.activeAttemptId,
+          scheduledTaskRunId: schema.sessionTurns.scheduledTaskRunId,
+        })
         .from(schema.sessionTurns)
         .where(
           and(
@@ -78067,7 +78137,13 @@ export async function peekSessionWork(
       if (turn.status === "running") {
         if (observerAccountId && turn.activeAttemptId) {
           const [attempt] = await scopedDb
-            .select()
+            .select({
+              id: schema.sessionTurnAttempts.id,
+              temporalWorkflowId: schema.sessionTurnAttempts.temporalWorkflowId,
+              temporalWorkflowRunId: schema.sessionTurnAttempts.temporalWorkflowRunId,
+              temporalActivityId: schema.sessionTurnAttempts.temporalActivityId,
+              quiescedAt: schema.sessionTurnAttempts.quiescedAt,
+            })
             .from(schema.sessionTurnAttempts)
             .where(
               and(

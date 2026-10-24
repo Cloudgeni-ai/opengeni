@@ -225,7 +225,102 @@ export async function recordSiteOpened(
         set: { openedAt: sql`greatest(${schema.siteOpens.openedAt}, now())` },
       })
       .returning({ openedAt: schema.siteOpens.openedAt });
+    // Opening a Site again brings an archived Site row back to the sidebar.
+    await scoped
+      .update(schema.siteSidebarStates)
+      .set({ archivedAt: null, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.siteSidebarStates.workspaceId, input.workspaceId),
+          eq(schema.siteSidebarStates.subjectId, input.subjectId),
+          eq(schema.siteSidebarStates.siteId, input.siteId),
+          sql`${schema.siteSidebarStates.archivedAt} is not null`,
+        ),
+      );
     return { openedAt: row!.openedAt.toISOString() };
+  });
+}
+
+/** One person's sidebar state for one Site row. */
+export type SiteSidebarState = {
+  siteId: string;
+  pinned: boolean;
+  pinnedAt: string | null;
+  archived: boolean;
+  archivedAt: string | null;
+};
+
+/**
+ * Pins or archives a Site row in one person's sidebar. Personal like session
+ * pins: it never changes the Site, its publication or its audience, and only
+ * a Site this viewer can see is recorded. Archiving hides the row (and the
+ * conversations listed under it) until it is restored or the Site is opened
+ * again; a pin survives archive and returns with the row. Repeating a state
+ * keeps its original time.
+ */
+export async function setSiteSidebarState(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    viewer: WorkspaceArtifactViewer;
+    siteId: string;
+    pinned?: boolean | undefined;
+    archived?: boolean | undefined;
+  },
+): Promise<SiteSidebarState> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+    const [site] = await scoped
+      .select({ accountId: schema.workspaceArtifacts.accountId })
+      .from(schema.workspaceArtifacts)
+      .where(
+        and(
+          eq(schema.workspaceArtifacts.workspaceId, input.workspaceId),
+          eq(schema.workspaceArtifacts.id, input.siteId),
+          visibleTo(input.viewer),
+        ),
+      )
+      .limit(1);
+    if (!site) throw new WorkspaceArtifactNotFoundError("Site not found");
+    const stamp = (next: boolean | undefined, column: "pinned_at" | "archived_at") =>
+      next === undefined
+        ? sql.raw(`site_sidebar_states.${column}`)
+        : next
+          ? sql.raw(`coalesce(site_sidebar_states.${column}, now())`)
+          : sql`null`;
+    const [row] = await scoped
+      .insert(schema.siteSidebarStates)
+      .values({
+        accountId: site.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        siteId: input.siteId,
+        pinnedAt: input.pinned ? sql`now()` : null,
+        archivedAt: input.archived ? sql`now()` : null,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.siteSidebarStates.workspaceId,
+          schema.siteSidebarStates.subjectId,
+          schema.siteSidebarStates.siteId,
+        ],
+        set: {
+          pinnedAt: stamp(input.pinned, "pinned_at"),
+          archivedAt: stamp(input.archived, "archived_at"),
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning({
+        pinnedAt: schema.siteSidebarStates.pinnedAt,
+        archivedAt: schema.siteSidebarStates.archivedAt,
+      });
+    return {
+      siteId: input.siteId,
+      pinned: row!.pinnedAt !== null,
+      pinnedAt: row!.pinnedAt?.toISOString() ?? null,
+      archived: row!.archivedAt !== null,
+      archivedAt: row!.archivedAt?.toISOString() ?? null,
+    };
   });
 }
 

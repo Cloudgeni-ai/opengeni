@@ -180,6 +180,8 @@ export {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   SiteOpenedResponse,
+  SiteSidebarStateResponse,
+  UpdateSiteSidebarStateRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifact,
@@ -16379,6 +16381,9 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     waiting: z.number().int().nonnegative(),
     unread: z.number().int().nonnegative(),
     activeWork: z.number().int().nonnegative(),
+    /** This person pinned the Site in their sidebar. Absent when not pinned. */
+    pinned: z.literal(true).optional(),
+    pinnedAt: z.string().datetime().nullable().optional(),
   }),
 );
 export type SiteConversationGroup = z.infer<typeof SiteConversationGroup>;

@@ -207,6 +207,34 @@ export const SiteOpenedResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type SiteOpenedResponse = z.infer<typeof SiteOpenedResponse>;
 
+/**
+ * Pin or archive a Site row in this person's own sidebar. Archive only hides
+ * the row for them; the Site stays published for everyone.
+ */
+export const UpdateSiteSidebarStateRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      pinned: z.boolean().optional(),
+      archived: z.boolean().optional(),
+    })
+    .strict()
+    .refine((value) => value.pinned !== undefined || value.archived !== undefined, {
+      message: "Set pinned or archived",
+    }),
+);
+export type UpdateSiteSidebarStateRequest = z.infer<typeof UpdateSiteSidebarStateRequest>;
+
+export const SiteSidebarStateResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    siteId: z.string().uuid(),
+    pinned: z.boolean(),
+    pinnedAt: z.string().datetime({ offset: true }).nullable(),
+    archived: z.boolean(),
+    archivedAt: z.string().datetime({ offset: true }).nullable(),
+  }),
+);
+export type SiteSidebarStateResponse = z.infer<typeof SiteSidebarStateResponse>;
+
 export const WorkspaceArtifactListQuery = /* @__PURE__ */ defineSchema(() =>
   z.object({
     limit: z.coerce

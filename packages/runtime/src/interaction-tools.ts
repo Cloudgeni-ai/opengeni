@@ -2563,7 +2563,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. When you already know several steps in the same target, such as pressing a run of buttons or filling known fields, send them in one call with action={type:'batch',actions:[...]} (semantic and keyboard actions): they run in order, stop at the first failure, and return the target's state after the last one. A later action may name, by role and name instead of ref, an element that an earlier one brings up, such as the next page or a form that is still loading; on macOS and in Linux sandboxes it waits up to 10 seconds for it to appear and enable. So when you repeat a procedure for many records, do each record in one batch. Pause for new state only when the next step depends on what you will see. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. When you already know several steps in the same target, such as pressing a run of buttons or filling known fields, send them in one call with action={type:'batch',actions:[...]} (semantic and keyboard actions): they run in order, stop at the first failure, and return the target's state after the last one. A later action may name, by role and name instead of ref, an element that an earlier one brings up, such as the next page or a form that is still loading; on macOS and in Linux sandboxes it waits up to 10 seconds for it to appear and enable. So when you repeat a procedure for many records, do each record in one batch; once one record has worked, you can instead loop over the rest in one Code Mode program that sends the same batches with interaction.computer.act and stops at the first one that does not complete. Pause for new state only when the next step depends on what you will see. Returns the durable causal receipt.",
     input: ComputerActInput,
     output: ComputerActOutput,
     readOnly: false,
@@ -2986,13 +2986,15 @@ function derivedOperationId(purpose: string, operationId: string, subject: strin
 }
 
 /**
- * Run a computer_act batch: each action is its own durable operation, fenced
- * by the observation the action before it returned, so it acts on the state
- * that action left. Stops at the first action that does not complete. A
- * retried call derives the same operation IDs; an action that already ran
- * under its ID returns its recorded receipt, whatever fence it ran with.
- * Before reading a fresh fence, the step's recorded receipt is read alongside
- * it, so a retry reuses what already ran even when the window is gone.
+ * Run a computer_act batch. A computer that supports it runs the batch as one
+ * operation (see actInComputerNativeBatch). Otherwise each action is its own
+ * durable operation, fenced by the observation the action before it
+ * returned, so it acts on the state that action left, and the batch stops at
+ * the first action that does not complete. A retried call derives the same
+ * operation IDs; an action that already ran under its ID returns its
+ * recorded receipt, whatever fence it ran with. One action at a time, a
+ * step's recorded receipt is read before a fresh fence, so a retry reuses
+ * what already ran even when the window is gone.
  */
 async function actInComputerBatch(
   transport: InteractionTransport,
@@ -3023,32 +3025,16 @@ async function actInComputerBatch(
   const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
   // The two ways derive different operation IDs. The computer fixes its
   // answer for the session's life, so every try of one batch picks the same
-  // way. A recorded receipt still decides first: both first receipts are read
-  // before anything is sent, and running the other way would send the actions
-  // again.
-  const nativeOperationId = derivedOperationId("computer-batch", operationId, "all");
-  const firstStepOperationId = derivedOperationId("computer-batch", operationId, "0");
-  const [nativePrior, firstStepPrior] = await Promise.all([
-    recorded(nativeOperationId),
-    recorded(firstStepOperationId),
-  ]);
-  let nativeBatch: boolean;
-  if (typeof nativePrior === "object") nativeBatch = true;
-  else if (typeof firstStepPrior === "object") nativeBatch = false;
-  else {
-    nativeBatch = await runsNatively();
-    if ((nativeBatch ? firstStepPrior : nativePrior) === "unknown")
-      throw new Error(
-        "whether an earlier try of this batch already ran could not be read, so it was not sent; retry the call",
-      );
-  }
-  if (nativeBatch)
+  // way and cannot send its actions under both ways' IDs. Run as one
+  // operation, a retry sends the same ID and the computer's journal answers
+  // it, so nothing is read first.
+  if (await runsNatively())
     return await actInComputerNativeBatch(transport, workspaceId, value, actions, {
-      operationId: nativeOperationId,
-      prior: nativePrior,
+      operationId: derivedOperationId("computer-batch", operationId, "all"),
       observe,
       recorded,
     });
+  const firstStepPrior = await recorded(derivedOperationId("computer-batch", operationId, "0"));
   let generation = value.expectedTargetGeneration;
   let observationId = value.expectedObservationId;
   let observation: Observation | null = null;
@@ -3192,9 +3178,9 @@ async function actInComputerNativeBatch(
   actions: ComputerAction[],
   batch: {
     operationId: string;
-    /** The batch's recorded receipt, read before this call sends anything. */
-    prior: z.output<typeof ComputerActionReceipt> | "absent" | "unknown";
     observe: () => Promise<z.output<typeof ComputerObservation>>;
+    /** The batch's recorded receipt, read only when this call cannot tell
+     * from its own requests whether an earlier try ran it. */
     recorded: (
       operationId: string,
     ) => Promise<z.output<typeof ComputerActionReceipt> | "absent" | "unknown">;
@@ -3205,24 +3191,30 @@ async function actInComputerNativeBatch(
       throw new Error(`a batch runs semantic and keyboard actions, not ${action.type}`);
     return action;
   });
-  let receipt = typeof batch.prior === "object" ? batch.prior : null;
+  let receipt: z.output<typeof ComputerActionReceipt> | null = null;
   let generation = value.expectedTargetGeneration;
   let observationId = value.expectedObservationId ?? null;
-  if (!receipt && (generation === undefined || observationId === null)) {
-    // The recorded receipt was read first: a fresh read replaces the latest
-    // observation, which would make a recovered receipt's fence stale.
-    if (observationId !== null) {
-      // The batch names its observation: the target list gives the
-      // generation without reading the window again, which would retire the
-      // refs the caller holds.
-      generation = (
-        await transport.listComputerTargets(workspaceId, value.computerSessionId)
-      ).targets.find((target) => target.id === value.targetId)?.targetGeneration;
-    }
-    if (generation === undefined || observationId === null) {
-      const current = await batch.observe();
-      generation ??= current.target.targetGeneration;
-      observationId ??= current.observationId;
+  if (generation === undefined || observationId === null) {
+    try {
+      if (observationId !== null) {
+        // The batch names its observation: the target list gives the
+        // generation without reading the window again, which would retire
+        // the refs the caller holds.
+        generation = (
+          await transport.listComputerTargets(workspaceId, value.computerSessionId)
+        ).targets.find((target) => target.id === value.targetId)?.targetGeneration;
+      }
+      if (generation === undefined || observationId === null) {
+        const current = await batch.observe();
+        generation ??= current.target.targetGeneration;
+        observationId ??= current.observationId;
+      }
+    } catch (error) {
+      // An earlier try may have run the batch, closing the window: its
+      // recorded receipt says what ran.
+      const prior = await batch.recorded(batch.operationId);
+      if (typeof prior !== "object") throw error;
+      receipt = prior;
     }
   }
   if (!receipt) {

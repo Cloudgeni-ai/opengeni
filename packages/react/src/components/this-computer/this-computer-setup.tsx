@@ -104,6 +104,9 @@ export function ThisComputerSetup({
   const portalStyle = usePortalTokenStyle(anchor.current);
   const wasOpen = useRef(false);
 
+  const permissions = thisComputerPermissionSteps(status);
+  const permissionsKnown = permissions.length > 0;
+
   // Each opening starts where the computer stands.
   useEffect(() => {
     if (open && !wasOpen.current) {
@@ -124,12 +127,35 @@ export function ThisComputerSetup({
     wasOpen.current = open;
   }, [open, status, ready]);
 
-  // A download started elsewhere (or before a relaunch) finishes here.
+  // One state at a time, and always the computer's own: the steps follow it
+  // when it moves on (a download started elsewhere or before a relaunch
+  // finishes here) and when it falls back (the agent stopped reporting, or the
+  // computer was removed or turned off elsewhere), so "you're all set" never
+  // stands beside a connection that is still being waited for.
+  const { acting } = computer;
+  // The reading from before Turn on says nothing about how it went; Turn on
+  // itself moves on from the answer it gets.
+  const readingBeforeTurnOn = useRef<typeof status | undefined>(undefined);
   useEffect(() => {
-    if (!open || phase !== "working" || status?.busy) return;
-    if (thisComputerNeedsPermissions(status)) setPhase("permissions");
-    else if (ready) setPhase("done");
-  }, [open, phase, status, ready]);
+    if (!open || !status || status.busy || acting) return;
+    if (status === readingBeforeTurnOn.current) return;
+    const waiting = phase === "working" || (phase === "permissions" && !permissionsKnown);
+    if (waiting || phase === "done") {
+      if (thisComputerNeedsPermissions(status)) setPhase("permissions");
+      else if (ready) setPhase("done");
+      else if (status.state === "connected") setPhase("working");
+      else if (status.state === "not_connected" || status.state === "not_installed") {
+        // It isn't connected after all: say why (removal needs no words, as
+        // turning it on registers it again), and offer turning it on again.
+        setFailure(
+          status.errorCode !== "removed" && (status.error || status.errorCode)
+            ? labels.error(status.errorCode ?? null, status.error)
+            : null,
+        );
+        setPhase("intro");
+      }
+    }
+  }, [open, phase, status, ready, acting, permissionsKnown, labels]);
 
   // Permissions are granted in System Settings, outside the app.
   const { refresh } = computer;
@@ -139,8 +165,6 @@ export function ThisComputerSetup({
     return () => window.clearInterval(timer);
   }, [open, phase, refresh]);
 
-  const permissions = thisComputerPermissionSteps(status);
-  const permissionsKnown = permissions.length > 0;
   const missing = nextMissingPermission(status);
   // The step shown: the one just allowed (for a moment), else the next missing.
   const current = justAllowed ?? missing;
@@ -191,9 +215,11 @@ export function ThisComputerSetup({
   }, [phase, open, onReady]);
 
   async function turnOn() {
+    readingBeforeTurnOn.current = status;
     setFailure(null);
     setPhase("working");
-    const next = await computer.connect({ screenControl: true });
+    // Resumes, registers afresh or starts the agent, whichever it needs.
+    const next = await computer.turnOn();
     if (!next || next.state !== "connected") {
       setFailure(
         labels.error(next?.errorCode ?? null, next?.error ?? computer.actionError ?? null),
@@ -209,6 +235,9 @@ export function ThisComputerSetup({
   const machineName = status?.machineName ?? "";
   const close = () => onOpenChange(false);
   const busyConnecting = phase === "working";
+  // Once the app has done its part, only the agent coming online is awaited,
+  // which carries on without this dialog.
+  const closable = phase !== "working" || (!acting && !status?.busy);
 
   let lead: ReactNode = null;
   let body: ReactNode = null;
@@ -445,7 +474,7 @@ export function ThisComputerSetup({
               if (phase !== "intro" && phase !== "done") event.preventDefault();
             }}
           >
-            {phase === "working" ? null : (
+            {!closable ? null : (
               <Dialog.Close className="og-tc-close" aria-label={labels.close}>
                 <XIcon aria-hidden />
               </Dialog.Close>

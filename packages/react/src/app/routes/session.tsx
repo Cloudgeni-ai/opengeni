@@ -66,6 +66,7 @@ import { LightboxProvider } from "../../timeline";
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
 import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
+import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
 import {
   SessionSecretsMenuBody,
@@ -2768,6 +2769,12 @@ function SessionChatPane(props: {
     props.connectionState,
     props.initialLoading,
   );
+  const queuedRecall = useQueuedPromptRecall({
+    queue: props.queue,
+    composer,
+    subjectId: context.accessContext.subjectId,
+    enabled: !terminal,
+  });
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
     if (attachments.hasUnresolved) {
       return {
@@ -3831,6 +3838,7 @@ function SessionChatPane(props: {
                 onOpenSession={props.onOpenSession}
                 queue={props.queue}
                 composer={terminal ? undefined : composer}
+                queuedRecall={queuedRecall}
                 goal={props.goal}
                 readOnly={terminal}
                 commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
@@ -3877,6 +3885,7 @@ function SessionChatPane(props: {
                 attachments={attachments}
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
+                queuedRecall={queuedRecall}
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,

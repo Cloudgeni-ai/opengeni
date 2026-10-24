@@ -3291,32 +3291,50 @@ describe("interaction attempt tools", () => {
     expect(sessionReads).toBe(1);
   });
 
-  test("a retried Computer batch runs the way its first try did when the computer's batch support changes", async () => {
+  test("a retried Computer batch reports what its first try ran without sending it again", async () => {
     const target = computerTarget();
-    const observation = computerObservation(target);
-    const journal = new Map<string, ComputerActionReceipt>();
+    // Like CUA, every read is a new observation, and the computer's journal
+    // refuses one operation ID sent with different fences.
+    let reads = 0;
+    const read = () => ({ ...computerObservation(target), observationId: `obs-${++reads}` });
+    const journal = new Map<
+      string,
+      { request: ComputerActionRequest; receipt: ComputerActionReceipt }
+    >();
     const sent: ComputerActionRequest[] = [];
-    // Each try is a fresh process that asks the computer whether it runs
-    // batches: the answer changes between tries, or cannot be read.
+    let receiptReads = 0;
+    let windowGone = false;
     const tryOnce = async (operationId: string, support: boolean | "unreadable") =>
       await createInteractionAttemptToolDefinitions({
         transport: partialTransport({
+          // The computer fixes its answer for the session's life.
           getComputerSession: async () => {
             if (support === "unreadable") throw new Error("api unavailable");
             return { capabilities: { actionBatches: support } } as never;
           },
           listComputerTargets: async () => ({ targets: [target] }) as never,
-          observeComputerTarget: async () => observation,
+          observeComputerTarget: async () => {
+            if (windowGone) throw new Error("window closed");
+            return read();
+          },
           actInComputer: async (_workspaceId, _computerSessionId, value) => {
             const existing = journal.get(value.operationId);
-            if (existing) return existing;
+            if (existing) {
+              if (existing.request.expectedObservationId !== value.expectedObservationId)
+                throw new OpenGeniApiError(409, "operation id is already bound", {
+                  code: "operation_conflict",
+                });
+              return existing.receipt;
+            }
             sent.push(value);
-            const receipt = computerReceipt(value.operationId, observation);
-            journal.set(value.operationId, receipt);
+            const receipt = computerReceipt(value.operationId, read());
+            journal.set(value.operationId, { request: value, receipt });
             return receipt;
           },
-          getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) =>
-            journal.get(id) ?? (await noRecordedReceipt()),
+          getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) => {
+            receiptReads += 1;
+            return journal.get(id)?.receipt ?? (await noRecordedReceipt());
+          },
         }),
         workspaceId,
         sessionId,
@@ -3326,7 +3344,6 @@ describe("interaction attempt tools", () => {
         {
           computerSessionId,
           targetId: target.id,
-          expectedObservationId: observation.observationId,
           action: {
             type: "batch",
             actions: [
@@ -3338,26 +3355,37 @@ describe("interaction attempt tools", () => {
         { operationId, caller: { kind: "model", subjectId: "model:test" } },
       );
 
-    // Run one action at a time, then retried on a computer that now runs
-    // batches: the recorded actions are reported, and nothing is sent again.
+    // Run as one operation: nothing is read before it is sent.
+    const native = randomUUID();
+    const whole = await tryOnce(native, true);
+    expect(sent.map((request) => request.action.type)).toEqual(["batch"]);
+    expect(receiptReads).toBe(0);
+    sent.length = 0;
+    // A retry reads the window again, so the journal refuses its new fence,
+    // and the recorded receipt says what ran.
+    const again = await tryOnce(native, true);
+    expect(sent).toEqual([]);
+    expect(again.structuredContent).toEqual(whole.structuredContent);
+    // So does a retry once the batch closed the window.
+    windowGone = true;
+    const gone = await tryOnce(native, true);
+    expect(sent).toEqual([]);
+    expect(gone.structuredContent).toEqual(whole.structuredContent);
+    // A retry that cannot read how the computer runs batches sends nothing.
+    await expect(tryOnce(native, "unreadable")).rejects.toThrow(
+      "so the batch was not sent; retry the call",
+    );
+    expect(sent).toEqual([]);
+
+    // One action at a time: a retry reuses the recorded actions.
+    windowGone = false;
     const sequential = randomUUID();
     const first = await tryOnce(sequential, false);
     expect(sent.map((request) => request.action.type)).toEqual(["keyboard", "keyboard"]);
     sent.length = 0;
-    const retried = await tryOnce(sequential, true);
+    const retried = await tryOnce(sequential, false);
     expect(sent).toEqual([]);
     expect(retried.structuredContent).toEqual(first.structuredContent);
-
-    // Run as one operation, then retried where support cannot be read.
-    const native = randomUUID();
-    const whole = await tryOnce(native, true);
-    expect(sent.map((request) => request.action.type)).toEqual(["batch"]);
-    sent.length = 0;
-    for (const support of ["unreadable", false] as const) {
-      const again = await tryOnce(native, support);
-      expect(sent).toEqual([]);
-      expect(again.structuredContent).toEqual(whole.structuredContent);
-    }
   });
 
   test("does not send a Computer batch whose way of running cannot be read", async () => {
@@ -3467,42 +3495,6 @@ describe("interaction attempt tools", () => {
     const held = await first;
     expect(sent.map((request) => request.action.type)).toEqual(["batch"]);
     expect(held.structuredContent).toEqual(second.structuredContent);
-  });
-
-  test("does not send a retried Computer batch when an earlier try's other way cannot be read", async () => {
-    const target = computerTarget();
-    const observation = computerObservation(target);
-    let sent = 0;
-    const definitions = createInteractionAttemptToolDefinitions({
-      transport: partialTransport({
-        getComputerSession: async () => ({ capabilities: { actionBatches: true } }) as never,
-        listComputerTargets: async () => ({ targets: [target] }) as never,
-        observeComputerTarget: async () => observation,
-        actInComputer: async (_workspaceId, _computerSessionId, value) => {
-          sent += 1;
-          return computerReceipt(value.operationId, observation);
-        },
-        getComputerActionReceipt: async () => {
-          throw new Error("controller unreachable");
-        },
-      }),
-      workspaceId,
-      sessionId,
-      selectedTools: ["computer_act"],
-      permissions: ["sessions:control"],
-    });
-    await expect(
-      definitions[0]!.execute(
-        {
-          computerSessionId,
-          targetId: target.id,
-          expectedObservationId: observation.observationId,
-          action: { type: "batch", actions: [{ type: "keyboard", action: "press", value: "5" }] },
-        },
-        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
-      ),
-    ).rejects.toThrow("whether an earlier try of this batch already ran could not be read");
-    expect(sent).toBe(0);
   });
 
   test("a retried Computer batch reuses actions that ran even when the window can no longer be read", async () => {

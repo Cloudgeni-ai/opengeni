@@ -161,6 +161,10 @@ projections use identical locks and admission decisions in the same transaction.
 Generic event appends (including explicit field updates), history checkpoints,
 open-suffix attachment and transport/token markers use that narrow projection
 too; none needs frozen session or attempt configuration to perform its write.
+Advisory `peekSessionWork` reads also select only their consumed control fields,
+without transferring unused prompts or frozen configuration. Query order,
+freshness, scope and later claim revalidation remain unchanged; see
+[observer measurements](session-work-peek-resources.md).
 
 Unread/tree attention use `packages/db/src/session-meaningful-events.ts`'s indexed
 non-bookkeeping frontier. Claimed lifecycle/exact parent reads acknowledge only
@@ -2544,9 +2548,16 @@ symlink or privacy grants, and never starts them as desktop children. Explicit
 signed-in setup reuses their live-reloaded connection store; native
 `service status --json` is the versioned read-only lifecycle seam. Pause/resume
 persists in the service manager across logins. Quitting the desktop leaves the
-service alone. Permission status comes from the current account's Machines
+service alone. A status read adopts an existing agent already registered to the
+open workspace once the server lists it, so a computer set up from the web shows
+computer use on in the app without any action. Permission status comes from the current account's Machines
 view, preserving the service's own macOS responsible-process identity. New
-app-hosted installations retain the existing child-supervision model.
+app-hosted installations retain the existing child-supervision model. That
+Machines view is also the server's word on the enrollment: when it answers
+without it (the machine was removed there), the status is `not_connected` with
+`errorCode: "removed"` (shown as computer use off) and turning it on enrolls
+afresh with a new token instead of reusing the stale local connection; a read that fails (network,
+sign-in, server error) is reported as such and never taken as removal.
 
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without

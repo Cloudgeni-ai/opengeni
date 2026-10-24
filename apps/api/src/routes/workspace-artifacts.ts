@@ -6,6 +6,8 @@ import {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   SiteOpenedResponse,
+  SiteSidebarStateResponse,
+  UpdateSiteSidebarStateRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
@@ -36,6 +38,7 @@ import {
   getWorkspaceArtifactContentRef,
   listWorkspaceArtifacts,
   recordSiteOpened,
+  setSiteSidebarState,
   nestedPostgresSqlState,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
@@ -255,6 +258,36 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
             subjectId: viewer.subjectId,
             viewer,
             siteId,
+          }),
+        ),
+      );
+    } catch (error) {
+      return workspaceArtifactErrorResponse(context, error);
+    }
+  });
+
+  // Pin or archive a Site row in this person's own sidebar. Personal like a
+  // session pin, so it needs only read access; archive hides the row for them
+  // and never changes the Site's publication or audience.
+  app.put(`${base}/:artifactId/sidebar`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    if (currentSiteSessionOrigin())
+      throw new HTTPException(403, { message: "A Site page cannot change the sidebar" });
+    const siteId = artifactId(context);
+    const change = await body(context, UpdateSiteSidebarStateRequest);
+    const viewer = await siteViewerForGrant(deps.db, grant);
+    if (!viewer.subjectId)
+      throw new HTTPException(403, { message: "A signed-in person is required" });
+    try {
+      return context.json(
+        SiteSidebarStateResponse.parse(
+          await setSiteSidebarState(deps.db, {
+            workspaceId,
+            subjectId: viewer.subjectId,
+            viewer,
+            siteId,
+            ...change,
           }),
         ),
       );

@@ -30,6 +30,22 @@ export type WorkspaceArtifactVersion = {
   createdAt: string;
 };
 
+/** Pin or archive a Site row in this person's own sidebar; set at least one. */
+export type UpdateSiteSidebarStateRequest = {
+  pinned?: boolean;
+  /** Hides the row (and the conversations under it) for this person only. */
+  archived?: boolean;
+};
+
+/** This person's sidebar state for one Site row. */
+export type SiteSidebarStateResponse = {
+  siteId: string;
+  pinned: boolean;
+  pinnedAt: string | null;
+  archived: boolean;
+  archivedAt: string | null;
+};
+
 /** This person's latest recorded open of a Site, which orders its sidebar row. */
 export type SiteOpenedResponse = {
   /** When the open was recorded (ISO 8601). */
