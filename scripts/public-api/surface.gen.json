@@ -36532,6 +36532,7 @@
       "automationListensForEvents": "value",
       "automationName": "value",
       "automationNextRun": "value",
+      "automationRunErrorText": "value",
       "automationRunEventsLabel": "value",
       "automationRunStatusLabel": "value",
       "automationRunTriggerLabel": "value",
