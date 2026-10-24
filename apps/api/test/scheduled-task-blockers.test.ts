@@ -49,6 +49,7 @@ function facts(
       reusableSessionId: chatId,
       updatedAt: edited,
       schedule: hourly,
+      events: null,
       ...overrides.task,
     },
     review: overrides.review ?? null,
@@ -213,6 +214,35 @@ describe("decideScheduledTaskBlocker", () => {
       kind: "block",
       state: "notified",
       reviewedRunId: failed.id,
+    });
+  });
+
+  test("event triggers decide whether runs follow: repeating ones keep going, a finished once-automation stops", () => {
+    const failed = run("failed", { error: "scheduled_turn_failed" });
+    const manual = { type: "manual" };
+    const spent = { type: "once", runAt: edited.toISOString(), timeZone: "UTC" };
+    const message = (schedule: unknown, events: ScheduledTaskBlockerFacts["task"]["events"]) => {
+      const decision = decideScheduledTaskBlocker(facts([failed], { task: { schedule, events } }));
+      if (decision.kind !== "block") throw new Error("expected a block");
+      return decision.message;
+    };
+    expect(message(manual, { once: true, completed: true })).toBe(
+      "The last scheduled run failed or was skipped. Open the latest run to see why. It has no more runs scheduled.",
+    );
+    expect(message(daily, { once: true, completed: true })).toContain(
+      "It has no more runs scheduled.",
+    );
+    expect(message(manual, { once: false, completed: false })).toContain(
+      "The schedule keeps trying.",
+    );
+    expect(message(spent, { once: false, completed: false })).toContain(
+      "The schedule keeps trying.",
+    );
+    expect(message(spent, null)).toContain("It has no more runs scheduled.");
+    // Repeating triggers keep a frequent schedule's tolerance for a short streak.
+    expect(scheduledTaskBlockerCadence(hourly, failed, { once: false, completed: false })).toEqual({
+      streak: SCHEDULED_TASK_BLOCKER_STREAK,
+      laterRuns: true,
     });
   });
 

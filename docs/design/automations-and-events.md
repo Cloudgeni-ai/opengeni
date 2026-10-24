@@ -72,7 +72,11 @@ MCP source the trigger also holds the subscription arguments the server's
    - *Once*: an automation can finish after its first run, whichever trigger
      fires first. "Wake me when X, or at 17:00 anyway" is one once-automation
      with an event trigger and a one-time (or manual) schedule. It is then
-     exhausted like a spent one-time schedule and pauses itself.
+     exhausted like a spent one-time schedule and pauses itself. Repeating
+     event triggers work the other way round: they keep an automation running
+     after its schedule's last run, so "on Friday at 9, and whenever X" still
+     listens after Friday (migration 0951). A blocked run's owner notice says
+     whether more runs follow by the same rule.
 6. **Loop protection.** Adapters mark events made by Opengeni's own identities
    (the GitHub App bot, the Slack bot). Triggers ignore them unless they opt in,
    as GitHub Actions ignores events made by a workflow's own token. Every event
