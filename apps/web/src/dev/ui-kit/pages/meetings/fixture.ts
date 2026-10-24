@@ -78,6 +78,7 @@ function recording(
         totalBytes: 2_400_000,
         durationMilliseconds,
         playable: true,
+        live: null,
       },
       {
         trackNumber: 1,
@@ -88,6 +89,7 @@ function recording(
         totalBytes: 2_400_000,
         durationMilliseconds,
         playable: true,
+        live: null,
       },
     ],
     transcript: version(id, 1, "complete"),

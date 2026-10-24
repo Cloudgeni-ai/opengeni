@@ -135,6 +135,14 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
        * remembered. Turning it off forgets every remembered voice.
        */
       voiceprints: z.boolean().optional(),
+      /**
+       * Show a live transcript while recording, by default. Off by default.
+       * While on, the recorder also streams each track to a live speech
+       * model as it is captured, which the provider bills for the audio
+       * streamed. The live text is a preview: the final transcript replaces
+       * it when the recording is done.
+       */
+      liveTranscript: z.boolean().optional(),
     })
     .strict(),
 );
@@ -425,6 +433,17 @@ export const RecordingTrack = /* @__PURE__ */ defineSchema(() =>
     durationMilliseconds: z.number().int(),
     /** The worker has prepared one seekable file for this track. */
     playable: z.boolean(),
+    /** The live transcript streamed for this track, or null when none was. */
+    live: z
+      .object({
+        providerId: z.string(),
+        model: z.string(),
+        /** Audio streamed to the live model so far. */
+        streamedMilliseconds: z.number().int(),
+        /** Estimated provider cost at list price, in US dollars. */
+        costUsd: z.number().nullable(),
+      })
+      .nullable(),
   }),
 );
 export type RecordingTrack = z.infer<typeof RecordingTrack>;
@@ -664,6 +683,119 @@ export const ListRecordingModelsResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResponse>;
+
+/**
+ * The wire protocols a live transcription session can speak. Clients connect
+ * to the provider directly with a short-lived grant from the API, so the
+ * workspace's provider key never leaves the server.
+ *
+ * `elevenlabs.scribe_realtime`: JSON over WebSocket. The client sends
+ * `{"message_type":"input_audio_chunk","audio_base_64":…,"commit":false,"sample_rate":…}`
+ * with little-endian 16-bit mono PCM; the provider answers with
+ * `partial_transcript` and `committed_transcript_with_timestamps` messages.
+ */
+export const RecordingLiveProtocol = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["elevenlabs.scribe_realtime"]),
+);
+export type RecordingLiveProtocol = z.infer<typeof RecordingLiveProtocol>;
+
+/** Ask for a live transcription session for one track of a recording being captured. */
+export const CreateRecordingLiveSessionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      trackNumber: z
+        .number()
+        .int()
+        .min(0)
+        .max(RECORDING_MAX_TRACKS - 1),
+      /** A live model; defaults to the deployment's live model. */
+      providerId: z.string().trim().min(1).max(128).optional(),
+      model: z.string().trim().min(1).max(128).optional(),
+    })
+    .strict(),
+);
+export type CreateRecordingLiveSessionRequest = z.infer<typeof CreateRecordingLiveSessionRequest>;
+
+/**
+ * A grant to stream one track to a live model. `url` already carries the
+ * single-use credential and the audio format; open it as a WebSocket before
+ * `expiresAt`, and ask for a new session to reconnect.
+ */
+export const RecordingLiveSession = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    providerId: z.string(),
+    model: z.string(),
+    protocol: RecordingLiveProtocol,
+    url: z.string(),
+    audio: z.object({ encoding: z.literal("pcm_s16le"), sampleRate: z.number().int() }),
+    expiresAt: z.string(),
+  }),
+);
+export type RecordingLiveSession = z.infer<typeof RecordingLiveSession>;
+
+/**
+ * A finished stretch of live text on one track. Times are from the start of
+ * the recording. Live segments are a preview: they are removed once the
+ * recording's first transcript is ready.
+ */
+export const RecordingLiveSegment = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    trackNumber: z.number().int(),
+    /** The recorder's own counter for the track, starting at 0. */
+    segmentNumber: z.number().int(),
+    startMilliseconds: z.number().int(),
+    endMilliseconds: z.number().int(),
+    text: z.string(),
+    /** Order across tracks; pass the last one seen as `after`. */
+    sequence: z.number().int(),
+  }),
+);
+export type RecordingLiveSegment = z.infer<typeof RecordingLiveSegment>;
+
+/**
+ * Save finished live text for one track. Sending a segment number again
+ * keeps the first copy, so a recorder can retry freely.
+ */
+export const AppendRecordingLiveSegmentsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      trackNumber: z
+        .number()
+        .int()
+        .min(0)
+        .max(RECORDING_MAX_TRACKS - 1),
+      /** All audio streamed for this track so far, for the cost estimate. */
+      streamedMilliseconds: z.number().int().min(0).max(RECORDING_MAX_DURATION_MILLISECONDS),
+      segments: z
+        .array(
+          z
+            .object({
+              segmentNumber: z.number().int().min(0).max(1_000_000),
+              startMilliseconds: z.number().int().min(0).max(RECORDING_MAX_DURATION_MILLISECONDS),
+              endMilliseconds: z.number().int().min(0).max(RECORDING_MAX_DURATION_MILLISECONDS),
+              text: z.string().max(16_384),
+            })
+            .strict()
+            .refine((segment) => segment.endMilliseconds >= segment.startMilliseconds, {
+              message: "endMilliseconds is before startMilliseconds",
+            }),
+        )
+        .max(100),
+    })
+    .strict(),
+);
+export type AppendRecordingLiveSegmentsRequest = z.infer<typeof AppendRecordingLiveSegmentsRequest>;
+
+export const ListRecordingLiveSegmentsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    segments: z.array(RecordingLiveSegment),
+    /** Pass as `after` for newer segments; the same value when there are none yet. */
+    after: z.number().int(),
+    /** A transcript is ready, so the live preview is over and its segments are gone. */
+    ended: z.boolean(),
+  }),
+);
+export type ListRecordingLiveSegmentsResponse = z.infer<typeof ListRecordingLiveSegmentsResponse>;
 
 export const RECORDING_EVENT_TYPES = [
   "recording.started",

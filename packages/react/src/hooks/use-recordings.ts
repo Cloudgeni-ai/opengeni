@@ -2,6 +2,7 @@ import type {
   CreateRecordingPersonRequest,
   ListRecordingModelsResponse,
   Recording,
+  RecordingLiveSegment,
   RecordingPerson,
   RecordingVoiceprintConsent,
   RecordingSpeaker,
@@ -56,6 +57,9 @@ export type RecordingsClientLike = Pick<
   | "rememberRecordingPersonVoice"
   | "forgetRecordingPersonVoice"
   | "listRecordingModels"
+  | "createRecordingLiveSession"
+  | "appendRecordingLiveSegments"
+  | "listRecordingLiveSegments"
 >;
 
 /** Refresh every few seconds while `active`, without an extra read when it turns on. */
@@ -159,6 +163,12 @@ export type UseRecorderOptions = RecordingsClientOverride & {
   timesliceMilliseconds?: number;
   keepAwake?: boolean;
   /**
+   * Also show a live transcript while recording, in `live`: each track is
+   * streamed to the workspace's live speech model as it is captured, which
+   * the provider bills for. A preview only. Default: off.
+   */
+  liveTranscript?: boolean;
+  /**
    * Where capture runs. Default: the browser (MediaRecorder and IndexedDB).
    * React Native passes `useNativeRecorderPlatform()` from `@opengeni/react-native/recordings`.
    */
@@ -189,7 +199,10 @@ export type UseRecorderResult = RecorderSnapshot & {
   recovered: string[];
   /** Start a new recording; per-recording options override the hook's. */
   start: (
-    overrides?: Pick<UseRecorderOptions, "title" | "systemAudio" | "microphone" | "visibility">,
+    overrides?: Pick<
+      UseRecorderOptions,
+      "title" | "systemAudio" | "microphone" | "visibility" | "liveTranscript"
+    >,
   ) => Promise<void>;
   pause: () => void;
   resume: () => void;
@@ -234,16 +247,26 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
   // instead of keeping the one it was created with.
   const clientRef = useRef(client);
   clientRef.current = client;
-  const transport = useMemo<RecordingTransport>(
-    () => ({
+  const transport = useMemo<RecordingTransport>(() => {
+    const methods = clientRef.current as Partial<RecordingsClientLike>;
+    return {
       createRecording: (...args) => clientRef.current.createRecording(...args),
       createRecordingUploads: (...args) => clientRef.current.createRecordingUploads(...args),
       completeRecordingChunks: (...args) => clientRef.current.completeRecordingChunks(...args),
       finalizeRecording: (...args) => clientRef.current.finalizeRecording(...args),
       deleteRecording: (...args) => clientRef.current.deleteRecording(...args),
-    }),
-    [],
-  );
+      // Only a client that has the live calls can show a live transcript.
+      ...(typeof methods.createRecordingLiveSession === "function" &&
+      typeof methods.appendRecordingLiveSegments === "function"
+        ? {
+            createRecordingLiveSession: (...args) =>
+              clientRef.current.createRecordingLiveSession(...args),
+            appendRecordingLiveSegments: (...args) =>
+              clientRef.current.appendRecordingLiveSegments(...args),
+          }
+        : {}),
+    };
+  }, []);
   const [snapshot, setSnapshot] = useState<RecorderSnapshot>(IDLE_SNAPSHOT);
   const [recovered, setRecovered] = useState<string[]>([]);
   const recorderRef = useRef<Recorder | null>(null);
@@ -356,6 +379,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
           ? { timesliceMilliseconds: merged.timesliceMilliseconds }
           : {}),
         ...(merged.keepAwake !== undefined ? { keepAwake: merged.keepAwake } : {}),
+        ...(merged.liveTranscript ? { liveTranscript: true } : {}),
         onChange: (next) => {
           if (recorderRef.current === recorder) setSnapshot(next);
         },
@@ -592,6 +616,88 @@ export function useRecording(
   };
 }
 
+const LIVE_POLL_MS = 2_000;
+
+export type UseLiveTranscriptOptions = RecordingsClientOverride & {
+  /** Default: on while a recording id is given. */
+  enabled?: boolean;
+};
+
+export type UseLiveTranscriptResult = {
+  /** Finished live text from every track, in time order. */
+  segments: RecordingLiveSegment[];
+  /** A transcript is ready, so the preview is over. */
+  ended: boolean;
+  error: Error | null;
+};
+
+/**
+ * The live transcript of a recording someone is capturing, as the recorder
+ * saves it, for viewers on other devices. Polls every two seconds until the
+ * transcript is ready. The device recording has it sooner in `useRecorder().live`.
+ */
+export function useLiveTranscript(
+  recordingId: string | null,
+  options: UseLiveTranscriptOptions = {},
+): UseLiveTranscriptResult {
+  const { client, workspaceId } = useEmbeddedRecordings(
+    options,
+    ["listRecordingLiveSegments"],
+    "useLiveTranscript",
+  );
+  const enabled = (options.enabled ?? true) && recordingId !== null;
+  const [state, setState] = useState<UseLiveTranscriptResult & { recordingId: string | null }>({
+    recordingId,
+    segments: [],
+    ended: false,
+    error: null,
+  });
+  const current = state.recordingId === recordingId ? state : null;
+  const ended = current?.ended ?? false;
+  useEffect(() => {
+    if (!enabled || !recordingId || ended) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let after = 0;
+    let segments: RecordingLiveSegment[] = [];
+    const read = async () => {
+      try {
+        const page = await client.listRecordingLiveSegments(workspaceId, recordingId, { after });
+        if (cancelled) return;
+        after = page.after;
+        if (page.segments.length > 0) {
+          segments = [...segments, ...page.segments].sort(
+            (left, right) =>
+              left.startMilliseconds - right.startMilliseconds || left.sequence - right.sequence,
+          );
+        }
+        setState({ recordingId, segments: page.ended ? [] : segments, ended: page.ended, error: null });
+        if (page.ended) return;
+      } catch (error) {
+        if (cancelled) return;
+        setState((previous) => ({
+          ...(previous.recordingId === recordingId
+            ? previous
+            : { segments: [], ended: false }),
+          recordingId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        }));
+      }
+      timer = setTimeout(() => void read(), LIVE_POLL_MS);
+    };
+    void read();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [client, workspaceId, recordingId, enabled, ended]);
+  return {
+    segments: current?.segments ?? [],
+    ended,
+    error: current?.error ?? null,
+  };
+}
+
 export type UseTranscriptOptions = RecordingsClientOverride & {
   /** A specific version; the current one by default. */
   versionId?: string;
@@ -821,11 +927,15 @@ export function useRecordingPeople(
   };
 }
 
-/** Transcription models this workspace offers, with capabilities, price and the default. */
+/**
+ * Models this workspace offers, with capabilities, price and the default:
+ * `models` make transcripts; `liveModels` stream the live transcript.
+ */
 export function useRecordingModels(
   options: RecordingsClientOverride & { enabled?: boolean } = {},
 ): {
   models: ListRecordingModelsResponse["models"];
+  liveModels: ListRecordingModelsResponse["models"];
   defaultModel: ListRecordingModelsResponse["default"] | null;
   loading: boolean;
   error: Error | null;
@@ -840,8 +950,12 @@ export function useRecordingModels(
     [client, workspaceId],
   );
   const state = usePolledValue(load, { enabled: options.enabled });
+  const all = state.data?.models;
+  const models = useMemo(() => (all ?? []).filter((entry) => entry.capabilities.batch), [all]);
+  const liveModels = useMemo(() => (all ?? []).filter((entry) => entry.capabilities.live), [all]);
   return {
-    models: state.data?.models ?? [],
+    models,
+    liveModels,
     defaultModel: state.data?.default ?? null,
     loading: state.loading,
     error: state.error,

@@ -1,5 +1,6 @@
 import type {
   RecordingDiarization,
+  RecordingLiveProtocol,
   RecordingTrackSource,
   RecordingTranscriptionCapabilities,
 } from "@opengeni/contracts";
@@ -61,14 +62,39 @@ export type RecordingTranscriptionResult = {
 
 export type RecordingTranscriptionCredentials = { apiKey: string };
 
+/** A live session a client opens itself, straight to the provider. */
+export type RecordingLiveSessionGrant = {
+  protocol: RecordingLiveProtocol;
+  /** WebSocket URL carrying a single-use credential; never the provider key. */
+  url: string;
+  audio: { encoding: "pcm_s16le"; sampleRate: number };
+  expiresAt: Date;
+};
+
+export type RecordingLiveSessionRequest = {
+  model: string;
+  /** ISO 639 hint; omitted means detect. */
+  language?: string | undefined;
+  signal?: AbortSignal | undefined;
+};
+
 export type RecordingTranscriptionProvider = {
   id: string;
   name: string;
   models: readonly RecordingTranscriptionModelSpec[];
+  /** Transcribe a whole file. Only called for models with `capabilities.batch`. */
   transcribe(
     request: RecordingTranscriptionRequest,
     credentials: RecordingTranscriptionCredentials,
   ): Promise<RecordingTranscriptionResult>;
+  /**
+   * Grant a client one live session. Present when some model has
+   * `capabilities.live`; only called for those models.
+   */
+  createLiveSession?(
+    request: RecordingLiveSessionRequest,
+    credentials: RecordingTranscriptionCredentials,
+  ): Promise<RecordingLiveSessionGrant>;
 };
 
 export type RecordingTranscriptionErrorCode =
@@ -366,6 +392,11 @@ export function recordingDiarizationKind(input: {
 // --- ElevenLabs Scribe ------------------------------------------------------
 
 const ELEVENLABS_SPEECH_TO_TEXT_URL = "https://api.elevenlabs.io/v1/speech-to-text";
+const ELEVENLABS_API_BASE_URL = "https://api.elevenlabs.io";
+const ELEVENLABS_REALTIME_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime";
+/** ElevenLabs single-use tokens last 15 minutes; grant a little less. */
+const ELEVENLABS_LIVE_TOKEN_MILLISECONDS = 14 * 60 * 1_000;
+const LIVE_SAMPLE_RATE = 16_000;
 /** Long recordings are chunked server-side; an hour can take a few minutes. */
 const ELEVENLABS_REQUEST_TIMEOUT_MILLISECONDS = 60 * 60 * 1_000;
 
@@ -383,6 +414,23 @@ const SCRIBE_CAPABILITIES: RecordingTranscriptionCapabilities = {
   speakerLibrary: false,
   maxDurationSeconds: 10 * 60 * 60,
   maxFileBytes: 3 * 1024 * 1024 * 1024,
+};
+
+/** Scribe v2 Realtime: words as they are spoken, per track, without speakers. */
+const SCRIBE_REALTIME_CAPABILITIES: RecordingTranscriptionCapabilities = {
+  batch: false,
+  live: true,
+  diarization: false,
+  liveDiarization: false,
+  multichannel: false,
+  maxSpeakers: null,
+  wordTimestamps: true,
+  languages: [],
+  languageDetection: true,
+  keyterms: false,
+  speakerLibrary: false,
+  maxDurationSeconds: null,
+  maxFileBytes: null,
 };
 
 type ElevenLabsWord = {
@@ -460,8 +508,12 @@ export function parseElevenLabsTranscript(body: unknown): RecordingTranscription
   };
 }
 
-function elevenLabsError(status: number, detail: string): RecordingTranscriptionError {
-  const message = `ElevenLabs could not transcribe this audio (HTTP ${status}${detail ? `: ${detail}` : ""})`;
+function elevenLabsError(
+  status: number,
+  detail: string,
+  action = "transcribe this audio",
+): RecordingTranscriptionError {
+  const message = `ElevenLabs could not ${action} (HTTP ${status}${detail ? `: ${detail}` : ""})`;
   if (status === 401 || status === 403) {
     return new RecordingTranscriptionError(message, "unauthorized", false);
   }
@@ -487,7 +539,12 @@ async function errorDetail(response: Response): Promise<string> {
 
 /** ElevenLabs Scribe, using the workspace's or organization's own ElevenLabs key. */
 export function createElevenLabsRecordingTranscriptionProvider(
-  options: { fetch?: typeof fetch; url?: string; timeoutMilliseconds?: number } = {},
+  options: {
+    fetch?: typeof fetch;
+    url?: string;
+    timeoutMilliseconds?: number;
+    now?: () => Date;
+  } = {},
 ): RecordingTranscriptionProvider {
   const request = options.fetch ?? fetch;
   return {
@@ -501,7 +558,53 @@ export function createElevenLabsRecordingTranscriptionProvider(
         usdPerHour: 0.22,
         keytermsPremium: 0.3,
       },
+      {
+        model: "scribe_v2_realtime",
+        name: "Scribe v2 Realtime",
+        capabilities: SCRIBE_REALTIME_CAPABILITIES,
+        usdPerHour: 0.39,
+      },
     ],
+    async createLiveSession(input, credentials) {
+      const now = options.now?.() ?? new Date();
+      let response: Response;
+      try {
+        response = await request(`${ELEVENLABS_API_BASE_URL}/v1/single-use-token/realtime_scribe`, {
+          method: "POST",
+          headers: { "xi-api-key": credentials.apiKey },
+          signal: input.signal
+            ? AbortSignal.any([input.signal, AbortSignal.timeout(15_000)])
+            : AbortSignal.timeout(15_000),
+        });
+      } catch (error) {
+        if (input.signal?.aborted) throw error;
+        throw new RecordingTranscriptionError("Could not reach ElevenLabs", "network", true);
+      }
+      if (!response.ok) {
+        throw elevenLabsError(response.status, await errorDetail(response), "start a live transcript");
+      }
+      const body = (await response.json().catch(() => null)) as { token?: unknown } | null;
+      if (typeof body?.token !== "string" || body.token.length === 0) {
+        throw new RecordingTranscriptionError(
+          "ElevenLabs returned no live session token",
+          "provider",
+          true,
+        );
+      }
+      const url = new URL(ELEVENLABS_REALTIME_URL);
+      url.searchParams.set("model_id", input.model);
+      url.searchParams.set("token", body.token);
+      url.searchParams.set("audio_format", `pcm_${LIVE_SAMPLE_RATE}`);
+      url.searchParams.set("commit_strategy", "vad");
+      url.searchParams.set("include_timestamps", "true");
+      if (input.language) url.searchParams.set("language_code", input.language);
+      return {
+        protocol: "elevenlabs.scribe_realtime",
+        url: url.toString(),
+        audio: { encoding: "pcm_s16le", sampleRate: LIVE_SAMPLE_RATE },
+        expiresAt: new Date(now.getTime() + ELEVENLABS_LIVE_TOKEN_MILLISECONDS),
+      };
+    },
     async transcribe(input, credentials) {
       const form = new FormData();
       form.append(
@@ -558,13 +661,25 @@ export function createRecordingTranscriptionProviderRegistry(
 }
 
 export const DEFAULT_RECORDING_TRANSCRIPTION = { providerId: "elevenlabs", model: "scribe_v2" };
+/** The live model a recorder streams to when a request names none. */
+export const DEFAULT_RECORDING_LIVE_TRANSCRIPTION = {
+  providerId: "elevenlabs",
+  model: "scribe_v2_realtime",
+};
 
+/**
+ * A provider's model, if it is offered for this use: `batch` transcribes
+ * whole tracks, `live` streams while recording.
+ */
 export function findRecordingTranscriptionModel(
   registry: RecordingTranscriptionProviderRegistry,
   providerId: string,
   model: string,
+  use: "batch" | "live" = "batch",
 ): { provider: RecordingTranscriptionProvider; spec: RecordingTranscriptionModelSpec } | null {
   const provider = registry.get(providerId);
   const spec = provider?.models.find((candidate) => candidate.model === model);
-  return provider && spec ? { provider, spec } : null;
+  if (!provider || !spec) return null;
+  if (use === "live") return spec.capabilities.live && provider.createLiveSession ? { provider, spec } : null;
+  return spec.capabilities.batch ? { provider, spec } : null;
 }
