@@ -47,7 +47,8 @@ function Sessions() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { client, models, workspaceId, workspaces, organizations, setWorkspaceId } = useAccount();
+  const { client, models, workspaceId, workspaces, organizations, setWorkspaceId, reload } =
+    useAccount();
   // Home's search button opens this screen ready to type.
   const { search } = useLocalSearchParams<{ search?: string }>();
   // The last list paints at once; refreshes run quietly behind it.
@@ -171,7 +172,8 @@ function Sessions() {
             refreshing={pulling}
             onRefresh={() => {
               setPulling(true);
-              void load().finally(() => setPulling(false));
+              // Pull to refresh covers the workspace switcher above the list too.
+              void Promise.all([load(), reload()]).finally(() => setPulling(false));
             }}
           />
         }
