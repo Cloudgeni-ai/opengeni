@@ -15,7 +15,43 @@ The continuous service, secret injection, qualified image and stop/restart
 qualification are separately owned deployment work. No live admin writes or
 controller activation are part of this change.
 
-## Intended boundaries
+## Explicit App-only plan (version 4)
+
+`bundle.ts prepare-app-only SNAPSHOT APP_ID INSTALLATION_ID NEW_OUTPUT_DIRECTORY`
+prepares a new, offline version 4 plan. Only that App has `always` bypass on
+Protection and the namespace; neither organization administrators nor repository
+role 5 retain ON bypass. Protection also requires
+`merge-batcher: run gh pr merge --auto (or add queue-ready)`, with its expected
+source bound to the App's integration ID. The App can bypass this check; this
+change does not manufacture a successful check or replace candidate CI evidence.
+The immutable guard still has no bypass.
+
+The restore payload is the exact saved Manual policy, including any original
+administrator bypass and without the added guiding check. Version 3 `prepare`
+and validation remain supported for retained activations; changing a plan's
+version does not upgrade it. Do not substitute version 4 payloads or config into
+an active version 3 watchdog. A live in-place upgrade still requires reviewed
+transition handling, a qualified image/plan binding and rollback qualification.
+The offline plan command does not authorize or implement that transition.
+
+Version 4 recovery also recognizes three exact inventories for a reviewed
+in-place upgrade: `legacy-applied` (both v3 payloads), `upgrade-admission`
+(v4 Protection, v3 namespace), and `legacy-namespace` (saved Manual Protection,
+v3 namespace). These are recovery states, never ordinary ON clearance. The
+historical namespace creation receipt remains unchanged; it must match either
+the exact predecessor or v4 payload, and the live full inventory must match the
+selected phase. Unknown combinations and drift still refuse restoration writes.
+OFF uses the exact saved restore payload and reverse-only stages for these states.
+An unresolved upgrade write blocks reverse writes unless its exact destination
+has been reconciled; absence or a different later inventory is not finality proof.
+
+This recovery support does not add forward upgrade writes. Before a live upgrade,
+the rollout owner must resolve single-writer coordination with scheduled OFF,
+qualify the new image and immutable binding, and retain provider/enforcement and
+rollback evidence. Do not pause the live Scheduler or introduce a claim reset to
+work around that requirement.
+
+## Legacy version 3 boundaries
 
 | Ruleset | Refs | Bypass | Rules |
 | --- | --- | --- | --- |

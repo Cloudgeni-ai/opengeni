@@ -3059,6 +3059,10 @@ with one hosted candidate in flight; it never updates main or PR readiness.
 Its portable container and deployment/rollback boundary are documented in
 [merge batcher](merge-batcher.md); the historical measurements and inactive
 native/vendor configurations remain in [merge queue](merge-queue.md).
+The offline [administration bundle](merge-batcher-admin/README.md) keeps legacy
+version 3 plans verifiable and offers explicit version 4 App-only plans with an
+App-bound guiding check. Both retain exact saved Manual rollback; an offline
+plan is not authorization or qualification for a live policy transition.
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |

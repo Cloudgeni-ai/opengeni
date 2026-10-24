@@ -447,7 +447,15 @@ export async function off(
         if (await exists(join(verifiedDirectory!, `${kind}-receipt.json`)))
           receipts[kind] = await json(join(verifiedDirectory!, `${kind}-receipt.json`));
       }
-      for (const candidate of ["restored", "guard", "namespace", "applied"] as const) {
+      for (const candidate of [
+        "restored",
+        "guard",
+        "namespace",
+        "applied",
+        "legacy-applied",
+        "upgrade-admission",
+        "legacy-namespace",
+      ] as const) {
         try {
           verify(plan, snapshot, candidate, receipts);
           return candidate;
@@ -458,10 +466,25 @@ export async function off(
       throw new Error("Unknown/drifted inventory; STOP retained, no restoration writes");
     }
     let current = await phase();
-    if (current === "applied" && !(await exists(join(planDir, "admit-attempt", "verified"))))
-      await stage("reconcile-admit");
+    if (
+      current === "upgrade-admission" &&
+      (await exists(join(planDir, "upgrade-admission-attempt"))) &&
+      !(await exists(join(planDir, "upgrade-admission-attempt", "verified")))
+    )
+      await stage("reconcile-upgrade-admission");
+    if (current === "applied") {
+      if (await exists(join(planDir, "upgrade-namespace-attempt"))) {
+        if (!(await exists(join(planDir, "upgrade-namespace-attempt", "verified"))))
+          await stage("reconcile-upgrade-namespace");
+      } else if (!(await exists(join(planDir, "admit-attempt", "verified")))) {
+        await stage("reconcile-admit");
+      }
+    }
     for (const [before, action] of [
+      ["legacy-applied", "restore-legacy-admission"],
+      ["upgrade-admission", "restore-upgrade-admission"],
       ["applied", "restore-admission"],
+      ["legacy-namespace", "delete-legacy-namespace"],
       ["namespace", "delete-namespace"],
       ["guard", "delete-guard"],
     ] as const) {
