@@ -488,6 +488,9 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "recording_speaker_voices",
       "recording_voice_rejections",
       "recording_live_segments",
+      // 0952 secret approval rules and requests are also withheld.
+      "secret_approval_rules",
+      "secret_use_approvals",
     ].sort();
     // 0823 (personal machine consent) adds protected tables the runtime role
     // never reads directly; insert them in the sorted protected list.
