@@ -576,11 +576,28 @@ export function projectElements(
   });
 }
 
+/** The elements of a reading with each listed once. macOS lists a table's
+ * cells again under each AXColumn, as new elements with the same role, label
+ * and bounds; the first of them stands for the element. */
+export function distinctElements<
+  Node extends Pick<InteractionSemanticNodeValue, "role" | "name" | "bounds">,
+>(nodes: readonly Node[]): Node[] {
+  const places = new Set<string>();
+  return nodes.filter((node) => {
+    if (!node.bounds || (node.bounds.width === 0 && node.bounds.height === 0)) return true;
+    const { x, y, width, height } = node.bounds;
+    const place = JSON.stringify([node.role, node.name ?? null, x, y, width, height]);
+    if (places.has(place)) return false;
+    places.add(place);
+    return true;
+  });
+}
+
 export function locate(
   nodes: InteractionSemanticNodeValue[],
   locator: ComputerLocator,
 ): InteractionSemanticNodeValue {
-  const matches = nodes.filter((node) => {
+  const found = nodes.filter((node) => {
     const match = (value: string | undefined, query: string, exact = false) =>
       exact ? value === query : (value ?? "").toLowerCase().includes(query.toLowerCase());
     switch (locator.kind) {
@@ -602,6 +619,7 @@ export function locate(
         return node.identifier === locator.value;
     }
   });
+  const matches = distinctElements(found);
   if (matches.length !== 1)
     throw new ComputerBackendError(
       matches.length ? "locator_ambiguous" : "locator_not_found",

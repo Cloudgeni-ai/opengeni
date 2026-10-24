@@ -2937,6 +2937,10 @@ describe("CUA desktop boundary", () => {
             role: "AXCheckBox",
             label: "Reminders",
             value: "0",
+            // Two checkboxes, each in its own place.
+            ...(data.elements[0].frame
+              ? { frame: { ...data.elements[0].frame, y: data.elements[0].frame.y + index * 30 } }
+              : {}),
           });
           if (data.elements) data.elements.push(checkbox(2), ...(this.twin ? [checkbox(3)] : []));
           response.structuredJson = JSON.stringify(data);
