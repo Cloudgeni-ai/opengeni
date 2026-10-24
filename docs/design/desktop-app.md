@@ -188,8 +188,10 @@ are non-mutating; only explicit signed-in setup enables desktop management.
   Repository discovery does the same, though turn-end capture, its only
   caller, doesn't run on Connected Machines today. The agent instructions say
   not to scan those folders unasked. The app declares only the microphone
-  usage description and the `audio-input` entitlement (dictation and voice
-  chats); account windows refuse the camera, screen sharing, Bluetooth, USB,
+  and system-audio recording usage descriptions and the `audio-input`
+  entitlement (dictation, voice chats and meeting recordings; macOS asks about
+  system audio only when a recording first includes the computer's audio);
+  account windows refuse the camera, screen sharing, Bluetooth, USB,
   serial and HID devices and location, and the app's own local pages in the
   default session get no permissions
   (`packages/desktop/src/main/web-permissions.ts`,
