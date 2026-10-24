@@ -466,6 +466,26 @@ describe("ModelPolicyPicker", () => {
     }
   });
 
+  test("on a phone the pill is a full 44px target or steps aside", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const trigger = container.querySelector<HTMLButtonElement>(".og-model-policy-trigger")!;
+    // Icon-only on a narrow phone row must still be 44×44, never a squeezed icon.
+    expect(trigger.className).toContain("max-sm:h-11");
+    expect(trigger.className).toContain("max-sm:min-w-11");
+    // Below a 44px row the pill hides instead of shrinking under the minimum.
+    expect(trigger.className).toContain("max-sm:@max-[2.75rem]/model-controls:hidden");
+  });
+
   test("explicit null hides group icons and descriptions", async () => {
     const container = await mount(
       <ModelPolicyPickerMenu
