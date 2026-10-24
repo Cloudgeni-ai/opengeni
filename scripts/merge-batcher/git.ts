@@ -71,7 +71,9 @@ export class GitStore {
     // These bounded LOCAL refs are negotiation hints, never queue/state proof.
     // Keep state roots separate so a one-off candidate read cannot evict main.
     const targets = refs.map((ref, index) =>
-      index < 64 ? `+${ref}:refs/batcher-cache/${cache}/${index}` : ref,
+      /^[a-f0-9]{40}$/.test(ref) && index < 64
+        ? `+${ref}:refs/batcher-cache/${cache}/${index}`
+        : ref,
     );
     await this.exec([
       "fetch",

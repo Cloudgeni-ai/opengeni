@@ -53,6 +53,9 @@ test("new main tips reuse fetched history across fresh processes without remote 
   expect(await new GitStore(destination).exec(["for-each-ref", "--format=%(refname)"])).toBe(
     "refs/batcher-cache/state/0",
   );
+  const cache = new GitStore(destination);
+  await cache.fetch(`file://${source.dir}`, ["+refs/heads/main:refs/remotes/traffic/main"]);
+  expect(await cache.exec(["rev-parse", "refs/remotes/traffic/main"])).toBe(parent!);
 });
 
 test("fetch anchors have a fixed bound and preserve exact requested object identities", async () => {
@@ -72,4 +75,7 @@ test("fetch anchors have a fixed bound and preserve exact requested object ident
   expect(args.at(-1)).toBe(`+${refs[1]}:refs/batcher-cache/state/0`);
   await git.fetch("fixture", [refs[2]!]);
   expect(args.at(-1)).toBe(`+${refs[2]}:refs/batcher-cache/objects/0`);
+  const refspecs = ["+refs/heads/main:refs/remotes/traffic/main", "refs/heads/main", "HEAD"];
+  await git.fetch("fixture", refspecs);
+  expect(args.slice(-3)).toEqual(refspecs);
 });
