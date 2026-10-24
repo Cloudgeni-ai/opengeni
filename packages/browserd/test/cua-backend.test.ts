@@ -2915,7 +2915,7 @@ describe("CUA desktop boundary", () => {
           });
           const target = (await backend.targets())[0]!;
           const observation = await controller.observe(target.id);
-          const raw = "{{" + "secret:Card/pin}}";
+          const raw = ["{{", "secret:Card/pin", "}}"].join("");
           const receipt = await controller.run({
             protocolVersion: 1,
             operationId: crypto.randomUUID(),

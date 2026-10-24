@@ -51,10 +51,16 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
+import { userContentSignedGetUrlOptions } from "../http/user-content";
 import { elevenLabsKeyAvailable } from "../realtime-websocket";
 
 const UPLOAD_URL_SECONDS = 15 * 60;
 const PLAYBACK_URL_SECONDS = 60 * 60;
+
+/** The type the worker stored a prepared track with, read from its key's extension. */
+function preparedTrackContentType(objectKey: string): string {
+  return objectKey.endsWith(".m4a") ? "audio/mp4" : "audio/webm";
+}
 
 /**
  * Recordings: captured conversations made of audio tracks. Clients record
@@ -469,6 +475,7 @@ export function registerRecordingRoutes(
       key: prepared.objectKey,
       expiresInSeconds: PLAYBACK_URL_SECONDS,
       audience: "public",
+      ...userContentSignedGetUrlOptions(preparedTrackContentType(prepared.objectKey)),
     });
     await recordAuditEvent(db, {
       accountId: actor.accountId,

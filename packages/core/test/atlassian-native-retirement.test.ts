@@ -34,7 +34,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-test("new native Atlassian source schedules refuse after workspace authority read and before downstream setup", async () => {
+test("new native Atlassian source schedules refuse before any database effect or downstream setup", async () => {
   const { workspaceId, subjectId } = grant;
   const source: KnowledgeSourceSyncAction = {
     kind: "knowledge_source_sync",
@@ -81,24 +81,13 @@ test("new native Atlassian source schedules refuse after workspace authority rea
       knowledgeSource: source,
     },
   });
-  // The Personal-workspace gate owns the first transaction. Retired source
-  // validation must still reject before any later DB operation or model setup.
-  let authorityReadCompleted = false;
-  let downstreamDatabaseAccesses = 0;
+  // Retired source validation is the first check: it rejects before the
+  // model guard, the Personal-workspace gate or any other database use.
+  let databaseAccesses = 0;
   const database = new Proxy(client.db, {
-    get(target, key, receiver) {
-      if (authorityReadCompleted) {
-        downstreamDatabaseAccesses += 1;
-        throw new Error("Unexpected database effect after workspace authority read");
-      }
-      if (key === "transaction") {
-        return async (...args: Parameters<typeof target.transaction>) => {
-          const result = await target.transaction(...args);
-          authorityReadCompleted = true;
-          return result;
-        };
-      }
-      return Reflect.get(target, key, receiver);
+    get() {
+      databaseAccesses += 1;
+      throw new Error("Unexpected database effect before retired source refusal");
     },
   });
   await expect(
@@ -110,6 +99,5 @@ test("new native Atlassian source schedules refuse after workspace authority rea
       payload,
     }),
   ).rejects.toMatchObject({ status: 410, message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
-  expect(authorityReadCompleted).toBe(true);
-  expect(downstreamDatabaseAccesses).toBe(0);
+  expect(databaseAccesses).toBe(0);
 });

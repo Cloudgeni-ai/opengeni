@@ -51,6 +51,7 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       "auth_verifications",
       "automation_webhook_endpoints",
       "deployment_model_catalog",
+      "event_ingress_routes",
       "integration_oauth_clients",
       "managed_accounts",
       "mcp_oauth_access_tokens",
