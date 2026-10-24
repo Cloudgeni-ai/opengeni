@@ -83,6 +83,46 @@ function staged(plan: Plan, phase: "guard" | "namespace" | "applied") {
 }
 
 describe("offline batcher administration contract", () => {
+  test("OrganizationAdmin null readback matches sentinel 1 without rewriting saved policy", () => {
+    const plan = prepare(fixture(), 5425399, 174101112);
+    const saved = JSON.stringify(plan);
+    for (const phase of ["namespace", "applied"] as const) {
+      const { current, receipts } = structuredClone(staged(plan, phase));
+      for (const rule of [...current.rulesets, receipts.namespace]) {
+        for (const actor of rule.bypass_actors as Record<string, unknown>[])
+          if (actor.actor_type === "OrganizationAdmin") actor.actor_id = null;
+      }
+      expect(() => verify(plan, current, phase, receipts)).not.toThrow();
+    }
+    expect(JSON.stringify(plan)).toBe(saved);
+  });
+  test("OrganizationAdmin normalization rejects other actor, ID, mode and shape drift", () => {
+    const plan = prepare(fixture(), 5425399, 174101112);
+    for (const change of [
+      { actor_id: 2 },
+      { actor_id: "1" },
+      { actor_id: null, actor_type: "RepositoryRole" },
+      { actor_id: null, actor_type: "Integration" },
+      { actor_id: null, bypass_mode: "pull_request" },
+      { actor_id: null, bypass_mode: "exempt" },
+      { actor_id: null, extra: true },
+    ]) {
+      const { current, receipts } = structuredClone(staged(plan, "namespace"));
+      const actors = receipts.namespace.bypass_actors as Record<string, unknown>[];
+      Object.assign(actors.find((a) => a.actor_type === "OrganizationAdmin")!, change);
+      expect(() => verify(plan, current, "namespace", receipts)).toThrow();
+    }
+    for (const mutation of ["missing", "duplicate", "integration-id"] as const) {
+      const { current, receipts } = structuredClone(staged(plan, "namespace"));
+      const actors = receipts.namespace.bypass_actors as Record<string, unknown>[];
+      const actor = actors.find((a) => a.actor_type === "OrganizationAdmin")!;
+      if (mutation === "missing") delete actor.actor_id;
+      if (mutation === "duplicate") actors.push({ ...actor, actor_id: null });
+      if (mutation === "integration-id")
+        actors.find((a) => a.actor_type === "Integration")!.actor_id = null;
+      expect(() => verify(plan, current, "namespace", receipts)).toThrow();
+    }
+  });
   test("observed GitHub omitted update default verifies plan, apply and exact reverse phases", () => {
     for (const omittedPlan of [false, true]) {
       const plan = prepare(fixture(), 5425399, 174101112);
