@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  BROWSER_LOCATOR_KIND_WORDS,
   BrowserTargetResolutionError,
   CurrentBrowserTab,
   expandRefShorthand,
@@ -155,5 +156,37 @@ describe("current browser tab", () => {
         locator: { kind: "ref", ref },
       });
     }
+  });
+
+  test("role:name takes roles of several words", () => {
+    expect(expandRefShorthand({ type: "click", locator: "push button:Save" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "push button", name: "Save", exact: true },
+    });
+    expect(expandRefShorthand({ type: "click", locator: "check box :Remember me" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "check box", name: "Remember me", exact: true },
+    });
+  });
+
+  test("kind words name their locator kind where the surface has no such role", () => {
+    const kindWords = BROWSER_LOCATOR_KIND_WORDS;
+    expect(
+      expandRefShorthand({ type: "fill", locator: "label:Email", value: "x" }, kindWords),
+    ).toEqual({ type: "fill", locator: { kind: "label", text: "Email" }, value: "x" });
+    expect(
+      expandRefShorthand(
+        { type: "batch", actions: [{ type: "fill", locator: "Placeholder: Search ", value: "x" }] },
+        kindWords,
+      ),
+    ).toEqual({
+      type: "batch",
+      actions: [{ type: "fill", locator: { kind: "placeholder", text: "Search" }, value: "x" }],
+    });
+    // Without kind words (desktop readings, where label is a role) it stays a role.
+    expect(expandRefShorthand({ type: "click", locator: "label:Email" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "label", name: "Email", exact: true },
+    });
   });
 });

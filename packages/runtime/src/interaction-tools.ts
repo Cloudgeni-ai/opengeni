@@ -103,6 +103,7 @@ import {
 } from "@opengeni/sdk";
 import { z } from "zod";
 import {
+  BROWSER_LOCATOR_KIND_WORDS,
   BrowserTargetResolutionError,
   CurrentBrowserTab,
   expandRefShorthand,
@@ -707,7 +708,7 @@ const BrowserActInput = z
     view: z.enum(["compact", "full", "none"]).optional(),
     includeScreenshot: z.boolean().optional(),
     action: z.preprocess(
-      expandRefShorthand,
+      (action) => expandRefShorthand(action, BROWSER_LOCATOR_KIND_WORDS),
       z.union([AgentBrowserAction, AgentBrowserActionBatch]),
     ),
   })
