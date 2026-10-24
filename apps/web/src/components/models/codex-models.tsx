@@ -263,7 +263,7 @@ export function CodexSettingRows({
       <SettingRowGroup>
         <SettingRow
           label="Codex is off in this workspace"
-          description="New chats and schedules here can't use Codex models. Accounts stay connected."
+          description="New chats and automations here can't use Codex models. Accounts stay connected."
           control={
             codex.canManage ? (
               <RowButton
@@ -314,7 +314,7 @@ export function CodexSettingRows({
         {codex.canManage ? (
           <SettingDangerRow
             label="Turn off Codex"
-            description="New chats and schedules here stop using Codex models. Accounts stay connected."
+            description="New chats and automations here stop using Codex models. Accounts stay connected."
             disabled={codex.busy}
             onClick={() => setTurningOff(true)}
           />
@@ -325,7 +325,7 @@ export function CodexSettingRows({
         onOpenChange={setTurningOff}
         title={`Turn off Codex in ${places.workspaceName}?`}
         consequences={[
-          "New chats and schedules here can't use Codex models.",
+          "New chats and automations here can't use Codex models.",
           "Work already running finishes first.",
           "Accounts stay connected. Turn Codex back on any time.",
         ]}

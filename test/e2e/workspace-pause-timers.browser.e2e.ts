@@ -184,7 +184,7 @@ test("all timer states through the real settings UI and API", async () => {
   await submit().click();
   await dialog().waitFor({ state: "hidden" });
   await runtime()
-    .getByText("New sessions and scheduled runs wait until someone resumes.", { exact: true })
+    .getByText("New sessions and automation runs wait until someone resumes.", { exact: true })
     .waitFor();
   expect(await inferenceControl()).toMatchObject({ state: "paused", timer: null });
   await capture("07-paused-indefinite");
@@ -202,7 +202,7 @@ test("all timer states through the real settings UI and API", async () => {
   await dialog().getByRole("button", { name: "Cancel scheduled pause", exact: true }).click();
   await dialog().waitFor({ state: "hidden" });
   await runtime()
-    .getByText("Agents can start new sessions and scheduled runs.", { exact: true })
+    .getByText("Agents can start new sessions and automation runs.", { exact: true })
     .waitFor();
   expect(await inferenceControl()).toMatchObject({ state: "active", timer: null });
   // The default editor, a picked time, and an invalid picked time.

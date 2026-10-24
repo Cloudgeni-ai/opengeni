@@ -66,7 +66,7 @@ export function PrivateScheduleSummaries({ workspaceId, now }: { workspaceId: st
         description: "Only they can resume it.",
       });
     } catch {
-      toast.error("Couldn't pause the schedule", { description: "Try again in a moment." });
+      toast.error("Couldn't pause the automation", { description: "Try again in a moment." });
     } finally {
       setBusyId(null);
     }

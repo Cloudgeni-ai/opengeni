@@ -95,7 +95,7 @@ try {
   const radar = page.getByRole("switch", { name: "Oslo demand and surplus radar" });
   await radar.click();
   await expect(radar).toHaveAttribute("aria-checked", "false");
-  await expect(page.getByText("Couldn't pause the schedule")).toBeVisible();
+  await expect(page.getByText("Couldn't pause the automation")).toBeVisible();
   await expect(radar).toHaveAttribute("aria-checked", "true");
   await context.close();
   console.log("schedules toggle preview: ok");

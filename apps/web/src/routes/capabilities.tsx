@@ -1308,7 +1308,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       params.get("reason") === "google_drive_native_retired"
     ) {
       setCallbackNotice(
-        "The previous Google Drive integration is retired. Connect Google Drive MCP and use a normal schedule for recurring work. Your imported documents and history are kept.",
+        "The previous Google Drive integration is retired. Connect Google Drive MCP and use an automation for recurring work. Your imported documents and history are kept.",
       );
       clearReturnParams();
     }
