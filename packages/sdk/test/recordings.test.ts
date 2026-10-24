@@ -434,6 +434,62 @@ describe("RecordingUploader", () => {
     expect(server.state.deleted).toBe(true);
   });
 
+  test("discard waits for a change being written, so the recording stays gone", async () => {
+    const server = fakeServer();
+    const memory = createMemoryRecordingChunkStore();
+    // Hold the next write of the record until the test lets it through.
+    let holdWrite: (() => void) | null = null;
+    let writeHeld: (() => void) | null = null;
+    const held = new Promise<void>((done) => (writeHeld = done));
+    const store: typeof memory = {
+      ...memory,
+      async putRecording(recording) {
+        if (recording.chunkCounts[0] === 1 && !holdWrite) {
+          const gate = new Promise<void>((done) => (holdWrite = done));
+          writeHeld!();
+          await gate;
+        }
+        await memory.putRecording(recording);
+      },
+    };
+    const { uploader } = uploaderFor(server, store);
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    const adding = uploader.addChunk(await testChunk(0, 0, "a"));
+    await held;
+    const discarding = uploader.discard(RECORDING);
+    holdWrite!();
+    await adding;
+    await discarding;
+    expect(await store.getRecording(RECORDING)).toBeNull();
+    expect(await store.listRecordings()).toEqual([]);
+  });
+
+  test("a recording discarded while the server creates it is removed there too", async () => {
+    const server = fakeServer();
+    let finishCreate: (() => void) | null = null;
+    let createStarted: (() => void) | null = null;
+    const started = new Promise<void>((done) => (createStarted = done));
+    const create0 = server.client.createRecording.bind(server.client);
+    server.client.createRecording = async (...args: Parameters<typeof create0>) => {
+      createStarted!();
+      await new Promise<void>((done) => (finishCreate = done));
+      return await create0(...args);
+    };
+    const { uploader, store } = uploaderFor(server);
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await started;
+    // The record still says the server has no copy, so discard has none to remove.
+    await uploader.discard(RECORDING);
+    expect(server.state.deleted).toBe(false);
+    finishCreate!();
+    for (let attempt = 0; attempt < 50 && !server.state.deleted; attempt += 1) {
+      await new Promise((done) => setTimeout(done, 1));
+    }
+    expect(server.state.created).toBe(1);
+    expect(server.state.deleted).toBe(true);
+    expect(await store.listRecordings()).toEqual([]);
+  });
+
   test("the IndexedDB store survives a reopen and keeps chunks in order", async () => {
     const factory = new IDBFactory();
     const first = createIndexedDbRecordingChunkStore({
