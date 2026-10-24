@@ -26,6 +26,7 @@ import type {
   RecordingTranscriptVersion,
   RecordingVisibility,
 } from "@opengeni/contracts";
+import { defaultRecordingSpeakerName } from "@opengeni/contracts";
 import {
   activeSegmentIndex,
   formatDuration,
@@ -39,6 +40,7 @@ import {
   useRecordingModels,
   useRecordingPeople,
   useRecordingsClient,
+  useLiveTranscript,
   useTranscript,
   type RecordingsClientOverride,
 } from "@opengeni/react/recordings";
@@ -87,7 +89,8 @@ import {
   speakerIsSuggested,
   type TranscriptActions,
 } from "./meeting-transcript";
-import { uploadLine } from "./recorder-panel";
+import { liveSpeakerName, recorderLiveLines, uploadLine } from "./recorder-panel";
+import { LiveTranscript, liveStatus } from "./live-transcript";
 import { useMeetingRecorder } from "./recorder-context";
 
 function errorText(error: unknown): string | undefined {
@@ -387,14 +390,26 @@ const SPINNER = (
 function PhaseNotice({
   recording,
   uploadingHere,
+  recordingElsewhere,
   onRetry,
 }: {
   recording: Recording;
   uploadingHere: string | null;
+  /** It's captured on another device with the live preview on. */
+  recordingElsewhere: boolean;
   onRetry: () => void;
 }) {
   const phase = meetingPhase(recording);
   if (phase.kind === "uploading") {
+    if (uploadingHere === null && recordingElsewhere) {
+      return (
+        <Notice tone="waiting" icon={SPINNER} title="Not finished yet" live="polite">
+          It's still being recorded or uploaded, in another tab or on another device. What's said
+          shows below as it comes in, and this page updates by itself. The transcript starts once
+          all the audio is in.
+        </Notice>
+      );
+    }
     return uploadingHere !== null ? (
       <Notice tone="waiting" icon={SPINNER} title="Uploading the audio" live="polite">
         {uploadingHere} Keep this tab open, or come back later: the audio is saved in this browser
@@ -525,6 +540,18 @@ export function MeetingDetailPage({
   const models = useRecordingModels(override);
   const { client } = useRecordingsClient(override);
   const { recorder } = useMeetingRecorder();
+  // The live preview, while a meeting is recorded and until its transcript is
+  // ready: this browser's own recorder has it first; anyone else reads what
+  // the recorder saved.
+  const recordingHere = Boolean(recorder && recorder.recordingId === recordingId && recorder.live);
+  const previewing =
+    Boolean(recording?.tracks.some((track) => track.live)) &&
+    !transcriptVersionId &&
+    (recording?.state === "capturing" || recording?.state === "processing");
+  const savedLive = useLiveTranscript(recordingId, {
+    ...override,
+    enabled: previewing && !recordingHere,
+  });
   const player = useRef<MeetingPlayerHandle>(null);
   const [position, setPosition] = useState(0);
   const [renaming, setRenaming] = useState(false);
@@ -819,7 +846,7 @@ export function MeetingDetailPage({
           </StatusBadge>
         ) : phase.kind === "uploading" ? (
           <StatusBadge variant="dot" tone="progress" pulse>
-            Uploading
+            {previewing && !recordingHere ? "In progress" : "Uploading"}
           </StatusBadge>
         ) : undefined
       }
@@ -941,6 +968,7 @@ export function MeetingDetailPage({
         <PhaseNotice
           recording={recording}
           uploadingHere={uploadingHere}
+          recordingElsewhere={previewing && !recordingHere}
           onRetry={() => setRerunning(true)}
         />
         {phase.kind === "ready" ? (
@@ -986,7 +1014,49 @@ export function MeetingDetailPage({
               </div>
             </div>
           ) : null}
-          {!showTranscript ? (
+          {!showTranscript && (previewing || recordingHere) ? (
+            <div className="grid gap-3">
+              <p className="text-sm leading-5 text-fg-muted">
+                <span className="mr-2 inline-flex rounded-full border border-border px-1.5 text-xs leading-4 font-medium text-fg-label">
+                  Preview
+                </span>
+                {recording.state === "capturing"
+                  ? "What's said so far, as it's heard. The transcript, with each speaker told apart, replaces it after the recording ends."
+                  : "What was said, as it was heard. The transcript, with each speaker told apart, replaces it in a minute or two."}
+              </p>
+              {recordingHere && recorder?.live ? (
+                <LiveTranscript
+                  heading={false}
+                  lines={recorderLiveLines(recorder)}
+                  partials={recorder.live.map((track) => ({
+                    trackNumber: track.trackNumber,
+                    text: track.partial,
+                  }))}
+                  speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber)}
+                  status={liveStatus(recorder.live)}
+                  empty="Listening. What's said shows up here within a few seconds."
+                />
+              ) : (
+                <LiveTranscript
+                  heading={false}
+                  lines={savedLive.segments}
+                  speakerName={(trackNumber) =>
+                    defaultRecordingSpeakerName(`track-${trackNumber}`, recording.tracks)
+                  }
+                  status={
+                    savedLive.error
+                      ? { text: "Can't load the preview right now", tone: "waiting" }
+                      : null
+                  }
+                  empty={
+                    recording.state === "capturing"
+                      ? "Nothing said yet. Text shows up here a few seconds after it's said."
+                      : "No live text was saved for this meeting."
+                  }
+                />
+              )}
+            </div>
+          ) : !showTranscript ? (
             <p className="text-sm leading-5 text-fg-muted">
               {phase.kind === "failed"
                 ? "No transcript yet."

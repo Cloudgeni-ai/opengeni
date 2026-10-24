@@ -166,6 +166,18 @@ export function MeetingDefaultsView({
     void save({ ...current, voiceprints: true }, "People are recognized by voice");
   };
 
+  const liveTranscript = current.liveTranscript === true;
+  const liveModel = models.liveModels[0] ?? null;
+  const liveAvailable = models.liveModels.some((entry) => entry.available);
+  const chooseLiveTranscript = (next: boolean) => {
+    if (next === liveTranscript) return;
+    const { liveTranscript: _previous, ...rest } = current;
+    void save(
+      next ? { ...rest, liveTranscript: true } : rest,
+      next ? "New meetings show a live transcript" : "New meetings don't show a live transcript",
+    );
+  };
+
   return (
     <Section title="Meetings" description="Applied to meetings recorded from now on.">
       {personal ? null : (
@@ -221,6 +233,37 @@ export function MeetingDefaultsView({
           />
         }
       />
+      {liveModel ? (
+        <SettingRow
+          label="Live transcript"
+          description={`Shows what's said while recording, as a preview until the transcript is ready. Anyone recording can turn it on or off for their meeting.${
+            liveModel.usdPerHour !== null
+              ? ` ${liveModel.providerName} charges about $${liveModel.usdPerHour.toFixed(2)} per hour of audio for it, on top of the transcript.`
+              : ""
+          }`}
+          hint={
+            !models.loading && !liveAvailable ? (
+              onConnectModels ? (
+                <SettingRowLink onClick={onConnectModels}>
+                  Connect {liveModel.providerName} to show a live transcript
+                </SettingRowLink>
+              ) : (
+                `An organization admin needs to connect ${liveModel.providerName} first.`
+              )
+            ) : undefined
+          }
+          control={
+            <Switch
+              aria-label="Live transcript"
+              checked={liveTranscript}
+              pending={saving}
+              disabled={!canManage}
+              {...(reason ? { disabledReason: reason } : {})}
+              onCheckedChange={chooseLiveTranscript}
+            />
+          }
+        />
+      ) : null}
       <SettingRow
         label="Recognize people by voice"
         description={

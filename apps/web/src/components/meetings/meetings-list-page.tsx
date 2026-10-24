@@ -10,6 +10,7 @@ import {
   formatDuration,
   meetingPhase,
   meetingStatusLabel,
+  useRecordingModels,
   useRecordings,
   useRecordingsClient,
   type RecordingsClientOverride,
@@ -65,11 +66,14 @@ function useNarrow(): boolean {
 
 export function MeetingsListPage({
   workspaceId,
+  liveTranscriptDefault = false,
   recordings: recordingsClient,
   meetingHref,
   onOpen,
 }: {
   workspaceId: string;
+  /** Whether the workspace shows a live transcript while recording by default. */
+  liveTranscriptDefault?: boolean;
   /** A recordings client to use instead of the app's, for previews. */
   recordings?: RecordingsClientOverride["recordings"];
   meetingHref: (recordingId: string) => string;
@@ -81,6 +85,8 @@ export function MeetingsListPage({
   const list = useRecordings({ ...override, ...(query ? { query } : {}) });
   const { client } = useRecordingsClient(override);
   const { recorder, finished } = useMeetingRecorder();
+  const models = useRecordingModels(override);
+  const liveAvailable = models.liveModels.some((entry) => entry.available);
   const narrow = useNarrow();
   const [pendingDelete, setPendingDelete] = useState<Recording | null>(null);
 
@@ -111,7 +117,11 @@ export function MeetingsListPage({
         description="Record a meeting and get a transcript of who said what."
       />
       <div className="mt-2 grid gap-8">
-        <RecorderPanel recorder={recorder} onStopped={onOpen} />
+        <RecorderPanel
+          recorder={recorder}
+          onStopped={onOpen}
+          liveTranscript={liveAvailable ? { defaultOn: liveTranscriptDefault } : null}
+        />
         {recorder && recorder.recovered.length > 0 ? (
           <Notice tone="info">
             {recorder.recovered.length === 1

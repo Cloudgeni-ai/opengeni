@@ -1,5 +1,7 @@
 import {
+  AppendRecordingLiveSegmentsRequest,
   CompleteRecordingChunksRequest,
+  CreateRecordingLiveSessionRequest,
   CreateRecordingPersonRequest,
   CreateRecordingRequest,
   CreateRecordingTranscriptRequest,
@@ -12,18 +14,23 @@ import {
   UpdateRecordingSpeakersRequest,
   type Recording,
   type RecordingChunkUpload,
+  type RecordingLiveSession,
   type RecordingTranscriptionModel,
   type RecordingTranscriptionOptions,
 } from "@opengeni/contracts";
 import {
   createRecordingTranscriptionProviderRegistry,
+  DEFAULT_RECORDING_LIVE_TRANSCRIPTION,
   DEFAULT_RECORDING_TRANSCRIPTION,
+  estimateRecordingTranscriptionCostMicros,
   findRecordingTranscriptionModel,
+  RecordingTranscriptionError,
   requireAccessGrant,
   type ApiRouteDeps,
   type RecordingTranscriptionProviderRegistry,
 } from "@opengeni/core";
 import {
+  appendRecordingLiveSegments,
   createRecording,
   createRecordingPerson,
   createRecordingTranscriptVersion,
@@ -34,6 +41,7 @@ import {
   getRecordingTranscriptPage,
   getWorkspace,
   listRecordingChunks,
+  listRecordingLiveSegments,
   listRecordingPeople,
   listRecordings,
   listRecordingTranscriptVersions,
@@ -46,6 +54,7 @@ import {
   RecordingNotFoundError,
   reserveRecordingChunks,
   setCurrentRecordingTranscriptVersion,
+  startRecordingLiveTrack,
   updateRecording,
   updateRecordingSegments,
   updateRecordingSpeakers,
@@ -55,7 +64,7 @@ import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
-import { elevenLabsKeyAvailable } from "../realtime-websocket";
+import { elevenLabsKeyAvailable, loadElevenLabsApiKey } from "../realtime-websocket";
 
 const UPLOAD_URL_SECONDS = 15 * 60;
 const PLAYBACK_URL_SECONDS = 60 * 60;
@@ -150,6 +159,40 @@ export function registerRecordingRoutes(
       versionId,
       ownerSubjectId: recording.ownerSubjectId,
     });
+  }
+
+  /** The provider key a workspace's recordings use, its own or its organization's. */
+  async function providerApiKey(
+    providerId: string,
+    scope: { accountId: string; workspaceId: string },
+  ): Promise<string | null> {
+    if (providerId !== "elevenlabs") return null;
+    return await loadElevenLabsApiKey(db, deps.settings, scope);
+  }
+
+  /** The live model a request names, else the provider's first, else the deployment's. */
+  function liveModelChoice(requested: {
+    providerId?: string | undefined;
+    model?: string | undefined;
+  }) {
+    const providerId = requested.providerId ?? DEFAULT_RECORDING_LIVE_TRANSCRIPTION.providerId;
+    const model =
+      requested.model ??
+      (requested.providerId
+        ? registry.get(providerId)?.models.find((spec) => spec.capabilities.live)?.model
+        : DEFAULT_RECORDING_LIVE_TRANSCRIPTION.model);
+    const found = model
+      ? findRecordingTranscriptionModel(registry, providerId, model, "live")
+      : null;
+    if (!found) {
+      throw new ApiHttpError(400, {
+        code: "validation_failed",
+        message: "This live transcription model is not offered here.",
+        retryable: false,
+        details: { code: "unknown_model", providerId, model: model ?? null },
+      });
+    }
+    return found;
   }
 
   app.get(base, async (c) => {
@@ -597,6 +640,102 @@ export function registerRecordingRoutes(
       })),
     );
     return c.json({ models, default: defaults });
+  });
+
+  /**
+   * A grant to stream one track of a recording being captured to a live
+   * model. The client connects to the provider itself; the grant carries a
+   * single-use credential, never the workspace's key.
+   */
+  app.post(`${base}/:recordingId/live-session`, async (c) => {
+    const actor = await actorFor(c, "sessions:create");
+    const recordingId = recordingIdParam(c);
+    const body = await parseRequestJson(c, CreateRecordingLiveSessionRequest);
+    const { provider, spec } = liveModelChoice(body);
+    const apiKey = await providerApiKey(provider.id, actor);
+    if (!apiKey) {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: `Add an ${provider.name} API key to this workspace's models to see a live transcript.`,
+        retryable: false,
+        details: { code: "credential_unavailable", providerId: provider.id },
+      });
+    }
+    const { language } = await guard(() =>
+      startRecordingLiveTrack(db, {
+        ...actor,
+        recordingId,
+        trackNumber: body.trackNumber,
+        providerId: provider.id,
+        model: spec.model,
+      }),
+    );
+    let grant;
+    try {
+      grant = await provider.createLiveSession!(
+        { model: spec.model, language: language ?? undefined },
+        { apiKey },
+      );
+    } catch (error) {
+      if (!(error instanceof RecordingTranscriptionError)) throw error;
+      const rejected = error.code === "unauthorized";
+      throw new ApiHttpError(rejected ? 409 : 502, {
+        code: rejected ? "conflict" : "upstream_unavailable",
+        message: rejected
+          ? `${provider.name} rejected this workspace's API key.`
+          : error.code === "quota_exceeded"
+            ? `${provider.name} has no credit left for a live transcript.`
+            : `${provider.name} could not start a live transcript. Try again.`,
+        retryable: error.retryable,
+        details: { code: error.code, providerId: provider.id },
+      });
+    }
+    const session: RecordingLiveSession = {
+      providerId: provider.id,
+      model: spec.model,
+      protocol: grant.protocol,
+      url: grant.url,
+      audio: grant.audio,
+      expiresAt: grant.expiresAt.toISOString(),
+    };
+    c.header("cache-control", "no-store");
+    return c.json(session, 201);
+  });
+
+  /** Save finished live text for one track; only the person recording may. */
+  app.post(`${base}/:recordingId/live-segments`, async (c) => {
+    const actor = await actorFor(c, "sessions:create");
+    const recordingId = recordingIdParam(c);
+    const body = await parseRequestJson(c, AppendRecordingLiveSegmentsRequest);
+    const recording = await guard(() => getRecording(db, { ...actor, recordingId }));
+    const live = recording.tracks.find((track) => track.trackNumber === body.trackNumber)?.live;
+    const spec = live
+      ? findRecordingTranscriptionModel(registry, live.providerId, live.model, "live")?.spec
+      : undefined;
+    const result = await guard(() =>
+      appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: body.trackNumber,
+        streamedMilliseconds: body.streamedMilliseconds,
+        costUsdMicros: spec
+          ? estimateRecordingTranscriptionCostMicros(spec, body.streamedMilliseconds)
+          : null,
+        segments: body.segments,
+      }),
+    );
+    return c.json(result);
+  });
+
+  /** Live text saved after `after`, for anyone who can see the recording. */
+  app.get(`${base}/:recordingId/live-segments`, async (c) => {
+    const actor = await actorFor(c, "sessions:read");
+    const recordingId = recordingIdParam(c);
+    const after = Number(c.req.query("after") ?? 0);
+    if (!Number.isSafeInteger(after) || after < 0) throw invalid("after must be a sequence number");
+    return c.json(
+      await guard(() => listRecordingLiveSegments(db, { ...actor, recordingId, after })),
+    );
   });
 }
 

@@ -102,6 +102,11 @@ export const recordingTracks = pgTable(
     durationMilliseconds: integer("duration_milliseconds").notNull().default(0),
     preparedObjectKey: text("prepared_object_key"),
     preparedBytes: bigint("prepared_bytes", { mode: "number" }),
+    // Migration 0942. The live transcript streamed for this track, if any.
+    liveProviderId: text("live_provider_id"),
+    liveModel: text("live_model"),
+    liveStreamedMilliseconds: integer("live_streamed_milliseconds").notNull().default(0),
+    liveCostUsdMicros: bigint("live_cost_usd_micros", { mode: "number" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -301,6 +306,32 @@ export const recordingSegmentEdits = pgTable(
     editedAt: timestamp("edited_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [primaryKey({ columns: [table.versionId, table.segmentIndex] })],
+);
+
+// Migration 0942. Finished live text per track while recording, a preview
+// that is removed once the first transcript is ready.
+export const recordingLiveSegments = pgTable(
+  "recording_live_segments",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    recordingId: uuid("recording_id").notNull(),
+    trackNumber: integer("track_number").notNull(),
+    segmentNumber: integer("segment_number").notNull(),
+    startMilliseconds: integer("start_milliseconds").notNull(),
+    endMilliseconds: integer("end_milliseconds").notNull(),
+    text: text("text").notNull(),
+    sequence: bigint("sequence", { mode: "number" }).notNull().generatedAlwaysAsIdentity(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.recordingId, table.trackNumber, table.segmentNumber] }),
+    index("recording_live_segments_sequence_idx").on(
+      table.workspaceId,
+      table.recordingId,
+      table.sequence,
+    ),
+  ],
 );
 
 export const recordingEvents = pgTable(

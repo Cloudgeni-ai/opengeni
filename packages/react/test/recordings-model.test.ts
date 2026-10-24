@@ -95,6 +95,7 @@ const tracks: RecordingTrack[] = [
     totalBytes: 1,
     durationMilliseconds: 1,
     playable: true,
+    live: null,
   },
   {
     trackNumber: 1,
@@ -105,6 +106,7 @@ const tracks: RecordingTrack[] = [
     totalBytes: 1,
     durationMilliseconds: 1,
     playable: true,
+    live: null,
   },
 ];
 

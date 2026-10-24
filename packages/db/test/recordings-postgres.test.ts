@@ -6,6 +6,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import {
   acceptOrganizationInvitation,
+  appendRecordingLiveSegments,
   claimRecordingTranscriptVersion,
   completeRecordingTranscriptVersion,
   createDb,
@@ -22,6 +23,7 @@ import {
   getRecording,
   getRecordingTranscriptPage,
   listDeletingRecordingObjectKeys,
+  listRecordingLiveSegments,
   listRecordingPeople,
   listRecordings,
   listStalledRecordingWork,
@@ -34,6 +36,7 @@ import {
   rememberRecordingPersonVoice,
   reserveRecordingChunks,
   setCurrentRecordingTranscriptVersion,
+  startRecordingLiveTrack,
   updateRecordingSegments,
   updateRecordingSpeakers,
   updateWorkspaceSettings,
@@ -847,5 +850,199 @@ describe("recordings", () => {
         (select count(*)::int from recordings where id = ${recording.recordingId}) as recordings,
         (select count(*)::int from recording_events where recording_id = ${recording.recordingId}) as events`;
     expect(rows).toEqual({ recordings: 0, events: 0 });
+  });
+
+  test("the live preview: only the recorder streams, everyone who can see it reads, a transcript ends it", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recordingId = crypto.randomUUID();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const memberActor = { workspaceId: scope.workspaceId, subjectId: scope.member };
+    await createRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      visibility: "workspace",
+      transcription: { language: "nb" },
+      tracks: [
+        { trackNumber: 0, source: "microphone", mimeType: "audio/webm" },
+        { trackNumber: 1, source: "system", mimeType: "audio/webm" },
+      ],
+    });
+    const live = { providerId: "elevenlabs", model: "scribe_v2_realtime" };
+    await expect(
+      startRecordingLiveTrack(db, { ...memberActor, recordingId, trackNumber: 0, ...live }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+    await expect(
+      appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 1_000,
+        costUsdMicros: 100,
+        segments: [],
+      }),
+    ).rejects.toMatchObject({ code: "no_live_session" });
+    expect(
+      await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 0, ...live }),
+    ).toEqual({ language: "nb" });
+    await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 1, ...live });
+    const segment = (segmentNumber: number, start: number, text: string) => ({
+      segmentNumber,
+      startMilliseconds: start,
+      endMilliseconds: start + 900,
+      text,
+    });
+    expect(
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 4_000,
+        costUsdMicros: 400,
+        segments: [segment(0, 100, "Hei alle."), segment(1, 2_000, "Kan dere høre meg?")],
+      }),
+    ).toEqual({ saved: 2, ended: false });
+    // A retry keeps the first copy, and an older total never lowers the stored one.
+    expect(
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 3_000,
+        costUsdMicros: 300,
+        segments: [segment(1, 2_000, "changed")],
+      }),
+    ).toEqual({ saved: 0, ended: false });
+    await appendRecordingLiveSegments(db, {
+      ...actor,
+      recordingId,
+      trackNumber: 1,
+      streamedMilliseconds: 4_000,
+      costUsdMicros: 400,
+      segments: [segment(0, 1_000, "Ja, fint.")],
+    });
+    await expect(
+      appendRecordingLiveSegments(db, {
+        ...memberActor,
+        recordingId,
+        trackNumber: 1,
+        streamedMilliseconds: 5_000,
+        costUsdMicros: 500,
+        segments: [segment(1, 3_000, "not mine")],
+      }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+
+    const all = await listRecordingLiveSegments(db, { ...memberActor, recordingId });
+    expect(all.ended).toBe(false);
+    expect(all.segments.map((row) => [row.trackNumber, row.segmentNumber, row.text])).toEqual([
+      [0, 0, "Hei alle."],
+      [0, 1, "Kan dere høre meg?"],
+      [1, 0, "Ja, fint."],
+    ]);
+    const newer = await listRecordingLiveSegments(db, {
+      ...actor,
+      recordingId,
+      after: all.segments[1]!.sequence,
+    });
+    expect(newer.segments.map((row) => row.text)).toEqual(["Ja, fint."]);
+    expect(newer.after).toBe(all.after);
+    const viewed = await getRecording(db, { ...actor, recordingId });
+    expect(viewed.tracks.map((track) => track.live)).toEqual([
+      { ...live, streamedMilliseconds: 4_000, costUsd: 0.0004 },
+      { ...live, streamedMilliseconds: 4_000, costUsd: 0.0004 },
+    ]);
+
+    // A recording stopped mid-stream still takes its last live text, then a
+    // ready transcript ends the preview and removes it.
+    for (const trackNumber of [0, 1]) {
+      await reserveRecordingChunks(db, {
+        ...actor,
+        recordingId,
+        trackNumber,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: 100,
+            sha256: sha(`${trackNumber}c`),
+            startMilliseconds: 0,
+            durationMilliseconds: 5_000,
+          },
+        ],
+      });
+      await markRecordingChunksUploaded(db, {
+        ...actor,
+        recordingId,
+        trackNumber,
+        chunkNumbers: [0],
+      });
+    }
+    const versionId = crypto.randomUUID();
+    await finalizeRecording(db, {
+      ...actor,
+      recordingId,
+      tracks: [
+        { trackNumber: 0, chunkCount: 1 },
+        { trackNumber: 1, chunkCount: 1 },
+      ],
+      transcription,
+      versionId,
+    });
+    await expect(
+      startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 0, ...live }),
+    ).rejects.toMatchObject({ code: "not_capturing" });
+    expect(
+      (
+        await appendRecordingLiveSegments(db, {
+          ...actor,
+          recordingId,
+          trackNumber: 0,
+          streamedMilliseconds: 5_000,
+          costUsdMicros: 500,
+          segments: [segment(2, 4_000, "Ha det.")],
+        })
+      ).saved,
+    ).toBe(1);
+    const processingOwner = crypto.randomUUID();
+    await claimRecordingTranscriptVersion(db, {
+      ...actor,
+      versionId,
+      processingOwner,
+      leaseSeconds: 600,
+    });
+    await completeRecordingTranscriptVersion(db, {
+      ...actor,
+      versionId,
+      processingOwner,
+      languages: ["nb"],
+      diarized: false,
+      diarization: "tracks",
+      audioMilliseconds: 5_000,
+      segments: [
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 900,
+          trackNumber: 0,
+          speakerLabel: "track-0",
+          text: "Hei alle.",
+        },
+      ],
+    });
+    const ended = await listRecordingLiveSegments(db, { ...memberActor, recordingId });
+    expect(ended).toMatchObject({ segments: [], ended: true });
+    expect(
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 6_000,
+        costUsdMicros: 600,
+        segments: [segment(3, 5_000, "late")],
+      }),
+    ).toEqual({ saved: 0, ended: true });
+    const [rows] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from recording_live_segments where recording_id = ${recordingId}`;
+    expect(rows!.count).toBe(0);
   });
 });

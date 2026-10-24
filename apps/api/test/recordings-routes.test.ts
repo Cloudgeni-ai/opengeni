@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { SessionWorkflowClient } from "@opengeni/core";
 import {
+  createConnection,
   createDb,
   createOrganizationApiKey,
   createWorkspace,
+  encryptEnvironmentValue,
   ensureExternalIdentity,
   type DbClient,
 } from "@opengeni/db";
@@ -27,6 +29,7 @@ afterAll(async () => {
 });
 
 const noop = async () => undefined;
+const encryptionKey = Buffer.alloc(32, 7);
 const memberPermissions = ["workspace:read", "sessions:read", "sessions:create"];
 type Started = Parameters<NonNullable<SessionWorkflowClient["startRecordingWorkflow"]>>[0];
 
@@ -78,7 +81,7 @@ async function fixture() {
       productAccessMode: "configured",
       sandboxBackend: "none",
       publicBaseUrl: "https://opengeni.example",
-      environmentsEncryptionKey: randomBytes(32).toString("base64"),
+      environmentsEncryptionKey: encryptionKey.toString("base64"),
     }),
     objectStorage,
     workflowClient: {
@@ -368,6 +371,128 @@ describe("recording routes", () => {
       providerId: "elevenlabs",
       model: "scribe_v2",
       available: false,
+    });
+    expect(
+      models.body.models.find((model: { model: string }) => model.model === "scribe_v2_realtime")
+        .capabilities,
+    ).toMatchObject({ batch: false, live: true });
+    // A live-only model cannot make a transcript.
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+          transcription: { providerId: "elevenlabs", model: "scribe_v2_realtime" },
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  test("the live preview: a single-use grant for the recorder, text for everyone who can see it", async () => {
+    const tokenRequests: { url: string; key: string | null }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      tokenRequests.push({ url: request.url, key: request.headers.get("xi-api-key") });
+      return Response.json({ token: "sutkn_live" });
+    }) as typeof fetch;
+    let scope: Awaited<ReturnType<typeof fixture>>;
+    try {
+      scope = await fixture();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      visibility: "workspace",
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const noKey = await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+      trackNumber: 0,
+    });
+    expect(noKey).toMatchObject({
+      status: 409,
+      body: { error: { details: { code: "credential_unavailable" } } },
+    });
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: null,
+      providerDomain: "api.elevenlabs.io",
+      kind: "api_key",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ apiKey: "workspace-eleven-key" }),
+      ),
+      metadata: { credentialRole: "elevenlabs", credentialLabel: "ElevenLabs" },
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    expect(
+      (
+        await scope.other.call("POST", `/recordings/${recordingId}/live-session`, {
+          trackNumber: 0,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+          trackNumber: 0,
+          model: "scribe_v2",
+        })
+      ).status,
+    ).toBe(400);
+    const granted = await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+      trackNumber: 0,
+    });
+    expect(granted.status).toBe(201);
+    expect(granted.body).toMatchObject({
+      providerId: "elevenlabs",
+      model: "scribe_v2_realtime",
+      protocol: "elevenlabs.scribe_realtime",
+      audio: { encoding: "pcm_s16le", sampleRate: 16_000 },
+    });
+    expect(granted.body.url).toContain("token=sutkn_live");
+    expect(JSON.stringify(granted.body)).not.toContain("workspace-eleven-key");
+    expect(tokenRequests).toEqual([
+      {
+        url: "https://api.elevenlabs.io/v1/single-use-token/realtime_scribe",
+        key: "workspace-eleven-key",
+      },
+    ]);
+
+    const saved = await scope.owner.call("POST", `/recordings/${recordingId}/live-segments`, {
+      trackNumber: 0,
+      streamedMilliseconds: 1_800_000,
+      segments: [{ segmentNumber: 0, startMilliseconds: 0, endMilliseconds: 1_200, text: "Hei." }],
+    });
+    expect(saved).toMatchObject({ status: 200, body: { saved: 1, ended: false } });
+    expect(
+      (
+        await scope.other.call("POST", `/recordings/${recordingId}/live-segments`, {
+          trackNumber: 0,
+          streamedMilliseconds: 0,
+          segments: [],
+        })
+      ).status,
+    ).toBe(403);
+    const read = await scope.other.call("GET", `/recordings/${recordingId}/live-segments?after=0`);
+    expect(read.body).toMatchObject({ ended: false, segments: [{ trackNumber: 0, text: "Hei." }] });
+    expect(
+      (
+        await scope.other.call(
+          "GET",
+          `/recordings/${recordingId}/live-segments?after=${read.body.after}`,
+        )
+      ).body.segments,
+    ).toEqual([]);
+    const recording = await scope.other.call("GET", `/recordings/${recordingId}`);
+    expect(recording.body.tracks[0].live).toEqual({
+      providerId: "elevenlabs",
+      model: "scribe_v2_realtime",
+      streamedMilliseconds: 1_800_000,
+      costUsd: 0.195,
     });
   });
 });

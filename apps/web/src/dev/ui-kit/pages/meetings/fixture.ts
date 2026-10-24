@@ -6,6 +6,7 @@
 import type {
   ListRecordingModelsResponse,
   Recording,
+  RecordingLiveSegment,
   RecordingPerson,
   RecordingSpeaker,
   RecordingTranscriptSegment,
@@ -18,6 +19,18 @@ const ME = "user:ingrid";
 const NOW = Date.now();
 const minutes = (count: number) => count * 60_000;
 const iso = (offset: number) => new Date(NOW - offset).toISOString();
+
+/** What the live preview has heard so far in the meeting being recorded. */
+export const LIVE_LINES: readonly [track: number, seconds: number, text: string][] = [
+  [0, 4, "Morning, everyone. Let's keep this one short."],
+  [1, 9, "Morning. I can start with the release."],
+  [1, 13, "The build went out last night and the error rate is flat."],
+  [0, 21, "Good. Anything blocking the migration?"],
+  [1, 25, "Only the review on the schema change. I'll ping Tomas after this."],
+  [0, 33, "Great, then let's look at the onboarding numbers."],
+];
+
+export const LIVE_RECORDING_ID = "3d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f60";
 
 function version(
   recordingId: string,
@@ -78,6 +91,7 @@ function recording(
         totalBytes: 2_400_000,
         durationMilliseconds,
         playable: true,
+        live: null,
       },
       {
         trackNumber: 1,
@@ -88,6 +102,7 @@ function recording(
         totalBytes: 2_400_000,
         durationMilliseconds,
         playable: true,
+        live: null,
       },
     ],
     transcript: version(id, 1, "complete"),
@@ -240,6 +255,27 @@ export function createMeetingsFixture(
     options.state === "empty"
       ? []
       : [
+          recording(LIVE_RECORDING_ID, "Platform standup", minutes(1), 0, {
+            state: "capturing",
+            captureEndedAt: null,
+            transcript: null,
+            tracks: [0, 1].map((trackNumber) => ({
+              trackNumber,
+              kind: "audio" as const,
+              source: trackNumber === 0 ? ("microphone" as const) : ("system" as const),
+              mimeType: "audio/webm",
+              chunkCount: 4,
+              totalBytes: 800_000,
+              durationMilliseconds: 0,
+              playable: false,
+              live: {
+                providerId: "elevenlabs",
+                model: "scribe_v2_realtime",
+                streamedMilliseconds: 38_000,
+                costUsd: 0.004,
+              },
+            })),
+          }),
           recording(
             "0c1d2e3f-4a5b-4c6d-8e7f-a0b1c2d3e4f5",
             "Customer call: Northwind",
@@ -306,9 +342,42 @@ export function createMeetingsFixture(
           maxFileBytes: 3_000_000_000,
         },
       },
+      {
+        providerId: "elevenlabs",
+        providerName: "ElevenLabs",
+        model: "scribe_v2_realtime",
+        name: "Scribe v2 Realtime",
+        available: true,
+        usdPerHour: 0.39,
+        capabilities: {
+          batch: false,
+          live: true,
+          diarization: false,
+          liveDiarization: false,
+          multichannel: false,
+          maxSpeakers: null,
+          wordTimestamps: true,
+          languages: [],
+          languageDetection: true,
+          keyterms: false,
+          speakerLibrary: false,
+          maxDurationSeconds: null,
+          maxFileBytes: null,
+        },
+      },
     ],
     default: { providerId: "elevenlabs", model: "scribe_v2" },
   };
+  const liveSegments: RecordingLiveSegment[] = LIVE_LINES.map(
+    ([trackNumber, seconds, text], index) => ({
+      trackNumber,
+      segmentNumber: index,
+      startMilliseconds: seconds * 1000,
+      endMilliseconds: seconds * 1000 + 3500,
+      text,
+      sequence: index + 1,
+    }),
+  );
   const find = (id: string) => {
     const found = recordings.find((entry) => entry.id === id);
     if (!found) throw new Error("Recording not found");
@@ -451,6 +520,21 @@ export function createMeetingsFixture(
       return await delay(people[index]!);
     },
     listRecordingModels: async () => await delay(models),
+    listRecordingLiveSegments: async (
+      _workspaceId: string,
+      id: string,
+      request: { after?: number } = {},
+    ) => {
+      const capturing = find(id).state === "capturing";
+      const fresh = capturing
+        ? liveSegments.filter((segment) => segment.sequence > (request.after ?? 0))
+        : [];
+      return await delay({
+        segments: fresh,
+        after: fresh.at(-1)?.sequence ?? request.after ?? 0,
+        ended: find(id).state === "ready",
+      });
+    },
   };
   return {
     client: client as unknown as RecordingsClientLike,

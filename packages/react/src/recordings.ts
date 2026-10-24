@@ -7,6 +7,7 @@
  * `@opengeni/sdk/recordings` for hosts without React.
  */
 export {
+  useLiveTranscript,
   useRecorder,
   useRecording,
   useRecordingModels,
@@ -16,6 +17,8 @@ export {
   useTranscript,
 } from "./hooks/use-recordings";
 export type {
+  UseLiveTranscriptOptions,
+  UseLiveTranscriptResult,
   UseRecorderOptions,
   UseRecorderResult,
   UseRecordingOptions,
