@@ -259,6 +259,7 @@ export type StartupPhase =
   | "repository"
   | "files"
   | "tools"
+  | "history"
   | "model_preparation"
   | "provider_first_byte";
 

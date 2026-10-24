@@ -4025,6 +4025,7 @@ const STARTUP_PHASES = new Set<StartupPhase>([
   "repository",
   "files",
   "tools",
+  "history",
   "model_preparation",
   "provider_first_byte",
 ]);

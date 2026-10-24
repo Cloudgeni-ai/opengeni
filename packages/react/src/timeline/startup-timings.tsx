@@ -8,6 +8,7 @@ const LABELS = (t: OpenGeniText): Record<StartupPhaseItem["phase"], string> => (
   repository: t("timeline.startupTimings.repository"),
   files: t("timeline.startupTimings.files"),
   tools: t("timeline.startupTimings.tools"),
+  history: t("timeline.startupTimings.conversationHistory"),
   model_preparation: t("timeline.startupTimings.runtimeModelRequest"),
   provider_first_byte: t("timeline.startupTimings.firstModelResponse"),
 });

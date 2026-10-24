@@ -3507,12 +3507,19 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.compactingConversationFirst":
     "Compacting conversation first",
   "timeline.platformActivityPresentation.connectingTools": "Connecting tools",
+  "timeline.platformActivityPresentation.conversationHistoryDidnTLoad":
+    "Conversation history didn’t load",
+  "timeline.platformActivityPresentation.conversationHistoryLoaded": "Conversation history loaded",
+  "timeline.platformActivityPresentation.conversationHistoryLoadingInterrupted":
+    "Conversation history loading interrupted",
   "timeline.platformActivityPresentation.couldNotMessageName": "Couldn't message {name}",
   "timeline.platformActivityPresentation.couldNotSpawnName": "Couldn't spawn {name}",
   "timeline.platformActivityPresentation.filePreparationFailed": "File preparation failed",
   "timeline.platformActivityPresentation.filePreparationInterrupted":
     "File preparation interrupted",
   "timeline.platformActivityPresentation.filesReady": "Files ready",
+  "timeline.platformActivityPresentation.loadingConversationHistory":
+    "Loading conversation history",
   "timeline.platformActivityPresentation.messagedName": "Messaged {name}",
   "timeline.platformActivityPresentation.messagingName": "Messaging {name}",
   "timeline.platformActivityPresentation.messagingWorker": "Messaging worker",
@@ -3639,6 +3646,7 @@ export const englishMessages = {
     "The start request was accepted; a worker has not started the turn yet.",
   "timeline.startupDispatchDetails.yourMessagesAreSavedNo":
     "Your messages are saved. No agent turn is running yet.",
+  "timeline.startupTimings.conversationHistory": "Conversation history",
   "timeline.startupTimings.duration": "Duration",
   "timeline.startupTimings.eachTurnHasItsOwn":
     "Each turn has its own startup. Phases can overlap; durations are not additive.",
