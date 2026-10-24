@@ -2013,6 +2013,8 @@ export const englishMessages = {
     "Waiting for browser or computer-use work to finish. It will not be stopped for the update.",
   "machines.machineStatus.waitingForUploads":
     "Waiting for file uploads to finish. They will not be stopped for the update.",
+  "machines.machineStatus.waitingForAnotherUpdate":
+    "The agent is already installing an update. This machine shows it once the agent restarts.",
   "machines.machineStatus.waitingForUnspecifiedWork":
     "The machine reports unfinished work but does not identify it. Nothing will be stopped for the update.",
   "machines.machineStatus.reportedBlockers":

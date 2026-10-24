@@ -64108,9 +64108,17 @@ export async function setEnrollmentOpStreamState(
 }
 
 /** Refresh the exact running agent build/capabilities from an authoritative
- * process Hello. A pending update becomes succeeded only when the successor
- * reports BOTH the requested version and the artifact digest selected from the
- * signed manifest. Merely reaching `restarting` never counts as success. */
+ * process Hello. An update becomes succeeded only when the successor reports
+ * BOTH the requested version and the artifact digest its managed-update receipt
+ * recorded for that version. Merely reaching `restarting` never counts as
+ * success.
+ *
+ * The updater is process-global: one agent process serves every enrollment it
+ * is linked to, so only one of them owns the operation that installs a build,
+ * and the others are refused or postponed while it runs. The receipt therefore
+ * proves the target for every enrollment of that process, whichever operation
+ * installed it, and settles a pending, postponed or failed update whose target
+ * is now running. */
 export async function setEnrollmentAgentRuntime(
   db: Database,
   input: {
@@ -64136,7 +64144,6 @@ export async function setEnrollmentAgentRuntime(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const now = new Date();
-      const completedOperationId = input.completedUpdate?.operationId ?? null;
       const completedTargetVersion = input.completedUpdate?.targetVersion ?? null;
       const completedBinarySha256 = input.completedUpdate?.binarySha256 ?? null;
       const activeUpdate = sql`${schema.enrollments.agentUpdateStatus} in (
@@ -64146,8 +64153,7 @@ export async function setEnrollmentAgentRuntime(
       // No receipt (manual install or ordinary restart) is false, not SQL NULL:
       // the negation below must still settle the replaced process's operation.
       const successorProvesCompletion = sql`coalesce((
-        ${activeUpdate}
-        and ${schema.enrollments.agentUpdateOperationId}::text = ${completedOperationId}
+        (${activeUpdate} or ${schema.enrollments.agentUpdateStatus} = 'failed')
         and ${schema.enrollments.agentUpdateTargetVersion} = ${completedTargetVersion}
         and ${schema.enrollments.agentUpdateTargetVersion} = ${input.agentVersion}
         and ${completedBinarySha256} = ${input.binarySha256}
