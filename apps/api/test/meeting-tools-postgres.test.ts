@@ -318,5 +318,33 @@ describe("meeting tools", () => {
     expect(read.meeting).toMatchObject({ title: "Live now", status: "recording" });
     expect(read.transcript).toStartWith("live preview");
     expect(read.lines).toBe("[0:01] Microphone: Hello all. Let's start.");
+
+    // A stretch past a whole page of live lines still continues to it.
+    const later = Array.from({ length: 1_100 }, (_, index) => ({
+      segmentNumber: 2 + index,
+      startMilliseconds: 6_000 + index * 1_000,
+      endMilliseconds: 6_900 + index * 1_000,
+      text: `Line ${index}.`,
+    }));
+    await appendRecordingLiveSegments(client!.db, {
+      ...scope.actor,
+      recordingId: live,
+      trackNumber: 0,
+      streamedMilliseconds: 1_200_000,
+      costUsdMicros: null,
+      segments: later,
+    });
+    const tools = toolsFor(scope.grantFor(scope.owner));
+    const stretch = await tools("meeting_read", { meetingId: live, from: "18:20", to: "18:23" });
+    expect(stretch.lines).toBe("");
+    expect(stretch.nextCursor).toStartWith("live:");
+    const rest = await tools("meeting_read", {
+      meetingId: live,
+      from: "18:20",
+      to: "18:23",
+      cursor: stretch.nextCursor,
+    });
+    expect(rest.lines).toBe("[18:20] Microphone: Line 1094. Line 1095. Line 1096.");
+    expect(rest.nextCursor).toBeNull();
   });
 });

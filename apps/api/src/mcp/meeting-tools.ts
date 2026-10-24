@@ -334,9 +334,13 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
           })),
           request.maxChars,
         );
-        const more =
-          rendered.lastKey !== null &&
-          (rendered.truncated || (live?.segments.length ?? 0) === LIVE_FETCH);
+        // A stretch can filter out a whole fetched page, so a full page
+        // continues after its last line even when none of it was shown.
+        const after = rendered.truncated
+          ? rendered.lastKey
+          : (live?.segments.length ?? 0) === LIVE_FETCH
+            ? live!.segments.at(-1)!.sequence
+            : null;
         return json({
           ...(first ? { meeting: await details(recording, who, []) } : {}),
           transcript:
@@ -344,7 +348,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
               ? "live preview: rough text while recording; speakers are not told apart"
               : transcriptNote(recording),
           lines: rendered.text,
-          nextCursor: more ? encodeCursor({ kind: "live", after: rendered.lastKey! }) : null,
+          nextCursor: after !== null ? encodeCursor({ kind: "live", after }) : null,
         });
       }
 
