@@ -3,10 +3,11 @@ import { WebhookIcon, WorkflowIcon } from "lucide-react";
 import type { CapabilityCatalogItem, EventSource } from "@opengeni/sdk";
 
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
+import { useOpenGeniText } from "../../messages/runtime";
 import { LogoTile, type LogoTileSize } from "../../ui/logo-tile";
 import {
   eventSourceChoiceOf,
-  eventSourceChoiceMeta,
+  eventSourceChoiceName,
   eventSourceProviderDomain,
   type EventSourceChoice,
 } from "./event-source-model";
@@ -65,6 +66,7 @@ export function EventSourceTile({
   size?: LogoTileSize | undefined;
   className?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   const src = logo?.(source) ?? null;
   const choice = eventSourceChoiceOf(source);
   const Glyph = GLYPH[choice];
@@ -73,7 +75,7 @@ export function EventSourceTile({
       size={size}
       src={src}
       fit="contain"
-      name={Glyph ? source.name : eventSourceChoiceMeta(choice).name}
+      name={Glyph ? source.name : eventSourceChoiceName(t, choice)}
       icon={Glyph ? <Glyph /> : undefined}
       className={className}
     />

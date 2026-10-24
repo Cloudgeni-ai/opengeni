@@ -14,7 +14,7 @@ import {
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { findPickerRow, type PickerModelRow } from "./model-policy";
 import { sessionDisplayStatus, type SessionDisplayStatus } from "./session-status-model";
-import { type OpenGeniText } from "./messages/runtime";
+import { createOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
 // Title ranking shared with the web command menu, so chat search on every
 // surface orders matches the same way.
@@ -131,9 +131,16 @@ export function sessionAutomationWait(
 }
 
 /** How a chat's automation wait reads in a tooltip, hover card or announcement. */
+export function sessionAutomationWaitLabel(t: OpenGeniText, wait: SessionAutomationWait): string {
+  return wait === "event" ? t("automations.wait.event") : t("automations.wait.schedule");
+}
+
+const english = createOpenGeniText();
+
+/** @deprecated English only. Use `sessionAutomationWaitLabel(t, wait)`, which follows the host's text. */
 export const SESSION_AUTOMATION_WAIT_LABEL: Record<SessionAutomationWait, string> = {
-  event: "Waiting for an event",
-  schedule: "On a schedule",
+  event: sessionAutomationWaitLabel(english, "event"),
+  schedule: sessionAutomationWaitLabel(english, "schedule"),
 };
 
 export function hasActiveEffectiveControl(session: SessionListRow): boolean {

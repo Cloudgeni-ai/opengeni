@@ -11,10 +11,11 @@ import { Children, isValidElement, useId } from "react";
 import { CreatorMonogram } from "../creator-monogram";
 import { type CreatorRef, creatorAnnouncement, creatorInitials } from "../../lib/creator-initials";
 import { formatWaitingSince } from "../../lib/format";
+import { t } from "../../lib/console-text";
 import { cn } from "../../lib/utils";
 import type { RailAggregateStatus } from "../../lib/sessions-group";
 import {
-  SESSION_AUTOMATION_WAIT_LABEL,
+  sessionAutomationWaitLabel,
   type SessionAutomationWait,
 } from "../../../session-list-model";
 
@@ -123,7 +124,7 @@ export function AutomationWaitIcon({
   className?: string | undefined;
 }) {
   const Icon = wait === "event" ? ZapIcon : CalendarClockIcon;
-  const label = SESSION_AUTOMATION_WAIT_LABEL[wait];
+  const label = sessionAutomationWaitLabel(t, wait);
   return (
     <span role="img" aria-label={label} title={label} className="inline-flex shrink-0">
       <Icon

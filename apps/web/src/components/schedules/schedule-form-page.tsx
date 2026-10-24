@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
+import { t } from "@opengeni/react/app/lib/console-text";
 import {
   EventTriggersField,
   emptyEventTriggersDraft,
@@ -967,7 +968,7 @@ function AgentScheduleForm({
     const cadenceProblem = cadenceIssue(draft.cadence, new Date());
     const triggerIssues =
       draft.events.triggers.length > 0
-        ? validateEventTriggers(draft.events, eventSources.sources ?? [])
+        ? validateEventTriggers(t, draft.events, eventSources.sources ?? [])
         : undefined;
     if (triggerIssues?.maxRunsPerHour) next.maxRunsPerHour = triggerIssues.maxRunsPerHour;
     setErrors(next);

@@ -7,12 +7,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { t } from "@opengeni/react/app/lib/console-text";
 import {
-  EVENT_SOURCE_CHOICES,
   EventSourceTile,
   createEventSourceRequest,
   eventSourceAddLabel,
   eventSourceChoiceMeta,
+  eventSourceChoices,
   eventSourceSubjectOfChoice,
   isEventSourceChoice,
   pastedWebhookSetup,
@@ -84,11 +85,14 @@ function EventSourcePicker({ workspaceId, go }: { workspaceId: string; go: Sched
       />
       <div className="mt-6 min-w-0">
         <RowList label="Kinds of event source" flush>
-          {EVENT_SOURCE_CHOICES.map((choice) => (
+          {eventSourceChoices(t).map((choice) => (
             <ListRow
               key={choice.choice}
               leading={
-                <EventSourceTile source={eventSourceSubjectOfChoice(choice.choice)} logo={logo} />
+                <EventSourceTile
+                  source={eventSourceSubjectOfChoice(t, choice.choice)}
+                  logo={logo}
+                />
               }
               title={choice.name}
               description={choice.description}
@@ -118,7 +122,7 @@ function EventSourceForm({
   go: ScheduleNavigation;
 }) {
   const { client } = useAppContext();
-  const meta = eventSourceChoiceMeta(choice);
+  const meta = eventSourceChoiceMeta(t, choice);
   const [name, setName] = useState("");
   const [visibility, setVisibility] = useState<"private" | "workspace">("workspace");
   const [serverId, setServerId] = useState<string | null>(null);
@@ -149,9 +153,9 @@ function EventSourceForm({
   const pasted = meta.setup === "paste";
   return (
     <FormPage
-      title={eventSourceAddLabel(choice)}
+      title={eventSourceAddLabel(t, choice)}
       description={meta.description}
-      submitLabel={eventSourceAddLabel(choice)}
+      submitLabel={eventSourceAddLabel(t, choice)}
       pendingLabel="Adding…"
       back={{ label: "Add an event source", onClick: () => go.newSource() }}
       onCancel={go.sources}
@@ -175,7 +179,7 @@ function EventSourceForm({
         if (Object.keys(next).length > 0) return false;
         const result = await client.createEventSource(
           workspaceId,
-          createEventSourceRequest({
+          createEventSourceRequest(t, {
             choice,
             name,
             visibility,
@@ -357,7 +361,7 @@ function PastedWebhookConnect({
   onDone: () => void;
 }) {
   const { client } = useAppContext();
-  const setup = pastedWebhookSetup(source)!;
+  const setup = pastedWebhookSetup(t, source)!;
   const [secret, setSecret] = useState("");
   const [error, setError] = useState<string | undefined>();
   return (

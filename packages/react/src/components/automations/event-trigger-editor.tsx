@@ -9,6 +9,7 @@ import { PlusIcon, Trash2Icon, XIcon } from "lucide-react";
 
 import type { EventSource, EventTypeDescriptor } from "@opengeni/sdk";
 
+import { useOpenGeniText } from "../../messages/runtime";
 import { Button } from "../../ui/button";
 import { CheckboxField, Field, TextArea, TextInput } from "../../ui/field";
 import { ComboboxSelect, SelectMenu, type SelectOption } from "../../ui/select-menu";
@@ -21,6 +22,7 @@ import {
   EVENT_TRIGGERS_PER_AUTOMATION_MAX,
   eventConditionFieldSuggestions,
   eventConditionOperator,
+  eventConditionOperatorLabel,
   eventTypeIssue,
   eventTypeLabel,
   newEventConditionDraft,
@@ -46,10 +48,13 @@ export function useEventTypes(
   sourceIds: readonly string[],
   load: (sourceId: string) => Promise<EventTypeDescriptor[]>,
 ): Record<string, EventTypesState> {
+  const t = useOpenGeniText();
   const [states, setStates] = useState<Record<string, EventTypesState>>({});
   const requested = useRef(new Set<string>());
   const loadRef = useRef(load);
   loadRef.current = load;
+  const textRef = useRef(t);
+  textRef.current = t;
   const key = [...new Set(sourceIds)].filter(Boolean).sort().join(",");
   useEffect(() => {
     for (const sourceId of key ? key.split(",") : []) {
@@ -65,7 +70,10 @@ export function useEventTypes(
             ...current,
             [sourceId]: {
               status: "error",
-              message: error instanceof Error ? error.message : "The events couldn't load.",
+              message:
+                error instanceof Error
+                  ? error.message
+                  : textRef.current("automations.editor.loadEventsFailed"),
             },
           }));
         },
@@ -107,6 +115,7 @@ export function EventTriggersField({
   allowOnce = true,
   disabled = false,
 }: EventTriggersFieldProps) {
+  const t = useOpenGeniText();
   const eventTypes = useEventTypes(
     value.triggers.map((trigger) => trigger.sourceId),
     loadEventTypes,
@@ -156,18 +165,20 @@ export function EventTriggersField({
           className="pointer-coarse:h-11"
         >
           <PlusIcon aria-hidden="true" />
-          {value.triggers.length === 0 ? "Add an event" : "Add another event"}
+          {value.triggers.length === 0
+            ? t("automations.editor.addEvent")
+            : t("automations.editor.addAnotherEvent")}
         </Button>
         {full ? (
           <span className="text-xs text-fg-muted">
-            An automation can listen for up to {EVENT_TRIGGERS_PER_AUTOMATION_MAX} events.
+            {t("automations.editor.triggersMax", { max: EVENT_TRIGGERS_PER_AUTOMATION_MAX })}
           </span>
         ) : null}
       </div>
       {allowOnce && value.triggers.length > 0 ? (
         <CheckboxField
-          label="Run once, then finish"
-          description="The first matching event runs it, then it stops listening. Good for “tell me when this happens”."
+          label={t("automations.editor.once")}
+          description={t("automations.editor.onceDescription")}
           checked={value.once}
           onCheckedChange={(once) => onChange({ ...value, once })}
           disabled={disabled}
@@ -211,6 +222,7 @@ export function EventTriggerEditor({
   autoFocus = false,
   disabled = false,
 }: EventTriggerEditorProps) {
+  const t = useOpenGeniText();
   const blockRef = useRef<HTMLDivElement>(null);
   const source = sources?.find((candidate) => candidate.id === value.sourceId);
   const descriptors = eventTypes?.status === "ready" ? eventTypes.eventTypes : [];
@@ -226,15 +238,15 @@ export function EventTriggerEditor({
   const sourceOptions: SelectOption[] = (sources ?? []).map((candidate) => ({
     value: candidate.id,
     label: candidate.name,
-    meta: eventSourceKindLabel(candidate),
+    meta: eventSourceKindLabel(t, candidate),
     leading: <EventSourceTile source={candidate} logo={sourceLogo} size="sm" />,
     ...(candidate.status === "active"
       ? {}
       : {
-          description: candidate.statusReason ?? "This source is turned off.",
+          description: candidate.statusReason ?? t("automations.editor.sourceOff"),
         }),
   }));
-  const label = `Event ${index + 1}`;
+  const label = t("automations.editor.eventN", { index: index + 1 });
 
   return (
     <div
@@ -244,7 +256,11 @@ export function EventTriggerEditor({
       className="flex min-w-0 flex-col gap-4 rounded-lg border border-border bg-surface p-4"
     >
       <div className="flex min-w-0 items-start gap-3">
-        <Field label="From" error={issues?.source} className="min-w-0 flex-1">
+        <Field
+          label={t("automations.editor.from")}
+          error={issues?.source}
+          className="min-w-0 flex-1"
+        >
           <SelectMenu
             variant={sourceOptions.length > 8 ? "combobox" : "menu"}
             options={sourceOptions}
@@ -252,19 +268,23 @@ export function EventTriggerEditor({
             onValueChange={(sourceId) =>
               onChange({ ...value, sourceId, eventTypes: [], conditions: [], argumentsText: "" })
             }
-            placeholder={sources === undefined ? "Loading sources…" : "Choose a source"}
+            placeholder={
+              sources === undefined
+                ? t("automations.editor.loadingSources")
+                : t("automations.editor.chooseSource")
+            }
             loading={sources === undefined}
-            searchPlaceholder="Search sources"
+            searchPlaceholder={t("automations.editor.searchSources")}
             emptyMessage={
               onAddSource ? (
                 <span>
-                  No event sources yet.{" "}
+                  {t("automations.editor.noSources")}{" "}
                   <button type="button" className="og-link" onClick={onAddSource}>
-                    Add a source
+                    {t("automations.editor.addSource")}
                   </button>
                 </span>
               ) : (
-                "No event sources yet. Ask a workspace admin to add one."
+                t("automations.editor.noSourcesAskAdmin")
               )
             }
             invalid={Boolean(issues?.source)}
@@ -278,8 +298,8 @@ export function EventTriggerEditor({
           size="icon-sm"
           onClick={onRemove}
           disabled={disabled}
-          aria-label={`Remove ${label.toLowerCase()}`}
-          title="Remove"
+          aria-label={t("automations.editor.removeEventN", { index: index + 1 })}
+          title={t("automations.editor.remove")}
           className="mt-7 shrink-0 text-fg-muted pointer-coarse:size-11"
         >
           <Trash2Icon aria-hidden="true" />
@@ -288,12 +308,16 @@ export function EventTriggerEditor({
       {value.sourceId ? (
         <>
           <Field
-            label={source?.kind === "mcp" ? "Event" : "Events"}
+            label={
+              source?.kind === "mcp"
+                ? t("automations.editor.event")
+                : t("automations.editor.events")
+            }
             error={issues?.eventTypes}
             hint={
               source?.kind === "mcp"
-                ? "Each MCP server trigger listens to one event."
-                : "Any of these starts a run."
+                ? t("automations.editor.mcpOneEventHint")
+                : t("automations.editor.anyStartsRun")
             }
           >
             <EventTypePicker
@@ -308,16 +332,16 @@ export function EventTriggerEditor({
           <EventConditionsEditor
             value={value.conditions}
             onChange={(conditions) => onChange({ ...value, conditions })}
-            suggestions={eventConditionFieldSuggestions(value.eventTypes, descriptors)}
+            suggestions={eventConditionFieldSuggestions(t, value.eventTypes, descriptors)}
             issues={issues?.conditions}
             disabled={disabled}
           />
           {showArguments ? (
             <Field
-              label="Subscription settings"
+              label={t("automations.editor.subscriptionSettings")}
               optional
               error={issues?.arguments}
-              hint="Sent to the MCP server when Opengeni subscribes, as a JSON object."
+              hint={t("automations.editor.subscriptionSettingsHint")}
             >
               <TextArea
                 mono
@@ -332,8 +356,8 @@ export function EventTriggerEditor({
           ) : null}
           {source?.kind === "github" || source?.kind === "slack" ? (
             <CheckboxField
-              label="Also run for what Opengeni does"
-              description="Off by default, so the agent's own comments and messages don't start another run."
+              label={t("automations.editor.includeOwn")}
+              description={t("automations.editor.includeOwnDescription")}
               checked={value.includeOwnEvents}
               onCheckedChange={(includeOwnEvents) => onChange({ ...value, includeOwnEvents })}
               disabled={disabled}
@@ -381,6 +405,7 @@ export function EventTypePicker({
   invalid?: boolean | undefined;
   disabled?: boolean | undefined;
 }) {
+  const t = useOpenGeniText();
   const [query, setQuery] = useState("");
   const descriptors = state?.status === "ready" ? state.eventTypes : NO_EVENT_TYPES;
   const options = useMemo(() => {
@@ -396,13 +421,21 @@ export function EventTypePicker({
         disabled: !descriptor.available,
         ...(descriptor.available
           ? {}
-          : { disabledReason: descriptor.unavailableReason ?? "Opengeni can't receive this one." }),
+          : {
+              disabledReason: descriptor.unavailableReason ?? t("automations.picker.cantReceive"),
+            }),
         keywords: [descriptor.description],
       }));
     const all: SelectOption[] =
       single || picked.has("*")
         ? []
-        : [{ value: "*", label: "Every event", description: "Anything this source sends." }];
+        : [
+            {
+              value: "*",
+              label: eventTypeLabel(t, "*"),
+              description: t("automations.picker.everyEventDescription"),
+            },
+          ];
     const needle = query.trim().toLowerCase();
     const matches = [...all, ...known].filter(
       (option) =>
@@ -418,19 +451,19 @@ export function EventTypePicker({
       !single &&
       !picked.has(typed) &&
       !descriptors.some((descriptor) => descriptor.type === typed) &&
-      eventTypeIssue(typed) === null
+      eventTypeIssue(t, typed) === null
         ? [
             {
               value: `${CUSTOM_PREFIX}${typed}`,
-              label: `Use “${typed}”`,
+              label: t("automations.picker.use", { type: typed }),
               description: typed.endsWith(".*")
-                ? `Every event whose type starts with ${typed.slice(0, -1)}`
-                : "An event type this source sends that isn't listed yet.",
+                ? t("automations.picker.prefixDescription", { prefix: typed.slice(0, -1) })
+                : t("automations.picker.unlisted"),
             },
           ]
         : [];
     return [...matches, ...custom];
-  }, [descriptors, query, single, value]);
+  }, [descriptors, query, single, t, value]);
 
   const add = (picked: string) => {
     const type = picked.startsWith(CUSTOM_PREFIX) ? picked.slice(CUSTOM_PREFIX.length) : picked;
@@ -441,7 +474,10 @@ export function EventTypePicker({
   return (
     <div className="flex min-w-0 flex-col gap-2">
       {value.length > 0 ? (
-        <ul aria-label="Picked events" className="m-0 flex min-w-0 list-none flex-wrap gap-1.5 p-0">
+        <ul
+          aria-label={t("automations.picker.picked")}
+          className="m-0 flex min-w-0 list-none flex-wrap gap-1.5 p-0"
+        >
           {value.map((type) => {
             const description = descriptors.find((entry) => entry.type === type)?.description;
             return (
@@ -451,13 +487,13 @@ export function EventTypePicker({
                 className="inline-flex h-7 max-w-full min-w-0 items-center gap-1 rounded-full border border-border bg-surface-2 pr-0.5 pl-2.5 text-xs font-medium text-fg"
               >
                 <span className={cn("min-w-0 truncate", type !== "*" && "font-mono")}>
-                  {eventTypeLabel(type)}
+                  {eventTypeLabel(t, type)}
                 </span>
                 <button
                   type="button"
                   onClick={() => onChange(value.filter((entry) => entry !== type))}
                   disabled={disabled}
-                  aria-label={`Remove ${eventTypeLabel(type)}`}
+                  aria-label={t("automations.picker.removeType", { type: eventTypeLabel(t, type) })}
                   className="grid size-6 shrink-0 place-items-center rounded-full text-fg-muted hover:bg-hover hover:text-fg pointer-coarse:size-8"
                 >
                   <XIcon aria-hidden="true" className="size-3" />
@@ -469,8 +505,7 @@ export function EventTypePicker({
       ) : null}
       {state?.status === "error" ? (
         <p className="m-0 text-xs leading-4.5 text-fg-muted">
-          The list of events couldn't load ({state.message.replace(/\.$/, "")}). You can still type
-          an event type.
+          {t("automations.picker.loadFailed", { reason: state.message.replace(/\.$/, "") })}
         </p>
       ) : null}
       {single && value.length > 0 ? null : (
@@ -480,16 +515,20 @@ export function EventTypePicker({
           onValueChange={add}
           onSearchChange={setQuery}
           filterLocally={false}
-          placeholder={value.length === 0 ? "Choose an event" : "Add an event"}
-          searchPlaceholder="Search or type an event type"
+          placeholder={
+            value.length === 0 ? t("automations.picker.choose") : t("automations.picker.addEvent")
+          }
+          searchPlaceholder={t("automations.picker.search")}
           loading={loading && state?.status !== "error"}
-          loadingLabel="Loading events…"
-          emptyMessage="No matching events. Type the exact event type to use it."
+          loadingLabel={t("automations.picker.loading")}
+          emptyMessage={t("automations.picker.empty")}
           invalid={invalid}
           disabled={disabled}
           showMetaInTrigger={false}
           className="max-w-full sm:max-w-80"
-          aria-label={value.length === 0 ? "Choose an event" : "Add an event"}
+          aria-label={
+            value.length === 0 ? t("automations.picker.choose") : t("automations.picker.addEvent")
+          }
         />
       )}
     </div>
@@ -515,6 +554,7 @@ export function EventConditionsEditor({
   issues?: Record<string, string> | undefined;
   disabled?: boolean | undefined;
 }) {
+  const t = useOpenGeniText();
   const listId = useId();
   const headingId = useId();
   const update = (key: string, next: Partial<EventConditionDraft>) =>
@@ -525,8 +565,10 @@ export function EventConditionsEditor({
   return (
     <div role="group" aria-labelledby={headingId} className="flex min-w-0 flex-col gap-2">
       <p id={headingId} className="m-0 text-sm leading-5 font-medium text-fg">
-        Only when
-        <span className="ml-1.5 text-xs font-normal text-fg-subtle">Optional</span>
+        {t("automations.conditions.heading")}
+        <span className="ml-1.5 text-xs font-normal text-fg-subtle">
+          {t("automations.conditions.optional")}
+        </span>
       </p>
       <datalist id={listId}>
         {suggestions.map((entry) => (
@@ -538,7 +580,7 @@ export function EventConditionsEditor({
       {value.map((condition, index) => {
         const operator = eventConditionOperator(condition.op);
         const issue = issues?.[condition.key];
-        const position = `condition ${index + 1}`;
+        const position = { index: index + 1 };
         return (
           <div key={condition.key} className="flex min-w-0 flex-col gap-1.5">
             <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 sm:grid-cols-[minmax(0,1.2fr)_9.5rem_minmax(0,1fr)_auto]">
@@ -547,7 +589,7 @@ export function EventConditionsEditor({
                 onChange={(event) => update(condition.key, { field: event.target.value })}
                 list={listId}
                 placeholder="data.action"
-                aria-label={`Field for ${position}`}
+                aria-label={t("automations.conditions.fieldFor", position)}
                 aria-invalid={issue ? true : undefined}
                 mono
                 suppressAutofill
@@ -560,8 +602,8 @@ export function EventConditionsEditor({
                 size="icon-sm"
                 onClick={() => onChange(value.filter((entry) => entry.key !== condition.key))}
                 disabled={disabled}
-                aria-label={`Remove ${position}`}
-                title="Remove"
+                aria-label={t("automations.conditions.remove", position)}
+                title={t("automations.editor.remove")}
                 className="text-fg-muted sm:order-last pointer-coarse:size-11"
               >
                 <XIcon aria-hidden="true" />
@@ -570,7 +612,7 @@ export function EventConditionsEditor({
                 variant="native"
                 options={EVENT_CONDITION_OPERATORS.map((option) => ({
                   value: option.value,
-                  label: option.label,
+                  label: eventConditionOperatorLabel(t, option.value),
                 }))}
                 value={condition.op}
                 onValueChange={(op) =>
@@ -579,7 +621,7 @@ export function EventConditionsEditor({
                     ...(eventConditionOperator(op).takes === null ? { value: "" } : {}),
                   })
                 }
-                aria-label={`Comparison for ${position}`}
+                aria-label={t("automations.conditions.comparisonFor", position)}
                 showSelectedDescription={false}
                 disabled={disabled}
                 className="col-span-2 sm:col-span-1"
@@ -591,7 +633,7 @@ export function EventConditionsEditor({
                   value={condition.value}
                   onChange={(event) => update(condition.key, { value: event.target.value })}
                   placeholder={operator.takes === "list" ? "opened, reopened" : "opened"}
-                  aria-label={`Value for ${position}`}
+                  aria-label={t("automations.conditions.valueFor", position)}
                   aria-invalid={issue ? true : undefined}
                   suppressAutofill
                   disabled={disabled}
@@ -613,7 +655,7 @@ export function EventConditionsEditor({
           className="-ml-2 text-fg-muted pointer-coarse:h-11"
         >
           <PlusIcon aria-hidden="true" />
-          Add a condition
+          {t("automations.conditions.add")}
         </Button>
       </div>
     </div>

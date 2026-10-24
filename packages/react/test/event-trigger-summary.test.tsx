@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { EventSource, EventTrigger } from "@opengeni/sdk";
 
 import { EventTriggerSummary } from "../src/automations";
+import { OpenGeniMessagesProvider } from "../src/messages/runtime";
 import { registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -95,6 +96,30 @@ describe("EventTriggerSummary", () => {
     );
     expect(view.container.textContent).toContain("Needs attention");
     expect(view.container.querySelector("a")).toBeNull();
+    await view.unmount();
+  });
+
+  test("speaks the host's language", async () => {
+    const view = await renderComponent(
+      <OpenGeniMessagesProvider
+        locale="nb"
+        messages={{
+          "automations.summary.from": "Fra",
+          "automations.conditions.onlyWhen": "bare når {field} {operator} {value}",
+          "automations.condition.op.equals": "er",
+          "automations.eventTypes.either": "{first} eller {second}",
+        }}
+      >
+        <EventTriggerSummary
+          triggers={[trigger({ eventTypes: ["pull_request.opened", "issues.opened"] })]}
+          sources={[source]}
+        />
+      </OpenGeniMessagesProvider>,
+    );
+    expect([...view.container.querySelectorAll("p")].map((line) => line.textContent)).toEqual([
+      "pull_request.opened eller issues.opened",
+      "Fra Acme GitHub, bare når data.repository er acme/api",
+    ]);
     await view.unmount();
   });
 });

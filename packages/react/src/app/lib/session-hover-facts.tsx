@@ -5,7 +5,7 @@ import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../timeline-mo
 
 import type { SemanticTone } from "../../ui/status-dot";
 import { formatAbsoluteTime, inSentence } from "../../ui/relative-time";
-import { SESSION_AUTOMATION_WAIT_LABEL, sessionAutomationWait } from "../../session-list-model";
+import { sessionAutomationWait, sessionAutomationWaitLabel } from "../../session-list-model";
 import { sessionStatusLabel, sessionInputWait } from "./session-rail";
 import type { RailSession } from "./session-list-entry";
 import { sessionSiteOrigin } from "./session-site-origin";
@@ -218,7 +218,7 @@ export function sessionHoverFacts(
   const origin: SessionHoverFacts["origin"] = site
     ? { kind: "site", label: `Started from ${site.title}` }
     : automationWait
-      ? { kind: automationWait, label: SESSION_AUTOMATION_WAIT_LABEL[automationWait] }
+      ? { kind: automationWait, label: sessionAutomationWaitLabel(t, automationWait) }
       : scheduledTaskIdOf(session)
         ? { kind: "automation", label: "Started by an automation" }
         : null;

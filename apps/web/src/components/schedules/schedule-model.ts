@@ -17,6 +17,7 @@ import {
   type CadenceScheduleSpec,
   type CadenceValue,
 } from "@opengeni/react/ui/cadence-picker";
+import { t } from "@opengeni/react/app/lib/console-text";
 import {
   emptyEventTriggersDraft,
   eventConditionDraftFrom,
@@ -173,7 +174,7 @@ export function automationWhenWords(
   sources: readonly Pick<EventSource, "id" | "name">[],
   now: Date,
 ): string {
-  const triggers = eventTriggersShortLabel(task.events?.triggers ?? [], sources);
+  const triggers = eventTriggersShortLabel(t, task.events?.triggers ?? [], sources);
   if (!triggers) return scheduleWords(task.schedule, now).short;
   if (task.schedule.type === "manual") return triggers;
   return `${scheduleWords(task.schedule, now).short} · ${triggers}`;
