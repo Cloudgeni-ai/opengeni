@@ -177,8 +177,8 @@ export function MeetingsListPage({
             query ? (
               <EmptyState
                 variant="inline"
-                title={`No meetings match “${query}”`}
-                description="Only meeting titles are searched."
+                title={`No meetings match “${query}”.`}
+                description="Search finds words in meeting titles and transcripts."
               />
             ) : (
               <EmptyState

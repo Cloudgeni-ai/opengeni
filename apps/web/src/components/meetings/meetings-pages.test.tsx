@@ -97,6 +97,55 @@ describe("Meetings list", () => {
     }
   });
 
+  test("search finds meetings by transcript words and says what it searches", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />,
+    );
+    const search = async (text: string) => {
+      const input = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Search meetings"]',
+      )!;
+      await act(async () => {
+        // react-dom watches the focused field for typing.
+        input.focus();
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(
+          input,
+          text,
+        );
+        input.dispatchEvent(new window.Event("input", { bubbles: true }));
+        // react-dom loads before the DOM here, so it reads typing from key events.
+        input.dispatchEvent(new window.KeyboardEvent("keyup", { bubbles: true }));
+      });
+      // Past the typing pause, then until the new list has loaded.
+      await settle(400);
+      const deadline = Date.now() + 3_000;
+      while ((view.container.textContent ?? "").includes("Loading meetings")) {
+        if (Date.now() > deadline) throw new Error("Timed out waiting for the search");
+        await settle(50);
+      }
+    };
+    try {
+      await waitForText(view.container, "Weekly product sync");
+      // Spoken in the meeting, not in any title, and only the start of a word.
+      await search("annual disc");
+      const found = view.container.textContent ?? "";
+      expect(found).toContain("Weekly product sync");
+      expect(found).not.toContain("Transcript failed");
+      await search("zzz");
+      expect(view.container.textContent).toContain(
+        "Search finds words in meeting titles and transcripts.",
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("an empty workspace explains how to start", async () => {
     const fixture = createMeetingsFixture({ state: "empty" });
     const view = await render(

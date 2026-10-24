@@ -385,6 +385,16 @@ export function createMeetingsFixture(
       sequence: index + 1,
     }),
   );
+  // Like the API: part of the title, or every word starting a word of the transcript.
+  const matchesSearch = (entry: Recording, query: string) => {
+    if (entry.title.toLowerCase().includes(query.toLowerCase())) return true;
+    const words = query.toLowerCase().match(/[\p{L}\p{N}]+/gu);
+    if (!words || entry.id !== readyId) return false;
+    const spoken = new Set(
+      segments.flatMap((segment) => segment.text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []),
+    );
+    return words.every((word) => [...spoken].some((candidate) => candidate.startsWith(word)));
+  };
   const find = (id: string) => {
     const found = recordings.find((entry) => entry.id === id);
     if (!found) throw new Error("Recording not found");
@@ -395,7 +405,7 @@ export function createMeetingsFixture(
     listRecordings: async (_workspaceId: string, request: { query?: string } = {}) =>
       await delay({
         recordings: recordings.filter((entry) =>
-          request.query ? entry.title.toLowerCase().includes(request.query.toLowerCase()) : true,
+          request.query ? matchesSearch(entry, request.query) : true,
         ),
         nextBefore: null,
       }),
