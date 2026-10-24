@@ -34,8 +34,6 @@ const workspaceRouteContracts = {
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
   workspaceReadOnlyChatsRoute: { kind: "page", source: "routes/read-only-chats.tsx" },
   workspaceInboxRoute: { kind: "page", source: "routes/inbox.tsx" },
-  workspaceMeetingsRoute: { kind: "page", source: "routes/meetings.tsx" },
-  workspaceMeetingDetailRoute: { kind: "page", source: "routes/meetings.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
   workspaceCapabilitiesRoute: {
     kind: "self-managed",
