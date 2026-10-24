@@ -1,6 +1,7 @@
-// Captures the schedule indicator preview: the real sidebar rows (one with an
-// upcoming schedule, one whose schedules are paused or past) with their hover
-// cards, and the real session header in each schedule state, light and dark.
+// Captures the automation wait preview: the real sidebar rows (one with an
+// upcoming schedule, one waiting for an app's event, one whose schedules are
+// paused or past) with their hover cards, and the real session header in each
+// wait state, light and dark.
 // Start the server first:
 //   bunx vite --config test/session-sidebar-preview.vite.config.ts --port 4292
 import { mkdir } from "node:fs/promises";
@@ -33,6 +34,7 @@ try {
     await page.screenshot({ path: path.join(output, `sidebar-${theme}.png`) });
     for (const [name, title] of [
       ["upcoming", "Quarterly cloud cost report"],
+      ["event", "Ship the billing migration"],
       ["lapsed", "Release stabilization checkpoint"],
     ] as const) {
       await page.getByText(title).first().hover();

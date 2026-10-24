@@ -17,7 +17,7 @@ import {
   type FollowupPull,
 } from "./model";
 import { latestRun, infrastructureRetryReason } from "./planner";
-import { latencySummary } from "./journal";
+import { observeDurableUncertainty, writeResolved } from "./cycle-outcome";
 
 export interface ActiveReads {
   openPullNumbers?(): Promise<number[]>;
@@ -170,6 +170,11 @@ export class GitHubActiveExecutor implements Executor {
     await this.git.fetch(this.writer.remote, [main, ...(sha ? [sha] : [])], "state");
     const ledger = sha ? await this.git.readLedger(sha) : emptyLedger();
     requireInitializedState(sha, ledger);
+    observeDurableUncertainty(
+      Object.values(ledger.effects)
+        .filter((effect) => ["submitting", "uncertain", "blocked"].includes(effect.status))
+        .map((effect) => effect.id),
+    );
     return { main, sha, ledger };
   }
   private async committed(updates: RefUpdate[]): Promise<boolean> {
@@ -191,7 +196,11 @@ export class GitHubActiveExecutor implements Executor {
       await this.writer.transaction(updates);
     } catch (error) {
       try {
-        if (await this.committed(updates)) return;
+        if (await this.committed(updates)) {
+          const fence = updates.find((update) => update.ref === this.writer.stateRef);
+          if (fence) writeResolved(`git:${fence.next}`);
+          return;
+        }
       } catch {
         // Verification failure cannot replace the original ambiguous push outcome.
         throw error;
@@ -473,13 +482,12 @@ export class GitHubActiveExecutor implements Executor {
         if (
           current.attempt !== effect.run.attempt ||
           current.status !== "completed" ||
-          (latencySummary(state.ledger.stages, now).p95 ?? 0) > 1800 ||
           (await this.reads.mainBusy())
         ) {
           await this.patchEffect(effect.id, {
             nextAt: new Date(Date.parse(now) + 60_000).toISOString(),
           });
-          return "whole-workflow retry waits for exact completed attempt, latency stop clearance and main headroom";
+          return "whole-workflow retry waits for exact completed attempt and complete available Batch-slot evidence";
         }
         await this.git.fetch(this.writer.remote, [effect.run.headSha]);
         const manifest = await this.git.inspect(effect.run.headSha);

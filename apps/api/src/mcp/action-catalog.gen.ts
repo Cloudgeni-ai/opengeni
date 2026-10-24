@@ -1373,6 +1373,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -1432,6 +1433,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -1454,6 +1456,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -1663,6 +1666,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -1978,6 +1982,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2245,6 +2250,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2267,6 +2273,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2431,6 +2438,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2491,6 +2499,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2513,6 +2522,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2535,6 +2545,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2551,6 +2562,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
     "request": [],
     "response": []
   },
@@ -2578,6 +2596,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2607,6 +2626,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2869,6 +2889,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -3661,6 +3682,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary",
@@ -3701,6 +3723,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceArtifactContentResponse"
+    ]
+  },
+  {
+    "id": "getWorkspaceArtifactCurrent",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/current",
+    "request": [],
+    "response": [
+      "WorkspaceArtifactCurrentResponse"
     ]
   },
   {
@@ -4018,6 +4049,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5515,6 +5547,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5652,6 +5685,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5674,6 +5708,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5954,6 +5989,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5976,6 +6012,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5998,6 +6035,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -6009,6 +6047,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items",
     "request": [],
     "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval/grants/:grantId/revoke",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval/grants/:grantId/revoke",
+    "request": [],
+    "response": [],
+    "browserOnly": "which secrets need the person's approval each time, and the approvals they gave, guard what agents may use, so only the person signed in to Opengeni themselves can change them, never an agent"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/restore",
@@ -6062,6 +6108,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -6284,6 +6331,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -6344,6 +6392,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -6375,10 +6424,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
+    "request": [],
+    "response": [],
+    "browserOnly": "which secrets need the person's approval each time, and the approvals they gave, guard what agents may use, so only the person signed in to Opengeni themselves can change them, never an agent"
   },
   {
     "id": "PUT /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
@@ -6397,6 +6455,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -8509,6 +8568,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary",

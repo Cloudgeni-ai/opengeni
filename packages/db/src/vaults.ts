@@ -669,6 +669,9 @@ export async function recordVaultSecretUse(
       toolName: string;
       operationId?: string;
       sourceCallId?: string;
+      destination?: string;
+      /** The approvals (0952) this use relied on. */
+      approvalIds?: string[];
     };
     items: Array<{
       itemId: string;

@@ -17,6 +17,7 @@ import {
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
+  type FakeMcpEventsProfile,
   type FakeMcpEventsServer,
   type FakeMcpEventType,
   startFakeMcpEventsServer,
@@ -659,10 +660,15 @@ describe("MCP event sources", () => {
     for (const fake of fakes) await fake.stop();
   });
 
-  async function mcpFixture() {
+  async function mcpFixture(options: { profile?: FakeMcpEventsProfile } = {}) {
     let app: { request: (path: string, init: RequestInit) => Promise<Response> } | null = null;
     const fake = startFakeMcpEventsServer({
-      eventTypes: [TICKET_CREATED, TICKET_CLOSED],
+      // A server built for ChatGPT offers webhook delivery only.
+      eventTypes:
+        options.profile === "chatgpt"
+          ? [{ ...TICKET_CLOSED, delivery: ["webhook"] }]
+          : [TICKET_CREATED, TICKET_CLOSED],
+      ...(options.profile ? { profile: options.profile } : {}),
       nextPollMs: 20_000,
       maxTtlMs: 3_600_000,
       webhookFetch: async (url, init) => await app!.request(new URL(url).pathname, init),
@@ -1017,6 +1023,36 @@ describe("MCP event sources", () => {
       "Polled instead",
     ]);
     expect((await f.task(automation.id)).events.triggers[0].status).toBe("active");
+  });
+
+  test("a server built for ChatGPT's earlier draft works over webhooks", async () => {
+    const f = await mcpFixture({ profile: "chatgpt" });
+    const source = await f.createSource();
+    const { eventTypes } = await f.json(
+      await f.app.request(`${f.sources}/${source.id}/event-types`, { headers: f.owner.headers }),
+    );
+    expect(eventTypes.map((entry: any) => entry.type)).toEqual(["ticket.closed"]);
+    const automation = await f.automation(source.id, "ticket.closed", { queue: "billing" });
+
+    await f.pump();
+    const [subscription] = await f.subscriptions();
+    expect(subscription).toMatchObject({ mode: "webhook", failures: 0 });
+    const serverId = String(subscription!.server_subscription_id);
+
+    // Its deliveries reuse the event id as webhook-id; a retry is still recorded once.
+    const event = await f.fake.emit("ticket.closed", { queue: "billing", title: "Refund sent" });
+    const delivered = f.fake.posts.at(-1)!;
+    expect(delivered).toMatchObject({ webhookId: event.eventId, status: 200 });
+    expect((await f.fake.redeliver(delivered)).status).toBe(200);
+    expect((await f.events(source.id)).map((stored) => stored.data.title)).toEqual(["Refund sent"]);
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toEqual([automation.id]);
+
+    // Access revoked, in the draft's numbering: the trigger is blocked, not retried quietly.
+    await f.fake.terminate(serverId, { code: -32_012, message: "Forbidden" });
+    f.fake.failNext("events/subscribe", { code: -32_012, message: "Forbidden" });
+    await f.pump();
+    expect((await f.task(automation.id)).events.triggers[0].status).toBe("blocked");
   });
 });
 

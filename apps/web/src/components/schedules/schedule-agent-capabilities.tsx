@@ -69,7 +69,7 @@ export function ScheduleAgentCapabilities({
         />
         <p className="text-xs leading-4.5 text-fg-muted">
           {custom
-            ? "Saved with the schedule. Later changes to the workspace's defaults don't change it."
+            ? "Saved with the automation. Later changes to the workspace's defaults don't change it."
             : "Each run uses the workspace's agent defaults at the time it runs."}
         </p>
       </div>

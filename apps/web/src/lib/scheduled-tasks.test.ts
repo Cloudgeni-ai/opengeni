@@ -920,7 +920,7 @@ describe("scheduled task access in plain words", () => {
       firstOccurredAt: "2026-09-17T08:00:05.000Z",
     };
     expect(scheduledTaskAccessFailureText(failure)).toBe(
-      "Couldn't use Slack: your personal account is not available to this schedule.",
+      "Couldn't use Slack: your personal account is not available to this automation.",
     );
     expect(
       scheduledTaskAccessFailuresText([
@@ -928,7 +928,7 @@ describe("scheduled task access in plain words", () => {
         { ...failure, serverId: "gmail", name: "Gmail", reason: "expired" },
       ]),
     ).toBe(
-      "Couldn't use Slack: your personal account is not available to this schedule. Couldn't use Gmail: its connection expired.",
+      "Couldn't use Slack: your personal account is not available to this automation. Couldn't use Gmail: its connection expired.",
     );
     expect(scheduledTaskAccessFailuresText([])).toBeNull();
     expect(scheduledTaskAccessFailuresText(undefined)).toBeNull();
@@ -953,7 +953,7 @@ describe("scheduled task access in plain words", () => {
       }),
     ).toEqual([
       "The account pinned for Slack can no longer be used, so runs go ahead without Slack.",
-      "New schedules in this workspace also get Gmail; this one does not.",
+      "New automations in this workspace also get Gmail; this one does not.",
       "2 newer Opengeni tools are not available to it: browser read and browser screenshot.",
       "old-crm is no longer set up in this workspace and will be removed.",
     ]);

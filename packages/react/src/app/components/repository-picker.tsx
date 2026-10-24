@@ -976,7 +976,7 @@ export function ScheduledTaskRepositoryPicker(props: {
       return;
     }
     if (selectedInstallationId !== null && selectedInstallationId !== repo.installationId) {
-      toast.info("Scheduled tasks use one GitHub token", {
+      toast.info("Automations use one GitHub token", {
         description: "Clear selected repositories to choose repositories from another account.",
       });
       return;
@@ -1074,7 +1074,7 @@ export function ScheduledTaskRepositoryPicker(props: {
                         onClick={() => toggleRepo(repo)}
                         disabled={props.busy}
                         aria-pressed={checked}
-                        aria-label={`Select ${repo.fullName} for scheduled task`}
+                        aria-label={`Select ${repo.fullName} for the automation`}
                         className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md text-left outline-hidden"
                       >
                         <span
@@ -1119,7 +1119,7 @@ export function ScheduledTaskRepositoryPicker(props: {
                             onClick={(event) => event.stopPropagation()}
                             disabled={props.busy}
                             placeholder={repo.defaultBranch}
-                            aria-label={`${repo.fullName} scheduled task ref`}
+                            aria-label={`${repo.fullName} branch or ref for the automation`}
                             className="h-7 text-xs"
                           />
                         </div>

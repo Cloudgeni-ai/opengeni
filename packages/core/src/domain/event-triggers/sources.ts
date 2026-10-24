@@ -290,7 +290,9 @@ async function createMcpEventSource(
       target,
       async (client, { server, connectionId }) => {
         const name = mcpServerDisplayName(server);
-        if (!serverOffersMcpEvents(client)) throw new McpServerWithoutEventsError(name);
+        if (!(await serverOffersMcpEvents(client, { timeout: 20_000 }))) {
+          throw new McpServerWithoutEventsError(name);
+        }
         return { name, connectionId };
       },
     );

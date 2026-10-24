@@ -75,10 +75,12 @@ describe("scheduled task access notices", () => {
       const text = view.container.textContent ?? "";
       expect(text).toContain("The last run could not use a connector");
       expect(text).toContain(
-        "Couldn't use Slack: your personal account is not available to this schedule.",
+        "Couldn't use Slack: your personal account is not available to this automation.",
       );
       expect(text).toContain("Refreshing access below may fix it.");
-      expect(text).toContain("New schedules in this workspace also get Gmail; this one does not.");
+      expect(text).toContain(
+        "New automations in this workspace also get Gmail; this one does not.",
+      );
       expect(text).toContain("1 newer Opengeni tool is not available to it: browser read.");
       const button = [...view.container.querySelectorAll("button")].find(
         (candidate) => candidate.textContent === "Refresh access",

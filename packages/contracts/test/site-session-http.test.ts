@@ -7,6 +7,7 @@ import {
   SITE_VERSION_HEADER,
   SiteDataUnsupportedError,
   SiteSessionPathError,
+  siteConversationContext,
   siteFrameBodyRefusal,
   siteFrameFromHeaders,
   siteFrameOperation,
@@ -295,4 +296,27 @@ test("Site frame bodies carry message text and model choices only", () => {
     ).toBe(field);
   // Reads and operations without a body rule are left alone.
   expect(siteFrameBodyRefusal("sessions.get", "/sessions/s", { anything: 1 })).toBeNull();
+});
+
+test("a Site view conversation's context names its Site and the version shown", () => {
+  const context = siteConversationContext({
+    siteId: "site-1",
+    title: "  Spend\n  dashboard ",
+    versionId: "version-7",
+    revision: 7,
+  });
+  expect(context).toContain("“Spend dashboard” (Site id site-1)");
+  expect(context).toContain("at version 7 (version id version-7)");
+  expect(context).toContain("publish the change as a new version of this Site");
+  // Bounded, and never empty, whatever the title.
+  const long = siteConversationContext({
+    siteId: "s",
+    title: "x".repeat(5_000),
+    versionId: "v",
+    revision: 1,
+  });
+  expect(long.length).toBeLessThan(800);
+  expect(
+    siteConversationContext({ siteId: "s", title: " ", versionId: "v", revision: 1 }),
+  ).toContain("“Untitled Site”");
 });

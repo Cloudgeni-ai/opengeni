@@ -366,7 +366,16 @@ failed/timed-out job evidence may request one
 whole-workflow retry; main, Version and release runs are excluded. The exact
 run/attempt, request time and reason are durably recorded in Git and stage evidence.
 Ambiguous or partial receipts hold rather than authorize a retry or blame a PR.
-A trusted second code failure splits the cohort or parks a failing singleton;
+A trusted failed candidate waits for a conclusive exact-base comparison before
+retry, splitting or parking. A complete verified Batch receipt identifies its
+failed classes: `source` maps only to main's `Source and type contracts`, and
+`unit-*` maps to the complete main `Unit tests (shard N/M)` set. A red or unknown
+relevant class holds; an unrelated browser/image/release failure does not hold
+when every relevant class is conclusively green. Unknown/running/error evidence,
+missing failure classes, duplicate jobs and incomplete shard sets do not release
+the hold. A verified full-green base also clears it. This is class relevance,
+not a same-assertion fingerprint proof, requeue operation or green-test waiver.
+Otherwise a trusted second code failure splits the cohort or parks a failing singleton;
 a second infrastructure or unknown outcome holds. Invalidated, landed or obsolete-base
 candidates cannot submit pending retries: the candidate must still be rooted in
 current main or an exact live predecessor chain, checked before and after the
@@ -392,12 +401,28 @@ provider snapshot lag or same-total substitutions. GitHub's status-filtered
 listing can itself cap accessible results at 1000; an inaccessible remainder
 holds as incomplete, so pagination does not promise unlimited inventory.
 Every distinct relevant active run's complete latest-job
-inventory is then read. There are no 64-run or 32-run admission limits. A
+inventory is then read using at most four concurrent read workers. Pages within
+each run remain sequential; results are reduced in the observed run order only
+after the reads settle. API errors cannot admit partial evidence. This bounds
+request concurrency, not inventory size or provider latency. There are no 64-run
+or 32-run admission limits. A
 120-second scan deadline is checked before each request and after the last
 response; an overrun or provider error holds. Each listing requires a stable
 reported total, correctly sized pages and unique identities across pages;
 inconsistent pages and run identity drift hold rather than admitting partial
 demand. A run is **approval-only** only when
+the following complete-job proof establishes it. The live reader may reuse that
+proof for at most 15 minutes only for main push CI whose sole waiting job is
+`Build API workload image` and whose other jobs are completed or pending
+descendants. Reuse requires matching run ID, attempt, head, workflow, branch and
+provider update timestamp, with `waiting` in both current status passes. Any
+observed status or timestamp transition, malformed/missing/expired cache, or
+different approval gate requires fresh complete job pages. Active Batch detection
+always precedes this optimization, including waiting Batch runs. A cold cache
+also requires full verification. `cachedApprovalOnlyRuns` reports reused verified
+zero-demand observations and is absent for incomplete scans; this does not claim
+an atomic provider snapshot or rule out provider lag/changes after observation.
+Without reusable proof, a run is approval-only only when
 every listing in the observation reports the run as `waiting` and its complete
 job page has at least one `waiting` job and otherwise only `pending` or
 `completed` jobs. Such
@@ -433,6 +458,29 @@ is not a claim that those tests passed. All selected tests must execute successf
 for the fast job and required aggregate to pass. A failed selected test is never
 converted into an intentional skip. Type selection is unchanged. Full guards
 and the full suite remain in Batch CI, whose impact plan is not capped.
+
+PR CI has no priority wait: no provider demand read can hold or fail PR
+admission. Only Version validation (`ci.yml` `automation-admission`) still runs
+the bounded `github-pr-ci.ts priority pr` yield, so only that job keeps the
+320-minute timeout exemption. The yield holds for queued or running main push CI
+and Batch CI. A waiting run whose jobs are only completed or waiting for
+approval does not hold it. Main push CI whose sole waiting job is
+`Build API workload image` (public-release approval), with every other job
+completed or `pending` and unique positive job IDs, also has zero runner demand.
+This relies on the current `ci.yml` job order: when the approval waits, every
+job not downstream of it already has its prerequisites completed, so it is
+queued, running or finished (never `pending`); a queued or running job holds.
+The yield never approves or cancels that release. Batch runs get no such
+exemption.
+
+Batch CI does not wait inside its planning job for main CI demand to clear. After
+checkout and Bun setup it verifies the immutable candidate and plans the complete
+combined tree, with a 20-minute planning-job timeout. GitHub schedules the resulting
+jobs; this is not a fairness or capacity guarantee. Full tests, previous-binary
+readiness, exact-attempt provenance and the final Batch ready gate are unchanged.
+Already-created runs retain their original workflow: the controller's single
+infrastructure retry reruns the same immutable candidate, not a new tree containing
+a later workflow fix.
 
 There is no global PR admission lock, permit system or synthetic runner reserve.
 GitHub queues bursts under its hosted capacity limits. Keep the fast gate small;
@@ -539,7 +587,17 @@ audit history, not green-candidate admission gates.
 
 A trusted candidate code failure is **not** proof that a member caused it. Until
 the separate producer/consumer contract supplies comparable same-job base batch-suite
-evidence, failed cohorts split sequentially and failed singleton heads are durably
+evidence, a failed candidate with red or unknown relevant exact-base classes stays held.
+This observation is requested only for a terminal trusted failed root; ordinary
+building and tested-green landing remain independent of main CI availability.
+The hold can stall other ready work while that failed root remains live. It ends
+when the latest exact-base comparison becomes conclusively green for the failed
+classes, main advances (normal obsolete-candidate invalidation), or readiness is
+withdrawn (normal binding invalidation). This patch adds no timer, regrouping,
+label mutation or operator override. Unknown evidence during a base rerun or API
+failure never releases the cohort into durable splitting/parking. Independent
+admission backpressure, including latency policy, still applies to those exits.
+Other failed cohorts split sequentially and failed singleton heads are durably
 parked, never blamed or ejected. Each parking record binds the PR head, tested base,
 batch, original cohort, run and attempt, with a durable non-blaming PR comment.
 Other ready heads proceed. Readiness churn and main advancement do not retry a
@@ -666,11 +724,16 @@ strict read-only shadow only retains local evidence and never writes remote stat
 
 Telemetry reports the nearest-rank rolling two-hour p95 from each exact
 head/ready-event's **first measured provider CI start**, deduplicating reruns and
-bisection candidates. More than 1,800 seconds emits a stop signal and holds new
-batch work, but an already-published trusted-green candidate can drain through
-all ordinary landing guards. Capacity-induced latency must not deadlock a tested
-candidate. Red/unknown results, new publication and retries remain held;
-reconciliation and observation continue. The window is based on the first CI
+bisection candidates. More than 1,800 seconds retains the legacy `stop` signal
+as an informational alert only. It does not veto build, publication, invalidation,
+dequeue, retry, split, parking or landing, including shadow publication and already
+durable retry intents. Valid numeric capacity and main-demand estimates are also
+informational. Complete evidence, active Batch/max-inflight limits, exact tested
+tree, lease/CAS, provenance and unknown-outcome safeguards still block unsafe
+actions. A completed eligible first attempt may request its single retry without
+an additional initial elapsed-time wait; provider-error backoff and reconciliation
+of uncertain submissions remain unchanged. No queue fairness or hard capacity
+guarantee follows from this policy. The window is based on the first CI
 start; an aged-out sample is unknown, not newly healthy. Historical stage data is
 retained, not reset. stage.json reports raw and capacity/OFF-adjusted p95, windowSeconds,
 sample count, coverageSince and completeWindow alongside the signal. This is a

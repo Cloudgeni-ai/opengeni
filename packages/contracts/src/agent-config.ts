@@ -757,7 +757,7 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
     label: "Knowledge",
     description: "Search and save workspace knowledge, task notes, and instructions.",
   },
-  schedules: { label: "Schedules", description: "Create and manage scheduled tasks." },
+  schedules: { label: "Automations", description: "Create and manage automations." },
   artifacts: {
     label: "Artifacts and Sites",
     description: "Publish files, documents, and Sites people can open.",

@@ -7277,7 +7277,7 @@ function accessibilityLocatorMatches(
         entry.role.toLowerCase() === locator.role.toLowerCase() &&
         (locator.name === undefined ||
           (locator.exact
-            ? entry.name === locator.name
+            ? sameAccessibleName(entry.name, locator.name)
             : (entry.name ?? "").toLocaleLowerCase().includes(locator.name.toLocaleLowerCase()))),
     );
   }
@@ -7285,7 +7285,7 @@ function accessibilityLocatorMatches(
     return entries.filter(
       (entry) =>
         entry.backendDOMNodeId !== null &&
-        entry.name === locator.text &&
+        sameAccessibleName(entry.name, locator.text) &&
         isFormControlRole(entry.role),
     );
   }

@@ -9,18 +9,37 @@ The runtime remains OFF/Manual until the rollout owner relays reviewed go.
 Cloud Scheduler invokes one Cloud Run Job every five minutes. Use the existing
 OFF service-account/credential path and the exact retained `off.ts` package;
 never substitute a new restoration implementation. A fresh authenticated
-supervisor `/status` response supplies `controlObservedAt`, the existing loop's
-control observation, not successful CI or cycle completion. Stopped/draining or
+supervisor `/status` response supplies `controlObservedAt` plus the paired
+`batcher-progress/v1` cycle measurements. Stopped/draining or
 three consecutive unclassified failures triggers OFF at the next tick. A loop
 observation at least 900 seconds old triggers OFF in every running/wait state.
-Missing, future or unreachable status also requests proven OFF, never grants Manual.
+Successful idle/no-work and Batch-wait cycles count as progress, not as landing
+proof. A last successful cycle at least 900 seconds old requests OFF even with
+fresh heartbeats, advancing completed-cycle counts or repeated read deferrals.
+Missing, malformed, future or unreachable observations request proven OFF, never grant Manual.
 
 This deliberately conservative source currently acts on one unavailable sample,
-including a startup null or any future timestamp. A transient error or clock skew
+including a missing progress schema or any future observation timestamp. A transient error or clock skew
 can therefore end an otherwise healthy activation. It does not wait fifteen
 minutes on unavailable status. This reviewed Low finding remains a rollout risk
-to acknowledge or address with a separately reviewed bounded sampling change;
-do not silently describe it as debounced or startup-tolerant.
+to acknowledge or address with a separately reviewed bounded sampling change.
+It is not debounced. A valid null-success startup receives 120 seconds from the
+immutable `runtimeStartedAt`. A cycle begun before the startup/progress deadline
+may finish before its fixed `cycleDeadlineAt`; a cycle starting at or after that
+deadline cannot renew grace. Expired active-cycle deadlines trigger OFF even if
+the last success is recent. The outer cycle bound is at most the supported
+one-hour execution plus 185 seconds of reconciliation/control/termination;
+the default cycle bound is 1,085 seconds. Timing pairs must be consistent and
+success/deferral timestamps cannot precede this process's start. Deployment must
+pair the trigger with the reviewed supervisor supplying these immutable fields.
+
+Deployment qualification must check the configured poll interval against the
+900-second progress window, including cycle overhead; an interval of 900 seconds
+or more is incompatible even for healthy idle work. Provider-read retry backoff
+and a restored `nextAt` must also permit a cycle before the progress/startup
+deadline. Do not widen watchdog grace to mask incompatible runtime scheduling.
+Deploy the paired supervisor before this watchdog, and roll back the watchdog
+before rolling back to a supervisor without these fields.
 
 The trigger cannot declare safety from status flags. Only unchanged OFF may
 declare Manual after its verified STOP/drain/reconciliation and exact saved-policy

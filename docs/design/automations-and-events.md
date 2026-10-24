@@ -278,6 +278,21 @@ delivery as `ignored`.
   durable, per-subscription ordering for poll, best-effort ordering for webhook.
   Opengeni orders an inbox batch by event time and tells the agent when events
   may have been missed.
+- **Servers built for ChatGPT** follow the extension's earlier design sketch,
+  which ChatGPT implements. They work the same way, over webhooks only. Three
+  differences matter to a client:
+  - They advertise a top-level `events` capability instead of the
+    `extensions` entry. The MCP client keeps only capabilities it knows, so a
+    server without the entry is asked `events/list`; one that answers offers
+    events.
+  - They number their errors -32011 to -32015 instead of -32023 to -32027.
+    Both numberings are read the same way.
+  - Their `webhook-id` is the event's `eventId`, which deduplication already
+    covers.
+
+  Over HTTP an unknown method can come back as a 404 carrying the JSON-RPC
+  error. The error in the body decides, so a server that stops offering events
+  blocks its triggers instead of retrying quietly.
 
 ## Delivering events to the agent
 
@@ -307,7 +322,12 @@ changing earlier context, so prompt caching is unaffected.
 
 An agent can create automations for itself. "Wake me when X" from a chat is a
 once-automation whose destination is that chat. While one is active, the chat
-shows what it is waiting for.
+shows what it is waiting for. Such a wait belongs to the chat: archiving the
+chat with Pause removes the one-time waits that continue it or its sub-chats
+(a run-once event automation that has not run, a one-time run still ahead) in
+the same transaction, and Restore does not bring them back. Repeating
+automations stay; a run of theirs that meets the paused chat is blocked and
+the owner is told. Hide for me changes nothing for the chat's waits.
 
 ## Surfaces
 
@@ -319,10 +339,18 @@ shows what it is waiting for.
   list deliveries and replay one, list recent events, and list the event types a
   source offers. `clientConfig.eventTriggers.enabled` tells clients whether the
   deployment has them on (`OPENGENI_EVENT_TRIGGERS_ENABLED`, default off).
+  Session reads and list entries carry `automationWait` (the lineage read
+  carries `sessionAutomationWait`) for readers who may see schedules: the next
+  run, the event and source the earliest listening automation waits for, and
+  how many automations wait. It counts only automations the reader can see,
+  and leaves out a source that is private to someone else.
 - **UI.** Schedules become Automations. The editor has a "When" section with a
   schedule and event triggers; each run shows the events that caused it.
   Event sources have a page with their endpoint, status and delivery log. Chats
-  show when they are waiting for an event or a schedule.
+  show what they are waiting for: the chat row's mark and hover card, the
+  command menu and the chat header name the event and its source ("Waiting
+  for deploy.finished from Deploys") or the next run ("Next run: Tomorrow,
+  09:00") in the viewer's language and time zone.
 - **Embeddable panel.** `AutomationsPanel` from `@opengeni/react/automations`
   is a drop-in list, page and form for a workspace's automations or one chat's,
   for hosts that embed chats. It takes the host's `OpenGeniClient`. In a chat,

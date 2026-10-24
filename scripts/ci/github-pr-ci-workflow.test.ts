@@ -37,7 +37,7 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
     workflow("batch-ci").jobs.plan.steps.some(
       (s: any) => s.run === "bun scripts/ci/github-pr-ci.ts priority batch",
     ),
-  ).toBe(true);
+  ).toBe(false);
   expect(workflow("batch-ci").concurrency["cancel-in-progress"]).toBe(false);
   expect(Object.keys(pr.jobs).sort()).toEqual(["fast", "plan", "ready"]);
   expect(pr.jobs.fast.needs).toBe("plan");

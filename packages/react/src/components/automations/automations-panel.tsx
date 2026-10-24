@@ -466,22 +466,34 @@ export function AutomationsPanel({
       <RowList label={t("automations.panel.list")} flush>
         {sortAutomations(tasks, now).map((task) => {
           const next = automationNextRun(task, now);
+          const when = automationWhenWords(t, task, sources ?? [], now);
+          const nextWords = next
+            ? t("automations.panel.next", {
+                time: formatRunTime(next, { timeZone: viewerTimeZone(), now, text: t }),
+              })
+            : null;
           return (
             <ListRow
               key={task.id}
               leading={<AutomationTile task={task} />}
               title={task.name}
-              description={automationWhenWords(t, task, sources ?? [], now)}
-              status={showsStatus(task) ? <AutomationStatus task={task} /> : undefined}
-              meta={
-                next
-                  ? [
-                      t("automations.panel.next", {
-                        time: formatRunTime(next, { timeZone: viewerTimeZone(), now, text: t }),
-                      }),
-                    ]
-                  : undefined
+              // One line that truncates once: when it runs, then the next run.
+              // A phone-width list keeps only the next run, which says the most.
+              description={
+                nextWords ? (
+                  <>
+                    <span className="@max-[479px]/list:hidden">
+                      {when}
+                      <span aria-hidden="true"> · </span>
+                      {nextWords}
+                    </span>
+                    <span className="hidden @max-[479px]/list:inline">{nextWords}</span>
+                  </>
+                ) : (
+                  when
+                )
               }
+              status={showsStatus(task) ? <AutomationStatus task={task} /> : undefined}
               control={
                 isFinishedOnce(task) ? undefined : (
                   <Switch

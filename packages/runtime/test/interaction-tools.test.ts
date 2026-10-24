@@ -101,6 +101,53 @@ describe("interaction attempt tools", () => {
       },
     });
   });
+  test("a nested step field one platform lacks merges into the steps instead of an anyOf", () => {
+    const steps = (extra: Record<string, unknown>, required: string[]) => ({
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            required,
+            additionalProperties: true,
+            properties: { tool: { type: "string" }, ...extra },
+          },
+        },
+      },
+    });
+    const merged = nativeCuaSchema([
+      steps({ toggle_to: { type: "boolean" } }, ["tool"]),
+      steps({}, ["tool"]),
+      steps({ timeout_ms: { type: "integer" } }, ["tool", "timeout_ms"]),
+    ]);
+    expect(merged).toEqual({
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            required: ["tool"],
+            additionalProperties: true,
+            properties: {
+              tool: { type: "string" },
+              toggle_to: { type: "boolean" },
+              timeout_ms: { type: "integer" },
+            },
+          },
+        },
+      },
+    });
+    // A real constraint difference around the nested fields still keeps both.
+    const differing = nativeCuaSchema([
+      steps({ toggle_to: { type: "boolean" } }, ["tool"]),
+      { type: "object", properties: { steps: { type: "array", maxItems: 8, items: {} } } },
+    ]);
+    expect((differing.properties as any).steps.anyOf).toHaveLength(2);
+  });
   test.each(["browser_read", "browser_act"] as const)(
     "%s preserves the definite tab diagnosis at the model boundary",
     async (tool) => {
@@ -3170,6 +3217,75 @@ describe("interaction attempt tools", () => {
     expect(retried.structuredContent).toEqual(result.structuredContent);
   });
 
+  test("a computer action can leave out its type and name elements as role:name", async () => {
+    const target = computerTarget();
+    const after = { ...computerObservation(target), observationId: "after-batch" };
+    const requests: ComputerActionRequest[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerActionReceipt: noRecordedReceipt,
+        getComputerSession: async () => ({ capabilities: { actionBatches: true } }) as never,
+        listComputerTargets: async () => ({ targets: [target] }) as never,
+        observeComputerTarget: async () => after,
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          return computerReceipt(value.operationId, after);
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      {
+        computerSessionId,
+        targetId: target.id,
+        action: {
+          actions: [
+            { locator: "link:Accounts", action: "invoke" },
+            { locator: "textbox:Search accounts", action: "set_value", value: "AC-1" },
+            { type: "keyboard", action: "press", value: "enter" },
+          ],
+        },
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result.isError).not.toBe(true);
+    expect(requests[0]?.action).toEqual({
+      type: "batch",
+      actions: [
+        {
+          type: "semantic",
+          locator: { kind: "role", role: "link", name: "Accounts", exact: true },
+          action: "invoke",
+        },
+        {
+          type: "semantic",
+          locator: { kind: "role", role: "textbox", name: "Search accounts", exact: true },
+          action: "set_value",
+          value: "AC-1",
+        },
+        { type: "keyboard", action: "press", value: "enter" },
+      ],
+    });
+    // The model view says so: type is optional, on an action and in a batch.
+    const schema = definitions[0]!.inputSchema as {
+      properties: {
+        action: {
+          required?: string[];
+          description?: string;
+          properties: Record<string, { items?: { required?: string[] } }>;
+        };
+      };
+    };
+    expect(schema.properties.action.required).toBeUndefined();
+    expect(schema.properties.action.description).toStartWith(
+      "type defaults to semantic when locator is set and to batch when actions is.",
+    );
+    expect(schema.properties.action.properties.actions?.items?.required).toBeUndefined();
+  });
+
   test("a computer that runs batches gets the whole batch as one operation", async () => {
     const target = computerTarget();
     const initial = computerObservation(target);
@@ -3940,8 +4056,8 @@ describe("interaction attempt tools", () => {
     expect(action.properties.actions.items).toEqual({
       type: "object",
       properties: { type: { type: "string", enum: ["semantic", "keyboard"] } },
-      required: ["type"],
-      description: "One semantic or keyboard action with the same fields as action.",
+      description:
+        "One semantic or keyboard action with the same fields as action; a semantic one can leave out type.",
     });
     expect(action.description).toContain("batch: actions");
   });
@@ -5525,7 +5641,11 @@ describe("interaction attempt tools", () => {
     })[0]!;
     const action = (act.inputSchema.properties as Record<string, Record<string, unknown>>).action!;
     const locator = (action.properties as Record<string, { anyOf?: unknown[] }>).locator!;
-    expect(locator.anyOf?.[0]).toEqual({ type: "string", description: "An element ref." });
+    expect(locator.anyOf?.[0]).toEqual({
+      type: "string",
+      description:
+        'An element ref, or role:name for the element with that role and exact name ("link:Sign in").',
+    });
     expect(JSON.stringify(locator.anyOf?.[1])).toContain('"ref"');
   });
 });

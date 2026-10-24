@@ -120,13 +120,13 @@ export function machineAudienceSummaryLines(
   if (summary.schedulesMadeOnlyMe > 0) {
     lines.push(
       summary.schedulesMadeOnlyMe === 1
-        ? `${owner} Workspace schedule on it becomes Only me.`
-        : `${owner} ${summary.schedulesMadeOnlyMe} Workspace schedules on it become Only me.`,
+        ? `${owner} Workspace automation on it becomes Only me.`
+        : `${owner} ${summary.schedulesMadeOnlyMe} Workspace automations on it become Only me.`,
     );
   }
   if (summary.schedulesPaused > 0) {
     lines.push(
-      `${count(summary.schedulesPaused, "schedule pauses", "schedules pause")}. Resume ${summary.schedulesPaused === 1 ? "it" : "them"} after choosing another machine.`,
+      `${count(summary.schedulesPaused, "automation pauses", "automations pause")}. Resume ${summary.schedulesPaused === 1 ? "it" : "them"} after choosing another machine.`,
     );
   }
   if (summary.notifiedPeople > 0) {
@@ -169,7 +169,7 @@ function itemOutcome(item: MachineAudienceItem): string {
 function itemTitle(item: MachineAudienceItem): string {
   const title = item.title?.trim();
   if (title) return title;
-  return item.kind === "schedule" ? "Someone's private schedule" : "Someone's private chat";
+  return item.kind === "schedule" ? "Someone's private automation" : "Someone's private chat";
 }
 
 function ItemRow({ item, workspaceId }: { item: MachineAudienceItem; workspaceId: string }) {
@@ -199,7 +199,7 @@ function ItemRow({ item, workspaceId }: { item: MachineAudienceItem; workspaceId
     <li className="flex min-w-0 flex-col gap-0.5 py-2.5">
       {link}
       <span className="text-xs leading-4.5 text-fg-muted">
-        {item.kind === "schedule" ? "Schedule · " : "Chat · "}
+        {item.kind === "schedule" ? "Automation · " : "Chat · "}
         {itemOutcome(item)}
       </span>
     </li>
@@ -465,7 +465,7 @@ export function MachineAudienceDialog({
             )}
             {listed.length > 0 ? (
               <Disclosure
-                title="Chats and schedules affected"
+                title="Chats and automations affected"
                 summary={count(listed.length, "item", "items")}
               >
                 <ul className="flex min-w-0 flex-col divide-y divide-border">

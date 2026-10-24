@@ -112,11 +112,11 @@ export function AgentActivityRow(props: AgentActivityProps) {
 
   const description = paused
     ? timerLabel && control.timer?.action === "resume"
-      ? `New sessions and scheduled runs wait. ${timerLabel}.`
-      : "New sessions and scheduled runs wait until someone resumes."
+      ? `New sessions and automation runs wait. ${timerLabel}.`
+      : "New sessions and automation runs wait until someone resumes."
     : timerLabel
-      ? `Agents can start new sessions and scheduled runs. ${timerLabel}.`
-      : "Agents can start new sessions and scheduled runs.";
+      ? `Agents can start new sessions and automation runs. ${timerLabel}.`
+      : "Agents can start new sessions and automation runs.";
 
   const coarse = "pointer-coarse:h-11";
   let controls: ReactNode;
@@ -314,7 +314,7 @@ function PauseDialog({
       description={
         paused
           ? "Pick when agent work resumes."
-          : "New sessions and scheduled runs wait until agent work resumes, and running work stops after its current step."
+          : "New sessions and automation runs wait until agent work resumes, and running work stops after its current step."
       }
       submitLabel={paused ? "Save" : "Pause"}
       pendingLabel={paused ? "Saving…" : "Pausing…"}

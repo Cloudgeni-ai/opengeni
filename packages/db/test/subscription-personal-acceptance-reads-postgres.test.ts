@@ -789,6 +789,9 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "recording_speaker_voices",
       "recording_voice_rejections",
       "recording_live_segments",
+      // 0952 secret approval rules and requests are also withheld.
+      "secret_approval_rules",
+      "secret_use_approvals",
     ].sort();
     // 0823 machine-consent tables are protected but not runtime-privileged.
     const protectedTables = [

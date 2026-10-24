@@ -99,9 +99,11 @@ describe("artifact catalog", () => {
     ).toEqual([ordinary, { ...pinned, pinned: false }]);
   });
   test("builds plain artifact URLs with the return-to-session search", () => {
+    // A Site opens in the Site view, with its chat beside it, wherever it was opened from.
     expect(artifactPath("ws 1", { kind: "site", id: "a/b" })).toBe(
-      "/workspaces/ws%201/artifacts/a%2Fb",
+      "/workspaces/ws%201/sites/a%2Fb",
     );
+    expect(artifactPath("ws", { kind: "site", id: "a" }, "s1")).toBe("/workspaces/ws/sites/a");
     expect(artifactPath("ws", { kind: "image", id: "i" }, "s1")).toBe(
       "/workspaces/ws/artifacts/files/i?fromSession=s1",
     );

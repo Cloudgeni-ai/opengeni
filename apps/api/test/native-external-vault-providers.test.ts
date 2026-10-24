@@ -4,6 +4,13 @@ import { DestinationPolicyError } from "@opengeni/network";
 import { createProviderCallBudget, providerOperations, VaultProviderError } from "@opengeni/vaults";
 import { testSettings } from "@opengeni/testing/settings";
 import { FakeKsm, loginData } from "../../../packages/vaults-keeper/test/fake-ksm";
+import {
+  FAKE_CLIENT_ID,
+  FAKE_CLIENT_SECRET,
+  FAKE_MASTER_PASSWORD,
+  FAKE_SERVER,
+  FakeBitwarden,
+} from "../../../packages/vaults-bitwarden/test/fake-server";
 import { VALID_TOKEN, makeFakeCli } from "../../../packages/vaults-protonpass/test/fixture";
 import {
   closeNativeExternalVaultProviders,
@@ -37,14 +44,15 @@ afterAll(async () => {
 });
 
 describe("native external vault factories", () => {
-  test("Keeper is always offered; Proton Pass only with an operator-installed CLI", () => {
+  test("Keeper and Bitwarden are always offered; Proton Pass only with an operator-installed CLI", () => {
     expect(Object.keys(createNativeExternalVaultFactories(testSettings())).sort()).toEqual([
+      "bitwarden",
       "keeper",
     ]);
     const withCli = createNativeExternalVaultFactories(
       testSettings({ protonPassCliPath: "/opt/proton/pass-cli" }),
     );
-    expect(Object.keys(withCli).sort()).toEqual(["keeper", "protonpass"]);
+    expect(Object.keys(withCli).sort()).toEqual(["bitwarden", "keeper", "protonpass"]);
   });
 
   test("Keeper setup persists the bound configuration and never returns the token", async () => {
@@ -96,6 +104,52 @@ describe("native external vault factories", () => {
     expect(error).toBeInstanceOf(VaultProviderError);
     expect((error as VaultProviderError).code).toBe("provider_unavailable");
     expect(fake.requests).toHaveLength(0);
+  });
+
+  test("Bitwarden setup stores the account key, never the master password, and reopens from it", async () => {
+    const fake = await FakeBitwarden.create();
+    fake.addCipher(fake.login("Deploy", { username: "deploy", password: "pw" }));
+    const { bitwarden } = createNativeExternalVaultFactories(testSettings(), {
+      bitwarden: { fetch: fake.fetch },
+    });
+    const prepared = await bitwarden!({
+      credentials: {
+        provider: "bitwarden",
+        serverUrl: FAKE_SERVER,
+        clientId: FAKE_CLIENT_ID,
+        clientSecret: FAKE_CLIENT_SECRET,
+        masterPassword: FAKE_MASTER_PASSWORD,
+      },
+    });
+    expect(prepared.provider.id).toBe("bitwarden");
+    if (prepared.credentials.provider !== "bitwarden") throw new Error("expected bitwarden");
+    expect(Object.keys(prepared.credentials).sort()).toEqual([
+      "apiUrl",
+      "clientId",
+      "clientSecret",
+      "identityUrl",
+      "provider",
+      "serverUrl",
+      "userKey",
+    ]);
+    expect(JSON.stringify(prepared.credentials)).not.toContain(FAKE_MASTER_PASSWORD);
+    const reopened = await bitwarden!({ credentials: prepared.credentials });
+    expect(reopened.credentials).toEqual(prepared.credentials);
+    const [personal] = await reopened.provider.listVaults(ctx());
+    expect(personal).toMatchObject({ name: "My vault", itemCount: 1 });
+
+    const wrong = await rejection(
+      bitwarden!({
+        credentials: {
+          provider: "bitwarden",
+          serverUrl: FAKE_SERVER,
+          clientId: FAKE_CLIENT_ID,
+          clientSecret: FAKE_CLIENT_SECRET,
+          masterPassword: "not it",
+        },
+      }),
+    );
+    expect((wrong as VaultProviderError).code).toBe("provider_auth_invalid");
   });
 
   test("verified setup operations narrow the adapter and refuse without a request", async () => {

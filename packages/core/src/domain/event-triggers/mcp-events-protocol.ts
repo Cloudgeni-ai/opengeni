@@ -14,6 +14,15 @@ import type { McpStreamableHttpClient } from "../mcp-streamable-http-client";
  * shapes of `events/list`, `events/poll`, `events/subscribe` and
  * `events/unsubscribe`, the signed webhook bodies a server POSTs back, the
  * `Mcp-Name` routing header, and the protocol's error codes.
+ *
+ * Servers built for ChatGPT follow the extension's earlier design sketch,
+ * which differs from SEP-3415 in two ways a client sees: it advertises
+ * `capabilities.events` instead of an `extensions` entry, and it numbers its
+ * errors -32011 to -32015 instead of -32023 to -32027. Both are accepted.
+ * The MCP client keeps only the capabilities it knows, so a server without
+ * the `extensions` entry is asked `events/list` instead of read.
+ * Its webhook deliveries reuse the `eventId` as `webhook-id`, which the
+ * receiver's deduplication already handles.
  */
 
 export const MCP_EVENTS_EXTENSION = "io.modelcontextprotocol/events";
@@ -32,6 +41,21 @@ export const McpEventsErrorCode = {
   Unsupported: -32_026,
   CallbackEndpointError: -32_027,
 } as const;
+
+/** The same errors in the design sketch's numbering, which ChatGPT's servers use. */
+export const McpEventsDraftErrorCode = {
+  NotFound: -32_011,
+  Forbidden: -32_012,
+  ResourceExhausted: -32_013,
+  Unsupported: -32_014,
+  CallbackEndpointError: -32_015,
+} as const;
+
+const DRAFT_ERROR_CODES = new Map<number, number>(
+  (Object.keys(McpEventsDraftErrorCode) as Array<keyof typeof McpEventsDraftErrorCode>).map(
+    (name) => [McpEventsDraftErrorCode[name], McpEventsErrorCode[name]],
+  ),
+);
 
 export type McpEventDeliveryMode = "poll" | "push" | "webhook";
 const DELIVERY_MODES = new Set<string>(["poll", "push", "webhook"]);
@@ -131,13 +155,29 @@ function requestOptions(options: RequestOptions) {
   };
 }
 
-/** Does the connected server offer events? */
-export function serverOffersMcpEvents(client: McpStreamableHttpClient): boolean {
+/**
+ * Does the connected server offer events? A SEP-3415 server says so in its
+ * capabilities. Any other server is asked for its first page of event types:
+ * one that answers offers events however it advertises them (ChatGPT's sketch
+ * uses a top-level `events` capability the MCP client does not keep), and one
+ * that doesn't know the method does not.
+ */
+export async function serverOffersMcpEvents(
+  client: McpStreamableHttpClient,
+  options: RequestOptions,
+): Promise<boolean> {
   const extensions = client.getServerCapabilities()?.extensions as
     | Record<string, unknown>
     | undefined;
   const settings = extensions?.[MCP_EVENTS_EXTENSION];
-  return settings !== undefined && settings !== null && typeof settings === "object";
+  if (settings !== undefined && settings !== null && typeof settings === "object") return true;
+  try {
+    await client.request({ method: "events/list" }, ListResultWire, requestOptions(options));
+    return true;
+  } catch (error) {
+    if (classifyMcpEventsError(error).kind === "events_unsupported") return false;
+    throw error;
+  }
 }
 
 const MAX_EVENT_TYPE_PAGES = 20;
@@ -415,6 +455,25 @@ function errorDetail(message: string, data: unknown): string | null {
   return text.trim() ? text.trim().slice(0, 300) : null;
 }
 
+const JsonRpcErrorBody = z.looseObject({
+  error: z.looseObject({
+    code: z.number().int(),
+    message: z.string(),
+    data: z.unknown().optional(),
+  }),
+});
+
+/** The JSON-RPC error an HTTP error response carries, if its body is one. */
+function jsonRpcErrorIn(text: unknown): { code: number; message: string; data?: unknown } | null {
+  if (typeof text !== "string" || !text.trimStart().startsWith("{")) return null;
+  try {
+    const parsed = JsonRpcErrorBody.safeParse(JSON.parse(text));
+    return parsed.success ? parsed.data.error : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Classify one protocol-level error (also used for a webhook `terminated` envelope). */
 export function classifyMcpEventsProtocolError(error: {
   code: number;
@@ -422,7 +481,7 @@ export function classifyMcpEventsProtocolError(error: {
   data?: unknown;
 }): McpEventsFailure {
   const data = (error.data ?? null) as Record<string, unknown> | null;
-  switch (error.code) {
+  switch (DRAFT_ERROR_CODES.get(error.code) ?? error.code) {
     case McpEventsErrorCode.NotFound:
       return { kind: "event_type_gone" };
     case McpEventsErrorCode.Unsupported:
@@ -449,9 +508,13 @@ export function classifyMcpEventsProtocolError(error: {
 export function classifyMcpEventsError(error: unknown): McpEventsFailure {
   if (ProtocolError.isInstance(error)) return classifyMcpEventsProtocolError(error);
   if (SdkHttpError.isInstance(error)) {
-    const status = (error.data as { status?: unknown } | undefined)?.status;
+    const { status, text } = (error.data ?? {}) as { status?: unknown; text?: unknown };
     if (status === 401) return { kind: "unauthorized" };
     if (status === 403) return { kind: "forbidden", detail: null };
+    // Over HTTP a JSON-RPC error can arrive with an error status, such as an
+    // unknown method as 404; the error in the body says what happened.
+    const rpc = jsonRpcErrorIn(text);
+    if (rpc) return classifyMcpEventsProtocolError(rpc);
     return { kind: "transient", detail: `HTTP ${String(status ?? "error")}` };
   }
   if (SdkError.isInstance(error)) {

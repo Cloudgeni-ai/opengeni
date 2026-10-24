@@ -26,10 +26,7 @@ type Workflow = Readonly<{ jobs?: Readonly<Record<string, Job>> }>;
 function validJobCap(file: string, jobName: string, job: Job): boolean {
   const cap = numericCap(job["timeout-minutes"]);
   if (cap === null) return false;
-  const priorityLane = new Map([
-    ["batch-ci.yml:plan", "batch"],
-    ["ci.yml:automation-admission", "pr"],
-  ]).get(`${file}:${jobName}`);
+  const priorityLane = new Map([["ci.yml:automation-admission", "pr"]]).get(`${file}:${jobName}`);
   if (!priorityLane) return cap <= MAX_JOB_TIMEOUT_MINUTES;
   // Five-hour bounded admission wait plus twenty minutes for setup/planning.
   // This is not a wider cap for test/build jobs or arbitrary added workflows.
@@ -260,6 +257,13 @@ describe("workflow timeout contract", () => {
     );
     expect(validJobCap("ci.yml", "automation-admission", { ...job, steps: [] })).toBe(false);
     expect(validJobCap("batch-ci.yml", "plan", job)).toBe(false);
+    expect(
+      validJobCap("batch-ci.yml", "plan", {
+        ...job,
+        steps: [{ run: "bun scripts/ci/github-pr-ci.ts priority batch" }],
+      }),
+    ).toBe(false);
+    expect(validJobCap("batch-ci.yml", "plan", { "timeout-minutes": 20, steps: [] })).toBe(true);
     expect(validJobCap("other.yml", "plan", job)).toBe(false);
   });
   test("all jobs and the exact 49 run plus 5 action steps use static native caps", async () => {

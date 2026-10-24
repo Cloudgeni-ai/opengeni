@@ -132,7 +132,7 @@ const GRANTEE: Record<VaultProviderId, string> = {
   onepassword: "This service account",
   protonpass: "This token",
   keeper: "This application",
-  bitwarden: "The bridge",
+  bitwarden: "This account",
   external: "Your service",
 };
 

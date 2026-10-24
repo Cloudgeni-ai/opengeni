@@ -103,6 +103,7 @@ import {
 } from "@opengeni/sdk";
 import { z } from "zod";
 import {
+  BROWSER_LOCATOR_KIND_WORDS,
   BrowserTargetResolutionError,
   CurrentBrowserTab,
   expandRefShorthand,
@@ -707,7 +708,7 @@ const BrowserActInput = z
     view: z.enum(["compact", "full", "none"]).optional(),
     includeScreenshot: z.boolean().optional(),
     action: z.preprocess(
-      expandRefShorthand,
+      (action) => expandRefShorthand(action, BROWSER_LOCATOR_KIND_WORDS),
       z.union([AgentBrowserAction, AgentBrowserActionBatch]),
     ),
   })
@@ -935,9 +936,28 @@ const ComputerActInput = z
     expectedTargetGeneration: z.string().min(1).max(256).optional(),
     expectedObservationId: ComputerObservation.shape.observationId.nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
-    action: z.preprocess(expandRefShorthand, z.union([ComputerAction, ComputerActionBatch])),
+    action: z.preprocess(
+      (action) => withComputerActionTypes(expandRefShorthand(action)),
+      z.union([ComputerAction, ComputerActionBatch]),
+    ),
   })
   .strict();
+/** A computer action may leave out its type where its fields say it: an
+ * action with a locator is semantic, one with actions is a batch. */
+function withComputerActionTypes(action: unknown): unknown {
+  if (!action || typeof action !== "object" || Array.isArray(action)) return action;
+  const record = action as Record<string, unknown>;
+  const typed =
+    record.type !== undefined
+      ? record
+      : "locator" in record
+        ? { type: "semantic", ...record }
+        : Array.isArray(record.actions)
+          ? { type: "batch", ...record }
+          : record;
+  if (!Array.isArray(typed.actions)) return typed;
+  return { ...typed, actions: typed.actions.map(withComputerActionTypes) };
+}
 /** computer_act input with the computer and window it resolved to. */
 type ResolvedComputerActInput = Omit<
   z.output<typeof ComputerActInput>,
@@ -2563,7 +2583,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. When you already know several steps in the same target, such as pressing a run of buttons or filling known fields, send them in one call with action={type:'batch',actions:[...]} (semantic and keyboard actions): they run in order, stop at the first failure, and return the target's state after the last one. A later action may name, by role and name instead of ref, an element that an earlier one brings up, such as the next page or a form that is still loading; on macOS and in Linux sandboxes it waits up to 10 seconds for it to appear and enable. set_value true or false on a checkbox or switch leaves it in that state and presses it only when needed, so a batch can set one without reading it first. So when you repeat a procedure for many records, do each record in one batch; once one record has worked, you can instead loop over the rest in one Code Mode program that sends the same batches with interaction.computer.act and stops at the first one that does not complete. Pause for new state only when the next step depends on what you will see. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. When you already know several steps in the same target, such as pressing a run of buttons or filling known fields, send them in one call with action={type:'batch',actions:[...]} (semantic and keyboard actions): they run in order, stop at the first failure, and return the target's state after the last one. A later action may name, by role and name instead of ref (\"button:Save\"), an element that an earlier one brings up, such as the next page or a form that is still loading; on macOS and in Linux sandboxes it waits up to 10 seconds for it to appear and enable. set_value true or false on a checkbox or switch leaves it in that state and presses it only when needed, so a batch can set one without reading it first. So when you repeat a procedure for many records, do each record in one batch; once one record has worked, you can instead loop over the rest in one Code Mode program that sends the same batches with interaction.computer.act and stops at the first one that does not complete. Pause for new state only when the next step depends on what you will see. Returns the durable causal receipt.",
     input: ComputerActInput,
     output: ComputerActOutput,
     readOnly: false,
@@ -2804,32 +2824,15 @@ export function createInteractionAttemptToolDefinitions(
  * (a top-level anyOf is rejected or ignored, so the model loses every argument
  * type). Properties are the union across platforms; a property whose platform
  * schemas differ in more than wording keeps those alternatives at property
- * level. Only properties every platform requires stay required. The session's
- * CUA worker still validates arguments against its own exact platform schema.
+ * level, unless they differ only in their nested properties (a step field one
+ * platform lacks), which merge the same way. Only properties every platform
+ * requires stay required. The session's CUA worker still validates arguments
+ * against its own exact platform schema.
  */
 export function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
   const unique = [...new Map(variants.map((schema) => [JSON.stringify(schema), schema])).values()];
   if (unique.length === 1) return unique[0] as AttemptToolJsonSchema;
-  const properties: Record<string, unknown> = {};
-  const names = [...new Set(unique.flatMap((schema) => Object.keys(objectProperties(schema))))];
-  for (const name of names) {
-    const alternatives = unique
-      .map((schema) => objectProperties(schema)[name])
-      .filter((value): value is Record<string, unknown> => isJsonObject(value));
-    // The first platform's wording wins for constraint-identical schemas.
-    const distinct = new Map<string, Record<string, unknown>>();
-    for (const schema of alternatives) {
-      const key = JSON.stringify(withoutWording(schema));
-      if (!distinct.has(key)) distinct.set(key, schema);
-    }
-    const options = [...distinct.values()];
-    properties[name] = options.length === 1 ? options[0] : { anyOf: options };
-  }
-  const required = names.filter((name) =>
-    unique.every((schema) =>
-      Array.isArray(schema.required) ? schema.required.includes(name) : false,
-    ),
-  );
+  const { properties, required } = mergedProperties(unique);
   return {
     type: "object",
     properties,
@@ -2838,6 +2841,70 @@ export function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToo
       ? { additionalProperties: false }
       : {}),
   } as AttemptToolJsonSchema;
+}
+
+/** The union of the schemas' properties; required only where all require it. */
+function mergedProperties(schemas: Record<string, unknown>[]): {
+  properties: Record<string, unknown>;
+  required: string[];
+} {
+  const properties: Record<string, unknown> = {};
+  const names = [...new Set(schemas.flatMap((schema) => Object.keys(objectProperties(schema))))];
+  for (const name of names)
+    properties[name] = mergedProperty(
+      schemas
+        .map((schema) => objectProperties(schema)[name])
+        .filter((value): value is Record<string, unknown> => isJsonObject(value)),
+    );
+  const required = names.filter((name) =>
+    schemas.every((schema) =>
+      Array.isArray(schema.required) ? schema.required.includes(name) : false,
+    ),
+  );
+  return { properties, required };
+}
+
+function mergedProperty(alternatives: Record<string, unknown>[]): Record<string, unknown> {
+  // The first platform's wording wins for constraint-identical schemas.
+  const distinct = new Map<string, Record<string, unknown>>();
+  for (const schema of alternatives) {
+    const key = JSON.stringify(withoutWording(schema));
+    if (!distinct.has(key)) distinct.set(key, schema);
+  }
+  const options = [...distinct.values()];
+  if (options.length === 1) return options[0]!;
+  return mergedShape(options) ?? { anyOf: options };
+}
+
+const NESTED_KEYS = new Set(["properties", "required", "items"]);
+
+/**
+ * One schema for alternatives that agree on everything but their nested
+ * properties or items, or undefined when they differ anywhere else.
+ */
+function mergedShape(options: Record<string, unknown>[]): Record<string, unknown> | undefined {
+  const shell = (schema: Record<string, unknown>) =>
+    JSON.stringify(
+      withoutWording(
+        Object.fromEntries(Object.entries(schema).filter(([key]) => !NESTED_KEYS.has(key))),
+      ),
+    );
+  const first = options[0]!;
+  if (options.some((schema) => shell(schema) !== shell(first))) return undefined;
+  const merged: Record<string, unknown> = { ...first };
+  if (options.some((schema) => "items" in schema)) {
+    const items = options.map((schema) => schema.items);
+    if (!items.every(isJsonObject)) return undefined;
+    merged.items = mergedProperty(items);
+  }
+  if (options.some((schema) => "properties" in schema || "required" in schema)) {
+    if (!options.every((schema) => isJsonObject(schema.properties))) return undefined;
+    const { properties, required } = mergedProperties(options);
+    merged.properties = properties;
+    if (required.length > 0) merged.required = required;
+    else delete merged.required;
+  }
+  return merged;
 }
 
 function objectProperties(schema: Record<string, unknown>): Record<string, unknown> {

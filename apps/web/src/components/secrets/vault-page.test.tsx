@@ -199,7 +199,7 @@ describe("vault page capabilities", () => {
 
   test("a locked source that never listed is not an empty vault", async () => {
     const { text } = await renderPage(
-      vault({ source: "bitwarden", syncStatus: "error", syncErrorCode: "provider_locked" }),
+      vault({ source: "protonpass", syncStatus: "error", syncErrorCode: "provider_locked" }),
     );
     expect(text).toContain("No items to show yet");
     expect(text).not.toContain("No items yet");

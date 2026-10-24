@@ -1,6 +1,8 @@
-// Preview-only: the SDK calls the Site view makes (the Site, its HTML and each
-// conversation's history), answered in memory. SiteView and
-// SessionConversation are real.
+// Preview-only: the SDK calls the Site view makes (the Site, its versions and
+// HTML, each conversation's history and live events, a restore), answered in
+// memory. SiteView and SessionConversation are real. A message the `edit`
+// script recognizes runs a short turn that publishes a new version, as the
+// agent would, so the Site view can be seen going live.
 import { OpenGeniApiError, type SessionEvent } from "@opengeni/sdk";
 import type { Session } from "@opengeni/react/app/types";
 
@@ -40,18 +42,91 @@ export type PreviewSite = { id: string; title: string; html: string };
 /** Exchanges per conversation: the person's question, then the answer. */
 export type PreviewHistory = ReadonlyMap<string, readonly (readonly [string, string])[]>;
 
+/** What the agent does for a message about the Site: its tool call, the new HTML and its reply. */
+export type PreviewEdit = {
+  tool: string;
+  arguments: Record<string, unknown>;
+  html: (current: string) => string;
+  reply: string;
+};
+
+type PreviewVersion = { id: string; revision: number; html: string; createdAt: string };
+
 export function siteViewPreviewClient(options: {
   workspaceId: string;
   sites: readonly PreviewSite[];
   rows: Session[];
   history: PreviewHistory;
+  /** The agent's edit for a message, or null to answer nothing. */
+  edit?: ((text: string) => PreviewEdit | null) | undefined;
+  /** Each Site's published address; without it the API has no publishing. */
+  publishedHost?: ((siteId: string) => string) | undefined;
+  /** How long loading a version's page takes, to show Updating. */
+  htmlDelayMs?: number | undefined;
 }) {
   const { workspaceId } = options;
-  const versionId = (siteId: string) => `${siteId.slice(0, -4)}7e57`;
+  const versionId = (siteId: string, revision: number) =>
+    `${siteId.slice(0, -4)}7e${String(revision).padStart(2, "0")}`;
   const site = (siteId: string) => {
     const found = options.sites.find((candidate) => candidate.id === siteId);
     if (!found) throw new OpenGeniApiError(404, "{}", { code: "artifact_not_found" });
     return found;
+  };
+  // Four versions each, the newest live, published a day apart.
+  const versions = new Map<string, PreviewVersion[]>();
+  const live = new Map<string, string>();
+  const changes = new Map<string, object[]>();
+  for (const each of options.sites) {
+    const list = [1, 2, 3, 4].map((revision) => ({
+      id: versionId(each.id, revision),
+      revision,
+      html: each.html,
+      createdAt: new Date(Date.now() - (5 - revision) * 86_400_000).toISOString(),
+    }));
+    versions.set(each.id, list);
+    live.set(each.id, list.at(-1)!.id);
+    changes.set(
+      each.id,
+      list.map((version, index) => change(each.id, "published", list[index - 1] ?? null, version)),
+    );
+  }
+  function change(
+    siteId: string,
+    type: "published" | "rolled_back",
+    from: PreviewVersion | null,
+    to: PreviewVersion,
+  ) {
+    return {
+      id: `${to.id}:${type}:${Date.now()}`,
+      artifactId: siteId,
+      workspaceId,
+      type,
+      fromVersionId: from?.id ?? null,
+      toVersionId: to.id,
+      reason: type,
+      actorSubjectId: "preview",
+      createdAt: type === "published" ? to.createdAt : new Date().toISOString(),
+    };
+  }
+  const versionsOf = (siteId: string) => {
+    site(siteId);
+    return versions.get(siteId)!;
+  };
+  const liveVersion = (siteId: string) =>
+    versionsOf(siteId).find((version) => version.id === live.get(siteId))!;
+  const publish = (siteId: string, html: string) => {
+    const list = versionsOf(siteId);
+    const from = liveVersion(siteId);
+    const next = {
+      id: versionId(siteId, list.length + 1),
+      revision: list.length + 1,
+      html,
+      createdAt: new Date().toISOString(),
+    };
+    list.push(next);
+    live.set(siteId, next.id);
+    changes.get(siteId)!.push(change(siteId, "published", from, next));
+    return next;
   };
   const events = new Map<string, SessionEvent[]>();
   for (const [sessionId, exchanges] of options.history) {
@@ -80,15 +155,93 @@ export function siteViewPreviewClient(options: {
     });
     events.set(sessionId, list);
   }
+  // Open live streams per conversation; each gets what is appended after it opened.
+  const streams = new Map<string, Set<{ queue: SessionEvent[]; wake: () => void }>>();
+  let eventNumber = 0;
+  const append = (
+    sessionId: string,
+    type: string,
+    payload: Record<string, unknown>,
+    extra: { turnId?: string | null; clientEventId?: string } = {},
+  ) => {
+    const list = events.get(sessionId) ?? [];
+    events.set(sessionId, list);
+    const event = {
+      id: `${sessionId}:live-${(eventNumber += 1)}`,
+      workspaceId,
+      sessionId,
+      sequence: (list.at(-1)?.sequence ?? 0) + 1,
+      type,
+      payload,
+      occurredAt: new Date().toISOString(),
+      turnId: extra.turnId ?? null,
+      clientEventId: extra.clientEventId ?? null,
+    } as unknown as SessionEvent;
+    list.push(event);
+    for (const stream of streams.get(sessionId) ?? []) {
+      stream.queue.push(event);
+      stream.wake();
+    }
+    return event;
+  };
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  /** The person's message, then the agent's turn: a tool call that publishes, and its reply. */
+  const send = (sessionId: string, text: string, clientEventId?: string) => {
+    const accepted = append(
+      sessionId,
+      "user.message",
+      { text, routing: "accepted_for_execution" },
+      clientEventId ? { clientEventId } : {},
+    );
+    const turnId = `${sessionId}:live-turn-${eventNumber}`;
+    const row = options.rows.find((candidate) => candidate.id === sessionId);
+    const siteId = (row?.metadata as { _opengeniSiteOrigin?: { siteId?: string } } | undefined)
+      ?._opengeniSiteOrigin?.siteId;
+    const edit = siteId ? options.edit?.(text) : null;
+    void (async () => {
+      await pause(300);
+      append(sessionId, "turn.started", { triggerEventId: accepted.id }, { turnId });
+      if (!edit || !siteId) {
+        append(sessionId, "agent.message.completed", { phase: "final", text: "Done." }, { turnId });
+        append(sessionId, "turn.completed", {}, { turnId });
+        return;
+      }
+      const callId = `${turnId}:call`;
+      append(
+        sessionId,
+        "agent.toolCall.created",
+        { id: callId, name: edit.tool, arguments: edit.arguments },
+        { turnId },
+      );
+      await pause(1_400);
+      const next = publish(siteId, edit.html(liveVersion(siteId).html));
+      append(
+        sessionId,
+        "agent.toolCall.output",
+        { id: callId, output: JSON.stringify({ versionId: next.id, revision: next.revision }) },
+        { turnId },
+      );
+      await pause(700);
+      append(
+        sessionId,
+        "agent.message.completed",
+        { phase: "final", text: edit.reply },
+        { turnId },
+      );
+      append(sessionId, "turn.completed", {}, { turnId });
+    })();
+    return accepted;
+  };
   const detail = (siteId: string) => {
     const { id, title } = site(siteId);
-    const version = {
-      id: versionId(id),
+    const shape = (version: PreviewVersion) => ({
+      id: version.id,
       artifactId: id,
-      revision: 4,
+      revision: version.revision,
       requestedTools: [],
-      createdAt: new Date(Date.now() - 86_400_000).toISOString(),
-    };
+      createdAt: version.createdAt,
+    });
+    const current = shape(liveVersion(id));
     return {
       artifact: {
         id,
@@ -96,11 +249,12 @@ export function siteViewPreviewClient(options: {
         kind: "site",
         title,
         status: "active",
-        currentVersion: version,
-        createdAt: version.createdAt,
-        updatedAt: version.createdAt,
+        currentVersion: current,
+        createdAt: versionsOf(id)[0]!.createdAt,
+        updatedAt: current.createdAt,
       },
-      versions: [version],
+      versions: [...versionsOf(id)].reverse().map(shape),
+      events: [...changes.get(id)!].reverse(),
     };
   };
   return {
@@ -119,11 +273,43 @@ export function siteViewPreviewClient(options: {
     getWorkspace: async (id: string) => ({ id, name: "Product engineering", kind: "shared" }),
     getWorkspaceModelCatalog: async () => ({ models: [] }),
     getWorkspaceArtifact: async (_workspace: string, siteId: string) => detail(siteId),
-    getWorkspaceArtifactHtml: async (_workspace: string, siteId: string) => site(siteId).html,
-    // The header's published-link read. Without the route the header keeps
-    // its plain "Live", which is what these previews show.
-    getSitePublicationLink: async () => {
-      throw new OpenGeniApiError(404, "{}");
+    getWorkspaceArtifactCurrent: async (_workspace: string, siteId: string) => ({
+      artifact: detail(siteId).artifact,
+    }),
+    getWorkspaceArtifactHtml: async (
+      _workspace: string,
+      siteId: string,
+      request: { versionId?: string } = {},
+    ) => {
+      const html = (
+        versionsOf(siteId).find((version) => version.id === request.versionId) ??
+        liveVersion(siteId)
+      ).html;
+      if (options.htmlDelayMs) await pause(options.htmlDelayMs);
+      return html;
+    },
+    rollbackWorkspaceArtifact: async (
+      _workspace: string,
+      siteId: string,
+      request: { versionId: string; expectedCurrentVersionId?: string },
+    ) => {
+      const from = liveVersion(siteId);
+      if (request.expectedCurrentVersionId && request.expectedCurrentVersionId !== from.id)
+        throw new OpenGeniApiError(409, "{}", { code: "artifact_version_conflict" });
+      const to = versionsOf(siteId).find((version) => version.id === request.versionId)!;
+      live.set(siteId, to.id);
+      changes.get(siteId)!.push(change(siteId, "rolled_back", from, to));
+      return detail(siteId);
+    },
+    /** Preview control: publish a version as someone else would, elsewhere. */
+    publishPreviewVersion: (siteId: string, html: (current: string) => string) =>
+      publish(siteId, html(liveVersion(siteId).html)),
+    // The header's published-link read. Without a published address the
+    // route is missing (404) and the header keeps its plain "Live".
+    getSitePublicationLink: async (_workspace: string, siteId: string) => {
+      const hostname = options.publishedHost?.(siteId);
+      if (!hostname) throw new OpenGeniApiError(404, "{}");
+      return { siteId, hostname, url: `https://${hostname}/`, status: "active" as const };
     },
     listEvents: async (
       _workspace: string,
@@ -140,12 +326,29 @@ export function siteViewPreviewClient(options: {
     },
     streamEvents: async function* (
       _workspace: string,
-      _sessionId: string,
+      sessionId: string,
       request: { signal?: AbortSignal; onOpen?: () => void } = {},
     ) {
+      const stream = { queue: [] as SessionEvent[], wake: () => {} };
+      const open = streams.get(sessionId) ?? new Set();
+      streams.set(sessionId, open);
+      open.add(stream);
       request.onOpen?.();
-      await waitForAbort(request.signal);
-      yield* [];
+      try {
+        while (!request.signal?.aborted) {
+          const next = stream.queue.shift();
+          if (next) {
+            yield next;
+            continue;
+          }
+          await Promise.race([
+            waitForAbort(request.signal),
+            new Promise<void>((resolve) => (stream.wake = resolve)),
+          ]);
+        }
+      } finally {
+        open.delete(stream);
+      }
     },
     getQueue: async () => ({
       version: 1,
@@ -168,11 +371,35 @@ export function siteViewPreviewClient(options: {
     getGoal: async () => {
       throw new OpenGeniApiError(404, "{}", { code: "goal_not_found" });
     },
-    // The preview never sends or controls work; the hooks expect the surface.
+    // Sending runs the scripted turn above.
+    submitComposerDraft: async (
+      _workspace: string,
+      sessionId: string,
+      request: { text: string; clientEventId?: string; expectedDraftRevision?: number },
+    ) => {
+      const accepted = send(sessionId, request.text, request.clientEventId);
+      return {
+        accepted,
+        turn: { id: `${sessionId}:live-turn-${eventNumber}` },
+        draft: {
+          ...blankDraft(),
+          revision: (request.expectedDraftRevision ?? 0) + 1,
+          updatedAt: new Date().toISOString(),
+        },
+        receipt: { appliedQueueVersion: 1 },
+        routing: "accepted_for_execution",
+        interruptionCount: 0,
+        replay: false,
+      };
+    },
+    sendMessage: async (
+      _workspace: string,
+      sessionId: string,
+      input: { text: string; clientEventId?: string },
+    ) => send(sessionId, input.text, input.clientEventId),
+    // The preview never controls work; the hooks expect the surface.
     ...Object.fromEntries(
       [
-        "submitComposerDraft",
-        "sendMessage",
         "steerMessage",
         "moveQueueItem",
         "editQueueItem",

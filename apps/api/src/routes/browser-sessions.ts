@@ -1757,6 +1757,12 @@ export function registerBrowserSessionRoutes(
               surface: "browser",
               toolName: "browser_act",
               operationId: request.operationId,
+              // The page's host, shown to a person asked to approve the use.
+              lookupDestination: async () => {
+                const targets = await sessionClient.listTargets();
+                const url = targets.find((target) => target.id === request.targetId)?.url;
+                return url ? new URL(url).host || null : null;
+              },
             },
             beforeResolve: requirePlacementAcceptsSecretValues(
               deps.db,

@@ -40,6 +40,7 @@ import {
   opensOnInvoke,
   parseDateValue,
   projectElements,
+  readWindowTitle,
   TOGGLE_ROLES,
   unindexedRows,
   unindexedTextByElement,
@@ -111,7 +112,9 @@ const INPUT_REREAD_MS = 150;
  * editor's placeholder) can be content that stays. */
 const SETTLE_MAX_MS = 5_000;
 const SETTLE_TEXT_MAX_MS = 2_500;
-const SETTLE_POLL_MS = 250;
+/** A reading of an ordinary window takes about 50 ms, so a save or load
+ * that finishes is seen within about a tenth of a second. */
+const SETTLE_POLL_MS = 100;
 
 /** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
@@ -1182,7 +1185,8 @@ export class CuaComputerBackend implements ComputerBackend {
       this.identity.platform,
       unindexedTextByElement(state.tree_markdown, this.identity.platform),
     );
-    const document = documentTitle(projected, target.native.title);
+    const shownTitle = readWindowTitle(state.elements, this.identity.platform);
+    const document = documentTitle(shownTitle, target.native.title);
     const roots = this.stabilizeRefs(targetId, document, projected);
     // The rows folded into a field are its text, typed by the person.
     const refTokens = this.tokens.get(targetId);
@@ -1243,7 +1247,13 @@ export class CuaComputerBackend implements ComputerBackend {
     const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {
       observationId: `${this.session}:${state.snapshot_id}`,
-      target: { ...target.native, bounds: state.window_bounds ?? target.native.bounds },
+      // Named as the reading shows the window: its listed title is the one it
+      // had when the windows were last listed, the page before an action.
+      target: {
+        ...target.native,
+        title: shownTitle ?? target.native.title,
+        bounds: state.window_bounds ?? target.native.bounds,
+      },
       frameId:
         [...this.frames.entries()]
           .reverse()
@@ -2377,13 +2387,13 @@ function inProgressText(text: string): boolean {
   return words.length > 0 && words.length <= MAX_PROGRESS_WORDS;
 }
 
-/** The title of the document a reading shows: its window element's, which
- * the reading itself carries, or else the window's listed title. A window's
+/** The title of the document a reading shows: its window element's own
+ * label, which the reading itself carries, or else the window's listed title
+ * (never the page text an unlabeled window element is named by). A window's
  * listed title is the one it had when the windows were last listed, so after
  * an action that opened another page it still names the page before. */
-function documentTitle(nodes: readonly InteractionSemanticNodeValue[], listed: string): string {
-  const window = nodes.find((node) => node.role === "window" && node.name);
-  return window ? `window\u0000${window.name}` : listed;
+function documentTitle(shown: string | undefined, listed: string): string {
+  return shown !== undefined ? `window\u0000${shown}` : listed;
 }
 
 /** A button among the rows CUA leaves unindexed: on macOS a disabled button
