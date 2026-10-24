@@ -1752,11 +1752,11 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           now: () => clock,
         });
       };
-      // The only (last) job page arrives late.
+      // The only (last) job page arrives late, before ordered reduction starts.
       expect(await oneRun(/\/jobs\?/, ACTIVE_RUN_SCAN_DEADLINE_MS + 1)).toMatchObject({
         ok: false,
         hold: "deadline",
-        scannedRuns: 1,
+        scannedRuns: 0,
       });
       expect(await oneRun(/\/jobs\?/, ACTIVE_RUN_SCAN_DEADLINE_MS)).toMatchObject({ ok: true });
       // With no active runs, the last run-list page arriving late also holds.
