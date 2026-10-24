@@ -11,6 +11,7 @@ import type {
 } from "@opengeni/sdk";
 
 import type { ProductStatus } from "../../ui/status-badge";
+import { eventTypeLabel } from "./event-trigger-model";
 
 /** What a person picks when adding a source. One per kind and webhook adapter. */
 export type EventSourceChoice =
@@ -266,6 +267,22 @@ export function deliveryEventsLabel(delivery: Pick<EventDelivery, "eventIds">): 
   const count = delivery.eventIds.length;
   if (count === 0) return "No events";
   return count === 1 ? "1 event" : `${count} events`;
+}
+
+/**
+ * What a delivery became, as its row's title: "pull_request.opened",
+ * "issues.opened and issue_comment.created", "push and 2 more", or the count
+ * when the server does not say which types.
+ */
+export function deliveryTitle(
+  delivery: Pick<EventDelivery, "eventIds"> & { eventTypes?: readonly string[] | undefined },
+): string {
+  const types = delivery.eventTypes ?? [];
+  if (types.length === 0) return deliveryEventsLabel(delivery);
+  const [first, second] = types as [string, ...string[]];
+  if (types.length === 1) return eventTypeLabel(first);
+  if (types.length === 2) return `${eventTypeLabel(first)} and ${eventTypeLabel(second!)}`;
+  return `${eventTypeLabel(first)} and ${types.length - 1} more`;
 }
 
 /** "1.2 KB". */

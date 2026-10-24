@@ -55,7 +55,7 @@ export function ScheduleAgentCapabilities({
         {/* The disclosure title already names the question. */}
         <SegmentedControl
           size="sm"
-          aria-label="Capabilities for this schedule"
+          aria-label="Capabilities for this automation"
           value={custom ? "custom" : "default"}
           disabled={disabled}
           onValueChange={(next) =>
@@ -63,7 +63,7 @@ export function ScheduleAgentCapabilities({
           }
           options={[
             { value: "default", label: "Workspace defaults" },
-            { value: "custom", label: "Choose for this schedule" },
+            { value: "custom", label: "Choose for this automation" },
           ]}
           className="self-start"
         />
@@ -94,7 +94,9 @@ export function ScheduleAgentCapabilities({
     <Disclosure
       variant="row"
       title="What the agent can do"
-      summary={custom ? `Chosen for this schedule · ${summary}` : `Workspace defaults · ${summary}`}
+      summary={
+        custom ? `Chosen for this automation · ${summary}` : `Workspace defaults · ${summary}`
+      }
     >
       {content}
     </Disclosure>

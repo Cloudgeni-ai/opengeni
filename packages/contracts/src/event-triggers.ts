@@ -295,6 +295,8 @@ export const EventDelivery = /* @__PURE__ */ defineSchema(() =>
     /** Why a delivery was ignored, rejected or failed, in plain language. */
     reason: z.string().nullable(),
     eventIds: z.array(Uuid),
+    /** The types of the events it became, each once, in order. */
+    eventTypes: z.array(z.string()),
     bodyBytes: z.number().int().nonnegative(),
     /** The raw body is kept for a few days so a delivery can be replayed. */
     bodyRetained: z.boolean(),

@@ -77,14 +77,14 @@ export function PrivateScheduleSummaries({ workspaceId, now }: { workspaceId: st
   return (
     <section aria-labelledby="private-schedules-heading" className="mt-10 min-w-0">
       <h2 id="private-schedules-heading" className="text-sm font-semibold text-fg">
-        Other people's private schedules
+        Other people's private automations
       </h2>
       <p className="mt-1 max-w-prose text-xs leading-4.5 text-fg-muted">
         You can see who owns them, how often they run and what they cost, and pause them. What they
         do stays private to their owner.
       </p>
       <div className="mt-3 min-w-0">
-        <RowList label="Other people's private schedules" columns={COLUMNS} flush>
+        <RowList label="Other people's private automations" columns={COLUMNS} flush>
           {summaries.map((summary) => {
             const paused = summary.status === "paused";
             const cost = formatMoney(costMicros(summary));

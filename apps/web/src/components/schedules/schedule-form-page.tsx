@@ -870,7 +870,7 @@ function AgentScheduleForm({
       }`,
       description:
         machine.scope === "user"
-          ? "Runs on your own computer. Only you can see this schedule and its chats."
+          ? "Runs on your own computer. Only you can see this automation and its chats."
           : "Runs on this computer, in its code folder.",
       leading: <LaptopIcon className="size-4 text-fg-subtle" />,
       disabled: !isMachineComputeSelectable(machine.state),
@@ -1663,11 +1663,11 @@ function AgentScheduleForm({
               ) : null}
               {eachRun === "existing_session" ? null : learningLoading ? (
                 <p role="status" className="m-0 text-sm text-fg-muted">
-                  Loading this schedule's agent learning settings…
+                  Loading this automation's agent learning settings…
                 </p>
               ) : learningError && isPermissionDenied(learningError) ? (
                 <p className="m-0 text-sm text-fg-muted">
-                  You can't see this schedule's agent learning settings. You can still save other
+                  You can't see this automation's agent learning settings. You can still save other
                   changes.
                 </p>
               ) : learningError ? (

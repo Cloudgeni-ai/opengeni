@@ -343,12 +343,12 @@ export function ScheduleDetailPage({
       });
       carryScheduledTaskDriftDismissal(workspaceId, task.id, dismissal, refreshed.executionDigest);
       toast.success("Access refreshed", {
-        description: "New runs of this schedule use it. Run it now to check.",
+        description: "New runs of this automation use it. Run it now to check.",
       });
       await refresh(true);
       notifyScheduledTaskAttentionUpdated();
     } catch (error) {
-      toast.error("Couldn't refresh this schedule's access", {
+      toast.error("Couldn't refresh this automation's access", {
         description: scheduleErrorText(error),
       });
     } finally {
@@ -403,7 +403,7 @@ export function ScheduleDetailPage({
       await refresh(true);
       notifyScheduledTaskAttentionUpdated();
     } catch (error) {
-      toast.error("Couldn't change this schedule's accounts", {
+      toast.error("Couldn't change this automation's accounts", {
         description: scheduleErrorText(error),
       });
     } finally {

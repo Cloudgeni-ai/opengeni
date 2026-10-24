@@ -303,8 +303,16 @@ describe("event sources", () => {
       "accepted",
       "rejected",
     ]);
-    expect(deliveries.deliveries[1]).toMatchObject({ duplicateCount: 1, bodyRetained: true });
-    expect(deliveries.deliveries[2]).toMatchObject({ bodyRetained: false, eventIds: [] });
+    expect(deliveries.deliveries[1]).toMatchObject({
+      duplicateCount: 1,
+      bodyRetained: true,
+      eventTypes: ["order.created"],
+    });
+    expect(deliveries.deliveries[2]).toMatchObject({
+      bodyRetained: false,
+      eventIds: [],
+      eventTypes: [],
+    });
 
     const events = await f.json(
       await f.app.request(`${f.sources}/${source.id}/events`, { headers: f.owner.headers }),

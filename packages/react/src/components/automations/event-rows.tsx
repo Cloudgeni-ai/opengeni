@@ -15,6 +15,7 @@ import {
   EVENT_DELIVERY_STATUS,
   byteSizeLabel,
   deliveryEventsLabel,
+  deliveryTitle,
   eventActorLabel,
 } from "./event-source-model";
 import { eventTypeLabel } from "./event-trigger-model";
@@ -133,7 +134,7 @@ export function EventDeliveryRow({
   ].filter((part): part is string => Boolean(part));
   return (
     <ListRow
-      title={deliveryEventsLabel(delivery)}
+      title={deliveryTitle(delivery)}
       description={delivery.reason ?? undefined}
       meta={meta}
       status={
