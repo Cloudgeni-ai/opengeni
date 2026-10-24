@@ -44,6 +44,28 @@ the program still fetches remote main before replay. Do not point it at another
 agent's writable repository/cache. No checkout or historical source execution
 occurs: candidates use the existing `GitStore` merge-tree/commit-tree builder.
 
+Cache negotiation refs reduce repeated downloads; they do not bound disk use.
+`GitStore.fetch` (`scripts/merge-batcher/git.ts`), used by both this tool's
+`--git-dir` cache and the controller's `BATCHER_GIT_DIR` cache, anchors each exact
+40-hex SHA in the first 64 positions of a fetch's list as a local
+`refs/batcher-cache/<state|candidate|objects>/<index>` ref; the next fetch into
+the same group overwrites those slots.
+Explicit refspecs such as this tool's `+refs/heads/main:refs/remotes/traffic/main`
+pass through unchanged. These refs only let the next fetch advertise history it
+already has, so changing tips no longer re-download the full history each cycle.
+They are never read as queue/state proof or pushed. Cache bytes still grow: the
+full main history as main advances, stale tips in higher slots after a shorter
+fetch, objects from overwritten slots that become unreachable and remain until
+Git prunes them (two weeks by default), and a transient repack peak of up to
+about twice the repository size during GC. The controller also keeps per-batch
+`refs/batcher-local/<batchId>` pins and `<batchId>.json` manifests without a
+bound. Size the volume with measured headroom for that peak; the cache is
+disposable and can be rebuilt from the remote. Fixed files such as this tool's
+`latest.json` and the controller's `stage.json` are replaced by temporary file
+plus rename, not appended, so deleting them each cycle does not reclaim growing
+space. This tool's timestamped `traffic-<time>.json` reports do accumulate in
+`--output`; the tool itself does not prune them.
+
 ## Collection and interpretation
 
 - Paginate closed PRs ordered by update time until the lookback boundary; select
