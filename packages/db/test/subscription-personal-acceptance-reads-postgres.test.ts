@@ -782,6 +782,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "recording_voiceprints",
       "recording_speaker_voices",
       "recording_voice_rejections",
+      // 0942 adds the live transcript segments.
+      "recording_live_segments",
     ].sort();
     // 0823 machine-consent tables are protected but not runtime-privileged.
     const protectedTables = [
