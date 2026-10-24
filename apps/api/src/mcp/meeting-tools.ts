@@ -216,14 +216,14 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         before,
         limit: request.limit,
       });
-      const details = await getRecordingSearchDetails(deps.db, {
+      const searchDetails = await getRecordingSearchDetails(deps.db, {
         ...who,
         recordingIds: page.recordings.map((recording) => recording.id),
         query: request.query,
       });
       return json({
         meetings: page.recordings.map((recording) => {
-          const found = details.get(recording.id);
+          const found = searchDetails.get(recording.id);
           return {
             id: recording.id,
             title: recording.title,
@@ -379,8 +379,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         })),
         request.maxChars,
       );
-      const more =
-        rendered.lastKey !== null && (rendered.truncated || page.nextAfter !== null);
+      const more = rendered.lastKey !== null && (rendered.truncated || page.nextAfter !== null);
       return json({
         ...(first ? { meeting: await details(recording, who, page.speakers) } : {}),
         transcript: versionSummary(page.version),

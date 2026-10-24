@@ -204,9 +204,9 @@ describe("meeting tools", () => {
       speakers: ["Speaker 1", "Tomas"],
       matches: ["[1:05] Tomas: The roof budget is tight."],
     });
-    expect(found.meetings.find((meeting: { id: string }) => meeting.id === standup)).toMatchObject(
-      { visibility: "only_me" },
-    );
+    expect(found.meetings.find((meeting: { id: string }) => meeting.id === standup)).toMatchObject({
+      visibility: "only_me",
+    });
 
     expect((await call("meetings_search", { person: "tomas" })).meetings).toHaveLength(1);
     const first = await call("meetings_search", { limit: 1 });
@@ -262,7 +262,11 @@ describe("meeting tools", () => {
     expect(next.nextCursor).toBeNull();
 
     // Only segments overlapping the stretch: 12 (1:00) and 13 (1:05), both Ingrid's.
-    const stretch = await call("meeting_read", { meetingId: recordingId, from: "1:00", to: "1:10" });
+    const stretch = await call("meeting_read", {
+      meetingId: recordingId,
+      from: "1:00",
+      to: "1:10",
+    });
     expect(stretch.lines).toBe(
       [
         "[1:00] Ingrid: Point number 12 about the schedule, which runs long enough to fill a line. Point number 13 about the schedule, which runs long enough to fill a line.",
@@ -302,7 +306,12 @@ describe("meeting tools", () => {
       costUsdMicros: null,
       segments: [
         { segmentNumber: 0, startMilliseconds: 1_000, endMilliseconds: 3_000, text: "Hello all." },
-        { segmentNumber: 1, startMilliseconds: 3_500, endMilliseconds: 5_000, text: "Let's start." },
+        {
+          segmentNumber: 1,
+          startMilliseconds: 3_500,
+          endMilliseconds: 5_000,
+          text: "Let's start.",
+        },
       ],
     });
     const read = await toolsFor(scope.grantFor(scope.owner))("meeting_read", { meetingId: live });
