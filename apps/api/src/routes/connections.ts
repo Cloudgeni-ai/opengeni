@@ -187,6 +187,7 @@ import {
 import { readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
 import { parseRequestJson } from "../http/request-body";
+import { parsePathParam } from "../http/path-identifier";
 
 type OpenGeniSlackInstallState = {
   connectAttemptId?: string;
@@ -256,9 +257,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/operations/:operationId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
-    const operationId = CreateConnectionRequest.shape.operationId
-      .unwrap()
-      .parse(c.req.param("operationId"));
+    const operationId = parsePathParam(
+      c,
+      "operationId",
+      CreateConnectionRequest.shape.operationId.unwrap(),
+    );
     const connection = await getConnectionCreationResult(db, {
       accountId: grant.accountId,
       workspaceId,
