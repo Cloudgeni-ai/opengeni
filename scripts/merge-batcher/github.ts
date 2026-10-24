@@ -73,6 +73,11 @@ export interface PullSnapshot {
   merged: boolean;
   mergeCommitSha?: string | null;
 }
+export interface AutoMergeState {
+  id: string;
+  headSha: string;
+  enabledAt: string | null;
+}
 export class ProviderError extends Error {
   constructor(
     readonly status: number,
@@ -271,6 +276,38 @@ export class GitHubReader {
       (comment) => typeof comment.body === "string" && comment.body.includes(marker),
     );
   }
+  async autoMergeState(number: number): Promise<AutoMergeState> {
+    const [owner, name] = this.config.repository.split("/");
+    const response = await this.transport("https://api.github.com/graphql", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await this.auth.token()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){id headRefOid autoMergeRequest{enabledAt}}}}`,
+        variables: { owner, name, number },
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    this.checkRateLimit(response);
+    if (!response.ok) throw new ProviderError(response.status, "auto-merge observation");
+    const data = (await response.json()) as Json,
+      pull = data.data?.repository?.pullRequest;
+    if (
+      data.errors ||
+      typeof pull?.id !== "string" ||
+      !/^[a-f0-9]{40}$/.test(pull.headRefOid) ||
+      (pull.autoMergeRequest !== null &&
+        !Number.isFinite(Date.parse(pull.autoMergeRequest?.enabledAt)))
+    )
+      throw Error("Auto-merge observation unavailable");
+    return {
+      id: pull.id,
+      headSha: pull.headRefOid,
+      enabledAt: pull.autoMergeRequest?.enabledAt ?? null,
+    };
+  }
   async currentAttempt(run: Run): Promise<{ attempt: number; status: string }> {
     const data = (await this.get(`actions/runs/${run.id}`)) as Json;
     if (
@@ -464,8 +501,9 @@ export class GitHubReader {
       const number = Number(pull.number);
       const queueReady =
         Array.isArray(pull.labels) && pull.labels.some((l: Json) => l.name === "queue-ready");
-      if (!queueReady) {
-        excluded.push({ number, reason: "queue-ready label required" });
+      const autoMerge = pull.auto_merge != null;
+      if (!queueReady && !autoMerge) {
+        excluded.push({ number, reason: "auto-merge or queue-ready required" });
         continue;
       }
       let events: ReadyEvent[];
@@ -503,6 +541,7 @@ export class GitHubReader {
         headRef: pull.head?.ref ?? "",
         draft: Boolean(pull.draft),
         queueReady,
+        autoMerge,
         events,
         checks,
         required,
@@ -1184,6 +1223,34 @@ export class GitHubMutations {
   }
   async announce(number: number, body: string): Promise<void> {
     await this.post(`issues/${number}/comments`, { body });
+  }
+  async disableAutoMerge(number: number, headSha: string, parkedAt: string): Promise<void> {
+    if (this.reader.config.mode !== "active") throw Error("Shadow mode forbids GitHub mutations");
+    const current = await this.reader.autoMergeState(number);
+    if (
+      current.enabledAt === null ||
+      current.headSha !== headSha ||
+      Date.parse(current.enabledAt) > Date.parse(parkedAt)
+    )
+      return;
+    // GitHub supplies no conditional disable mutation. Re-read immediately and
+    // never replay an ambiguous submission; a later enable is a new request.
+    const response = await this.reader.transport("https://api.github.com/graphql", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await this.reader.auth.token()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){pullRequest{id}}}`,
+        variables: { id: current.id },
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new ProviderError(response.status, "disable auto-merge");
+    const data = (await response.json()) as Json;
+    if (data.errors || data.data?.disablePullRequestAutoMerge?.pullRequest?.id !== current.id)
+      throw Error("Disable auto-merge outcome unverified");
   }
   async createFollowup(request: FollowupRequest): Promise<void> {
     const [owner, name] = request.sourceRepository.split("/");

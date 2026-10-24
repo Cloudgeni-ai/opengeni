@@ -3038,7 +3038,10 @@ full-main CI. A two-hour latency breaker retains raw measurements and deducts on
 bounded recorded main-capacity holds. Latency-stop backpressure holds new work, not an otherwise eligible
 trusted-green landing; all landing fences still apply. Failed cohorts split sequentially; failed singletons are durably
 parked without attribution, while unrelated ready heads proceed. Parking survives
-main advancement and readiness churn for the same PR head; new heads can re-enter.
+main advancement and label churn for the same PR head; new heads or explicit native
+auto-merge re-enables after parking can re-enter. Intake accepts a current native
+auto-merge request or queue-ready label with exact-head checks. Parking durably
+disables auto-merge; native MERGED readback is distinct from ledger landing/closure.
 Comparable base evidence and trusted same-way failure fingerprints are not yet
 available; neither full-main success nor matching job names proves member blame.
 `queue-health.yml` records provider batch timing separately from the controller's
