@@ -382,6 +382,10 @@ audit only. Replaceable fanout follows commit. Separate conversation history
 uses sequence cursors; `packages/db/src/session-event-slices.ts` transfers bounded
 message-scalar slices, never whole histories. Exact tool-name/call-ID filters use
 trigger-maintained metadata to avoid detoasting skipped arguments and outputs.
+Exact tool-name pages merge two disjoint ordered index branches in one statement:
+bounded non-null name projections and legacy/oversized-name fallbacks. Each
+branch retains its keyset and limit; names keep the database collation and no
+input-length restriction is introduced. See [tool-name paging](tool-name-paging.md).
 Legacy rows retain their payload fallback (and its read cost); these projections
 do not authorize access or replace the retained payload. Full-history Find
 (`packages/db/src/session-message-search.ts`) coalesces authorized scalar windows
