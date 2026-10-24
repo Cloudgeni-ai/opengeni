@@ -292,7 +292,7 @@ export class GitHubReader {
   }
   async autoMergeState(number: number): Promise<AutoMergeState> {
     const [owner, name] = this.config.repository.split("/");
-    const response = await this.transport("https://api.github.com/graphql", {
+    const response = await this.readTransport("https://api.github.com/graphql", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${await this.auth.token()}`,
@@ -1279,10 +1279,13 @@ export class GitHubMutations {
       return;
     // GitHub supplies no conditional disable mutation. Re-read immediately and
     // never replay an ambiguous submission; a later enable is a new request.
+    const token = await this.reader.auth.token();
+    const outcomeKey = `graphql-disable:${randomUUID()}`;
+    writeAttempted(outcomeKey);
     const response = await this.reader.transport("https://api.github.com/graphql", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${await this.reader.auth.token()}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -1291,10 +1294,12 @@ export class GitHubMutations {
       }),
       signal: AbortSignal.timeout(30_000),
     });
+    if ([400, 401, 403, 404, 409, 422, 429].includes(response.status)) writeResolved(outcomeKey);
     if (!response.ok) throw new ProviderError(response.status, "disable auto-merge");
     const data = (await response.json()) as Json;
     if (data.errors || data.data?.disablePullRequestAutoMerge?.pullRequest?.id !== current.id)
       throw Error("Disable auto-merge outcome unverified");
+    writeResolved(outcomeKey);
   }
   async createFollowup(request: FollowupRequest): Promise<void> {
     const [owner, name] = request.sourceRepository.split("/");
