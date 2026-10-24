@@ -33,6 +33,14 @@ the default cycle bound is 1,085 seconds. Timing pairs must be consistent and
 success/deferral timestamps cannot precede this process's start. Deployment must
 pair the trigger with the reviewed supervisor supplying these immutable fields.
 
+Deployment qualification must check the configured poll interval against the
+900-second progress window, including cycle overhead; an interval of 900 seconds
+or more is incompatible even for healthy idle work. Provider-read retry backoff
+and a restored `nextAt` must also permit a cycle before the progress/startup
+deadline. Do not widen watchdog grace to mask incompatible runtime scheduling.
+Deploy the paired supervisor before this watchdog, and roll back the watchdog
+before rolling back to a supervisor without these fields.
+
 The trigger cannot declare safety from status flags. Only unchanged OFF may
 declare Manual after its verified STOP/drain/reconciliation and exact saved-policy
 restoration. Unknown effects, failed drain, rules drift or unavailable proof keep

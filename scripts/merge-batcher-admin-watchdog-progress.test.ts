@@ -119,6 +119,34 @@ test("malformed deferral counters are unknown", () => {
   }
 });
 
+test("deferral cannot precede the latest successful cycle", () => {
+  expect(
+    reason(
+      {
+        ...status,
+        firstObservationDeferredAt: status.lastSuccessfulCycleAt - 1,
+        consecutiveObservationDeferrals: 1,
+      },
+      now,
+    ),
+  ).toBe("unavailable");
+});
+
+test("deferral timestamp and count must agree in both directions", () => {
+  expect(reason({ ...status, consecutiveObservationDeferrals: 1 }, now)).toBe("unavailable");
+  expect(reason({ ...status, firstObservationDeferredAt: now }, now)).toBe("unavailable");
+  expect(
+    reason(
+      {
+        ...status,
+        firstObservationDeferredAt: now,
+        consecutiveObservationDeferrals: 1,
+      },
+      now,
+    ),
+  ).toBeNull();
+});
+
 test("progress-triggered OFF still requires proven restoration and never repeats unknown effects", async () => {
   let claimed = false;
   let calls = 0;
