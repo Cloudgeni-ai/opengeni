@@ -51,7 +51,12 @@ export const eventSources = pgTable(
   }),
 );
 
-/** Credential-free routing from a webhook URL or a provider identity to a source. */
+/**
+ * Credential-free routing from a webhook URL (its random route id) or a GitHub
+ * App installation to a source. No tenant RLS: intake finds the workspace
+ * here. So it holds no provider identity: a GitHub route's external key is a
+ * keyed hash of the installation (githubInstallationRouteKey).
+ */
 export const eventIngressRoutes = pgTable(
   "event_ingress_routes",
   {

@@ -13,6 +13,7 @@ import {
 } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
+  bindGitHubInstallationRepositories,
   claimEventTriggerDispatch,
   createDb,
   createEventSource,
@@ -20,14 +21,17 @@ import {
   createScheduledTaskRun,
   deleteEventSource,
   eventOccurrenceProducerKey,
+  findAppEventSource,
   getEventOccurrenceForRun,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTask,
   getScheduledTaskEvents,
   getScheduledTaskRunEventOccurrences,
+  githubInstallationRouteKey,
   listDueEventTriggerTasks,
   listEventDeliveries,
   listEventSources,
+  listGitHubEventRoutes,
   listInboundEvents,
   markEventOccurrenceStarted,
   markScheduledTaskRunFailedIfQueued,
@@ -278,6 +282,68 @@ describe("event sources", () => {
     const second = await createEventSource(client.db, github);
     expect(first.created).toBe(true);
     expect(second).toEqual({ source: first.source, created: false });
+  });
+
+  test("the route table keeps no provider identity", async () => {
+    const space = await workspace();
+    const routeSecret = new Uint8Array(32).fill(7);
+    const installationId = 424_242;
+    await bindGitHubInstallationRepositories(client.db, {
+      ...space,
+      installationId,
+      linkedBySubjectId: space.subjectId,
+      repositoryIds: [1],
+      eventRouteSecret: routeSecret,
+    });
+    const app = {
+      accountId: space.accountId,
+      workspaceId: space.workspaceId,
+      createdBySubjectId: space.subjectId,
+      name: "App",
+      visibility: "workspace" as const,
+    };
+    const { source: github } = await createEventSource(client.db, {
+      ...app,
+      kind: "github",
+      ownerSubjectId: null,
+      externalKey: "github",
+      routeSecret,
+    });
+    const { source: slack } = await createEventSource(client.db, {
+      ...app,
+      kind: "slack",
+      ownerSubjectId: null,
+      externalKey: "team:T0001",
+    });
+    const { source: gmail } = await createEventSource(client.db, {
+      ...app,
+      kind: "gmail",
+      ownerSubjectId: space.subjectId,
+      externalKey: "email:someone@example.com",
+    });
+    const routes = await shared!.admin<{ source_id: string; external_key: string | null }[]>`
+      SELECT source_id, external_key FROM event_ingress_routes
+      WHERE source_id IN (${github.id}, ${slack.id}, ${gmail.id})`;
+    // GitHub keeps one keyed route per installation; Slack and Gmail need none.
+    expect([...routes]).toEqual([
+      {
+        source_id: github.id,
+        external_key: githubInstallationRouteKey(routeSecret, installationId),
+      },
+    ]);
+    expect(routes[0]!.external_key).not.toContain(String(installationId));
+    expect(await listGitHubEventRoutes(client.db, routeSecret, installationId)).toEqual([
+      { accountId: space.accountId, workspaceId: space.workspaceId, sourceId: github.id },
+    ]);
+    expect(
+      await listGitHubEventRoutes(client.db, new Uint8Array(32).fill(8), installationId),
+    ).toEqual([]);
+    expect(await findAppEventSource(client.db, space.workspaceId, "slack", "team:T0001")).toEqual(
+      expect.objectContaining({ id: slack.id }),
+    );
+    expect(
+      await findAppEventSource(client.db, space.workspaceId, "slack", "team:T0002"),
+    ).toBeNull();
   });
 
   test("people see shared sources, app sources and their own private ones", async () => {

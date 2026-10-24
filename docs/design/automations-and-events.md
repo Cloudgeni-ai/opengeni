@@ -124,7 +124,12 @@ delivery as `ignored`.
   with `X-Hub-Signature-256` and the App webhook secret.
   - A workspace has at most one GitHub source, shared with the workspace. It
     follows the workspace's GitHub connection: its routes, one per bound
-    installation, are recomputed whenever a binding changes.
+    installation, are recomputed whenever a binding changes or the source is
+    added again (which repairs lost routes).
+  - The route table has no tenant RLS, so a GitHub route keeps no
+    installation id: its key is an HMAC-SHA-256 of the installation under a
+    route secret derived from the deployment's encryption key. A deployment
+    without that key cannot add a GitHub source.
   - A route only names a candidate. Each delivery reaches a workspace only if
     the workspace is still bound to the installation and allowed the
     delivery's repository, the same check that gives its agents repository
@@ -142,7 +147,9 @@ delivery as `ignored`.
     deployment's own Apps (`<slug>[bot]`) mark own events.
 - **Slack**: the existing Slack events receiver keeps its conversational
   behaviour and additionally records the callback for the workspace the Slack
-  team is installed in, when that workspace has a Slack source.
+  team is installed in, when that workspace has a Slack source. The receiver's
+  installation routing already names that workspace, so the source needs no
+  ingress route.
   - One Slack source per workspace, shared with the workspace like the channels
     the app is in.
   - Types: `message.posted` (messages and thread replies), `message.edited`,
@@ -161,7 +168,9 @@ delivery as `ignored`.
   instead of depending on that setup the source has a **feed**: Opengeni reads
   the mailbox history every minute while an automation listens.
   - A source is private to its owner and one per mailbox in a workspace.
-    Adding it reads the Gmail profile to learn the address.
+    Adding it reads the Gmail profile to learn the address. Nothing is
+    delivered, so it has no ingress route; the address stays on the source
+    row, behind workspace RLS.
   - The feed keeps the history id as its cursor. Its first read only learns
     where "now" is. Each read lists `history.list` (new messages, `INBOX`)
     since the cursor and reads each new message's headers and snippet

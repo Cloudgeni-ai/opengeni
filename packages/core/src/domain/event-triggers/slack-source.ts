@@ -1,8 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   createEventSource,
-  getEventSource,
-  listEventIngressRoutesForApp,
+  findAppEventSource,
   listSlackInstallationBindings,
   recordEventDelivery,
   type Database,
@@ -15,10 +14,11 @@ import { eventMatchesTrigger } from "./matching";
 /**
  * The Slack source: the Slack app's event callbacks, for the workspace its
  * Slack team is installed in. Shared with the whole workspace, like the
- * channels the app is in.
+ * channels the app is in. Slack's own installation routing already names the
+ * workspace of every callback, so the source needs no ingress route.
  */
 
-function slackTeamRouteKey(teamId: string): string {
+function slackTeamSourceKey(teamId: string): string {
   return `team:${teamId}`;
 }
 
@@ -46,7 +46,7 @@ export async function createSlackEventSource(input: {
     name: input.name ?? "Slack",
     ownerSubjectId: null,
     visibility: "workspace",
-    externalKey: slackTeamRouteKey(binding.slackTeamId),
+    externalKey: slackTeamSourceKey(binding.slackTeamId),
   });
   return source;
 }
@@ -65,38 +65,34 @@ export async function recordSlackEvent(input: {
   receivedAt?: Date;
 }): Promise<void> {
   if (input.settings.eventTriggersEnabled !== true) return;
-  const routes = await listEventIngressRoutesForApp(
+  const source = await findAppEventSource(
     input.db,
+    input.workspaceId,
     "slack",
-    slackTeamRouteKey(input.teamId),
+    slackTeamSourceKey(input.teamId),
   );
-  const receivedAt = input.receivedAt ?? new Date();
-  for (const route of routes) {
-    if (route.workspaceId !== input.workspaceId) continue;
-    const source = await getEventSource(input.db, route.workspaceId, route.sourceId);
-    if (!source || source.kind !== "slack") continue;
-    const outcome = readDelivery({
-      source,
-      settings: input.settings,
-      headers: new Headers(),
-      body: input.body,
-      receivedAt,
-      refire: false,
-    });
-    if (outcome.status !== "accepted") continue;
-    const bodySha256 = sha256Hex(input.body);
-    const eventId = outcome.events[0]?.externalId;
-    await recordEventDelivery(input.db, {
-      accountId: source.accountId,
-      workspaceId: source.workspaceId,
-      sourceId: source.id,
-      ...outcome,
-      dedupeKey: eventId ? `slack:${eventId}` : `sha256:${bodySha256}`,
-      body: input.body,
-      bodyBytes: input.body.byteLength,
-      bodySha256,
-      headers: {},
-      match: eventMatchesTrigger,
-    });
-  }
+  if (!source) return;
+  const outcome = readDelivery({
+    source,
+    settings: input.settings,
+    headers: new Headers(),
+    body: input.body,
+    receivedAt: input.receivedAt ?? new Date(),
+    refire: false,
+  });
+  if (outcome.status !== "accepted") return;
+  const bodySha256 = sha256Hex(input.body);
+  const eventId = outcome.events[0]?.externalId;
+  await recordEventDelivery(input.db, {
+    accountId: source.accountId,
+    workspaceId: source.workspaceId,
+    sourceId: source.id,
+    ...outcome,
+    dedupeKey: eventId ? `slack:${eventId}` : `sha256:${bodySha256}`,
+    body: input.body,
+    bodyBytes: input.body.byteLength,
+    bodySha256,
+    headers: {},
+    match: eventMatchesTrigger,
+  });
 }

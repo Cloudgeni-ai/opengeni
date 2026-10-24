@@ -15,6 +15,7 @@ import {
   type ScheduledTaskRunEventOccurrence,
   type WebhookEventAdapter,
 } from "@opengeni/contracts";
+import { createHmac } from "node:crypto";
 import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
@@ -128,12 +129,15 @@ export type CreateEventSourceInput = {
   externalKey?: string | null;
   mcpServerId?: string | null;
   connectionId?: string | null;
+  /** A GitHub source's routes are keyed with this (see githubInstallationRouteKey). */
+  routeSecret?: Uint8Array | null;
 };
 
 /**
  * Create a source. Webhook sources are always new and get a routed URL. App
  * and MCP sources are one per installation, mailbox or connection: creating
- * one that exists returns it unchanged (`created: false`).
+ * one that exists returns it unchanged (`created: false`), except that a
+ * GitHub source's routes are recomputed either way, which repairs lost ones.
  */
 export async function createEventSource(
   db: Database,
@@ -184,23 +188,30 @@ export async function createEventSource(
           )
           .limit(1);
         if (!existing) throw new Error("event source create conflicted without an existing source");
+        if (input.kind === "github") {
+          await syncGitHubEventRoutes(tx, input.workspaceId, input.routeSecret ?? null);
+        }
         return { source: mapSource(existing, null), created: false };
       }
+      // A generic webhook's URL names its own route, and a GitHub source is
+      // routed by its workspace's installations. Slack callbacks arrive
+      // already resolved to their workspace, Gmail is read rather than
+      // delivered, and an MCP subscription adds its webhook route when it
+      // subscribes, so those get none here.
       let routeId: string | null = null;
       if (input.kind === "github") {
-        await syncGitHubEventRoutes(tx, inserted.workspaceId);
-      } else if (input.kind !== "mcp") {
+        await syncGitHubEventRoutes(tx, inserted.workspaceId, input.routeSecret ?? null);
+      } else if (input.kind === "webhook") {
         const [route] = await tx
           .insert(schema.eventIngressRoutes)
           .values({
             accountId: inserted.accountId,
             workspaceId: inserted.workspaceId,
             sourceId: inserted.id,
-            kind: input.kind,
-            externalKey: input.kind === "webhook" ? null : (input.externalKey ?? null),
+            kind: "webhook",
           })
           .returning({ routeId: schema.eventIngressRoutes.routeId });
-        routeId = input.kind === "webhook" ? (route?.routeId ?? null) : null;
+        routeId = route?.routeId ?? null;
       }
       if (eventSourceKindHasFeed(input.kind)) {
         await tx.insert(schema.eventSourceFeeds).values({
@@ -241,9 +252,20 @@ export async function wakeEventSourceFeeds(
     );
 }
 
-/** The route key of one GitHub App installation's deliveries. */
-export function githubInstallationRouteKey(installationId: number): string {
-  return `installation:${installationId}`;
+/**
+ * The route key of one GitHub App installation's deliveries.
+ * event_ingress_routes has no tenant RLS (intake finds the workspace through
+ * it), so it never holds a provider identity: the key is an HMAC-SHA-256 of
+ * the installation under the deployment's route secret. Equality lookups work
+ * the same; the table alone tells nobody which installation a workspace uses.
+ */
+export function githubInstallationRouteKey(
+  routeSecret: Uint8Array,
+  installationId: number,
+): string {
+  return createHmac("sha256", routeSecret)
+    .update(`github installation ${installationId}`)
+    .digest("hex");
 }
 
 /**
@@ -251,9 +273,15 @@ export function githubInstallationRouteKey(installationId: number): string {
  * installation bound to the workspace. Its routes are recomputed from the
  * bindings whenever a binding or the source changes, inside the writer's
  * workspace scope. Intake still checks each delivery's repository against the
- * workspace's current binding, so a route is only ever a candidate.
+ * workspace's current binding, so a route is only ever a candidate. Without a
+ * route secret (a deployment with no encryption key) nothing can be routed,
+ * so the source keeps no routes.
  */
-export async function syncGitHubEventRoutes(scoped: Database, workspaceId: string): Promise<void> {
+export async function syncGitHubEventRoutes(
+  scoped: Database,
+  workspaceId: string,
+  routeSecret: Uint8Array | null,
+): Promise<void> {
   const sources = await scoped
     .select({ id: schema.eventSources.id, accountId: schema.eventSources.accountId })
     .from(schema.eventSources)
@@ -261,12 +289,14 @@ export async function syncGitHubEventRoutes(scoped: Database, workspaceId: strin
       and(eq(schema.eventSources.workspaceId, workspaceId), eq(schema.eventSources.kind, "github")),
     );
   if (sources.length === 0) return;
-  const installations = await scoped
-    .select({ installationId: schema.githubInstallations.installationId })
-    .from(schema.githubInstallations)
-    .where(eq(schema.githubInstallations.workspaceId, workspaceId));
+  const installations = routeSecret
+    ? await scoped
+        .select({ installationId: schema.githubInstallations.installationId })
+        .from(schema.githubInstallations)
+        .where(eq(schema.githubInstallations.workspaceId, workspaceId))
+    : [];
   const wanted = new Set(
-    installations.map((row) => githubInstallationRouteKey(row.installationId)),
+    installations.map((row) => githubInstallationRouteKey(routeSecret!, row.installationId)),
   );
   for (const source of sources) {
     const routes = await scoped
@@ -347,6 +377,29 @@ export async function getEventSource(
     if (!row) return null;
     const routes = await routesBySource(scoped, [row.id]);
     return mapSource(row, routes.get(row.id) ?? null);
+  });
+}
+
+/** A workspace's app source for one app identity (a Slack team), if it has one. */
+export async function findAppEventSource(
+  db: Database,
+  workspaceId: string,
+  kind: "slack",
+  externalKey: string,
+): Promise<EventSourceRecord | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scoped) => {
+    const [row] = await scoped
+      .select()
+      .from(schema.eventSources)
+      .where(
+        and(
+          eq(schema.eventSources.workspaceId, workspaceId),
+          eq(schema.eventSources.kind, kind),
+          eq(schema.eventSources.externalKey, externalKey),
+        ),
+      )
+      .limit(1);
+    return row ? mapSource(row, null) : null;
   });
 }
 
@@ -449,11 +502,11 @@ export async function resolveEventIngressRoute(
   return row ? { ...row, kind: row.kind as EventSourceKind } : null;
 }
 
-/** Every workspace source an app identity (an installation, a team, a mailbox) delivers to. */
-export async function listEventIngressRoutesForApp(
+/** Every workspace GitHub source one GitHub App installation delivers to. */
+export async function listGitHubEventRoutes(
   db: Database,
-  kind: Exclude<EventSourceKind, "webhook" | "mcp">,
-  externalKey: string,
+  routeSecret: Uint8Array,
+  installationId: number,
 ): Promise<Array<{ accountId: string; workspaceId: string; sourceId: string }>> {
   return await db
     .select({
@@ -464,8 +517,11 @@ export async function listEventIngressRoutesForApp(
     .from(schema.eventIngressRoutes)
     .where(
       and(
-        eq(schema.eventIngressRoutes.kind, kind),
-        eq(schema.eventIngressRoutes.externalKey, externalKey),
+        eq(schema.eventIngressRoutes.kind, "github"),
+        eq(
+          schema.eventIngressRoutes.externalKey,
+          githubInstallationRouteKey(routeSecret, installationId),
+        ),
       ),
     )
     .limit(100);

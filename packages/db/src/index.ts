@@ -5359,6 +5359,8 @@ export async function upsertGitHubInstallation(
     accountLogin?: string | null;
     accountType?: string | null;
     linkedBySubjectId?: string | null;
+    /** The deployment's event route secret: GitHub event routes are recomputed with it. */
+    eventRouteSecret: Uint8Array | null;
   },
 ): Promise<GitHubInstallation> {
   return await withRlsContext(
@@ -5397,7 +5399,7 @@ export async function upsertGitHubInstallation(
       if (!row) {
         throw new Error("Failed to upsert GitHub installation");
       }
-      await syncGitHubEventRoutes(scopedDb, input.workspaceId);
+      await syncGitHubEventRoutes(scopedDb, input.workspaceId, input.eventRouteSecret);
       return mapGitHubInstallation(row);
     },
   );
@@ -5413,6 +5415,8 @@ export async function bindGitHubInstallationRepositories(
     accountType?: string | null;
     linkedBySubjectId: string;
     repositoryIds: number[];
+    /** The deployment's event route secret: GitHub event routes are recomputed with it. */
+    eventRouteSecret: Uint8Array | null;
   },
 ): Promise<GitHubInstallationAccess> {
   if (!Number.isSafeInteger(input.installationId) || input.installationId <= 0) {
@@ -5479,7 +5483,7 @@ export async function bindGitHubInstallationRepositories(
             })),
           );
         }
-        await syncGitHubEventRoutes(tx, input.workspaceId);
+        await syncGitHubEventRoutes(tx, input.workspaceId, input.eventRouteSecret);
         return { ...mapGitHubInstallation(row), repositoryIds };
       }),
   );
@@ -5502,6 +5506,8 @@ export async function bindAuthorizedGitHubInstallationRepositories(
     authorityExpiresAt: Date;
     authorityNonce: string;
     repositoryIds: number[];
+    /** The deployment's event route secret: GitHub event routes are recomputed with it. */
+    eventRouteSecret: Uint8Array | null;
   },
 ): Promise<GitHubInstallationAccess | null> {
   if (!Number.isSafeInteger(input.installationId) || input.installationId <= 0) {
@@ -5646,7 +5652,7 @@ export async function bindAuthorizedGitHubInstallationRepositories(
           input.authorityCheckedAt,
           input.authorityExpiresAt,
         );
-        await syncGitHubEventRoutes(tx, input.workspaceId);
+        await syncGitHubEventRoutes(tx, input.workspaceId, input.eventRouteSecret);
         return { ...mapGitHubInstallation(row), repositoryIds };
       }),
   );
@@ -5782,7 +5788,13 @@ export async function areGitHubRepositoriesAllowedForWorkspace(
 
 export async function deleteGitHubInstallationBinding(
   db: Database,
-  input: { accountId: string; workspaceId: string; installationId: number },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    installationId: number;
+    /** The deployment's event route secret: GitHub event routes are recomputed with it. */
+    eventRouteSecret: Uint8Array | null;
+  },
 ): Promise<boolean> {
   return await withRlsContext(
     db,
@@ -5797,7 +5809,7 @@ export async function deleteGitHubInstallationBinding(
           ),
         )
         .returning({ id: schema.githubInstallations.id });
-      await syncGitHubEventRoutes(scopedDb, input.workspaceId);
+      await syncGitHubEventRoutes(scopedDb, input.workspaceId, input.eventRouteSecret);
       return rows.length > 0;
     },
   );
