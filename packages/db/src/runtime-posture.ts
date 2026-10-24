@@ -1624,6 +1624,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
   "live_session_turn_machine_consent(uuid)",
   "bind_session_attempt_machine_consent(uuid, uuid, uuid)",
+  "carry_session_attempt_machine_authorization(uuid, uuid, uuid)",
   "assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean)",
   "enable_organization_private_sessions_from_activation(uuid, text[])",
   "usage_allowance_members(uuid, uuid)",

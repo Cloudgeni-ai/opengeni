@@ -671,6 +671,10 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       ].map((routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`),
       "target-schema runtime capability create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb) is missing or ambiguous",
     );
+    // 0948 carries an agent's personal machine move into a replacement attempt.
+    heldBack.push(
+      "owner-internal target-schema helper carry_session_attempt_machine_authorization(uuid, uuid, uuid) is missing or ambiguous",
+    );
     // 0854 adds the private-file lookup.
     heldBack.push(
       "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
@@ -748,8 +752,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
-      // 0929 adds event-trigger state. Its non-RLS ingress routing table has
-      // deferred runtime DML (0937), so neither inventory reports it here.
+      // 0929 adds event-trigger state. Its non-RLS ingress routing table is
+      // runtime-privileged since 0947 but never protected; see below.
       "inbound_events",
       "event_deliveries",
       "event_sources",
@@ -791,7 +795,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "session_turn_machine_consents",
     ].sort();
     heldBack.push(
-      `runtime privilege tables are missing: ${runtimeTables.join(", ")}`,
+      `runtime privilege tables are missing: ${[...runtimeTables, "event_ingress_routes"].sort().join(", ")}`,
       `protected tables are missing: ${protectedTables.join(", ")}`,
     );
     const expected = [

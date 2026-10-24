@@ -451,8 +451,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
-      // 0929 adds event-trigger state. Its non-RLS ingress routing table has
-      // deferred runtime DML (0937), so neither inventory reports it here.
+      // 0929 adds event-trigger state. Its non-RLS ingress routing table is
+      // runtime-privileged since 0947 but never protected; see below.
       "inbound_events",
       "event_deliveries",
       "event_sources",
@@ -514,7 +514,7 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       ...ABSENT_USAGE_HISTORY_POSTURE,
       // Nor Site Data (0776), published Sites (0782) or Site SQL (0783), whose
       // tables the runtime and protected contracts list.
-      `runtime privilege tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
+      `runtime privilege tables are missing: ${[...SITE_DATA_TABLES, "event_ingress_routes"].sort().join(", ")}`,
       `protected tables are missing: ${PROTECTED_TABLES.join(", ")}`,
       // Nor session-tree machine consent and agent-child provenance (0851).
       "owner-internal target-schema helper guard_session_agent_creation_provenance() is missing or ambiguous",
@@ -523,6 +523,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       // Nor the personal machine consent helpers (0823).
       "owner-internal target-schema helper live_session_turn_machine_consent(uuid) is missing or ambiguous",
       "owner-internal target-schema helper bind_session_attempt_machine_consent(uuid, uuid, uuid) is missing or ambiguous",
+      // Nor the replacement-attempt machine carry (0948).
+      "owner-internal target-schema helper carry_session_attempt_machine_authorization(uuid, uuid, uuid) is missing or ambiguous",
       "owner-internal target-schema helper assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean) is missing or ambiguous",
       // Nor per-task usage limits (0773).
       ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES.map(
