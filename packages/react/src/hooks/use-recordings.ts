@@ -3,6 +3,7 @@ import type {
   ListRecordingModelsResponse,
   Recording,
   RecordingPerson,
+  RecordingVoiceprintConsent,
   RecordingSpeaker,
   RecordingTranscriptionOptions,
   RecordingTranscriptPage,
@@ -52,6 +53,8 @@ export type RecordingsClientLike = Pick<
   | "getRecordingTrackAudio"
   | "listRecordingPeople"
   | "createRecordingPerson"
+  | "rememberRecordingPersonVoice"
+  | "forgetRecordingPersonVoice"
   | "listRecordingModels"
 >;
 
@@ -609,6 +612,8 @@ export type UseTranscriptResult = {
     label: string,
     name: { personId: string } | { name: string } | null,
   ) => Promise<void>;
+  /** Turn down a voice suggestion; that person is not suggested for this voice again. */
+  rejectSuggestion: (label: string) => Promise<void>;
   /** Move one segment to another speaker label. */
   moveSegment: (segmentIndex: number, label: string) => Promise<void>;
   /** Correct one segment's text; null restores the original. */
@@ -710,6 +715,16 @@ export function useTranscript(
       );
       applySpeakers(result.speakers);
     },
+    rejectSuggestion: async (label) => {
+      const target = versionFor();
+      const result = await client.updateRecordingSpeakers(
+        workspaceId,
+        target.recordingId,
+        { rejectSuggestions: [{ label }] },
+        { versionId: target.versionId },
+      );
+      applySpeakers(result.speakers);
+    },
     moveSegment: async (segmentIndex, label) => {
       const target = versionFor();
       const result = await client.updateRecordingSpeakers(
@@ -747,10 +762,22 @@ export function useRecordingPeople(
   error: Error | null;
   refresh: () => Promise<void>;
   create: (request: CreateRecordingPersonRequest) => Promise<RecordingPerson>;
+  /** Agree to have a person's voice remembered (see rememberRecordingPersonVoice). */
+  rememberVoice: (
+    personId: string,
+    consent: RecordingVoiceprintConsent,
+  ) => Promise<RecordingPerson>;
+  /** Forget a person's voice and withdraw their agreement. */
+  forgetVoice: (personId: string) => Promise<RecordingPerson>;
 } {
   const { client, workspaceId } = useEmbeddedRecordings(
     options,
-    ["listRecordingPeople", "createRecordingPerson"],
+    [
+      "listRecordingPeople",
+      "createRecordingPerson",
+      "rememberRecordingPersonVoice",
+      "forgetRecordingPersonVoice",
+    ],
     "useRecordingPeople",
   );
   const query = options.query;
@@ -768,6 +795,24 @@ export function useRecordingPeople(
     create: useCallback(
       async (request: CreateRecordingPersonRequest) => {
         const person = await client.createRecordingPerson(workspaceId, request);
+        await refresh();
+        return person;
+      },
+      [client, workspaceId, refresh],
+    ),
+    rememberVoice: useCallback(
+      async (personId: string, consent: RecordingVoiceprintConsent) => {
+        const person = await client.rememberRecordingPersonVoice(workspaceId, personId, {
+          consent,
+        });
+        await refresh();
+        return person;
+      },
+      [client, workspaceId, refresh],
+    ),
+    forgetVoice: useCallback(
+      async (personId: string) => {
+        const person = await client.forgetRecordingPersonVoice(workspaceId, personId);
         await refresh();
         return person;
       },

@@ -17,9 +17,12 @@ import {
   ensureManagedAccessForUser,
   failRecordingTranscriptVersion,
   finalizeRecording,
+  forgetRecordingPersonVoice,
+  forgetWorkspaceRecordingVoices,
   getRecording,
   getRecordingTranscriptPage,
   listDeletingRecordingObjectKeys,
+  listRecordingPeople,
   listRecordings,
   listStalledRecordingWork,
   markRecordingChunksUploaded,
@@ -28,10 +31,12 @@ import {
   RecordingConflictError,
   RecordingForbiddenError,
   RecordingNotFoundError,
+  rememberRecordingPersonVoice,
   reserveRecordingChunks,
   setCurrentRecordingTranscriptVersion,
   updateRecordingSegments,
   updateRecordingSpeakers,
+  updateWorkspaceSettings,
   type DbClient,
 } from "../src";
 
@@ -642,6 +647,194 @@ describe("recordings", () => {
         ownerSubjectId: scope.owner,
       },
     ]);
+  });
+
+  test("remembered voices: consent, learning from confirmed speakers, suggestions and forgetting", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    await updateWorkspaceSettings(db, scope.workspaceId, { recordings: { voiceprints: true } });
+    const ownerActor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const memberActor = { workspaceId: scope.workspaceId, subjectId: scope.member };
+    const ingrid = (
+      await createRecordingPerson(db, {
+        ...ownerActor,
+        accountId: scope.accountId,
+        personId: crypto.randomUUID(),
+        displayName: "Ingrid",
+      })
+    ).person;
+    const me = (
+      await createRecordingPerson(db, {
+        ...ownerActor,
+        accountId: scope.accountId,
+        personId: crypto.randomUUID(),
+        displayName: "Recording owner",
+        memberSubjectId: scope.owner,
+      })
+    ).person;
+    expect(ingrid.voice).toBeNull();
+
+    // Members agree only for themselves; someone attests for an outsider.
+    await expect(
+      rememberRecordingPersonVoice(db, { ...memberActor, personId: me.id, consent: "self" }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+    await expect(
+      rememberRecordingPersonVoice(db, { ...ownerActor, personId: me.id, consent: "attested" }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+    await expect(
+      rememberRecordingPersonVoice(db, { ...ownerActor, personId: ingrid.id, consent: "self" }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+    expect(
+      (await rememberRecordingPersonVoice(db, { ...ownerActor, personId: me.id, consent: "self" }))
+        .voice,
+    ).toMatchObject({ consent: "self", learned: false });
+
+    const model = "test-model";
+    const ingridVoice = [0.9, 0.1, 0.05, 0];
+    const otherVoice = [0, 0.2, 1, 0.1];
+    async function transcribe(
+      recording: { recordingId: string; actor: typeof ownerActor },
+      versionId: string,
+      voices: Array<[string, number[]]>,
+    ) {
+      const lease = crypto.randomUUID();
+      await claimRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId,
+        processingOwner: lease,
+        leaseSeconds: 600,
+      });
+      await completeRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId,
+        processingOwner: lease,
+        languages: ["en"],
+        diarized: true,
+        diarization: "ours",
+        audioMilliseconds: 60_000,
+        segments: voices.map(([label], index) => ({
+          startMilliseconds: index * 10_000,
+          endMilliseconds: index * 10_000 + 9_000,
+          trackNumber: 1,
+          speakerLabel: label,
+          text: `Line ${index}.`,
+        })),
+        voices: voices.map(([label, embedding]) => ({
+          label,
+          channel: "call",
+          model,
+          embedding,
+          speechMilliseconds: 30_000,
+        })),
+      });
+      return (
+        await getRecordingTranscriptPage(db, {
+          ...recording.actor,
+          recordingId: recording.recordingId,
+          versionId,
+        })
+      ).speakers;
+    }
+
+    // Nobody is remembered yet, so nothing is suggested.
+    const first = await finalizedRecording(scope, "workspace");
+    const firstSpeakers = await transcribe(first, first.versionId, [
+      ["speaker_0", ingridVoice],
+      ["speaker_1", otherVoice],
+    ]);
+    expect(firstSpeakers.filter((speaker) => speaker.source === "suggested")).toEqual([]);
+
+    // Confirming Ingrid before she is remembered teaches nothing; agreeing
+    // afterwards learns from the speakers already confirmed as her.
+    await updateRecordingSpeakers(db, {
+      ...ownerActor,
+      recordingId: first.recordingId,
+      assignments: [{ label: "speaker_0", personId: ingrid.id }],
+    });
+    const remembered = await rememberRecordingPersonVoice(db, {
+      ...ownerActor,
+      personId: ingrid.id,
+      consent: "attested",
+    });
+    expect(remembered.voice).toMatchObject({ consent: "attested", learned: true });
+
+    // A later meeting suggests her for the voice that sounds like her.
+    const second = await finalizedRecording(scope, "workspace");
+    const secondSpeakers = await transcribe(second, second.versionId, [
+      ["speaker_0", otherVoice],
+      ["speaker_1", [0.88, 0.12, 0.02, 0.01]],
+    ]);
+    const suggested = secondSpeakers.find((speaker) => speaker.label === "speaker_1");
+    expect(suggested).toMatchObject({ personId: ingrid.id, name: "Ingrid", source: "suggested" });
+    expect(suggested?.confidence).toBeGreaterThan(0.9);
+    expect(secondSpeakers.find((speaker) => speaker.label === "speaker_0")?.source).toBeNull();
+
+    // "Not them" is remembered for that voice, across versions.
+    const turnedDown = await updateRecordingSpeakers(db, {
+      ...ownerActor,
+      recordingId: second.recordingId,
+      rejectSuggestions: [{ label: "speaker_1" }],
+    });
+    expect(turnedDown.find((speaker) => speaker.label === "speaker_1")?.source).toBeNull();
+    const again = await createRecordingTranscriptVersion(db, {
+      ...ownerActor,
+      recordingId: second.recordingId,
+      versionId: crypto.randomUUID(),
+      transcription,
+    });
+    const againSpeakers = await transcribe(second, again.id, [
+      ["speaker_0", [0.87, 0.13, 0.03, 0]],
+      ["speaker_1", otherVoice],
+    ]);
+    expect(againSpeakers.filter((speaker) => speaker.source === "suggested")).toEqual([]);
+
+    // Renaming the confirmed speaker takes the voice back out of her print.
+    await updateRecordingSpeakers(db, {
+      ...ownerActor,
+      recordingId: first.recordingId,
+      assignments: [{ label: "speaker_0", name: "Someone else" }],
+    });
+    const peopleAfterRename = await listRecordingPeople(db, ownerActor);
+    expect(peopleAfterRename.find((person) => person.id === ingrid.id)?.voice).toMatchObject({
+      learned: false,
+    });
+    await updateRecordingSpeakers(db, {
+      ...ownerActor,
+      recordingId: first.recordingId,
+      assignments: [{ label: "speaker_0", personId: ingrid.id }],
+    });
+    expect(
+      (await listRecordingPeople(db, ownerActor)).find((person) => person.id === ingrid.id)?.voice,
+    ).toMatchObject({ learned: true });
+
+    // Members forget only their own voice; anyone may forget an outsider's.
+    await expect(
+      forgetRecordingPersonVoice(db, { ...memberActor, personId: me.id }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+    expect(
+      (await forgetRecordingPersonVoice(db, { ...memberActor, personId: ingrid.id })).voice,
+    ).toBeNull();
+    const [afterForget] = await shared.admin<{ prints: number }[]>`
+      select count(*)::int as prints from recording_voiceprints where person_id = ${ingrid.id}`;
+    expect(afterForget).toEqual({ prints: 0 });
+
+    // Turning recognition off forgets every voice in the workspace.
+    await rememberRecordingPersonVoice(db, {
+      ...ownerActor,
+      personId: ingrid.id,
+      consent: "attested",
+    });
+    await forgetWorkspaceRecordingVoices(db, ownerActor);
+    const [afterOff] = await shared.admin<
+      { prints: number; voices: number; rejections: number; consents: number }[]
+    >`
+      select
+        (select count(*)::int from recording_voiceprints where workspace_id = ${scope.workspaceId}) as prints,
+        (select count(*)::int from recording_speaker_voices where workspace_id = ${scope.workspaceId}) as voices,
+        (select count(*)::int from recording_voice_rejections where workspace_id = ${scope.workspaceId}) as rejections,
+        (select count(*)::int from recording_people where workspace_id = ${scope.workspaceId} and voice_consent is not null) as consents`;
+    expect(afterOff).toEqual({ prints: 0, voices: 0, rejections: 0, consents: 0 });
   });
 
   test("deleting the workspace removes its recordings", async () => {

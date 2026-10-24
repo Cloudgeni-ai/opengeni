@@ -18,6 +18,7 @@ import {
   markRecordingChunksUploaded,
   markRecordingDeleting,
   reserveRecordingChunks,
+  updateWorkspaceSettings,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -329,7 +330,11 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
             { startMilliseconds: 800, endMilliseconds: 1_200, speaker: "S0" },
             { startMilliseconds: 1_250, endMilliseconds: 1_600, speaker: "S1" },
           ],
-          voices: [],
+          voices: [
+            { speaker: "S1", speechMilliseconds: 5_000, embedding: [0, 1, 0] },
+            { speaker: "S0", speechMilliseconds: 6_000, embedding: [1, 0, 0] },
+          ],
+          voiceModel: "test-voices",
         };
       },
     };
@@ -380,6 +385,12 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     };
     const third = await version("ours");
     const run = activities(storage, provider, "key", broken);
+    const stored = async (versionId: string) =>
+      await shared!.admin<{ label: string; channel: string; model: string }[]>`
+        select speaker_label as label, channel, model from recording_speaker_voices
+        where version_id = ${versionId} order by speaker_label`;
+    // Voices are kept only while the workspace recognizes them.
+    expect(await stored(first.versionId)).toEqual([]);
     expect(await run.activities.transcribeRecordingVersion(third)).toEqual({ outcome: "complete" });
     expect(run.warnings).toContain("our diarizer failed; using the model's speakers");
     const fallback = await page(third.versionId);
@@ -387,6 +398,32 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(fallback.segments.map((segment) => segment.speakerLabel)).toEqual([
       "track-0",
       "speaker_0",
+    ]);
+
+    // Recognizing voices uses ours even on `auto`, and keeps each speaker's
+    // voice under the label it has in the transcript.
+    await updateWorkspaceSettings(client.db, recording.actor.workspaceId, {
+      recordings: { voiceprints: true },
+    });
+    const fourth = crypto.randomUUID();
+    await createRecordingTranscriptVersion(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      versionId: fourth,
+      transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
+    });
+    diarized.length = 0;
+    expect(
+      await activities(storage, provider, "key", ours).activities.transcribeRecordingVersion({
+        ...recording.input,
+        versionId: fourth,
+        processingOwner: fourth,
+      }),
+    ).toEqual({ outcome: "complete" });
+    expect(diarized).toEqual(["track-1.webm"]);
+    expect(await stored(fourth)).toEqual([
+      { label: "speaker_0", channel: "call", model: "test-voices" },
+      { label: "speaker_1", channel: "call", model: "test-voices" },
     ]);
   });
 

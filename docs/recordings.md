@@ -146,6 +146,50 @@ can set its default in `settings.recordings.transcription`.
 - `GET` and `POST /v1/workspaces/:workspaceId/recording-people` read and add
   people in the directory.
 
+## Recognizing people by voice
+
+Off by default. A workspace admin turns it on with
+`settings.recordings.voiceprints: true`. While it is on, the worker runs
+Opengeni's own diarizer (when it is installed) for every transcript, whatever
+the model, and keeps
+each speaker's averaged voice vector with the transcript version. Only
+numbers are stored, never extra audio, and the API never returns them.
+
+A person's voice is remembered only after they agree:
+
+- `PUT /v1/workspaces/:workspaceId/recording-people/:personId/voice` with
+  `{"consent": "self"}` is a member agreeing for themselves. Members can only
+  agree for themselves.
+- `{"consent": "attested"}` is someone confirming that a person from outside
+  the workspace agreed. The person's `voice` records which kind of agreement
+  it was, and when. Agreeing answers 409 `voice_recognition_off` while the setting
+  is off.
+- `DELETE` on the same path forgets the voice and withdraws the agreement.
+  Only a member can forget their own voice; anyone in the workspace can
+  forget someone from outside it. Names the voice suggested are removed too.
+- Turning the setting off forgets every voice in the workspace.
+
+Agreeing doesn't record anything by itself. A person's voiceprint is learned
+from the speakers named as them, in meetings transcribed while the setting
+was on, both before and after they agreed. It is the speech-weighted mean of
+those speakers' vectors, with each meeting
+counting for at most two minutes and speakers with under four seconds of
+speech skipped. Renaming a speaker to someone else takes its voice back out.
+Voiceprints are kept apart by kind of audio (microphone, call audio from the
+computer, and room or uploaded audio) and by speaker model, because vectors
+from different models don't compare.
+
+When a transcript finishes, each unnamed speaker is compared with the
+remembered voices. A cosine similarity of 0.6 or more names the closest
+person, at most once per person, as a `suggested` speaker with the
+similarity as `confidence`. People confirm a suggestion by naming the speaker
+as that person. `PATCH …/speakers` with `rejectSuggestions: [{label}]` turns
+one down, and that person isn't suggested again for a similar voice in that
+recording. Measured on AMI meetings, with four people enrolled from one
+meeting and matched in three later ones against 23 other voices, all 12
+speakers were found. The same person scored 0.85 to 0.97, and nobody else
+scored above 0.46.
+
 ## Events
 
 Recording events go out through the existing signed

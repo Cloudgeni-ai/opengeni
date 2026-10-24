@@ -6902,6 +6902,30 @@
       ]
     },
     {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/recording-people/:personId/voice",
+      "sdk": [
+        "OpenGeniRecordingsClient.forgetRecordingPersonVoice"
+      ],
+      "request": [],
+      "response": [
+        "RecordingPerson"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/recording-people/:personId/voice",
+      "sdk": [
+        "OpenGeniRecordingsClient.rememberRecordingPersonVoice"
+      ],
+      "request": [
+        "RememberRecordingPersonVoiceRequest"
+      ],
+      "response": [
+        "RecordingPerson"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/recordings",
       "sdk": [
@@ -23500,7 +23524,12 @@
         "$.email": "string! null",
         "$.externalRef": "string! null",
         "$.id": "string!",
-        "$.memberSubjectId": "string! null"
+        "$.memberSubjectId": "string! null",
+        "$.voice": "object! null",
+        "$.voice.consent": "ref(RecordingVoiceprintConsent)!",
+        "$.voice.consentedAt": "string!",
+        "$.voice.learned": "boolean!",
+        "$.voice.updatedAt": "string! null"
       }
     },
     "RecordingSpeaker": {
@@ -23686,6 +23715,15 @@
         "$.providerId": "string?"
       }
     },
+    "RecordingVoiceprintConsent": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"attested\\\"\",\"\\\"self\\\"\"]"
+      }
+    },
     "RefreshScheduledTaskAccessRequest": {
       "io": [
         "input"
@@ -23719,6 +23757,15 @@
         "$": "object",
         "$.expectedObjectiveRevision": "integer!",
         "$.rationale": "string!"
+      }
+    },
+    "RememberRecordingPersonVoiceRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.consent": "ref(RecordingVoiceprintConsent)!"
       }
     },
     "RemoveEnrollmentRequest": {
@@ -29288,6 +29335,9 @@
         "$.assignments[].label": "string!",
         "$.assignments[].name": "string? null",
         "$.assignments[].personId": "string? null",
+        "$.rejectSuggestions": "array?",
+        "$.rejectSuggestions[]": "object",
+        "$.rejectSuggestions[].label": "string!",
         "$.segmentOverrides": "array?",
         "$.segmentOverrides[]": "object",
         "$.segmentOverrides[].label": "string!",
@@ -31616,7 +31666,8 @@
         "$.diarizer": "ref(RecordingDiarizer)?",
         "$.transcription": "object?",
         "$.transcription.model": "string!",
-        "$.transcription.providerId": "string!"
+        "$.transcription.providerId": "string!",
+        "$.voiceprints": "boolean?"
       }
     },
     "WorkspaceSessionDefaults": {
@@ -40754,6 +40805,7 @@
       "createRecordingUploads",
       "deleteRecording",
       "finalizeRecording",
+      "forgetRecordingPersonVoice",
       "getRecording",
       "getRecordingTrackAudio",
       "getRecordingTranscript",
@@ -40761,6 +40813,7 @@
       "listRecordingPeople",
       "listRecordingTranscriptVersions",
       "listRecordings",
+      "rememberRecordingPersonVoice",
       "setCurrentRecordingTranscript",
       "updateRecording",
       "updateRecordingSegments",
@@ -53467,6 +53520,9 @@
       "finalizeRecording": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"FinalizeRecordingRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"FinalizeRecordingResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "forgetRecordingPersonVoice": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingPerson\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getRecording": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Recording\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -53487,6 +53543,9 @@
       ],
       "listRecordingTranscriptVersions": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTranscriptVersion\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "rememberRecordingPersonVoice": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RememberRecordingPersonVoiceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingPerson\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setCurrentRecordingTranscript": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTranscriptVersion\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

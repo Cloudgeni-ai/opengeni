@@ -90163,6 +90163,14 @@ export * from "./mcp-oauth";
 export * from "./tool-gateway-approvals";
 export * from "./transcription-recordings";
 export * from "./recordings";
+export {
+  cosineSimilarity,
+  recordingVoiceChannel,
+  suggestSpeakersByVoice,
+  VOICE_SUGGESTION_THRESHOLD,
+  type RecordingSpeakerVoice,
+  type RecordingVoiceChannel,
+} from "./recording-voices";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-materialization";
 export * from "./attempt-tool-catalogs";

@@ -126,7 +126,7 @@ const LINES: Array<[label: string, seconds: number, text: string]> = [
     "I'd keep it to one. Three choices is how we got the stall in the first place.",
   ],
   ["track-0", 71, "Fair. One suggested task, and a link to the full list for people who want it."],
-  ["speaker_1", 80, "Works for me."],
+  ["speaker_2", 80, "Works for me."],
   ["track-0", 96, "Pricing page next. Tomas, where did we land on the annual discount?"],
   [
     "speaker_0",
@@ -134,7 +134,7 @@ const LINES: Array<[label: string, seconds: number, text: string]> = [
     "Two months free on annual. Finance is fine with it as long as we show the monthly price first.",
   ],
   [
-    "speaker_1",
+    "speaker_2",
     118,
     "Then the comparison table needs a toggle. I'll mock both versions so we can pick.",
   ],
@@ -182,9 +182,14 @@ export function createMeetingsFixture(
 ): MeetingsFixture {
   const readyId = "5f2d1c4b-0a9e-4d8c-b7f6-e5d4c3b2a190";
   const people: RecordingPerson[] = [
-    person("8a7b6c5d-4e3f-4a1b-9c8d-7e6f5a4b3c2d", "Ingrid Solberg"),
+    person("8a7b6c5d-4e3f-4a1b-9c8d-7e6f5a4b3c2d", "Ingrid Solberg", {
+      memberSubjectId: ME,
+      voice: rememberedVoice("self"),
+    }),
     person("1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e", "Tomas Eriksen"),
-    person("9c8b7a6f-5e4d-4c3b-a291-807f6e5d4c3b", "Lea Haugen"),
+    person("9c8b7a6f-5e4d-4c3b-a291-807f6e5d4c3b", "Lea Haugen", {
+      voice: rememberedVoice("attested"),
+    }),
   ];
   let speakers: RecordingSpeaker[] = [
     {
@@ -202,6 +207,13 @@ export function createMeetingsFixture(
       confidence: null,
     },
     { label: "speaker_1", name: "speaker_1", personId: null, source: null, confidence: null },
+    {
+      label: "speaker_2",
+      name: "Lea Haugen",
+      personId: people[2]!.id,
+      source: "suggested",
+      confidence: 0.86,
+    },
   ];
   let segments: RecordingTranscriptSegment[] = LINES.map(([label, seconds, text], index) => {
     const next = LINES[index + 1]?.[1] ?? seconds + 8;
@@ -350,8 +362,15 @@ export function createMeetingsFixture(
       request: {
         assignments?: Array<{ label: string; personId?: string | null; name?: string | null }>;
         segmentOverrides?: Array<{ segmentIndex: number; label: string }>;
+        rejectSuggestions?: Array<{ label: string }>;
       },
     ) => {
+      const rejected = new Set((request.rejectSuggestions ?? []).map((entry) => entry.label));
+      speakers = speakers.map((speaker) =>
+        rejected.has(speaker.label) && speaker.source === "suggested"
+          ? { ...speaker, personId: null, name: speaker.label, source: null, confidence: null }
+          : speaker,
+      );
       for (const assignment of request.assignments ?? []) {
         const named = people.find((entry) => entry.id === assignment.personId);
         speakers = speakers.map((speaker) =>
@@ -361,6 +380,7 @@ export function createMeetingsFixture(
                 personId: assignment.personId ?? null,
                 name: named?.displayName ?? assignment.name ?? speaker.label,
                 source: assignment.personId || assignment.name ? "confirmed" : null,
+                confidence: null,
               }
             : speaker,
         );
@@ -398,10 +418,37 @@ export function createMeetingsFixture(
       });
     },
     listRecordingPeople: async () => await delay(people),
-    createRecordingPerson: async (_workspaceId: string, request: { displayName: string }) => {
-      const created = person(crypto.randomUUID(), request.displayName);
+    createRecordingPerson: async (
+      _workspaceId: string,
+      request: { displayName: string; memberSubjectId?: string },
+    ) => {
+      const created = person(crypto.randomUUID(), request.displayName, {
+        memberSubjectId: request.memberSubjectId ?? null,
+      });
       people.push(created);
       return await delay(created);
+    },
+    rememberRecordingPersonVoice: async (
+      _workspaceId: string,
+      personId: string,
+      request: { consent: "self" | "attested" },
+    ) => {
+      const index = people.findIndex((entry) => entry.id === personId);
+      people[index] = {
+        ...people[index]!,
+        voice: { ...rememberedVoice(request.consent), learned: false, updatedAt: null },
+      };
+      return await delay(people[index]!);
+    },
+    forgetRecordingPersonVoice: async (_workspaceId: string, personId: string) => {
+      const index = people.findIndex((entry) => entry.id === personId);
+      people[index] = { ...people[index]!, voice: null };
+      speakers = speakers.map((speaker) =>
+        speaker.personId === personId && speaker.source === "suggested"
+          ? { ...speaker, personId: null, name: speaker.label, source: null, confidence: null }
+          : speaker,
+      );
+      return await delay(people[index]!);
     },
     listRecordingModels: async () => await delay(models),
   };
@@ -413,7 +460,20 @@ export function createMeetingsFixture(
   };
 }
 
-function person(id: string, displayName: string): RecordingPerson {
+function rememberedVoice(consent: "self" | "attested"): NonNullable<RecordingPerson["voice"]> {
+  return {
+    consent,
+    consentedAt: new Date(NOW - minutes(60 * 24 * 12)).toISOString(),
+    learned: true,
+    updatedAt: new Date(NOW - minutes(60 * 24 * 2)).toISOString(),
+  };
+}
+
+function person(
+  id: string,
+  displayName: string,
+  extra: Partial<Pick<RecordingPerson, "memberSubjectId" | "voice">> = {},
+): RecordingPerson {
   return {
     id,
     displayName,
@@ -421,5 +481,7 @@ function person(id: string, displayName: string): RecordingPerson {
     email: null,
     externalRef: null,
     createdAt: new Date(NOW - minutes(60 * 24 * 30)).toISOString(),
+    voice: null,
+    ...extra,
   };
 }
