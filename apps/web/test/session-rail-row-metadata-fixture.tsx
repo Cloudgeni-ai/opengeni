@@ -67,7 +67,7 @@ const cases = [
     active: false,
     depth: 0,
     summary: neutral,
-    scheduled: true,
+    automationWait: "schedule" as const,
     relativeTime: "12 Aug",
   },
   { id: "no-metadata", active: false, depth: 0, summary: neutral },
@@ -166,7 +166,7 @@ function SessionRailRowMetadataFixture() {
                       descendantLabel={null}
                       mobile={false}
                       summary={scenario.summary}
-                      scheduled={"scheduled" in scenario ? scenario.scheduled : false}
+                      automationWait={"automationWait" in scenario ? scenario.automationWait : null}
                       relativeTime={"relativeTime" in scenario ? scenario.relativeTime : undefined}
                       creator={
                         scenario.depth > 0
@@ -252,7 +252,7 @@ function SessionRailRowMetadataFixture() {
             depthLabel={null}
             descendantLabel={null}
             summary={waitSession.inputWait ? active : neutral}
-            scheduled={false}
+            automationWait={null}
           />
         </div>
         <div className="flex flex-wrap gap-3 p-4">

@@ -1,11 +1,15 @@
 /**
  * A chat's status as the sidebar row shows it (working, needs you, waiting,
- * failed, unread, scheduled, who started it), for the command menu and the
+ * failed, unread, waiting on an automation, who started it), for the command menu and the
  * Control+Tab switcher. A remembered row only counts while it is known to be
  * current: the sidebar keeps its own workspace's rows live, and other rows
  * are read again when a list opens.
  */
-import { sessionHasUpcomingSchedule, type SessionListRow } from "../../../session-list-model";
+import {
+  sessionAutomationWait,
+  type SessionAutomationWait,
+  type SessionListRow,
+} from "../../../session-list-model";
 import { railRowCreator, type CreatorRef } from "../creator-initials";
 import { summarizeRailNodes, type RailAggregateStatus } from "../sessions-group";
 import type { ChatRecord } from "./chat-directory";
@@ -15,7 +19,7 @@ export const CHAT_STATUS_FRESH_MS = 90_000;
 
 export type ChatStatus = {
   summary: RailAggregateStatus;
-  scheduled: boolean;
+  automationWait: SessionAutomationWait | null;
   creator: CreatorRef | null;
 };
 
@@ -27,7 +31,7 @@ export function chatRowStatus(row: SessionListRow, now: Date = new Date()): Chat
       undefined,
       now,
     ),
-    scheduled: sessionHasUpcomingSchedule(row),
+    automationWait: sessionAutomationWait(row),
     creator: railRowCreator(row),
   };
 }

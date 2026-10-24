@@ -16083,6 +16083,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * paused, and not a one-time schedule whose time has passed.
      */
     hasUpcomingSchedules: z.boolean().optional(),
+    /**
+     * An active automation targeting this session will run when one of its
+     * events arrives: it has an active event trigger and, if it runs once,
+     * has not run yet.
+     */
+    waitingForEvents: z.boolean().optional(),
     initialMessage: z.string(),
     title: z.string().nullable(),
     titleSource: z.enum(["user", "agent"]).nullable(),
@@ -16427,6 +16433,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     backgroundCommandActivity: true,
     hasSchedules: true,
     hasUpcomingSchedules: true,
+    waitingForEvents: true,
     title: true,
     titleSource: true,
     createdBy: true,
@@ -16535,6 +16542,8 @@ export const SessionLineageResponse = /* @__PURE__ */ defineSkillContractSchema(
     sessionHasSchedules: z.boolean().optional(),
     /** An active schedule targeting the requested session can still start a run. */
     sessionHasUpcomingSchedules: z.boolean().optional(),
+    /** An active automation targeting the requested session is waiting for an event. */
+    sessionWaitingForEvents: z.boolean().optional(),
     ancestors: z.array(Session),
     children: z.array(LineageNode),
     truncated: z.boolean().default(false),

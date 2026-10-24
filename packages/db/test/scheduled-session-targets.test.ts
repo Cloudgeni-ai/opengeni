@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   bootstrapWorkspace,
   createDb,
+  createEventSource,
   createSession,
   createScheduledTask,
   updateScheduledTask,
@@ -10,6 +11,7 @@ import {
   scheduledSessionIds,
   scheduledTaskHasUpcomingRun,
   sessionScheduleTargets,
+  setScheduledTaskEvents,
   listScheduledTasks,
 } from "../src/index";
 
@@ -142,7 +144,11 @@ test("upcoming targets exclude paused, past one-time, ended and manual schedules
   const ended = await create("active", { type: "interval", everySeconds: 60, endAt: earlier });
   const manual = await create("active", { type: "manual" });
   const pausedFuture = await create("paused", { type: "once", runAt: later, timeZone: "UTC" });
-  expect(await targets()).toEqual({ scheduled: new Set([session.id]), upcoming: new Set() });
+  expect(await targets()).toEqual({
+    scheduled: new Set([session.id]),
+    upcoming: new Set(),
+    waitingForEvents: new Set(),
+  });
   expect(await scheduledSessionIds(client.db, session.workspaceId, [session.id])).toEqual(
     new Set([session.id]),
   );
@@ -158,7 +164,75 @@ test("upcoming targets exclude paused, past one-time, ended and manual schedules
   for (const task of [stale, expired, ended, manual, calendar]) {
     await deleteScheduledTask(client.db, session.workspaceId, task.id);
   }
-  expect(await targets()).toEqual({ scheduled: new Set(), upcoming: new Set() });
+  expect(await targets()).toEqual({
+    scheduled: new Set(),
+    upcoming: new Set(),
+    waitingForEvents: new Set(),
+  });
+}, 60_000);
+
+test("a chat waits for events while an active automation listens and has not finished", async () => {
+  const session = await fixture();
+  const space = { accountId: session.accountId, workspaceId: session.workspaceId };
+  const { source } = await createEventSource(client.db, {
+    ...space,
+    createdBySubjectId: "scheduler",
+    kind: "webhook",
+    adapter: "standard",
+    name: "Deploys",
+    ownerSubjectId: "scheduler",
+    visibility: "workspace",
+    secretEncrypted: "encrypted-secret",
+  });
+  const automation = await createScheduledTask(client.db, {
+    ...space,
+    name: "Wake me when it deploys",
+    status: "active",
+    schedule: { type: "manual" },
+    temporalScheduleId: crypto.randomUUID(),
+    runMode: "existing_session",
+    overlapPolicy: "skip",
+    targetSessionId: session.id,
+    agentConfig: { prompt: "Check the deploy", resources: [], tools: [], metadata: {} },
+    createdBy: { kind: "service", subjectId: "scheduler" },
+    metadata: {},
+  });
+  const waiting = async () =>
+    (await sessionScheduleTargets(client.db, session.workspaceId, [session.id])).waitingForEvents;
+  expect(await waiting()).toEqual(new Set());
+
+  const trigger = {
+    sourceId: source.id,
+    eventTypes: ["deploy.finished"],
+    conditions: [],
+    includeOwnEvents: false,
+  };
+  await setScheduledTaskEvents(client.db, {
+    ...space,
+    taskId: automation.id,
+    triggers: [trigger, { ...trigger, eventTypes: ["deploy.failed"] }],
+    once: true,
+  });
+  expect(await waiting()).toEqual(new Set([session.id]));
+  // A manual automation that only events start has no upcoming scheduled run.
+  expect(
+    (await sessionScheduleTargets(client.db, session.workspaceId, [session.id])).upcoming,
+  ).toEqual(new Set());
+
+  await updateScheduledTask(client.db, session.workspaceId, automation.id, { status: "paused" });
+  expect(await waiting()).toEqual(new Set());
+  await updateScheduledTask(client.db, session.workspaceId, automation.id, { status: "active" });
+  expect(await waiting()).toEqual(new Set([session.id]));
+
+  // A once-automation that has run stops waiting.
+  await shared.admin`update scheduled_task_event_settings set completed_at = now() where task_id = ${automation.id}`;
+  expect(await waiting()).toEqual(new Set());
+  await shared.admin`update scheduled_task_event_settings set completed_at = null where task_id = ${automation.id}`;
+
+  await shared.admin`update event_triggers set status = 'blocked', status_reason = 'The source was disconnected' where task_id = ${automation.id}`;
+  expect(await waiting()).toEqual(new Set());
+  await setScheduledTaskEvents(client.db, { ...space, taskId: automation.id, triggers: [] });
+  expect(await waiting()).toEqual(new Set());
 }, 60_000);
 
 test("an upcoming run needs an active schedule with a run left", () => {

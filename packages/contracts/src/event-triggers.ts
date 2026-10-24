@@ -97,16 +97,30 @@ export const EventSource = /* @__PURE__ */ defineSchema(() =>
     statusReason: z.string().nullable(),
     /** The URL to paste into the sending app. Webhook sources only. */
     webhookUrl: z.string().nullable(),
+    /**
+     * A Linear or Sentry webhook whose secret is not pasted yet: it refuses
+     * deliveries until the secret is set with an update.
+     */
+    awaitingSigningSecret: z.boolean().default(false),
     /** MCP sources only. */
     mcp: EventSourceMcpBinding.nullable(),
     lastDeliveryAt: Timestamp.nullable(),
     createdAt: Timestamp,
     updatedAt: Timestamp,
+    /**
+     * What the reading person can do with the source: `manage` (its owner or
+     * a workspace admin: edit, rotate, test, replay, delete) or `use` (point
+     * triggers at it and read its log). Set on REST reads.
+     */
+    viewerAccess: z.enum(["manage", "use"]).optional(),
   }),
 );
 export type EventSource = z.infer<typeof EventSource>;
 
-/** Linear and Sentry generate the secret; paste it here. Standard sources get one from Opengeni. */
+/**
+ * Linear and Sentry generate the secret once they have the webhook URL, so it
+ * is pasted on create or afterwards. Standard sources get one from Opengeni.
+ */
 export const EventSourceSigningSecretInput = /* @__PURE__ */ defineSchema(() =>
   z.string().min(8).max(512),
 );
@@ -147,19 +161,15 @@ export const CreateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
         .strict(),
     ])
     .superRefine((value, context) => {
-      if (value.kind !== "webhook") return;
-      if (value.adapter === "standard" && value.signingSecret !== undefined) {
+      if (
+        value.kind === "webhook" &&
+        value.adapter === "standard" &&
+        value.signingSecret !== undefined
+      ) {
         context.addIssue({
           code: "custom",
           path: ["signingSecret"],
           message: "Opengeni generates the signing secret for standard webhooks",
-        });
-      }
-      if (value.adapter !== "standard" && value.signingSecret === undefined) {
-        context.addIssue({
-          code: "custom",
-          path: ["signingSecret"],
-          message: `Paste the signing secret ${value.adapter === "linear" ? "Linear" : "Sentry"} shows for this webhook`,
         });
       }
     }),

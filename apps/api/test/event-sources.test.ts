@@ -401,6 +401,72 @@ describe("event sources", () => {
     expect((await f.deliver(source.webhookUrl, rotated.signingSecret, body)).status).toBe(404);
   });
 
+  test("a run-once automation finishes after its first event run, and turning it on re-arms it", async () => {
+    const f = await fixture({ enabled: true });
+    const { source, signingSecret } = await f.json(
+      await f.app.request(f.sources, {
+        method: "POST",
+        headers: f.owner.headers,
+        body: JSON.stringify({ kind: "webhook", adapter: "standard", name: "Deploys" }),
+      }),
+    );
+    const automation = await f.json(
+      await f.createAutomation(f.owner.headers, {
+        triggers: [{ sourceId: source.id, eventTypes: ["deploy.finished"] }],
+        once: true,
+      }),
+    );
+    expect(automation.events).toMatchObject({ once: true, completedAt: null });
+    const started: EventOccurrenceToStart[] = [];
+    const dispatch = async () => {
+      await makeDue(f.workspace.id);
+      await dispatchDueEventTriggers({
+        db: db.db,
+        settings: f.settings,
+        bus: f.bus,
+        startRun: async (occurrence) => {
+          if (occurrence.workspaceId === f.workspace.id) started.push(occurrence);
+        },
+      });
+    };
+    const deploy = () =>
+      f.deliver(
+        source.webhookUrl,
+        signingSecret,
+        JSON.stringify({ type: "deploy.finished", data: { id: crypto.randomUUID() } }),
+      );
+    const read = async () =>
+      await f.json(
+        await f.app.request(`${f.tasks}/${automation.id}`, { headers: f.owner.headers }),
+      );
+
+    expect((await deploy()).status).toBe(200);
+    await dispatch();
+    expect(started).toHaveLength(1);
+    const finished = await read();
+    expect(finished.status).toBe("active");
+    expect(finished.events.completedAt).not.toBeNull();
+
+    // Finished, it no longer listens.
+    expect((await deploy()).status).toBe(200);
+    await dispatch();
+    expect(started).toHaveLength(1);
+
+    // Turning it on again listens for the next one, not the ones it missed.
+    const resumed = await f.app.request(`${f.tasks}/${automation.id}/resume`, {
+      method: "POST",
+      headers: f.owner.headers,
+    });
+    expect(resumed.status).toBe(200);
+    expect((await f.json(resumed)).events.completedAt).toBeNull();
+    await dispatch();
+    expect(started).toHaveLength(1);
+    expect((await deploy()).status).toBe(200);
+    await dispatch();
+    expect(started).toHaveLength(2);
+    expect((await read()).events.completedAt).not.toBeNull();
+  });
+
   test("a turned-off source logs deliveries without firing, and replays once it is back on", async () => {
     const f = await fixture({ enabled: true });
     const { source, signingSecret } = await f.json(
@@ -457,13 +523,51 @@ describe("event sources", () => {
 
   test("pasted Linear secrets verify Linear's signature", async () => {
     const f = await fixture({ enabled: true });
-    const missing = await f.app.request(f.sources, {
+    const linearSecret = "lin_wh_0123456789abcdef";
+    // Linear shows its secret only after it has the URL: the source waits for it.
+    const waiting = await f.app.request(f.sources, {
       method: "POST",
       headers: f.owner.headers,
-      body: JSON.stringify({ kind: "webhook", adapter: "linear", name: "Linear" }),
+      body: JSON.stringify({ kind: "webhook", adapter: "linear", name: "Linear (setup)" }),
     });
-    expect(missing.status).toBe(400);
-    const linearSecret = "lin_wh_0123456789abcdef";
+    expect(waiting.status).toBe(201);
+    const pending = (await f.json(waiting)).source;
+    expect(pending).toMatchObject({
+      status: "blocked",
+      visibility: "private",
+      awaitingSigningSecret: true,
+    });
+    expect(pending.statusReason).toContain("Paste the signing secret Linear shows");
+    const early = await f.app.request(new URL(pending.webhookUrl).pathname, {
+      method: "POST",
+      headers: { "content-type": "application/json", "linear-event": "Issue" },
+      body: JSON.stringify({ action: "create", type: "Issue" }),
+    });
+    expect(early.status).not.toBe(200);
+    const { deliveries } = await f.json(
+      await f.app.request(`${f.sources}/${pending.id}/deliveries`, { headers: f.owner.headers }),
+    );
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).toMatchObject({ status: "rejected", bodyRetained: false });
+    expect(deliveries[0].reason).toContain("No signing secret yet");
+    const turnedOn = await f.app.request(`${f.sources}/${pending.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ status: "active" }),
+    });
+    expect(turnedOn.status).toBe(422);
+    const pasted = await f.app.request(`${f.sources}/${pending.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ signingSecret: linearSecret }),
+    });
+    expect(pasted.status).toBe(200);
+    expect(await f.json(pasted)).toMatchObject({
+      status: "active",
+      statusReason: null,
+      awaitingSigningSecret: false,
+    });
+
     const created = await f.app.request(f.sources, {
       method: "POST",
       headers: f.owner.headers,

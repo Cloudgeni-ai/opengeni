@@ -116,6 +116,26 @@ export function sessionHasUpcomingSchedule(
   return session.hasUpcomingSchedules ?? session.hasSchedules === true;
 }
 
+/**
+ * What an automation posting into this chat is waiting for: an event that can
+ * still arrive, or the schedule's next run. An event wins when both apply,
+ * because it can start a run at any moment; null when nothing will.
+ */
+export type SessionAutomationWait = "event" | "schedule";
+
+export function sessionAutomationWait(
+  session: Pick<SessionListRow, "hasSchedules" | "hasUpcomingSchedules" | "waitingForEvents">,
+): SessionAutomationWait | null {
+  if (session.waitingForEvents === true) return "event";
+  return sessionHasUpcomingSchedule(session) ? "schedule" : null;
+}
+
+/** How a chat's automation wait reads in a tooltip, hover card or announcement. */
+export const SESSION_AUTOMATION_WAIT_LABEL: Record<SessionAutomationWait, string> = {
+  event: "Waiting for an event",
+  schedule: "On a schedule",
+};
+
 export function hasActiveEffectiveControl(session: SessionListRow): boolean {
   return (session.effectiveControl?.state ?? "active") === "active";
 }

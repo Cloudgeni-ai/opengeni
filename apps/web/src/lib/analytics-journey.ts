@@ -15,6 +15,7 @@ const PAGES = new Set([
   "state",
   "memory",
   "schedules",
+  "automations",
   "artifacts",
   "settings",
   "organization",
@@ -30,6 +31,7 @@ const PAGES = new Set([
   "read-only-chats",
   "inbox",
   "sites",
+  "meetings",
 ]);
 // Top-level routes outside a workspace, by exact path shape. A concrete id in
 // the path is never reported for these; everything unlisted is "other".

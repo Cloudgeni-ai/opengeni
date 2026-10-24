@@ -210,6 +210,18 @@ export async function rearmScheduledTaskEventsOnResume(
   await rearmScheduledTaskEvents(tx, task.workspaceId, task.id);
 }
 
+/**
+ * A run-once automation that already ran. It stays active but nothing starts
+ * it, so turning it on again (resume) re-arms it like a paused one.
+ */
+export async function scheduledTaskFinishedOnce(
+  db: Database,
+  task: Pick<ScheduledTask, "workspaceId" | "id">,
+): Promise<boolean> {
+  const events = (await getScheduledTaskEvents(db, task.workspaceId, [task.id])).get(task.id);
+  return Boolean(events?.once && events.completedAt);
+}
+
 /** Attach each automation's event triggers to a read. */
 export async function withScheduledTaskEvents(
   db: Database,

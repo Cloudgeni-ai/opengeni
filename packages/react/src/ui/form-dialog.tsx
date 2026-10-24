@@ -721,7 +721,7 @@ export function FormDialog({
    FormPage and FormInline: the same frame without an overlay.
    -------------------------------------------------------------------------- */
 
-/** A full-page create form, for example /schedules/new. The footer sticks to the bottom. */
+/** A full-page create form, for example /automations/new. The footer sticks to the bottom. */
 export function FormPage(props: Omit<FormFrameProps, "variant">) {
   return <FormFrame variant="page" {...props} />;
 }
