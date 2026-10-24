@@ -392,6 +392,7 @@ export const englishMessages = {
   "automations.panel.deleteBody": "It stops running. Chats from earlier runs stay.",
   "automations.panel.deleteConfirm": "Delete automation",
   "automations.panel.deleteTitle": "Delete “{name}”?",
+  "automations.panel.deleting": "Deleting…",
   "automations.panel.description": "Run the agent on a schedule, or when something happens.",
   "automations.panel.descriptionChat":
     "Pick this chat up again on a schedule, or when something happens.",
@@ -1781,6 +1782,7 @@ export const englishMessages = {
     "{product} is updating, so that may not have gone through. Try again in a moment.",
   "lib.transientRetry.opengeniIsUpdatingWeLl":
     "{product} is updating. We'll reconnect automatically.",
+  "list.loading": "Loading {label}",
   "machineCard.active": "Active",
   "machineCard.aSecondCopyOfThe":
     "A second copy of the agent is running on this machine. It's kept out, so work isn't affected. Stop the extra copy.",

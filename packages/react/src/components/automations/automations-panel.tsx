@@ -21,6 +21,7 @@ import type {
 } from "@opengeni/sdk";
 
 import { useOpenGeniText } from "../../messages/runtime";
+import { usePortalTokenSource } from "../../lib/use-portal-token-style";
 import { apiErrorFacts } from "../../ui/api-error";
 import { Button } from "../../ui/button";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
@@ -29,6 +30,7 @@ import { EmptyState } from "../../ui/empty-state";
 import { ErrorMessage } from "../../ui/error-message";
 import { ListRow, ListRowSkeleton, RowList } from "../../ui/list-row";
 import { LogoTile } from "../../ui/logo-tile";
+import { StandaloneOverlayRoot } from "../../ui/portal-container";
 import { RelativeTime, useMinuteNow } from "../../ui/relative-time";
 import { Skeleton } from "../../ui/skeleton";
 import { StatusBadge, type ProductStatus } from "../../ui/status-badge";
@@ -142,6 +144,8 @@ export function AutomationsPanel({
 }: AutomationsPanelProps) {
   const t = useOpenGeniText();
   const title = titleProp === undefined ? t("automations.panel.title") : titleProp;
+  /** The panel's root: its overlays copy its tokens, so they match it outside the host's tree. */
+  const { source: root, ref: rootRef } = usePortalTokenSource<HTMLElement>();
   const now = new Date(useMinuteNow());
   const [view, setView] = useState<View>({ kind: "list" });
   const [notice, setNotice] = useState<Notice>(null);
@@ -501,9 +505,11 @@ export function AutomationsPanel({
   return (
     <TooltipProvider>
       <section
+        ref={rootRef}
         aria-label={title ?? t("automations.panel.title")}
-        className={cn("og-automations flex min-w-0 flex-col gap-4", className)}
+        className={cn("og-root og-automations flex min-w-0 flex-col gap-4", className)}
       >
+        <StandaloneOverlayRoot source={root}>
         {view.kind === "list" && (title !== null || (tasks?.length ?? 0) > 0) ? (
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-4 gap-y-2">
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -541,9 +547,11 @@ export function AutomationsPanel({
           title={t("automations.panel.deleteTitle", { name: deleting?.name ?? "" })}
           description={t("automations.panel.deleteBody")}
           confirmLabel={t("automations.panel.deleteConfirm")}
+          pendingLabel={t("automations.panel.deleting")}
           cancelLabel={t("automations.form.cancel")}
           onConfirm={() => (deleting ? remove(deleting) : true)}
         />
+        </StandaloneOverlayRoot>
       </section>
     </TooltipProvider>
   );
