@@ -76019,10 +76019,16 @@ export async function claimSessionWorkForAttempt(
               .find((causalTurnId): causalTurnId is string => causalTurnId !== null);
           // The account intent this inference continues: the receiving
           // context's, or the causal turn's in this session. A scheduled
-          // occurrence was resolved at its own admission, and another agent's
-          // message or Steer acts with its sender's exact accounts.
+          // occurrence was resolved at its own admission. Another agent's
+          // message or Steer outside a receiving context acts with its
+          // sender's exact accounts; delivered into this session's receiving
+          // context it runs on that context's authority, so it continues the
+          // context's intent like any other input there. Copying the context's
+          // accounts instead would keep a chat driven by agent messages on the
+          // accounts its person had at their last message, including a
+          // superseded connection generation after a reconnect.
           let continuedConnectionAccountIntent: ConnectionAccountIntent | null =
-            receiverContext && !scheduledTaskRunId && !agentCommandUpdate
+            receiverContext && !scheduledTaskRunId
               ? parseConnectionAccountIntent(receiverContext.connectionAccountIntent)
               : null;
           if (causalHumanTurnId) {
