@@ -65,6 +65,7 @@
     "@opengeni/storage": "workspace:*",
     "@opengeni/tool-gateway": "workspace:*",
     "@opengeni/vaults": "workspace:*",
+    "@opengeni/vaults-bitwarden": "workspace:*",
     "@opengeni/vaults-keeper": "workspace:*",
     "@opengeni/vaults-onepassword": "workspace:*",
     "@opengeni/vaults-protonpass": "workspace:*",

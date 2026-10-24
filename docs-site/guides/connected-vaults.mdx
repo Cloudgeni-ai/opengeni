@@ -17,8 +17,10 @@ backend needs to mint and renew access for each run. You can use both.
   are supported; updates are not. The deployment operator installs the official CLI.
 - **Keeper Secrets Manager:** connect a one-time setup token. Shared folders
   become vaults. No Archive or permanent-delete action is exposed.
-- **Bitwarden Password Manager:** connect your customer-controlled bridge.
-  The master password and unlocked CLI session stay with the customer. This is
+- **Bitwarden Password Manager:** connect bitwarden.com, bitwarden.eu, a
+  self-hosted server or Vaultwarden with the account's personal API key and its
+  master password, which is used once and never stored. My vault and each
+  organization collection become vaults. Nothing needs to be installed. This is
   not Bitwarden Secrets Manager.
 - **Your product:** connect a signed external-vault endpoint. One connection
   can provide multiple vaults with their own capabilities.

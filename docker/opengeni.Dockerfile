@@ -49,7 +49,7 @@ COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
 COPY packages/vaults/package.json packages/vaults/package.json
-COPY packages/vaults-bitwarden-bridge/package.json packages/vaults-bitwarden-bridge/package.json
+COPY packages/vaults-bitwarden/package.json packages/vaults-bitwarden/package.json
 COPY packages/vaults-keeper/package.json packages/vaults-keeper/package.json
 COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/package.json
 COPY packages/vaults-protonpass/package.json packages/vaults-protonpass/package.json

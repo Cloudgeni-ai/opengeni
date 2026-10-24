@@ -96,9 +96,7 @@ export function isVaultProviderWireMutation(
 }
 
 /** Remote providers that use this protocol. */
-export const VaultProviderWireProvider = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["external", "bitwarden"]),
-);
+export const VaultProviderWireProvider = /* @__PURE__ */ defineSchema(() => z.enum(["external"]));
 export type VaultProviderWireProvider = z.infer<typeof VaultProviderWireProvider>;
 
 // oxlint-disable-next-line no-control-regex
