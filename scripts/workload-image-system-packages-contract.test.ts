@@ -146,7 +146,9 @@ describe("workload image system package contract", () => {
   test("keeps upload conversion on the existing control worker and voice decoding local", async () => {
     const api = await readFile(resolve(root, "apps/api/src/index.ts"), "utf8");
     expect(api).toContain('temporal.workflow.start("documentIndexWorkflow"');
-    expect(api).toContain("documentIndexer: workflowClient.documentIndexer");
+    expect(api).toContain(
+      'documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal")',
+    );
     const control = await readFile(resolve(root, "apps/worker/src/activities-control.ts"), "utf8");
     expect(control).toContain("createDocumentActivities(services, resolveDocumentServices)");
     const segmenter = await readFile(
