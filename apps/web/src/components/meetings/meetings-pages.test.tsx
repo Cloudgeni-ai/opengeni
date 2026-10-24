@@ -259,9 +259,30 @@ describe("Live transcript", () => {
         ...view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
       ].find((element) => element.closest("label")?.textContent?.includes("Live transcript"));
       expect(box?.checked).toBe(true);
+      // Switched on, it says what it costs.
+      expect(view.container.textContent).toContain("The live transcript adds about $");
     } finally {
       await view.unmount();
     }
+  });
+
+  test("streamed pieces are joined without doubled or stray punctuation", async () => {
+    const { tidyLiveText, tidyPartialText } = await import("./live-transcript");
+    expect(tidyLiveText(["It's between you…", ". And the dog ."])).toBe(
+      "It's between you. And the dog.",
+    );
+    expect(tidyLiveText(["Well...", "maybe,,", "yes!!"])).toBe("Well... maybe, yes!");
+    expect(tidyPartialText("so we were thinking…")).toBe("so we were thinking");
+  });
+
+  test("unavailable live text says why and that nothing is lost", async () => {
+    const { liveUnavailableText } = await import("./recorder-panel");
+    const text = liveUnavailableText([
+      { error: { code: "quota_exceeded", message: "The live transcript stopped" } },
+    ]);
+    expect(text).toContain("no credit left");
+    expect(text).toContain("still recorded and transcribed");
+    expect(liveUnavailableText([{ error: null }])).not.toContain("  ");
   });
 
   test("turns from one track read as one turn, in time order", async () => {

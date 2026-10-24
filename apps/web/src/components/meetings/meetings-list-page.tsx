@@ -86,7 +86,7 @@ export function MeetingsListPage({
   const { client } = useRecordingsClient(override);
   const { recorder, finished } = useMeetingRecorder();
   const models = useRecordingModels(override);
-  const liveAvailable = models.liveModels.some((entry) => entry.available);
+  const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
   const narrow = useNarrow();
   const [pendingDelete, setPendingDelete] = useState<Recording | null>(null);
 
@@ -120,7 +120,11 @@ export function MeetingsListPage({
         <RecorderPanel
           recorder={recorder}
           onStopped={onOpen}
-          liveTranscript={liveAvailable ? { defaultOn: liveTranscriptDefault } : null}
+          liveTranscript={
+            liveModel
+              ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }
+              : null
+          }
         />
         {recorder && recorder.recovered.length > 0 ? (
           <Notice tone="info">
@@ -222,7 +226,7 @@ export function MeetingsListPage({
                         ? [
                             <RelativeTime key="recorded" date={recording.startedAt} />,
                             recording.durationMilliseconds > 0
-                              ? `${formatDuration(recording.durationMilliseconds)} long`
+                              ? formatDuration(recording.durationMilliseconds)
                               : null,
                           ].filter(Boolean)
                         : undefined

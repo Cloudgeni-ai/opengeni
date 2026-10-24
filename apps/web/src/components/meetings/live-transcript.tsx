@@ -52,6 +52,28 @@ export function groupLiveTurns(lines: readonly LiveTranscriptLine[]): LiveTurn[]
 
 const NO_PARTIALS: readonly { trackNumber: number; text: string }[] = [];
 
+/**
+ * Joins a turn's pieces into readable text. Streaming providers send pieces
+ * that end in a trailing ellipsis while they wait, or a space before a full
+ * stop; joined naively those read as "between you…." or "dog .".
+ */
+export function tidyLiveText(pieces: readonly string[]): string {
+  return pieces
+    .map((piece) => piece.trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+([.,!?;:])/g, "$1")
+    .replace(/(?:…|\.{3})(?=[.,!?;:…])/g, "")
+    .replace(/([,!?;:])\1+/g, "$1")
+    .replace(/(?<!\.)\.\.(?!\.)/g, ".")
+    .replace(/\s{2,}/g, " ");
+}
+
+/** Words still being heard, without the provider's "still listening" ellipsis. */
+export function tidyPartialText(text: string): string {
+  return tidyLiveText([text]).replace(/\s*(?:…|\.{3})$/, "");
+}
+
 export function LiveTranscript({
   lines,
   partials = NO_PARTIALS,
@@ -74,7 +96,9 @@ export function LiveTranscript({
   className?: string;
 }) {
   const turns = useMemo(() => groupLiveTurns(lines), [lines]);
-  const heard = partials.filter((partial) => partial.text.trim());
+  const heard = partials
+    .map((partial) => ({ ...partial, text: tidyPartialText(partial.text) }))
+    .filter((partial) => partial.text);
   // Words still being heard from whoever spoke last continue their turn.
   const lastTrack = turns.at(-1)?.trackNumber;
   const continuing = heard.find((partial) => partial.trackNumber === lastTrack) ?? null;
@@ -117,32 +141,37 @@ export function LiveTranscript({
   };
 
   const statusLine = status ? (
-    <p
-      className={cn(
-        "text-xs leading-4",
-        status.tone === "waiting" ? "font-medium text-fg-label" : "text-fg-muted",
-      )}
-      aria-live="polite"
-    >
-      {status.tone === "waiting" ? (
+    status.tone === "waiting" ? (
+      // A dropped connection is a state of the whole box, so it reads as a banner over it.
+      <p
+        className="flex items-start gap-2 rounded-[10px] border border-status-waiting/40 bg-status-waiting/10 px-3 py-2 text-xs leading-4.5 font-medium text-fg-label"
+        aria-live="polite"
+      >
         <span
           aria-hidden="true"
-          className="mr-1.5 inline-block size-1.5 rounded-full bg-status-waiting align-middle"
+          className="mt-1.5 inline-block size-1.5 shrink-0 animate-pulse rounded-full bg-status-waiting motion-reduce:animate-none"
         />
-      ) : null}
-      {status.text}
-    </p>
+        {status.text}
+      </p>
+    ) : (
+      <p className="text-xs leading-4 text-fg-muted" aria-live="polite">
+        {status.text}
+      </p>
+    )
   ) : null;
 
   return (
     <section aria-label="Live transcript" className={cn("grid min-w-0 gap-2", className)}>
       {heading ? (
-        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <h3 className="text-xs leading-4 font-medium text-fg-label">
-            Live transcript <span className="font-normal text-fg-muted">· preview</span>
-          </h3>
-          {statusLine}
-        </div>
+        <>
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+            <h3 className="text-xs leading-4 font-medium text-fg-label">
+              Live transcript <span className="font-normal text-fg-muted">· preview</span>
+            </h3>
+            {status?.tone === "muted" ? statusLine : null}
+          </div>
+          {status?.tone === "waiting" ? statusLine : null}
+        </>
       ) : (
         statusLine
       )}
@@ -175,9 +204,9 @@ export function LiveTranscript({
                     </span>
                   </div>
                   <p className="text-sm leading-5 text-pretty text-fg">
-                    {turn.texts.join(" ")}
+                    {tidyLiveText(turn.texts)}
                     {continuing && index === turns.length - 1 ? (
-                      <span className="text-fg-muted"> {continuing.text.trim()}</span>
+                      <span className="text-fg-muted"> {continuing.text}</span>
                     ) : null}
                   </p>
                 </li>
@@ -189,8 +218,9 @@ export function LiveTranscript({
                     <span className="text-xs leading-4 font-semibold text-fg">
                       {speakerName(partial.trackNumber)}
                     </span>
+                    <span className="text-xs leading-4 text-fg-muted">now</span>
                   </div>
-                  <p className="text-sm leading-5 text-fg-muted">{partial.text.trim()}</p>
+                  <p className="text-sm leading-5 text-fg-muted">{partial.text}</p>
                 </li>
               ))}
             </ol>
@@ -222,7 +252,10 @@ export function liveStatus(
     return { text: "Live preview unavailable. The recording is unaffected.", tone: "muted" };
   }
   if (tracks.some((track) => track.state === "reconnecting")) {
-    return { text: "Reconnecting the preview", tone: "waiting" };
+    return {
+      text: "Reconnecting the live text. The recording itself is unaffected, and its full transcript comes after you stop.",
+      tone: "waiting",
+    };
   }
   if (tracks.every((track) => track.state === "connecting")) {
     return { text: "Connecting", tone: "muted" };
