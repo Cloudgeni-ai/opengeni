@@ -1744,6 +1744,11 @@ Summary collection IDs use that same body-visibility helper with only the
 `groupIds` input; they do not clone retained content or inspect discarded
 relationships. Full entry bodies keep their complete visibility projection.
 
+The recursive visibility statement runs through PL/pgSQL generic-plan reuse
+without caching rows or authority. Its scoped plan setting restores on return.
+Root and collection membership retain their original per-member visibility
+checks and position before ranking and pagination.
+
 Canonical: [`knowledge.md`](knowledge.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),
 [`image-generation.md`](image-generation.md),
