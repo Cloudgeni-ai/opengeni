@@ -38122,6 +38122,7 @@
     "@opengeni/react/ui/portal-container": {
       "containedPortal": "value",
       "PortalContainerProvider": "value",
+      "StandaloneOverlayRoot": "value",
       "usePortalContainer": "value"
     },
     "@opengeni/react/ui/relative-time": {
