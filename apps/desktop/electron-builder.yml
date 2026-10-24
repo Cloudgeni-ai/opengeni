@@ -60,7 +60,7 @@ mac:
   extendInfo:
     NSMicrophoneUsageDescription: Opengeni uses the microphone when you dictate, talk to an agent or record a meeting.
     NSCameraUsageDescription: Opengeni uses the camera when you share a photo with an agent.
-    NSAudioCaptureUsageDescription: Opengeni records other apps' audio when you include it in a meeting recording.
+    NSAudioCaptureUsageDescription: Opengeni records your computer's audio, such as the other people in a call, when you include it in a meeting recording.
   notarize: true
 dmg:
   writeUpdateInfo: false

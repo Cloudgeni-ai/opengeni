@@ -26,7 +26,7 @@ export function recorderErrorText(
 ): { title: string; body: string } {
   if (systemAudioKind === "desktop" && error.code === "system_audio_unavailable") {
     // The desktop app's own sentence says what to do on this computer.
-    return { title: "Can't record other apps' audio", body: error.message };
+    return { title: "Can't record computer audio", body: error.message };
   }
   switch (error.code) {
     case "microphone_denied":
@@ -81,11 +81,31 @@ export function uploadLine(recorder: MeetingRecorder, online: boolean): string |
   }
   if (recorder.state === "paused") return "Nothing is recorded while paused.";
   if (capturing) {
-    return "You can use other pages while it records. The audio is saved as you go, so a dropped connection loses nothing.";
+    return `${capturingWhat(recorder)} ${
+      recorder.systemAudioKind === "desktop"
+        ? "You can keep using other apps and pages. The audio is saved as you go."
+        : "You can use other pages while it records. The audio is saved as you go, so a dropped connection loses nothing."
+    }`;
   }
   if (!upload || recorder.state === "starting") return null;
   if (upload.pendingChunks === 0) return "Finishing the upload.";
   return `Uploading ${upload.pendingChunks} ${upload.pendingChunks === 1 ? "piece" : "pieces"} of audio.`;
+}
+
+/** What this recording captures, as a sentence. */
+function capturingWhat(recorder: MeetingRecorder): string {
+  const sources = new Set(recorder.tracks.map((track) => track.source));
+  const system = sources.has("system");
+  if (!sources.has("microphone")) {
+    return system ? `Recording ${systemAudioNoun(recorder.systemAudioKind)}.` : "Recording.";
+  }
+  return system
+    ? `Recording your microphone and ${systemAudioNoun(recorder.systemAudioKind)}.`
+    : "Recording your microphone only.";
+}
+
+function systemAudioNoun(systemAudioKind: MeetingRecorder["systemAudioKind"]): string {
+  return systemAudioKind === "desktop" ? "your computer's audio" : "the tab's audio";
 }
 
 /** True while audio is waiting on this device because the connection is down. */
@@ -157,7 +177,7 @@ function LevelMeter({
 
 function trackLabel(source: string, systemAudioKind: MeetingRecorder["systemAudioKind"]): string {
   if (source === "microphone") return "Microphone";
-  if (source === "system") return systemAudioKind === "desktop" ? "Other apps" : "Tab audio";
+  if (source === "system") return systemAudioKind === "desktop" ? "Computer audio" : "Tab audio";
   return "Audio";
 }
 
@@ -174,7 +194,7 @@ export function RecorderPanel({
   const tabAudioId = useId();
   const [title, setTitle] = useState("");
   const desktopAudio = recorder?.systemAudioKind === "desktop";
-  // In the desktop app other apps' audio is on unless turned off; a browser's
+  // In the desktop app computer audio is on unless turned off; a browser's
   // share prompt is something to opt into.
   const [tabAudioChoice, setTabAudio] = useState<boolean | null>(null);
   const tabAudio = tabAudioChoice ?? desktopAudio;
@@ -338,7 +358,7 @@ export function RecorderPanel({
               disabled={starting}
               onCheckedChange={setTabAudio}
             />
-            {desktopAudio ? "Include other apps' audio" : "Include a tab's audio"}
+            {desktopAudio ? "Include computer audio" : "Include a tab's audio"}
           </label>
         ) : null}
         <Button
@@ -350,25 +370,6 @@ export function RecorderPanel({
           {starting ? "Starting" : "Start recording"}
         </Button>
       </form>
-      {!error ? (
-        <p className="px-1 text-xs leading-4.5 text-fg-muted" aria-live="polite">
-          {desktopAudio
-            ? starting
-              ? "Starting. Allow the microphone, and recording other apps' audio, if your computer asks."
-              : tabAudio
-                ? "Records your microphone and what other apps play, so everyone in a call is heard. Let people know you're recording."
-                : "Records your microphone only. Include other apps' audio to hear everyone in a call. Let people know you're recording."
-            : starting
-              ? tabAudio
-                ? "Starting. Allow the microphone if your browser asks, then pick the meeting tab and turn on Share tab audio."
-                : "Starting. Allow the microphone if your browser asks."
-              : tabAudio
-                ? "Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio."
-                : recorder?.systemAudioSupported
-                  ? "Records your microphone. For a call in another browser tab, such as Meet, Teams or Zoom on the web, include its audio to hear everyone. Let people know you're recording."
-                  : "Records your microphone. Let people know you're recording."}
-        </p>
-      ) : null}
       {error ? (
         <Notice
           tone="failed"
@@ -378,6 +379,23 @@ export function RecorderPanel({
           {recorderErrorText(error, recorder?.systemAudioKind).body}
         </Notice>
       ) : null}
+      <p className="px-1 text-xs leading-4.5 text-fg-muted" aria-live="polite">
+        {desktopAudio
+          ? starting
+            ? "Starting. Allow the microphone, and recording computer audio, if your computer asks."
+            : tabAudio
+              ? "Records your microphone and everything your computer plays, including the call, music and alerts. Tell everyone on the call you're recording."
+              : "Microphone only, so people on the call won't be heard. Tell everyone on the call you're recording."
+          : starting
+            ? tabAudio
+              ? "Starting. Allow the microphone if your browser asks, then pick the meeting tab and turn on Share tab audio."
+              : "Starting. Allow the microphone if your browser asks."
+            : tabAudio
+              ? "Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio."
+              : recorder?.systemAudioSupported
+                ? "Records your microphone. For a call in another browser tab, such as Meet, Teams or Zoom on the web, include its audio to hear everyone. Tell everyone on the call you're recording."
+                : "Records your microphone. Tell everyone you're recording."}
+      </p>
     </section>
   );
 }

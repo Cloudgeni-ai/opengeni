@@ -43,7 +43,7 @@ function fakeRecorder(
           {
             trackNumber: 1,
             source: "system",
-            label: audio === "desktop" ? "Other apps' audio" : "Meet tab",
+            label: audio === "desktop" ? "Computer audio" : "Meet tab",
           },
         ]
       : [],

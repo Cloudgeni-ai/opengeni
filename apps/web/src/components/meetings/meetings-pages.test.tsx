@@ -178,7 +178,7 @@ describe("Recorder errors", () => {
       message: "Turn on System Audio Recording for Opengeni in System Settings.",
     } as Parameters<typeof recorderErrorText>[0];
     expect(recorderErrorText(helper, "desktop")).toEqual({
-      title: "Can't record other apps' audio",
+      title: "Can't record computer audio",
       body: "Turn on System Audio Recording for Opengeni in System Settings.",
     });
   });

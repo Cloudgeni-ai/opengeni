@@ -1418,14 +1418,14 @@ export function desktopSystemAudioSource(
         const message =
           error && typeof error === "object" && "message" in error
             ? String((error as { message: unknown }).message)
-            : "This computer can't record other apps' audio.";
+            : "This computer can't record its own audio.";
         throw new RecorderCaptureError("system_audio_unavailable", message);
       }
       for (const [id, samples] of early.splice(0)) if (id === captureId) write(samples);
       const id = captureId;
       return {
         stream: new MediaStream([generator]),
-        label: "Other apps' audio",
+        label: "Computer audio",
         stop: () => {
           finish();
           void capture.stop(id).catch(() => undefined);

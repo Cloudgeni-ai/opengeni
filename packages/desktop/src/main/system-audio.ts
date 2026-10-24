@@ -65,12 +65,12 @@ export function systemAudioUsable(
 }
 
 const MESSAGES: Record<DesktopSystemAudioErrorCode, string> = {
-  unavailable: "This computer can't record other apps' audio.",
+  unavailable: "This computer can't record its own audio.",
   permission_denied:
-    "Recording other apps' audio isn't allowed. Allow this app under System Settings > Privacy & Security > Screen & System Audio Recording, then try again.",
+    "Recording computer audio isn't allowed. Allow this app under System Settings > Privacy & Security > Screen & System Audio Recording, then try again.",
   sound_server_unavailable:
-    "Other apps' audio can't be recorded because no sound server (PulseAudio or PipeWire) is running.",
-  capture_failed: "Recording other apps' audio stopped unexpectedly.",
+    "Computer audio can't be recorded because no sound server (PulseAudio or PipeWire) is running.",
+  capture_failed: "Recording computer audio stopped unexpectedly.",
 };
 
 function captureError(code: string | undefined, detail?: string): DesktopSystemAudioError {
