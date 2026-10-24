@@ -8,11 +8,13 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
   const pr = workflow("pr-ci");
   expect(pr.concurrency.queue).toBe("max");
   expect(pr.concurrency["cancel-in-progress"]).toBe(false);
-  expect(pr.concurrency.group).toStartWith("pr-ci-fanout-v2-${{");
+  expect(pr.concurrency.group).toBe(
+    "pr-ci-${{ github.event.pull_request.number || inputs.pr_number }}",
+  );
   expect(pr.permissions).toEqual({ contents: "read", actions: "read", "pull-requests": "read" });
   expect(pr.on.pull_request.branches).toEqual(["main"]);
   expect(
-    pr.jobs.plan.steps.some((s: any) => s.run === "bun scripts/ci/github-pr-ci.ts priority pr"),
+    pr.jobs.plan.steps.some((s: any) => s.run === "bun scripts/ci/github-pr-ci.ts admit-fast"),
   ).toBe(true);
   expect(
     workflow("batch-ci").jobs.plan.steps.some(
@@ -20,49 +22,33 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
     ),
   ).toBe(true);
   expect(workflow("batch-ci").concurrency["cancel-in-progress"]).toBe(false);
-  // plan completes before contracts + the two unit shards; ready joins them.
-  expect(Object.keys(pr.jobs).sort()).toEqual(["contracts", "plan", "ready", "units"]);
-  expect(pr.jobs.contracts.needs).toBe("plan");
-  expect(pr.jobs.units.needs).toBe("plan");
-  expect(pr.jobs.units.strategy.matrix.include).toBe(
-    "${{ fromJSON(needs.plan.outputs.unit_matrix) }}",
-  );
-  expect(pr.jobs.plan.steps.find((s: any) => s.id === "plan").run).toContain(
-    'unit_matrix=[{"index":0,"total":2},{"index":1,"total":2}]',
-  );
+  expect(Object.keys(pr.jobs).sort()).toEqual(["fast", "plan", "ready"]);
+  expect(pr.jobs.fast.needs).toBe("plan");
+  expect(pr.jobs.fast.strategy).toBeUndefined();
+  expect(pr.jobs.plan.concurrency.group).toBe("pr-ci-admission-v3");
+  expect(pr.jobs.fast.concurrency).toBeUndefined();
 });
 
-test("actual concurrency expression has four stable buckets shared by PR and dispatch", () => {
+test("actual concurrency expression isolates PRs and matches dispatch", () => {
   const group = String(workflow("pr-ci").concurrency.group);
   const expression = group.slice(group.indexOf("${{") + 3, group.lastIndexOf("}}"));
   // Evaluate this authored expression's restricted function subset, not a
   // second implementation of the bucket algorithm. actionlint checks GHA syntax.
-  const evaluate = new Function(
-    "github",
-    "inputs",
-    "format",
-    "endsWith",
-    `return (${expression});`,
-  );
+  const evaluate = new Function("github", "inputs", `return (${expression});`);
   const bucket = (number: number, dispatch: boolean) =>
     evaluate(
       { event: { pull_request: { number: dispatch ? undefined : number } } },
       { pr_number: dispatch ? String(number) : undefined },
-      (_template: string, value: unknown) => String(value),
-      (value: string, suffix: string) => value.endsWith(suffix),
     );
   const buckets = new Set<string>();
-  for (let number = 1; number <= 10000; number++) {
-    const actual = bucket(number, false);
-    expect(actual).toBe(String((number % 10) % 4));
-    expect(bucket(number, true)).toBe(actual);
+  for (let number = 1; number <= 1000; number++) {
+    const actual = String(bucket(number, false));
+    expect(actual).toBe(String(number));
+    expect(String(bucket(number, true))).toBe(actual);
     buckets.add(actual);
   }
-  expect([...buckets].sort()).toEqual(["0", "1", "2", "3"]);
-  // Contracts + two units are the peak; plan and ready never overlap them.
-  const maxPrJobs = buckets.size * 3;
-  expect(maxPrJobs).toBe(12);
-  expect(60 - 28 - 18 - maxPrJobs).toBe(2);
+  expect(buckets.size).toBe(1000);
+  expect(28 + 18 + 9 + 4 + 1).toBe(60);
 });
 
 test("Queue ready entry and labeling do not wait for PR CI", () => {
@@ -78,32 +64,30 @@ test("Queue ready entry and labeling do not wait for PR CI", () => {
 
 test("required aggregate covers docs and every selected job at exact head", () => {
   const { jobs } = workflow("pr-ci");
-  expect(jobs.contracts.steps.some((s: any) => s.run === "bun run lint")).toBe(true);
+  expect(jobs.fast.steps.some((s: any) => s.run === "bun run lint")).toBe(true);
   expect(jobs.ready.name).toBe("PR CI");
-  expect(jobs.ready.needs).toEqual(["plan", "contracts", "units"]);
+  expect(jobs.ready.needs).toEqual(["plan", "fast"]);
   expect(jobs.ready.if).toBe("${{ always() }}");
   const aggregate = jobs.ready.steps[0].run;
-  for (const required of [
-    'test "$PLAN" = success',
-    'test "$CONTRACTS" = success',
-    'test "$UNITS" = success',
-    'test "$UNITS" = skipped',
-  ])
+  for (const required of ['test "$PLAN" = success', 'test "$FAST" = success'])
     expect(aggregate).toContain(required);
-  expect(jobs.contracts.if).toBeUndefined();
-  const commands = jobs.contracts.steps.map((s: any) => s.run ?? "").join("\n");
+  expect(jobs.fast.if).toBeUndefined();
+  const commands = jobs.fast.steps.map((s: any) => s.run ?? "").join("\n");
   expect(commands).toContain("run-typecheck-plan.ts");
-  expect(commands).toContain("run-guards-plan.ts");
+  expect(commands).not.toContain("run-guards-plan.ts");
   expect(commands).not.toContain("--exclude generated-fonts");
   expect(commands).not.toContain("--exclude lint");
   expect(readFileSync("scripts/ci/impact.ts", "utf8")).toContain('"generated-fonts"');
-  for (const name of ["contracts", "units"]) {
+  for (const name of ["fast"]) {
     expect(jobs[name]["runs-on"]).toBe("ubuntu-latest");
     const checkout = jobs[name].steps.find((s: any) => s.uses?.startsWith("actions/checkout@"));
     expect(checkout.with.ref).toBe("${{ needs.plan.outputs.head }}");
     expect(checkout.with["persist-credentials"]).toBe(false);
   }
-  const units = jobs.units.steps.find((s: any) => s.name === "Test every selected unit file");
+  const units = jobs.fast.steps.find((s: any) => s.name === "Test every selected unit file");
+  expect(units.if).toBe(
+    "${{ needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.unit_count != '0' }}",
+  );
   expect(units.env.OPENGENI_REQUIRE_REAL_DB).toBe("1");
   expect(units.run).toContain("batch-setup.ts postgres");
   expect(units.run).toContain("run-unit-shard.ts");

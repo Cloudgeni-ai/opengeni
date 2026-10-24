@@ -1,4 +1,5 @@
 import { appendFileSync, readFileSync } from "node:fs";
+import { classifyPrWorkflow, fastBudget, type FastObservation } from "./pr-fast-budget";
 
 class IncompleteInventory extends Error {}
 
@@ -97,7 +98,7 @@ export async function runPrCiCommand(
     token = env.GITHUB_TOKEN;
   if (!repo || !token) throw Error("Repository and GitHub token required");
   const admissionStartedAt = timing.now();
-  const deadline = admissionStartedAt + 5 * 60 * 60 * 1000;
+  const deadline = admissionStartedAt + (action === "admit-fast" ? 110 : 300) * 60 * 1000;
   const prPriorityYieldDeadline = admissionStartedAt + 15 * 60 * 1000;
   let readAfter = 0;
   async function api(path: string, method = "GET", body?: unknown): Promise<any> {
@@ -173,6 +174,70 @@ export async function runPrCiCommand(
   const output = (name: string, value: string) => {
     if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `${name}=${value}\n`);
   };
+  if (action === "admit-fast") {
+    const ownRun = Number(env.GITHUB_RUN_ID);
+    if (!Number.isSafeInteger(ownRun) || ownRun <= 0) throw Error("Run identity required");
+    const definitions = new Map<string, ReturnType<typeof classifyPrWorkflow>>();
+    while (timing.now() < deadline) {
+      try {
+        const observationStartedAt = timing.now();
+        const all = new Map<number, Run>();
+        for (const status of ["queued", "in_progress", "waiting", "pending", "requested"])
+          for (const run of await pages(`actions/runs?status=${status}`, "workflow_runs"))
+            all.set(run.id, run);
+        if (all.size > 256) throw new IncompleteInventory("Active run inventory exceeds256");
+        const observations: FastObservation[] = [];
+        for (const run of all.values()) {
+          if (run.id === ownRun || run.status === "completed") continue;
+          if (!Number.isSafeInteger(run.id) || !Number.isSafeInteger(run.run_attempt))
+            throw new IncompleteInventory("Invalid run identity");
+          const path = run.path.split("@")[0];
+          let kind: FastObservation["kind"] = "other";
+          if (path === ".github/workflows/pr-ci.yml") {
+            if (!/^[a-f0-9]{40}$/.test(run.head_sha))
+              throw new IncompleteInventory("Invalid PR source identity");
+            if (!definitions.has(run.head_sha)) {
+              const source = await api(`contents/.github/workflows/pr-ci.yml?ref=${run.head_sha}`);
+              if (source.encoding !== "base64" || source.size > 100000)
+                throw new IncompleteInventory("Unbounded workflow source");
+              definitions.set(
+                run.head_sha,
+                classifyPrWorkflow(
+                  Bun.YAML.parse(Buffer.from(source.content, "base64").toString("utf8")),
+                ),
+              );
+            }
+            const classified = definitions.get(run.head_sha);
+            if (!classified)
+              throw new IncompleteInventory(`Unknown PR workflow budget for run ${run.id}`);
+            kind = classified;
+          } else if (
+            path === ".github/workflows/ci.yml" &&
+            run.event === "push" &&
+            run.head_branch === "main"
+          )
+            kind = "main";
+          else if (path === ".github/workflows/batch-ci.yml") kind = "batch";
+          observations.push({
+            id: run.id,
+            kind,
+            jobs: await pages(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`, "jobs"),
+            ...(kind === "legacy-pr" ? { legacyGroup: "pr-ci-fanout" } : {}),
+          });
+        }
+        if (timing.now() - observationStartedAt > 60000)
+          throw new IncompleteInventory("Runner observation exceeded60seconds");
+        const decision = fastBudget(observations, ownRun);
+        console.log(decision.reason);
+        if (decision.allowed) return;
+      } catch (error) {
+        if (!(error instanceof IncompleteInventory)) throw error;
+        console.log(`${error.message}; admission remains held`);
+      }
+      await timing.sleep(60000);
+    }
+    throw Error("Fast admission budget did not clear before deadline");
+  }
   if (action === "priority") {
     const lane = laneArgument;
     if (lane !== "pr" && lane !== "batch") throw Error("Invalid priority lane");
@@ -217,12 +282,12 @@ export async function runPrCiCommand(
         console.log("Higher-priority observed demand clear; repository admission granted");
         return;
       }
-      // PR CI serializes a complete fast fanout within each of four buckets. Main priority is a
+      // Retained for older callers; current PR CI uses admit-fast. Main priority is a
       // bounded courtesy, not a provider scheduling guarantee: continuous main
       // pushes must not starve the PRs that repair main. Only a complete known
       // inventory reaches this branch; unknown demand still holds above.
       if (lane === "pr" && timing.now() >= prPriorityYieldDeadline) {
-        console.log("PR priority yield reached 15 minutes; admitting this bounded bucket fanout");
+        console.log("PR priority yield reached 15 minutes; admitting the bounded legacy fanout");
         return;
       }
       console.log(hold);

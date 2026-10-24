@@ -18,22 +18,10 @@ permissions:
   actions: read
   pull-requests: read
 
-# Four stable PR buckets, each serializing its whole fan-out (at most three
-# concurrent jobs). Unlike one global FIFO, a long suite does not stop every PR
-# from starting admission. Native scheduling is not a hard priority guarantee.
-# Queue overflow is never success; only the supersession handler cancels runs.
+# Serialize only the same PR. The trusted supersession handler cancels outdated
+# heads; a duplicate run at the current head must not cancel current work.
 concurrency:
-  group: >-
-    pr-ci-fanout-v2-${{
-      (endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '0') ||
-       endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '4') ||
-       endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '8')) && '0' ||
-      (endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '1') ||
-       endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '5') ||
-       endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '9')) && '1' ||
-      (endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '2') ||
-       endsWith(format('{0}', github.event.pull_request.number || inputs.pr_number), '6')) && '2' || '3'
-    }}
+  group: pr-ci-${{ github.event.pull_request.number || inputs.pr_number }}
   queue: max
   cancel-in-progress: false
 
@@ -43,13 +31,17 @@ env:
 
 jobs:
   plan:
+    name: PR fast admission
+    concurrency:
+      group: pr-ci-admission-v3
+      queue: max
+      cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 320
+    timeout-minutes: 120
     outputs:
       docs_only: ${{ steps.identity.outputs.docs_only }}
       head: ${{ steps.identity.outputs.head }}
       unit_count: ${{ steps.plan.outputs.unit_count }}
-      unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -65,10 +57,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: bun scripts/ci/github-pr-ci.ts identity
       - name: Yield admission to main and candidate CI
-        if: ${{ steps.identity.outputs.docs_only != 'true' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: bun scripts/ci/github-pr-ci.ts priority pr
+        run: bun scripts/ci/github-pr-ci.ts admit-fast
       - id: plan
         name: Plan all affected files
         env:
@@ -78,17 +69,17 @@ jobs:
           set -euo pipefail
           bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output "$RUNNER_TEMP/pr-plan.json"
           echo "unit_count=$(jq '.unitTests | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
-          echo 'unit_matrix=[{"index":0,"total":2},{"index":1,"total":2}]' >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: pr-impact-plan
           path: ${{ runner.temp }}/pr-plan.json
           if-no-files-found: error
 
-  contracts:
+  fast:
+    name: PR fast checks
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:
@@ -108,44 +99,18 @@ jobs:
           path: ${{ runner.temp }}/pr-plan
       - name: Check affected types
         run: bun scripts/ci/run-typecheck-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
-      - name: Check affected source guards
-        run: bun scripts/ci/run-guards-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json" --exclude publish-closure --exclude sdk-compat --exclude example-builds
-
-  units:
-    needs: plan
-    if: ${{ needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.unit_count != '0' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.plan.outputs.head }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: .bun-version
-      - name: Install unit dependencies
-        run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@v4
-        with:
-          name: pr-impact-plan
-          path: ${{ runner.temp }}/pr-plan
       - name: Test every selected unit file
+        if: ${{ needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.unit_count != '0' }}
         env:
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: |
           set -euo pipefail
           bun scripts/ci/batch-setup.ts postgres
-          bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json" --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+          bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json" --shard 0 --shards 1
 
   ready:
     name: PR CI
-    needs: [plan, contracts, units]
+    needs: [plan, fast]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -153,16 +118,8 @@ jobs:
       - name: Require all selected hosted work
         env:
           PLAN: ${{ needs.plan.result }}
-          DOCS: ${{ needs.plan.outputs.docs_only }}
-          CONTRACTS: ${{ needs.contracts.result }}
-          UNITS: ${{ needs.units.result }}
-          COUNT: ${{ needs.plan.outputs.unit_count }}
+          FAST: ${{ needs.fast.result }}
         run: |
           set -euo pipefail
           test "$PLAN" = success
-          test "$CONTRACTS" = success
-          if [ "$DOCS" = true ]; then
-            test "$UNITS" = skipped
-          else
-            if [ "$COUNT" = 0 ]; then test "$UNITS" = skipped; else test "$UNITS" = success; fi
-          fi
+          test "$FAST" = success

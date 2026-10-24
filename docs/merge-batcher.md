@@ -412,20 +412,25 @@ slot. Missing budget/reserve or any unrecognized or missing job status holds
 rather than inventing capacity. Waiting, pending and job-less runs can start
 requesting runners after observation.
 
-PR CI uses four stable whole-workflow concurrency buckets selected from the
-final decimal digit of the PR number (digit modulo four), shared by PR events
-and explicit dispatch. Each bucket retains FIFO `queue: max` and never cancels
-another run. One workflow peaks at three jobs (contracts and two unit shards),
-so the new lanes request at most 12 PR jobs. This leaves 2 observed main jobs in
-the 60-job budget after the 28-job other-repository allowance and 18 candidate
-slots; additional main demand holds Batch admission. During migration, the
-legacy single lane can contribute another 3 jobs, so it cannot be treated as
-free capacity. Provider inventories and the existing capacity gate still apply;
-these are bounds, not reserved runners or strict scheduling guarantees.
+PR CI serializes only the same PR. A separate short admission job holds a
+provider concurrency lock while observing outstanding permits and planning;
+it releases the lock before checks run. At most four admitted workflows each
+run one fast-check runner for lint, impacted types and impacted units.
+The full suite remains in Batch CI. A successful admission reserves its slot
+until the workflow is terminal, including gaps before downstream jobs appear.
 
-The 15-minute main-priority courtesy starts when the admission step executes,
-not when GitHub creates a pending workflow. Four buckets reduce whole-suite
-head-of-line blocking; they do not promise a 15-minute end-to-end queue bound.
+The proposed shared budget is 28 other-repository jobs, at least 18 Batch jobs,
+at least 9 observed main jobs, 4 fast checks and 1 admission runner: 60 total.
+Additional observed demand holds new admission. Pre-fanout main reserves at
+least 30, rather than assuming its small initial job list is its final demand.
+Verified legacy global PR concurrency contributes another 3 jobs once for its
+entire queue; unknown workflow topology holds instead of assuming that bound.
+These are conservative observed admission reservations, not provider-reserved
+runners or a hard end-to-end wait guarantee. Provider demand can change after
+observation. The Batch capacity gate remains independent and unchanged.
+
+The earlier 15-minute main-priority courtesy did not bound the global pre-job
+FIFO. The new gate does not waive a real capacity hold after 15 minutes.
 Old pending runs retain their old workflow definition. Recovery requires a
 genuine current-head refresh by the PR owner onto the updated workflow; the
 normal supersession handler cancels only that PR's obsolete-head run. Do not
