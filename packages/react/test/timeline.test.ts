@@ -2977,6 +2977,8 @@ describe("buildTimeline", () => {
       event("sandbox.operation.completed", { name: "file-resource-download" }, turn),
       event("turn.startup.phase.started", { phase: "tools" }, turn),
       event("turn.startup.phase.completed", { phase: "tools", durationMs: 350 }, turn),
+      event("turn.startup.phase.started", { phase: "history" }, turn),
+      event("turn.startup.phase.completed", { phase: "history", durationMs: 2_400 }, turn),
       event("turn.startup.phase.started", { phase: "model_preparation" }, turn),
       event("turn.startup.phase.completed", { phase: "model_preparation", durationMs: 420 }, turn),
       event("agent.model.request", { phase: "started" }, turn),
@@ -2993,11 +2995,13 @@ describe("buildTimeline", () => {
       "repository",
       "files",
       "tools",
+      "history",
       "model_preparation",
       "provider_first_byte",
     ]);
     expect(phases.every((phase) => phase.status === "complete")).toBe(true);
     expect(phases.find((phase) => phase.phase === "tools")?.durationMs).toBe(350);
+    expect(phases.find((phase) => phase.phase === "history")?.durationMs).toBe(2_400);
     expect(phases.find((phase) => phase.phase === "provider_first_byte")?.durationMs).toBe(1_250);
   });
 

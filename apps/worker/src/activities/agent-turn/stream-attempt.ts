@@ -343,6 +343,58 @@ export async function attachPendingUpdatesBeforePreparingModelInput(input: {
   return true;
 }
 
+/** History loads faster than this in nearly every turn; only slower loads get a visible phase. */
+export const HISTORY_STARTUP_PHASE_VISIBLE_AFTER_MS = 1_000;
+
+type HistoryStartupPhaseEvent = {
+  type: "turn.startup.phase.started" | "turn.startup.phase.completed" | "turn.startup.phase.failed";
+  payload: { phase: "history"; durationMs?: number };
+};
+
+/**
+ * Loads the conversation history for the first model request and, when that
+ * takes longer than `visibleAfterMs` (for example slow screenshot reads),
+ * shows it as the `history` startup phase. A fast load publishes nothing, so
+ * the common path adds no event and no timeline row.
+ */
+export async function prepareHistoryWithStartupPhase(input: {
+  publish: (events: HistoryStartupPhaseEvent[]) => Promise<unknown>;
+  prepare: () => Promise<void>;
+  visibleAfterMs?: number;
+}): Promise<void> {
+  const startedAt = performance.now();
+  const reveal: { published: Promise<unknown> | null } = { published: null };
+  const timer = setTimeout(() => {
+    reveal.published = input.publish([
+      { type: "turn.startup.phase.started", payload: { phase: "history" } },
+    ]);
+    // Awaited below; this only keeps an early rejection from being unhandled.
+    reveal.published.catch(() => undefined);
+  }, input.visibleAfterMs ?? HISTORY_STARTUP_PHASE_VISIBLE_AFTER_MS);
+  let outcome: "completed" | "failed" = "completed";
+  try {
+    await input.prepare();
+  } catch (error) {
+    outcome = "failed";
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (reveal.published) {
+      await reveal.published;
+      await input.publish([
+        {
+          type:
+            outcome === "completed" ? "turn.startup.phase.completed" : "turn.startup.phase.failed",
+          payload: {
+            phase: "history",
+            durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+          },
+        },
+      ]);
+    }
+  }
+}
+
 export async function runTurnStreamAttempt(
   deps: TurnStreamAttemptDeps,
 ): Promise<RunAgentTurnResult> {
@@ -2454,7 +2506,11 @@ export async function runTurnStreamAttempt(
       shouldAttach:
         trigger.type === "user.approvalDecision" || trigger.type === "user.humanInputResponse",
       attachPendingUpdates: attachPendingUpdatesAfterOpenSuffix,
-      prepareModelInput: prepareRunAttemptInput,
+      prepareModelInput: () =>
+        prepareHistoryWithStartupPhase({
+          publish: eventing.publish!,
+          prepare: prepareRunAttemptInput,
+        }),
     }))
   ) {
     return claimedResult({ status: "cancelled" });
