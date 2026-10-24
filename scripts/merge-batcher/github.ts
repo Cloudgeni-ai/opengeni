@@ -300,9 +300,11 @@ export class GitHubReader {
       batchWorkflow: this.config.workflow,
       baseBranch: this.config.baseBranch,
       excludePrCiDemand: true,
+      approvalCache: this.cache,
     });
     result.scannedRuns = scan.scannedRuns;
     result.approvalOnlyRuns = scan.approvalOnlyRuns;
+    if (scan.ok) result.cachedApprovalOnlyRuns = scan.cachedApprovalOnlyRuns;
     if (!scan.ok) return { ...result, reason: HEADROOM_HOLD_REASONS[scan.hold] };
     const { mainDemand, otherDemand } = scan;
     result.mainDemand = mainDemand;

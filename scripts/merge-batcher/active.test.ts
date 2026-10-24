@@ -1814,6 +1814,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         otherDemand: 0,
         scannedRuns: 10,
         approvalOnlyRuns: 10,
+        cachedApprovalOnlyRuns: 0,
         runnerRelevantRuns: 0,
         latestMain: {
           runId: 10,
@@ -1864,6 +1865,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         otherDemand: 0,
         scannedRuns: 1,
         approvalOnlyRuns: 0,
+        cachedApprovalOnlyRuns: 0,
         runnerRelevantRuns: 1,
         latestMain: {
           runId: 1,
