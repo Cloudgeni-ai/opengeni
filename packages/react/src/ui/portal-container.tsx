@@ -35,10 +35,7 @@ export function usePortalContainer(): PortalTarget | null {
  * them, they keep the host's theme, and the host's layout never clips them.
  * Inside an app that already provides a container, that container is used.
  */
-export function StandaloneOverlayRoot(props: {
-  source: HTMLElement | null;
-  children?: ReactNode;
-}) {
+export function StandaloneOverlayRoot(props: { source: HTMLElement | null; children?: ReactNode }) {
   const enclosing = usePortalContainer();
   const style = usePortalTokenStyle(enclosing ? null : props.source);
   const [layer, setLayer] = useState<HTMLDivElement | null>(null);
