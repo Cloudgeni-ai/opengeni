@@ -448,8 +448,19 @@ export {
   managedCodemodeClientDigest,
   type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
-import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
-export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
+import {
+  InputWaitYield,
+  waitForInputReply,
+  type InputWaitRequest,
+  type InputWaitYieldStream,
+} from "./input-wait-yield";
+export {
+  InputWaitYield,
+  modelResponseHasProgressUpdate,
+  modelResponseHasVisibleText,
+  waitForInputReply,
+  type InputWaitRequest,
+} from "./input-wait-yield";
 import { withModelStepHandover } from "./model-step-handover";
 export { ModelStepHandover } from "./model-step-handover";
 export {
@@ -4791,9 +4802,10 @@ export type PrepareToolsOptions = {
   /**
    * Consulted before `wait_for_input` registers a wait. A returned message is
    * given to the model as a tool error instead of waiting, for example when the
-   * wait would end a person's turn without any visible reply.
+   * wait would end a person's turn without any visible reply. It receives the
+   * call's verbatim `reply` argument, if any.
    */
-  inputWaitReplyGuard?: () => Promise<string | null>;
+  inputWaitReplyGuard?: (request: InputWaitRequest) => Promise<string | null>;
   /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
   mcpAccountLabels?: ReadonlyMap<string, McpAccountRouteLabel>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
@@ -9085,8 +9097,11 @@ export class PrefixedMcpServer implements MCPServer {
       meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : undefined;
     // A wait that would end a person's turn without a visible reply is refused
     // before admission, so the model answers first and nothing remote changes.
+    // Its optional `reply` is the verbatim answer, recorded once it is accepted.
+    const waitRequest =
+      unprefixed === "wait_for_input" ? { reply: waitForInputReply(args) } : undefined;
     if (unprefixed === "wait_for_input") {
-      const refusal = await this.inputWaitYield?.replyRefusal();
+      const refusal = await this.inputWaitYield?.replyRefusal(waitRequest);
       if (refusal) {
         return boundedMcpToolResult({
           isError: true,
@@ -9097,7 +9112,7 @@ export class PrefixedMcpServer implements MCPServer {
     // Admission must precede the physical remote call, not merely observe its
     // result: model dispatch and terminal settlement drain this reservation.
     const completeWait =
-      unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait() : undefined;
+      unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait(waitRequest) : undefined;
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
       const physicalCall = async (callArgs: Record<string, unknown>) => {
