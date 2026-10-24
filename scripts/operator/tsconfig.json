@@ -4,6 +4,7 @@
     "noEmit": true
   },
   "include": [
+    "bench-http-model-catalog.ts",
     "credit-promotion-policy.ts",
     "connected-machine-load-profile.ts",
     "connected-machine-load-profile.test.ts",

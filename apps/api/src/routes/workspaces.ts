@@ -11,6 +11,7 @@ import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   listWorkspaceProviderCustomModelsByKind,
   getOrganizationModelProviderCatalogForWorkspace,
+  loadWorkspaceModelCatalogInputs,
   type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
 import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni/config";
@@ -648,11 +649,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       subjectId: grant.subjectId,
     });
-    const workspaceConnectionsRead =
+    // Reuse the core's one-invocation public metadata scope. Subscription
+    // readiness and live provider discovery remain separate, fresh reads.
+    const catalogInputs =
       typeof deps.db.transaction === "function" &&
       typeof (deps.db as typeof deps.db & { rollback?: unknown }).rollback !== "function"
-        ? listConnectionsMetadata(deps.db, workspaceId, null)
+        ? loadWorkspaceModelCatalogInputs(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKinds,
+            organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
+          })
         : undefined;
+    const workspaceConnectionsRead = catalogInputs?.then((inputs) => inputs.workspaceConnections);
     // The original promise remains in the catalog batch. On failure the
     // restrictions keep their standalone read rather than mask its error.
     const restrictionMetadata = workspaceConnectionsRead?.catch(() => undefined);
@@ -709,17 +718,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           ),
       ),
       workspaceConnectionsRead ?? listConnectionsMetadata(deps.db, workspaceId, null),
-      listWorkspaceProviderCustomModelsByKind(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKinds,
-      }),
-      getOrganizationModelProviderCatalogForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        // Organization Azure OpenAI has no workspace custom-model rail.
-        providerKinds: [...providerKinds, "openai", "azure_openai"],
-      }),
+      catalogInputs?.then((inputs) => inputs.workspaceCustomModels) ??
+        listWorkspaceProviderCustomModelsByKind(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          providerKinds,
+        }),
+      catalogInputs?.then((inputs) => inputs.organizationProviders) ??
+        getOrganizationModelProviderCatalogForWorkspace(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          // Organization Azure OpenAI has no workspace custom-model rail.
+          providerKinds: [...providerKinds, "openai", "azure_openai"],
+        }),
       getWorkspace(deps.db, workspaceId),
       getOrganizationModelDefaults(deps.db, grant.accountId),
       deps.settings.billingMode === "stripe"
