@@ -3,6 +3,7 @@ import { AtomicGitWriter, GitStore, type RefUpdate } from "./git";
 import {
   githubCapabilities,
   ProviderError,
+  AutoMergePreSubmitError,
   type PullSnapshot,
   type AutoMergeState,
 } from "./github";
@@ -619,6 +620,8 @@ export class GitHubActiveExecutor implements Executor {
       return "durable REST effect submitted";
     } catch (error) {
       const status = error instanceof ProviderError ? error.status : null;
+      const notSubmitted =
+        effect.kind === "disable-auto-merge" && error instanceof AutoMergePreSubmitError;
       const latest = (await this.load()).ledger.effects[effect.id];
       if (!latest) throw error;
       const sent = latest.status === "submitting" || latest.status === "uncertain";
@@ -629,15 +632,18 @@ export class GitHubActiveExecutor implements Executor {
         status:
           definitive || checks >= 8
             ? "blocked"
-            : (throttled && postStarted) || !sent
+            : notSubmitted || (throttled && postStarted) || !sent
               ? "pending"
               : "uncertain",
         checks,
         nextAt: new Date(
           Date.parse(now) + Math.min(3600, 60 * 2 ** Math.min(checks, 6)) * 1000,
         ).toISOString(),
-        lastError:
-          status === null ? "Transport/observation outcome unknown" : `GitHub HTTP ${status}`,
+        lastError: notSubmitted
+          ? "Pre-submit observation failed; no mutation sent"
+          : status === null
+            ? "Transport/observation outcome unknown"
+            : `GitHub HTTP ${status}`,
       });
       return definitive
         ? "REST effect blocked by explicit provider rejection"

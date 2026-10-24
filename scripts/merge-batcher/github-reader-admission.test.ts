@@ -55,6 +55,7 @@ async function fixture() {
     classic: false,
     queueReady: true,
     autoEnabled: false,
+    staleAutoEvent: false,
     protected: false,
     secondRulePage: false,
     missingRunOnce: false,
@@ -119,7 +120,7 @@ async function fixture() {
               pullRequest: {
                 timelineItems: {
                   nodes: [
-                    ...(state.autoEnabled
+                    ...(state.autoEnabled || state.staleAutoEvent
                       ? [
                           {
                             __typename: "AutoMergeEnabledEvent",
@@ -151,7 +152,7 @@ async function fixture() {
             head: { sha, ref: "feature" },
             draft: false,
             labels: state.queueReady ? [{ name: "queue-ready" }] : [],
-            auto_merge: {},
+            auto_merge: state.autoEnabled ? {} : null,
           },
         ];
       else if (path === "branches/main") body = { protected: state.protected };
@@ -289,6 +290,12 @@ test("auto-merge requires the actual enable event and exact-head CI", async () =
   f.state.jobCheckId = 999;
   expect((await f.reader.ready()).ready).toHaveLength(0);
   expect(f.state.commentsRead).toBe(false);
+});
+test("a stale timeline enable without current REST auto_merge cannot admit", async () => {
+  const f = await fixture();
+  f.state.queueReady = false;
+  f.state.staleAutoEvent = true;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
 });
 test("required workflow on second rule page cannot be ignored", async () => {
   const f = await fixture();
