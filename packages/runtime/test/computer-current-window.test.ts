@@ -71,8 +71,16 @@ describe("current computer window", () => {
   test("a remembered computer that is gone is resolved afresh", async () => {
     const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
     current.use("c-1", "w-1");
-    current.failed(await current.target({}));
+    current.failed(await current.session(undefined));
     expect(await current.session(undefined)).toEqual({ computerSessionId: "c-2", implicit: true });
+  });
+
+  test("a remembered window that is gone is forgotten, its computer kept", async () => {
+    const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
+    current.use("c-1", "w-1");
+    current.failed(await current.target({}));
+    expect(await current.session(undefined)).toEqual({ computerSessionId: "c-1", implicit: true });
+    await expect(current.target({})).rejects.toMatchObject({ code: "computer_target_required" });
   });
 
   test("a remembered window that is gone keeps its explicitly named computer", async () => {
@@ -203,6 +211,57 @@ describe("computer tools without identifiers", () => {
     );
     await tools.computer_targets!.execute({}, { operationId: randomUUID(), caller: model });
     expect(listed).toEqual([other, other]);
+  });
+
+  test("without memory, a computer left on a machine the chat moved away from is not used", async () => {
+    const sandboxGroupId = randomUUID();
+    const machine = randomUUID();
+    const listed: string[] = [];
+    const here = { ...computerSession(), id: randomUUID(), lastUsedAt: "2026-10-24T00:00:00.000Z" };
+    here.placement = { kind: "connected_machine", sandboxId: machine };
+    const left = { ...computerSession(), lastUsedAt: "2026-10-24T00:30:00.000Z" };
+    left.placement = { kind: "sandbox_group", sandboxGroupId };
+    const tools = definitions({
+      getSession: async () => ({ activeSandboxId: machine, sandboxGroupId }) as never,
+      listComputerSessions: async () => ({ revision: 1, sessions: [left, here] }),
+      listComputerTargets: async (_workspace, computer) => {
+        listed.push(computer);
+        return { computerSessionId: computer, targets: [] } as never;
+      },
+    });
+    await tools.computer_targets!.execute({}, { operationId: randomUUID(), caller: model });
+    expect(listed).toEqual([here.id]);
+  });
+
+  test("browser tools likewise skip a browser left on a machine the chat moved away from", async () => {
+    const sandboxGroupId = randomUUID();
+    const machine = randomUUID();
+    const browser = (placement: unknown, lastUsedAt: string) => ({
+      id: randomUUID(),
+      lifecycle: "active",
+      placement,
+      lastUsedAt,
+      associations: [{ sessionId, lastUsedAt }],
+    });
+    const here = browser({ kind: "connected_machine", sandboxId: machine }, now);
+    const left = browser({ kind: "sandbox_group", sandboxGroupId }, "2026-10-24T01:30:00.000Z");
+    const listed: string[] = [];
+    const [tabs] = createInteractionAttemptToolDefinitions({
+      transport: {
+        getSession: async () => ({ activeSandboxId: machine, sandboxGroupId }),
+        listBrowserSessions: async () => ({ revision: 1, sessions: [left, here] }),
+        listBrowserTargets: async (_workspace: string, id: string) => {
+          listed.push(id);
+          return { browserSessionId: id, controllerGeneration: "controller-1", targets: [] };
+        },
+      } as unknown as InteractionTransport,
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_tabs"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    await tabs!.execute({ operation: "list" }, { operationId: randomUUID(), caller: model });
+    expect(listed).toEqual([here.id]);
   });
 
   test("computer_act's model schema takes a bare ref as a locator and leaves ids optional", () => {

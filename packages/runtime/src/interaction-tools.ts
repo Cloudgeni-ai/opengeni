@@ -1158,18 +1158,37 @@ export function createInteractionAttemptToolDefinitions(
     }
     return known;
   };
+  /** The sessions on the placement this chat runs on now. One left on a
+   * machine the chat has since moved away from is used only when named, as
+   * computer_open and browser_open reuse. The person's own Chrome is on
+   * neither machine. */
+  const onCurrentPlacement = async <T extends { placement: z.infer<typeof InteractionPlacement> }>(
+    listed: Promise<T[]>,
+  ): Promise<T[]> => {
+    const [sessions, current] = await Promise.all([
+      listed,
+      readCurrentInteractionPlacement(input.transport, input.workspaceId, input.sessionId),
+    ]);
+    return sessions.filter(
+      (session) =>
+        current === null ||
+        session.placement.kind === "attached_device" ||
+        placementFieldsMatch(session.placement, current),
+    );
+  };
   const currentTab = new CurrentBrowserTab({
     listLiveSessions: async () =>
-      filterDiscoveredSessions(
-        (
-          await input.transport.listBrowserSessions(input.workspaceId, {
+      await onCurrentPlacement<
+        Awaited<ReturnType<InteractionTransport["listBrowserSessions"]>>["sessions"][number]
+      >(
+        input.transport
+          .listBrowserSessions(input.workspaceId, {
             associatedSessionId: input.sessionId,
             includeTerminal: false,
           })
-        ).sessions,
-        input.sessionId,
-        "current_session",
-        false,
+          .then(({ sessions }) =>
+            filterDiscoveredSessions(sessions, input.sessionId, "current_session", false),
+          ),
       ),
     listTargets: async (browserSessionId) =>
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
@@ -1177,12 +1196,14 @@ export function createInteractionAttemptToolDefinitions(
   const currentComputer = new CurrentComputerWindow({
     latestLiveSession: async () =>
       newestRelevant(
-        (
-          await input.transport.listComputerSessions(input.workspaceId, {
-            associatedSessionId: input.sessionId,
-            includeTerminal: false,
-          })
-        ).sessions,
+        await onCurrentPlacement(
+          input.transport
+            .listComputerSessions(input.workspaceId, {
+              associatedSessionId: input.sessionId,
+              includeTerminal: false,
+            })
+            .then(({ sessions }) => sessions),
+        ),
         input.sessionId,
       )?.id ?? null,
   });
@@ -2618,7 +2639,12 @@ export function createInteractionAttemptToolDefinitions(
             action,
           });
         },
-        (receipt) => receipt.observation?.target.id,
+        // The window an action opened, when the receipt says so: a batch
+        // says it only when its last action completed.
+        (receipt) =>
+          "steps" in receipt && receipt.steps.at(-1)?.state !== "completed"
+            ? null
+            : receipt.observation?.target.id,
       ),
   });
 

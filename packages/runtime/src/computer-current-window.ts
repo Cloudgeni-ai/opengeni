@@ -55,16 +55,16 @@ export class CurrentComputerWindow {
     if (this.current?.computerSessionId === computerSessionId) this.current = null;
   }
 
-  /** A call that relied on remembered identifiers found them gone: resolve
-   * afresh next time. */
+  /** A call that relied on remembered identifiers found its computer or
+   * window gone. A remembered window is the likelier one to have closed, so
+   * only it is forgotten; a remembered computer used with a named window is
+   * forgotten, to resolve afresh next time. */
   failed(resolved: ResolvedComputerSession & { implicitTarget?: boolean }): void {
-    if (resolved.implicit) this.forgetSession(resolved.computerSessionId);
-    else if (
-      resolved.implicitTarget &&
-      this.current?.computerSessionId === resolved.computerSessionId
-    ) {
-      this.current = { computerSessionId: resolved.computerSessionId, targetId: null };
-    }
+    if (resolved.implicitTarget) {
+      if (this.current?.computerSessionId === resolved.computerSessionId) {
+        this.current = { computerSessionId: resolved.computerSessionId, targetId: null };
+      }
+    } else if (resolved.implicit) this.forgetSession(resolved.computerSessionId);
   }
 
   async session(computerSessionId: string | undefined): Promise<ResolvedComputerSession> {
