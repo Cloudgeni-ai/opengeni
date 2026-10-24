@@ -183,12 +183,13 @@ describe("offline batcher administration contract", () => {
       ).not.toThrow();
     }
   });
-  test("App has exact runtime permissions without administration or events", () => {
+  test("App has exact runtime permissions with read-only administration and no events", () => {
     expect(manifest.name).toBe("Opengeni merge batcher");
     expect(manifest.name.length).toBeLessThanOrEqual(34);
     expect(manifest.public).toBe(false);
     expect(manifest.default_events).toEqual([]);
     expect(manifest.default_permissions).toEqual({
+      administration: "read",
       contents: "write",
       workflows: "write",
       actions: "write",
