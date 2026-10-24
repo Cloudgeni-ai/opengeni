@@ -412,33 +412,18 @@ slot. Missing budget/reserve or any unrecognized or missing job status holds
 rather than inventing capacity. Waiting, pending and job-less runs can start
 requesting runners after observation.
 
-PR CI serializes only the same PR. A separate short admission job holds a
-provider concurrency lock while observing outstanding permits and planning;
-it releases the lock before checks run. At most four admitted workflows each
-run one fast-check runner for lint, impacted types and impacted units.
-The full suite remains in Batch CI. A successful admission reserves its slot
-until the workflow is terminal, including gaps before downstream jobs appear.
+PR CI uses per-PR concurrency with cancellation enabled: a newer run supersedes
+the same PR, not an unrelated PR, main or Batch run. Explicit dispatch uses its
+PR-number input for the same group. Planning, one fast-check job and the final
+aggregate run sequentially; fast checks cover lint, impacted types and impacted
+unit files. Full guards and the full suite remain in Batch CI.
 
-The proposed shared budget is 28 other-repository jobs, at least 18 Batch jobs,
-at least 9 observed main jobs, 4 fast checks and 1 admission runner: 60 total.
-Additional observed demand holds new admission. Pre-fanout main reserves at
-least 30, rather than assuming its small initial job list is its final demand.
-Verified legacy global PR concurrency contributes another 3 jobs once for its
-entire queue. Attempt job names must agree with the declared topology; a modern
-admission job can never be collapsed into the shared legacy reservation. PRs
-execute a merge-ref workflow, so the head file alone is not execution evidence.
-Mismatches and unknown workflow topology hold instead of assuming that bound.
-These are conservative observed admission reservations, not provider-reserved
-runners or a hard end-to-end wait guarantee. Provider demand can change after
-observation. The Batch capacity gate remains independent and unchanged.
-
-The earlier 15-minute main-priority courtesy did not bound the global pre-job
-FIFO. The new gate does not waive a real capacity hold after 15 minutes.
-Already-created pending runs retain their scheduled definition. Recovery may require a
-genuine current-head refresh by the PR owner onto the updated workflow; the
-normal supersession handler cancels only that PR's obsolete-head run. Do not
-blanket-cancel main, Batch, Version, or unrelated PR runs, or manufacture a
-passing check to drain the backlog.
+There is no global PR admission lock, permit system or synthetic runner reserve.
+GitHub queues bursts under its hosted capacity limits. Keep the fast gate small;
+add a global cap only if measured main/Batch starvation justifies it. The Batch
+capacity gate below is unchanged. Already-created runs retain their scheduled
+definition, so backlog recovery must use current exact-head checks, not a false
+success or blanket cancellation of main, Batch, Version or unrelated work.
 
 Further checks protect the organization's shared hosted pool. They do not
 change the 52/30/18 allocation, and the two main holds apply before any

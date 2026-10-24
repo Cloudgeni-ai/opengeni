@@ -6,16 +6,16 @@ const workflow = (name: string) =>
 
 test("PR CI reserves a bounded PR lane without cancelling main or batch", () => {
   const pr = workflow("pr-ci");
-  expect(pr.concurrency.queue).toBe("max");
-  expect(pr.concurrency["cancel-in-progress"]).toBe(false);
+  expect(pr.concurrency.queue).toBeUndefined();
+  expect(pr.concurrency["cancel-in-progress"]).toBe(true);
   expect(pr.concurrency.group).toBe(
     "pr-ci-${{ github.event.pull_request.number || inputs.pr_number }}",
   );
   expect(pr.permissions).toEqual({ contents: "read", actions: "read", "pull-requests": "read" });
   expect(pr.on.pull_request.branches).toEqual(["main"]);
   expect(
-    pr.jobs.plan.steps.some((s: any) => s.run === "bun scripts/ci/github-pr-ci.ts admit-fast"),
-  ).toBe(true);
+    pr.jobs.plan.steps.some((s: any) => /github-pr-ci.ts (priority|admit-fast)/.test(s.run ?? "")),
+  ).toBe(false);
   expect(
     workflow("batch-ci").jobs.plan.steps.some(
       (s: any) => s.run === "bun scripts/ci/github-pr-ci.ts priority batch",
@@ -25,7 +25,7 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
   expect(Object.keys(pr.jobs).sort()).toEqual(["fast", "plan", "ready"]);
   expect(pr.jobs.fast.needs).toBe("plan");
   expect(pr.jobs.fast.strategy).toBeUndefined();
-  expect(pr.jobs.plan.concurrency.group).toBe("pr-ci-admission-v3");
+  expect(pr.jobs.plan.concurrency).toBeUndefined();
   expect(pr.jobs.fast.concurrency).toBeUndefined();
 });
 
@@ -48,7 +48,7 @@ test("actual concurrency expression isolates PRs and matches dispatch", () => {
     buckets.add(actual);
   }
   expect(buckets.size).toBe(1000);
-  expect(28 + 18 + 9 + 4 + 1).toBe(60);
+  expect(workflow("pr-ci").jobs.fast.strategy).toBeUndefined();
 });
 
 test("Queue ready entry and labeling do not wait for PR CI", () => {

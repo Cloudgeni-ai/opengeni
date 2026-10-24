@@ -74,7 +74,7 @@
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "3801fcc28c5420631546eb6ba750dc830e1343d6d71604db6262dad83421abb5"
+      "sha256": "3dce5295b0fc253bf0480d30e52c42118b9dd2c1d409e1151dc897f306712f77"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -1502,12 +1502,6 @@
       "job": "plan",
       "step": "Plan all affected files",
       "sha256": "e4483f886b789019b974e5d00c292b3b504eeafc293c5d1f2e045c069bb78f11"
-    },
-    {
-      "workflow": ".github/workflows/pr-ci.yml",
-      "job": "plan",
-      "step": "Yield admission to main and candidate CI",
-      "sha256": "151d2b2055cf35f0a5b753e53347ccd3fff55bacbe9f19f8ebbd8399287f6ab4"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",

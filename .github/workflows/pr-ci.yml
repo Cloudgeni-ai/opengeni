@@ -18,12 +18,10 @@ permissions:
   actions: read
   pull-requests: read
 
-# Serialize only the same PR. The trusted supersession handler cancels outdated
-# heads; a duplicate run at the current head must not cancel current work.
+# A newer run supersedes only the same PR. Dispatch retains its explicit PR ID.
 concurrency:
   group: pr-ci-${{ github.event.pull_request.number || inputs.pr_number }}
-  queue: max
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   OPENGENI_TEST_MAX_CONCURRENCY: "2"
@@ -31,13 +29,8 @@ env:
 
 jobs:
   plan:
-    name: PR fast admission
-    concurrency:
-      group: pr-ci-admission-v3
-      queue: max
-      cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 15
     outputs:
       docs_only: ${{ steps.identity.outputs.docs_only }}
       head: ${{ steps.identity.outputs.head }}
@@ -56,10 +49,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: bun scripts/ci/github-pr-ci.ts identity
-      - name: Yield admission to main and candidate CI
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bun scripts/ci/github-pr-ci.ts admit-fast
       - id: plan
         name: Plan all affected files
         env:
