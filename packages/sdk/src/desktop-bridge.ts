@@ -34,7 +34,27 @@ export type DesktopCapability =
   /** The web app lists its actions and keys; the shell builds the menu bar from them. */
   | "menuActions"
   /** The app reports a new version it found, and installs it on request. */
-  | "updates";
+  | "updates"
+  /** Record the audio other apps play (a meeting's other participants) as its own track. */
+  | "systemAudio";
+
+export type DesktopSystemAudioErrorCode =
+  /** This computer, its OS version or this app build can't record other apps' audio. */
+  | "unavailable"
+  /** The person hasn't allowed recording other apps' audio. */
+  | "permission_denied"
+  /** Linux: no PulseAudio or PipeWire sound server to record from. */
+  | "sound_server_unavailable"
+  /** The capture failed to start or stopped unexpectedly. */
+  | "capture_failed";
+
+export interface DesktopSystemAudioError {
+  code: DesktopSystemAudioErrorCode;
+  /** A plain English sentence for people. */
+  message: string;
+  /** Technical detail for logs. */
+  detail?: string;
+}
 
 /**
  * The app's own updates as the web app shows them. `downloading` means a new
@@ -75,7 +95,8 @@ export interface DesktopMenuAction {
  * not listen still gets the navigation ones (the bridge falls back to loading
  * the workspace's page), so older servers keep working.
  */
-export type DesktopCommand = "newSession" | "searchSessions" | "toggleSidebar" | "openInbox";
+export type DesktopCommand =
+  "newSession" | "searchSessions" | "toggleSidebar" | "openInbox";
 
 /** One signed-in account as the web app sees it. Never carries a credential. */
 export interface DesktopAccount {
@@ -209,11 +230,16 @@ export interface DesktopBridge {
      * sign-in from the app's own credential; true when the page should reload.
      */
     restoreWebSession(): Promise<boolean>;
-    onChange(listener: (snapshot: DesktopAccountsSnapshot) => void): Unsubscribe;
+    onChange(
+      listener: (snapshot: DesktopAccountsSnapshot) => void,
+    ): Unsubscribe;
   };
   readonly thisComputer: {
     status(workspaceId: string): Promise<ThisComputerStatus>;
-    connect(workspaceId: string, options: ThisComputerConnectOptions): Promise<ThisComputerStatus>;
+    connect(
+      workspaceId: string,
+      options: ThisComputerConnectOptions,
+    ): Promise<ThisComputerStatus>;
     pause(): Promise<void>;
     resume(): Promise<void>;
     /**
@@ -244,7 +270,9 @@ export interface DesktopBridge {
   readonly appShots?: {
     status(): Promise<DesktopAppShotStatus>;
     /** Change the settings; the shortcut follows at once. */
-    update(settings: Partial<DesktopAppShotSettings>): Promise<DesktopAppShotStatus>;
+    update(
+      settings: Partial<DesktopAppShotSettings>,
+    ): Promise<DesktopAppShotStatus>;
     /**
      * Ask for one permission: the system prompt the first time, then its list
      * in System Settings with the app's guide beside it.
@@ -268,14 +296,42 @@ export interface DesktopBridge {
     install(): Promise<void>;
     onChange(listener: (state: DesktopUpdateState) => void): Unsubscribe;
   };
+  /**
+   * Other apps' audio, as mono float samples. With the `systemAudio`
+   * capability. The app leaves its own sounds out.
+   */
+  readonly systemAudio?: {
+    /**
+     * Start recording. Resolves once audio flows; rejects with a
+     * {@link DesktopSystemAudioError}. Starting again ends the page's previous
+     * capture.
+     */
+    start(): Promise<{ captureId: string; sampleRate: number }>;
+    stop(captureId: string): Promise<void>;
+    /** Samples arrive about ten times a second, silence included. */
+    onSamples(
+      listener: (captureId: string, samples: Float32Array) => void,
+    ): Unsubscribe;
+    /** The capture ended: stopped (error null) or failed. */
+    onEnded(
+      listener: (
+        captureId: string,
+        error: DesktopSystemAudioError | null,
+      ) => void,
+    ): Unsubscribe;
+  };
 }
 
 /** The bridge when the page runs inside a desktop app, else null. */
 export function getDesktopBridge(): DesktopBridge | null {
-  const candidate = (globalThis as Record<string, unknown>)[DESKTOP_BRIDGE_GLOBAL];
+  const candidate = (globalThis as Record<string, unknown>)[
+    DESKTOP_BRIDGE_GLOBAL
+  ];
   if (!candidate || typeof candidate !== "object") return null;
   const bridge = candidate as Partial<DesktopBridge>;
-  return bridge.version === DESKTOP_BRIDGE_VERSION ? (bridge as DesktopBridge) : null;
+  return bridge.version === DESKTOP_BRIDGE_VERSION
+    ? (bridge as DesktopBridge)
+    : null;
 }
 
 export function hasDesktopCapability(
@@ -314,6 +370,10 @@ export const DESKTOP_IPC = {
   updatesState: "og:updates:state",
   updatesInstall: "og:updates:install",
   updatesChanged: "og:updates:changed",
+  systemAudioStart: "og:system-audio:start",
+  systemAudioStop: "og:system-audio:stop",
+  systemAudioSamples: "og:system-audio:samples",
+  systemAudioEnded: "og:system-audio:ended",
   welcomeState: "og:welcome:state",
   welcomeSignIn: "og:welcome:sign-in",
   welcomeCancel: "og:welcome:cancel",

@@ -17,6 +17,11 @@ npmRebuild: false
 nodeGypRebuild: false
 asar: true
 electronLanguages: [en]
+# The system audio helper for meeting recordings (audio-capture/), built for
+# each platform and architecture by scripts/build-audio-capture.ts.
+extraResources:
+  - from: build/audio-capture/${os}-${arch}
+    to: audio-capture
 protocols:
   - name: Opengeni
     schemes: [opengeni]
@@ -53,8 +58,9 @@ mac:
     - from: build/LaunchAgents
       to: Library/LaunchAgents
   extendInfo:
-    NSMicrophoneUsageDescription: Opengeni uses the microphone when you dictate or talk to an agent.
+    NSMicrophoneUsageDescription: Opengeni uses the microphone when you dictate, talk to an agent or record a meeting.
     NSCameraUsageDescription: Opengeni uses the camera when you share a photo with an agent.
+    NSAudioCaptureUsageDescription: Opengeni records other apps' audio when you include it in a meeting recording.
   notarize: true
 dmg:
   writeUpdateInfo: false

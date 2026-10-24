@@ -1,11 +1,18 @@
 /**
  * The recorder on the Meetings page. Idle, it is one row: a title, whether to
- * include a tab's audio, and Start recording. Live, the same panel shows the
+ * include the other people (other apps' audio in the desktop app, a tab's audio
+ * in a browser), and Start recording. Live, the same panel shows the
  * clock, a level meter per track, Pause and Stop, and where the audio is (on
  * this device, uploading, or waiting for the connection).
  */
 import { useEffect, useId, useRef, useState } from "react";
-import { CircleIcon, MicIcon, PauseIcon, PlayIcon, SquareIcon } from "lucide-react";
+import {
+  CircleIcon,
+  MicIcon,
+  PauseIcon,
+  PlayIcon,
+  SquareIcon,
+} from "lucide-react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { Checkbox } from "@opengeni/react/ui/field";
@@ -19,7 +26,17 @@ import type { MeetingRecorder } from "./recorder-context";
 type RecorderError = NonNullable<MeetingRecorder["error"]>;
 
 /** What went wrong and what to do, in the browser's terms. */
-export function recorderErrorText(error: RecorderError): { title: string; body: string } {
+export function recorderErrorText(
+  error: RecorderError,
+  systemAudioKind: MeetingRecorder["systemAudioKind"] = "display",
+): { title: string; body: string } {
+  if (
+    systemAudioKind === "desktop" &&
+    error.code === "system_audio_unavailable"
+  ) {
+    // The desktop app's own sentence says what to do on this computer.
+    return { title: "Can't record other apps' audio", body: error.message };
+  }
   switch (error.code) {
     case "microphone_denied":
       return {
@@ -57,12 +74,17 @@ export function recorderErrorText(error: RecorderError): { title: string; body: 
 }
 
 /** Where the audio is right now, in one short line. */
-export function uploadLine(recorder: MeetingRecorder, online: boolean): string | null {
+export function uploadLine(
+  recorder: MeetingRecorder,
+  online: boolean,
+): string | null {
   const upload = recorder.upload;
-  const capturing = recorder.state === "recording" || recorder.state === "paused";
+  const capturing =
+    recorder.state === "recording" || recorder.state === "paused";
   if (upload?.failed) return `Upload failed: ${upload.failed.message}`;
   if (upload?.finalized) return "Uploaded";
-  if (upload?.discarded) return "Nothing was recorded, so no meeting was saved.";
+  if (upload?.discarded)
+    return "Nothing was recorded, so no meeting was saved.";
   if (!online || upload?.retryingAfterError) {
     return capturing
       ? "Not uploading: no connection. Recording continues, and the audio is kept on this device until it uploads."
@@ -78,7 +100,10 @@ export function uploadLine(recorder: MeetingRecorder, online: boolean): string |
 }
 
 /** True while audio is waiting on this device because the connection is down. */
-export function uploadStalled(recorder: MeetingRecorder, online: boolean): boolean {
+export function uploadStalled(
+  recorder: MeetingRecorder,
+  online: boolean,
+): boolean {
   const upload = recorder.upload;
   if (upload?.failed || upload?.finalized || upload?.discarded) return false;
   return !online || Boolean(upload?.retryingAfterError);
@@ -121,7 +146,8 @@ function LevelMeter({
       const level = paused ? 0 : (levels()[trackNumber] ?? 0);
       // Fast attack, slow release, so speech reads as steady movement.
       smoothed = level > smoothed ? level : smoothed * 0.88 + level * 0.12;
-      if (barRef.current) barRef.current.style.transform = `scaleX(${Math.max(0.02, smoothed)})`;
+      if (barRef.current)
+        barRef.current.style.transform = `scaleX(${Math.max(0.02, smoothed)})`;
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
@@ -129,7 +155,9 @@ function LevelMeter({
   }, [levels, trackNumber, paused]);
   return (
     <div className="flex min-w-0 items-center gap-2">
-      <span className="w-24 shrink-0 truncate text-xs leading-4 text-fg-muted">{label}</span>
+      <span className="w-24 shrink-0 truncate text-xs leading-4 text-fg-muted">
+        {label}
+      </span>
       <span
         aria-hidden="true"
         className="relative h-1.5 min-w-16 flex-1 overflow-hidden rounded-full bg-surface-2"
@@ -144,9 +172,13 @@ function LevelMeter({
   );
 }
 
-function trackLabel(source: string): string {
+function trackLabel(
+  source: string,
+  systemAudioKind: MeetingRecorder["systemAudioKind"],
+): string {
   if (source === "microphone") return "Microphone";
-  if (source === "system") return "Tab audio";
+  if (source === "system")
+    return systemAudioKind === "desktop" ? "Other apps" : "Tab audio";
   return "Audio";
 }
 
@@ -162,16 +194,22 @@ export function RecorderPanel({
   const titleId = useId();
   const tabAudioId = useId();
   const [title, setTitle] = useState("");
-  const [tabAudio, setTabAudio] = useState(false);
+  const desktopAudio = recorder?.systemAudioKind === "desktop";
+  // In the desktop app other apps' audio is on unless turned off; a browser's
+  // share prompt is something to opt into.
+  const [tabAudioChoice, setTabAudio] = useState<boolean | null>(null);
+  const tabAudio = tabAudioChoice ?? desktopAudio;
   const [errorDismissed, setErrorDismissed] = useState(false);
   const online = useOnline();
   const state = recorder?.state ?? "idle";
-  const live = state === "recording" || state === "paused" || state === "stopping";
+  const live =
+    state === "recording" || state === "paused" || state === "stopping";
 
   if (recorder && !recorder.supported) {
     return (
       <Notice tone="muted" title="This browser can't record">
-        Use a current version of Chrome, Edge, Safari or Firefox to record meetings.
+        Use a current version of Chrome, Edge, Safari or Firefox to record
+        meetings.
       </Notice>
     );
   }
@@ -200,7 +238,11 @@ export function RecorderPanel({
               <span
                 className={cn(
                   "relative size-3 rounded-full",
-                  paused ? "bg-fg-subtle" : stalled ? "bg-status-waiting" : "bg-status-failed",
+                  paused
+                    ? "bg-fg-subtle"
+                    : stalled
+                      ? "bg-status-waiting"
+                      : "bg-status-failed",
                 )}
               />
             </span>
@@ -229,7 +271,7 @@ export function RecorderPanel({
                 key={track.trackNumber}
                 recorder={recorder}
                 trackNumber={track.trackNumber}
-                label={trackLabel(track.source)}
+                label={trackLabel(track.source, recorder.systemAudioKind)}
                 paused={paused}
               />
             ))}
@@ -242,7 +284,11 @@ export function RecorderPanel({
               onClick={() => (paused ? recorder.resume() : recorder.pause())}
               className="rounded-[10px] pointer-coarse:h-11 max-sm:flex-1"
             >
-              {paused ? <PlayIcon aria-hidden="true" /> : <PauseIcon aria-hidden="true" />}
+              {paused ? (
+                <PlayIcon aria-hidden="true" />
+              ) : (
+                <PauseIcon aria-hidden="true" />
+              )}
               {paused ? "Resume" : "Pause"}
             </Button>
             <Button
@@ -294,7 +340,10 @@ export function RecorderPanel({
           void start();
         }}
       >
-        <MicIcon aria-hidden="true" className="size-4 shrink-0 text-fg-subtle max-sm:hidden" />
+        <MicIcon
+          aria-hidden="true"
+          className="size-4 shrink-0 text-fg-subtle max-sm:hidden"
+        />
         <label htmlFor={titleId} className="sr-only">
           Meeting title
         </label>
@@ -311,7 +360,11 @@ export function RecorderPanel({
           <label
             htmlFor={tabAudioId}
             className="flex shrink-0 cursor-pointer items-center gap-2 text-sm leading-5 text-fg-label select-none pointer-coarse:min-h-11 max-sm:self-start"
-            title="Records the other people in a browser call, such as Google Meet or Teams on the web"
+            title={
+              desktopAudio
+                ? "Records the other people in a call in Zoom, Teams, Meet or any other app"
+                : "Records the other people in a browser call, such as Google Meet or Teams on the web"
+            }
           >
             <Checkbox
               id={tabAudioId}
@@ -319,7 +372,9 @@ export function RecorderPanel({
               disabled={starting}
               onCheckedChange={setTabAudio}
             />
-            Include a tab's audio
+            {desktopAudio
+              ? "Include other apps' audio"
+              : "Include a tab's audio"}
           </label>
         ) : null}
         <Button
@@ -327,30 +382,42 @@ export function RecorderPanel({
           disabled={!recorder || starting}
           className="shrink-0 rounded-[10px] pointer-coarse:h-11 max-sm:w-full"
         >
-          <CircleIcon aria-hidden="true" className="fill-status-failed text-status-failed" />
+          <CircleIcon
+            aria-hidden="true"
+            className="fill-status-failed text-status-failed"
+          />
           {starting ? "Starting" : "Start recording"}
         </Button>
       </form>
       {!error ? (
-        <p className="px-1 text-xs leading-4.5 text-fg-muted" aria-live="polite">
-          {starting
-            ? tabAudio
-              ? "Starting. Allow the microphone if your browser asks, then pick the meeting tab and turn on Share tab audio."
-              : "Starting. Allow the microphone if your browser asks."
-            : tabAudio
-              ? "Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio."
-              : recorder?.systemAudioSupported
-                ? "Records your microphone. For a call in another browser tab, such as Meet, Teams or Zoom on the web, include its audio to hear everyone. Let people know you're recording."
-                : "Records your microphone. Let people know you're recording."}
+        <p
+          className="px-1 text-xs leading-4.5 text-fg-muted"
+          aria-live="polite"
+        >
+          {desktopAudio
+            ? starting
+              ? "Starting. Allow the microphone, and recording other apps' audio, if your computer asks."
+              : tabAudio
+                ? "Records your microphone and what other apps play, so everyone in a call is heard. Let people know you're recording."
+                : "Records your microphone only. Include other apps' audio to hear everyone in a call. Let people know you're recording."
+            : starting
+              ? tabAudio
+                ? "Starting. Allow the microphone if your browser asks, then pick the meeting tab and turn on Share tab audio."
+                : "Starting. Allow the microphone if your browser asks."
+              : tabAudio
+                ? "Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio."
+                : recorder?.systemAudioSupported
+                  ? "Records your microphone. For a call in another browser tab, such as Meet, Teams or Zoom on the web, include its audio to hear everyone. Let people know you're recording."
+                  : "Records your microphone. Let people know you're recording."}
         </p>
       ) : null}
       {error ? (
         <Notice
           tone="failed"
-          title={recorderErrorText(error).title}
+          title={recorderErrorText(error, recorder?.systemAudioKind).title}
           onDismiss={() => setErrorDismissed(true)}
         >
-          {recorderErrorText(error).body}
+          {recorderErrorText(error, recorder?.systemAudioKind).body}
         </Notice>
       ) : null}
     </section>

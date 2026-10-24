@@ -20,6 +20,7 @@ import type { DesktopAppConfig } from "./config";
 import { LOCAL_ORIGIN, localPageUrl } from "./local-pages";
 import { routeNewWindow, routePopupNavigation } from "./popup-routing";
 import { MainFrameLoad } from "./reachability";
+import { systemAudioUsable } from "./system-audio";
 import { MIN_SIZE, placeWindow, type Placement, type SavedWindow } from "./window-placement";
 
 export interface AccountTarget {
@@ -330,6 +331,9 @@ export class MainWindow {
         additionalArguments: [
           `--opengeni-origin=${new URL(target.baseUrl).origin}`,
           `--opengeni-product=${this.config.productName}`,
+          ...(systemAudioUsable(this.config.systemAudioHelperPath)
+            ? ["--opengeni-system-audio"]
+            : []),
         ],
       },
     });
