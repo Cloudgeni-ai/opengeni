@@ -851,13 +851,26 @@ export class RecordingUploader {
 }
 
 /** Turn API refusals that retrying cannot fix into a permanent error. */
+/**
+ * Refusals that time or a fresh credential fix: an expired or not yet loaded
+ * sign-in, a timeout, and rate limiting. The recording itself is fine, so
+ * these are retried with backoff instead of failing the upload.
+ */
+const RETRYABLE_REFUSALS = new Set([401, 408, 425, 429]);
+
 async function guarded<T>(work: () => Promise<T>): Promise<T> {
   try {
     return await work();
   } catch (error) {
     const status = (error as { status?: unknown }).status;
     const retryable = (error as { retryable?: unknown }).retryable;
-    if (typeof status === "number" && status >= 400 && status < 500 && retryable !== true) {
+    if (
+      typeof status === "number" &&
+      status >= 400 &&
+      status < 500 &&
+      retryable !== true &&
+      !RETRYABLE_REFUSALS.has(status)
+    ) {
       const details = (error as { details?: { code?: unknown } }).details;
       const code =
         typeof details?.code === "string"

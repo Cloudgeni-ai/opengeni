@@ -293,6 +293,32 @@ describe("RecordingUploader", () => {
     expect((await store.listChunks(RECORDING)).length).toBe(1);
   });
 
+  test("a sign-in that is not valid yet is retried, not failed", async () => {
+    const server = fakeServer();
+    server.state.refuse = { status: 401, code: "unauthorized" };
+    // Backoff has to yield here, or retrying the refusal would never let the test run.
+    const uploader = new RecordingUploader({
+      client: server.client,
+      store: createMemoryRecordingChunkStore(),
+      fetch: server.fetchImpl,
+      sleep: () => new Promise((done) => setTimeout(done, 1)),
+      isCaptureActive: async () => false,
+    });
+    const seen: Array<string | null> = [];
+    uploader.subscribe((status) => seen.push(status.retryingAfterError));
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    for (let attempt = 0; attempt < 50 && !seen.some(Boolean); attempt += 1) {
+      await new Promise((done) => setTimeout(done, 1));
+    }
+    // The app signs in again (or its token loads): the same upload carries on.
+    server.state.refuse = null;
+    const status = await uploader.finish(RECORDING);
+    expect(seen.some((error) => error?.includes("unauthorized"))).toBe(true);
+    expect(status.failed).toBeNull();
+    expect(status.finalized).toBe(true);
+  });
+
   test("a recording stopped before any audio is removed instead of finalized", async () => {
     const server = fakeServer();
     const { uploader, store } = uploaderFor(server);

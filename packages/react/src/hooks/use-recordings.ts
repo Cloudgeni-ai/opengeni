@@ -19,6 +19,7 @@ import {
   type RecorderPlatform,
   type RecorderSnapshot,
   type RecordingChunkStore,
+  type RecordingTransport,
   type OpenGeniRecordingsTransport,
 } from "@opengeni/sdk/recordings";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
@@ -219,6 +220,21 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
   );
   const optionsRef = useRef(options);
   optionsRef.current = options;
+  // The uploader outlives client changes (a sign-in token that loads late or is
+  // refreshed, a switched account), so it calls through to the latest client
+  // instead of keeping the one it was created with.
+  const clientRef = useRef(client);
+  clientRef.current = client;
+  const transport = useMemo<RecordingTransport>(
+    () => ({
+      createRecording: (...args) => clientRef.current.createRecording(...args),
+      createRecordingUploads: (...args) => clientRef.current.createRecordingUploads(...args),
+      completeRecordingChunks: (...args) => clientRef.current.completeRecordingChunks(...args),
+      finalizeRecording: (...args) => clientRef.current.finalizeRecording(...args),
+      deleteRecording: (...args) => clientRef.current.deleteRecording(...args),
+    }),
+    [],
+  );
   const [snapshot, setSnapshot] = useState<RecorderSnapshot>(IDLE_SNAPSHOT);
   const [recovered, setRecovered] = useState<string[]>([]);
   const recorderRef = useRef<Recorder | null>(null);
@@ -240,7 +256,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       const isCaptureActive = platformRef.current.isCaptureActive;
       const platformFetch = platformRef.current.fetch;
       uploaderRef.current = new RecordingUploader({
-        client,
+        client: transport,
         store: store(),
         ...(platformFetch ? { fetch: platformFetch } : {}),
         ...(isCaptureActive ? { isCaptureActive: (id: string) => isCaptureActive(id) } : {}),
@@ -257,7 +273,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       });
     }
     return uploaderRef.current;
-  }, [client, store]);
+  }, [transport, store]);
 
   useEffect(() => {
     if (!support.supported || optionsRef.current.resumePending === false) return;
@@ -307,8 +323,11 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
         return;
       }
       const merged = { ...optionsRef.current, ...overrides };
-      const recorder = platformRef.current.createRecorder({
-        client,
+      // Earlier recorders stay subscribed to the shared uploader for their own
+      // recording; only the current one may change what the hook shows.
+      let recorder: Recorder | null = null;
+      recorder = platformRef.current.createRecorder({
+        client: transport,
         workspaceId,
         store: store(),
         uploader: uploader(),
@@ -323,12 +342,14 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
           ? { timesliceMilliseconds: merged.timesliceMilliseconds }
           : {}),
         ...(merged.keepAwake !== undefined ? { keepAwake: merged.keepAwake } : {}),
-        onChange: setSnapshot,
+        onChange: (next) => {
+          if (recorderRef.current === recorder) setSnapshot(next);
+        },
       });
       recorderRef.current = recorder;
       await recorder.start();
     },
-    [client, workspaceId, store, uploader],
+    [transport, workspaceId, store, uploader],
   );
 
   return {
