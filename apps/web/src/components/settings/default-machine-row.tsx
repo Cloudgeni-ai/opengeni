@@ -60,7 +60,7 @@ export function DefaultMachineRow({ workspaceId }: { workspaceId: string }) {
       description={
         unavailable
           ? "Machine unavailable. Choose a replacement to start new chats."
-          : "Used by new chats and schedules following the workspace default."
+          : "Used by new chats and automations following the workspace default."
       }
       controlWidth="select"
       control={

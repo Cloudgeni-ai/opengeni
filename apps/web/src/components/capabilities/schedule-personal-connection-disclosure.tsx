@@ -15,7 +15,7 @@ export function SchedulePersonalConnectionDisclosure({
   return (
     <div
       className={cn("mt-1.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle", className)}
-      title="Each run uses the owner's connected accounts. Only the owner can edit or run this schedule."
+      title="Each run uses the owner's connected accounts. Only the owner can edit or run this automation."
     >
       <UserRoundIcon className="size-3 shrink-0" />
       <span>

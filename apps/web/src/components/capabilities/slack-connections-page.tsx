@@ -360,7 +360,7 @@ export function SlackConnectionsPage(props: {
           if (!open) setRemove(null);
         }}
         title={`Remove ${remove ? connectionAccountIdentityLabel(remove.metadata, "Slack account") : "Slack account"}?`}
-        description="Chats and schedules using this account will lose its access. Your other Slack connections stay connected."
+        description="Chats and automations using this account will lose its access. Your other Slack connections stay connected."
         confirmLabel="Remove account"
         onConfirm={async () => {
           if (!remove) return true;

@@ -10,7 +10,7 @@ export function usageMetricLabel(eventType: string): string {
     "file.uploaded": "Files uploaded",
     "file.deleted": "Files deleted",
     "document.indexed": "Documents indexed",
-    "scheduled_task.fired": "Scheduled tasks started",
+    "scheduled_task.fired": "Automation runs started",
     "api_key.request": "API requests",
   };
   return Object.hasOwn(labels, eventType) ? labels[eventType]! : eventType;
