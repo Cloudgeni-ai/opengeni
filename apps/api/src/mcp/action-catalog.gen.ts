@@ -3704,6 +3704,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getWorkspaceArtifactCurrent",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/current",
+    "request": [],
+    "response": [
+      "WorkspaceArtifactCurrentResponse"
+    ]
+  },
+  {
     "id": "getWorkspaceArtifactHtml",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/html",

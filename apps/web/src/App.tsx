@@ -874,11 +874,14 @@ const workspaceArtifactsRoute = createRoute({
 });
 const workspaceArtifactDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
+  // A Site's details, by tab; without a tab it opens the Site view instead.
   path: "artifacts/$artifactId",
   validateSearch: artifactReturnSearch,
   component: ArtifactDetail,
 });
-// A Site with its conversations beside it; the rail's Site rows open it.
+// A Site with its conversations beside it, where it is edited live. Every
+// way into a Site opens it: the rail, the Artifacts list, links and Edit with
+// Opengeni (`?new`, a new conversation with its composer focused).
 const workspaceSiteViewRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sites/$siteId",
@@ -1482,13 +1485,14 @@ function ArtifactDetail() {
 
 function SiteViewPage() {
   const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
-  const { conversation } = workspaceSiteViewRoute.useSearch();
+  const { conversation, new: startNew } = workspaceSiteViewRoute.useSearch();
   return (
     <LazySiteViewRoute
       key={`${workspaceId}:${siteId}`}
       workspaceId={workspaceId}
       siteId={siteId}
       conversation={conversation}
+      startNew={startNew === true}
     />
   );
 }

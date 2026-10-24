@@ -329,11 +329,17 @@ function useArtifactOpen({
   const open = () =>
     onSelect
       ? onSelect(item)
-      : void navigate({
-          to: artifactRoute(item.kind),
-          params: { workspaceId, artifactId: item.id },
-          search: browseSearch ?? (sessionId ? { fromSession: sessionId } : {}),
-        });
+      : item.kind === "site"
+        ? // A Site opens in the Site view, with its chat beside it.
+          void navigate({
+            to: "/workspaces/$workspaceId/sites/$siteId",
+            params: { workspaceId, siteId: item.id },
+          })
+        : void navigate({
+            to: artifactRoute(item.kind),
+            params: { workspaceId, artifactId: item.id },
+            search: browseSearch ?? (sessionId ? { fromSession: sessionId } : {}),
+          });
   const menu = (
     <>
       <DropdownMenuItem onSelect={open}>
@@ -393,9 +399,10 @@ function useArtifactOpen({
     link: onSelect
       ? null
       : {
-          href: browseSearch
-            ? `${artifactPath(workspaceId, item)}${stringifySearch(browseSearch)}`
-            : artifactPath(workspaceId, item, sessionId),
+          href:
+            browseSearch && item.kind !== "site"
+              ? `${artifactPath(workspaceId, item)}${stringifySearch(browseSearch)}`
+              : artifactPath(workspaceId, item, sessionId),
           onClick: (event: MouseEvent<HTMLElement>) => {
             if (!isPlainClick(event)) return;
             event.preventDefault();

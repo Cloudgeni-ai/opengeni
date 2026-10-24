@@ -73,10 +73,14 @@ export async function getWorkspaceSiteSessionOrigin(
   viewer: WorkspaceArtifactViewer,
   siteId: string,
   versionId: string,
-): Promise<{ siteId: string; title: string }> {
+): Promise<{ siteId: string; title: string; revision: number }> {
   return withWorkspaceRls(db, workspaceId, async (scoped) => {
     const [origin] = await scoped
-      .select({ siteId: schema.workspaceArtifacts.id, title: schema.workspaceArtifacts.title })
+      .select({
+        siteId: schema.workspaceArtifacts.id,
+        title: schema.workspaceArtifacts.title,
+        revision: schema.workspaceArtifactVersions.revision,
+      })
       .from(schema.workspaceArtifacts)
       .innerJoin(
         schema.workspaceArtifactVersions,
@@ -597,6 +601,23 @@ export async function getWorkspaceArtifact(
       versionsTruncated: versionRows.length > 100,
       eventsTruncated: eventRows.length > 100,
     };
+  });
+}
+
+/**
+ * The Site and its current version alone, without its history: what an open
+ * Site view checks every few seconds to see whether a new version is live.
+ */
+export async function getWorkspaceArtifactCurrent(
+  db: Database,
+  workspaceId: string,
+  viewer: WorkspaceArtifactViewer,
+  artifactId: string,
+): Promise<WorkspaceArtifact> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const artifact = await artifactRow(scopedDb, workspaceId, artifactId, viewer);
+    if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
+    return artifactFromRow(artifact, await currentVersion(scopedDb, artifact));
   });
 }
 

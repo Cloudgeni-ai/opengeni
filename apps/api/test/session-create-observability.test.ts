@@ -10,7 +10,7 @@ import {
   variableSetsRemovedResponse,
   withoutEmptyLegacyVariableSetFields,
 } from "../src/http/variable-sets-removed";
-import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import { currentSiteViewerRlsContext } from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
@@ -87,7 +87,8 @@ function productionRoute() {
       withEffectivePolicy, measureSessionCreatePhase, legacyVariableSetFields,
       variableSetsRemovedResponse, withoutEmptyLegacyVariableSetFields,
       currentSiteSessionOrigin, currentSiteViewerRlsContext,
-      siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson } = ports;
+      siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson,
+      SITE_FRAME_HEADER, hasPermission, siteViewConversationContext } = ports;
     ${code}
     return handler;
   `,
@@ -152,6 +153,12 @@ function routeFixture() {
     currentSiteSessionOrigin,
     currentSiteViewerRlsContext,
     siteFrameBodyRefusal,
+    SITE_FRAME_HEADER,
+    // The Site view's first-message context is for people who may publish.
+    hasPermission: () => false,
+    siteViewConversationContext: async () => {
+      throw new Error("Unexpected Site view context");
+    },
     createSessionForRequest: (...args: unknown[]) => {
       calls.push({ name: "create", args });
       return hold.create.promise;

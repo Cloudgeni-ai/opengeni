@@ -21,6 +21,7 @@ export {
   type ArtifactLoadErrorView,
   ArtifactSandbox,
   type ArtifactSandboxProps,
+  type SiteLiveStatus,
   DeferredChatMedia,
   SiteView,
   type SiteViewProps,

@@ -39,8 +39,11 @@
   ordinary lists ignore them. A Site row is stable: its conversations stay
   nested under it, collapsed by default, whichever session is open. A Site's
   title in its row refreshes with the next list read.
-- A Site row opens the console's Site view
-  (`/workspaces/:workspaceId/sites/:siteId`): the Site fills the page and a
+- Every way into a Site opens the console's Site view
+  (`/workspaces/:workspaceId/sites/:siteId`): its sidebar row, the Artifacts
+  list (and its Copy link), a duplicated Site, links and notifications naming
+  `/artifacts/:id` without a tab (replaced, so Back leaves the Site), and the
+  Site tab of its details. The Site fills the page and a
   chat panel sits beside it with one conversation open, the newest unless
   `?conversation=<id>` chooses one. The panel doesn't list conversations (the
   Site's sidebar row does); it shows the open one as a regular chat with the
@@ -64,8 +67,63 @@
   it). The panel follows `siteSessionIds` hints, so a conversation started in
   the Site beside it becomes the newest when the Site is next opened. The
   panel's menu opens the conversation as a full chat or the Site's details
-  (`/artifacts/:id`, with settings, sharing and its Conversations tab).
-  `/artifacts/:id` (with its tabs) and `/sessions/:id` keep working.
+  (`/artifacts/:id?tab=settings`; Versions for people who can't manage it).
+  The details page is reached by tab (`?tab=versions|conversations|data|settings`,
+  Versions by default) and `/sessions/:id` keeps working. **Edit with
+  Opengeni** on the details page opens the Site view with `?new=true`: a new
+  conversation in the panel (shown even if it was hidden), its composer
+  focused once the Site has loaded; the address then drops `?new`, so Back or
+  a reload doesn't repeat it.
+- The Site view edits the Site live, with today's permissions: anyone who can
+  see the Site and has `artifacts:publish` can change it; visitors can't, and
+  there are no drafts or approval step.
+  - The conversation knows its Site. When a conversation is created from the
+    panel (the request carries the Site headers without the frame marker, so
+    it isn't Site code, and its caller may publish), the API attaches
+    `siteConversationContext` (`@opengeni/contracts/site-session-http`) to
+    its first message as server-authored `modelContext`: the Site's id,
+    title and the version shown, and that a change is published as a new
+    version straight away. For someone who may publish, the panel attaches
+    the same context, with the version then live, to every later message
+    (`sendExtras`); others get none, as from the API. It is
+    ordinary model-visible context, never authority; a caller still can't
+    set its own context on a Site create (403), and a published host's
+    conversations get none.
+  - The preview follows the Site. `useSiteLiveVersion` checks the Site when
+    the open conversation's tool call returns or its turn ends
+    (`SessionConversation`'s `onEvent`, which fires only for events newer
+    than the history it opened with), every five seconds while the page is
+    visible (versions published from anywhere else), and on focus, coming
+    back online or into view; overlapping checks share one. A check reads
+    only the Site and its current version (`GET
+    /v1/workspaces/:workspaceId/published-artifacts/:artifactId/current`,
+    `getWorkspaceArtifactCurrent` in the SDK, `artifacts:read`, without
+    provenance, so it needs no session reads); the history is read again
+    only when that changed. Against a server without it (404 or 405) every
+    check reads the history. A Site that is gone (403 or 404) stops the timed
+    checks. `SiteView` gets the current `versionId` and reloads in place when
+    it changes, replacing the frame once, in the same render as its HTML,
+    and keeping the version on screen until the new one has loaded; a failed
+    update tries again, waiting longer each time (up to 30 seconds), and a
+    hidden tab waits until it is shown. The frame's label says what is true
+    (`ArtifactSandbox` `liveState`): **Live**, **Updating** while a new
+    version loads, or **Reconnecting** when a check or update failed (the
+    version shown stays); on a narrow screen only its dot shows, and it is
+    still announced. On a Site published to the web, the header's link to
+    the published Site stands in for **Live**, and **Updating** or
+    **Reconnecting** shows beside it.
+  - The version chip in the Site's header (`SiteVersionMenu`) shows the live
+    version and its recent history (eight, then **All versions** on the
+    details page). **Undo last change** restores the version that was live
+    before the change that made the current one live (a publish or a
+    restore, so a second Undo goes forward again and reads **Undo
+    restore**), else the revision before;
+    **Restore** on any listed version does the same. Both use the existing
+    rollback with `expectedCurrentVersionId`, so a version published
+    meanwhile wins and the chip says "The Site changed meanwhile". People
+    without publish permission, and archived Sites, get the history only.
+    In full screen its menu opens inside the full-screen frame. An archived
+    Site's view links to its details, where it can be restored.
 - A Site is a sidebar row even before anyone asks it anything. Placement has
   one rule: a Site is a top-level row in the project of the chat that created
   it (the session tree of its first version), and new Site conversations are
