@@ -2086,6 +2086,9 @@ export type SiteConversationGroup = {
   waiting: number;
   unread: number;
   activeWork: number;
+  /** This person pinned the Site in their sidebar. Absent when not pinned. */
+  pinned?: true;
+  pinnedAt?: string | null;
 };
 
 export type SessionListResponse = {

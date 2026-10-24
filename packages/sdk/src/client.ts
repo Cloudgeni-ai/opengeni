@@ -119,6 +119,8 @@ import type {
 import type {
   DuplicateWorkspaceArtifactRequest,
   SiteOpenedResponse,
+  SiteSidebarStateResponse,
+  UpdateSiteSidebarStateRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
@@ -2157,6 +2159,22 @@ export class OpenGeniClient {
     return this.requestJson(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/opened`,
+    );
+  }
+  /**
+   * Pin or archive a Site row in this person's own sidebar. Personal like a
+   * session pin; archive never unpublishes the Site. Opening the Site again
+   * restores an archived row. Needs `artifacts:read`.
+   */
+  async updateSiteSidebarState(
+    workspaceId: string,
+    siteId: string,
+    request: UpdateSiteSidebarStateRequest,
+  ): Promise<SiteSidebarStateResponse> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/sidebar`,
+      request,
     );
   }
 

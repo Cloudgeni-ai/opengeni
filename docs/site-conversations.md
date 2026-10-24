@@ -101,6 +101,19 @@
   conversations a row has no count and nothing to disclose; it opens the
   Site view. Conversations someone moved to another project nest under a row
   for the Site in that project, and the Site keeps its row in its own one.
+- Every sidebar row has Pin and Archive one click away (hover or keyboard
+  focus shows them over the row's time; right-click and the touch overflow
+  menu offer them too). For a Site row both are personal sidebar state
+  (`site_sidebar_states`, `PUT
+  /v1/workspaces/:workspaceId/published-artifacts/:artifactId/sidebar`,
+  `updateSiteSidebarState` in the SDK, `artifacts:read`, refused on a Site
+  origin) and never change the Site or anyone else's sidebar. Pin moves the
+  row, with its conversations, into Pinned, once across projects. Archive
+  hides the row and its conversations from this person's sidebar only; the
+  Site stays published and others still see it. Undo, or opening the Site
+  again, restores it; a pin is kept. Archived Sites are not listed under the
+  Archived filter. Archive on a spawned chat's row archives its workstream,
+  since archive belongs to the top-level chat.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.
