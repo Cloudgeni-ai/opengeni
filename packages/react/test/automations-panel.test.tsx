@@ -8,7 +8,6 @@ import type {
   ScheduledTaskRun,
 } from "@opengeni/sdk";
 
-import * as selectMenu from "../src/ui/select-menu";
 import {
   actRun,
   flush,
@@ -19,6 +18,8 @@ import {
 } from "./render-hook";
 
 registerDom();
+// Imported after the DOM exists: Radix decides at load whether layout effects run.
+const selectMenu = await import("../src/ui/select-menu");
 
 // Popover menus need layout the test DOM lacks; plain option lists stand in,
 // and `pick` chooses by the menu's label.
@@ -47,6 +48,8 @@ mock.module("../src/ui/select-menu", () => {
   return { ...selectMenu, SelectMenu: OptionList, ComboboxSelect: OptionList };
 });
 const { AutomationsPanel } = await import("../src/automations");
+const { OpenGeniMessagesProvider } = await import("../src/messages/runtime");
+const { PortalContainerProvider } = await import("../src/ui/portal-container");
 
 const WORKSPACE_ID = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d";
 const SESSION_ID = "6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
@@ -370,4 +373,62 @@ test("a failed load offers to try again", async () => {
   await click(button(container, "Try again"));
   expect(client.listScheduledTasks).toHaveBeenCalledTimes(2);
   expect(container.textContent).toContain("No automations yet.");
+});
+
+test("it is a styled root of its own, and its delete confirmation opens in a styled layer", async () => {
+  const client = fakeClient({ tasks: [task()] });
+  const container = await render(client, { sessionId: SESSION_ID });
+  expect(container.querySelector("section")?.classList.contains("og-root")).toBe(true);
+  await click(container.querySelector<HTMLButtonElement>("[data-row-action]")!);
+  await click(button(container, "Delete"));
+  // A host's dialog would clip or unstyle it: it opens under <body>, in the panel's own layer.
+  const layer = document.body.querySelector<HTMLElement>(":scope > [data-og-overlays]");
+  expect(layer?.classList.contains("og-root")).toBe(true);
+  const dialog = layer?.querySelector<HTMLElement>('[role="dialog"]');
+  expect(dialog?.textContent).toContain("Delete “Morning digest”?");
+  expect(container.contains(dialog ?? null)).toBe(false);
+  await click(button(dialog!, "Delete automation"));
+  expect(client.deleteScheduledTask).toHaveBeenCalledWith(WORKSPACE_ID, task().id);
+  expect(container.textContent).toContain("Nothing picks this chat up again yet.");
+});
+
+test("in an app with its own overlay container, the panel's overlays open there", async () => {
+  const client = fakeClient({ tasks: [task()] });
+  const appRoot = document.createElement("div");
+  document.body.append(appRoot);
+  rendered = await renderComponent(
+    <PortalContainerProvider container={appRoot}>
+      <AutomationsPanel
+        client={client as unknown as OpenGeniClient}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+      />
+    </PortalContainerProvider>,
+  );
+  await flush();
+  const { container } = rendered;
+  await click(container.querySelector<HTMLButtonElement>("[data-row-action]")!);
+  await click(button(container, "Delete"));
+  expect(document.body.querySelector("[data-og-overlays]")).toBeNull();
+  expect(appRoot.querySelector('[role="dialog"]')?.textContent).toContain(
+    "Delete “Morning digest”?",
+  );
+});
+
+test("the loading note is in the host's language", async () => {
+  const client = fakeClient();
+  client.listScheduledTasks.mockImplementation(() => new Promise<ScheduledTask[]>(() => {}));
+  rendered = await renderComponent(
+    <OpenGeniMessagesProvider
+      locale="nb"
+      messages={{ "list.loading": "Laster {label}", "automations.panel.list": "Automatiseringer" }}
+    >
+      <AutomationsPanel client={client as unknown as OpenGeniClient} workspaceId={WORKSPACE_ID} />
+    </OpenGeniMessagesProvider>,
+  );
+  await flush();
+  const notes = [...rendered.container.querySelectorAll('[role="status"]')].map(
+    (note) => note.textContent,
+  );
+  expect(notes).toContain("Laster automatiseringer");
 });

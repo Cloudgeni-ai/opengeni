@@ -25,6 +25,7 @@ import {
   PlusIcon,
 } from "lucide-react";
 
+import { useOpenGeniText } from "../messages/runtime";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "./dropdown-menu";
 import { LogoTileSizeProvider, type LogoTileSize } from "./logo-tile";
 import { useSectionListFrame } from "./section-variant";
@@ -176,6 +177,7 @@ export function RowList({
   className,
   children,
 }: RowListProps) {
+  const t = useOpenGeniText();
   const value = useMemo<RowListContextValue>(() => ({ variant, columns }), [variant, columns]);
   // In settings (grouped sections) a flush list that is not already inside a
   // section card becomes the card itself: rows keep their 12px padding, the
@@ -187,7 +189,7 @@ export function RowList({
   } as CSSProperties;
   const busyNote = busy ? (
     <span role="status" className="sr-only">
-      Loading {label.toLocaleLowerCase()}
+      {t("list.loading", { label: label.toLocaleLowerCase() })}
     </span>
   ) : null;
 
