@@ -70,6 +70,10 @@ export function LiveTranscript({
 }) {
   const turns = useMemo(() => groupLiveTurns(lines), [lines]);
   const heard = partials.filter((partial) => partial.text.trim());
+  // Words still being heard from whoever spoke last continue their turn.
+  const lastTrack = turns.at(-1)?.trackNumber;
+  const continuing = heard.find((partial) => partial.trackNumber === lastTrack) ?? null;
+  const newTurns = heard.filter((partial) => partial !== continuing);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow the newest words unless the reader scrolled up to reread.
   const following = useRef(true);
@@ -126,7 +130,7 @@ export function LiveTranscript({
           <p className="text-sm leading-5 text-fg-muted">{empty}</p>
         ) : (
           <ol className="grid gap-3">
-            {turns.map((turn) => (
+            {turns.map((turn, index) => (
               <li key={turn.key} className="grid min-w-0 gap-0.5">
                 <div className="flex items-center gap-2">
                   <SpeakerDot slot={turn.trackNumber + 1} />
@@ -137,10 +141,15 @@ export function LiveTranscript({
                     {formatClock(turn.startMilliseconds)}
                   </span>
                 </div>
-                <p className="text-sm leading-5 text-pretty text-fg">{turn.texts.join(" ")}</p>
+                <p className="text-sm leading-5 text-pretty text-fg">
+                  {turn.texts.join(" ")}
+                  {continuing && index === turns.length - 1 ? (
+                    <span className="text-fg-muted"> {continuing.text.trim()}…</span>
+                  ) : null}
+                </p>
               </li>
             ))}
-            {heard.map((partial) => (
+            {newTurns.map((partial) => (
               <li key={`partial:${partial.trackNumber}`} className="grid min-w-0 gap-0.5">
                 <div className="flex items-center gap-2">
                   <SpeakerDot slot={partial.trackNumber + 1} />
