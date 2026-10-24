@@ -326,6 +326,7 @@ function delivery(index: number, fields: Partial<EventDelivery>): EventDelivery 
     status: "accepted",
     reason: null,
     eventIds: [uuid("e0e00000", index)],
+    eventTypes: ["pull_request.opened"],
     bodyBytes: 18_432 + index * 311,
     bodyRetained: true,
     duplicateCount: 0,
@@ -335,13 +336,22 @@ function delivery(index: number, fields: Partial<EventDelivery>): EventDelivery 
 }
 const deliveries: EventDelivery[] = [
   delivery(1, {}),
-  delivery(2, { duplicateCount: 2 }),
-  delivery(3, {}),
-  delivery(4, { status: "ignored", reason: "No automation listens for ping.", eventIds: [] }),
+  delivery(2, { duplicateCount: 2, eventTypes: ["pull_request.synchronize"] }),
+  delivery(3, {
+    eventIds: [uuid("e0e00000", 3), uuid("e0e00000", 13)],
+    eventTypes: ["issues.opened", "issue_comment.created"],
+  }),
+  delivery(4, {
+    status: "ignored",
+    reason: "No automation listens for ping.",
+    eventIds: [],
+    eventTypes: [],
+  }),
   delivery(5, {
     status: "rejected",
     reason: "The signature did not match the source's secret.",
     eventIds: [],
+    eventTypes: [],
     bodyRetained: false,
   }),
 ];

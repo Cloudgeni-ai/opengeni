@@ -16157,6 +16157,8 @@
         "$.duplicateCount": "integer!",
         "$.eventIds": "array!",
         "$.eventIds[]": "string",
+        "$.eventTypes": "array!",
+        "$.eventTypes[]": "string",
         "$.id": "string!",
         "$.reason": "string! null",
         "$.receivedAt": "string!",
@@ -34889,6 +34891,7 @@
       "BrowserRecorder": "type",
       "BrowserRecorderErrorCode": "type",
       "BrowserRecorderOptions": "type",
+      "browserRecorderPlatform": "value",
       "BrowserRecorderSnapshot": "type",
       "BrowserRecorderState": "type",
       "canCaptureSystemAudio": "value",
@@ -34898,6 +34901,12 @@
       "OpenGeniRecordingsClient": "value",
       "OpenGeniRecordingsTransport": "type",
       "preferredRecordingMimeType": "value",
+      "Recorder": "type",
+      "RecorderErrorCode": "type",
+      "RecorderOptions": "type",
+      "RecorderPlatform": "type",
+      "RecorderSnapshot": "type",
+      "RecorderState": "type",
       "RecordingChunk": "type",
       "RecordingChunkStore": "type",
       "RecordingTransport": "type",
@@ -34905,7 +34914,8 @@
       "RecordingUploaderOptions": "type",
       "RecordingUploadStatus": "type",
       "sha256Hex": "value",
-      "StoredRecording": "type"
+      "StoredRecording": "type",
+      "StoredRecordingChunk": "type"
     },
     "@opengeni/sdk/session-history-import": {
       "appendArchivedSessionEvents": "value",
@@ -36216,6 +36226,7 @@
       "createEventSourceRequest": "value",
       "DEFAULT_EVENT_RUNS_PER_HOUR": "value",
       "deliveryEventsLabel": "value",
+      "deliveryTitle": "value",
       "emptyEventTriggersDraft": "value",
       "EVENT_COMMON_FIELDS": "value",
       "EVENT_CONDITION_OPERATORS": "value",
@@ -36780,8 +36791,23 @@
       "useWorkspaceRealtimeModelSelection": "value"
     },
     "@opengeni/react/recordings": {
+      "activeSegmentIndex": "value",
+      "defaultMeetingTitle": "value",
+      "defaultSpeakerName": "value",
+      "formatClock": "value",
+      "formatDuration": "value",
+      "groupTranscriptTurns": "value",
+      "languageName": "value",
+      "meetingPhase": "value",
+      "MeetingPhase": "type",
+      "meetingStatusLabel": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
+      "speakerColorSlots": "value",
+      "speakerDisplayName": "value",
+      "speakerIsNamed": "value",
+      "transcriptErrorText": "value",
+      "TranscriptTurn": "type",
       "useRecorder": "value",
       "UseRecorderOptions": "type",
       "UseRecorderResult": "type",
@@ -36796,7 +36822,8 @@
       "UseRecordingsResult": "type",
       "useTranscript": "value",
       "UseTranscriptOptions": "type",
-      "UseTranscriptResult": "type"
+      "UseTranscriptResult": "type",
+      "versionSummary": "value"
     },
     "@opengeni/react/responsive.css": {
       "default": "value"

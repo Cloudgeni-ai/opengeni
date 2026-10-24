@@ -9,6 +9,7 @@ import {
   byteSizeLabel,
   createEventSourceRequest,
   deliveryEventsLabel,
+  deliveryTitle,
   emptyEventTriggersDraft,
   eventActorLabel,
   eventConditionFieldSuggestions,
@@ -395,6 +396,22 @@ describe("event sources", () => {
     expect(deliveryEventsLabel({ eventIds: [] })).toBe("No events");
     expect(deliveryEventsLabel({ eventIds: ["a"] })).toBe("1 event");
     expect(deliveryEventsLabel({ eventIds: ["a", "b"] })).toBe("2 events");
+    expect(deliveryTitle({ eventIds: [], eventTypes: [] })).toBe("No events");
+    expect(deliveryTitle({ eventIds: ["a"], eventTypes: ["push"] })).toBe("push");
+    expect(
+      deliveryTitle({
+        eventIds: ["a", "b"],
+        eventTypes: ["issues.opened", "issue_comment.created"],
+      }),
+    ).toBe("issues.opened and issue_comment.created");
+    expect(
+      deliveryTitle({
+        eventIds: ["a", "b", "c"],
+        eventTypes: ["push", "check_run.completed", "release.published"],
+      }),
+    ).toBe("push and 2 more");
+    // A server that does not name the types still gets a count.
+    expect(deliveryTitle({ eventIds: ["a", "b"] })).toBe("2 events");
     expect(byteSizeLabel(512)).toBe("512 B");
     expect(byteSizeLabel(1536)).toBe("1.5 KB");
     expect(byteSizeLabel(20 * 1024)).toBe("20 KB");

@@ -104,7 +104,7 @@ describe("scheduled task access notices", () => {
     try {
       expect(view.container.querySelector("button")).toBeNull();
       expect(view.container.textContent).toContain(
-        "Refreshing needs a signed-in person who can manage schedules.",
+        "Refreshing needs a signed-in person who can manage automations.",
       );
     } finally {
       await view.cleanup();
@@ -123,7 +123,7 @@ describe("scheduled task access notices", () => {
     );
     try {
       expect(view.container.textContent).toContain(
-        "Check the connection in Capabilities, then run the schedule again.",
+        "Check the connection in Capabilities, then run the automation again.",
       );
       expect(view.container.querySelector("button")).toBeNull();
     } finally {
@@ -161,8 +161,10 @@ describe("scheduled task access notices", () => {
       const sentence =
         "The account pinned for Linear can no longer be used, so runs go ahead without Linear.";
       expect(text.split(sentence)).toHaveLength(2);
-      expect(text).toContain("edit the schedule to pin another one or use your current accounts.");
-      expect(text).not.toContain("This schedule's access is out of date");
+      expect(text).toContain(
+        "edit the automation to pin another one or use your current accounts.",
+      );
+      expect(text).not.toContain("This automation's access is out of date");
       // A refresh never changes pins, so it is not offered for one.
       expect(
         [...view.container.querySelectorAll("button")].some(
@@ -184,7 +186,7 @@ describe("scheduled task access notices", () => {
     );
     try {
       const text = required.container.textContent ?? "";
-      expect(text).toContain("Runs of this schedule are being skipped");
+      expect(text).toContain("Runs of this automation are being skipped");
       expect(text).toContain(
         "The account pinned for Linear can no longer be used, so runs are skipped.",
       );
@@ -211,7 +213,7 @@ describe("scheduled task access notices", () => {
     );
     try {
       expect(view.container.textContent).toContain(
-        "Reconnect the account in Capabilities, or edit the schedule to pin another one or use your current accounts.",
+        "Reconnect the account in Capabilities, or edit the automation to pin another one or use your current accounts.",
       );
       expect(view.container.querySelector("button")).toBeNull();
     } finally {

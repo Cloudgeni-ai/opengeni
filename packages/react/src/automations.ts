@@ -49,6 +49,7 @@ export {
   byteSizeLabel,
   createEventSourceRequest,
   deliveryEventsLabel,
+  deliveryTitle,
   eventActorLabel,
   eventSourceAddLabel,
   eventSourceChoiceMeta,

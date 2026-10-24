@@ -60,7 +60,7 @@ test("an admin sees whose private schedule it is, its cadence and cost, and can 
     await flush();
   });
   const text = container.textContent ?? "";
-  expect(text).toContain("Other people's private schedules");
+  expect(text).toContain("Other people's private automations");
   expect(text).toContain("Ada Lovelace's schedule");
   expect(text).toContain("Every hour");
   expect(text).toContain("A member's schedule");

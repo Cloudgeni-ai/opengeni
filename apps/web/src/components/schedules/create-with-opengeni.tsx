@@ -96,8 +96,8 @@ function CreateWithOpenGeniDialog({
         }
       }}
       size="sm"
-      title="Create a schedule with Opengeni"
-      description="It starts a chat, finds the repositories, secrets and integrations the schedule needs, and creates it. It asks you only for what it can't find."
+      title="Create an automation with Opengeni"
+      description="It starts a chat, finds the repositories, secrets and integrations the automation needs, and creates it. It asks you only for what it can't find."
       submitLabel="Start chat"
       pendingLabel="Starting…"
       submitDisabled={catalog.loading || model === null || context.busy}

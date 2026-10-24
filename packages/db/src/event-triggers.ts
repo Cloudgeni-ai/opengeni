@@ -533,14 +533,27 @@ export type RecordEventDeliveryResult = {
 
 export const EVENT_DISPATCH_SETTLE_MS = 3_000;
 
-function mapDelivery(row: DeliveryRow, eventIds: string[]): EventDelivery {
+/** The events one delivery became: their ids, and their types each once, in order. */
+type DeliveryEvents = { ids: string[]; types: string[] };
+
+const NO_DELIVERY_EVENTS: DeliveryEvents = { ids: [], types: [] };
+
+function deliveryEventsOf(events: ReadonlyArray<{ id: string; type: string }>): DeliveryEvents {
+  return {
+    ids: events.map((event) => event.id),
+    types: [...new Set(events.map((event) => event.type))],
+  };
+}
+
+function mapDelivery(row: DeliveryRow, events: DeliveryEvents): EventDelivery {
   return {
     id: row.id,
     sourceId: row.sourceId,
     receivedAt: row.receivedAt.toISOString(),
     status: row.status as EventDeliveryStatus,
     reason: row.reason,
-    eventIds,
+    eventIds: events.ids,
+    eventTypes: events.types,
     bodyBytes: row.bodyBytes,
     bodyRetained: row.body !== null,
     duplicateCount: row.duplicateCount,
@@ -594,9 +607,9 @@ export async function recordEventDeliveryInTransaction(
   if (!stored) throw new Error("event delivery was not stored");
   const deliveryRow = deliveryRowFromRaw(stored);
   if (stored.duplicate) {
-    const eventIds = await deliveryEventIds(tx, input.workspaceId, [deliveryRow.id]);
+    const events = await deliveryEvents(tx, input.workspaceId, [deliveryRow.id]);
     return {
-      delivery: mapDelivery(deliveryRow, eventIds.get(deliveryRow.id) ?? []),
+      delivery: mapDelivery(deliveryRow, events.get(deliveryRow.id) ?? NO_DELIVERY_EVENTS),
       duplicate: true,
       eventIds: [],
       matchedTaskIds: [],
@@ -649,7 +662,7 @@ export async function recordEventDeliveryInTransaction(
   return {
     delivery: mapDelivery(
       updated ?? deliveryRow,
-      inserted.map((entry) => entry.id),
+      deliveryEventsOf(inserted.map((entry) => ({ id: entry.id, type: entry.event.type }))),
     ),
     duplicate: false,
     eventIds: inserted.map((entry) => entry.id),
@@ -703,15 +716,19 @@ function deliveryRowFromRaw(raw: DeliveryRowRaw): DeliveryRow {
   };
 }
 
-async function deliveryEventIds(
+async function deliveryEvents(
   db: Database,
   workspaceId: string,
   deliveryIds: string[],
-): Promise<Map<string, string[]>> {
-  const result = new Map<string, string[]>();
+): Promise<Map<string, DeliveryEvents>> {
+  const result = new Map<string, DeliveryEvents>();
   if (deliveryIds.length === 0) return result;
   const rows = await db
-    .select({ id: schema.inboundEvents.id, deliveryId: schema.inboundEvents.deliveryId })
+    .select({
+      id: schema.inboundEvents.id,
+      type: schema.inboundEvents.type,
+      deliveryId: schema.inboundEvents.deliveryId,
+    })
     .from(schema.inboundEvents)
     .where(
       and(
@@ -720,10 +737,12 @@ async function deliveryEventIds(
       ),
     )
     .orderBy(schema.inboundEvents.occurredAt, schema.inboundEvents.id);
+  const byDelivery = new Map<string, Array<{ id: string; type: string }>>();
   for (const row of rows) {
     if (!row.deliveryId) continue;
-    result.set(row.deliveryId, [...(result.get(row.deliveryId) ?? []), row.id]);
+    byDelivery.set(row.deliveryId, [...(byDelivery.get(row.deliveryId) ?? []), row]);
   }
+  for (const [deliveryId, events] of byDelivery) result.set(deliveryId, deliveryEventsOf(events));
   return result;
 }
 
@@ -842,9 +861,9 @@ export async function getEventDeliveryForReplay(
       )
       .limit(1);
     if (!row) return null;
-    const eventIds = await deliveryEventIds(scoped, workspaceId, [row.id]);
+    const events = await deliveryEvents(scoped, workspaceId, [row.id]);
     return {
-      delivery: mapDelivery(row, eventIds.get(row.id) ?? []),
+      delivery: mapDelivery(row, events.get(row.id) ?? NO_DELIVERY_EVENTS),
       body: row.body,
       headers: row.headers,
       streamKey: row.streamKey,
@@ -905,14 +924,14 @@ export async function listEventDeliveries(
       .orderBy(desc(schema.eventDeliveries.receivedAt), desc(schema.eventDeliveries.id))
       .limit(limit + 1);
     const page = rows.slice(0, limit);
-    const eventIds = await deliveryEventIds(
+    const events = await deliveryEvents(
       scoped,
       workspaceId,
       page.map((row) => row.id),
     );
     const last = page.at(-1);
     return {
-      deliveries: page.map((row) => mapDelivery(row, eventIds.get(row.id) ?? [])),
+      deliveries: page.map((row) => mapDelivery(row, events.get(row.id) ?? NO_DELIVERY_EVENTS)),
       nextCursor: rows.length > limit && last ? encodeEventCursor(last.receivedAt, last.id) : null,
     };
   });
