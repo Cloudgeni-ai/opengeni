@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/batch-ci.yml",
-      "sha256": "5923fbcf6eca0905ee547f7fbbe94bb931f469bb2d944c460ae4e1a52d425717"
+      "sha256": "8373203c1e3a7313da4bcae83d236a0ce91d2b84b8c9262db6a60631dd51a6c8"
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
@@ -624,8 +624,20 @@
     {
       "workflow": ".github/workflows/batch-ci.yml",
       "job": "source",
+      "step": "Previous-binary database readiness",
+      "sha256": "2f05aa9bffac152003fa13cbd180ccde355e865e0c57642387ae7aa28b1b3a6d"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "source",
       "step": "Run source contracts and record an exact code verdict",
       "sha256": "c74e6723098254dfd42dae57a16316a7aadce24a905587c25ef922ca7b6a0ea8"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "source",
+      "step": "Separate previous-binary database infrastructure from compatibility assertions",
+      "sha256": "ca48ed8b74d50815f2552ddc1193305712f0b2eac79f1875bee678e80247a4f3"
     },
     {
       "workflow": ".github/workflows/batch-ci.yml",
