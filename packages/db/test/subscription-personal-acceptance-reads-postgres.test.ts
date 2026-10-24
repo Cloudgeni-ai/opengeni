@@ -748,7 +748,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
-      // 0929 adds event-trigger state; ingress routing is non-RLS.
+      // 0929 adds event-trigger state. Its non-RLS ingress routing table has
+      // deferred runtime DML (0937), so neither inventory reports it here.
       "inbound_events",
       "event_deliveries",
       "event_sources",
@@ -756,7 +757,6 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "scheduled_task_event_inbox",
       "scheduled_task_event_occurrences",
       "scheduled_task_event_settings",
-      "event_ingress_routes",
       // 0930 recording tables are also withheld.
       "recordings",
       "recording_tracks",
@@ -776,10 +776,12 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "teams_bot_outbox",
       "teams_bot_proofs",
       "teams_bot_routes",
+      // 0935 adds the event source feed cursors.
+      "event_source_feeds",
     ].sort();
     // 0823 machine-consent tables are protected but not runtime-privileged.
     const protectedTables = [
-      ...runtimeTables.filter((table) => table !== "event_ingress_routes"),
+      ...runtimeTables,
       "session_attempt_machine_consents",
       "session_turn_machine_consents",
     ].sort();

@@ -362,6 +362,31 @@ operational exemption is pinned in `NON_RLS_RUNTIME_TABLES` and
 `packages/db/test/non-rls-authority-tables.test.ts`, with shared atomic admission
 covered by `packages/db/test/slack-api-rate-limits.test.ts`.
 
+### 2026-10-24 addendum: event source ingress routes
+
+`event_ingress_routes` (migration `0929_event_triggers.sql`) generalizes the
+webhook routing exemption above to every event source kind. A delivery arrives
+with either a random route UUID (generic webhooks) or a provider identity
+(a GitHub key, a Slack team, a Gmail mailbox), and that exact key is what
+discovers the owning organization, workspace and FORCE-RLS `event_sources` row.
+Requiring an organization GUC first would be circular, as for
+`automation_webhook_endpoints`.
+
+Each row holds the route id, organization, workspace and source attribution,
+the source kind, an optional exact external key and its creation time. It
+stores no secret, credential, event payload or trigger configuration; the
+FORCE-RLS source row and its encrypted secret still authenticate every delivery
+after the lookup.
+
+One difference from the earlier routing tables: a Gmail route key is the
+lower-cased mailbox address, so arbitrary runtime-role SQL could read mailbox
+addresses with their tenant attribution, not only opaque ids. Storing a keyed
+hash of provider identities instead of the plain value would remove that and
+keeps equality lookups working; it is the recommended follow-up before runtime
+DML on this table is granted (migration `0937` currently withholds it). The
+exemption is pinned in `NON_RLS_RUNTIME_TABLES` and
+`packages/db/test/non-rls-authority-tables.test.ts`.
+
 ## What would change the verdict
 
 The `workspaces` and `workspace_memberships` exemptions are consequences of one
