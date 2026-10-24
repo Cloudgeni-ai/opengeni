@@ -505,24 +505,24 @@ export function MeetingTranscript({
                       className="group/speaker -mx-1.5 flex min-w-0 items-center gap-2 rounded-[6px] px-1.5 py-0.5 text-sm leading-5 font-semibold text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11"
                     >
                       <SpeakerDot slot={slots.get(turn.speakerLabel)} />
-                      <span
-                        className={cn(
-                          "truncate",
-                          unnamed &&
-                            "underline decoration-fg-subtle decoration-dotted underline-offset-4",
-                        )}
-                      >
-                        {name}
-                      </span>
+                      <span className={cn("truncate", unnamed && "text-fg-label")}>{name}</span>
                       {suggested ? (
                         <span className="shrink-0 rounded-full border border-dashed border-border-strong px-1.5 text-xs leading-4 font-normal text-fg-muted">
                           Suggested
                         </span>
                       ) : null}
-                      <ChevronDownIcon
-                        aria-hidden="true"
-                        className="size-3.5 shrink-0 text-fg-subtle opacity-0 transition-opacity duration-[120ms] group-hover/speaker:opacity-100 group-focus-visible/speaker:opacity-100 group-data-[state=open]/speaker:opacity-100 pointer-coarse:opacity-100 motion-reduce:transition-none"
-                      />
+                      {unnamed ? (
+                        // An unnamed speaker always shows it can be named, not only on hover.
+                        <span className="flex shrink-0 items-center gap-1 text-xs leading-4 font-normal text-fg-muted group-hover/speaker:text-fg">
+                          <PencilIcon aria-hidden="true" className="size-3" />
+                          Name
+                        </span>
+                      ) : (
+                        <ChevronDownIcon
+                          aria-hidden="true"
+                          className="size-3.5 shrink-0 text-fg-subtle opacity-0 transition-opacity duration-[120ms] group-hover/speaker:opacity-100 group-focus-visible/speaker:opacity-100 group-data-[state=open]/speaker:opacity-100 pointer-coarse:opacity-100 motion-reduce:transition-none"
+                        />
+                      )}
                     </button>
                   </SpeakerNameMenu>
                 ) : (

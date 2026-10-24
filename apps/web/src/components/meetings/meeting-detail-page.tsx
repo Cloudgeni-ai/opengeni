@@ -587,7 +587,7 @@ export function MeetingDetailPage({
         const personId = suggested?.personId;
         toast.success(
           suggested
-            ? `Left unnamed. ${suggested.name} won't be suggested for this voice again`
+            ? `${suggested.name} won't be suggested for this speaker again`
             : "Left unnamed",
           suggested && personId
             ? {
@@ -734,14 +734,24 @@ export function MeetingDetailPage({
   const suggestedCount = speakerLabels.filter((label) =>
     speakerIsSuggested(label, transcript.speakers),
   ).length;
+  // Speakers that still need someone to say who they are: unnamed, or a
+  // name suggested from a voice that nobody has confirmed yet.
+  const reviewLabels = speakerLabels.filter(
+    (label) =>
+      !speakerIsNamed(label, transcript.speakers) ||
+      Boolean(speakerIsSuggested(label, transcript.speakers)),
+  );
 
-  const speakerButtons = (variant: "list" | "chips") =>
-    speakerLabels.map((label) => {
+  const speakerButtons = (variant: "list" | "chips", labels: readonly string[] = speakerLabels) =>
+    labels.map((label) => {
       const name = speakerDisplayName(label, transcript.speakers, recording.tracks);
       const suggested = speakerIsSuggested(label, transcript.speakers);
+      const unnamed = !speakerIsNamed(label, transcript.speakers);
       const menuLabel = suggested
         ? `${name}, suggested from their voice. Confirm or correct`
-        : `${name}, change who this is`;
+        : unnamed
+          ? `${name}, name this speaker`
+          : `${name}, change who this is`;
       return (
         <li key={label} className="min-w-0">
           <SpeakerNameMenu
@@ -776,7 +786,7 @@ export function MeetingDetailPage({
                 aria-label={menuLabel}
                 className={cn(
                   "flex max-w-52 min-w-0 items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-sm leading-5 text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11",
-                  suggested && "border-dashed border-border-strong",
+                  (suggested || unnamed) && "border-dashed border-border-strong",
                 )}
               >
                 <SpeakerDot slot={slots.get(label)} />
@@ -828,18 +838,14 @@ export function MeetingDetailPage({
         </li>
       );
     });
-  const unnamedLine =
-    unnamedCount > 0
-      ? unnamedCount === 1
-        ? "One speaker has no name yet. Pick a speaker to name them."
-        : `${unnamedCount} speakers have no name yet. Pick a speaker to name them.`
-      : null;
-  // The chips have no Confirm buttons of their own, so they say where to go.
-  const chipsHint =
-    [unnamedLine, suggestedCount > 0 ? "Tap a name marked ? to confirm or change it." : null]
-      .filter(Boolean)
-      .join(" ") || null;
-  const unnamedHint = unnamedLine;
+  const reviewLine =
+    reviewLabels.length === 0
+      ? null
+      : unnamedCount > 0 && suggestedCount > 0
+        ? `Who spoke? ${unnamedCount} ${unnamedCount === 1 ? "speaker" : "speakers"} to name, ${suggestedCount} ${suggestedCount === 1 ? "name" : "names"} to confirm.`
+        : unnamedCount > 0
+          ? `Who spoke? ${unnamedCount === 1 ? "One speaker has" : `${unnamedCount} speakers have`} no name yet.`
+          : `Who spoke? ${suggestedCount === 1 ? "One name was" : `${suggestedCount} names were`} suggested from a voice.`;
 
   const update = async (
     request: Parameters<typeof meeting.update>[0],
@@ -928,12 +934,7 @@ export function MeetingDetailPage({
       <DetailAside label="About this transcript">
         {speakerLabels.length > 0 ? (
           <DetailAsideItem label="Speakers">
-            <div className="grid w-full min-w-0 gap-2">
-              <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>
-              {unnamedHint ? (
-                <p className="text-xs leading-4.5 text-fg-muted">{unnamedHint}</p>
-              ) : null}
-            </div>
+            <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>
           </DetailAsideItem>
         ) : null}
         {meeting.versions.length > 0 ? (
@@ -1018,6 +1019,19 @@ export function MeetingDetailPage({
       ) : null}
       <DetailPageBody aside={aside}>
         <DetailSection title="Transcript">
+          {showTranscript && reviewLabels.length > 0 ? (
+            // Beside the speakers card, the speakers still to review sit at
+            // the top of the transcript, where the reader starts. Only the outer
+            // wrapper hides, so no display class competes with the container query.
+            <div className="mb-5 @max-[620px]/detail:hidden">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm leading-5 text-fg-muted">{reviewLine}</p>
+                <ul aria-label="Speakers to review" className="flex flex-wrap gap-2">
+                  {speakerButtons("chips", reviewLabels)}
+                </ul>
+              </div>
+            </div>
+          ) : null}
           {showTranscript && speakerLabels.length > 0 ? (
             // Only while the speakers card sits below the transcript. The
             // wrapper carries no display class, so the container query wins.
@@ -1026,8 +1040,10 @@ export function MeetingDetailPage({
                 <ul aria-label="Speakers" className="flex flex-wrap gap-2">
                   {speakerButtons("chips")}
                 </ul>
-                {chipsHint ? (
-                  <p className="text-xs leading-4.5 text-fg-muted">{chipsHint}</p>
+                {reviewLine ? (
+                  <p className="text-xs leading-4.5 text-fg-muted">
+                    {reviewLine} Tap a dashed name to say who it is.
+                  </p>
                 ) : null}
               </div>
             </div>
