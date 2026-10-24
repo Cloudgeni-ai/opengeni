@@ -61,6 +61,7 @@ export default defineConfig({
     "src/realtime-websocket-transport.ts",
     "src/model-picker-order.ts",
     "src/model-display.ts",
+    "src/secret-use-approval.ts",
   ],
   format: ["esm"],
   target: "es2022",
@@ -82,6 +83,7 @@ export default defineConfig({
     "@opengeni/contracts/plugin-discovery",
     "@opengeni/contracts/workspace-integration-wire",
     "@opengeni/contracts/model-display",
+    "@opengeni/contracts/secret-use-approval-question",
     "@opengeni/contracts/tool-review-presentation",
   ],
 });
