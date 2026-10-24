@@ -81,6 +81,7 @@ function recording(
     durationMilliseconds,
     errorCode: null,
     externalRef: null,
+    audioDeletedAt: null,
     metadata: {},
     transcription: {},
     tracks: [
@@ -316,6 +317,7 @@ export function createMeetingsFixture(
             minutes(60 * 24 * 6),
             minutes(24),
             {
+              audioDeletedAt: iso(minutes(60 * 24 * 5)),
               tracks: [],
               transcript: version("7f8a9b0c-1d2e-4f3a-8b4c-5d6e7f8a9b0c", 1, "complete"),
             },

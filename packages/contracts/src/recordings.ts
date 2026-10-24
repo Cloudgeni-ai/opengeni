@@ -130,6 +130,43 @@ export const RecordingTranscriptionOptions = /* @__PURE__ */ defineSchema(() =>
 export type RecordingTranscriptionOptions = z.infer<typeof RecordingTranscriptionOptions>;
 
 /**
+ * How long a workspace keeps meetings, in days after they were recorded.
+ * Audio can go sooner than the transcript, never later.
+ */
+export const RecordingRetention = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      audioDays: z.number().int().min(0).max(36_500).optional(),
+      transcriptDays: z.number().int().min(1).max(36_500).optional(),
+    })
+    .strict()
+    .refine(
+      (value) =>
+        value.audioDays === undefined ||
+        value.transcriptDays === undefined ||
+        value.audioDays <= value.transcriptDays,
+      "audioDays can't be longer than transcriptDays",
+    ),
+);
+export type RecordingRetention = z.infer<typeof RecordingRetention>;
+
+const DAY_MILLISECONDS = 86_400_000;
+
+/**
+ * When retention deletes a meeting's audio and the meeting itself, counted
+ * from when it was recorded. Null where nothing is set. The sweep runs every
+ * few minutes, so deletion follows shortly after.
+ */
+export function recordingRetentionDates(
+  retention: RecordingRetention | undefined,
+  recordedAt: Date,
+): { audio: Date | null; meeting: Date | null } {
+  const at = (days: number | undefined) =>
+    days === undefined ? null : new Date(recordedAt.getTime() + days * DAY_MILLISECONDS);
+  return { audio: at(retention?.audioDays), meeting: at(retention?.transcriptDays) };
+}
+
+/**
  * A workspace's recording defaults. New recordings are Only me unless the
  * workspace says otherwise; products may always set visibility explicitly.
  */
@@ -162,6 +199,14 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
        * it when the recording is done.
        */
       liveTranscript: z.boolean().optional(),
+      /**
+       * How long meetings are kept, in days after they were recorded. Unset
+       * keeps them until someone deletes them. When `audioDays` passes, the
+       * audio is deleted and the transcript stays (0 deletes it as soon as
+       * the transcript is done); when `transcriptDays` passes, the whole
+       * meeting is deleted.
+       */
+      retention: RecordingRetention.optional(),
     })
     .strict(),
 );
@@ -516,6 +561,8 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     durationMilliseconds: z.number().int(),
     externalRef: z.string().nullable(),
     metadata: z.record(z.string(), z.unknown()),
+    /** When the workspace's retention deleted the audio; the transcript stays. */
+    audioDeletedAt: z.string().nullable(),
     transcription: RecordingTranscriptionOptions,
     tracks: z.array(RecordingTrack),
     /** The current transcript version, or the newest one while none is complete. */

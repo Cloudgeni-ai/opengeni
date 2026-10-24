@@ -23508,6 +23508,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.audioDeletedAt": "string! null",
         "$.captureEndedAt": "string! null",
         "$.createdAt": "string!",
         "$.durationMilliseconds": "integer!",
@@ -23653,6 +23654,16 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"browser\\\"\",\"\\\"meeting\\\"\"]"
+      }
+    },
+    "RecordingRetention": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.audioDays": "integer?",
+        "$.transcriptDays": "integer?"
       }
     },
     "RecordingSpeaker": {
@@ -31804,6 +31815,7 @@
         "$.defaultVisibility": "ref(SessionVisibility)?",
         "$.diarizer": "ref(RecordingDiarizer)?",
         "$.liveTranscript": "boolean?",
+        "$.retention": "ref(RecordingRetention)?",
         "$.transcription": "object?",
         "$.transcription.model": "string!",
         "$.transcription.providerId": "string!",

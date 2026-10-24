@@ -16,15 +16,19 @@ import {
   type RecordingTrackWords,
 } from "@opengeni/core";
 import {
+  beginRecordingAudioExpiry,
   claimRecordingTranscriptVersion,
+  completeRecordingAudioExpiry,
   completeRecordingTranscriptVersion,
   failRecordingTranscriptVersion,
   getRecordingTrackPreparedObject,
   getWorkspace,
   listDeletingRecordingObjectKeys,
+  listDueRecordingRetention,
   listStalledRecordingWork,
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
+  markRecordingDeleting,
   nestedPostgresSqlState,
   purgeDeletingRecording,
   recordingPreparedTrackObjectKey,
@@ -32,6 +36,7 @@ import {
   recordingVoiceChannel,
   setRecordingTrackPrepared,
   type Database,
+  type DueRecordingRetention,
   type RecordingSpeakerVoice,
   type StalledRecordingWork,
 } from "@opengeni/db";
@@ -566,11 +571,91 @@ export function createRecordingActivities(
     return { found: work.length, started, failed };
   }
 
+  let reportedRetentionWithheld = false;
+
+  /**
+   * Apply each workspace's recording retention: delete the audio of meetings
+   * past their audio period (the transcript stays), and delete meetings past
+   * their transcript period, as their owner would. While the runtime's
+   * EXECUTE on the retention inventory is still withheld (migration 0946), a
+   * pass is a no-op, logged once at debug level.
+   */
+  async function applyRecordingRetention(): Promise<{
+    found: number;
+    audioDeleted: number;
+    recordingsDeleted: number;
+    failed: number;
+  }> {
+    const { db, objectStorage, startRecordingWorkflow, observability } = await services();
+    const none = { found: 0, audioDeleted: 0, recordingsDeleted: 0, failed: 0 };
+    let due: DueRecordingRetention[];
+    try {
+      due = await listDueRecordingRetention(db, 50);
+    } catch (error) {
+      if (nestedPostgresSqlState(error) !== "42501") throw error;
+      if (!reportedRetentionWithheld) {
+        reportedRetentionWithheld = true;
+        observability.debug("Recording retention skipped: runtime EXECUTE is not granted yet");
+      }
+      return none;
+    }
+    let audioDeleted = 0;
+    let recordingsDeleted = 0;
+    let failed = 0;
+    for (const item of due) {
+      const actor = { workspaceId: item.workspaceId, subjectId: item.ownerSubjectId };
+      try {
+        if (item.kind === "recording") {
+          await markRecordingDeleting(db, { ...actor, recordingId: item.recordingId });
+          // The recovery sweep starts it later if this start fails.
+          await startRecordingWorkflow?.({
+            kind: "deletion",
+            accountId: item.accountId,
+            workspaceId: item.workspaceId,
+            recordingId: item.recordingId,
+            versionId: null,
+            ownerSubjectId: item.ownerSubjectId,
+          });
+          recordingsDeleted += 1;
+          continue;
+        }
+        if (!objectStorage) {
+          throw ApplicationFailure.retryable(
+            "Object storage is unavailable",
+            "storage_unavailable",
+          );
+        }
+        const keys = await beginRecordingAudioExpiry(db, {
+          ...actor,
+          recordingId: item.recordingId,
+        });
+        if (keys === null) continue;
+        const prefix = `workspaces/${item.workspaceId}/recordings/${item.recordingId}/`;
+        for (const key of keys) {
+          if (key.startsWith(prefix)) await objectStorage.deleteObject(key);
+        }
+        await completeRecordingAudioExpiry(db, { ...actor, recordingId: item.recordingId });
+        audioDeleted += 1;
+      } catch (error) {
+        if (error instanceof RecordingNotFoundError) continue;
+        failed += 1;
+        observability.warn("recording retention failed", {
+          workspaceId: item.workspaceId,
+          recordingId: item.recordingId,
+          kind: item.kind,
+          error: error instanceof Error ? error.message.slice(0, 1_000) : String(error),
+        });
+      }
+    }
+    return { found: due.length, audioDeleted, recordingsDeleted, failed };
+  }
+
   return {
     transcribeRecordingVersion,
     failRecordingTranscript,
     deleteRecordingMedia,
     recoverRecordingWorkflows,
+    applyRecordingRetention,
   };
 }
 

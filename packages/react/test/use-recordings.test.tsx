@@ -147,6 +147,7 @@ describe("useRecording", () => {
       durationMilliseconds: 1_800_000,
       errorCode: null,
       externalRef: null,
+      audioDeletedAt: null,
       metadata: {},
       transcription: {},
       tracks: [],

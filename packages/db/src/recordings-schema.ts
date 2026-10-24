@@ -87,6 +87,8 @@ export const recordings = pgTable(
     externalRef: text("external_ref"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     transcription: jsonb("transcription").$type<Record<string, unknown>>().notNull().default({}),
+    // Migration 0946. When the workspace retention deleted the audio.
+    audioDeletedAt: timestamp("audio_deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

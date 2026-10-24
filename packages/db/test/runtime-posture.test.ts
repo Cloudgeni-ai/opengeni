@@ -3842,6 +3842,7 @@ describe("definer and event_ingress_routes grants withheld by 0937", () => {
       "list_stalled_recording_work_v1(integer)",
       "list_due_mcp_event_subscriptions_v1(integer)",
       "list_due_event_source_feeds_v1(integer)",
+      "list_due_recording_retention_v1(integer)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
@@ -3884,6 +3885,7 @@ describe("definer and event_ingress_routes grants withheld by 0937", () => {
     for (const name of [
       "prune_event_intake_v1(integer, integer, integer)",
       "list_stalled_recording_work_v1(integer)",
+      "list_due_recording_retention_v1(integer)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
@@ -3896,7 +3898,9 @@ describe("definer and event_ingress_routes grants withheld by 0937", () => {
       (table) => table.name !== "recordings",
     );
     beforeRecordings.privateRoutines = beforeRecordings.privateRoutines.filter(
-      (entry) => entry.name !== "list_stalled_recording_work_v1(integer)",
+      (entry) =>
+        entry.name !== "list_stalled_recording_work_v1(integer)" &&
+        entry.name !== "list_due_recording_retention_v1(integer)",
     );
     expect(eventViolations(beforeRecordings)).toEqual([]);
   });

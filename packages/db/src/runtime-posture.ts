@@ -48,7 +48,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * withheld for one release: the event trigger dispatcher's identity-only due
  * inventory and intake retention pass (0929), the recording recovery sweep's
  * stalled-work inventory (0930), the MCP Events subscription pump's due
- * inventory (0932) and the source feed pump's due inventory (0935). Each is
+ * inventory (0932), the source feed pump's due inventory (0935) and the
+ * recording retention sweep's due inventory (0946, withheld from the start). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. The release that knew none of them
  * rejects a runtime EXECUTE grant on an unknown definer, so 0937 withholds the
  * grant (and provisioning keeps it withheld) until this binary is the previous
@@ -61,6 +62,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "list_stalled_recording_work_v1(integer)",
   "list_due_mcp_event_subscriptions_v1(integer)",
   "list_due_event_source_feeds_v1(integer)",
+  "list_due_recording_retention_v1(integer)",
 ] as const;
 
 /**
@@ -75,6 +77,11 @@ const DEFERRED_PRIVATE_ROUTINE_TABLES: Readonly<
   "list_stalled_recording_work_v1(integer)": ["recording_transcript_versions", "recordings"],
   "list_due_mcp_event_subscriptions_v1(integer)": ["mcp_event_subscriptions"],
   "list_due_event_source_feeds_v1(integer)": ["event_source_feeds"],
+  "list_due_recording_retention_v1(integer)": [
+    "recordings",
+    "recording_transcript_versions",
+    "workspaces",
+  ],
 };
 
 /**

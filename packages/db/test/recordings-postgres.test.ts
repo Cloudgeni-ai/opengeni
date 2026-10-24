@@ -7,12 +7,14 @@ import {
 import {
   acceptOrganizationInvitation,
   appendRecordingLiveSegments,
+  beginRecordingAudioExpiry,
   browserRecordingActionLogObjectKey,
   browserRecordingBundleObjectKey,
   browserRecordingVideoObjectKey,
   claimBrowserRecordingVideo,
   claimRecordingTranscriptVersion,
   completeBrowserRecordingVideo,
+  completeRecordingAudioExpiry,
   completeRecordingTranscriptVersion,
   createBrowserRecording,
   createDb,
@@ -32,6 +34,7 @@ import {
   getRecording,
   getRecordingTranscriptPage,
   listDeletingRecordingObjectKeys,
+  listDueRecordingRetention,
   listRecordingLiveSegments,
   listRecordingPeople,
   listRecordings,
@@ -659,6 +662,89 @@ describe("recordings", () => {
         ownerSubjectId: scope.owner,
       },
     ]);
+  });
+
+  test("retention deletes old audio and keeps the transcript, then deletes old meetings", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "private");
+    const id = recording.recordingId;
+    const mine = async () =>
+      (await listDueRecordingRetention(db, 200)).filter((due) => due.recordingId === id);
+    const due = (kind: "audio" | "recording") => ({
+      kind,
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      recordingId: id,
+      ownerSubjectId: scope.owner,
+    });
+    // Ten days old, transcribed, with prepared audio for playback.
+    await shared.admin`
+      update recordings set state = 'ready',
+        capture_ended_at = now() - interval '10 days', started_at = now() - interval '10 days'
+      where id = ${id}`;
+    await shared.admin`
+      update recording_transcript_versions set state = 'complete', completed_at = now(), is_current = true
+      where id = ${recording.versionId}`;
+    await shared.admin`
+      update recording_tracks set prepared_bytes = 100,
+        prepared_object_key = ${`workspaces/${scope.workspaceId}/recordings/${id}/prepared/0.ogg`}
+      where recording_id = ${id} and track_number = 0`;
+    // Nothing is due until the workspace sets a period that has passed.
+    expect(await mine()).toEqual([]);
+    await updateWorkspaceSettings(db, scope.workspaceId, {
+      recordings: { retention: { audioDays: 30, transcriptDays: 365 } },
+    });
+    expect(await mine()).toEqual([]);
+    await updateWorkspaceSettings(db, scope.workspaceId, {
+      recordings: { retention: { audioDays: 7, transcriptDays: 365 } },
+    });
+    expect(await mine()).toEqual([due("audio")]);
+
+    // Only the owner acts on it; the audio objects come back for deletion.
+    const keys = await beginRecordingAudioExpiry(db, { ...recording.actor, recordingId: id });
+    expect(keys?.sort()).toEqual(
+      [
+        ...(
+          await shared.admin<{ object_key: string }[]>`
+          select object_key from recording_chunks where recording_id = ${id}`
+        ).map((row) => row.object_key),
+        `workspaces/${scope.workspaceId}/recordings/${id}/prepared/0.ogg`,
+      ].sort(),
+    );
+    // Stamped but interrupted before the objects were gone: offered again,
+    // and beginning again returns the same objects.
+    expect(await mine()).toEqual([due("audio")]);
+    expect(
+      (await beginRecordingAudioExpiry(db, { ...recording.actor, recordingId: id }))?.sort(),
+    ).toEqual(keys?.sort());
+    await completeRecordingAudioExpiry(db, { ...recording.actor, recordingId: id });
+    const after = await getRecording(db, { ...recording.actor, recordingId: id });
+    expect(after.audioDeletedAt).not.toBeNull();
+    expect(
+      await shared.admin`select 1 from recording_chunks where recording_id = ${id}`,
+    ).toHaveLength(0);
+    expect(after.tracks.some((track) => track.playable)).toBe(false);
+    expect(after.transcript?.state).toBe("complete");
+    expect(await mine()).toEqual([]);
+    // Without the audio, it can't be transcribed again.
+    await expect(
+      createRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        recordingId: id,
+        versionId: crypto.randomUUID(),
+        transcription,
+      }),
+    ).rejects.toMatchObject({ code: "audio_deleted" });
+
+    // Past the transcript period, the whole meeting is due for deletion.
+    await updateWorkspaceSettings(db, scope.workspaceId, {
+      recordings: { retention: { audioDays: 1, transcriptDays: 5 } },
+    });
+    expect(await mine()).toEqual([due("recording")]);
+    await markRecordingDeleting(db, { ...recording.actor, recordingId: id });
+    expect(await mine()).toEqual([]);
   });
 
   test("remembered voices: consent, learning from confirmed speakers, suggestions and forgetting", async () => {

@@ -314,6 +314,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "runtime role lacks EXECUTE on private routine list_due_event_source_feeds_v1(integer)",
       "runtime role lacks EXECUTE on private routine list_due_event_trigger_tasks_v1(integer)",
       "runtime role lacks EXECUTE on private routine list_due_mcp_event_subscriptions_v1(integer)",
+      "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)",
       "runtime role lacks EXECUTE on private routine list_stalled_recording_work_v1(integer)",
       "runtime role lacks EXECUTE on private routine prune_event_intake_v1(integer, integer, integer)",
       "runtime role lacks EXECUTE on private routine wake_teams_route_for_session_event()",
