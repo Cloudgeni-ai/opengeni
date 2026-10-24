@@ -97,13 +97,16 @@ describe("offline batcher administration contract", () => {
       parameters: {
         required_status_checks: [{ context: appOnlyCheckName, integration_id: 5425399 }],
         strict_required_status_checks_policy: false,
+        do_not_enforce_on_create: false,
       },
     });
     expect(plan.restore).toEqual(writable(before.rulesets[0]!));
     expect(plan.restore.bypass_actors).toEqual([
       { actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" },
     ]);
-    expect((plan.restore.rules as { type: string }[]).some(r => r.type === "required_status_checks")).toBe(false);
+    expect(
+      (plan.restore.rules as { type: string }[]).some((r) => r.type === "required_status_checks"),
+    ).toBe(false);
     for (const phase of ["guard", "namespace", "applied"] as const) {
       const { current, receipts } = staged(plan, phase);
       expect(() => verify(plan, current, phase, receipts)).not.toThrow();
@@ -118,14 +121,36 @@ describe("offline batcher administration contract", () => {
     const plan = prepareAppOnly(fixture(), 5425399, 174101112);
     for (const key of ["namespace", "admission"] as const) {
       const changed = structuredClone(plan);
-      (changed[key].bypass_actors as unknown[]).push({ actor_id: null, actor_type: "OrganizationAdmin", bypass_mode: "always" });
+      (changed[key].bypass_actors as unknown[]).push({
+        actor_id: null,
+        actor_type: "OrganizationAdmin",
+        bypass_mode: "always",
+      });
       expect(() => validatePlan(changed)).toThrow();
     }
     const changed = structuredClone(plan);
-    const rules = changed.admission.rules as { type: string; parameters?: { required_status_checks: { integration_id?: number }[] } }[];
-    delete rules.find(r => r.type === "required_status_checks")!.parameters!.required_status_checks[0]!.integration_id;
+    const rules = changed.admission.rules as {
+      type: string;
+      parameters?: { required_status_checks: { integration_id?: number }[] };
+    }[];
+    delete rules.find((r) => r.type === "required_status_checks")!.parameters!
+      .required_status_checks[0]!.integration_id;
     expect(() => validatePlan(changed)).toThrow();
     expect(JSON.stringify(legacy)).toBe(saved);
+  });
+
+  test("App-only provider readback includes the explicit create default without accepting changed semantics", () => {
+    const plan = prepareAppOnly(fixture(), 5425399, 174101112);
+    const { current, receipts } = staged(plan, "applied");
+    const rule = (
+      current.rulesets[0]!.rules as { type: string; parameters: Record<string, unknown> }[]
+    ).find((r) => r.type === "required_status_checks")!;
+    rule.parameters.do_not_enforce_on_create = false;
+    expect(() => verify(plan, current, "applied", receipts)).not.toThrow();
+    for (const value of [true, null, "false", 0]) {
+      rule.parameters.do_not_enforce_on_create = value;
+      expect(() => verify(plan, current, "applied", receipts)).toThrow();
+    }
   });
 
   test("OrganizationAdmin null readback matches sentinel 1 without rewriting saved policy", () => {

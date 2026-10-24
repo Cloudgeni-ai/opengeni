@@ -408,7 +408,9 @@ test("App-only policy runs existing OFF back to exact saved Manual with administ
     expect(protection.bypass_actors).toEqual([
       { actor_id: 501, actor_type: "Integration", bypass_mode: "always" },
     ]);
-    expect(protection.rules.some((r: { type: string }) => r.type === "required_status_checks")).toBe(true);
+    expect(
+      protection.rules.some((r: { type: string }) => r.type === "required_status_checks"),
+    ).toBe(true);
     const result = await operator.run();
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);

@@ -222,6 +222,7 @@ export function prepareAppOnly(before: Snapshot, appId: number, installationId: 
           parameters: {
             required_status_checks: [{ context: appOnlyCheckName, integration_id: appId }],
             strict_required_status_checks_policy: false,
+            do_not_enforce_on_create: false,
           },
         },
       ],
@@ -235,7 +236,9 @@ export function validatePlan(plan: Plan): void {
   if (plan.schemaVersion !== 3 && plan.schemaVersion !== 4)
     throw new Error("Rollout requires a reviewed version 3 or version 4 plan");
   const expected = (plan.schemaVersion === 4 ? prepareAppOnly : prepare)(
-    plan.before, plan.appId, plan.installationId,
+    plan.before,
+    plan.appId,
+    plan.installationId,
   );
   equal(plan as unknown as Json, expected as unknown as Json, "Prepared exclusive-main plan");
 }
@@ -287,7 +290,9 @@ export async function cli(args: string[]): Promise<void> {
   if ((command === "prepare" || command === "prepare-app-only") && rest.length === 4) {
     const [snapshot, app, installation, output] = rest as [string, string, string, string];
     const plan = (command === "prepare-app-only" ? prepareAppOnly : prepare)(
-      await json<Snapshot>(snapshot), Number(app), Number(installation),
+      await json<Snapshot>(snapshot),
+      Number(app),
+      Number(installation),
     );
     await mkdir(output, { recursive: false, mode: 0o700 });
     for (const [name, value] of Object.entries({
