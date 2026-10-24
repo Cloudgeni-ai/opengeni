@@ -19244,6 +19244,11 @@ export type SessionScheduleTargets = {
   scheduled: Set<string>;
   /** Sessions an active schedule targets that can still start a run. */
   upcoming: Set<string>;
+  /**
+   * Sessions an active automation targets that an event can still start: it
+   * has an active event trigger and, if it runs once, has not run yet.
+   */
+  waitingForEvents: Set<string>;
 };
 
 export async function sessionScheduleTargets(
@@ -19252,15 +19257,23 @@ export async function sessionScheduleTargets(
   sessionIds: string[],
   now: Date = new Date(),
 ): Promise<SessionScheduleTargets> {
-  if (sessionIds.length === 0) return { scheduled: new Set(), upcoming: new Set() };
+  if (sessionIds.length === 0)
+    return { scheduled: new Set(), upcoming: new Set(), waitingForEvents: new Set() };
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .select({
         sessionId: schema.scheduledTasks.reusableSessionId,
         status: schema.scheduledTasks.status,
         schedule: schema.scheduledTasks.schedule,
+        triggerStatus: schema.eventTriggers.status,
+        eventsCompletedAt: schema.scheduledTaskEventSettings.completedAt,
       })
       .from(schema.scheduledTasks)
+      .leftJoin(schema.eventTriggers, eq(schema.eventTriggers.taskId, schema.scheduledTasks.id))
+      .leftJoin(
+        schema.scheduledTaskEventSettings,
+        eq(schema.scheduledTaskEventSettings.taskId, schema.scheduledTasks.id),
+      )
       .where(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
@@ -19269,11 +19282,18 @@ export async function sessionScheduleTargets(
           anyOf(schema.scheduledTasks.reusableSessionId, sessionIds),
         ),
       );
-    const targets: SessionScheduleTargets = { scheduled: new Set(), upcoming: new Set() };
+    const targets: SessionScheduleTargets = {
+      scheduled: new Set(),
+      upcoming: new Set(),
+      waitingForEvents: new Set(),
+    };
     for (const row of rows) {
       if (!row.sessionId) continue;
       targets.scheduled.add(row.sessionId);
       if (scheduledTaskHasUpcomingRun(row, now)) targets.upcoming.add(row.sessionId);
+      if (row.status === "active" && row.triggerStatus === "active" && !row.eventsCompletedAt) {
+        targets.waitingForEvents.add(row.sessionId);
+      }
     }
     return targets;
   });

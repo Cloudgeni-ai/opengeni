@@ -595,7 +595,7 @@ export const SECTIONS: readonly SectionMeta[] = [
       "New variable set, Add variable, Create API key, Invite people, New schedule, Edit schedule, Connect account",
     recommended: "b",
     whyRecommended:
-      "Every create and edit flow is a full page (/schedules/new) with a back link and a sticky Cancel + primary footer. Nothing slides in from the side.",
+      "Every create and edit flow is a full page (/automations/new) with a back link and a sticky Cancel + primary footer. Nothing slides in from the side.",
     decision:
       "Decided 27 Sep 2026: B everywhere. Changed from A (dialog or sheet by size). A small centered dialog stays only for one-field prompts such as Rename or Replace value.",
     alternatives: [

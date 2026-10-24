@@ -34,7 +34,7 @@ describe("chat status in the command menu and switcher", () => {
     expect(waiting.summary.label).toContain("needs you");
     const done = chatRowStatus(session("c", { hasUpcomingSchedules: true } as Partial<Session>));
     expect(done.summary.kind).toBe("neutral");
-    expect(done.scheduled).toBe(true);
+    expect(done.automationWait).toBe("schedule");
     expect(done.creator?.subjectId).toBe("user-1");
     // A subagent's chat names no creator, as in the sidebar.
     expect(chatRowStatus(session("d", { parentSessionId: "a" })).creator).toBeNull();

@@ -1,18 +1,21 @@
 /**
- * Schedules: one flat list of every schedule in the workspace. Active ones by
- * next run, then the ones that won't fire. Each row's switch pauses or resumes
- * it in one click. A row opens the schedule's own page; New schedule opens the
- * form page.
+ * Automations: one flat list of every automation in the workspace. Scheduled
+ * ones by next run, then the ones waiting for events, then the ones that
+ * won't fire. Each row's switch pauses or resumes it in one click. A row opens
+ * the automation's own page; New automation opens the form page.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import {
-  CalendarClockIcon,
   GitPullRequestIcon,
   LockIcon,
+  MessageSquareCodeIcon,
   PlusIcon,
+  RadioTowerIcon,
   SunriseIcon,
+  TagsIcon,
   TrendingUpIcon,
+  ZapIcon,
 } from "lucide-react";
 
 import { Button } from "@opengeni/react/ui/button";
@@ -46,12 +49,15 @@ import type {
 } from "@opengeni/react/app/types";
 
 import {
-  SCHEDULE_TEMPLATES,
+  automationWhenWords,
   lastRunState,
+  listensForEvents,
+  nextRunOf,
   ownsSchedule,
-  scheduleWords,
+  scheduleTemplates,
   sortSchedulesForList,
   templateCadenceLabel,
+  type ScheduleTemplate,
 } from "./schedule-model";
 import {
   LastRunValue,
@@ -64,12 +70,14 @@ import {
   inAppClick,
   schedulePath,
   schedulePermissions,
+  scheduleSwitchedOn,
   useScheduleAccess,
   useScheduleNavigation,
 } from "./schedule-parts";
 import { scheduledTaskAttentionText } from "./schedule-access-notices";
 import { PrivateScheduleSummaries } from "./private-schedule-summaries";
 import { useScheduleActions } from "./use-schedule-actions";
+import { useEventSources, useEventTriggersEnabled } from "./use-event-sources";
 import {
   CreateWithOpenGeniButton,
   useCanCreateScheduleWithAgent,
@@ -121,6 +129,8 @@ const TEMPLATE_ICONS: Record<string, ReactNode> = {
   "morning-brief": <SunriseIcon />,
   "dependency-pr": <GitPullRequestIcon />,
   "cost-check": <TrendingUpIcon />,
+  "pr-review": <MessageSquareCodeIcon />,
+  "issue-triage": <TagsIcon />,
 };
 
 /**
@@ -154,13 +164,16 @@ export function SchedulesListPage({
   targetSessionId,
 }: {
   workspaceId: string;
-  /** Show only the schedules that post into this chat (from the chat header). */
+  /** Show only the automations that post into this chat (from the chat header). */
   targetSessionId?: string;
 }) {
   const { client, accessContext } = useAppContext();
   const access = useScheduleAccess(workspaceId);
   const isAdmin = hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
   const go = useScheduleNavigation(workspaceId);
+  const eventTriggers = useEventTriggersEnabled();
+  // Source names for the rows' "When" words; rows read without them meanwhile.
+  const { sources } = useEventSources(workspaceId, eventTriggers);
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
@@ -343,23 +356,44 @@ export function SchedulesListPage({
   return (
     <>
       <PageHeader
-        icon={<CalendarClockIcon />}
-        title="Schedules"
-        description="Recurring agent work in this workspace."
+        icon={<ZapIcon />}
+        title="Automations"
+        description={
+          eventTriggers
+            ? "Agent work that runs on a schedule or when something happens."
+            : "Recurring agent work in this workspace."
+        }
         actions={
-          canCreate && !empty && viewState !== "loading" ? (
+          (canCreate && !empty && viewState !== "loading") || eventTriggers ? (
             <>
-              {canAsk && !targetSessionId ? <CreateWithOpenGeniButton onClick={ask.open} /> : null}
-              <Button
-                type="button"
-                onClick={() =>
-                  go.create(targetSessionId ? { sourceSessionId: targetSessionId } : undefined)
-                }
-                className="pointer-coarse:h-11"
-              >
-                <PlusIcon aria-hidden="true" />
-                New schedule
-              </Button>
+              {eventTriggers && !targetSessionId ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={go.sources}
+                  className="pointer-coarse:h-11"
+                >
+                  <RadioTowerIcon aria-hidden="true" />
+                  Event sources
+                </Button>
+              ) : null}
+              {canCreate && !empty && viewState !== "loading" ? (
+                <>
+                  {canAsk && !targetSessionId ? (
+                    <CreateWithOpenGeniButton onClick={ask.open} />
+                  ) : null}
+                  <Button
+                    type="button"
+                    onClick={() =>
+                      go.create(targetSessionId ? { sourceSessionId: targetSessionId } : undefined)
+                    }
+                    className="pointer-coarse:h-11"
+                  >
+                    <PlusIcon aria-hidden="true" />
+                    New automation
+                  </Button>
+                </>
+              ) : null}
             </>
           ) : undefined
         }
@@ -376,11 +410,11 @@ export function SchedulesListPage({
               onClick={() => go.list()}
               className="pointer-coarse:h-11"
             >
-              Show all schedules
+              Show all automations
             </Button>
           }
         >
-          Schedules for{" "}
+          Automations for{" "}
           <Link
             to="/workspaces/$workspaceId/sessions/$sessionId"
             params={{ workspaceId, sessionId: targetSessionId }}
@@ -393,13 +427,13 @@ export function SchedulesListPage({
       ) : null}
       <div className="mt-6 min-w-0">
         {viewState === "loading" ? (
-          <RowList label="Schedules" columns={columns} flush busy>
+          <RowList label="Automations" columns={columns} flush busy>
             <ListRowSkeleton count={4} />
           </RowList>
         ) : viewState === "error" ? (
           <ErrorMessage
             align="center"
-            title="Couldn't load schedules"
+            title="Couldn't load automations"
             details={loadError ? [{ label: "Error", value: loadError.message }] : undefined}
             action={
               <Button
@@ -413,12 +447,14 @@ export function SchedulesListPage({
               </Button>
             }
           >
-            Check your connection, then try again. Your schedules keep running either way.
+            Check your connection, then try again. Your automations keep running either way.
           </ErrorMessage>
         ) : empty ? (
           <SchedulesEmpty
             canCreate={canCreate}
             filtered={Boolean(targetSessionId)}
+            templates={scheduleTemplates(eventTriggers)}
+            eventTriggers={eventTriggers}
             now={clock}
             onNew={() =>
               go.create(targetSessionId ? { sourceSessionId: targetSessionId } : undefined)
@@ -432,7 +468,7 @@ export function SchedulesListPage({
             onPointerLeave={() => window.setTimeout(releaseOrder)}
             onBlur={() => window.setTimeout(releaseOrder)}
           >
-            <RowList label="Schedules" columns={columns} flush>
+            <RowList label="Automations" columns={columns} flush>
               {sorted.map((listed) => {
                 const pending = switching[listed.id];
                 const task = pending ? { ...listed, status: pending } : listed;
@@ -444,7 +480,7 @@ export function SchedulesListPage({
                   <ListRow
                     key={task.id}
                     leading={<ScheduleTile task={task} />}
-                    // Titles stay in fg; a paused schedule says so in its switch and Next run.
+                    // Titles stay in fg; a paused automation says so in its switch and Next run.
                     title={task.name}
                     titleAddon={
                       task.visibility === "private" ? (
@@ -460,13 +496,11 @@ export function SchedulesListPage({
                     description={
                       narrow ? (
                         <>
-                          {task.status === "active" && task.schedule.type !== "manual"
-                            ? "Next "
-                            : null}
+                          {nextRunOf(task, clock) ? "Next " : null}
                           <NextRunValue task={task} now={clock} />
                         </>
                       ) : (
-                        scheduleWords(task.schedule, clock).short
+                        automationWhenWords(task, sources ?? [], clock)
                       )
                     }
                     cells={{
@@ -483,7 +517,9 @@ export function SchedulesListPage({
                     control={
                       switchable ? (
                         <Switch
-                          checked={task.status !== "paused"}
+                          checked={
+                            pending !== undefined ? pending === "active" : scheduleSwitchedOn(task)
+                          }
                           pending={pending !== undefined}
                           disabled={actions.busyTaskId === task.id}
                           onCheckedChange={(on) => void switchSchedule(listed, on)}
@@ -544,7 +580,8 @@ function sameIds(held: readonly string[], tasks: readonly ScheduledTask[]): bool
 
 /**
  * One quiet badge per row; the schedule's own page says what happened and
- * offers the refresh. Drift is shown only to the owner, who can act on it.
+ * offers the refresh. A trigger that can't receive events and drift are shown
+ * only to the owner, who can act on them.
  */
 function accessBadge({
   task,
@@ -566,6 +603,20 @@ function accessBadge({
     );
   }
   if (!own) return undefined;
+  const held = listensForEvents(task)
+    ? task.events?.triggers.find((trigger) => trigger.status === "blocked")
+    : undefined;
+  if (held) {
+    return (
+      <StatusBadge
+        variant="dot"
+        status="needs_you"
+        reason={held.statusReason ?? "One of its event sources can't deliver events."}
+      >
+        Needs attention
+      </StatusBadge>
+    );
+  }
   const drift = visibleScheduledTaskPolicyDrift(
     task.policyDrift,
     scheduledTaskDriftDismissal(workspaceId, task),
@@ -583,6 +634,8 @@ function accessBadge({
 function SchedulesEmpty({
   canCreate,
   filtered,
+  templates,
+  eventTriggers,
   now,
   onNew,
   onAsk,
@@ -590,6 +643,9 @@ function SchedulesEmpty({
 }: {
   canCreate: boolean;
   filtered: boolean;
+  /** The templates this deployment can create. */
+  templates: readonly ScheduleTemplate[];
+  eventTriggers: boolean;
   now: Date;
   onNew: () => void;
   /** "Create with Opengeni"; absent without the permissions to start it. */
@@ -600,12 +656,16 @@ function SchedulesEmpty({
     return (
       <EmptyState
         variant="inline"
-        title="No schedules for this chat"
-        description="Schedule a message to continue the conversation later."
+        title="No automations for this chat"
+        description={
+          eventTriggers
+            ? "Continue the conversation later, on a schedule or when something happens."
+            : "Schedule a message to continue the conversation later."
+        }
         action={
           canCreate ? (
             <Button type="button" onClick={onNew}>
-              New schedule
+              New automation
             </Button>
           ) : undefined
         }
@@ -615,12 +675,14 @@ function SchedulesEmpty({
   return (
     <EmptyState
       variant="page"
-      icon={<CalendarClockIcon />}
-      title="No schedules yet"
+      icon={<ZapIcon />}
+      title="No automations yet"
       description={
         canCreate
-          ? "Have the agent do something on a rhythm, like a morning brief or a weekly dependency PR."
-          : "Schedules run agent work on a rhythm. Ask a workspace admin for access to create one."
+          ? eventTriggers
+            ? "Have the agent work on a rhythm, like a morning brief, or when something happens, like a new pull request."
+            : "Have the agent do something on a rhythm, like a morning brief or a weekly dependency PR."
+          : "Automations run agent work on their own. Ask a workspace admin for access to create one."
       }
       action={
         canCreate ? (
@@ -628,7 +690,7 @@ function SchedulesEmpty({
             {onAsk ? <CreateWithOpenGeniButton onClick={onAsk} /> : null}
             <Button type="button" onClick={onNew} className="pointer-coarse:h-11">
               <PlusIcon aria-hidden="true" />
-              New schedule
+              New automation
             </Button>
           </>
         ) : undefined
@@ -637,7 +699,7 @@ function SchedulesEmpty({
       templates={
         canCreate ? (
           <EmptyStateTemplates>
-            {SCHEDULE_TEMPLATES.map((template) => (
+            {templates.map((template) => (
               <EmptyStateTemplate
                 key={template.id}
                 icon={TEMPLATE_ICONS[template.id]}

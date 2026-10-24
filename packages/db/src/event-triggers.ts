@@ -122,6 +122,9 @@ export type CreateEventSourceInput = {
   visibility: EventSourceVisibility;
   adapter?: WebhookEventAdapter | null;
   secretEncrypted?: string | null;
+  /** Defaults to active; a pasted webhook waiting for its secret starts blocked. */
+  status?: EventSourceStatus;
+  statusReason?: string | null;
   externalKey?: string | null;
   mcpServerId?: string | null;
   connectionId?: string | null;
@@ -147,6 +150,7 @@ export async function createEventSource(
         ownerSubjectId: input.ownerSubjectId,
         visibility: input.visibility,
         secretEncrypted: input.secretEncrypted ?? null,
+        ...(input.status ? { status: input.status, statusReason: input.statusReason ?? null } : {}),
         externalKey: input.externalKey ?? null,
         mcpServerId: input.mcpServerId ?? null,
         connectionId: input.connectionId ?? null,

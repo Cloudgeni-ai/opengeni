@@ -9,6 +9,7 @@ import type {
   ParsedSendTestEventRequest,
   SendTestEventResponse,
   UpdateEventSourceRequest,
+  WebhookEventAdapter,
 } from "@opengeni/contracts";
 import {
   createEventSource,
@@ -142,6 +143,7 @@ export function eventSourceForClient(source: EventSourceRecord, baseUrl: string)
       source.kind === "webhook" && source.routeId
         ? eventSourceWebhookUrl(baseUrl, source.routeId)
         : null,
+    awaitingSigningSecret: source.kind === "webhook" && source.secretEncrypted === null,
     mcp:
       source.kind === "mcp" && source.mcpServerId
         ? { serverId: source.mcpServerId, connectionId: source.connectionId }
@@ -203,11 +205,6 @@ export async function createEventSourceForViewer(
   const key = requireEncryptionKey(input.settings);
   const generated = request.adapter === "standard" ? generateStandardWebhookSecret() : null;
   const secret = generated ?? request.signingSecret;
-  if (!secret) {
-    throw new HTTPException(422, {
-      message: "Paste the signing secret the sending app shows",
-    });
-  }
   // A workspace-level caller owns nothing, so its sources are the workspace's.
   const owner = input.viewer.subjectId;
   const { source } = await createEventSource(input.db, {
@@ -219,12 +216,22 @@ export async function createEventSourceForViewer(
     name: request.name,
     ownerSubjectId: owner,
     visibility: owner === null ? "workspace" : request.visibility,
-    secretEncrypted: encryptEnvironmentValue(key, secret),
+    // Linear and Sentry show their secret only once they have the URL, so a
+    // source without one waits, blocked, until it is pasted.
+    ...(secret
+      ? { secretEncrypted: encryptEnvironmentValue(key, secret) }
+      : { status: "blocked" as const, statusReason: awaitingSecretReason(request.adapter) }),
   });
   return {
     source: eventSourceForClient(source, input.baseUrl),
     ...(generated ? { signingSecret: generated } : {}),
   };
+}
+
+/** Why a pasted webhook waits: the sending app's secret is not pasted yet. */
+function awaitingSecretReason(adapter: WebhookEventAdapter): string {
+  const app = adapter === "linear" ? "Linear" : adapter === "sentry" ? "Sentry" : "the sending app";
+  return `Paste the signing secret ${app} shows for this webhook. Until then its deliveries are refused.`;
 }
 
 /** Network access for MCP sources; tests replace the transport. */
@@ -337,13 +344,29 @@ export async function updateEventSourceForViewer(input: {
           : "This source has no signing secret to replace",
     });
   }
+  // The first pasted secret is what a waiting webhook source was blocked on.
+  if (
+    request.status === "active" &&
+    request.signingSecret === undefined &&
+    source.kind === "webhook" &&
+    source.secretEncrypted === null
+  ) {
+    throw new HTTPException(422, {
+      message: "Paste the signing secret first, then the source can receive events",
+    });
+  }
+  const unblocks =
+    request.signingSecret !== undefined &&
+    source.secretEncrypted === null &&
+    source.status === "blocked";
+  const status = request.status ?? (unblocks ? "active" : undefined);
   const updated = await updateEventSource(input.db, source.workspaceId, source.id, {
     ...(request.name !== undefined ? { name: request.name } : {}),
     ...(request.visibility !== undefined ? { visibility: request.visibility } : {}),
-    ...(request.status !== undefined
+    ...(status !== undefined
       ? {
-          status: request.status,
-          statusReason: request.status === "disabled" ? "Turned off" : null,
+          status,
+          statusReason: status === "disabled" ? "Turned off" : null,
         }
       : {}),
     ...(request.signingSecret !== undefined
@@ -429,21 +452,24 @@ export async function receiveEventWebhook(input: {
   if (!route && input.headers.has("x-mcp-subscription-id")) return { outcome: "gone" };
   if (!route || route.kind !== "webhook") return { outcome: "not_found" };
   const source = await getEventSource(input.db, route.workspaceId, route.sourceId);
-  if (!source || source.kind !== "webhook" || !source.adapter || !source.secretEncrypted) {
+  if (!source || source.kind !== "webhook" || !source.adapter) {
     return { outcome: "not_found" };
   }
   const receivedAt = input.receivedAt ?? new Date();
   const bodySha256 = sha256Hex(input.body);
-  const secret = decryptEnvironmentValue(
-    requireEncryptionKey(input.settings),
-    source.secretEncrypted,
-  );
-  const verification = webhookAdapter(source.adapter).verify({
-    secret,
-    headers: input.headers,
-    body: input.body,
-    nowSeconds: receivedAt.getTime() / 1000,
-  });
+  // Before its secret is pasted, a delivery is refused but still logged, so
+  // the person setting it up sees the app is sending.
+  const verification = source.secretEncrypted
+    ? webhookAdapter(source.adapter).verify({
+        secret: decryptEnvironmentValue(
+          requireEncryptionKey(input.settings),
+          source.secretEncrypted,
+        ),
+        headers: input.headers,
+        body: input.body,
+        nowSeconds: receivedAt.getTime() / 1000,
+      })
+    : ({ ok: false, reason: "No signing secret yet: paste the one the app shows" } as const);
   const base = {
     accountId: source.accountId,
     workspaceId: source.workspaceId,

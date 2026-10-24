@@ -53,7 +53,7 @@ export function WorkspaceShortcutLinks({
           item={item}
           needsReview={item.to === "/workspaces/$workspaceId/state" && pendingKnowledge}
           needsAttention={
-            item.to === "/workspaces/$workspaceId/schedules" && schedulesNeedAttention
+            item.to === "/workspaces/$workspaceId/automations" && schedulesNeedAttention
           }
           recording={item.to === "/workspaces/$workspaceId/meetings" && recording}
           workspaceId={rail.workspaceId}
@@ -160,7 +160,7 @@ export function PrimaryNavExtras() {
                 <WorkspaceConfigLink
                   item={
                     PRIMARY_WORKSPACE_ITEMS.find(
-                      (item) => item.to === "/workspaces/$workspaceId/schedules",
+                      (item) => item.to === "/workspaces/$workspaceId/automations",
                     )!
                   }
                   workspaceId={rail.workspaceId}
@@ -169,7 +169,7 @@ export function PrimaryNavExtras() {
                   active={isConfigItemActive(
                     pathname,
                     rail.workspaceId,
-                    "/workspaces/$workspaceId/schedules",
+                    "/workspaces/$workspaceId/automations",
                   )}
                   onNavigate={() => rail.setDrawerOpen(false)}
                 />

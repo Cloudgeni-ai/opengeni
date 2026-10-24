@@ -6338,7 +6338,7 @@ function makeRecurringText(
 }
 
 function slackSchedulesUrl(deps: ApiRouteDeps, workspaceId: string): string | null {
-  return safeSlackActionUrl(deps, `/workspaces/${encodeURIComponent(workspaceId)}/schedules`);
+  return safeSlackActionUrl(deps, `/workspaces/${encodeURIComponent(workspaceId)}/automations`);
 }
 
 function linkUrl(

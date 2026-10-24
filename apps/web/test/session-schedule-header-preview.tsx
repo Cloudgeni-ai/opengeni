@@ -81,7 +81,7 @@ createRoot(document.getElementById("root")!).render(
             onToggleInspector={() => undefined}
             onRename={async () => null}
             onPin={async () => null}
-            onOpenSchedule={session.hasSchedules ? () => undefined : null}
+            onOpenAutomations={session.hasSchedules ? () => undefined : null}
           />
         </section>
       ))}

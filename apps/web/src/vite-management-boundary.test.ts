@@ -161,7 +161,7 @@ describe("web management chunk boundary", () => {
     const primitiveTest = new RegExp(pattern!);
     for (const separator of ["/", "\\"]) {
       const moduleId = (relative: string) => `/repo/${relative}`.replaceAll("/", separator);
-      for (const icon of ["calendar-clock", "gauge"]) {
+      for (const icon of ["calendar-clock", "gauge", "zap"]) {
         expect(
           primitiveTest.test(moduleId(`node_modules/lucide-react/dist/esm/icons/${icon}.mjs`)),
         ).toBe(true);

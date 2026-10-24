@@ -186,8 +186,8 @@ function ItemRow({ item, workspaceId }: { item: MachineAudienceItem; workspaceId
       </Link>
     ) : item.title && item.kind === "schedule" && item.scheduledTaskId ? (
       <Link
-        to="/workspaces/$workspaceId/schedules/$scheduleId"
-        params={{ ...params, scheduleId: item.scheduledTaskId }}
+        to="/workspaces/$workspaceId/automations/$automationId"
+        params={{ ...params, automationId: item.scheduledTaskId }}
         className="block truncate text-sm font-medium text-fg underline decoration-border-strong underline-offset-2 hover:text-brand"
       >
         {title}

@@ -158,10 +158,10 @@ import {
   defaultExpandedAncestors,
   sessionAncestorPath,
   sessionStateLabel,
-  sessionHasUpcomingSchedule,
   sessionInputWait,
   visualTreeDepth,
 } from "../../lib/session-rail";
+import { sessionAutomationWait } from "../../../session-list-model";
 import {
   cancelSessionRowRevealIntent,
   consumeSessionRowRevealIntent,
@@ -4855,7 +4855,7 @@ function SessionRow(props: {
         />
         <RailTrailingMetadata
           summary={props.aggregateStatus}
-          scheduled={sessionHasUpcomingSchedule(props.session)}
+          automationWait={sessionAutomationWait(props.session)}
           relativeTime={rail.isMobile ? undefined : relativeTime}
           creator={creator}
         />
@@ -4992,7 +4992,7 @@ function SessionRow(props: {
                   descendantLabel={descendantLabel}
                   mobile={rail.isMobile}
                   summary={props.aggregateStatus}
-                  scheduled={sessionHasUpcomingSchedule(props.session)}
+                  automationWait={sessionAutomationWait(props.session)}
                   relativeTime={rail.isMobile ? undefined : relativeTime}
                   jumpKey={jumpKey}
                   creator={creator}

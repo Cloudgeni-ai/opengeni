@@ -854,7 +854,7 @@ function OriginLink({ workspaceId, origin }: { workspaceId: string; origin: Orig
   const href =
     origin.kind === "chat"
       ? `/workspaces/${workspaceId}/sessions/${origin.sessionId}`
-      : `/workspaces/${workspaceId}/schedules?taskId=${origin.taskId}`;
+      : `/workspaces/${workspaceId}/automations?taskId=${origin.taskId}`;
   const unnamed = origin.kind === "chat" && origin.unnamed;
   const link = (
     <a

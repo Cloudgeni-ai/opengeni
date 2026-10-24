@@ -5,7 +5,6 @@ import {
   AudioLinesIcon,
   BoxIcon,
   BrainCircuitIcon,
-  CalendarClockIcon,
   GaugeIcon,
   LaptopIcon,
   LockKeyholeIcon,
@@ -13,6 +12,7 @@ import {
   PlugIcon,
   ServerCogIcon,
   SettingsIcon,
+  ZapIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -30,7 +30,7 @@ const WORKSPACE_CONFIG_ICONS = {
   laptop: LaptopIcon,
   "brain-circuit": BrainCircuitIcon,
   plug: PlugIcon,
-  "calendar-clock": CalendarClockIcon,
+  zap: ZapIcon,
   "audio-lines": AudioLinesIcon,
   "panels-top-left": PanelsTopLeftIcon,
   settings: SettingsIcon,
@@ -59,7 +59,7 @@ export function WorkspaceConfigLink(props: {
   const attentionTitle = props.needsReview
     ? "Knowledge needs review"
     : props.needsAttention
-      ? "A schedule needs your attention"
+      ? "An automation needs your attention"
       : null;
 
   if (variant === "rail") {

@@ -1015,7 +1015,7 @@ export default function FormDialogSection() {
 
       <UsageNotes
         use={[
-          "Creating or editing one object: its own page, for example /schedules/new or /variable-sets/aws-production/edit",
+          "Creating or editing one object: its own page, for example /automations/new or /variable-sets/aws-production/edit",
           "A second step after submit, like an API key shown once, on the same page",
           "A small centered dialog only for one-field prompts: Rename, Replace value",
         ]}

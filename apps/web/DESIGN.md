@@ -582,7 +582,7 @@ Inside settings, pages are flush: `FLUSH_DETAIL_PAGE_CLASS` for `DetailPage`,
 back link, title and rows start where the section header does. Page actions use `RowButton` and
 `MoreMenu` from `@opengeni/react/ui/page-actions`.
 
-**Creating and editing is a page too.** New schedule (`/schedules/new`), Edit schedule, New
+**Creating and editing is a page too.** New automation (`/automations/new`), Edit automation, New
 variable set, Add variables, Create API key, Invite people, Connect account, New workspace, New
 knowledge entry. Use `FormPage` from `@opengeni/react/ui/form-dialog`: a back link, a 20/600
 title, one 640px column of fields, server errors inside the form, and a sticky footer with Cancel

@@ -147,7 +147,7 @@ test("reuses the compact Schedule button without requiring creation metadata", a
       onToggleInspector={() => undefined}
       onRename={async () => null}
       onPin={async () => null}
-      onOpenSchedule={
+      onOpenAutomations={
         linked
           ? () => {
               opened++;
@@ -159,14 +159,16 @@ test("reuses the compact Schedule button without requiring creation metadata", a
   try {
     await act(async () => root.render(render(true)));
     const button = container.querySelector<HTMLButtonElement>(
-      'button[title="Open schedules for this session"]',
+      'button[title="On a schedule. Open automations for this chat"]',
     );
-    expect(button?.textContent?.trim()).toBe("Schedule");
+    expect(button?.textContent?.trim()).toBe("Automation");
     await act(async () => button?.click());
     expect(opened).toBe(1);
     await act(async () => root.render(render(false)));
-    expect(container.querySelector('button[title="Open schedules for this session"]')).toBeNull();
-    // A paused or finished schedule still links to its settings, marked inactive.
+    expect(
+      container.querySelector('button[title="On a schedule. Open automations for this chat"]'),
+    ).toBeNull();
+    // A paused or finished automation still links to its settings, marked inactive.
     await act(async () =>
       root.render(
         <SessionHeader
@@ -180,19 +182,41 @@ test("reuses the compact Schedule button without requiring creation metadata", a
           onToggleInspector={() => undefined}
           onRename={async () => null}
           onPin={async () => null}
-          onOpenSchedule={() => {
+          onOpenAutomations={() => {
             opened++;
           }}
         />,
       ),
     );
     const inactive = container.querySelector<HTMLButtonElement>(
-      'button[title="No upcoming runs. Open schedules for this session"]',
+      'button[title="Nothing upcoming. Open automations for this chat"]',
     );
-    expect(inactive?.textContent?.trim()).toBe("Schedule");
-    expect(inactive?.querySelector("svg")?.getAttribute("class")).toContain("lucide-calendar-off");
+    expect(inactive?.textContent?.trim()).toBe("Automation");
+    expect(inactive?.querySelector("svg")?.getAttribute("class")).toContain("lucide-zap-off");
     await act(async () => inactive?.click());
     expect(opened).toBe(2);
+    // An automation an event can still wake says so.
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{ ...session, hasSchedules: true, waitingForEvents: true }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          onOpenAutomations={() => undefined}
+        />,
+      ),
+    );
+    const listening = container.querySelector<HTMLButtonElement>(
+      'button[title="Waiting for an event. Open automations for this chat"]',
+    );
+    expect(listening?.querySelector("svg")?.getAttribute("class")).toContain("lucide-zap");
   } finally {
     await act(async () => root.unmount());
     container.remove();

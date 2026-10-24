@@ -1,8 +1,9 @@
 /**
- * Pure helpers for the Schedules pages: the cadence in words, the next run,
- * the list order, the derived name, and the create/update requests built from
- * the form draft. The cadence words and next runs come from the shared
- * CadencePicker logic, so the list, the schedule page and the form agree.
+ * Pure helpers for the Automations pages: when an automation runs in words
+ * (its schedule and its event triggers), the next run, the list order, the
+ * derived name, and the create/update requests built from the form draft.
+ * The cadence words and next runs come from the shared CadencePicker logic,
+ * so the list, the automation page and the form agree.
  */
 import {
   DEFAULT_CADENCE_TIME,
@@ -17,6 +18,15 @@ import {
   type CadenceValue,
 } from "@opengeni/react/ui/cadence-picker";
 import {
+  emptyEventTriggersDraft,
+  eventTriggersInputFrom,
+  eventTriggersShortLabel,
+  newEventTriggerDraft,
+  sameEventTriggers,
+  type EventSourceChoice,
+  type EventTriggersDraft,
+} from "@opengeni/react/automations";
+import {
   agentConfigFromFormState,
   newScheduledTaskFormState,
   scheduledTaskStateLabel,
@@ -25,6 +35,7 @@ import {
 } from "@/lib/scheduled-tasks";
 import type {
   CreateScheduledTaskRequest,
+  EventSource,
   McpConnectionAccountSelection,
   UpdateScheduledTaskRequest,
   VaultPolicy,
@@ -136,9 +147,69 @@ export function nextRunOf(task: ScheduledTask, now: Date): Date | null {
   return nextRuns(cadence.rule, { timeZone: cadence.timeZone, now, count: 1 })[0] ?? null;
 }
 
+/** It has event triggers, so events can start it. */
+export function hasEventTriggers(task: Pick<ScheduledTask, "events">): boolean {
+  return (task.events?.triggers.length ?? 0) > 0;
+}
+
+/** A run-once automation whose run happened: it no longer listens or runs. */
+export function isFinishedOnce(task: Pick<ScheduledTask, "events">): boolean {
+  return Boolean(task.events?.once && task.events.completedAt);
+}
+
+/** Events can start it now: it is on, has triggers and has not finished. */
+export function listensForEvents(task: ScheduledTask): boolean {
+  return scheduledTaskStateLabel(task).active && hasEventTriggers(task) && !isFinishedOnce(task);
+}
+
+/**
+ * When it runs, in one line: "Every weekday at 08:00 · Oslo",
+ * "pull_request.opened from GitHub", or both.
+ */
+export function automationWhenWords(
+  task: Pick<ScheduledTask, "schedule" | "events">,
+  sources: readonly Pick<EventSource, "id" | "name">[],
+  now: Date,
+): string {
+  const triggers = eventTriggersShortLabel(task.events?.triggers ?? [], sources);
+  if (!triggers) return scheduleWords(task.schedule, now).short;
+  if (task.schedule.type === "manual") return triggers;
+  return `${scheduleWords(task.schedule, now).short} · ${triggers}`;
+}
+
+/**
+ * When it runs, as the Overview's sentence: "Runs every weekday at 08:00 Oslo
+ * time, and when a matching event arrives", or "Runs once, on the first
+ * matching event".
+ */
+export function automationWhenSentence(
+  task: Pick<ScheduledTask, "schedule" | "events">,
+  now: Date,
+): string {
+  const words = scheduleWords(task.schedule, now).sentence;
+  if (!hasEventTriggers(task)) return `${words}.`;
+  if (task.schedule.type !== "manual") return `${words}, and when a matching event arrives.`;
+  return task.events?.once
+    ? "Runs once, on the first matching event."
+    : "Runs when a matching event arrives.";
+}
+
 /** "Mon 28 Sep, 08:00" or "Today, 14:00" in the viewer's zone. */
 export function runTimeLabel(date: Date, now: Date): string {
   return formatRunTime(date, { timeZone: viewerTimeZone(), now });
+}
+
+/**
+ * The events an event run carried, in a few words: the first event's summary
+ * and how many more came with it. Null for a run no event started.
+ */
+export function runEventsLabel(run: Pick<ScheduledTaskRun, "eventOccurrence">): string | null {
+  const occurrence = run.eventOccurrence;
+  if (!occurrence || occurrence.eventCount === 0) return null;
+  const [first] = occurrence.events;
+  if (!first) return `${occurrence.eventCount} events`;
+  const what = first.summary ?? first.subject ?? first.type;
+  return occurrence.eventCount === 1 ? what : `${what} and ${occurrence.eventCount - 1} more`;
 }
 
 export function cadenceIssue(cadence: CadenceValue | null, now: Date): string | null {
@@ -146,20 +217,28 @@ export function cadenceIssue(cadence: CadenceValue | null, now: Date): string | 
   return validateCadence(cadence.rule, { timeZone: cadence.timeZone, now })?.message ?? null;
 }
 
+/** The cadence runs more than once; a run-once automation can't have one. */
+export function cadenceRepeats(cadence: CadenceValue | null): boolean {
+  return cadence !== null && cadence.rule.frequency !== "once";
+}
+
 /**
- * Active schedules by next run (soonest first), then everything that won't
- * fire (paused, sync off, on demand, no runs left) by name.
+ * Active schedules by next run (soonest first), then automations waiting for
+ * events, then everything that won't fire (paused, sync off, on demand, no
+ * runs left, finished) by name.
  */
 export function sortSchedulesForList(tasks: readonly ScheduledTask[], now: Date): ScheduledTask[] {
   const keyed = tasks.map((task) => ({
     task,
     next: nextRunOf(task, now)?.getTime() ?? null,
+    listening: listensForEvents(task),
   }));
+  const rank = (entry: (typeof keyed)[number]) =>
+    entry.next !== null ? 0 : entry.listening ? 1 : 2;
   keyed.sort((left, right) => {
-    const leftLive = left.next !== null;
-    const rightLive = right.next !== null;
-    if (leftLive !== rightLive) return leftLive ? -1 : 1;
-    if (leftLive && rightLive && left.next !== right.next) return left.next! - right.next!;
+    if (rank(left) !== rank(right)) return rank(left) - rank(right);
+    if (left.next !== null && right.next !== null && left.next !== right.next)
+      return left.next - right.next;
     return left.task.name.localeCompare(right.task.name);
   });
   return keyed.map((entry) => entry.task);
@@ -238,8 +317,10 @@ export const NAME_MAX_LENGTH = 80;
  * editor never showed.
  */
 export interface ScheduleDraft extends ScheduledTaskFormState {
-  /** Null for a schedule that only runs with Run now. */
+  /** Null when it runs only on events or with Run now. */
   cadence: CadenceValue | null;
+  /** Its event triggers and their run policy; no triggers when it runs on a schedule only. */
+  events: EventTriggersDraft;
   rigId: string | null;
   /** Who can see the schedule and the chats it creates. */
   visibility: "private" | "workspace";
@@ -277,6 +358,7 @@ export function newScheduleDraft(defaults: DraftDefaults, timeZone?: string): Sc
   return {
     ...newScheduledTaskFormState(defaults.includeOpenGeniTool, [], formDefaults(defaults)),
     cadence: defaultCadence(timeZone),
+    events: emptyEventTriggersDraft(),
     rigId: null,
     visibility: "workspace",
   };
@@ -287,7 +369,15 @@ export interface ScheduleTemplate {
   name: string;
   description: string;
   instructions: string;
-  cadence: CadenceValue["rule"];
+  /** Null for a template that runs on events only. */
+  cadence: CadenceValue["rule"] | null;
+  /** The event it listens for; offered only where event triggers run. */
+  event?: {
+    choice: EventSourceChoice;
+    eventTypes: string[];
+    /** "When a pull request opens", for the template card. */
+    label: string;
+  };
 }
 
 export const SCHEDULE_TEMPLATES: readonly ScheduleTemplate[] = [
@@ -315,12 +405,46 @@ export const SCHEDULE_TEMPLATES: readonly ScheduleTemplate[] = [
       "Summarize yesterday's cloud spend by service and flag anything that is more than 20% above the weekly average.",
     cadence: { frequency: "weekdays", time: "08:00" },
   },
+  {
+    id: "pr-review",
+    name: "Review new pull requests",
+    description: "Reads each new pull request and leaves a review.",
+    instructions:
+      "Review the pull request from the event. Read the diff and the files it touches, check it against the repository's conventions, and run the tests if you can. Leave one review with concrete, actionable comments, and approve only when it is ready to merge.",
+    cadence: null,
+    event: {
+      choice: "github",
+      eventTypes: ["pull_request.opened", "pull_request.ready_for_review"],
+      label: "When a pull request opens",
+    },
+  },
+  {
+    id: "issue-triage",
+    name: "Triage new issues",
+    description: "Labels, prioritizes and routes each new Linear issue.",
+    instructions:
+      "Triage the issue from the event. Check whether it duplicates an open issue, add the labels and priority it needs, and comment with what is missing to act on it. Assign it to the team that owns that area when it is clear.",
+    cadence: null,
+    event: { choice: "linear", eventTypes: ["Issue.create"], label: "When an issue is created" },
+  },
 ];
 
-export function templateById(id: string | undefined): ScheduleTemplate | undefined {
-  return SCHEDULE_TEMPLATES.find((template) => template.id === id);
+/** The templates this deployment can create: event templates only where events run. */
+export function scheduleTemplates(eventTriggers: boolean): readonly ScheduleTemplate[] {
+  return SCHEDULE_TEMPLATES.filter((template) => eventTriggers || !template.event);
 }
 
+export function templateById(
+  id: string | undefined,
+  eventTriggers = true,
+): ScheduleTemplate | undefined {
+  return scheduleTemplates(eventTriggers).find((template) => template.id === id);
+}
+
+/**
+ * The draft a template starts. An event template's trigger has no source yet:
+ * the form picks the first source of its kind once sources load.
+ */
 export function draftFromTemplate(
   template: ScheduleTemplate,
   defaults: DraftDefaults,
@@ -331,12 +455,33 @@ export function draftFromTemplate(
     ...base,
     name: template.name,
     prompt: template.instructions,
-    cadence: { timeZone: base.cadence!.timeZone, rule: template.cadence },
+    cadence: template.cadence ? { timeZone: base.cadence!.timeZone, rule: template.cadence } : null,
+    events: template.event
+      ? {
+          ...base.events,
+          triggers: [{ ...newEventTriggerDraft(), eventTypes: [...template.event.eventTypes] }],
+        }
+      : base.events,
   };
 }
 
-/** "Every weekday at 08:00: …" templates show their cadence as a tile meta. */
+/** A new automation starting from one source: a trigger on it, no schedule. */
+export function draftForEventSource(
+  sourceId: string,
+  defaults: DraftDefaults,
+  timeZone?: string,
+): ScheduleDraft {
+  const base = newScheduleDraft(defaults, timeZone);
+  return {
+    ...base,
+    cadence: null,
+    events: { ...base.events, triggers: [newEventTriggerDraft(sourceId)] },
+  };
+}
+
+/** "Every weekday at 08:00" or "When a pull request opens", for a template card. */
 export function templateCadenceLabel(template: ScheduleTemplate, now: Date): string {
+  if (!template.cadence) return template.event?.label ?? "Only when you run it";
   return describeCadence(template.cadence, {
     timeZone: viewerTimeZone(),
     now,
@@ -348,7 +493,12 @@ export function templateCadenceLabel(template: ScheduleTemplate, now: Date): str
    -------------------------------------------------------------------------- */
 
 export function scheduleName(draft: Pick<ScheduleDraft, "name" | "prompt">): string {
-  return draft.name.trim() || deriveScheduleName(draft.prompt) || "Untitled schedule";
+  return draft.name.trim() || deriveScheduleName(draft.prompt) || "Untitled automation";
+}
+
+/** The `events` of a create request: present only with triggers. */
+function eventsForCreate(draft: Pick<ScheduleDraft, "events">) {
+  return draft.events.triggers.length > 0 ? { events: eventTriggersInputFrom(draft.events) } : {};
 }
 
 /**
@@ -449,6 +599,7 @@ export function createRequestFromDraft(
       ...(draft.visibility === "private" ? { visibility: "private" as const } : {}),
       overlapPolicy: overlapPolicyForCreate(draft),
       metadata: taskMetadataFromFormState(draft),
+      ...eventsForCreate(draft),
     };
   return {
     ...(draft.agentLearning && Object.keys(draft.agentLearning).length
@@ -469,6 +620,7 @@ export function createRequestFromDraft(
     agentConfig: agentConfigFromFormState(draft),
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
     ...(narrowedVaultPolicy(draft.vaultPolicy) ? { vaultPolicy: draft.vaultPolicy } : {}),
+    ...eventsForCreate(draft),
   };
 }
 
@@ -549,6 +701,15 @@ export function updateRequestFromDraft(
       ? {}
       : { overlapPolicy: draft.overlapPolicy }),
     ...(initial.visibility === draft.visibility ? {} : { visibility: draft.visibility }),
+    // Triggers are sent whole, and only when they changed; none removes them all.
+    ...(sameEventTriggers(initial.events, draft.events)
+      ? {}
+      : {
+          events:
+            draft.events.triggers.length > 0
+              ? eventTriggersInputFrom(draft.events)
+              : { triggers: [] },
+        }),
     ...(same(oldMetadata, nextMetadata) ? {} : { metadata: nextMetadata }),
     // An existing-chat schedule has no pins; moving into a chat drops them.
     ...(draft.runMode === "existing_session" ||

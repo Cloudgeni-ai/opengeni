@@ -137,6 +137,7 @@ import {
 import { prepareExternalLinkTaskAdmission } from "../application/external-link-work-admission";
 import {
   rearmScheduledTaskEventsOnResume,
+  scheduledTaskFinishedOnce,
   validateScheduledTaskEvents,
   validateScheduleForExistingEvents,
   writeScheduledTaskEvents,
@@ -1429,7 +1430,8 @@ export async function validatedScheduledTaskUpdate(
 
 /**
  * Validate an edit's event triggers with the rest of it and write them in the
- * transaction that commits it. Resuming an automation re-arms its events.
+ * transaction that commits it. Resuming an automation re-arms its events, and
+ * so does turning on a run-once automation that already ran.
  */
 async function withScheduledTaskEventsUpdate(
   input: Pick<
@@ -1460,9 +1462,11 @@ async function withScheduledTaskEventsUpdate(
       schedule,
     });
   }
-  const resumes = update.status === "active" && existing.status !== "active";
+  const resumes =
+    update.status === "active" &&
+    (existing.status !== "active" || (await scheduledTaskFinishedOnce(input.db, existing)));
   const statusChanges = update.status !== undefined && update.status !== existing.status;
-  if (!events && !statusChanges) return update;
+  if (!events && !statusChanges && !resumes) return update;
   const prior = update.beforeUpdateCommit;
   return {
     ...update,

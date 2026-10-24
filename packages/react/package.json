@@ -148,6 +148,10 @@
       "types": "./src/artifacts-spreadsheet.ts",
       "default": "./src/artifacts-spreadsheet.ts"
     },
+    "./automations": {
+      "types": "./src/automations.ts",
+      "default": "./src/automations.ts"
+    },
     "./artifacts/document": {
       "types": "./src/artifacts-document.ts",
       "default": "./src/artifacts-document.ts"

@@ -395,7 +395,7 @@ export default defineConfig({
               // reads the rail context, so those leaves (and the icons both
               // sides draw) stay here rather than in the lazy action chunk.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive|archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-square-text|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-ccw-clock|rotate-cw|save|server|text-search)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive|archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-square-text|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-ccw-clock|rotate-cw|save|server|text-search|zap|zap-off)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -468,6 +468,8 @@ export default defineConfig({
               // its RowSelect) into a direct workspace load. Connection access renders a Models
               // form page, so it lives here, not in model-connection-settings,
               // whose shared icons the eager workspace graph imports.
+              // Workspace meeting defaults render only on the settings page, but
+              // entry-aware merging can fold them into a chunk direct sessions load.
               // Organization provider connections and Codex subscriptions are imported by the Models
               // pages above and by the lazy organization Models section; outside
               // this group they land in the section's chunk and form a cycle
@@ -481,7 +483,7 @@ export default defineConfig({
               // so the lazy agent consent route cannot read uninitialized data
               // across a settings-pages/organization-access-fields chunk cycle.
               name: "settings-pages",
-              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.tsx?)$/,
+              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:components[\\/](?:connection-access-settings|meetings[\\/]meeting-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.tsx?)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

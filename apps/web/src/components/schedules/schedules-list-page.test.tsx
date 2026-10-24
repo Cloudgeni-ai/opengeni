@@ -73,6 +73,7 @@ const client = {
 };
 const context = {
   client,
+  clientConfig: {},
   accessContext: {
     subjectId: viewer,
     workspaceGrants: [{ workspaceId, permissions: ["scheduled_tasks:manage"] }],
@@ -205,7 +206,7 @@ test("a failed resume puts the switch back and says what failed", async () => {
   expect(settled.getAttribute("aria-checked")).toBe("false");
   expect(rowText(settled)).toContain("Paused");
   expect(toastError).toHaveBeenCalledTimes(1);
-  expect(toastError.mock.calls[0]?.[0]).toBe("Couldn't resume the schedule");
+  expect(toastError.mock.calls[0]?.[0]).toBe("Couldn't resume the automation");
 });
 
 test("rows keep their place after a switch, even once the list reloads", async () => {

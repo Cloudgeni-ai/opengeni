@@ -31,6 +31,7 @@ import {
   sendTestEvent,
   updateEventSourceForViewer,
   type ApiRouteDeps,
+  type EventSourceViewer,
 } from "@opengeni/core";
 import { listEventDeliveries, listEventSources, listInboundEvents } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -61,6 +62,14 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
     return { grant, viewer, workspaceId };
   }
 
+  // REST reads say what the reading person may do, so clients never re-derive it.
+  function forViewer(viewer: EventSourceViewer, source: EventSource): EventSource {
+    return {
+      ...source,
+      viewerAccess: eventSourceAccess(viewer, source) === "manage" ? "manage" : "use",
+    };
+  }
+
   function sourceIdParam(c: Context): string {
     const sourceId = c.req.param("sourceId") ?? "";
     if (!z.string().uuid().safeParse(sourceId).success) {
@@ -87,7 +96,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       ListEventSourcesResponse.parse({
         sources: sources
           .filter((source) => eventSourceAccess(viewer, source) !== "none")
-          .map((source) => eventSourceForClient(source, baseUrl(c))),
+          .map((source) => forViewer(viewer, eventSourceForClient(source, baseUrl(c)))),
       }),
     );
   });
@@ -108,13 +117,16 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(deps.eventSourceFetch ? { fetch: deps.eventSourceFetch } : {}),
     });
     c.header("cache-control", "private, no-store");
-    return c.json(CreateEventSourceResponse.parse(created), 201);
+    return c.json(
+      CreateEventSourceResponse.parse({ ...created, source: forViewer(viewer, created.source) }),
+      201,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {
     const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
     const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "use");
-    return c.json(EventSource.parse(eventSourceForClient(source, baseUrl(c))));
+    return c.json(EventSource.parse(forViewer(viewer, eventSourceForClient(source, baseUrl(c)))));
   });
 
   app.patch("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {
@@ -128,7 +140,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       request,
       baseUrl: baseUrl(c),
     });
-    return c.json(EventSource.parse(updated));
+    return c.json(EventSource.parse(forViewer(viewer, updated)));
   });
 
   app.delete("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {

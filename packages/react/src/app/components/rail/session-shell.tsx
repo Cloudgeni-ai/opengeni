@@ -467,7 +467,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   // sandbox switcher and codex indicator flow in as slots so the header stays a
   // pure, screenshot-testable component.
   if (showSessionActions && context.session) {
-    // Both schedule facts come from one read, so a newer lineage never pairs
+    // The automation facts come from one read, so a newer lineage never pairs
     // with an older session read (an older server sends no upcoming flag).
     const lineageSchedules = lineage.lineage?.sessionHasSchedules;
     return (
@@ -480,6 +480,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
                 hasSchedules: lineageSchedules,
                 hasUpcomingSchedules:
                   lineage.lineage?.sessionHasUpcomingSchedules ?? lineageSchedules,
+                waitingForEvents: lineage.lineage?.sessionWaitingForEvents ?? false,
               }),
         }}
         ancestors={ancestors}
@@ -595,11 +596,11 @@ function SessionRouteHeader({
     <SessionHeader
       session={session}
       ancestors={ancestors}
-      onOpenSchedule={
+      onOpenAutomations={
         session.hasSchedules
           ? () =>
               void navigate({
-                to: "/workspaces/$workspaceId/schedules",
+                to: "/workspaces/$workspaceId/automations",
                 params: { workspaceId: session.workspaceId },
                 search: { targetSessionId: session.id },
               })
