@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import {
   docsOnly,
+  mainReleaseApprovalOnly,
   priorityHold,
   supersededPrRuns,
   supersededVersionValidationRuns,
@@ -88,6 +89,45 @@ test("pre-fanout and unknown job states hold; proven approval waits do not", () 
     ),
   ).toBeNull();
   expect(priorityHold("pr", [{ run: r, jobs: [] }], 1)).toBeNull();
+});
+test("main public-release approval tail with pending descendants is zero demand", () => {
+  const main = { ...run(1, ".github/workflows/ci.yml"), status: "waiting" };
+  const tail = [
+    { id: 10, name: "test", status: "completed", conclusion: "success" },
+    { id: 11, name: "Build API workload image", status: "waiting", conclusion: null },
+    { id: 12, name: "Deploy staging", status: "pending", conclusion: null },
+  ];
+  const job = (patch: Record<string, unknown>, index = 1) =>
+    tail.map((j, i) => (i === index ? { ...j, ...patch } : j));
+  expect(mainReleaseApprovalOnly(main, tail)).toBe(true);
+  for (const lane of ["pr", "batch"] as const)
+    expect(priorityHold(lane, [{ run: main, jobs: tail }], 99)).toBeNull();
+  for (const jobs of [
+    [],
+    job({ name: "Deploy production" }),
+    job({ status: "queued" }, 2),
+    job({ status: "in_progress" }, 0),
+    job({ status: "requested" }, 2),
+    job({ status: "mystery" }, 2),
+    job({ id: 10 }, 2),
+    job({ id: 0 }, 2),
+    job({ id: undefined }, 0),
+    [...tail, { id: 13, name: "Build API workload image", status: "waiting", conclusion: null }],
+  ]) {
+    expect(mainReleaseApprovalOnly(main, jobs)).toBe(false);
+    expect(priorityHold("pr", [{ run: main, jobs }], 99)).toContain("main run 1");
+  }
+  // Run status must itself be waiting; listed demand is never re-read as idle.
+  expect(mainReleaseApprovalOnly({ ...main, status: "in_progress" }, tail)).toBe(false);
+  // The release-tail proof applies only to main push CI: Batch handling is unchanged.
+  const batch = {
+    ...run(2, ".github/workflows/batch-ci.yml", "push", "queue/live/x"),
+    status: "waiting",
+  };
+  expect(priorityHold("pr", [{ run: batch, jobs: tail }], 99)).toContain("batch run 2");
+  expect(
+    priorityHold("pr", [{ run: batch, jobs: tail.filter((j) => j.status !== "pending") }], 99),
+  ).toBeNull();
 });
 test("docs-only filters never hide code/workflow/renamed source", () => {
   expect(docsOnly(["README.md", "docs/guide.md"])).toBe(true);
