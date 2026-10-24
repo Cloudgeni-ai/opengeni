@@ -326,10 +326,11 @@ describe("CUA desktop boundary", () => {
   });
 
   test("on Linux and Windows set_value true or false reads a checkbox's selected state", async () => {
-    for (const [platform, role, Base] of [
+    const cases: ReadonlyArray<readonly ["linux" | "windows", string, typeof Fixture]> = [
       ["linux", "check box", LinuxPermissionsFixture],
       ["windows", "CheckBox", WindowsFixture],
-    ] as const) {
+    ];
+    for (const [platform, role, Base] of cases) {
       class SelectedFixture extends Base {
         checked = false;
         presses = 0;
