@@ -257,6 +257,7 @@ import { chordLabel, currentPlatform } from "../../lib/actions/chords";
 import { useHeldModifier } from "../../lib/actions/held-modifier";
 import { requestCommandMenu } from "../../lib/actions/events";
 import { rememberChats, setSidebarOrder } from "../../lib/actions/chat-directory";
+import { rememberSidebarSites } from "../../lib/actions/site-directory";
 import { useChatOperations } from "../../lib/actions/chat-operations";
 import { TooltipWithKeys } from "../command-menu/keycaps";
 
@@ -2446,6 +2447,17 @@ export function SessionList() {
   useEffect(() => {
     rememberChats(directorySubject, [...pinned, ...sessions]);
   }, [directorySubject, pinned, sessions]);
+  // ⌘K lists the Site rows shown here too: recent ones before anything is
+  // typed, and the ones whose title matches. Filtered views (archived, needs
+  // you, mine only) are left out so they never replace the full list.
+  const sidebarSiteGroups =
+    hierarchyMode && browseStatus !== "archived" && !needsYouOnly && !mineOnly
+      ? rootPage.siteGroups
+      : null;
+  useEffect(() => {
+    if (sidebarSiteGroups)
+      rememberSidebarSites(directorySubject, rail.workspaceId, sidebarSiteGroups);
+  }, [directorySubject, rail.workspaceId, sidebarSiteGroups]);
   useEffect(() => {
     setSidebarOrder(
       directorySubject,
