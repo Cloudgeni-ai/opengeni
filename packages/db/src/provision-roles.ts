@@ -2292,8 +2292,8 @@ BEGIN
       END IF;
     END LOOP;
     -- Deferred definers stay withheld until the previous release knows them
-    -- (DEFERRED_RUNTIME_PRIVATE_ROUTINES, migration 0937).
-    FOREACH routine_signature IN ARRAY ARRAY[${DEFERRED_RUNTIME_PRIVATE_ROUTINES.map(literal).join(",")} ] LOOP
+    -- (DEFERRED_RUNTIME_PRIVATE_ROUTINES; empty when none is withheld).
+    FOREACH routine_signature IN ARRAY ARRAY[${DEFERRED_RUNTIME_PRIVATE_ROUTINES.map(literal).join(",")} ]::text[] LOOP
       IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
         EXECUTE format('REVOKE EXECUTE ON FUNCTION opengeni_private.%s FROM PUBLIC, %I',
           routine_signature, ${literal(role)});

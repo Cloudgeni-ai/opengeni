@@ -315,7 +315,6 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "table teams_bot_outbox grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table teams_bot_proofs grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table teams_bot_routes grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
-      "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)",
       "runtime role lacks EXECUTE on private routine wake_teams_route_for_session_event()",
     ]);
   } finally {

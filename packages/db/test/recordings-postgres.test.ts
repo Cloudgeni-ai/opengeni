@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  grantDeferredRuntimeAccess,
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import {
@@ -66,7 +65,6 @@ const workspaceIds: string[] = [];
 beforeAll(async () => {
   shared = await acquireRestrictedRuntimeTestDatabase("recordings-postgres");
   if (!shared) return;
-  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl, { searchPath: shared.schema });
 }, 180_000);
 

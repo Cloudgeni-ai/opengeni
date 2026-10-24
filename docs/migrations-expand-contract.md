@@ -257,8 +257,8 @@ below), grant it in a rolling migration, drop it from
 "not yet" handling. A new non-RLS table the runtime writes needs the same two
 steps, with readiness accepting no runtime DML or all four. 0929, 0930, 0932
 and 0935 granted on creation instead; 0937 withheld those grants and the
-`event_ingress_routes` DML again, and 0947 restored them. 0946 creates the
-recording retention inventory withheld.
+`event_ingress_routes` DML again, and 0947 restored them. 0946 created the
+recording retention inventory withheld, and 0950 granted it.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects
