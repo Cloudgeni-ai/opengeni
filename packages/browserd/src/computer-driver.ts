@@ -94,6 +94,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
   /** Set once a failed helper could not be shut down. No replacement may
    * start beside it, so every later call fails with this clear reason. */
   private helperLost: InteractionControllerError | null = null;
+  /** The target last observed or acted on, listed as current (see
+   * ComputerTarget.current). */
+  private current: string | null = null;
 
   /** Secret values typed in this session; redacted from everything it returns,
    * since desktop accessibility trees and window titles show field values. */
@@ -158,6 +161,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
         }
         return { ...observed, frameId: frame.frameId };
       });
+      this.current = observation.target.id;
       return this.typedSecrets.redact(this.projectObservation(observation));
     } catch (error) {
       throw predispatchError(error, this.typedSecrets.merged());
@@ -253,6 +257,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
         if (text === null) throw error;
         return await pasteText(client, native, text);
       });
+      // An action that opened a window returns that window, and leaves the
+      // computer in it.
+      this.current = observation?.target.id ?? command.targetId;
       return observation === null
         ? null
         : redactInteractionSecretValues(this.projectObservation(observation), secretValues);
@@ -435,6 +442,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
   private projectTarget(target: ComputerBackendTarget): ComputerTargetValue {
     return ComputerTarget.parse({
       ...target,
+      ...(target.id === this.current ? { current: true } : {}),
       computerSessionId: this.computerSessionId,
       controllerGeneration: this.controllerGeneration,
     });

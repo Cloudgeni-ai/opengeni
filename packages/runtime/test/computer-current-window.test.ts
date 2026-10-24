@@ -21,6 +21,7 @@ const sessionId = randomUUID();
 const computerSessionId = randomUUID();
 const now = "2026-10-24T01:00:00.000Z";
 const model = { kind: "model", subjectId: "model:test" } as const;
+const none = async () => null;
 
 describe("current computer window", () => {
   test("uses the latest live computer, then remembers the window a call used", async () => {
@@ -30,6 +31,7 @@ describe("current computer window", () => {
         lookups += 1;
         return "c-1";
       },
+      currentTarget: none,
     });
     expect(await current.session(undefined)).toEqual({ computerSessionId: "c-1", implicit: true });
     await expect(current.target({})).rejects.toMatchObject({ code: "computer_target_required" });
@@ -47,7 +49,10 @@ describe("current computer window", () => {
   });
 
   test("explicit identifiers win, and another computer has no remembered window", async () => {
-    const current = new CurrentComputerWindow({ latestLiveSession: async () => null });
+    const current = new CurrentComputerWindow({
+      latestLiveSession: async () => null,
+      currentTarget: none,
+    });
     current.use("c-1", "w-1");
     expect(await current.target({ targetId: "w-2" })).toMatchObject({
       computerSessionId: "c-1",
@@ -60,7 +65,10 @@ describe("current computer window", () => {
   });
 
   test("a session with no computer says to open one", async () => {
-    const current = new CurrentComputerWindow({ latestLiveSession: async () => null });
+    const current = new CurrentComputerWindow({
+      latestLiveSession: async () => null,
+      currentTarget: none,
+    });
     await expect(current.target({})).rejects.toMatchObject({
       code: "computer_session_required",
       message:
@@ -69,28 +77,40 @@ describe("current computer window", () => {
   });
 
   test("a remembered computer that is gone is resolved afresh", async () => {
-    const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
+    const current = new CurrentComputerWindow({
+      latestLiveSession: async () => "c-2",
+      currentTarget: none,
+    });
     current.use("c-1", "w-1");
     current.failed(await current.session(undefined), "computer");
     expect(await current.session(undefined)).toEqual({ computerSessionId: "c-2", implicit: true });
   });
 
   test("a remembered computer gone under its remembered window is resolved afresh", async () => {
-    const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
+    const current = new CurrentComputerWindow({
+      latestLiveSession: async () => "c-2",
+      currentTarget: none,
+    });
     current.use("c-1", "w-1");
     current.failed(await current.target({}), "computer");
     expect(await current.session(undefined)).toEqual({ computerSessionId: "c-2", implicit: true });
   });
 
   test("an explicitly named computer that is gone is forgotten too", async () => {
-    const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
+    const current = new CurrentComputerWindow({
+      latestLiveSession: async () => "c-2",
+      currentTarget: none,
+    });
     current.use("c-1", "w-1");
     current.failed(await current.target({ computerSessionId: "c-1" }), "computer");
     expect(await current.session(undefined)).toEqual({ computerSessionId: "c-2", implicit: true });
   });
 
   test("a remembered window that is gone is forgotten, its computer kept", async () => {
-    const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
+    const current = new CurrentComputerWindow({
+      latestLiveSession: async () => "c-2",
+      currentTarget: none,
+    });
     current.use("c-1", "w-1");
     current.failed(await current.target({}), "window");
     expect(await current.session(undefined)).toEqual({ computerSessionId: "c-1", implicit: true });
@@ -98,15 +118,67 @@ describe("current computer window", () => {
   });
 
   test("a remembered window that is gone keeps its explicitly named computer", async () => {
-    const current = new CurrentComputerWindow({ latestLiveSession: async () => "c-2" });
+    const current = new CurrentComputerWindow({
+      latestLiveSession: async () => "c-2",
+      currentTarget: none,
+    });
     current.use("c-1", "w-1");
     current.failed(await current.target({ computerSessionId: "c-1" }), "window");
     expect(await current.session(undefined)).toEqual({ computerSessionId: "c-1", implicit: true });
     await expect(current.target({})).rejects.toMatchObject({ code: "computer_target_required" });
   });
+
+  test("before this attempt used a window, the computer's current window is used", async () => {
+    const asked: string[] = [];
+    const current = new CurrentComputerWindow({
+      latestLiveSession: async () => "c-1",
+      currentTarget: async (computer) => {
+        asked.push(computer);
+        return computer === "c-1" ? "w-9" : null;
+      },
+    });
+    expect(await current.target({})).toEqual({
+      computerSessionId: "c-1",
+      implicit: true,
+      targetId: "w-9",
+      implicitTarget: true,
+    });
+    await expect(current.target({ computerSessionId: "c-2" })).rejects.toMatchObject({
+      code: "computer_target_required",
+    });
+    // A window this attempt used wins without asking.
+    current.use("c-1", "w-1");
+    expect((await current.target({})).targetId).toBe("w-1");
+    expect(asked).toEqual(["c-1", "c-2"]);
+  });
 });
 
 describe("computer tools without identifiers", () => {
+  test("a later turn keeps working in the window the computer was last used in", async () => {
+    const targets: string[] = [];
+    const tools = definitions({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      listComputerTargets: async () =>
+        ({
+          computerSessionId,
+          targets: [computerTarget("window-1"), { ...computerTarget("window-2"), current: true }],
+        }) as never,
+      actInComputer: async (_workspace, _computer, value) => {
+        targets.push(value.targetId);
+        return receipt(value.operationId, observation(computerTarget(value.targetId)));
+      },
+    });
+    const result = await tools.computer_act!.execute(
+      {
+        expectedObservationId: randomUUID(),
+        action: { type: "semantic", locator: "e1", action: "invoke" },
+      },
+      { operationId: randomUUID(), caller: model },
+    );
+    expect(result.isError).not.toBe(true);
+    expect(targets).toEqual(["window-2"]);
+  });
+
   test("observe then act on the current window, with a bare ref inside a batch", async () => {
     const target = computerTarget("window-1");
     const requests: ComputerActionRequest[] = [];
@@ -193,6 +265,8 @@ describe("computer tools without identifiers", () => {
   test("omitting the window before any window was used says how to name one", async () => {
     const tools = definitions({
       listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      listComputerTargets: async () =>
+        ({ computerSessionId, targets: [computerTarget("window-1")] }) as never,
     });
     const result = await tools.computer_act!.execute(
       { action: { type: "keyboard", action: "press", value: "Enter" } },
@@ -203,7 +277,7 @@ describe("computer tools without identifiers", () => {
       error: {
         code: "computer_target_required",
         message:
-          "No window of this computer has been used yet in this turn. Pass targetId from computer_open or computer_targets.",
+          "No window of this computer has been used yet. Pass targetId from computer_open or computer_targets.",
         retryable: false,
       },
     });

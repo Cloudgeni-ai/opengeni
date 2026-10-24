@@ -247,10 +247,13 @@ describe("ComputerDriver", () => {
         computerSessionId,
         controllerGeneration,
       });
+      expect((await driver.listTargets())[0]!.current).toBeUndefined();
       expect(await controller.observe("window-1")).toMatchObject({
         observationId: "observation-1",
         semantic: { kind: "snapshot", nodeCount: 1 },
       });
+      // The window last observed or acted on is listed as current.
+      expect((await driver.listTargets())[0]!.current).toBe(true);
       const receipt = await controller.run(command());
       expect(receipt).toMatchObject({
         state: "completed",

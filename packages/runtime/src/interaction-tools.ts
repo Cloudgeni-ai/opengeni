@@ -1207,6 +1207,10 @@ export function createInteractionAttemptToolDefinitions(
         ),
         input.sessionId,
       )?.id ?? null,
+    currentTarget: async (computerSessionId) =>
+      (
+        await input.transport.listComputerTargets(input.workspaceId, computerSessionId)
+      ).targets.find((target) => target.current)?.id ?? null,
   });
   /** Run one call on the requested or current computer and remember it on
    * success. */
