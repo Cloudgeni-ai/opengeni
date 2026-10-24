@@ -237,8 +237,9 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
     expect(publicAccess).toEqual({ grants: 0 });
     // At the historical 0864 boundary, the current runtime still needs the
     // withheld usage-history routines, the later 0890 reconciliation tables,
-    // the 0909 message search text table, Site opens, and the six Teams tables. The previous
-    // runtime remains ready.
+    // the 0909 message search text table, Site opens, the six Teams tables, and
+    // the 0948 attempt machine-authorization helper. The previous runtime
+    // remains ready.
     expect(
       evaluateRuntimeDatabasePosture(
         await inspectRuntimeDatabasePosture(client.db, options),
@@ -246,8 +247,9 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ),
     ).toEqual([
       ...ABSENT_USAGE_HISTORY_POSTURE,
-      "runtime privilege tables are missing: event_deliveries, event_ingress_routes, event_source_feeds, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_live_segments, recording_people, recording_segment_edits, recording_speaker_assignments, recording_speaker_voices, recording_tracks, recording_transcript_segments, recording_transcript_versions, recording_voice_rejections, recording_voiceprints, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
-      "protected tables are missing: event_deliveries, event_source_feeds, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_live_segments, recording_people, recording_segment_edits, recording_speaker_assignments, recording_speaker_voices, recording_tracks, recording_transcript_segments, recording_transcript_versions, recording_voice_rejections, recording_voiceprints, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "runtime privilege tables are missing: event_deliveries, event_ingress_routes, event_source_feeds, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_live_segments, recording_people, recording_segment_edits, recording_speaker_assignments, recording_speaker_voices, recording_tracks, recording_transcript_segments, recording_transcript_versions, recording_voice_rejections, recording_voiceprints, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, site_sidebar_states, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "protected tables are missing: event_deliveries, event_source_feeds, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_live_segments, recording_people, recording_segment_edits, recording_speaker_assignments, recording_speaker_voices, recording_tracks, recording_transcript_segments, recording_transcript_versions, recording_voice_rejections, recording_voiceprints, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, site_sidebar_states, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "owner-internal target-schema helper carry_session_attempt_machine_authorization(uuid, uuid, uuid) is missing or ambiguous",
     ]);
     expect(
       previous.evaluateRuntimeDatabasePosture(
@@ -278,7 +280,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
         options,
       ),
     ).toEqual([
-      "RLS tables are absent from the declared contract: event_deliveries, event_source_feeds, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_live_segments, recording_people, recording_segment_edits, recording_speaker_assignments, recording_speaker_voices, recording_tracks, recording_transcript_segments, recording_transcript_versions, recording_voice_rejections, recording_voiceprints, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "RLS tables are absent from the declared contract: event_deliveries, event_source_feeds, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_live_segments, recording_people, recording_segment_edits, recording_speaker_assignments, recording_speaker_voices, recording_tracks, recording_transcript_segments, recording_transcript_versions, recording_voice_rejections, recording_voiceprints, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, site_sidebar_states, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
       "table event_deliveries grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table event_ingress_routes grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table event_source_feeds grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
@@ -306,6 +308,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "table scheduled_task_event_settings grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table session_message_search_texts grants excess runtime privileges: SELECT, INSERT",
       "table site_opens grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table site_sidebar_states grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table teams_bot_inbox grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table teams_bot_installations grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table teams_bot_links grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
