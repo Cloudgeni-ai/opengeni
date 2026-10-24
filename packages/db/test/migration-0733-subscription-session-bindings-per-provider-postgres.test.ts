@@ -481,6 +481,11 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "teams_bot_routes",
       // 0935 adds the event source feed cursors.
       "event_source_feeds",
+      // 0940 voice recognition and 0942 live transcript tables are also withheld.
+      "recording_voiceprints",
+      "recording_speaker_voices",
+      "recording_voice_rejections",
+      "recording_live_segments",
     ].sort();
     // 0823 (personal machine consent) adds protected tables the runtime role
     // never reads directly; insert them in the sorted protected list.
