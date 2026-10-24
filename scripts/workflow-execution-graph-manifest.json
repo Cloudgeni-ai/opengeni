@@ -46,7 +46,7 @@
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
-      "sha256": "ce5eedb9f060034199a789f724445ef2967324ad6108906b268930ac11c44290"
+      "sha256": "d9a29f87cc03b47d1ec25704a34286fbae647749236d64c9d27582fc83b5d322"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -1278,8 +1278,14 @@
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "linux",
+      "step": "System audio helper",
+      "sha256": "7202e2af62f646e8d16d9689957969398f848258d717e9b3b8025622cbb5fcc4"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
       "step": "Verify",
-      "sha256": "22f1b4a1b8b959438183f7fcbc25f8203a5c36425a942316fcac2c363bf4a64f"
+      "sha256": "69ee76eeb60c8b5be9abc968dbc0d7ee1efb50a142beeb90659e9ce6b28e7f93"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
@@ -1308,8 +1314,14 @@
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "macos",
+      "step": "System audio helper",
+      "sha256": "1b63ee05ca6b99ff2d76896ec6eb93159ecc93fd9652dc3602050703597012ae"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
       "step": "Verify",
-      "sha256": "dc4a624a3538c56c0fd5162ae9c67d6bb63a46e4c160c9762da38277bdbf079e"
+      "sha256": "76a37b7caac131c95d5072c7223bf77ea58627bb2f94f73af7d4916bbbb0ab93"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
@@ -1344,8 +1356,14 @@
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "windows",
+      "step": "System audio helper",
+      "sha256": "746889878349f6c658426262b2425622aae42d6bb7c19b7f34604b2803da9e0a"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
       "step": "Verify",
-      "sha256": "e558a14395a7534bb9328c859d9bf44b1847aff3d029f3db9131f90e904e4f6e"
+      "sha256": "04fbd88846ecf3972bf4bb02e360a17573572c2898ed9c86e79f9dd31b976d63"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
