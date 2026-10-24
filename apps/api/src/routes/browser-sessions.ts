@@ -1421,7 +1421,9 @@ export function registerBrowserSessionRoutes(
         if (!video) return progress("encoding");
         const actionLog = await objectStorage.getObjectBytes(video.actionLogObjectKey);
         if (!actionLog) {
-          throw new HTTPException(503, { message: "browser recording action log is not available" });
+          throw new HTTPException(503, {
+            message: "browser recording action log is not available",
+          });
         }
         await authorizeSourceSession(deps, grant, sourceSessionId, "session.control");
         const sourceSession = await requireSourceSession(deps, workspaceId, sourceSessionId);

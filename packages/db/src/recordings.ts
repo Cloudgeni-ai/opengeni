@@ -568,8 +568,8 @@ export async function listDeletingRecordingObjectKeys(
     ]);
     return [
       ...new Set([
-      ...chunks.map((chunk) => chunk.objectKey),
-      ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
+        ...chunks.map((chunk) => chunk.objectKey),
+        ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
         // A browser recording's video and the action log beside it, even if
         // the worker saved them without recording it yet.
         ...(tracks.some((track) => track.kind === "video")
@@ -912,7 +912,10 @@ export async function claimBrowserRecordingVideo(
     const row = await lockRecording(tx, input.workspaceId, input.recordingId);
     if (row.purpose !== "browser" || row.state !== "processing") return null;
     const [chunk] = await tx
-      .select({ objectKey: schema.recordingChunks.objectKey, sha256: schema.recordingChunks.sha256 })
+      .select({
+        objectKey: schema.recordingChunks.objectKey,
+        sha256: schema.recordingChunks.sha256,
+      })
       .from(schema.recordingChunks)
       .where(
         and(

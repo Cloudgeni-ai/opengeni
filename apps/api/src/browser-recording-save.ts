@@ -64,10 +64,7 @@ export async function stageBrowserRecordingBundle(input: {
     });
   }
   const now = input.now ?? Date.now;
-  await input.scheduleDeletion?.(
-    [bundleKey],
-    new Date(now() + BROWSER_RECORDING_STAGING_TTL_MS),
-  );
+  await input.scheduleDeletion?.([bundleKey], new Date(now() + BROWSER_RECORDING_STAGING_TTL_MS));
   const put = await objectStorage.createPutUrl({
     key: bundleKey,
     contentType: "application/octet-stream",

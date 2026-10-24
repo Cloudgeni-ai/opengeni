@@ -748,10 +748,11 @@ export type BrowserRecordingSaveResponse = {
   actionLogPath: string;
 };
 
-/** A save still moving the recording off its browser host (HTTP 202). The
- * SDK repeats the request with the same operationId after `retryAfterMs`. */
+/** A save still in progress (HTTP 202): `uploading` while the recording
+ * moves off its browser host, `encoding` while its video is made. The SDK
+ * repeats the request with the same operationId after `retryAfterMs`. */
 export type BrowserRecordingSaveProgress = {
-  state: "uploading";
+  state: "uploading" | "encoding";
   recording: BrowserRecordingSummary;
   retryAfterMs: number;
 };

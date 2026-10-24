@@ -12210,7 +12210,7 @@
         "$": "object",
         "$.recording": "ref(BrowserRecordingSummary)!",
         "$.retryAfterMs": "integer!",
-        "$.state": "const!=[\"\\\"uploading\\\"\"]"
+        "$.state": "enum!=[\"\\\"encoding\\\"\",\"\\\"uploading\\\"\"]"
       }
     },
     "BrowserRecordingSaveRequest": {
@@ -15152,7 +15152,7 @@
         "$.tracks": "array!",
         "$.tracks[]": "object",
         "$.tracks[].mimeType": "string!",
-        "$.tracks[].source": "ref(RecordingTrackSource)!",
+        "$.tracks[].source": "ref(RecordingCaptureSource)!",
         "$.tracks[].trackNumber": "integer!",
         "$.transcription": "ref(RecordingTranscriptionOptions)?",
         "$.visibility": "ref(SessionVisibility)?"
@@ -23511,11 +23511,13 @@
         "$.captureEndedAt": "string! null",
         "$.createdAt": "string!",
         "$.durationMilliseconds": "integer!",
+        "$.errorCode": "string! null",
         "$.externalRef": "string! null",
         "$.id": "string!",
         "$.metadata": "object!",
         "$.metadata{}": "unknown",
         "$.ownerSubjectId": "string!",
+        "$.purpose": "ref(RecordingPurpose)!",
         "$.startedAt": "string!",
         "$.state": "ref(RecordingState)!",
         "$.title": "string!",
@@ -23526,6 +23528,14 @@
         "$.updatedAt": "string!",
         "$.visibility": "ref(SessionVisibility)!",
         "$.workspaceId": "string!"
+      }
+    },
+    "RecordingCaptureSource": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"microphone\\\"\",\"\\\"mixed\\\"\",\"\\\"system\\\"\",\"\\\"upload\\\"\"]"
       }
     },
     "RecordingChunkDescriptor": {
@@ -23637,6 +23647,14 @@
         "$.voice.updatedAt": "string! null"
       }
     },
+    "RecordingPurpose": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"browser\\\"\",\"\\\"meeting\\\"\"]"
+      }
+    },
     "RecordingSpeaker": {
       "io": [
         "output"
@@ -23674,7 +23692,7 @@
         "$": "object",
         "$.chunkCount": "integer!",
         "$.durationMilliseconds": "integer!",
-        "$.kind": "const!=[\"\\\"audio\\\"\"]",
+        "$.kind": "ref(RecordingTrackKind)!",
         "$.live": "object! null",
         "$.live.costUsd": "number! null",
         "$.live.model": "string!",
@@ -23684,7 +23702,11 @@
         "$.playable": "boolean!",
         "$.source": "ref(RecordingTrackSource)!",
         "$.totalBytes": "integer!",
-        "$.trackNumber": "integer!"
+        "$.trackNumber": "integer!",
+        "$.video": "object! null",
+        "$.video.frameCount": "integer!",
+        "$.video.height": "integer!",
+        "$.video.width": "integer!"
       }
     },
     "RecordingTrackAudio": {
@@ -23699,13 +23721,20 @@
         "$.url": "string!"
       }
     },
-    "RecordingTrackSource": {
+    "RecordingTrackKind": {
       "io": [
-        "input",
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"microphone\\\"\",\"\\\"mixed\\\"\",\"\\\"system\\\"\",\"\\\"upload\\\"\"]"
+        "$": "enum=[\"\\\"audio\\\"\",\"\\\"video\\\"\"]"
+      }
+    },
+    "RecordingTrackSource": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"browser_tab\\\"\",\"\\\"microphone\\\"\",\"\\\"mixed\\\"\",\"\\\"system\\\"\",\"\\\"upload\\\"\"]"
       }
     },
     "RecordingTranscriptPage": {

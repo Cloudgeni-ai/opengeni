@@ -94,8 +94,8 @@ function harness(options: {
         sessionClient: sessionClient as never,
         objectStorage: objectStorage as never,
         recordingId,
-        bundleKey: (stored) => {
-          keyedFor.push(stored);
+        bundleKey: (expected) => {
+          keyedFor.push(expected);
           return bundleKey;
         },
         audience: "public",

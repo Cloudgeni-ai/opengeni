@@ -9,10 +9,7 @@ import {
   getBrowserRecordingVideo,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createBrowserRecordingActivities } from "../src/activities/browser-recordings";
@@ -105,7 +102,11 @@ async function scope() {
     subjectId: `subject-${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
-  return { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId };
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    subjectId: grant.subjectId,
+  };
 }
 
 function activities(storage: ReturnType<typeof memoryStorage>) {

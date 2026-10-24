@@ -57,7 +57,9 @@ export function createBrowserRecordingActivities(
       : activityContext()?.cancellationSignal;
 
   /** The recording with its track and bundle chunk; repeating it changes nothing. */
-  async function createBrowserRecordingFromBundle(input: BrowserRecordingVideoInput): Promise<void> {
+  async function createBrowserRecordingFromBundle(
+    input: BrowserRecordingVideoInput,
+  ): Promise<void> {
     const { db } = await services();
     await createBrowserRecording(db, {
       accountId: input.accountId,
