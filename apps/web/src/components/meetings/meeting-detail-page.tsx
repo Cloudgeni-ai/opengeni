@@ -403,8 +403,8 @@ function PhaseNotice({
     if (uploadingHere === null && recordingElsewhere) {
       return (
         <Notice tone="waiting" icon={SPINNER} title="Not finished yet" live="polite">
-          It's still being recorded or uploaded on another device. A rough preview of what's said
-          shows below, and the transcript starts once all the audio is in.
+          It's still being recorded or uploaded, in another tab or on another device. A rough
+          preview of what's said shows below, and the transcript starts once all the audio is in.
         </Notice>
       );
     }
@@ -844,7 +844,7 @@ export function MeetingDetailPage({
           </StatusBadge>
         ) : phase.kind === "uploading" ? (
           <StatusBadge variant="dot" tone="progress" pulse>
-            Uploading
+            {previewing && !recordingHere ? "In progress" : "Uploading"}
           </StatusBadge>
         ) : undefined
       }

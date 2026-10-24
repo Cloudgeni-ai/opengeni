@@ -231,6 +231,7 @@ describe("Live transcript", () => {
       await waitForText(view.container, "Let's keep this one short.");
       const text = view.container.textContent ?? "";
       expect(text).toContain("Not finished yet");
+      expect(text).toContain("In progress");
       expect(text).toContain("A rough preview.");
       // Someone else's microphone isn't "You".
       expect(text).toContain("Microphone");
