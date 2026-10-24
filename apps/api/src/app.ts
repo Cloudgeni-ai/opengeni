@@ -1479,6 +1479,7 @@ export function createAppComposition(deps: AppDependencies): {
             workspace?.settings.voiceInput,
           ).data;
           const voiceContext = {
+            accountId: grant.accountId,
             workspaceId,
             subjectId: grant.subjectId,
             preferredProvider: voicePreferences?.preferredProvider,
