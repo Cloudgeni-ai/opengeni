@@ -128,6 +128,10 @@ literally.
   values. A missing secret's error includes a ready `request_human_input` call
   only when the relevant provider inventory could be checked. A provider
   outage or incomplete inventory is not proof that a secret is missing.
+- A reference to an item or field marked "ask me each time" that no approval
+  covers fails with `approval_required` and an `approvalCard`: a ready
+  `request_human_input` call asking the person to allow that use (see
+  [Approval for each use](#approval-for-each-use)).
 - TOTP codes are computed at dispatch and never stored.
 
 The grammar, resolver, splicer, generator and TOTP each have one
@@ -178,6 +182,81 @@ vault name.
   tells the person to answer in the app.
 - `session_human_input_respond` from another agent accepts only a reference or
   a generate request, never a raw value.
+
+## Approval for each use
+
+A person can mark an item, or single fields of it by name, as "ask me each
+time" on the item's page. Agents still list the item, see its fields and write
+references to it; only the use of a marked value waits for a person. The same
+rules apply to hosted and connected vaults and to every surface, because the
+check sits in the one resolver (`createSecretResolver`), after the references
+are matched and before any provider read or decryption.
+
+When an agent's call uses a marked value that no approval covers:
+
+1. Nothing is run and no value is read. The resolver records a pending request
+   (the chat, the item and field names, the surface, the tool and, where known,
+   the destination: a page's host, a machine or a connector) and fails the call
+   with `approval_required`.
+2. The error carries `approvalCard`, a `request_human_input` call whose single
+   question has the id `secret-approval:<request id>`. The agent passes it on
+   unchanged. An identical blocked use in the same chat within the hour reuses
+   the pending request instead of asking twice.
+3. When the card is stored, Opengeni replaces its text with its own description
+   of the stored request and makes it unskippable, so the person always sees
+   what is really being asked, whatever the agent submitted. It reaches them
+   like any other question: in the chat, the inbox and as a phone push.
+4. Only the person the run acts for can answer it, signed in to Opengeni
+   themselves (web, desktop or phone app). Answers from other agents, parent
+   chats, API keys, personal keys or connected agents acting as the person are
+   refused, and child-session notices mark the question as for a person only.
+   When a scheduled run's approval timeout passes with no answer, the system
+   denies the card, as it rejects a pending tool approval; the system can never
+   allow one.
+5. The answer becomes a grant, recorded in the same transaction:
+
+   | Choice | Covers | Ends |
+   |---|---|---|
+   | Allow once | The next use of those fields in this chat | When used, or 30 minutes after it was given |
+   | Allow in this chat | Every use of those fields in this chat | When revoked |
+   | Allow for 1 hour | Every use of those fields in any of the person's chats in the workspace | After an hour, or when revoked |
+   | Deny | Nothing; the agent is told not to retry | |
+
+   The agent then retries the same call. A once grant is used up only after
+   every value of the call was read, so a failed call keeps it, and two calls
+   racing for one once grant cannot both use it.
+
+Who is asked and who can change the rules:
+
+- A person using their own reference (for example revealing it on the item's
+  page) is not asked: the approval would be their own.
+- A scheduled run asks the schedule's owner. A run that acts for no person
+  (for example a session an API key started without one) has nobody to ask
+  and is refused with `denied`, and so are Sites.
+- `secret_get` never returns a marked value to an agent, even with
+  `secrets:read`; the agent uses the reference where the value is needed.
+- Marks and grants are listed with `GET …/items/:itemId/approval`. Changing the
+  marks (`PUT …/approval`) and revoking a grant
+  (`POST …/approval/grants/:grantId/revoke`) need the person signed in to
+  Opengeni themselves, with `secrets:write` and access to the item. API keys,
+  agents and anything acting as the person (a connected agent, an agent with
+  admin access, a personal API key) get `human_auth_required`, so an agent can
+  never lift its own approval. The organization MCP action catalog marks both
+  actions as browser-only.
+- The secret-use audit row of an approved use lists the approvals it relied on
+  (`approvalIds`) and its `destination`.
+
+Limits:
+
+- A grant covers its own chat. A child session the agent starts is a different
+  chat and asks again (or uses an hour-long grant).
+- Marks follow the item's id. If a connected vault's item is deleted and
+  re-created in the password manager, it is a new item and needs marking again.
+- Values the agent already received (for example in a file it wrote earlier)
+  are not recalled by revoking a grant; revoking stops the next use.
+- Cards are answered in Opengeni itself. A reply in a Slack or Teams thread,
+  or an embedding product's server answering for its user, is refused; those
+  surfaces link the person to the chat instead.
 
 ## Agent tools
 
@@ -317,6 +396,7 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `GET, POST /vaults/:vaultId/items`; `GET, PATCH, DELETE /vaults/:vaultId/items/:itemId` | Items |
 | `POST /vaults/:vaultId/items/:itemId/restore`, `/move` | Restore an archived item; move or copy |
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |
+| `GET, PUT /vaults/:vaultId/items/:itemId/approval`; `POST …/approval/grants/:grantId/revoke` | "Ask me each time" marks and the approvals in force |
 | `PUT /sessions/:sessionId/vault-policy`; `GET /sessions/:sessionId/secrets` | Session policy and the secrets a session has used |
 | `POST /connections/1password/install`; `GET /connections/1password/service-accounts`; `GET /connections/:connectionId/provider-vaults` | 1Password connections |
 | `PUT /connections/:connectionId/1password/token`; `DELETE /connections/:connectionId/1password` | Replace a 1Password token; disconnect (unlinks its vaults) |

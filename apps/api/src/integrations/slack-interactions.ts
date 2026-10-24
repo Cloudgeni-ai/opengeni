@@ -30,6 +30,7 @@ import {
   type SessionEvent,
   type WorkspaceSlackReactionSummonSettings,
   workspaceSlackReactionChannelAllowed,
+  secretUseApprovalIdFromQuestionId,
 } from "@opengeni/contracts";
 import {
   allowanceExhaustedMessage,
@@ -3901,6 +3902,25 @@ async function continueSlackSession(
     });
     return;
   }
+  // Only the person, signed in to Opengeni, can allow an agent to use a
+  // secret; a thread reply can't answer that card.
+  if (pending.some((request) => hasSecretApprovalQuestion(request.questions))) {
+    const client = await createOpenGeniSlackBotInteractionClient(deps, {
+      accountId: entry.accountId,
+      workspaceId: entry.workspaceId,
+      connectionId: entry.connectionId,
+      subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
+    });
+    await client.postMessage({
+      operationId: deterministicUuid(`slack-secret-approval-reply-refused:${entry.id}`),
+      channelId: interaction.slackChannelId,
+      threadTimestamp: interaction.slackThreadTs,
+      text: slackSecretApprovalReplyRefusalText(
+        slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId),
+      ),
+    });
+    return;
+  }
   if (pending.length === 1) {
     const response = humanInputResponse(pending[0]!.questions, entry.text);
     if (response) {
@@ -5147,17 +5167,22 @@ async function slackHumanInputCard(
   const operationId = deterministicUuid(
     slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:human-input`),
   );
-  const secretUrl = hasSecretQuestion(request.questions)
-    ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
-    : null;
-  const text = hasSecretQuestion(request.questions)
-    ? `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\n${
-        secretUrl ? `<${secretUrl}|Answer in Opengeni>` : "Answer in Opengeni"
-      }; secrets are saved to a vault and never posted in Slack${request.allowSkip ? ". You can also choose Skip" : ""}.`
-    : `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread${request.allowSkip ? " or choose Skip" : ""}.`;
+  const secretQuestion = hasSecretQuestion(request.questions);
+  const approvalQuestion = hasSecretApprovalQuestion(request.questions);
+  const secretUrl =
+    secretQuestion || approvalQuestion
+      ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
+      : null;
+  const answerInOpengeni = secretUrl ? `<${secretUrl}|Answer in Opengeni>` : "Answer in Opengeni";
+  const text = secretQuestion
+    ? `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\n${answerInOpengeni}; secrets are saved to a vault and never posted in Slack${request.allowSkip ? ". You can also choose Skip" : ""}.`
+    : approvalQuestion
+      ? `${mention}Opengeni needs your approval:\n${formatQuestions(request.questions)}\n${answerInOpengeni}; only you can allow a secret's use, signed in to Opengeni.`
+      : `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread${request.allowSkip ? " or choose Skip" : ""}.`;
   if (!requesterAuthorized || !interaction.initiatingSlackUserId) return { text, operationId };
   const question = request.questions.length === 1 ? request.questions[0] : null;
   const canUseButtons =
+    !approvalQuestion &&
     question?.kind === "single_select" &&
     question.options.length > 0 &&
     question.options.length <= 5;
@@ -6095,6 +6120,16 @@ function humanInputResponse(questions: HumanInputQuestion[], text: string) {
 
 function hasSecretQuestion(questions: readonly HumanInputQuestion[]): boolean {
   return questions.some((question) => question.kind === "secret");
+}
+
+function hasSecretApprovalQuestion(questions: readonly HumanInputQuestion[]): boolean {
+  return questions.some((question) => secretUseApprovalIdFromQuestionId(question.id) !== null);
+}
+
+export function slackSecretApprovalReplyRefusalText(sessionUrl: string | null): string {
+  return `Only you can allow an agent to use this secret, signed in to Opengeni: ${
+    sessionUrl ? `<${sessionUrl}|answer in Opengeni>` : "open the task in Opengeni"
+  }. Your reply was not sent to the agent.`;
 }
 
 export function slackSecretAnswerRefusalText(sessionUrl: string | null): string {

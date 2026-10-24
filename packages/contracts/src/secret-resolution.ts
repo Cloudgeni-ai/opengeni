@@ -59,6 +59,16 @@ export interface SecretUseContext {
   toolName: string;
   operationId?: string;
   sourceCallId?: string;
+  /**
+   * Where the value goes, for a person approving the use: a page's host, a
+   * machine or a connector name. Never a value.
+   */
+  destination?: string;
+  /**
+   * Looks the destination up when it costs a round trip (a browser page's
+   * host). Called only when a use must ask for approval; failures are ignored.
+   */
+  lookupDestination?: () => Promise<string | null>;
 }
 
 export type SecretMaterial =
@@ -107,6 +117,7 @@ export const SECRET_REFERENCE_FAILURE_CODES = [
   "binary_value",
   "unsupported_shell",
   "secretfile_not_allowed",
+  "approval_required",
 ] as const;
 export type SecretReferenceFailureCode = (typeof SECRET_REFERENCE_FAILURE_CODES)[number];
 
@@ -123,11 +134,17 @@ export const SECRET_REFERENCE_ERROR_CODE = "secret_reference_error" as const;
 function failureHint(
   failures: readonly SecretReferenceFailure[],
   askCard: RequestHumanInputToolInput | null,
+  approvalCard: RequestHumanInputToolInput | null,
 ): string {
   const hints: string[] = [];
   if (askCard !== null) {
     hints.push(
       "Nothing was run. A secret is missing: call request_human_input with askCard exactly as given, then retry with the returned references.",
+    );
+  }
+  if (approvalCard !== null) {
+    hints.push(
+      "Nothing was run. The person must approve each use of this secret: call request_human_input with approvalCard exactly as given. If they allow it, retry the same call; if they deny it, do not retry.",
     );
   }
   if (failures.some((failure) => failure.code === "ambiguous")) {
@@ -147,10 +164,13 @@ export class SecretReferenceError extends Error {
   readonly code = SECRET_REFERENCE_ERROR_CODE;
   readonly failures: SecretReferenceFailure[];
   readonly askCard: RequestHumanInputToolInput | null;
+  /** approval_required: the host-owned card that asks the person to allow this use. */
+  readonly approvalCard: RequestHumanInputToolInput | null;
 
   constructor(
     failures: SecretReferenceFailure[],
     askCard: RequestHumanInputToolInput | null = null,
+    approvalCard: RequestHumanInputToolInput | null = null,
   ) {
     const first = failures[0];
     super(
@@ -161,9 +181,14 @@ export class SecretReferenceError extends Error {
     this.name = "SecretReferenceError";
     this.failures = failures;
     this.askCard = askCard;
+    this.approvalCard = approvalCard;
   }
 
-  /** JSON string for tool output: {error, failures, askCard, hint}. Never contains values. */
+  /**
+   * JSON string for tool output: {error, failures, askCard, approvalCard?,
+   * hint}. `approvalCard` appears only when a use needs approval. Never
+   * contains values.
+   */
   toModelOutput(): string {
     return JSON.stringify({
       error: this.code,
@@ -174,7 +199,8 @@ export class SecretReferenceError extends Error {
         ...(failure.candidates ? { candidates: failure.candidates } : {}),
       })),
       askCard: this.askCard,
-      hint: failureHint(this.failures, this.askCard),
+      ...(this.approvalCard !== null ? { approvalCard: this.approvalCard } : {}),
+      hint: failureHint(this.failures, this.askCard, this.approvalCard),
     });
   }
 }
