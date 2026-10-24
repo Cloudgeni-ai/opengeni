@@ -434,6 +434,15 @@ for the fast job and required aggregate to pass. A failed selected test is never
 converted into an intentional skip. Type selection is unchanged. Full guards
 and the full suite remain in Batch CI, whose impact plan is not capped.
 
+Batch CI does not wait inside its planning job for main CI demand to clear. After
+checkout and Bun setup it verifies the immutable candidate and plans the complete
+combined tree, with a 20-minute planning-job timeout. GitHub schedules the resulting
+jobs; this is not a fairness or capacity guarantee. Full tests, previous-binary
+readiness, exact-attempt provenance and the final Batch ready gate are unchanged.
+Already-created runs retain their original workflow: the controller's single
+infrastructure retry reruns the same immutable candidate, not a new tree containing
+a later workflow fix.
+
 There is no global PR admission lock, permit system or synthetic runner reserve.
 GitHub queues bursts under its hosted capacity limits. Keep the fast gate small;
 add a global cap only if measured main/Batch starvation justifies it. The live

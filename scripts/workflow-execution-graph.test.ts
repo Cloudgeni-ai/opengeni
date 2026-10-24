@@ -31,6 +31,19 @@ const workflowPath = ".github/workflows/fixture.yml";
 const actionPath = ".github/actions/probe/action.yml";
 const discoveryActionPath = ".github/actions/probe/action.yaml";
 
+test("Batch plan no longer has a five-hour priority timeout exemption", () => {
+  const source = (timeout: number) =>
+    `name: Batch CI\non: push\njobs:\n  plan:\n    timeout-minutes: ${timeout}\n    steps:\n      - name: Priority fixture\n        run: bun scripts/ci/github-pr-ci.ts priority batch\n`;
+  expect(
+    inspectWorkflowExecutionSources({
+      ".github/workflows/batch-ci.yml": source(320),
+    }).violations.join("\n"),
+  ).toContain("job timeout-minutes must be a static integer in 1..120");
+  expect(
+    inspectWorkflowExecutionSources({ ".github/workflows/batch-ci.yml": source(20) }).violations,
+  ).toEqual([]);
+});
+
 const minimalWorkflow = [
   "name: Fixture",
   "on: push",

@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/batch-ci.yml",
-      "sha256": "8373203c1e3a7313da4bcae83d236a0ce91d2b84b8c9262db6a60631dd51a6c8"
+      "sha256": "605daeab2bf825d6073906c38ee7de215548d8b9e7d8464a83731acc48740093"
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
@@ -596,12 +596,6 @@
       "job": "plan",
       "step": "Verify candidate provenance and plan the complete combined tree",
       "sha256": "174176c895ef72cebb813592e508df2ee3b4d9c42f256a2412b2da89d7cf4510"
-    },
-    {
-      "workflow": ".github/workflows/batch-ci.yml",
-      "job": "plan",
-      "step": "Yield candidate fan-out to full main CI",
-      "sha256": "ab5e0510fc370cc259f71aad85e00d7393f66623aed423a5117351059b21ae3b"
     },
     {
       "workflow": ".github/workflows/batch-ci.yml",
