@@ -345,7 +345,7 @@ describe("connection ownership UI", () => {
     );
     try {
       expect(rendered.container.textContent).toContain("Personal connection to linear.app");
-      expect(rendered.container.textContent).toContain("Your messages and personal schedules");
+      expect(rendered.container.textContent).toContain("Your messages and personal automations");
       expect(rendered.container.textContent).not.toContain("11111111-1111-4111-8111-111111111111");
     } finally {
       await rendered.unmount();
