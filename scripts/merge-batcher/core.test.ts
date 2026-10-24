@@ -1309,7 +1309,7 @@ describe("integration boundaries and queue-only shadow CI", () => {
     });
     expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
   });
-  test.each(["red", "unknown", "green"] as const)(
+  test.each(["unknown", "green"] as const)(
     "#5243 inherited %s base splits without ejecting or blaming innocent members",
     (status) => {
       const c = candidate([pull(5436), pull(5439), pull(5440)]);
@@ -1331,6 +1331,26 @@ describe("integration boundaries and queue-only shadow CI", () => {
       expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
     },
   );
+  test("exact red base holds failed cohorts before retry or split, never a green landing", () => {
+    const c = candidate([pull(5436), pull(5439)]);
+    const o = observation(c.manifest.pulls, [c]);
+    o.baseCI!.status = "red";
+    const before = canonical(o.ledger);
+    for (const attempt of [1, 2]) {
+      c.runs = [run(c, "code_failure", attempt)];
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+      expect(canonical(o.ledger)).toBe(before);
+    }
+    for (const invalid of [
+      { ...o.baseCI!, sha: "f".repeat(40) },
+      { ...o.baseCI!, runId: null },
+      { ...o.baseCI!, attempt: 0 },
+    ]) {
+      expect(plan({ ...o, baseCI: invalid }, { ...cfg, mode: "active" }).kind).toBe("record");
+    }
+    c.runs = [run(c, "success")];
+    expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
+  });
   test("batch retry eligibility rejects ambiguous, second-attempt, Version and unrelated runs", () => {
     const c = candidate();
     const good = run(c, "infrastructure");

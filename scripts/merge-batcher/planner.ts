@@ -179,6 +179,24 @@ function planCandidate(o: Observation, c: Config): Action {
               reason: "full-main CI has priority; tested candidate retained without cancellation",
             }
           : { kind: "land", candidate: root };
+      // A red exact base is not proof that members caused this failure. Hold
+      // before retry/splitting, retaining the failed candidate and all evidence.
+      // This does not claim identical fingerprints or authorize a green result.
+      const base = o.baseCI;
+      if (
+        run.trusted &&
+        run.outcome === "code_failure" &&
+        base?.sha === root.manifest.baseSha &&
+        base.status === "red" &&
+        Number.isSafeInteger(base.runId) &&
+        base.runId! > 0 &&
+        Number.isSafeInteger(base.attempt) &&
+        base.attempt! > 0
+      )
+        return {
+          kind: "wait",
+          reason: "exact-base main CI is red; retain failed cohort without retry, split or parking",
+        };
       // A failed exact candidate gets one flake allowance before any split or
       // singleton parking. The durable retry intent prevents duplicate requests.
       if (run.attempt === 1 && infrastructureRetryReason(root, run, c)) {
