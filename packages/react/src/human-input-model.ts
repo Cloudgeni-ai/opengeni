@@ -7,7 +7,7 @@ import type {
   HumanInputSecretSaveTo,
   HumanInputSecretSpec,
 } from "@opengeni/sdk";
-import { secretUseApprovalIdFromQuestionId } from "@opengeni/contracts";
+import { secretUseApprovalIdFromQuestionId } from "@opengeni/sdk/secret-use-approval";
 import { type OpenGeniText } from "./messages/runtime";
 
 /* Pure drafting and validation rules for structured human-input requests,

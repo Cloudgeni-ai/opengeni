@@ -16,22 +16,13 @@ import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import type { RequestHumanInputToolInput } from "./index";
 import type { SecretUseSurface } from "./secret-resolution";
+import { secretUseApprovalQuestionId } from "./secret-use-approval-question";
 
-/** Question ids `secret-approval:<request uuid>` bind a card to a stored request. */
-export const SECRET_USE_APPROVAL_QUESTION_PREFIX = "secret-approval:";
-
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-export function secretUseApprovalQuestionId(approvalId: string): string {
-  return `${SECRET_USE_APPROVAL_QUESTION_PREFIX}${approvalId}`;
-}
-
-/** The request id a question is bound to, or null for any other question. */
-export function secretUseApprovalIdFromQuestionId(questionId: string): string | null {
-  if (!questionId.startsWith(SECRET_USE_APPROVAL_QUESTION_PREFIX)) return null;
-  const id = questionId.slice(SECRET_USE_APPROVAL_QUESTION_PREFIX.length).toLowerCase();
-  return UUID_PATTERN.test(id) ? id : null;
-}
+export {
+  SECRET_USE_APPROVAL_QUESTION_PREFIX,
+  secretUseApprovalIdFromQuestionId,
+  secretUseApprovalQuestionId,
+} from "./secret-use-approval-question";
 
 export const SECRET_USE_APPROVAL_DECISIONS = ["once", "session", "window", "deny"] as const;
 export type SecretUseApprovalDecision = (typeof SECRET_USE_APPROVAL_DECISIONS)[number];

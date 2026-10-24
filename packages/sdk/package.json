@@ -178,6 +178,10 @@
       "types": "./src/model-display.ts",
       "default": "./src/model-display.ts"
     },
+    "./secret-use-approval": {
+      "types": "./src/secret-use-approval.ts",
+      "default": "./src/secret-use-approval.ts"
+    },
     "./chat": {
       "types": "./src/chat/index.ts",
       "default": "./src/chat/index.ts"

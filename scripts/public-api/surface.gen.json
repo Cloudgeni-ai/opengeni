@@ -35289,6 +35289,11 @@
       "SystemAudioKind": "type",
       "SystemAudioSource": "type"
     },
+    "@opengeni/sdk/secret-use-approval": {
+      "SECRET_USE_APPROVAL_QUESTION_PREFIX": "value",
+      "secretUseApprovalIdFromQuestionId": "value",
+      "secretUseApprovalQuestionId": "value"
+    },
     "@opengeni/sdk/session-history-import": {
       "appendArchivedSessionEvents": "value",
       "AppendArchivedSessionEventsRequest": "type",
