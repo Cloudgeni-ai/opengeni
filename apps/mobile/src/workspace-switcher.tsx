@@ -1,6 +1,11 @@
 import { NativeMenu, type MenuAction } from "@/native-menu";
 import { workspacesInOrg } from "@opengeni/react/organization-model";
-import { fontStyle, Icon, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
+import {
+  BAR_MAX_FONT_SCALE,
+  fontStyle,
+  Icon,
+  useNativeTimelineTheme,
+} from "@opengeni/react-native/timeline";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 import { useState } from "react";
@@ -164,6 +169,7 @@ export function WorkspaceSwitcherTitle() {
         {personal ? <Icon name="lock" size={13} color={c.fg} /> : null}
         <Text
           numberOfLines={1}
+          maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
           style={{
             ...fontStyle(theme, 600),
             fontSize: 16,
@@ -179,6 +185,7 @@ export function WorkspaceSwitcherTitle() {
       {org ? (
         <Text
           numberOfLines={1}
+          maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
           style={{
             ...fontStyle(theme, 500),
             fontSize: 12,

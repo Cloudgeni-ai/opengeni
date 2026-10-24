@@ -102,6 +102,21 @@ export function useNativeTimelineTheme(): NativeTimelineTheme {
   return useContext(ThemeContext);
 }
 
+/**
+ * The largest text-size multiplier for text in fixed-height bars (navigation
+ * titles, badges). A bar cannot grow, so iOS keeps bar titles near their
+ * default size at accessibility sizes instead of letting them spill over the
+ * buttons and the page below.
+ */
+export const BAR_MAX_FONT_SCALE = 1.2;
+
+/**
+ * The largest text-size multiplier for display headings. iOS grows its title
+ * styles about twice at the largest accessibility size (body text about three
+ * times), so a heading never pushes the content under it off the screen.
+ */
+export const HEADING_MAX_FONT_SCALE = 2;
+
 /** Text style for a web weight, resolving host font families when supplied. */
 export function fontStyle(
   theme: NativeTimelineTheme,
