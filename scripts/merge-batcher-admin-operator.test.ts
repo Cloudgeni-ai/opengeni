@@ -227,7 +227,7 @@ if(process.env.DRIFT_ON_SLEEP) {
 }
 `;
 
-async function harness() {
+async function harness(appOnly = false) {
   const root = await mkdtemp(join(tmpdir(), "batcher-admin-operator-"));
   await mkdir(join(root, "bin"));
   const before: Snapshot = {
@@ -261,6 +261,10 @@ async function harness() {
     ],
   };
   const state = join(root, "state.json");
+  if (appOnly)
+    before.rulesets[0]!.bypass_actors = [
+      { actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" },
+    ];
   const log = join(root, "requests.jsonl");
   await writeFile(state, JSON.stringify(before));
   await writeFile(log, "");
@@ -272,7 +276,7 @@ async function harness() {
     await writeFile(join(root, "bin", name!), body!);
     await chmod(join(root, "bin", name!), 0o700);
   }
-  await cli(["prepare", state, "501", "999", join(root, "plan")]);
+  await cli([appOnly ? "prepare-app-only" : "prepare", state, "501", "999", join(root, "plan")]);
   const fixtureEnv = {
     ...process.env,
     PATH: `${join(root, "bin")}:${process.env.PATH}`,
@@ -389,6 +393,32 @@ test("explicit write opt-in, unknown actions and classic-read failure issue zero
     await h.close();
   }
 });
+test("App-only policy runs existing OFF back to exact saved Manual with administrator bypass", async () => {
+  const h = await harness(true);
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    const operator = await offHarness(h);
+    for (const action of ["create-guard", "create-namespace", "admit"]) {
+      const result = await h.run(action, "--apply-after-go");
+      expect(result.stderr).toBe("");
+      expect(result.code).toBe(0);
+    }
+    const applied = JSON.parse(await readFile(h.state, "utf8"));
+    const protection = applied.rulesets.find((r: { id: number }) => r.id === 101);
+    expect(protection.bypass_actors).toEqual([
+      { actor_id: 501, actor_type: "Integration", bypass_mode: "always" },
+    ]);
+    expect(protection.rules.some((r: { type: string }) => r.type === "required_status_checks")).toBe(true);
+    const result = await operator.run();
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect((await h.run("check-stable", "original")).code).toBe(0);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+  } finally {
+    await h.close();
+  }
+});
+
 test("provider omitted update default survives live-shaped receipt, apply and one-command OFF", async () => {
   const h = await harness();
   try {
