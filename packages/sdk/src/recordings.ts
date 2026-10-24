@@ -371,6 +371,8 @@ export interface RecordingChunkStore {
 
 export type RecordingUploadStatus = {
   recordingId: string;
+  /** The server has the recording, so it shows in recording lists. */
+  created: boolean;
   /** Chunks stored locally and not confirmed by the server yet. */
   pendingChunks: number;
   pendingBytes: number;
@@ -629,6 +631,7 @@ export class RecordingUploader {
         waiters: [],
         status: {
           recordingId,
+          created: false,
           pendingChunks: 0,
           pendingBytes: 0,
           uploading: false,
@@ -716,6 +719,7 @@ export class RecordingUploader {
         return true;
       }
     }
+    if (!pump.status.created) this.update(pump, { created: true });
     let chunks = await store.listChunks(recordingId);
     this.update(pump, {
       pendingChunks: chunks.length,

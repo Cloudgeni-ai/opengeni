@@ -232,6 +232,21 @@ describe("RecordingUploader", () => {
     expect(server.stored.has("0/0")).toBe(true);
   });
 
+  test("the status says when the server has the recording, before any audio is sent", async () => {
+    const server = fakeServer();
+    const { uploader } = uploaderFor(server);
+    const createdBeforeAudio: boolean[] = [];
+    uploader.subscribe((status) => {
+      if (status.created && server.stored.size === 0) createdBeforeAudio.push(true);
+    });
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    expect(uploader.status(RECORDING)?.created).toBe(false);
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    const status = await uploader.finish(RECORDING);
+    expect(status.created).toBe(true);
+    expect(createdBeforeAudio.length).toBeGreaterThan(0);
+  });
+
   test("resume() finishes a recording an earlier page left behind", async () => {
     const server = fakeServer();
     const store = createMemoryRecordingChunkStore();

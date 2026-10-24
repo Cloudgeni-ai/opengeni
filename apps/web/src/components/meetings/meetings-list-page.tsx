@@ -90,8 +90,8 @@ export function MeetingsListPage({
   useEffect(() => {
     if (finishedCount > 0) void refresh();
   }, [finishedCount, refresh]);
-  // A recording that just started shows up in the list right away.
-  const liveId = recorder?.recordingId ?? null;
+  // A recording that just started shows up in the list as soon as the server has it.
+  const liveId = recorder?.upload?.created ? recorder.recordingId : null;
   const lastLiveId = useRef<string | null>(null);
   useEffect(() => {
     if (liveId && liveId !== lastLiveId.current) {

@@ -74,13 +74,15 @@ function Meetings({ workspaceId }: { workspaceId: string }) {
     if (finishedCount > 0) void refreshList();
   }, [finishedCount, refreshList]);
   const capturingId = isCapturing(recorder) ? recorder?.recordingId : null;
+  // Refresh once the server has the new recording, so it shows in the list.
+  const listedId = capturingId && recorder?.upload?.created ? capturingId : null;
   const capturingStarted = useRef<string | null>(null);
   useEffect(() => {
-    if (capturingId && capturingStarted.current !== capturingId) {
-      capturingStarted.current = capturingId;
+    if (listedId && capturingStarted.current !== listedId) {
+      capturingStarted.current = listedId;
       void refreshList();
     }
-  }, [capturingId, refreshList]);
+  }, [listedId, refreshList]);
 
   return (
     <>
