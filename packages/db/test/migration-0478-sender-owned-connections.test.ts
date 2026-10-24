@@ -156,11 +156,12 @@ const withheldMigrations = [
   // Rewrites the execution-context key withheld 0608 adds; replay after it.
   ...workspaceDeletionMigrationTail,
   // 0929 redefines the exhausted-task predicate withheld 0761 creates; 0932,
-  // 0935 and 0937 build on 0929. Replay them after 0761.
+  // 0935, 0937 and 0938 build on 0929. Replay them after 0761.
   "0929_event_triggers.sql",
   "0932_mcp_event_subscriptions.sql",
   "0935_event_source_feeds.sql",
   "0937_definer_runtime_grants_deferred.sql",
+  "0938_event_source_awaiting_secret.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 
