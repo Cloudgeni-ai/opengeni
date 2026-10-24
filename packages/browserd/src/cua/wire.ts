@@ -39,6 +39,11 @@ export const Windows = z.object({
         // window server keeps ordered out (one no person ever sees).
         space_ids: z.array(id).max(1_024).nullish(),
         on_current_space: z.boolean().nullish(),
+        // Stacking order: the highest z_index is frontmost; null when the
+        // platform cannot tell. macOS also gives the window layer, where 0
+        // holds ordinary app windows and higher layers menus and overlays.
+        z_index: z.number().int().nullish(),
+        layer: z.number().int().nullish(),
       }),
     )
     .max(4096),

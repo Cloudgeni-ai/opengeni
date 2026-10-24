@@ -9,7 +9,9 @@
 // ComputerSession, and one that omits targetId before this attempt used a
 // window of that computer uses the window the computer was last observed or
 // acted on in (its current target), so a later turn keeps working where the
-// one before left off.
+// one before left off. A read of a computer with no current target starts in
+// its focused window, or its only screen when no window is focused; an action
+// still needs a window the agent has seen.
 
 export class ComputerTargetResolutionError extends Error {
   constructor(
@@ -25,8 +27,8 @@ export type CurrentComputerWindowDeps = {
   /** This agent session's most recently used live ComputerSession, if any. */
   latestLiveSession: () => Promise<string | null>;
   /** The window this computer was last observed or acted on in, if it is
-   * still there. */
-  currentTarget: (computerSessionId: string) => Promise<string | null>;
+   * still there. For a read without one, the window to start in. */
+  currentTarget: (computerSessionId: string, reading: boolean) => Promise<string | null>;
 };
 
 export type ResolvedComputerSession = {
@@ -89,10 +91,13 @@ export class CurrentComputerWindow {
     return { computerSessionId: latest, implicit: true };
   }
 
-  async target(value: {
-    computerSessionId?: string | undefined;
-    targetId?: string | undefined;
-  }): Promise<ResolvedComputerTarget> {
+  async target(
+    value: {
+      computerSessionId?: string | undefined;
+      targetId?: string | undefined;
+    },
+    reading = false,
+  ): Promise<ResolvedComputerTarget> {
     const session = await this.session(value.computerSessionId);
     if (value.targetId !== undefined) {
       return { ...session, targetId: value.targetId, implicitTarget: false };
@@ -100,7 +105,7 @@ export class CurrentComputerWindow {
     if (this.current?.computerSessionId === session.computerSessionId && this.current.targetId) {
       return { ...session, targetId: this.current.targetId, implicitTarget: true };
     }
-    const current = await this.deps.currentTarget(session.computerSessionId);
+    const current = await this.deps.currentTarget(session.computerSessionId, reading);
     if (current) return { ...session, targetId: current, implicitTarget: true };
     throw new ComputerTargetResolutionError(
       "computer_target_required",

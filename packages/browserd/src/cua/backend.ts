@@ -814,6 +814,22 @@ export class CuaComputerBackend implements ComputerBackend {
         !(macos && window.is_on_screen === false && window.space_ids === null),
     );
     const presences = await this.offScreenPresences(windows);
+    // The frontmost ordinary window is the one the person has in front: CUA
+    // reports stacking, not keyboard focus. Windows' listing also stacks
+    // cloaked and always-on-top windows as ordinary ones, so it marks none.
+    let front: { id: string; z: number } | null = null;
+    for (const window of this.identity.platform === "windows" ? [] : windows) {
+      const id = `cua:window:${window.pid}:${window.window_id}`;
+      if (
+        typeof window.z_index !== "number" ||
+        (window.layer ?? 0) !== 0 ||
+        presences.has(id) ||
+        // Minimized, hidden or unmapped on every platform.
+        window.is_on_screen === false
+      )
+        continue;
+      if (!front || window.z_index > front.z) front = { id, z: window.z_index };
+    }
     const live = new Set<string>();
     for (const window of windows) {
       const id = `cua:window:${window.pid}:${window.window_id}`;
@@ -840,7 +856,7 @@ export class CuaComputerBackend implements ComputerBackend {
           processId: window.pid,
           title: window.title || window.app_name,
           bounds: window.bounds,
-          focused: false,
+          focused: id === front?.id,
           ...(onScreen || restorable ? {} : { offScreen: true as const }),
         },
       });
@@ -1253,6 +1269,9 @@ export class CuaComputerBackend implements ComputerBackend {
         ...target.native,
         title: shownTitle ?? target.native.title,
         bounds: state.window_bounds ?? target.native.bounds,
+        // Which window is in front is known only when windows are listed;
+        // a reading after an action or a switch would show it stale.
+        focused: false,
       },
       frameId:
         [...this.frames.entries()]

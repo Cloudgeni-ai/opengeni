@@ -313,6 +313,53 @@ describe("computer tools without identifiers", () => {
     });
   });
 
+  test("a first read without a window starts in the focused window, else the only screen", async () => {
+    const observeWith = async (targets: ComputerTarget[]) => {
+      const observed: string[] = [];
+      const tools = definitions({
+        listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+        listComputerTargets: async () => ({ computerSessionId, targets }) as never,
+        captureComputerTarget: async (_workspace, _computer, targetId) => {
+          observed.push(targetId);
+          return {
+            frameId: "frame-1",
+            targetGeneration: `generation-${targetId}`,
+            width: 8,
+            height: 8,
+            mediaType: "image/png",
+            data: PIXEL_PNG,
+          } as never;
+        },
+        observeComputerTarget: async (_workspace, _computer, targetId) =>
+          observation(targets.find((target) => target.id === targetId)!),
+      });
+      const result = await tools.computer_observe!.execute(
+        {},
+        { operationId: randomUUID(), caller: model },
+      );
+      return { result, observed };
+    };
+    const window = (id: string, focused: boolean) => ({ ...computerTarget(id), focused });
+    const screen = { ...computerTarget("screen-1"), kind: "screen" as const, focused: false };
+
+    const front = await observeWith([window("window-1", false), window("window-2", true), screen]);
+    expect(front.result.isError).not.toBe(true);
+    expect(front.observed).toEqual(["window-2"]);
+
+    const desktop = await observeWith([window("window-1", false), screen]);
+    expect(desktop.result.isError).not.toBe(true);
+    expect(desktop.observed).toEqual(["screen-1"]);
+
+    const unclear = await observeWith([
+      window("window-1", false),
+      screen,
+      { ...screen, id: "screen-2" },
+    ]);
+    expect(unclear.result.structuredContent).toMatchObject({
+      error: { code: "computer_target_required" },
+    });
+  });
+
   test("a computer found gone under its remembered window is not kept as current", async () => {
     const other = randomUUID();
     const listed: string[] = [];

@@ -892,7 +892,9 @@ const ComputerTargetsInput = z.object({ computerSessionId: CurrentComputerSessio
 const ComputerObserveInput = z
   .object({
     computerSessionId: CurrentComputerSessionId,
-    targetId: CurrentComputerTargetId,
+    targetId: CurrentComputerTargetId.describe(
+      "Omit to use the window you used last, or at first the focused window (the screen when none is).",
+    ),
   })
   .strict();
 const ComputerObserveOutput = ComputerObservation.extend({
@@ -1227,12 +1229,20 @@ export function createInteractionAttemptToolDefinitions(
         ),
         input.sessionId,
       )?.id ?? null,
-    currentTarget: async (computerSessionId) => {
+    currentTarget: async (computerSessionId, reading) => {
       try {
+        const { targets } = await input.transport.listComputerTargets(
+          input.workspaceId,
+          computerSessionId,
+        );
+        const current = targets.find((target) => target.current);
+        if (current || !reading) return current?.id ?? null;
+        // A first read without a window starts where the person would look:
+        // the focused window, or the only screen when no window is focused.
+        const only = (found: typeof targets) => (found.length === 1 ? found[0]!.id : null);
         return (
-          (
-            await input.transport.listComputerTargets(input.workspaceId, computerSessionId)
-          ).targets.find((target) => target.current)?.id ?? null
+          only(targets.filter((target) => target.kind === "window" && target.focused)) ??
+          only(targets.filter((target) => target.kind === "screen"))
         );
       } catch (error) {
         // The computer itself is gone: resolve afresh next time.
@@ -1259,13 +1269,15 @@ export function createInteractionAttemptToolDefinitions(
   };
   /** Run one call on the requested or current window and remember, on
    * success, the window it leaves the agent in: the one it acted on, or the
-   * one the action opened. */
+   * one the action opened. A read may start in a window the agent has not
+   * used yet. */
   const onComputerWindow = async <T>(
     value: { computerSessionId?: string | undefined; targetId?: string | undefined },
     run: (window: ResolvedComputerTarget) => Promise<T>,
     leftIn: (output: T) => string | null | undefined = () => null,
+    reading = false,
   ): Promise<T> => {
-    const window = await currentComputer.target(value);
+    const window = await currentComputer.target(value, reading);
     try {
       const output = await run(window);
       currentComputer.use(window.computerSessionId, leftIn(output) ?? window.targetId);
@@ -2511,53 +2523,58 @@ export function createInteractionAttemptToolDefinitions(
         : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`;
     },
     execute: async (requested) =>
-      await onComputerWindow(requested, async (value) => {
-        // The tree and the pixels are independent reads of the same target;
-        // a generation mismatch below re-reads the tree once. An app target
-        // spans several windows, so most adapters cannot photograph it; its
-        // tree is then the whole observation instead of a failed read.
-        const capture = input.transport
-          .captureComputerTarget(input.workspaceId, value.computerSessionId, value.targetId)
-          .then(
-            (frame) => ({ frame, error: null as unknown }),
-            (error: unknown) => ({ frame: null, error }),
-          );
-        let observation = await input.transport.observeComputerTarget(
-          input.workspaceId,
-          value.computerSessionId,
-          value.targetId,
-        );
-        const { frame, error } = await capture;
-        if (frame === null) {
-          if (observation.target.kind === "app") return observation;
-          throw error;
-        }
-        if (observation.target.targetGeneration !== frame.targetGeneration) {
-          observation = await input.transport.observeComputerTarget(
+      await onComputerWindow(
+        requested,
+        async (value) => {
+          // The tree and the pixels are independent reads of the same target;
+          // a generation mismatch below re-reads the tree once. An app target
+          // spans several windows, so most adapters cannot photograph it; its
+          // tree is then the whole observation instead of a failed read.
+          const capture = input.transport
+            .captureComputerTarget(input.workspaceId, value.computerSessionId, value.targetId)
+            .then(
+              (frame) => ({ frame, error: null as unknown }),
+              (error: unknown) => ({ frame: null, error }),
+            );
+          let observation = await input.transport.observeComputerTarget(
             input.workspaceId,
             value.computerSessionId,
             value.targetId,
           );
-        }
-        if (observation.target.targetGeneration !== frame.targetGeneration) {
-          throw new Error("computer target changed while its visual observation was captured");
-        }
-        const image = await compactComputerImage(frame.data, frame.mediaType);
-        return new InteractionExecutionResult(
-          {
-            ...observation,
-            frameId: frame.frameId,
-            capturedFrame: { width: frame.width, height: frame.height },
-          },
-          [
+          const { frame, error } = await capture;
+          if (frame === null) {
+            if (observation.target.kind === "app") return observation;
+            throw error;
+          }
+          if (observation.target.targetGeneration !== frame.targetGeneration) {
+            observation = await input.transport.observeComputerTarget(
+              input.workspaceId,
+              value.computerSessionId,
+              value.targetId,
+            );
+          }
+          if (observation.target.targetGeneration !== frame.targetGeneration) {
+            throw new Error("computer target changed while its visual observation was captured");
+          }
+          const image = await compactComputerImage(frame.data, frame.mediaType);
+          return new InteractionExecutionResult(
             {
-              type: "image",
-              data: Buffer.from(image.data).toString("base64"),
-              mimeType: image.mimeType,
+              ...observation,
+              frameId: frame.frameId,
+              capturedFrame: { width: frame.width, height: frame.height },
             },
-          ],
-        );
-      }),
+            [
+              {
+                type: "image",
+                data: Buffer.from(image.data).toString("base64"),
+                mimeType: image.mimeType,
+              },
+            ],
+          );
+        },
+        () => null,
+        true,
+      ),
   });
 
   add({
