@@ -3833,7 +3833,7 @@ describe("runtime definers: 0947 grants what 0937 withheld, 0946's stays deferre
       /event_ingress_routes|runtime definer/.test(violation),
     );
 
-  test("every runtime definer is known, and runtime EXECUTE is required unless deferred", () => {
+  test("every runtime definer is known, and runtime EXECUTE is required", () => {
     const pinnedPaths = [
       'search_path="opengeni_tenant", opengeni_private, public',
       "search_path=pg_catalog, public, pg_temp",
@@ -3853,14 +3853,12 @@ describe("runtime definers: 0947 grants what 0937 withheld, 0946's stays deferre
       "list_due_event_source_feeds_v1(integer)",
       "list_due_recording_retention_v1(integer)",
     ]);
-    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
-      "list_due_recording_retention_v1(integer)",
-    ]);
+    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
-      runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(
-        (name) => name !== "list_due_recording_retention_v1(integer)",
-      ).map((name) => `runtime role lacks EXECUTE on private routine ${name}`),
+      runtimePosture.RUNTIME_DEFINER_ROUTINES.map(
+        (name) => `runtime role lacks EXECUTE on private routine ${name}`,
+      ),
     );
   });
 

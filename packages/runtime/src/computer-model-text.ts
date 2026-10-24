@@ -20,6 +20,7 @@ export type ComputerTextNode = {
   value?: string | { redacted: true; reason: string } | undefined;
   states: readonly string[];
   actions: readonly string[];
+  bounds?: { x: number; y: number; width: number; height: number } | null | undefined;
   children?: readonly ComputerTextNode[] | undefined;
 };
 
@@ -266,6 +267,10 @@ export function computerNodeLines(
   const tree = options.tree ?? conventions(roots);
   const clip: Clip = { clipped: 0 };
   const lines: string[] = [];
+  // macOS lists a table's cells again under each AXColumn, as new elements
+  // with the same role, label and bounds; the one listed first stands for
+  // both.
+  const listedAt = new Set<string>();
   let omitted = 0;
   let focusedListed = false;
   const visit = (
@@ -298,11 +303,32 @@ export function computerNodeLines(
       // Nothing to read, act on or descend into (macOS table rows whose cells
       // the platform did not expose).
       const empty = plain && !labelled && node.actions.length === 0 && !node.children?.length;
-      if (hidden || container || repeatedText || empty || (offscreen && !labelled && !focused)) {
+      const place =
+        node.bounds && (node.bounds.width > 0 || node.bounds.height > 0)
+          ? JSON.stringify([
+              node.role,
+              name ?? null,
+              value ?? null,
+              node.bounds.x,
+              node.bounds.y,
+              node.bounds.width,
+              node.bounds.height,
+            ])
+          : null;
+      const listedElsewhere = !focused && place !== null && listedAt.has(place);
+      if (
+        hidden ||
+        container ||
+        repeatedText ||
+        empty ||
+        listedElsewhere ||
+        (offscreen && !labelled && !focused)
+      ) {
         omitted += 1;
         if (!hidden && node.children) visit(node.children, depth, parentName);
         continue;
       }
+      if (place !== null) listedAt.add(place);
       if (node.ref === options.focusedRef) focusedListed = true;
       lines.push(computerNodeLine(node, depth, tree, offscreen, focused, clip));
       if (node.children) visit(node.children, depth + 1, name);

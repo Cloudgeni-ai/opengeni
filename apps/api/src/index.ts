@@ -32,6 +32,8 @@ import {
   createObservability,
   installCpuSamplingSignal,
   logStartupDependencyRetry,
+  traceClientCalls,
+  traceFetch,
   type Observability,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
@@ -527,7 +529,11 @@ export async function startApi(
   }
   // Compute sandboxes reach their agent over this process's bus and database.
   installComputeAgentPlane({ db: dbClient.db, bus, settings });
-  const objectStorage = createObjectStorage(settings);
+  // Calls made while serving a request become child spans of its request span.
+  const createdObjectStorage = createObjectStorage(settings);
+  const objectStorage = createdObjectStorage
+    ? traceClientCalls(createdObjectStorage, "object_storage")
+    : null;
   let editableArtifactComposition: StandaloneEditableArtifactApplication | undefined;
   if (objectStorage && isArtifactRuntimeConfigured()) {
     try {
@@ -545,8 +551,8 @@ export async function startApi(
     settings,
     db: dbClient.db,
     bus,
-    workflowClient: workflowClient.client,
-    documentIndexer: workflowClient.documentIndexer,
+    workflowClient: traceClientCalls(workflowClient.client, "temporal"),
+    documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
     objectStorage,
     ...(editableArtifactComposition
       ? {
@@ -782,6 +788,9 @@ export async function startApi(
 if (import.meta.main) {
   const fatalBoundary = installApiFatalProcessBoundary();
   try {
+    // Standalone process only: an embedding host owns its own global fetch.
+    // Outbound HTTP made while serving a request becomes a child span of it.
+    globalThis.fetch = traceFetch(globalThis.fetch);
     const settings = getSettings();
     const observability = createObservability(settings, { component: "api" });
     fatalBoundary.attachObservability(observability);

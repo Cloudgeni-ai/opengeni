@@ -4,9 +4,33 @@ import {
   dateFields,
   dateFieldValueFromParts,
   dateFieldTyping,
+  locate,
   projectElements,
   unindexedTextByElement,
 } from "../src/cua/projection";
+
+test("a table cell macOS repeats under its AXColumn is one element to a locator", () => {
+  const [row, column, elsewhere] = projectElements(
+    [
+      { x: 200, y: 459 },
+      { x: 200, y: 459 },
+      { x: 200, y: 900 },
+    ].map((frame, offset) => ({
+      element_index: offset + 1,
+      element_token: `snapshot:${offset + 1}`,
+      role: "AXLink",
+      label: "Juniper Dental",
+      actions: ["AXPress"],
+      frame: { ...frame, w: 106, h: 19 },
+    })),
+    "macos",
+  );
+  const locator = { kind: "role", role: "link", name: "Juniper Dental", exact: true } as const;
+  expect(locate([row!, column!], locator).ref).toBe(row!.ref);
+  expect(() => locate([row!, column!, elsewhere!], locator)).toThrow(
+    "CUA locator must resolve to exactly one observed element",
+  );
+});
 
 test("desktop elements with document-sized labels and values still form valid nodes", () => {
   const [node] = projectElements(

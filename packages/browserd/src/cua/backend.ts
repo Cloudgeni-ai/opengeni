@@ -34,6 +34,7 @@ import {
   dateFieldFormat,
   dateFields,
   dateFieldTyping,
+  distinctElements,
   locate,
   observedRole,
   opensOnInvoke,
@@ -1710,8 +1711,9 @@ export class CuaComputerBackend implements ComputerBackend {
         const findable =
           node.name !== undefined &&
           node.name === this.ownLabels.get(command.targetId)?.get(token) &&
-          observed.roots.filter((other) => other.role === node.role && other.name === node.name)
-            .length === 1;
+          distinctElements(
+            observed.roots.filter((other) => other.role === node.role && other.name === node.name),
+          ).length === 1;
         const named = findable ? namedOperation(this.identity.platform, args, action, node) : null;
         if (!named || !this.initialCapabilities.actionBatches)
           throw unsupported(
@@ -1762,8 +1764,9 @@ export class CuaComputerBackend implements ComputerBackend {
         if (
           findable &&
           !special &&
-          observed.roots.filter((other) => other.role === node.role && other.name === node.name)
-            .length > 1
+          distinctElements(
+            observed.roots.filter((other) => other.role === node.role && other.name === node.name),
+          ).length > 1
         )
           throw unsupported(
             "Several elements here have this element's role and name, and it comes after an action that names an element not yet shown, so it cannot be told apart in the same batch: act on it in its own call",

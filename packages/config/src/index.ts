@@ -413,6 +413,13 @@ const SettingsSchema = z.object({
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
   observabilityOtlpHeaders: z.string().default(""),
+  /**
+   * Continue a request's incoming W3C `traceparent` as the parent of the API's
+   * request span. Off by default: the request span then starts its own trace
+   * and links to the caller's context. Turn it on only when every caller that
+   * can reach the API is trusted (behind an embedding backend or trusted edge).
+   */
+  observabilityTrustIncomingTraceContext: EnvBoolean.default(false),
   observabilityDiagnosticsEndpoint: z.string().url().optional(),
   observabilityDiagnosticsHeaders: z.string().default(""),
   analyticsEnabled: EnvBoolean.default(false),
@@ -5135,6 +5142,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     observabilityOtlpHeaders:
       optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
     observabilityDiagnosticsEndpoint: optional("OPENGENI_OBSERVABILITY_DIAGNOSTICS_ENDPOINT"),
+    observabilityTrustIncomingTraceContext: optional(
+      "OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT",
+    ),
     observabilityDiagnosticsHeaders: optional("OPENGENI_OBSERVABILITY_DIAGNOSTICS_HEADERS"),
     analyticsEnabled: optional("OPENGENI_ANALYTICS_ENABLED"),
     analyticsConsentRequired: optional("OPENGENI_ANALYTICS_CONSENT_REQUIRED"),
