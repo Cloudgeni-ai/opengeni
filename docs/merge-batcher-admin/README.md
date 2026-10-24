@@ -350,6 +350,10 @@ explicit safe hold, not a claim that REST readbacks provide a transaction fence.
 
 ## Controller enable and one-command OFF
 
+For the separately scheduled recovery design, see the
+[independent watchdog contract](watchdog.md). Its prepared payloads and pure
+policy are not a deployed provider adapter or live kill-test qualification.
+
 Only after ruleset readbacks, App permissions, the qualified continuous runtime,
 capacity observation and the separate release/activation go are satisfied, the
 deployment owner may configure the reviewed portable entrypoint:

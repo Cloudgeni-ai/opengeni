@@ -1,0 +1,62 @@
+{
+  "status": "prepared-not-deployable-until-provider-adapter-and-review",
+  "project": "cloudgeni-gecko",
+  "region": "europe-west1",
+  "owner": "rollout-owner",
+  "watchdogJob": {
+    "name": "projects/cloudgeni-gecko/locations/europe-west1/jobs/batcher-watchdog",
+    "template": {
+      "taskCount": 1,
+      "parallelism": 1,
+      "template": {
+        "serviceAccount": "${WATCHDOG_SERVICE_ACCOUNT_EMAIL}",
+        "maxRetries": 0,
+        "timeout": "3600s",
+        "containers": [
+          {
+            "image": "${SAME_REVIEWED_BATCHER_IMAGE_DIGEST}",
+            "command": ["bun"],
+            "args": ["/app/docs/merge-batcher-admin/watchdog-main.ts", "run"],
+            "env": [
+              {
+                "name": "WATCHDOG_CONFIG_BUCKET",
+                "value": "${DEDICATED_CONFIG_BUCKET}"
+              },
+              { "name": "WATCHDOG_CONFIG_OBJECT", "value": "${PINNED_CONFIG_OBJECT}" },
+              { "name": "WATCHDOG_CONFIG_GENERATION", "value": "${PINNED_CONFIG_GENERATION}" }
+            ],
+            "resources": { "limits": { "cpu": "1", "memory": "1Gi" } }
+          }
+        ]
+      }
+    }
+  },
+  "watchdogSchedule": {
+    "name": "projects/cloudgeni-gecko/locations/europe-west1/jobs/batcher-watchdog-tick",
+    "schedule": "*/5 * * * *",
+    "timeZone": "UTC",
+    "attemptDeadline": "180s",
+    "retryConfig": { "retryCount": 0, "maxRetryDuration": "0s" },
+    "httpTarget": {
+      "uri": "https://run.googleapis.com/v2/projects/cloudgeni-gecko/locations/europe-west1/jobs/batcher-watchdog:run",
+      "httpMethod": "POST",
+      "headers": { "Content-Type": "application/json" },
+      "body": "e30=",
+      "oauthToken": {
+        "serviceAccountEmail": "${SCHEDULER_SERVICE_ACCOUNT_EMAIL}",
+        "scope": "https://www.googleapis.com/auth/cloud-platform"
+      }
+    }
+  },
+  "independentObserver": {
+    "owner": "runtime-owner",
+    "implementation": "GitHub scheduled comment-only sweep",
+    "nominalIntervalSeconds": 600,
+    "missingCompletionThresholdSeconds": 1200,
+    "requiredEvidence": [
+      "terminal Cloud Run execution",
+      "matching batcher_watchdog_completed event"
+    ],
+    "status": "pending-paired-source-and-read-only-workload-identity-binding"
+  }
+}

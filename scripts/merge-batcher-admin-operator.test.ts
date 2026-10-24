@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile, cp } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -59,6 +59,31 @@ if(process.env.STOP_FAILURE)process.exitCode=2;
   await bindStop(h.root, runtime);
   return {
     runtime,
+    async gated(extra: Record<string, string> = {}) {
+      const runner = join(h.root, "gated-off.ts");
+      await writeFile(
+        runner,
+        `
+import { off } from ${JSON.stringify(join(directory, "off.ts"))};
+await off(${JSON.stringify(h.root)}, '--apply-after-go', async (receipt, action) => {
+  if (!receipt.stop.disabled || receipt.operator.uid !== receipt.runtime.uid) throw Error('bad drain');
+  await Bun.write(process.env.FIXTURE_LOG, await Bun.file(process.env.FIXTURE_LOG).text()+JSON.stringify({endpoint:action,method:'GATE'})+'\\n');
+  if (process.env.REJECT_GATE === action || process.env.REJECT_GATE === 'all') throw Error('unknown durable hold');
+}, process.env.HYDRATED_OPERATOR);
+`,
+      );
+      const child = Bun.spawn(["bun", runner], {
+        env: { ...h.fixtureEnv, ...extra },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [code] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      return code;
+    },
     async run(extra: Record<string, string> = {}, flag = "--apply-after-go") {
       const child = Bun.spawn(["bun", join(directory, "off.ts"), "run", h.root, flag], {
         env: { ...h.fixtureEnv, ...extra },
@@ -257,6 +282,85 @@ test("checked-in shell helpers parse; sourcing read-only definitions has no effe
     { encoding: "utf8" },
   );
   expect(output).toBe("ok");
+});
+test("durable journal failure blocks rule effect and OFF child before submission", async () => {
+  const h = await harness();
+  try {
+    const missing = join(h.root, "missing-journal-config.json");
+    const result = await h.run("create-guard", "--apply-after-go", {
+      BATCHER_ADMIN_JOURNAL_CONFIG: missing,
+    });
+    expect(result.code).not.toBe(0);
+    expect(
+      (await h.events()).filter((event) =>
+        ["POST", "PUT", "DELETE", "STOP"].includes(event.method),
+      ),
+    ).toHaveLength(0);
+    expect(await Bun.file(join(h.root, "plan/create-guard-attempt/intent")).exists()).toBe(true);
+    const control = await offHarness(h);
+    expect((await control.run({ BATCHER_ADMIN_JOURNAL_CONFIG: missing })).code).not.toBe(0);
+    expect((await h.events()).filter((event) => event.method === "STOP")).toHaveLength(0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("successful journal path snapshots intent, response, verification and final OFF in order", async () => {
+  const h = await harness();
+  try {
+    const preload = join(h.root, "offline-preload.ts");
+    await writeFile(
+      preload,
+      `
+globalThis.fetch = async (url, init = {}) => {
+  if (String(url).includes('metadata.google.internal')) return Response.json({access_token:'fixture',expires_in:3600});
+  if (String(url).includes('/upload/')) {
+    const body = JSON.parse(String(init.body));
+    const event = {endpoint:'journal',method:'CHECKPOINT',files:Object.keys(body.files)};
+    await Bun.write(process.env.FIXTURE_LOG,await Bun.file(process.env.FIXTURE_LOG).text()+JSON.stringify(event)+'\\n');
+    return Response.json({generation:String(Number(new URL(url).searchParams.get('ifGenerationMatch'))+1)});
+  }
+  throw Error('Unexpected offline transport');
+};
+`,
+    );
+    const wrapper = join(h.root, "bin/bun");
+    await writeFile(wrapper, `#!/bin/sh\nexec '${process.execPath}' --preload '${preload}' "$@"\n`);
+    await chmod(wrapper, 0o700);
+    const journal = join(h.root, "journal-config.json");
+    await writeFile(
+      journal,
+      JSON.stringify({ bucket: "fixture", object: "off", generation: "1", directory: h.root }),
+    );
+    const extra = { BATCHER_ADMIN_JOURNAL_CONFIG: journal };
+    expect((await h.run("create-guard", "--apply-after-go", extra)).code).toBe(0);
+    const events = (await h.events()) as unknown as { method: string; files?: string[] }[];
+    const write = events.findIndex((event) => event.method === "POST");
+    const snapshots = events
+      .map((event, index) => ({ ...event, index }))
+      .filter((event) => event.method === "CHECKPOINT");
+    const attemptPrefix = "plan/create-guard-attempt/";
+    expect(snapshots[0]!.index).toBeLessThan(write);
+    expect(snapshots[0]!.files).toContain(attemptPrefix + "intent");
+    expect(snapshots[0]!.files).not.toContain(attemptPrefix + "response.json");
+    expect(snapshots[1]!.index).toBeGreaterThan(write);
+    expect(snapshots[1]!.files).toContain(attemptPrefix + "response.json");
+    expect(snapshots[1]!.files).not.toContain(attemptPrefix + "verified");
+    expect(snapshots[2]!.files).toContain(attemptPrefix + "verified");
+    for (const stage of ["create-namespace", "admit"])
+      expect((await h.run(stage, "--apply-after-go", extra)).code).toBe(0);
+    const operator = await offHarness(h);
+    const result = await operator.run(extra);
+    expect(result.code).toBe(0);
+    const all = (await h.events()) as unknown as { method: string; files?: string[] }[];
+    const last = all.filter((event) => event.method === "CHECKPOINT").at(-1)!;
+    expect(last.files?.some((path) => /^off\.[^/]+\/off-verified.json$/.test(path))).toBe(true);
+    const stop = all.findIndex((event) => event.method === "STOP");
+    expect(all[stop - 1]?.method).toBe("CHECKPOINT");
+    expect(all[stop + 1]?.method).toBe("CHECKPOINT");
+  } finally {
+    await h.close();
+  }
 });
 test("both App-JWT GETs use explicit Bearer, without logging the secret", async () => {
   const h = await harness();
@@ -732,6 +836,79 @@ test("observed applied forward PUT can be reconciled before reverse restoration"
     expect((await h.run("reconcile-admit")).code).toBe(0);
     for (const action of ["restore-admission", "delete-namespace", "delete-guard"])
       expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("OFF executes only the verified hydrated operator without an image-local receipt", async () => {
+  const h = await harness();
+  try {
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h),
+      copied = join(h.root, "hydrated-operator");
+    await cp(operator.runtime, copied, { recursive: true });
+    await rm(join(operator.runtime, "deployment-receipt.json"));
+    expect(await operator.gated({ HYDRATED_OPERATOR: copied })).toBe(0);
+    expect(await Bun.file(join(operator.runtime, "deployment-receipt.json")).exists()).toBe(false);
+  } finally {
+    await h.close();
+  }
+});
+
+test("pre-restoration rejection retains protections after drain and gates each reverse stage and completion", async () => {
+  const h = await harness();
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect(await operator.gated({ REJECT_GATE: "all" })).not.toBe(0);
+    expect((await h.events())[0]?.method).toBe("STOP");
+    expect(
+      (await h.events()).filter((e) => ["PUT", "DELETE", "POST"].includes(e.method)),
+    ).toHaveLength(0);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect(await operator.gated({ REJECT_GATE: "delete-namespace" })).not.toBe(0);
+    expect(
+      (await h.events())
+        .filter((e) => ["PUT", "DELETE", "POST"].includes(e.method))
+        .map((e) => e.method),
+    ).toEqual(["PUT"]);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect(await operator.gated()).toBe(0);
+    expect((await h.events()).filter((e) => e.method === "GATE").map((e) => e.endpoint)).toEqual([
+      "delete-namespace",
+      "delete-guard",
+      "verify-restored",
+    ]);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+    expect(await operator.gated({ REJECT_GATE: "verify-restored" })).not.toBe(0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("pre-restoration gate also rejects reverse reissue after an unapplied failure", async () => {
+  const h = await harness();
+  try {
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h);
+    expect(await operator.gated({ FAIL_WRITE: "before" })).not.toBe(0);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect(await operator.gated({ REJECT_GATE: "reissue-restore-admission" })).not.toBe(0);
+    expect(
+      (await h.events()).filter((e) => ["PUT", "DELETE", "POST"].includes(e.method)),
+    ).toHaveLength(0);
+    expect(
+      (await h.events()).some(
+        (e) => e.method === "GATE" && e.endpoint === "reissue-restore-admission",
+      ),
+    ).toBe(true);
+    expect(await operator.gated()).toBe(0);
   } finally {
     await h.close();
   }

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rmdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { validatePlan, verify, type Phase, type Plan, type RuleSet, type Snapshot } from "./bundle";
+import { checkpoint } from "./watchdog-journal";
 
 const controlFiles = [
   "control.ts",
@@ -233,6 +234,8 @@ function verifyReconciliation(result: Stop, receipt: Deployment, expected: Deplo
   return result.drainProven === false && result.idempotent === true;
 }
 async function command(args: string[], directory: string, name: string): Promise<string> {
+  const journal = process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
+  if (journal) await checkpoint(journal);
   const child = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
   const [status, out, err] = await Promise.all([
     child.exited,
@@ -241,25 +244,39 @@ async function command(args: string[], directory: string, name: string): Promise
   ]);
   await writeFile(join(directory, `${name}.stdout`), out, { flag: "wx", mode: 0o600 });
   await writeFile(join(directory, `${name}.stderr`), err, { flag: "wx", mode: 0o600 });
+  if (journal) await checkpoint(journal);
   if (status !== 0)
     throw new Error(
       `${name} failed; retained receipts, STOP/hold remains, no automatic forward retry`,
     );
   return out;
 }
-export async function off(adminPath: string, optIn: string): Promise<void> {
+export type DrainedReceipt = {
+  runtime: Contract["deployment"];
+  stop: Stop;
+  operator: Deployment;
+};
+export type RestoreGate = (receipt: DrainedReceipt, action: string) => Promise<void>;
+export async function off(
+  adminPath: string,
+  optIn: string,
+  beforeRestore?: RestoreGate,
+  hydratedOperator?: string,
+): Promise<string> {
   if (optIn !== "--apply-after-go")
     throw new Error("OFF requires separate operator go and --apply-after-go");
   const admin = resolve(adminPath),
     planDir = join(admin, "plan");
   const contract = await json<Contract>(join(admin, "stop-contract.json"));
+  const operatorDirectory = hydratedOperator ?? contract.directory;
   if (contract.schemaVersion !== 1 || !isAbsolute(contract.directory))
     throw new Error("Invalid STOP contract");
-  if (JSON.stringify(await hashes(contract.directory)) !== JSON.stringify(contract.sources))
+  if (!isAbsolute(operatorDirectory)) throw Error("Absolute operator directory required");
+  if (JSON.stringify(await hashes(operatorDirectory)) !== JSON.stringify(contract.sources))
     throw new Error("Reviewed STOP source changed");
   if (
     JSON.stringify(
-      identity(await json<Deployment>(join(contract.directory, "deployment-receipt.json"))),
+      identity(await json<Deployment>(join(operatorDirectory, "deployment-receipt.json"))),
     ) !== JSON.stringify(contract.deployment)
   )
     throw new Error("STOP target changed");
@@ -272,16 +289,20 @@ export async function off(adminPath: string, optIn: string): Promise<void> {
     // prevent the already-bound runtime's durable stop operation.
     const result = JSON.parse(
       await command(
-        [process.execPath, join(contract.directory, "control.ts"), "stop"],
+        [process.execPath, join(operatorDirectory, "control.ts"), "stop"],
         attempt,
         "stop",
       ),
     ) as Stop;
-    verifyStop(
-      result,
-      await json<Deployment>(join(contract.directory, "deployment-receipt.json")),
-      contract.deployment,
+    const operatorReceipt = await json<Deployment>(
+      join(operatorDirectory, "deployment-receipt.json"),
     );
+    await writeFile(join(attempt, "operator-receipt.json"), JSON.stringify(operatorReceipt), {
+      flag: "wx",
+      mode: 0o600,
+    });
+    verifyStop(result, operatorReceipt, contract.deployment);
+    const drained = { runtime: contract.deployment, stop: result, operator: operatorReceipt };
     const plan = await json<Plan>(join(planDir, "plan.json"));
     validatePlan(plan);
     let serial = 0;
@@ -320,11 +341,18 @@ export async function off(adminPath: string, optIn: string): Promise<void> {
     ] as const) {
       if (current !== before) continue;
       const prior = await exists(join(planDir, `${action}-attempt`, "intent"));
-      await stage(prior ? `reissue-${action}` : action, "--apply-after-go");
+      const reverse = prior ? `reissue-${action}` : action;
+      // Watchdog callers must freshly reconcile their durable fence/effects
+      // after drain, including every recovery/reissue. Never cache acceptance.
+      if (beforeRestore) await beforeRestore(drained, reverse);
+      await stage(reverse, "--apply-after-go");
       current = await phase();
     }
     if (current !== "restored") throw new Error("Restoration incomplete; hold manual merges");
     await stage("check-stable", "restored");
+    // Also gate already-restored/reentrant completion: it is not permission to
+    // turn an unresolved durable hold into a successful watchdog receipt.
+    if (beforeRestore) await beforeRestore(drained, "verify-restored");
     await writeFile(
       join(attempt, "off-verified.json"),
       JSON.stringify(
@@ -342,6 +370,9 @@ export async function off(adminPath: string, optIn: string): Promise<void> {
     console.log(
       `OFF verified; normal reviewed squash path restored. Receipt: ${attempt}/off-verified.json`,
     );
+    if (process.env.BATCHER_ADMIN_JOURNAL_CONFIG)
+      await checkpoint(process.env.BATCHER_ADMIN_JOURNAL_CONFIG);
+    return join(attempt, "off-verified.json");
   } finally {
     await rmdir(lock);
   }
