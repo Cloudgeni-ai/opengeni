@@ -18,6 +18,7 @@ import {
 import {
   lazy,
   Suspense,
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -84,6 +85,9 @@ const InlineChatImage = lazy(() =>
   import("./inline-chat-image").then((module) => ({
     default: module.InlineChatImage,
   })),
+);
+const ArtifactViewer = lazy(() =>
+  import("./artifact-viewer").then((module) => ({ default: module.ArtifactViewer })),
 );
 
 const IMAGE_GLYPH = <ImageIcon className="size-4 text-fg-subtle" aria-hidden />;
@@ -257,16 +261,42 @@ function isPlainClick(event: MouseEvent<HTMLElement>) {
   return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
 }
 
-/** Opening an artifact: its own page in the router, or the caller's handler. */
-function useArtifactOpen(
-  workspaceId: string,
-  item: ArtifactCatalogItem,
-  sessionId?: string,
-  onSelect?: (item: ArtifactCatalogItem) => void,
-  onPin?: ArtifactPinAction,
+/**
+ * Images and files are looked at, so a click shows them in the list's viewer.
+ * Sites and documents are worked on, so a click opens them in the session's
+ * panel as before; the viewer still steps through them.
+ */
+function opensInViewer(item: ArtifactCatalogItem) {
+  return item.kind === "image" || item.kind === "file";
+}
+
+type ArtifactOpenOptions = {
+  workspaceId: string;
+  item: ArtifactCatalogItem;
+  sessionId?: string | undefined;
+  onSelect?: ((item: ArtifactCatalogItem) => void) | undefined;
+  /** A plain click on an image or file shows it in the list's viewer instead. */
+  onView?: ((item: ArtifactCatalogItem) => void) | undefined;
+  onPin?: ArtifactPinAction | undefined;
+  loading?: boolean | undefined;
+  browseSearch?: ArtifactReturnSearch | undefined;
+};
+
+/**
+ * Opening an artifact: its own page in the router, or the caller's handler.
+ * With a viewer, a plain click on an image or file shows it there; the menu's
+ * Open still opens it.
+ */
+function useArtifactOpen({
+  workspaceId,
+  item,
+  sessionId,
+  onSelect,
+  onView,
+  onPin,
   loading = false,
-  browseSearch?: ArtifactReturnSearch,
-) {
+  browseSearch,
+}: ArtifactOpenOptions) {
   const page = usePage();
   const navigate = useNavigate();
   const stringifySearch = useStringifySearch();
@@ -354,8 +384,9 @@ function useArtifactOpen(
       </DropdownMenuItem>
     </>
   );
+  const activate = onView && opensInViewer(item) ? () => onView(item) : open;
   return {
-    open,
+    open: activate,
     menu,
     dialog: audience.dialog,
     // Links keep a real href (new tab, copy); a plain click stays in the router.
@@ -368,7 +399,7 @@ function useArtifactOpen(
           onClick: (event: MouseEvent<HTMLElement>) => {
             if (!isPlainClick(event)) return;
             event.preventDefault();
-            open();
+            activate();
           },
         },
   };
@@ -399,6 +430,7 @@ export function ArtifactRow({
   item,
   sessionId,
   onSelect,
+  onView,
   onPin,
   loading,
   browseSearch,
@@ -407,19 +439,21 @@ export function ArtifactRow({
   item: ArtifactCatalogItem;
   sessionId?: string | undefined;
   onSelect?: ((item: ArtifactCatalogItem) => void) | undefined;
+  onView?: ((item: ArtifactCatalogItem) => void) | undefined;
   onPin?: ArtifactPinAction | undefined;
   loading?: boolean | undefined;
   browseSearch?: ArtifactReturnSearch | undefined;
 }) {
-  const { open, menu, link, dialog } = useArtifactOpen(
+  const { open, menu, link, dialog } = useArtifactOpen({
     workspaceId,
     item,
     sessionId,
     onSelect,
+    onView,
     onPin,
     loading,
     browseSearch,
-  );
+  });
   const archived = item.status === "archived";
   return (
     <>
@@ -610,6 +644,7 @@ export function ArtifactCard({
   item,
   sessionId,
   onSelect,
+  onView,
   onPin,
   loading,
   browseSearch,
@@ -618,19 +653,21 @@ export function ArtifactCard({
   item: ArtifactCatalogItem;
   sessionId?: string | undefined;
   onSelect?: ((item: ArtifactCatalogItem) => void) | undefined;
+  onView?: ((item: ArtifactCatalogItem) => void) | undefined;
   onPin?: ArtifactPinAction | undefined;
   loading?: boolean | undefined;
   browseSearch?: ArtifactReturnSearch | undefined;
 }) {
-  const { open, menu, link, dialog } = useArtifactOpen(
+  const { open, menu, link, dialog } = useArtifactOpen({
     workspaceId,
     item,
     sessionId,
     onSelect,
+    onView,
     onPin,
     loading,
     browseSearch,
-  );
+  });
   const titleId = useId();
   const archived = item.status === "archived";
   // The title is the card's action, stretched over the whole card; the menu sits above it.
@@ -760,6 +797,7 @@ export function ArtifactLibrary({
   onEmptyChange,
   artifactKindsHidden = false,
   browseSearch,
+  viewer = false,
 }: {
   workspaceId: string;
   sessionId?: string | undefined;
@@ -790,12 +828,22 @@ export function ArtifactLibrary({
   artifactKindsHidden?: boolean | undefined;
   /** Workspace library query carried into the full-page viewer, not embedded panels. */
   browseSearch?: ArtifactReturnSearch | undefined;
+  /**
+   * Images and files open in one large viewer that steps through this list
+   * (the session panel). The workspace library browses on artifact pages.
+   */
+  viewer?: boolean | undefined;
 }) {
   const [view, setView] = useState<ArtifactView>(readArtifactView);
   const changeView = (next: ArtifactView) => {
     setView(next);
     rememberArtifactView(next);
   };
+  // The artifact open in the viewer, which steps through `items` as listed.
+  const [viewing, setViewing] = useState<string | null>(null);
+  const showInViewer = (item: ArtifactCatalogItem) => setViewing(artifactKey(item));
+  const closeViewer = useCallback(() => setViewing(null), []);
+  const viewingItem = viewing ? items.find((item) => artifactKey(item) === viewing) : undefined;
   const groups = compact ? [TYPE_GROUP, STATUS_GROUP, SORT_GROUP] : [STATUS_GROUP, SORT_GROUP];
   const filterValue = filterValueFor(filters, compact);
   const setFilterValue = (next: ToolbarFilterValue) => {
@@ -929,6 +977,7 @@ export function ArtifactLibrary({
                 item={item}
                 sessionId={sessionId}
                 onSelect={onSelect}
+                onView={viewer ? showInViewer : undefined}
                 onPin={onPin}
                 loading={loading}
                 browseSearch={browseSearch}
@@ -949,6 +998,7 @@ export function ArtifactLibrary({
                 item={item}
                 sessionId={sessionId}
                 onSelect={onSelect}
+                onView={viewer ? showInViewer : undefined}
                 onPin={onPin}
                 loading={loading}
                 browseSearch={browseSearch}
@@ -1014,6 +1064,57 @@ export function ArtifactLibrary({
         <Notice title="Sites and documents are hidden">{ARTIFACT_ACCESS_REQUIRED}</Notice>
       ) : null}
       <div className="min-w-0">{body}</div>
+      {viewing ? (
+        <Suspense fallback={null}>
+          <ArtifactViewer
+            workspaceId={workspaceId}
+            items={items}
+            currentKey={viewing}
+            onCurrentKeyChange={setViewing}
+            onClose={closeViewer}
+            actions={
+              viewingItem ? (
+                <ArtifactViewerMenu
+                  key={viewing}
+                  workspaceId={workspaceId}
+                  item={viewingItem}
+                  sessionId={sessionId}
+                  onSelect={onSelect}
+                  onPin={onPin}
+                  loading={loading}
+                  browseSearch={browseSearch}
+                />
+              ) : null
+            }
+          />
+        </Suspense>
+      ) : null}
     </section>
+  );
+}
+
+/** The row's ⋯ menu in the viewer's header; its Open still opens the artifact itself. */
+function ArtifactViewerMenu(props: Omit<ArtifactOpenOptions, "onView">) {
+  const { menu, dialog } = useArtifactOpen(props);
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="pointer-coarse:size-11"
+            aria-label={`More actions for ${props.item.title}`}
+          >
+            <MoreHorizontalIcon aria-hidden="true" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="min-w-44">
+          {menu}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {dialog}
+    </>
   );
 }

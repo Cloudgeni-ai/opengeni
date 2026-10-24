@@ -145,6 +145,36 @@ search, and a Filter menu for archived items and sorting. The session panel
 uses the same catalog with a source-session filter. Both open the existing
 type-specific viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
 
+In the session panel a plain click on an image or file opens the artifact
+viewer (`artifact-viewer.tsx`): one window-sized dialog that steps through
+exactly the artifacts the panel lists, in its order, so search, filters and
+sorting carry over. Previous/Next in its header, Left/Right, or a touch swipe
+step without wrapping; the header shows "3 of 23", the title, Download for
+images and the row's ⋯ menu (whose Open still opens the artifact in the panel);
+Escape closes it. Neighbouring images preload through the retained-image
+cache. Sites, documents, spreadsheets and presentations keep opening in the
+panel on click, and show their embedded preview when the viewer steps onto
+them, where arrow keys stay with the content. The workspace library keeps its
+URL-based browsing on artifact pages (below). Chat images keep the timeline
+lightbox, which already pages through every image in the conversation.
+The viewer follows the list as it changes: an artifact that leaves it (archived
+or deleted) closes the viewer, and pinning one moves it to the top of the list,
+so its position number changes.
+
+Images in the viewer and in the chat lightbox share one zoom surface
+(`components/zoom-pan-image.tsx`, geometry in `lib/zoom-pan.ts`). An image
+opens fitted to the window, enlarged up to 2x when it is small. Cmd/Ctrl + plus
+and minus, Cmd/Ctrl + wheel, a trackpad or touch pinch and the −/+ buttons zoom
+around the pointer (or the centre) from actual size or the fitted size,
+whichever is smaller, up to 800%, with the percentage between the buttons;
+Cmd/Ctrl + 0 or Fit fits again, and a click
+toggles fitted and actual size at the click point. A zoomed image pans by
+dragging or scrolling. The image is laid out at its zoomed pixel size on whole
+pixels, and from 200% its pixels are drawn crisply rather than smoothed. Each
+step to another image starts fitted. While an image is on screen the zoom keys
+are claimed before the browser or the desktop app's View menu sees them, so
+they zoom the image rather than the window; elsewhere window zoom is unchanged.
+
 Workspace-library tabs, search, sorting and archive filters travel in the URL
 when opening a viewer. The Artifacts back link and browser Back return to that
 same query, with the library's scroll position and loaded pages restored in the
