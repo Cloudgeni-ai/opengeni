@@ -477,7 +477,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
 });
 
 describe("stalled recording recovery", () => {
-  test("is a quiet no-op while 0937 withholds EXECUTE, and restarts work once granted", async () => {
+  test("restarts stalled work", async () => {
     if (!client || !shared) return;
     const db = client.db;
     const suffix = crypto.randomUUID();
@@ -506,14 +506,13 @@ describe("stalled recording recovery", () => {
       UPDATE recordings SET updated_at = now() - interval '10 minutes' WHERE id = ${recordingId}
     `;
     const starts: string[] = [];
-    const debug: string[] = [];
     const services = async () =>
       ({
         db,
         observability: {
           warn: () => undefined,
           info: () => undefined,
-          debug: (message: string) => debug.push(message),
+          debug: () => undefined,
         },
         startRecordingWorkflow: async (work: { recordingId: string }) => {
           starts.push(work.recordingId);
@@ -527,22 +526,13 @@ describe("stalled recording recovery", () => {
       cancellationSignal: () => undefined,
     });
 
-    for (let pass = 0; pass < 2; pass += 1) {
-      expect(await run.recoverRecordingWorkflows()).toEqual({ found: 0, started: 0, failed: 0 });
-    }
-    expect(starts).toEqual([]);
-    expect(debug).toEqual([
-      "Recording workflow recovery skipped: runtime EXECUTE is not granted yet",
-    ]);
-
-    await grantDeferredRuntimeAccess(shared.admin);
     const recovered = await run.recoverRecordingWorkflows();
     expect(recovered.failed).toBe(0);
     expect(starts).toContain(recordingId);
   });
 });
 
-// Last: it grants the deferred EXECUTE the recovery test expects withheld.
+// Last: it grants the EXECUTE 0946 withholds.
 describe.skipIf(!hasFfmpeg)("recording retention", () => {
   test("retention deletes old audio and keeps the transcript, then hands old meetings to deletion", async () => {
     if (!client || !shared) return;
@@ -592,7 +582,16 @@ describe.skipIf(!hasFfmpeg)("recording retention", () => {
       cancellationSignal: () => undefined,
     });
 
-    // After the recovery test, so the runtime has EXECUTE on 0946's inventory.
+    // A quiet no-op while 0946 withholds EXECUTE on its inventory.
+    for (let pass = 0; pass < 2; pass += 1) {
+      expect(await run.applyRecordingRetention()).toEqual({
+        found: 0,
+        audioDeleted: 0,
+        recordingsDeleted: 0,
+        failed: 0,
+      });
+    }
+    expect(debug).toEqual(["Recording retention skipped: runtime EXECUTE is not granted yet"]);
     await grantDeferredRuntimeAccess(shared.admin);
     const audio = await run.applyRecordingRetention();
     expect(audio).toMatchObject({ audioDeleted: 1, recordingsDeleted: 0, failed: 0 });

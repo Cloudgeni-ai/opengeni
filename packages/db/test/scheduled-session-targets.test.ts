@@ -1,9 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   bootstrapWorkspace,
   createDb,
@@ -25,9 +21,6 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("scheduled-session-targets");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
-  // Creating an event source writes event_ingress_routes, which migration 0937
-  // withholds from the runtime role until the follow-up release.
-  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl);
 }, 180_000);
 afterAll(async () => {
