@@ -2,6 +2,9 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 // Pin the source we tested, including fixes newer than the published SDK.
+// A pin that changes a tool's schema also needs the macOS and Linux catalogs
+// regenerated (scripts/generate-cua-desktop-tools.ts): native calls are refused
+// when the worker's schema differs from the bundled one.
 export const cuaSourceRevision = "ef58ccf32cb7c1f830088d7b2d12170cf594ab49";
 const repository = "https://github.com/Cloudgeni-ai/cua.git";
 
