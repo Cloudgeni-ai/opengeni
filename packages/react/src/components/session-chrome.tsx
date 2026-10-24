@@ -506,7 +506,7 @@ function pendingKindLabel(t: OpenGeniText, kind: SessionPendingInputPreview["kin
     case "agent_steer_instruction":
       return t("sessionChrome.steer");
     case "scheduled_occurrence":
-      return t("sessionChrome.schedule");
+      return t("sessionChrome.automation");
     case "goal_continuation":
       return t("sessionChrome.goalWake");
     case "agent_message":
