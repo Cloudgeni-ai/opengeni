@@ -508,17 +508,24 @@ export class RecordingUploader {
     change: (recording: StoredRecording) => StoredRecording | null,
   ): Promise<StoredRecording | null> {
     const store = this.options.store;
+    return await this.exclusive(recordingId, async () => {
+      const current = await store.getRecording(recordingId);
+      if (!current) return null;
+      const changed = change(current);
+      if (!changed) return current;
+      await store.putRecording(changed);
+      return changed;
+    });
+  }
+
+  /**
+   * Run `work` with no other change to this recording's stored record in
+   * between. Discarding takes a turn too, so a change already reading the
+   * record can't write it back after the recording was thrown away.
+   */
+  private async exclusive<T>(recordingId: string, work: () => Promise<T>): Promise<T> {
     const previous = this.writes.get(recordingId) ?? Promise.resolve();
-    const next = previous
-      .catch(() => undefined)
-      .then(async () => {
-        const current = await store.getRecording(recordingId);
-        if (!current) return null;
-        const changed = change(current);
-        if (!changed) return current;
-        await store.putRecording(changed);
-        return changed;
-      });
+    const next = previous.catch(() => undefined).then(work);
     this.writes.set(recordingId, next);
     try {
       return await next;
@@ -591,8 +598,11 @@ export class RecordingUploader {
   /** Throw a recording away: its local chunks and whatever the server already has. */
   async discard(recordingId: string): Promise<void> {
     const store = this.options.store;
-    const recording = await store.getRecording(recordingId);
-    await store.deleteRecording(recordingId);
+    const recording = await this.exclusive(recordingId, async () => {
+      const current = await store.getRecording(recordingId);
+      await store.deleteRecording(recordingId);
+      return current;
+    });
     this.pumps.delete(recordingId);
     if (recording?.created) {
       await this.options.client
@@ -757,18 +767,27 @@ export class RecordingUploader {
       return true;
     }
     if (!recording.created) {
-      await guarded(() => client.createRecording(recording!.workspaceId, recording!.create));
+      const workspaceId = recording.workspaceId;
+      await guarded(() => client.createRecording(workspaceId, recording!.create));
       recording = await this.mutate(recordingId, (current) => ({
         ...current,
         created: true,
         updatedAt: Date.now(),
       }));
       if (!recording) {
+        // Discarded while the server was creating it: discard saw no server
+        // copy to remove, so remove the one just made.
+        await guarded(() => client.deleteRecording(workspaceId, recordingId)).catch(
+          (error: unknown) => {
+            if (error instanceof PermanentRecordingError && error.status === 404) return;
+            throw error;
+          },
+        );
         this.update(pump, {
           pendingChunks: 0,
           pendingBytes: 0,
           uploading: false,
-          finalized: true,
+          discarded: true,
         });
         return true;
       }
