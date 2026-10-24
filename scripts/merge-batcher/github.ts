@@ -78,6 +78,8 @@ export interface AutoMergeState {
   headSha: string;
   enabledAt: string | null;
 }
+// Only raised before the disable mutation transport is invoked.
+export class AutoMergePreSubmitError extends Error {}
 export class GitHubAuth {
   private cached: { token: string; expires: number } | null = null;
   constructor(
@@ -1255,7 +1257,14 @@ export class GitHubMutations {
   }
   async disableAutoMerge(number: number, headSha: string, parkedAt: string): Promise<void> {
     if (this.reader.config.mode !== "active") throw Error("Shadow mode forbids GitHub mutations");
-    const current = await this.reader.autoMergeState(number);
+    let current: AutoMergeState;
+    try {
+      current = await this.reader.autoMergeState(number);
+    } catch (cause) {
+      throw new AutoMergePreSubmitError("Auto-merge observation failed; no mutation sent", {
+        cause,
+      });
+    }
     if (
       current.enabledAt === null ||
       current.headSha !== headSha ||
