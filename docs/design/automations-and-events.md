@@ -366,10 +366,11 @@ major. PR Review moves to an automation with a GitHub pull-request trigger.
 - **Database grants.** The runtime calls the dispatcher's security-definer
   functions and writes `event_ingress_routes`. Those grants follow the
   two-release rule in `docs/migrations-expand-contract.md`: 0937 withholds
-  them, and a later rolling migration grants them once a release containing
-  0937 is the previous production release. Until then the event paths fail
-  for lack of privilege, so turn the flag on only where the grants exist. The
-  retention pass runs regardless of the flag and skips quietly until then.
+  them, and 0947 grants them once a release containing 0937 is the previous
+  production release. Until 0947 has run, the event paths fail for lack of
+  privilege, so turn the flag on only in a deployment whose release includes
+  0947 and whose previous release included 0937. The retention pass runs
+  regardless of the flag and skips quietly until then.
 
 ## Delivery
 
