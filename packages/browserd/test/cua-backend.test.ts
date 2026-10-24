@@ -3402,6 +3402,88 @@ describe("CUA desktop boundary", () => {
         }
       });
 
+      test("a later action naming one of several shown goes to CUA by role and name", async () => {
+        const fixture = new LinkFixture();
+        fixture.links = ["Juniper Printing", "Juniper Printing"];
+        const { backend, observation } = await open(fixture);
+        try {
+          // An earlier action (a search typed a moment ago) may narrow them:
+          // CUA's step waits for the window to settle before it decides.
+          await backend.dispatch(
+            asBatch(named(observation, "button", "Apply"), {
+              type: "semantic",
+              locator: { kind: "role", role: "link", name: "Juniper Printing", exact: true },
+              action: "invoke",
+            } as ComputerBackendActionCommand["action"]),
+          );
+          const steps = fixture.calls.find((call) => call.name === "run_steps")!.args.steps as {
+            args: Record<string, unknown>;
+          }[];
+          expect(steps[1]!.args.element_token).toBeUndefined();
+          expect(steps[1]!.args).toMatchObject({
+            role: "link",
+            name: "Juniper Printing",
+            exact: true,
+          });
+        } finally {
+          await backend.close();
+        }
+        // The first action has nothing before it to narrow them.
+        const first = new LinkFixture();
+        first.links = ["Juniper Printing", "Juniper Printing"];
+        const opened = await open(first);
+        try {
+          const failure = await opened.backend
+            .dispatch(asBatch(named(opened.observation, "link", "Juniper Printing"), enter))
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_ambiguous", dispatched: false });
+          expect(first.ran).toBe(false);
+        } finally {
+          await opened.backend.close();
+        }
+        // Still several once settled: nothing was pressed, and the message
+        // points at refs, as an action here has no `nth`.
+        const settled = new LinkFixture();
+        settled.links = ["Juniper Printing", "Juniper Printing"];
+        settled.reply = {
+          ok: false,
+          total: 2,
+          executed: 2,
+          failed_step: 1,
+          steps: [
+            { index: 0, ok: true, message: "ok" },
+            {
+              index: 1,
+              ok: false,
+              code: "ambiguous",
+              phase: "find",
+              message:
+                '2 elements match link "Juniper Printing" in window 7; add `nth` or a more exact name: nth 0: link "Juniper Printing"; nth 1: link "Juniper Printing"',
+            },
+          ],
+        };
+        const third = await open(settled);
+        try {
+          const failure = await third.backend
+            .dispatch(
+              asBatch(named(third.observation, "button", "Apply"), {
+                type: "semantic",
+                locator: { kind: "role", role: "link", name: "Juniper Printing", exact: true },
+                action: "invoke",
+              } as ComputerBackendActionCommand["action"]),
+            )
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_ambiguous" });
+          const message = (failure as Error).message;
+          expect(message).toContain(
+            "give a more exact name, or observe the window and act on the one meant by its ref",
+          );
+          expect(message).not.toContain("nth`");
+        } finally {
+          await third.backend.close();
+        }
+      });
+
       test("the receipt names each stand-in, without a typed secret", async () => {
         const secret = "synthetic-pin-4711";
         const fixture = new LinkFixture();

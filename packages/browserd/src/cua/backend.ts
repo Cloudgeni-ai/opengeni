@@ -713,7 +713,16 @@ export class CuaComputerBackend implements ComputerBackend {
           outcome.message,
         )))
       : null;
-    const reason = refusal?.message ?? outcome.message;
+    // CUA's own lookup can take an `nth`; an action here names one element
+    // of several by its ref instead.
+    const reason =
+      refusal?.message ??
+      (outcome.cuaCode === "ambiguous"
+        ? outcome.message.replace(
+            "; add `nth` or a more exact name: ",
+            "; give a more exact name, or observe the window and act on the one meant by its ref: ",
+          )
+        : outcome.message);
     const message = single
       ? `CUA stopped part way through the input: ${reason}`
       : `CUA stopped the batch at action ${action + 1}: ${reason}`;
@@ -1654,10 +1663,18 @@ export class CuaComputerBackend implements ComputerBackend {
         // Not in the batch's observation: an earlier action may bring it up,
         // or the element shown under the other role pressed alike may be the
         // one meant, which CUA's step decides once the window has settled.
-        const named =
-          (laterInBatch || (inBatch && mayStandIn(observed.roots, action))) &&
+        // Several shown by that name: an earlier action may narrow them (a
+        // search filtering a list), and CUA's step waits for the window to
+        // settle before it reports them.
+        const unseen = error instanceof ComputerBackendError && error.code === "locator_not_found";
+        const several =
+          laterInBatch &&
           error instanceof ComputerBackendError &&
-          error.code === "locator_not_found" &&
+          error.code === "locator_ambiguous" &&
+          action.locator.kind !== "ref" &&
+          action.locator.kind !== "identifier";
+        const named =
+          (unseen ? laterInBatch || (inBatch && mayStandIn(observed.roots, action)) : several) &&
           (ACTIONS_ON_UNSEEN.has(action.action) ||
             // select or deselect means a state only on a checkbox or switch.
             ((action.action === "select" || action.action === "deselect") &&
