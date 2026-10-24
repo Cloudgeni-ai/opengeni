@@ -119,7 +119,21 @@ export class CurrentBrowserTab {
   }
 }
 
-/** An element ref passed where a locator is expected, as a bare string. */
+/** `role:name` as a bare locator string: a role word, a colon, and the
+ * element's name. Refs are letters and hex digits, never a colon. */
+const ROLE_SHORTHAND = /^([A-Za-z][A-Za-z_-]*):(.*\S.*)$/su;
+
+/** A bare string passed where a locator is expected: `role:name` names the
+ * element with that role and exact name, anything else is an element ref. */
+function expandLocatorString(value: string): Record<string, unknown> {
+  const role = ROLE_SHORTHAND.exec(value);
+  return role
+    ? { kind: "role", role: role[1], name: role[2]!.trim(), exact: true }
+    : { kind: "ref", ref: value };
+}
+
+/** Locators passed as bare strings (an element ref, or `role:name`),
+ * expanded to locator objects, in an action and its batch items. */
 export function expandRefShorthand(action: unknown): unknown {
   if (!action || typeof action !== "object" || Array.isArray(action)) return action;
   const record = action as Record<string, unknown>;
@@ -128,7 +142,7 @@ export function expandRefShorthand(action: unknown): unknown {
     const value = record[field];
     if (typeof value === "string") {
       expanded ??= { ...record };
-      expanded[field] = { kind: "ref", ref: value };
+      expanded[field] = expandLocatorString(value);
     }
   }
   if (Array.isArray(record.actions)) {

@@ -122,4 +122,38 @@ describe("current browser tab", () => {
     const untouched = { type: "press", key: "Enter" };
     expect(expandRefShorthand(untouched)).toBe(untouched);
   });
+
+  test("expands role:name locators to the element with that role and exact name", () => {
+    expect(expandRefShorthand({ type: "click", locator: "link:Quartz Analytics" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "link", name: "Quartz Analytics", exact: true },
+    });
+    // Only the first colon splits, and the name is trimmed.
+    expect(expandRefShorthand({ type: "click", locator: "button: Time: 10:30 " })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "button", name: "Time: 10:30", exact: true },
+    });
+    expect(
+      expandRefShorthand({
+        type: "batch",
+        actions: [{ type: "drag", from: "menu_item:Inbox", to: "e3" }],
+      }),
+    ).toEqual({
+      type: "batch",
+      actions: [
+        {
+          type: "drag",
+          from: { kind: "role", role: "menu_item", name: "Inbox", exact: true },
+          to: { kind: "ref", ref: "e3" },
+        },
+      ],
+    });
+    // A colon with nothing named after it, or no role word before it, is a ref.
+    for (const ref of ["button:", "button:  ", ":Save", "e1a2b3c4d", "1x:Save"]) {
+      expect(expandRefShorthand({ type: "click", locator: ref })).toEqual({
+        type: "click",
+        locator: { kind: "ref", ref },
+      });
+    }
+  });
 });
