@@ -322,7 +322,12 @@ changing earlier context, so prompt caching is unaffected.
 
 An agent can create automations for itself. "Wake me when X" from a chat is a
 once-automation whose destination is that chat. While one is active, the chat
-shows what it is waiting for.
+shows what it is waiting for. Such a wait belongs to the chat: archiving the
+chat with Pause removes the one-time waits that continue it or its sub-chats
+(a run-once event automation that has not run, a one-time run still ahead) in
+the same transaction, and Restore does not bring them back. Repeating
+automations stay; a run of theirs that meets the paused chat is blocked and
+the owner is told. Hide for me changes nothing for the chat's waits.
 
 ## Surfaces
 

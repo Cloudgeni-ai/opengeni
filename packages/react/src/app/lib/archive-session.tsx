@@ -128,7 +128,7 @@ export async function requestSessionArchive(
       !(await confirm({
         title: "Pause and archive this chat?",
         description:
-          "This chat has active work. Pause stops it and its sub-chats for everyone with access, and blocks automations from starting work in them. Only your sidebar hides the chat. Restoring it will not resume it.",
+          "This chat has active work. Pause stops it and its sub-chats for everyone with access, removes their one-time waits, and blocks automations from starting work in them. Only your sidebar hides the chat. Restoring it will not resume it.",
         confirmLabel: "Pause and archive",
       }))
     )

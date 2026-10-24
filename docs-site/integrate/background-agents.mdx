@@ -86,7 +86,7 @@ await og.createScheduledTask(workspaceId, {
 
 Your backend sends `{ "type": "ticket.created", "timestamp": "…", "data": { … } }` with the `webhook-id`, `webhook-timestamp` and `webhook-signature` headers; any Standard Webhooks library signs it. Each run gets the events that started it. Redelivered events (same `webhook-id`) are ignored, and the agent treats event data as untrusted input.
 
-- `events.once: true` finishes the task after its first run, for "tell me when this happens".
+- `events.once: true` finishes the task after its first run, for "tell me when this happens". A once-task that continues a chat belongs to it: archiving that chat with Pause removes the task if it has not run yet.
 - `events.maxRunsPerHour` (default 30) holds back a burst; held events are batched into the next run, and the owner is told once.
 - Events made by Opengeni's own bots don't fire a trigger unless it sets `includeOwnEvents: true`.
 - `listEventDeliveries`, `replayEventDelivery` and `sendTestEvent` show what arrived, process a delivery again, and send a test event. `listEventSourceTypes` lists the event types a trigger can name.
