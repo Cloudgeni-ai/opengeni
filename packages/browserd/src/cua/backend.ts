@@ -112,7 +112,9 @@ const INPUT_REREAD_MS = 150;
  * editor's placeholder) can be content that stays. */
 const SETTLE_MAX_MS = 5_000;
 const SETTLE_TEXT_MAX_MS = 2_500;
-const SETTLE_POLL_MS = 250;
+/** A reading of an ordinary window takes about 50 ms, so a save or load
+ * that finishes is seen within about a tenth of a second. */
+const SETTLE_POLL_MS = 100;
 
 /** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
