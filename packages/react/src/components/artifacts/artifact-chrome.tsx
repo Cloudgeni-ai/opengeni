@@ -144,6 +144,10 @@ export type ArtifactLabels = Readonly<{
   startingEditor: string;
   kindSubtitle: (kind: ArtifactKind) => string;
   live: string;
+  /** The Live label while a newer version of the Site loads. */
+  liveUpdating: string;
+  /** The Live label while new versions can't be checked for. */
+  liveReconnecting: string;
   reloadSite: string;
   openFullScreen: string;
   editWithAgent: string;
@@ -181,6 +185,8 @@ export const DEFAULT_ARTIFACT_LABELS = (t: OpenGeniText): ArtifactLabels =>
     startingEditor: t("artifacts.artifactChrome.startingTheSecureEditingSession"),
     kindSubtitle: (kind: ArtifactKind) => artifactKindSubtitle(t, kind),
     live: t("artifacts.artifactChrome.live"),
+    liveUpdating: t("artifacts.artifactChrome.liveUpdating"),
+    liveReconnecting: t("artifacts.artifactChrome.liveReconnecting"),
     reloadSite: t("artifacts.artifactChrome.reloadSite"),
     openFullScreen: t("artifacts.artifactChrome.openSiteFullScreen"),
     editWithAgent: t("artifacts.artifactChrome.editWithOpengeni"),

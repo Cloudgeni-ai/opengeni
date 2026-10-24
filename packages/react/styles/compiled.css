@@ -5348,10 +5348,22 @@
       --tw-ring-color: color-mix(in oklab, var(--color-ring) 40%, transparent);
     }
   }
+:where(.og-root).ring-status-running\/15,:where(.og-root) .ring-status-running\/15 {
+    --tw-ring-color: var(--color-status-running);
+    @supports (color: color-mix(in lab, red, red)) {
+      --tw-ring-color: color-mix(in oklab, var(--color-status-running) 15%, transparent);
+    }
+  }
 :where(.og-root).ring-status-success\/10,:where(.og-root) .ring-status-success\/10 {
     --tw-ring-color: var(--color-status-success);
     @supports (color: color-mix(in lab, red, red)) {
       --tw-ring-color: color-mix(in oklab, var(--color-status-success) 10%, transparent);
+    }
+  }
+:where(.og-root).ring-status-waiting\/15,:where(.og-root) .ring-status-waiting\/15 {
+    --tw-ring-color: var(--color-status-waiting);
+    @supports (color: color-mix(in lab, red, red)) {
+      --tw-ring-color: color-mix(in oklab, var(--color-status-waiting) 15%, transparent);
     }
   }
 :where(.og-root).ring-surface,:where(.og-root) .ring-surface {
@@ -7721,6 +7733,11 @@
       outline-offset: calc(2px * -1) !important;
     }
   }
+:where(.og-root).focus-visible\:outline-offset-1,:where(.og-root) .focus-visible\:outline-offset-1 {
+    &:focus-visible {
+      outline-offset: 1px;
+    }
+  }
 :where(.og-root).focus-visible\:outline-offset-2,:where(.og-root) .focus-visible\:outline-offset-2 {
     &:focus-visible {
       outline-offset: 2px;
@@ -9832,6 +9849,11 @@
       display: none;
     }
   }
+:where(.og-root).\@max-\[479px\]\/list\:inline,:where(.og-root) .\@max-\[479px\]\/list\:inline {
+    @container list (width < 479px) {
+      display: inline;
+    }
+  }
 :where(.og-root).\@max-\[34rem\]\/titlebar\:hidden\!,:where(.og-root) .\@max-\[34rem\]\/titlebar\:hidden\! {
     @container titlebar (width < 34rem) {
       display: none !important;
@@ -10579,6 +10601,11 @@
     @media (pointer: coarse) {
       width: 44px;
       height: 44px;
+    }
+  }
+:where(.og-root).pointer-coarse\:h-8,:where(.og-root) .pointer-coarse\:h-8 {
+    @media (pointer: coarse) {
+      height: calc(var(--spacing) * 8);
     }
   }
 :where(.og-root).pointer-coarse\:h-9,:where(.og-root) .pointer-coarse\:h-9 {

@@ -4155,6 +4155,7 @@ Useful settings:
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
+- `OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT=true` makes each API request span a child of the caller's W3C `traceparent`, so a calling service sees Opengeni's spans inside its own trace. Leave it off (the default) when untrusted clients can reach the API: the request span then starts its own trace and carries a span link to the caller's context. See `docs/application-observability.md`.
 
 The Helm chart has optional Prometheus Operator wiring, off by default:
 

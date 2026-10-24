@@ -361,6 +361,41 @@ describe("HumanInputForm async host boundary", () => {
     );
   });
 
+  test("a secret approval card offers only its own choices, with no Other field", async () => {
+    const questionId = "secret-approval:0f8fad5b-d9cb-469f-a165-70867728950e";
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: {
+          id: "request-approval",
+          questions: [
+            {
+              id: questionId,
+              kind: "single_select" as const,
+              prompt: "Allow the agent to use GitHub › password in the browser on github.com?",
+              options: [
+                { id: "once", label: "Allow once" },
+                { id: "session", label: "Allow in this chat" },
+                { id: "window", label: "Allow for 1 hour" },
+                { id: "deny", label: "Deny" },
+              ],
+              required: true,
+              allowOther: false,
+            },
+          ],
+          allowSkip: false,
+          expiresAt: null,
+        },
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    const group = mounted.container.querySelector(`[data-human-input-question="${questionId}"]`);
+    expect(group?.querySelectorAll('[role="radio"], input[type="radio"]').length).toBe(4);
+    expect(group?.textContent).toContain("Allow in this chat");
+    expect(group?.textContent).not.toContain("Other");
+    expect(group?.querySelector('input[type="text"]')).toBeNull();
+  });
+
   test("clicking or typing Other selects it and submits its exact text", async () => {
     const submissions: SubmitHumanInputResponseRequest[] = [];
     mounted = await renderComponent(

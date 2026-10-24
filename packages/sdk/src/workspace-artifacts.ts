@@ -108,6 +108,13 @@ export type WorkspaceArtifactDetailResponse = {
   versionsTruncated: boolean;
   eventsTruncated: boolean;
 };
+/**
+ * A Site and its current version without its history or who made it: what an
+ * open Site view checks to see whether a new version is live.
+ */
+export type WorkspaceArtifactCurrentResponse = {
+  artifact: WorkspaceArtifact;
+};
 export type WorkspaceArtifactContentResponse = {
   artifactId: string;
   versionId: string;

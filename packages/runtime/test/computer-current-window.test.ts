@@ -514,7 +514,8 @@ describe("computer tools without identifiers", () => {
     expect(schema.required ?? []).toEqual(["action"]);
     expect(schema.properties.action.properties.locator.anyOf[0]).toEqual({
       type: "string",
-      description: "An element ref.",
+      description:
+        'An element ref, or role:name for the element with that role and exact name ("link:Sign in").',
     });
     // The model view is computed once from the tool's schema.
     expect(computerActModelInputSchema(act.inputSchema)).toBeDefined();

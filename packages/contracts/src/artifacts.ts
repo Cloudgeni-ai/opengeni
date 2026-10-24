@@ -271,6 +271,17 @@ export const WorkspaceArtifactDetailResponse = /* @__PURE__ */ defineSchema(() =
 );
 export type WorkspaceArtifactDetailResponse = z.infer<typeof WorkspaceArtifactDetailResponse>;
 
+/**
+ * A Site and its current version without its history or who made it: what an
+ * open Site view checks to see whether a new version is live.
+ */
+export const WorkspaceArtifactCurrentResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    artifact: WorkspaceArtifact,
+  }),
+);
+export type WorkspaceArtifactCurrentResponse = z.infer<typeof WorkspaceArtifactCurrentResponse>;
+
 export const WorkspaceArtifactHtml = /* @__PURE__ */ defineSchema(() =>
   z
     .string()

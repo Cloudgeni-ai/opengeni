@@ -214,6 +214,41 @@ export type RevealVaultFieldResponse = {
   totp: { code: string; periodSeconds: number; expiresAt: string } | null;
 };
 
+/** How long an approval for a secret's use lasts. */
+export type SecretUseGrantScope = "once" | "session" | "window";
+
+/** One approval in force for an item's use by agents. */
+export type SecretUseGrant = {
+  id: string;
+  /** once: the next use; session: the chat until revoked; window: 1 hour in any of the person's chats. */
+  scope: SecretUseGrantScope;
+  sessionId: string;
+  /** The field names the approval covers on this item. */
+  fields: string[];
+  surface: string;
+  toolName: string;
+  destination: string | null;
+  decidedAt: string;
+  decidedBySubjectId: string | null;
+  expiresAt: string | null;
+};
+
+/** Which agent uses of an item need the acting person's approval each time. */
+export type VaultItemApproval = {
+  /** Every field of the item needs approval. */
+  item: boolean;
+  /** Field names that need approval on their own. */
+  fields: string[];
+  grants: SecretUseGrant[];
+  /** The caller may change the marks and revoke approvals (a signed-in person with secrets:write). */
+  canChange: boolean;
+};
+
+export type SetVaultItemApprovalRequest = {
+  item: boolean;
+  fields?: string[];
+};
+
 export type ListVaultItemsQuery = {
   q?: string | undefined;
   type?: VaultItemType | undefined;
@@ -334,7 +369,16 @@ export type VaultErrorCode =
 export type ExternalVaultProviderKind = "external" | "protonpass" | "keeper" | "bitwarden";
 export type VaultProviderCredentials =
   | { provider: "external"; endpoint: string; signingSecret: string }
-  | { provider: "bitwarden"; endpoint: string; signingSecret: string }
+  | {
+      provider: "bitwarden";
+      /** https://vault.bitwarden.com, https://vault.bitwarden.eu or a self-hosted server. */
+      serverUrl: string;
+      /** The account's personal API key: `user.<uuid>` and its secret. */
+      clientId: string;
+      clientSecret: string;
+      /** Opens the account once during setup; never stored. */
+      masterPassword: string;
+    }
   | { provider: "protonpass"; token: string }
   | { provider: "keeper"; oneTimeToken: string; hostname?: string | undefined };
 export type InstallVaultProviderRequest = {

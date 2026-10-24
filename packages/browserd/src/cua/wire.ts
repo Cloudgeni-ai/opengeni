@@ -53,6 +53,8 @@ export const Element = z.object({
   value: z.union([text, z.number().finite(), z.boolean()]).optional(),
   enabled: z.boolean().optional(),
   focused: z.boolean().optional(),
+  // Whether a checkbox, switch, radio, tab or row is on or selected.
+  selected: z.boolean().optional(),
   frame: ElementRect.optional(),
   actions: z.array(text).max(64).default([]),
 });
@@ -118,6 +120,8 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   write_not_applied: "driver_failed",
   // A step that sets a checked state found an element that has none.
   not_a_toggle: "invalid_action",
+  // A step's name fits several elements once the window settled; nothing ran.
+  ambiguous: "locator_ambiguous",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can

@@ -77,6 +77,14 @@ async function scheduledTaskFullViewerForGrant(
   return { subjectId, admin: false, seesPrivateSummaries: false };
 }
 
+/** The person a grant reads schedules as, or null for keys and services. */
+export async function scheduledTaskViewerSubjectForGrant(
+  db: Database,
+  grant: AccessGrant,
+): Promise<string | null> {
+  return (await scheduledTaskFullViewerForGrant(db, grant)).subjectId;
+}
+
 export function scheduledTaskAccess(
   viewer: ScheduledTaskViewer,
   task: Pick<ScheduledTask, "visibility" | "ownerSubjectId">,

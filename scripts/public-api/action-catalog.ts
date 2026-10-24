@@ -102,6 +102,12 @@ export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reaso
     reason:
       "a task's usage limit bounds what agents may spend, so only a person in the Opengeni app or the embedding product's server can change it, never an agent",
   },
+  {
+    pattern:
+      /^(PUT \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/approval|POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/approval\/grants\/:grantId\/revoke)$/,
+    reason:
+      "which secrets need the person's approval each time, and the approvals they gave, guard what agents may use, so only the person signed in to Opengeni themselves can change them, never an agent",
+  },
 ];
 
 export function actionCatalogBrowserOnlyReason(method: string, path: string): string | undefined {

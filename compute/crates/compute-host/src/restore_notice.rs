@@ -338,13 +338,16 @@ mod tests {
     /// A stand-in for a VMM's vsock socket with one guest behind it, which
     /// answers its successive connections with `answers`; `None` drops the
     /// connection unanswered, as a guest does during its transport reset.
+    /// Its directory goes with the guest when the test's runtime ends.
     fn guest(name: &str, answers: &'static [Option<&'static [u8]>]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("notice-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let socket = dir.join("vsock.sock");
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("notice-{name}-"))
+            .tempdir()
+            .unwrap();
+        let socket = dir.path().join("vsock.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move {
+            let _dir = dir;
             let mut held = Vec::new();
             let mut seeds = Vec::new();
             for answer in answers {
@@ -423,18 +426,21 @@ mod tests {
         }
     }
 
-    /// A guest that answers each `question` with one of `answers`.
+    /// A guest that answers each `question` with one of `answers`. Its
+    /// directory goes with the guest when the test's runtime ends.
     fn asked_guest(
         name: &str,
         question: &'static str,
         answers: &'static [&'static [u8]],
     ) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("{question}-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let socket = dir.join("vsock.sock");
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("{question}-{name}-"))
+            .tempdir()
+            .unwrap();
+        let socket = dir.path().join("vsock.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move {
+            let _dir = dir;
             let mut held = Vec::new();
             for answer in answers {
                 let (stream, _) = listener.accept().await.unwrap();

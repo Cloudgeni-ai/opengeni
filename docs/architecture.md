@@ -761,7 +761,10 @@ Model admission overlaps pooled metadata, preserving authority;
 transaction handles stay serial. Public connection and custom-model metadata
 share a short scope through `packages/db/src/workspace-model-catalog-inputs.ts`;
 default selection and fresh admission still read independently, outside provider
-discovery and credential I/O. Enums remain additive within major releases;
+discovery and credential I/O. The HTTP model-catalog route reuses that public
+metadata scope on pooled connections, retaining its own provider lists and fresh
+subscription readiness; see [HTTP catalog resources](http-model-catalog-resources.md).
+Enums remain additive within major releases;
 parity tests pin mirrors.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
@@ -1940,7 +1943,7 @@ behind a generic 500, so its session lookups run through
 | `packages/vaults-keeper` | `@opengeni/vaults-keeper` | Keeper Secrets Manager vault provider on the pinned official SDK (a fresh, filesystem-less SDK instance per operation, DNS-pinned requests), loaded only by dynamic import from the API and worker |
 | `packages/vaults-onepassword` | `@opengeni/vaults-onepassword` | 1Password service-account vault provider (pinned `@1password/sdk`), loaded only by dynamic import from the API and worker |
 | `packages/vaults-protonpass` | `@opengeni/vaults-protonpass` | Proton Pass vault provider that runs an operator-installed, version-pinned `pass-cli` under a scoped token in private per-token sessions, loaded only by dynamic import from the API and worker |
-| `packages/vaults-bitwarden-bridge` | `@opengeni/vaults-bitwarden-bridge` | Customer-run bridge (private, unpublished) serving the signed remote vault protocol from an already-unlocked `bw serve` on a private Unix socket |
+| `packages/vaults-bitwarden` | `@opengeni/vaults-bitwarden` | Bitwarden and Vaultwarden vault provider over the server's client API with the account's personal API key; decrypts locally, keeps no values, loaded only by dynamic import from the API and worker |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |

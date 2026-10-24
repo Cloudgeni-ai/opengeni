@@ -42,6 +42,7 @@ export type {
   ScheduledTaskRunEventOccurrence,
   SendTestEventRequest,
   SendTestEventResponse,
+  SessionAutomationWaitSummary,
   UpdateEventSourceRequest,
   WebhookEventAdapter,
 } from "@opengeni/contracts";
@@ -580,6 +581,7 @@ export type {
   WorkspaceArtifactVisibility,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactEvent,
   WorkspaceArtifactListOptions,

@@ -34,11 +34,14 @@ import {
   dateFieldFormat,
   dateFields,
   dateFieldTyping,
+  distinctElements,
   locate,
   observedRole,
   opensOnInvoke,
   parseDateValue,
   projectElements,
+  readWindowTitle,
+  TOGGLE_ROLES,
   unindexedRows,
   unindexedTextByElement,
   type DateSegment,
@@ -109,7 +112,9 @@ const INPUT_REREAD_MS = 150;
  * editor's placeholder) can be content that stays. */
 const SETTLE_MAX_MS = 5_000;
 const SETTLE_TEXT_MAX_MS = 2_500;
-const SETTLE_POLL_MS = 250;
+/** A reading of an ordinary window takes about 50 ms, so a save or load
+ * that finishes is seen within about a tenth of a second. */
+const SETTLE_POLL_MS = 100;
 
 /** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
@@ -713,7 +718,9 @@ export class CuaComputerBackend implements ComputerBackend {
           outcome.message,
         )))
       : null;
-    const reason = refusal?.message ?? outcome.message;
+    const reason =
+      refusal?.message ??
+      (outcome.cuaCode === "ambiguous" ? ambiguityForRefs(outcome.message) : outcome.message);
     const message = single
       ? `CUA stopped part way through the input: ${reason}`
       : `CUA stopped the batch at action ${action + 1}: ${reason}`;
@@ -1178,7 +1185,8 @@ export class CuaComputerBackend implements ComputerBackend {
       this.identity.platform,
       unindexedTextByElement(state.tree_markdown, this.identity.platform),
     );
-    const document = documentTitle(projected, target.native.title);
+    const shownTitle = readWindowTitle(state.elements, this.identity.platform);
+    const document = documentTitle(shownTitle, target.native.title);
     const roots = this.stabilizeRefs(targetId, document, projected);
     // The rows folded into a field are its text, typed by the person.
     const refTokens = this.tokens.get(targetId);
@@ -1239,7 +1247,13 @@ export class CuaComputerBackend implements ComputerBackend {
     const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {
       observationId: `${this.session}:${state.snapshot_id}`,
-      target: { ...target.native, bounds: state.window_bounds ?? target.native.bounds },
+      // Named as the reading shows the window: its listed title is the one it
+      // had when the windows were last listed, the page before an action.
+      target: {
+        ...target.native,
+        title: shownTitle ?? target.native.title,
+        bounds: state.window_bounds ?? target.native.bounds,
+      },
       frameId:
         [...this.frames.entries()]
           .reverse()
@@ -1654,10 +1668,18 @@ export class CuaComputerBackend implements ComputerBackend {
         // Not in the batch's observation: an earlier action may bring it up,
         // or the element shown under the other role pressed alike may be the
         // one meant, which CUA's step decides once the window has settled.
-        const named =
-          (laterInBatch || (inBatch && mayStandIn(observed.roots, action))) &&
+        // Several shown by that name: an earlier action may narrow them (a
+        // search filtering a list), and CUA's step waits for the window to
+        // settle before it reports them.
+        const unseen = error instanceof ComputerBackendError && error.code === "locator_not_found";
+        const several =
+          laterInBatch &&
           error instanceof ComputerBackendError &&
-          error.code === "locator_not_found" &&
+          error.code === "locator_ambiguous" &&
+          action.locator.kind !== "ref" &&
+          action.locator.kind !== "identifier";
+        const named =
+          (unseen ? laterInBatch || (inBatch && mayStandIn(observed.roots, action)) : several) &&
           (ACTIONS_ON_UNSEEN.has(action.action) ||
             // select or deselect means a state only on a checkbox or switch.
             ((action.action === "select" || action.action === "deselect") &&
@@ -1700,8 +1722,9 @@ export class CuaComputerBackend implements ComputerBackend {
         const findable =
           node.name !== undefined &&
           node.name === this.ownLabels.get(command.targetId)?.get(token) &&
-          observed.roots.filter((other) => other.role === node.role && other.name === node.name)
-            .length === 1;
+          distinctElements(
+            observed.roots.filter((other) => other.role === node.role && other.name === node.name),
+          ).length === 1;
         const named = findable ? namedOperation(this.identity.platform, args, action, node) : null;
         if (!named || !this.initialCapabilities.actionBatches)
           throw unsupported(
@@ -1752,8 +1775,9 @@ export class CuaComputerBackend implements ComputerBackend {
         if (
           findable &&
           !special &&
-          observed.roots.filter((other) => other.role === node.role && other.name === node.name)
-            .length > 1
+          distinctElements(
+            observed.roots.filter((other) => other.role === node.role && other.name === node.name),
+          ).length > 1
         )
           throw unsupported(
             "Several elements here have this element's role and name, and it comes after an action that names an element not yet shown, so it cannot be told apart in the same batch: act on it in its own call",
@@ -2115,6 +2139,28 @@ const NAMED_STEP_FIND_MS = 1_000;
  * of the other with that name, once the window has settled. */
 const PRESSED_ALIKE_ROLES: ReadonlySet<string> = new Set(["button", "link"]);
 
+/** CUA's ambiguity message, worded for an action here: CUA's lookup can take
+ * an `nth`, while an action here names one element of several by its ref.
+ * CUA's `nth` and element numbers are left out of each candidate the message
+ * lists; names and window titles are kept as they are. */
+export function ambiguityForRefs(message: string): string {
+  const reworded = message.replace(
+    "; add `nth` or a more exact name: ",
+    "; give a more exact name, or observe the window and act on the one meant by its ref: ",
+  );
+  for (const lead of ["act on the one meant by its ref: ", "name the role of the one meant: "]) {
+    const at = reworded.lastIndexOf(lead);
+    if (at < 0) continue;
+    const listStart = at + lead.length;
+    const candidates = reworded
+      .slice(listStart)
+      .split("; ")
+      .map((candidate) => candidate.replace(/^(?:nth \d+: )?(?:\[\d+\] )?/, ""));
+    return reworded.slice(0, listStart) + candidates.join("; ");
+  }
+  return reworded;
+}
+
 /** Whether the first action of a batch, naming a button or link its
  * observation does not show, may mean an element shown with that name under
  * the other role: its step then goes to CUA by role and name, which uses that
@@ -2233,15 +2279,6 @@ function selectsByPressing(
   );
 }
 
-/** Checkbox and switch roles as observations show them on each platform. */
-const TOGGLE_ROLES: ReadonlySet<string> = new Set([
-  "checkbox",
-  "check box",
-  "switch",
-  "toggle button",
-  "check menu item",
-]);
-
 const CHECKED_WORDS: Readonly<Record<string, boolean>> = {
   true: true,
   on: true,
@@ -2350,13 +2387,13 @@ function inProgressText(text: string): boolean {
   return words.length > 0 && words.length <= MAX_PROGRESS_WORDS;
 }
 
-/** The title of the document a reading shows: its window element's, which
- * the reading itself carries, or else the window's listed title. A window's
+/** The title of the document a reading shows: its window element's own
+ * label, which the reading itself carries, or else the window's listed title
+ * (never the page text an unlabeled window element is named by). A window's
  * listed title is the one it had when the windows were last listed, so after
  * an action that opened another page it still names the page before. */
-function documentTitle(nodes: readonly InteractionSemanticNodeValue[], listed: string): string {
-  const window = nodes.find((node) => node.role === "window" && node.name);
-  return window ? `window\u0000${window.name}` : listed;
+function documentTitle(shown: string | undefined, listed: string): string {
+  return shown !== undefined ? `window\u0000${shown}` : listed;
 }
 
 /** A button among the rows CUA leaves unindexed: on macOS a disabled button

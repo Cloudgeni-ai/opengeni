@@ -45,6 +45,11 @@ export interface WindowEvents {
   /** The window was closed by the person. */
   closed(): void;
   focused(): void;
+  /**
+   * Whether pages may use the microphone, as set on the This computer page.
+   * Absent: they may.
+   */
+  microphoneAllowed?(): boolean;
 }
 
 /**
@@ -161,8 +166,25 @@ export class MainWindow {
       this.window.on(event as "maximize", () => this.scheduleSave());
     }
     this.window.on("move", () => this.scheduleSave());
-    this.window.on("focus", () => this.events.focused());
+    this.window.on("focus", () => this.windowFocused());
     this.window.on("closed", () => this.events.closed());
+  }
+
+  private windowFocused(): void {
+    this.focusShownPage();
+    this.events.focused();
+  }
+
+  /**
+   * Give the shown page keyboard focus. When the window becomes active again
+   * (after the app was hidden, or the display slept), macOS doesn't hand focus
+   * back to the child view, so the page's first keystrokes would be lost: a
+   * held Control+Tab, for one, arrives as a lone Control release.
+   */
+  private focusShownPage(): void {
+    const contents = this.shown?.webContents;
+    if (!contents || contents.isDestroyed() || contents.isFocused()) return;
+    contents.focus();
   }
 
   /** Show the window right away; the theme background is already painted. */
@@ -179,6 +201,7 @@ export class MainWindow {
       this.maximizeOnReveal = false;
     }
     this.window.focus();
+    this.focusShownPage();
   }
 
   get accountId(): string | null {
@@ -366,11 +389,17 @@ export class MainWindow {
     contents.session.setPermissionRequestHandler((requester, permission, callback, details) => {
       const trusted = sameOrigin(details.requestingUrl, target.baseUrl) && requester === contents;
       const mediaTypes = "mediaTypes" in details ? details.mediaTypes : undefined;
-      callback(grantsPermissionRequest(trusted, permission, { mediaTypes }));
+      callback(
+        grantsPermissionRequest(trusted, permission, {
+          mediaTypes,
+          microphone: this.events.microphoneAllowed?.() ?? true,
+        }),
+      );
     });
     contents.session.setPermissionCheckHandler((_requester, permission, origin, details) =>
       grantsPermissionCheck(sameOrigin(origin, target.baseUrl), permission, {
         mediaType: details.mediaType,
+        microphone: this.events.microphoneAllowed?.() ?? true,
       }),
     );
     // USB, serial and HID devices are never offered, and a Web Bluetooth

@@ -1333,9 +1333,11 @@ function AgentScheduleForm({
             label="Message"
             error={errors.prompt}
             hint={
-              draft.events.triggers.length > 0
-                ? "Sent to the agent on each run, with the events that started it."
-                : "Sent to the agent each time it runs."
+              needsRepositories
+                ? "Sent to the agent on each run, with the events that started it. A run can only open the repositories added here, so add the ones it works on."
+                : draft.events.triggers.length > 0
+                  ? "Sent to the agent on each run, with the events that started it."
+                  : "Sent to the agent each time it runs."
             }
           >
             <ComposerField
@@ -1386,14 +1388,7 @@ function AgentScheduleForm({
             onAddSource={() => go.newSource(templateApp)}
             frequencies={SCHEDULE_FREQUENCIES}
             now={now}
-          >
-            {needsRepositories ? (
-              <p className="m-0 text-xs leading-4.5 text-fg-muted">
-                Runs can only open repositories added to the message. Add the ones this automation
-                works on.
-              </p>
-            ) : null}
-          </AutomationWhenField>
+          />
           <Field label="Name" optional error={errors.name} hint="Shown in the automations list.">
             <TextInput
               value={draft.name}

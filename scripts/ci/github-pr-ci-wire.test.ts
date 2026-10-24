@@ -408,3 +408,98 @@ test("malformed priority response is not converted to an empty admission snapsho
   ).rejects.toThrow("Malformed");
   expect(sleeps).toBe(0);
 });
+
+const priorityEnv = { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture", GITHUB_RUN_ID: "2" };
+const fakeTiming = () => {
+  const clock = { now: 0, sleeps: [] as number[] };
+  return {
+    clock,
+    timing: {
+      now: () => clock.now,
+      sleep: async (ms: number) => {
+        clock.sleeps.push(ms);
+        clock.now += ms;
+      },
+      random: () => 0.5,
+    },
+  };
+};
+
+test("a read that hits a gateway error or a dropped connection is repeated with backoff", async () => {
+  const { clock, timing } = fakeTiming();
+  const failures: (number | "network")[] = [502, "network", 504, 503];
+  let calls = 0;
+  const transport = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    calls++;
+    expect(init?.method).toBe("GET");
+    const failure = failures.shift();
+    if (failure === "network") throw new TypeError("fetch failed");
+    if (failure) return new Response("", { status: failure });
+    return Response.json({ total_count: 0, workflow_runs: [] });
+  }) as typeof fetch;
+  await runPrCiCommand("priority", priorityEnv, transport, "pr", timing);
+  // Four failed reads, then the ten inventory reads (two workflows, five statuses).
+  expect(calls).toBe(14);
+  // 2 s, 4 s, 8 s, 16 s, each with half of it as jitter (random 0.5 gives 3/4).
+  expect(clock.sleeps).toEqual([1500, 3000, 6000, 12000]);
+});
+
+test("a read that keeps failing gives up after bounded retries", async () => {
+  const { clock, timing } = fakeTiming();
+  let calls = 0;
+  const transport = (async () => {
+    calls++;
+    return new Response("", { status: 502 });
+  }) as unknown as typeof fetch;
+  await expect(runPrCiCommand("priority", priorityEnv, transport, "pr", timing)).rejects.toThrow(
+    "GitHub GET 502",
+  );
+  expect(calls).toBe(6);
+  expect(clock.sleeps).toEqual([1500, 3000, 6000, 12000, 22500]);
+});
+
+test("a read that times out is repeated", async () => {
+  const { clock, timing } = fakeTiming();
+  let calls = 0;
+  const transport = (async () => {
+    calls++;
+    if (calls === 1) throw new DOMException("The operation timed out.", "TimeoutError");
+    return Response.json({ total_count: 0, workflow_runs: [] });
+  }) as unknown as typeof fetch;
+  await runPrCiCommand("priority", priorityEnv, transport, "pr", timing);
+  expect(calls).toBe(11);
+  expect(clock.sleeps).toEqual([1500]);
+});
+
+test("a failed read is not repeated past the admission deadline", async () => {
+  const { clock, timing } = fakeTiming();
+  const deadline = 5 * 60 * 60 * 1000;
+  let calls = 0;
+  const transport = (async () => {
+    calls++;
+    // The first read starts the admission clock; the next fails a second before the deadline.
+    if (calls === 1) {
+      clock.now = deadline - 1000;
+      return Response.json({ total_count: 0, workflow_runs: [] });
+    }
+    return new Response("", { status: 504 });
+  }) as unknown as typeof fetch;
+  await expect(runPrCiCommand("priority", priorityEnv, transport, "pr", timing)).rejects.toThrow(
+    "GitHub GET 504",
+  );
+  expect(calls).toBe(2);
+  expect(clock.sleeps).toEqual([]);
+});
+
+test("a mutation that hits a gateway error is never repeated", async () => {
+  const f = await fixture();
+  const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      f.calls.push({ path: String(input), method: "POST", body: undefined, query: "" });
+      return new Response("", { status: 502 });
+    }
+    return f.transport(input, init);
+  }) as typeof fetch;
+  await expect(runPrCiCommand("superseded", f.env, transport)).rejects.toThrow("GitHub POST 502");
+  expect(f.calls.filter((c) => c.method === "POST")).toHaveLength(1);
+});

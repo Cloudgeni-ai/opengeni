@@ -746,6 +746,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_runtime_usage",
       // 0842 adds private Site/chat grants to both posture inventories.
       "site_session_access",
+      // Per-person Site sidebar pins and archive state.
+      "site_sidebar_states",
       "site_sql_databases",
       "site_sql_migrations",
       "site_sql_queries",
@@ -787,6 +789,9 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "recording_speaker_voices",
       "recording_voice_rejections",
       "recording_live_segments",
+      // 0952 secret approval rules and requests are also withheld.
+      "secret_approval_rules",
+      "secret_use_approvals",
     ].sort();
     // 0823 machine-consent tables are protected but not runtime-privileged.
     const protectedTables = [

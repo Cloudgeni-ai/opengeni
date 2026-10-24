@@ -234,13 +234,13 @@ describe("who can use a machine", () => {
     expect(text).toContain("Your 3 chats on it keep working.");
     expect(text).toContain("1 chat from someone else moves off it.");
     expect(text).toContain("1 running turn someone else started stops now.");
-    expect(text).toContain("Your Workspace schedule on it becomes Only me.");
+    expect(text).toContain("Your Workspace automation on it becomes Only me.");
     expect(text).toContain("The shared one stays shared; only you can run it on this machine.");
-    expect(text).toContain("1 schedule pauses.");
+    expect(text).toContain("1 automation pauses.");
     expect(text).toContain("1 person gets a notice");
     expect(text).toContain("To undo, share it with the workspace again.");
     // The itemized list is collapsed behind one row.
-    expect(text).toContain("Chats and schedules affected");
+    expect(text).toContain("Chats and automations affected");
     expect(text).toContain("1 item");
     // A member can't pick another owner.
     expect(text).not.toContain("As an admin you can make it someone else's.");
@@ -307,8 +307,8 @@ describe("who can use a machine", () => {
     ).toEqual([
       "Sam Example's 2 chats on it keep working.",
       "1 chat from someone else moves off it. Its history stays; its next turn needs another machine.",
-      "Sam Example's Workspace schedule on it becomes Only me.",
-      "1 schedule pauses. Resume it after choosing another machine.",
+      "Sam Example's Workspace automation on it becomes Only me.",
+      "1 automation pauses. Resume it after choosing another machine.",
       "1 person gets a notice in their inbox saying what changed.",
     ]);
   });

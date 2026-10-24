@@ -68,6 +68,7 @@ import {
   canSwitchSchedule,
   hasMenuItems,
   inAppClick,
+  runsOnEventsOnly,
   schedulePath,
   schedulePermissions,
   scheduleSwitchedOn,
@@ -494,9 +495,11 @@ export function SchedulesListPage({
                       workspaceId,
                     })}
                     description={
-                      narrow ? (
+                      // A phone shows one fact: the next run, or the events it
+                      // waits for, or why it won't run.
+                      narrow && !runsOnEventsOnly(task, clock) ? (
                         <>
-                          {nextRunOf(task, clock) ? "Next " : null}
+                          {nextRunOf(task, clock) ? "Next run: " : null}
                           <NextRunValue task={task} now={clock} />
                         </>
                       ) : (

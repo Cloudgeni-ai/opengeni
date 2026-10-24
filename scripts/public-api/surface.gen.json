@@ -1740,6 +1740,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -1767,6 +1768,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary",
@@ -1796,6 +1798,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary",
@@ -3595,6 +3598,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -3619,6 +3623,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -3704,6 +3709,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -3728,6 +3734,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -3776,6 +3783,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -3800,6 +3808,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -3954,6 +3963,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -6504,6 +6514,17 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/current",
+      "sdk": [
+        "OpenGeniClient.getWorkspaceArtifactCurrent"
+      ],
+      "request": [],
+      "response": [
+        "WorkspaceArtifactCurrentResponse"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data",
       "sdk": [
         "OpenGeniClient.getSiteData"
@@ -8548,6 +8569,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -8750,6 +8772,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9520,6 +9543,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9544,6 +9568,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9568,6 +9593,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9592,6 +9618,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9616,6 +9643,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9640,6 +9668,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9664,6 +9693,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9688,6 +9718,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9712,6 +9743,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9736,6 +9768,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9760,6 +9793,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9947,6 +9981,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -9976,6 +10011,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -10023,6 +10059,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -10047,6 +10084,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -10072,6 +10110,7 @@
         "SessionSecretsView",
         "VaultFieldVersionMeta",
         "VaultItem",
+        "VaultItemApproval",
         "VaultItemSummary",
         "VaultProviderConnectionSummary",
         "VaultSummary"
@@ -15352,6 +15391,7 @@
         "$.archived": "boolean!",
         "$.archivedAt": "string! null",
         "$.attentionVersion": "integer!",
+        "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.bundledSkillIds": "unknown?",
         "$.channelId": "string! null",
@@ -25225,6 +25265,25 @@
         "$|kind=personal.workspaceId": "string! null"
       }
     },
+    "SecretUseGrant": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.decidedAt": "string!",
+        "$.decidedBySubjectId": "string! null",
+        "$.destination": "string! null",
+        "$.expiresAt": "string! null",
+        "$.fields": "array!",
+        "$.fields[]": "string",
+        "$.id": "string!",
+        "$.scope": "enum!=[\"\\\"once\\\"\",\"\\\"session\\\"\",\"\\\"window\\\"\"]",
+        "$.sessionId": "string!",
+        "$.surface": "string!",
+        "$.toolName": "string!"
+      }
+    },
     "SendTestEventRequest": {
       "io": [
         "input"
@@ -25276,6 +25335,7 @@
         "$.archived": "boolean!",
         "$.archivedAt": "string! null",
         "$.attentionVersion": "integer!",
+        "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.bundledSkillIds": "unknown?",
         "$.channelId": "string! null",
@@ -25417,6 +25477,22 @@
         "$.reason": "enum!=[\"\\\"database_claim_rejected\\\"\",\"\\\"initiator_membership_required\\\"\",\"\\\"personal_resource_grant_required\\\"\"]",
         "$.retryPolicy": "const!=[\"\\\"explicit_recheck\\\"\"]",
         "$.sqlState": "string! null"
+      }
+    },
+    "SessionAutomationWaitSummary": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.automations": "integer!",
+        "$.event": "object! null",
+        "$.event.eventTypes": "array!",
+        "$.event.eventTypes[]": "string",
+        "$.event.source": "object! null",
+        "$.event.source.kind": "ref(EventSourceKind)!",
+        "$.event.source.name": "string!",
+        "$.nextRunAt": "string! null"
       }
     },
     "SessionBackgroundCommand": {
@@ -25865,6 +25941,7 @@
         "$.children[].children": "array!",
         "$.children[].children[]": "ref(__schema0)",
         "$.children[].session": "ref(Session)!",
+        "$.sessionAutomationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.sessionHasSchedules": "boolean?",
         "$.sessionHasUpcomingSchedules": "boolean?",
         "$.sessionWaitingForEvents": "boolean?",
@@ -25884,6 +25961,7 @@
         "$.archived": "boolean!",
         "$.archivedAt": "string! null",
         "$.attentionVersion": "integer!",
+        "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.channelId": "string! null",
         "$.createdAt": "string!",
@@ -30199,6 +30277,20 @@
         "$.websites[]": "string"
       }
     },
+    "VaultItemApproval": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.canChange": "boolean!",
+        "$.fields": "array!",
+        "$.fields[]": "string",
+        "$.grants": "array!",
+        "$.grants[]": "ref(SecretUseGrant)",
+        "$.item": "boolean!"
+      }
+    },
     "VaultItemField": {
       "io": [
         "output"
@@ -30885,6 +30977,15 @@
         "$.requestedTools[]": "ref(AttemptToolIdentity)",
         "$.source": "ref(WorkspaceArtifactSourceBundle)!",
         "$.versionId": "string!"
+      }
+    },
+    "WorkspaceArtifactCurrentResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.artifact": "ref(WorkspaceArtifact)!"
       }
     },
     "WorkspaceArtifactDetailResponse": {
@@ -33566,6 +33667,8 @@
       "ScheduledTaskToolPolicy": "type",
       "ScheduledTaskTriggerType": "type",
       "ScopedKnowledgeScope": "type",
+      "SecretUseGrant": "type",
+      "SecretUseGrantScope": "type",
       "SendMessageInput": "type",
       "SendTestEventRequest": "type",
       "SendTestEventResponse": "type",
@@ -33587,6 +33690,7 @@
       "SessionAdminAccess": "type",
       "SessionAdmissionBlock": "type",
       "SessionApprovalRequest": "type",
+      "SessionAutomationWaitSummary": "type",
       "SessionBackgroundCommand": "type",
       "SessionBackgroundCommandActivity": "type",
       "SessionBackgroundCommandListResponse": "type",
@@ -33694,6 +33798,7 @@
       "SetMemberAllowanceRequest": "type",
       "SetSessionModelAccountChoiceRequest": "type",
       "SetSessionModelAccountChoiceResponse": "type",
+      "SetVaultItemApprovalRequest": "type",
       "SetWorkspaceAllowanceRequest": "type",
       "SetWorkspaceArtifactStatusRequest": "type",
       "signOpenGeniPayload": "value",
@@ -34013,6 +34118,7 @@
       "VaultFieldKind": "type",
       "VaultFieldVersionMeta": "type",
       "VaultItem": "type",
+      "VaultItemApproval": "type",
       "VaultItemField": "type",
       "VaultItemReferences": "type",
       "VaultItemSummary": "type",
@@ -34067,6 +34173,7 @@
       "WorkspaceAllowanceUsage": "type",
       "WorkspaceArtifact": "type",
       "WorkspaceArtifactContentResponse": "type",
+      "WorkspaceArtifactCurrentResponse": "type",
       "WorkspaceArtifactDetailResponse": "type",
       "WorkspaceArtifactEvent": "type",
       "WorkspaceArtifactListOptions": "type",
@@ -35203,6 +35310,11 @@
       "SystemAudioKind": "type",
       "SystemAudioSource": "type"
     },
+    "@opengeni/sdk/secret-use-approval": {
+      "SECRET_USE_APPROVAL_QUESTION_PREFIX": "value",
+      "secretUseApprovalIdFromQuestionId": "value",
+      "secretUseApprovalQuestionId": "value"
+    },
     "@opengeni/sdk/session-history-import": {
       "appendArchivedSessionEvents": "value",
       "AppendArchivedSessionEventsRequest": "type",
@@ -35945,6 +36057,8 @@
       "SecretsUi": "type",
       "SecretsUiProvider": "value",
       "SecretTextTokenLike": "type",
+      "SecretUseGrant": "type",
+      "SecretUseGrantScope": "type",
       "SeriesPoint": "type",
       "SESSION_EVENT_BROWSER_MAX_BYTES": "value",
       "SESSION_EVENT_BROWSER_MAX_COUNT": "value",
@@ -35997,6 +36111,7 @@
       "SessionStatusProps": "type",
       "SessionUsageLimitStop": "type",
       "setStartupDetails": "value",
+      "SetVaultItemApprovalRequest": "type",
       "SharedMachineDisclosure": "value",
       "SharedMachineDisclosureProps": "type",
       "shouldRecallQueuedOnKey": "value",
@@ -36229,6 +36344,7 @@
       "VaultFieldKind": "type",
       "VaultFieldVersionMeta": "type",
       "VaultItem": "type",
+      "VaultItemApproval": "type",
       "VaultItemField": "type",
       "VaultItemReferences": "type",
       "VaultItemSummary": "type",
@@ -36413,6 +36529,7 @@
       "SessionArtifactViewer": "value",
       "SessionArtifactViewerLabels": "type",
       "SessionArtifactViewerProps": "type",
+      "SiteLiveState": "type",
       "SiteSnapshotClient": "type",
       "SiteToolBridgeFactory": "type",
       "SiteToolScope": "type",
@@ -36532,6 +36649,7 @@
       "automationListensForEvents": "value",
       "automationName": "value",
       "automationNextRun": "value",
+      "automationRunErrorText": "value",
       "automationRunEventsLabel": "value",
       "automationRunStatusLabel": "value",
       "automationRunTriggerLabel": "value",
@@ -36641,6 +36759,8 @@
       "sessionAutomationWait": "value",
       "SessionAutomationWait": "type",
       "sessionAutomationWaitLabel": "value",
+      "sessionAutomationWaitWords": "value",
+      "SessionAutomationWaitWords": "type",
       "sortAutomations": "value",
       "useEventTypes": "value",
       "validateAutomationDraft": "value",
@@ -39092,6 +39212,7 @@
       "getWorkspace",
       "getWorkspaceArtifact",
       "getWorkspaceArtifactContent",
+      "getWorkspaceArtifactCurrent",
       "getWorkspaceArtifactHtml",
       "getWorkspaceCapture",
       "getWorkspaceCaptureFile",
@@ -39824,6 +39945,7 @@
       "getVideoGenerationSettings",
       "getWorkspace",
       "getWorkspaceArtifact",
+      "getWorkspaceArtifactCurrent",
       "getWorkspaceArtifactHtml",
       "getWorkspaceCapture",
       "getWorkspaceCaptureFile",
@@ -40577,6 +40699,7 @@
       "getWorkspaceAllowanceState",
       "getWorkspaceArtifact",
       "getWorkspaceArtifactContent",
+      "getWorkspaceArtifactCurrent",
       "getWorkspaceArtifactHtml",
       "getWorkspaceCapture",
       "getWorkspaceCaptureFile",
@@ -42514,6 +42637,9 @@
       ],
       "getWorkspaceArtifactContent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactContentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getWorkspaceArtifactCurrent": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactCurrentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getWorkspaceArtifactHtml": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -44996,6 +45122,9 @@
       "getWorkspaceArtifactContent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactContentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getWorkspaceArtifactCurrent": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactCurrentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getWorkspaceArtifactHtml": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -47273,6 +47402,9 @@
       ],
       "getWorkspaceArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactDetailResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getWorkspaceArtifactCurrent": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactCurrentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getWorkspaceArtifactHtml": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -49733,6 +49865,9 @@
       "getWorkspaceArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactDetailResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getWorkspaceArtifactCurrent": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactCurrentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getWorkspaceArtifactHtml": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -52000,6 +52135,9 @@
       ],
       "getWorkspaceArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactDetailResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getWorkspaceArtifactCurrent": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactCurrentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getWorkspaceArtifactHtml": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

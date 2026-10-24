@@ -119,8 +119,41 @@ export class CurrentBrowserTab {
   }
 }
 
-/** An element ref passed where a locator is expected, as a bare string. */
-export function expandRefShorthand(action: unknown): unknown {
+/** `role:name` as a bare locator string: a role word, a colon, and the
+ * element's name. Refs are letters and hex digits, never a colon. */
+// Roles can be several words ("push button" in Linux readings); no ref has a
+// space, and none starts with a letters-only word and a colon.
+const ROLE_SHORTHAND = /^([A-Za-z][A-Za-z _-]*):(.*\S.*)$/su;
+
+/** Words before the colon that name another locator kind rather than a role,
+ * for surfaces where they are not also roles: a page has no `label` or
+ * `placeholder` role, but a Linux desktop reading does have `label`. */
+export type LocatorKindWords = Readonly<Record<string, "label" | "placeholder">>;
+
+/** The page locator kinds a model may name with `kind:text`. */
+export const BROWSER_LOCATOR_KIND_WORDS: LocatorKindWords = {
+  label: "label",
+  placeholder: "placeholder",
+};
+
+/** A bare string passed where a locator is expected: `role:name` names the
+ * element with that role and exact name, anything else is an element ref. */
+function expandLocatorString(value: string, kindWords: LocatorKindWords): Record<string, unknown> {
+  const role = ROLE_SHORTHAND.exec(value);
+  if (!role) return { kind: "ref", ref: value };
+  const word = role[1]!.trim();
+  const name = role[2]!.trim();
+  const kind = Object.hasOwn(kindWords, word.toLowerCase())
+    ? kindWords[word.toLowerCase()]
+    : undefined;
+  return kind
+    ? { kind, text: name }
+    : { kind: "role", role: word.toLowerCase(), name, exact: true };
+}
+
+/** Locators passed as bare strings (an element ref, or `role:name`),
+ * expanded to locator objects, in an action and its batch items. */
+export function expandRefShorthand(action: unknown, kindWords: LocatorKindWords = {}): unknown {
   if (!action || typeof action !== "object" || Array.isArray(action)) return action;
   const record = action as Record<string, unknown>;
   let expanded: Record<string, unknown> | null = null;
@@ -128,12 +161,12 @@ export function expandRefShorthand(action: unknown): unknown {
     const value = record[field];
     if (typeof value === "string") {
       expanded ??= { ...record };
-      expanded[field] = { kind: "ref", ref: value };
+      expanded[field] = expandLocatorString(value, kindWords);
     }
   }
   if (Array.isArray(record.actions)) {
     expanded ??= { ...record };
-    expanded.actions = record.actions.map(expandRefShorthand);
+    expanded.actions = record.actions.map((item) => expandRefShorthand(item, kindWords));
   }
   return expanded ?? action;
 }

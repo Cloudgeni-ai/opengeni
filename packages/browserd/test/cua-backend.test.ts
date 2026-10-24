@@ -7,7 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
-import { CuaComputerBackend, namedOperation } from "../src/cua/backend";
+import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
 import type {
@@ -322,6 +322,71 @@ describe("CUA desktop boundary", () => {
       expect(fixture.selectAllPressed).toBe(true);
     } finally {
       await backend.close();
+    }
+  });
+
+  test("on Linux and Windows set_value true or false reads a checkbox's selected state", async () => {
+    const cases: ReadonlyArray<readonly ["linux" | "windows", string, typeof Fixture]> = [
+      ["linux", "check box", LinuxPermissionsFixture],
+      ["windows", "CheckBox", WindowsFixture],
+    ];
+    for (const [platform, role, Base] of cases) {
+      class SelectedFixture extends Base {
+        checked = false;
+        presses = 0;
+        async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+          if (name !== "get_window_state" && args.element_token === `s${this.snapshot}:2`) {
+            this.presses += 1;
+            this.checked = !this.checked;
+          }
+          const response = await super.callTool(name, argumentsJson);
+          if (name !== "get_window_state" || !response.structuredJson) return response;
+          const data = JSON.parse(response.structuredJson);
+          if (data.elements)
+            data.elements.push({
+              element_index: 2,
+              element_token: `s${this.snapshot}:2`,
+              role,
+              label: "Reminders",
+              selected: this.checked,
+              actions: platform === "linux" ? ["click"] : ["invoke", "toggle"],
+            });
+          response.structuredJson = JSON.stringify(data);
+          return response;
+        }
+      }
+      const fixture = new SelectedFixture();
+      const backend = await CuaComputerBackend.open(fixture, platform);
+      const clicks = () => ({ length: fixture.presses });
+      const target = (await backend.targets())[0]!;
+      const setTo = async (value: boolean) => {
+        const observation = await backend.observe(target.id);
+        const node = observation.roots.find((root) => root.name === "Reminders")!;
+        expect(node.value).toBe(fixture.checked ? "1" : "0");
+        return await backend.dispatch({
+          ...command(observation),
+          action: {
+            type: "semantic",
+            action: "set_value",
+            locator: { kind: "ref", ref: node.ref },
+            value,
+          },
+        });
+      };
+      try {
+        await setTo(true);
+        expect(fixture.checked).toBe(true);
+        expect(clicks()).toHaveLength(1);
+        // Already checked: nothing is pressed.
+        await setTo(true);
+        expect(clicks()).toHaveLength(1);
+        await setTo(false);
+        expect(fixture.checked).toBe(false);
+        expect(clicks()).toHaveLength(2);
+      } finally {
+        await backend.close();
+      }
     }
   });
 
@@ -1037,11 +1102,15 @@ describe("CUA desktop boundary", () => {
     try {
       const target = (await backend.targets())[0]!;
       const billing = await backend.observe(target.id);
+      // The observation names the window by the page its reading shows.
+      expect(billing.target.title).toBe("Billing - Northwind Admin");
       // An action opened another page: the window still lists the old title
       // until the windows are listed again, but the reading shows the new one.
       fixture.windowName = "Accounts - Northwind Admin";
       const opened = await backend.observe(target.id);
       expect(opened.roots[0]!.ref).not.toBe(billing.roots[0]!.ref);
+      expect(opened.target.title).toBe("Accounts - Northwind Admin");
+      expect((await backend.targets())[0]!.title).toBe("Fixture");
       fixture.title = "Accounts - Northwind Admin";
       await backend.targets();
       const relisted = await backend.observe(target.id);
@@ -1058,6 +1127,22 @@ describe("CUA desktop boundary", () => {
       expect(
         [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
       ).toMatchObject({ element_token: `s${latest}:0` });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("an observation's title is its window element's own label, clipped, or else the listed title", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      fixture.windowName = "";
+      expect((await backend.observe(target.id)).target.title).toBe("Fixture");
+      fixture.windowName = "Report ".repeat(1_000);
+      const long = await backend.observe(target.id);
+      expect(long.target.title).toHaveLength(4_096);
+      expect(long.target.title.startsWith("Report Report")).toBe(true);
     } finally {
       await backend.close();
     }
@@ -2937,6 +3022,10 @@ describe("CUA desktop boundary", () => {
             role: "AXCheckBox",
             label: "Reminders",
             value: "0",
+            // Two checkboxes, each in its own place.
+            ...(data.elements[0].frame
+              ? { frame: { ...data.elements[0].frame, y: data.elements[0].frame.y + index * 30 } }
+              : {}),
           });
           if (data.elements) data.elements.push(checkbox(2), ...(this.twin ? [checkbox(3)] : []));
           response.structuredJson = JSON.stringify(data);
@@ -3400,6 +3489,140 @@ describe("CUA desktop boundary", () => {
         } finally {
           await second.backend.close();
         }
+      });
+
+      test("a later action naming one of several shown goes to CUA by role and name", async () => {
+        const fixture = new LinkFixture();
+        fixture.links = ["Juniper Printing", "Juniper Printing"];
+        const { backend, observation } = await open(fixture);
+        try {
+          // An earlier action (a search typed a moment ago) may narrow them:
+          // CUA's step waits for the window to settle before it decides.
+          await backend.dispatch(
+            asBatch(named(observation, "button", "Apply"), {
+              type: "semantic",
+              locator: { kind: "role", role: "link", name: "Juniper Printing", exact: true },
+              action: "invoke",
+            } as ComputerBackendActionCommand["action"]),
+          );
+          const steps = fixture.calls.find((call) => call.name === "run_steps")!.args.steps as {
+            args: Record<string, unknown>;
+          }[];
+          expect(steps[1]!.args.element_token).toBeUndefined();
+          expect(steps[1]!.args).toMatchObject({
+            role: "link",
+            name: "Juniper Printing",
+            exact: true,
+          });
+        } finally {
+          await backend.close();
+        }
+        // The first action has nothing before it to narrow them.
+        const first = new LinkFixture();
+        first.links = ["Juniper Printing", "Juniper Printing"];
+        const opened = await open(first);
+        try {
+          const failure = await opened.backend
+            .dispatch(asBatch(named(opened.observation, "link", "Juniper Printing"), enter))
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_ambiguous", dispatched: false });
+          expect(first.ran).toBe(false);
+        } finally {
+          await opened.backend.close();
+        }
+        // Still several once settled: nothing was pressed, and the message
+        // points at refs, as an action here has no `nth`.
+        const settled = new LinkFixture();
+        settled.links = ["Juniper Printing", "Juniper Printing"];
+        settled.reply = {
+          ok: false,
+          total: 2,
+          executed: 2,
+          failed_step: 1,
+          steps: [
+            { index: 0, ok: true, message: "ok" },
+            {
+              index: 1,
+              ok: false,
+              code: "ambiguous",
+              phase: "find",
+              message:
+                '2 elements match link "Juniper Printing" in window 7; add `nth` or a more exact name: nth 0: [15] AXLink "Juniper Printing"; nth 1: [20] AXLink "Juniper Printing"',
+            },
+          ],
+        };
+        const third = await open(settled);
+        try {
+          const failure = await third.backend
+            .dispatch(
+              asBatch(named(third.observation, "button", "Apply"), {
+                type: "semantic",
+                locator: { kind: "role", role: "link", name: "Juniper Printing", exact: true },
+                action: "invoke",
+              } as ComputerBackendActionCommand["action"]),
+            )
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_ambiguous" });
+          const message = (failure as Error).message;
+          expect(message).toContain(
+            'give a more exact name, or observe the window and act on the one meant by its ref: AXLink "Juniper Printing"; AXLink "Juniper Printing"',
+          );
+          expect(message).not.toContain("nth");
+        } finally {
+          await third.backend.close();
+        }
+
+        // Elements of other roles with that name are listed without CUA's
+        // element numbers too.
+        const otherRoles = new LinkFixture();
+        otherRoles.links = ["Juniper Printing", "Juniper Printing"];
+        otherRoles.reply = {
+          ok: false,
+          total: 2,
+          executed: 2,
+          failed_step: 1,
+          steps: [
+            { index: 0, ok: true, message: "ok" },
+            {
+              index: 1,
+              ok: false,
+              code: "ambiguous",
+              phase: "find",
+              message:
+                'no link "Juniper Printing" in window 7, and 2 elements of other roles have that exact name; name the role of the one meant: [15] AXButton "Juniper Printing"; [20] AXStaticText "Juniper Printing"',
+            },
+          ],
+        };
+        const fourth = await open(otherRoles);
+        try {
+          const failure = await fourth.backend
+            .dispatch(
+              asBatch(named(fourth.observation, "button", "Apply"), {
+                type: "semantic",
+                locator: { kind: "role", role: "link", name: "Juniper Printing", exact: true },
+                action: "invoke",
+              } as ComputerBackendActionCommand["action"]),
+            )
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_ambiguous" });
+          const message = (failure as Error).message;
+          expect(message).toContain(
+            'name the role of the one meant: AXButton "Juniper Printing"; AXStaticText "Juniper Printing"',
+          );
+          expect(message).not.toMatch(/\[\d+\]/);
+        } finally {
+          await fourth.backend.close();
+        }
+
+        // A name or window title that itself reads like a candidate number
+        // is kept as it is.
+        expect(
+          ambiguityForRefs(
+            '2 elements match button "Tab: [1] new" in window 7 "Mail: [3] unread"; add `nth` or a more exact name: nth 0: [15] AXButton "Tab: [1] new"; nth 1: [20] AXButton "Tab: [1] new" (waited 1503 ms)',
+          ),
+        ).toBe(
+          '2 elements match button "Tab: [1] new" in window 7 "Mail: [3] unread"; give a more exact name, or observe the window and act on the one meant by its ref: AXButton "Tab: [1] new"; AXButton "Tab: [1] new" (waited 1503 ms)',
+        );
       });
 
       test("the receipt names each stand-in, without a typed secret", async () => {

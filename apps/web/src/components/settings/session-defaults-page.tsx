@@ -167,7 +167,7 @@ export function SessionDefaultsPage({
     if (context.ownsWorkspaceInvocation(workspaceId, invocation)) {
       await context.refreshWorkspace(workspaceId);
       toast.success("Agent defaults saved", {
-        description: "New chats and schedules start with them.",
+        description: "New chats and automations start with them.",
       });
     }
     return true;
@@ -178,7 +178,7 @@ export function SessionDefaultsPage({
       backLabel="General"
       onClose={onClose}
       title="Agent defaults"
-      description="New chats and schedules in this workspace start with these. Running chats keep what they started with."
+      description="New chats and automations in this workspace start with these. Running chats keep what they started with."
       loading={!draft}
       loadingFields={4}
       submitLabel="Save"

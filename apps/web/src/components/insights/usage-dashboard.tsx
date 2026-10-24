@@ -348,7 +348,7 @@ const FILTER_FIELD_LABEL: Record<UsageFilterField, string> = {
   projectId: "Project",
   person: "Person",
   rootSessionId: "Session",
-  scheduleId: "Schedule",
+  scheduleId: "Automation",
   source: "Source",
 };
 

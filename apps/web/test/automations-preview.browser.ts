@@ -80,7 +80,10 @@ const pages: Array<{
     check: async (page) => {
       await expect(page.getByRole("heading", { name: "Automations" })).toBeVisible();
       await expect(page.getByRole("switch")).toHaveCount(6);
-      await expect(visible(page, "On events")).toBeVisible();
+      // Wide lists say "On events" in Next run; a phone names the events instead.
+      await expect(
+        visible(page, page.viewportSize()!.width < 640 ? "deploy.finished from" : "On events"),
+      ).toBeVisible();
       // A finished run-once automation reads Off, and turning it on re-arms it.
       const finished = page.getByRole("switch", { name: "Answer the first order from Norway" });
       await expect(finished).toHaveAttribute("aria-checked", "false");
@@ -103,6 +106,7 @@ const pages: Array<{
       await expect(
         page.getByText("From Acme on GitHub, only when 2 conditions hold"),
       ).toBeVisible();
+      await expect(page.getByText("Starts a new chat", { exact: true })).toBeVisible();
     },
   },
   {
@@ -120,6 +124,8 @@ const pages: Array<{
       await expect(page.getByRole("heading", { name: "New automation" })).toBeVisible();
       await expect(page.getByText("pull_request.opened").first()).toBeVisible();
       await expect(page.getByLabel("Field for condition 1")).toHaveValue("data.pull_request.draft");
+      // A GitHub trigger without repositories says so where they are added: the message.
+      await expect(page.getByText(/A run can only open the repositories added here/)).toBeVisible();
     },
   },
   {

@@ -32,6 +32,15 @@ const roles: Record<string, string> = {
 
 const MARKDOWN_ROW = /^(\s*)- (?:\[(\d+)\] )?(\S+)(.*)$/u;
 
+/** Checkbox and switch roles as observations show them on each platform. */
+export const TOGGLE_ROLES: ReadonlySet<string> = new Set([
+  "checkbox",
+  "check box",
+  "switch",
+  "toggle button",
+  "check menu item",
+]);
+
 /** The role an observation shows for an element CUA names by its own role. */
 export function observedRole(role: string): string {
   return roles[role] ?? role;
@@ -221,6 +230,23 @@ function repeatsParentLabel(
  */
 function withoutLiveMemoryUsage(label: string): string {
   return label.replace(/ - (?:High )?[Mm]emory usage - [\d.,]+\s?[KMGT]?B(?= - |$)/u, "");
+}
+
+/**
+ * The title a reading's window element carries: its own label, not the page
+ * text an unlabeled element is named by, and clipped to a target title's
+ * bounds. Undefined when the reading has no labeled window element.
+ */
+export function readWindowTitle(
+  elements: readonly CuaElement[],
+  platform: Platform,
+): string | undefined {
+  const window = elements.find(
+    (element) => observedRole(element.role) === "window" && element.label?.trim(),
+  );
+  if (!window?.label) return undefined;
+  const title = platform === "macos" ? withoutLiveMemoryUsage(window.label) : window.label;
+  return title.trim() ? title.slice(0, 4_096) : undefined;
 }
 
 /** One part of a web page's date or time field, in the order the page shows
@@ -533,19 +559,28 @@ export function projectElements(
     // a whole value: Chrome keeps the field's own value at the one the page
     // gave it first (or none) while typing changes the parts.
     const typed = typedFields.get(element.element_index);
-    const value =
+    const role = (numberField ? "spinbutton" : (roles[element.role] ?? element.role)).slice(0, 256);
+    const fieldValue =
       (typed &&
         dateFieldValueFromParts(
           typed.segments,
           typed.parts.map((part) => byIndex.get(part)?.value),
         )) ??
       element.value;
+    // Linux and Windows report whether a checkbox or switch is on only as
+    // CUA's `selected`; it reads as its value, "1" or "0", as on macOS.
+    const value =
+      fieldValue === undefined && typeof element.selected === "boolean" && TOGGLE_ROLES.has(role)
+        ? element.selected
+          ? "1"
+          : "0"
+        : fieldValue;
     return {
       ref: element.element_token ?? `read-only:${element.element_index}`,
       // Desktop labels and values can be whole documents (an editor's text
       // area). Clip to the semantic-node contract so one element cannot make
       // the entire observation invalid.
-      role: (numberField ? "spinbutton" : (roles[element.role] ?? element.role)).slice(0, 256),
+      role,
       ...(label
         ? { name: label.slice(0, 8_192) }
         : containedText && !protectedReason
@@ -576,13 +611,35 @@ export function projectElements(
   });
 }
 
+/** The elements of a reading with each listed once. macOS lists a table's
+ * cells again under each AXColumn, as new elements with the same role, label
+ * and bounds; the first of them stands for the element. */
+export function distinctElements<
+  Node extends Pick<InteractionSemanticNodeValue, "role" | "name" | "bounds">,
+>(nodes: readonly Node[]): Node[] {
+  const places = new Set<string>();
+  return nodes.filter((node) => {
+    if (!node.bounds || (node.bounds.width === 0 && node.bounds.height === 0)) return true;
+    const { x, y, width, height } = node.bounds;
+    const place = JSON.stringify([node.role, node.name ?? null, x, y, width, height]);
+    if (places.has(place)) return false;
+    places.add(place);
+    return true;
+  });
+}
+
 export function locate(
   nodes: InteractionSemanticNodeValue[],
   locator: ComputerLocator,
 ): InteractionSemanticNodeValue {
-  const matches = nodes.filter((node) => {
+  const found = nodes.filter((node) => {
+    // An exact name is the whole name, compared the way names are shown:
+    // trimmed, runs of whitespace as one space, and in any case.
+    const normalized = (value: string) => value.replace(/\s+/gu, " ").trim().toLowerCase();
     const match = (value: string | undefined, query: string, exact = false) =>
-      exact ? value === query : (value ?? "").toLowerCase().includes(query.toLowerCase());
+      exact
+        ? value !== undefined && normalized(value) === normalized(query)
+        : (value ?? "").toLowerCase().includes(query.toLowerCase());
     switch (locator.kind) {
       case "ref":
         return node.ref === locator.ref;
@@ -602,6 +659,7 @@ export function locate(
         return node.identifier === locator.value;
     }
   });
+  const matches = distinctElements(found);
   if (matches.length !== 1)
     throw new ComputerBackendError(
       matches.length ? "locator_ambiguous" : "locator_not_found",

@@ -17,6 +17,7 @@ import {
   screen,
   session,
   shell,
+  systemPreferences,
   type CookiesSetDetails,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
@@ -60,6 +61,7 @@ import {
 } from "../contract";
 import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
 import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
+import { ComputerCapabilities, ComputerSettingsStore } from "./computer-capabilities";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
@@ -172,6 +174,8 @@ export class DesktopShell {
   private readonly systemAudio: SystemAudioCaptures;
   /** Pages whose system audio captures end when they navigate or close. */
   private readonly systemAudioPages = new WeakSet<WebContents>();
+  /** What Opengeni may do on this computer: the This computer settings page. */
+  private readonly capabilities: ComputerCapabilities;
   private tray: AppTray | null = null;
   private updates: AppUpdates | null = null;
   private quitting = false;
@@ -242,6 +246,10 @@ export class DesktopShell {
       env: process.env,
       agentSigningKey: config.agentSigningKey,
       ...(config.browserExtensionIds ? { browserExtensionIds: config.browserExtensionIds } : {}),
+      agentSwitches: () => {
+        const { screenControl, browserExtension } = this.capabilities.current;
+        return { screenControl, browserExtension };
+      },
       ...(config.agentPath ? { agentPath: config.agentPath } : {}),
       ...(config.agentConfigDir ? { agentConfigDir: config.agentConfigDir } : {}),
       ...(config.adoptStandaloneAgent !== undefined
@@ -316,6 +324,29 @@ export class DesktopShell {
         this.broadcast(DESKTOP_IPC.computerChanged);
         void this.refreshTray();
       },
+    });
+    this.capabilities = new ComputerCapabilities({
+      platform: process.platform,
+      store: new ComputerSettingsStore(app.getPath("userData")),
+      microphoneStatus: () =>
+        process.platform === "darwin" || process.platform === "win32"
+          ? systemPreferences.getMediaAccessStatus("microphone")
+          : null,
+      askForMicrophone: () => systemPreferences.askForMediaAccess("microphone"),
+      openSystemSettings: (url) => void shell.openExternal(url),
+      agentSwitchesChanged: () => this.computer.agentSwitchesChanged(),
+      unavailable: () =>
+        this.config.thisComputer && this.computer.runsOwnAgent && !this.computer.anotherAgentServes
+          ? []
+          : ["screenControl", "browserExtension"],
+      unavailableReason: () =>
+        this.computer.anotherAgentServes
+          ? "Another Opengeni agent is serving this computer."
+          : null,
+      screenControlSwitch: () => this.computer.screenControlSwitchSupported(),
+      screenControlConnected: () => this.computer.screenControlConnected,
+      onChange: () => this.broadcast(DESKTOP_IPC.capabilitiesChanged),
+      log: (message, caught) => console.warn(message, caught),
     });
     const appShotStore = new AppShotSettingsStore(app.getPath("userData"), process.platform);
     this.systemAudio = new SystemAudioCaptures({
@@ -594,6 +625,7 @@ export class DesktopShell {
         this.failedLoads.clear();
         this.clearUnreachable();
       },
+      microphoneAllowed: () => this.capabilities.current.microphone,
       focused: () => {
         this.computer.invalidate();
         void this.inbox.poll();
@@ -1197,6 +1229,9 @@ export class DesktopShell {
       this.updates?.install();
     });
     handle(DESKTOP_IPC.appShotsUpdate, (_account, change) => this.appShots.update(change));
+    handle(DESKTOP_IPC.capabilitiesStatus, () => this.capabilities.status());
+    handle(DESKTOP_IPC.capabilitiesUpdate, (_account, change) => this.capabilities.update(change));
+    handle(DESKTOP_IPC.capabilitiesRequestMicrophone, () => this.capabilities.requestMicrophone());
     handle(DESKTOP_IPC.appShotsRequestPermission, async (_account, id) => {
       if (id === "screenRecording" || id === "accessibility") {
         await this.appShots.requestPermission(id as DesktopAppShotPermissionId);

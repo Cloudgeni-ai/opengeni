@@ -9,6 +9,7 @@ import {
   automationDraftFrom,
   automationName,
   automationNextRun,
+  automationRunErrorText,
   automationRunEventsLabel,
   automationScheduleSpec,
   automationUpdateRequest,
@@ -24,6 +25,7 @@ import {
   isAgentAutomation,
   newAutomationDraft,
   newEventTriggerDraft,
+  sessionAutomationWaitWords,
   sortAutomations,
   validateAutomationDraft,
   withEventArgument,
@@ -149,6 +151,64 @@ describe("automation words", () => {
     expect(automationRunEventsLabel(t, run(1))).toBe("Order 42 created");
     expect(automationRunEventsLabel(t, run(3))).toContain("Order 42 created");
     expect(automationRunEventsLabel(t, run(3))).toContain("2");
+  });
+
+  test("a run's recorded reason reads as a sentence, never as its code", () => {
+    expect(automationRunErrorText(t, "scheduled_turn_failed")).toBe(
+      t("automations.run.error.turnFailed"),
+    );
+    expect(automationRunErrorText(t, " scheduled_session_not_idle ")).toBe(
+      t("automations.run.error.chatBusy"),
+    );
+    // Refusals before a run starts share the words of the codes they mean.
+    expect(automationRunErrorText(t, "machine_enrollment_inactive")).toBe(
+      automationRunErrorText(t, "scheduled_machine_unavailable"),
+    );
+    expect(automationRunErrorText(t, "model is not available: gpt-6-luna")).toBe(
+      t("automations.run.error.modelUnavailable"),
+    );
+    // A code this version doesn't know, or an inherited key name, is not shown.
+    for (const unknown of ["scheduled_something_new", "constructor", ""]) {
+      expect(automationRunErrorText(t, unknown)).toBe(t("automations.run.error.unknown"));
+    }
+    expect(automationRunErrorText(t, "  Sandbox capacity is unavailable.  ")).toBe(
+      "Sandbox capacity is unavailable.",
+    );
+  });
+
+  test("every reason the scheduler records has its own words", () => {
+    const codes = [
+      "scheduled_turn_failed",
+      "scheduled_turn_cancelled",
+      "scheduled_turn_superseded",
+      "scheduled_turn_withdrawn_for_edit",
+      "scheduled_update_failed",
+      "scheduled_session_not_idle",
+      "scheduled_session_paused",
+      "session_cancelled",
+      "scheduled_target_session_unavailable",
+      "scheduled_target_execution_changed",
+      "scheduled_workspace_paused",
+      "scheduled_task_paused_before_claim",
+      "scheduled_machine_unavailable",
+      "scheduled_authority_unavailable",
+      "scheduled_authority_exhausted",
+      "connection_account_unavailable",
+      "scheduled_model_unavailable",
+      "machine_target_unavailable",
+      "variable_set_unavailable",
+      "rig_version_unavailable",
+      "insufficient_credits",
+      "allowance_exhausted",
+      "monthly_model_cost_limit",
+      "monthly_agent_run_limit",
+      "session_usage_limit",
+    ];
+    for (const code of codes) {
+      const text = automationRunErrorText(t, code);
+      expect(text).not.toBe(t("automations.run.error.unknown"));
+      expect(text).not.toContain("_");
+    }
   });
 
   test("names come from the instructions when none is typed", () => {
@@ -339,5 +399,95 @@ describe("event arguments", () => {
     ).toContain('"mine"');
     expect(eventArgumentsForEvent(undefined, "not json", { projectId: "p-9" })).toBe("not json");
     expect(eventArgumentsForEvent(schema, "", undefined)).toBe("");
+  });
+});
+
+describe("sessionAutomationWaitWords", () => {
+  const at = { now: NOW, timeZone: "UTC" };
+
+  test("a chat no automation will post into waits for nothing", () => {
+    expect(sessionAutomationWaitWords(t, {}, at)).toBeNull();
+    expect(
+      sessionAutomationWaitWords(
+        t,
+        { hasSchedules: true, hasUpcomingSchedules: false, waitingForEvents: false },
+        at,
+      ),
+    ).toBeNull();
+  });
+
+  test("without the details the plain wait is named", () => {
+    expect(sessionAutomationWaitWords(t, { waitingForEvents: true }, at)).toEqual({
+      kind: "event",
+      label: "Waiting for an event",
+      short: "Waiting on an event",
+    });
+    expect(
+      sessionAutomationWaitWords(t, { hasUpcomingSchedules: true, automationWait: null }, at),
+    ).toEqual({ kind: "schedule", label: "On a schedule", short: "On a schedule" });
+  });
+
+  test("an event names what it waits for and where from, then the next run", () => {
+    expect(
+      sessionAutomationWaitWords(
+        t,
+        {
+          waitingForEvents: true,
+          hasUpcomingSchedules: true,
+          automationWait: {
+            nextRunAt: "2026-10-22T09:00:00.000Z",
+            event: {
+              source: { kind: "mcp", name: "Deploys" },
+              eventTypes: ["deploy.finished", "deploy.failed"],
+            },
+            automations: 2,
+          },
+        },
+        at,
+      ),
+    ).toEqual({
+      kind: "event",
+      label:
+        "Waiting for deploy.finished or deploy.failed from Deploys. Next run: Tomorrow, 09:00. 1 more automation is waiting too.",
+      short: "Waiting on Deploys",
+    });
+  });
+
+  test("a schedule names its next run in the viewer's time zone", () => {
+    expect(
+      sessionAutomationWaitWords(
+        t,
+        {
+          hasUpcomingSchedules: true,
+          automationWait: { nextRunAt: "2026-10-21T14:00:00.000Z", event: null, automations: 3 },
+        },
+        { now: NOW, timeZone: "Europe/Oslo" },
+      ),
+    ).toEqual({
+      kind: "schedule",
+      label: "Next run: Today, 16:00. 2 more automations are waiting too.",
+      short: "Next: Today, 16:00",
+    });
+  });
+
+  test("a source the viewer can't see stays unnamed", () => {
+    expect(
+      sessionAutomationWaitWords(
+        t,
+        {
+          waitingForEvents: true,
+          automationWait: {
+            nextRunAt: null,
+            event: { source: null, eventTypes: ["*"] },
+            automations: 1,
+          },
+        },
+        at,
+      ),
+    ).toEqual({
+      kind: "event",
+      label: "Waiting for every event from a source you can't see",
+      short: "Waiting on an event",
+    });
   });
 });

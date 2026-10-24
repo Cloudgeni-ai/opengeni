@@ -21,11 +21,7 @@ import {
   updateWorkspaceSettings,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createHash } from "node:crypto";
 import { createRecordingActivities } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -560,7 +556,6 @@ describe.skipIf(!hasFfmpeg)("recording retention", () => {
       recordings: { retention: { audioDays: 7, transcriptDays: 30 } },
     });
     const starts: string[] = [];
-    const debug: string[] = [];
     const services = async () =>
       ({
         db,
@@ -568,7 +563,7 @@ describe.skipIf(!hasFfmpeg)("recording retention", () => {
         observability: {
           warn: () => undefined,
           info: () => undefined,
-          debug: (message: string) => debug.push(message),
+          debug: () => undefined,
         },
         startRecordingWorkflow: async (work: { recordingId: string }) => {
           starts.push(work.recordingId);
@@ -582,17 +577,6 @@ describe.skipIf(!hasFfmpeg)("recording retention", () => {
       cancellationSignal: () => undefined,
     });
 
-    // A quiet no-op while 0946 withholds EXECUTE on its inventory.
-    for (let pass = 0; pass < 2; pass += 1) {
-      expect(await run.applyRecordingRetention()).toEqual({
-        found: 0,
-        audioDeleted: 0,
-        recordingsDeleted: 0,
-        failed: 0,
-      });
-    }
-    expect(debug).toEqual(["Recording retention skipped: runtime EXECUTE is not granted yet"]);
-    await grantDeferredRuntimeAccess(shared.admin);
     const audio = await run.applyRecordingRetention();
     expect(audio).toMatchObject({ audioDeleted: 1, recordingsDeleted: 0, failed: 0 });
     expect(storage.objects.size).toBe(0);

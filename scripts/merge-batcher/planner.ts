@@ -12,6 +12,7 @@ import {
   type Pull,
   type Run,
 } from "./model";
+import { failedBaseHold } from "./base-failure";
 
 export type Action =
   | { kind: "wait"; reason: string }
@@ -87,17 +88,9 @@ export function descendants(id: string, candidates: Candidate[]): string[] {
   return [...ids];
 }
 export function plan(o: Observation, c: Config): Action {
-  const action = planCandidate(o, c);
-  // Latency is admission backpressure, not evidence that an already tested
-  // candidate is unsafe. Drain only a landing selected by every normal guard;
-  // do not bypass provenance, readiness, base, latest-attempt or main priority.
-  if (o.telemetry?.status === "stop" && action.kind !== "land")
-    return {
-      kind: "wait",
-      reason:
-        "stop signal: recent 2h sampled capacity/OFF-adjusted p95 ready-to-CI exceeds 30 minutes",
-    };
-  return action;
+  // Latency is diagnostic, not permission to suppress recovery or admission.
+  // All evidence, provenance and single-slot guards remain in planCandidate.
+  return planCandidate(o, c);
 }
 function planCandidate(o: Observation, c: Config): Action {
   const ledger = structuredClone(o.ledger);
@@ -179,18 +172,23 @@ function planCandidate(o: Observation, c: Config): Action {
               reason: "full-main CI has priority; tested candidate retained without cancellation",
             }
           : { kind: "land", candidate: root };
+      // A red exact base is not proof that members caused this failure. Hold
+      // before retry/splitting, retaining the failed candidate and all evidence.
+      // This does not claim identical fingerprints or authorize a green result.
+      if (run.trusted && run.outcome === "code_failure") {
+        const reason = failedBaseHold(run, root.manifest.baseSha, o.baseCI);
+        if (reason) return { kind: "wait", reason };
+      }
       // A failed exact candidate gets one flake allowance before any split or
       // singleton parking. The durable retry intent prevents duplicate requests.
       if (run.attempt === 1 && infrastructureRetryReason(root, run, c)) {
         if (ledger.retries[root.manifest.batchId])
           return { kind: "wait", reason: "single batch retry already requested; no duplicate" };
-        if (
-          !run.completedAt ||
-          Date.parse(o.now) < Date.parse(run.completedAt) + 60000 ||
-          inflight >= c.maxInflight ||
-          o.mainBusy
-        )
-          return { kind: "wait", reason: "bounded retry backoff or CI capacity" };
+        if (!run.completedAt || inflight >= c.maxInflight || o.mainBusy)
+          return {
+            kind: "wait",
+            reason: "retry requires completion evidence and an available Batch slot",
+          };
         return { kind: "retry", candidate: root, run };
       }
       if (run.trusted && run.outcome === "code_failure") {
@@ -249,14 +247,11 @@ function planCandidate(o: Observation, c: Config): Action {
           reason:
             "not an eligible first-attempt infrastructure-only candidate; hold without PR blame",
         };
-      const backoff = 60;
-      if (
-        !run.completedAt ||
-        Date.parse(o.now) < Date.parse(run.completedAt) + backoff * 1000 ||
-        inflight >= c.maxInflight ||
-        o.mainBusy
-      )
-        return { kind: "wait", reason: "bounded retry backoff or CI capacity" };
+      if (!run.completedAt || inflight >= c.maxInflight || o.mainBusy)
+        return {
+          kind: "wait",
+          reason: "retry requires completion evidence and an available Batch slot",
+        };
       return { kind: "retry", candidate: root, run };
     }
     if (!run)

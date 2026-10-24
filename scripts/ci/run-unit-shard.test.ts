@@ -12,6 +12,7 @@ import {
   sanitizedTestEnvironment,
   sourceMutatesSharedPostgresRole,
   sourceRequiresExclusiveSharedPostgres,
+  sourceSaturatesCpu,
   sourceUsesExplicitTestConcurrency,
   sourceUsesWallClockPerformanceAssertion,
 } from "./run-unit-shard";
@@ -23,6 +24,7 @@ function withUnitShardFixture<T>(run: (root: string, files: string[]) => T): T {
     const sources = {
       parallel: "test('ordinary', () => {});",
       explicitConcurrency: "test.concurrent('race', () => {});",
+      cpuSaturating: "// opengeni:test-saturates-cpu",
       wallClockSensitive: "const started = performance.now(); expect(elapsed).toBeLessThan(100);",
       sharedPostgresExclusive: "// opengeni:test-shared-postgres-exclusive",
       clusterRoleSensitive: "await sql.unsafe('create role fixture_role nologin');",
@@ -168,7 +170,7 @@ describe("class-aware unit shard selection", () => {
         .flatMap((shard) => records(fixtureProcessPlan(root, shard)))
         .sort((left, right) => left.path.localeCompare(right.path));
       expect(actual).toEqual(expected);
-      expect(new Set(actual.map((entry) => entry.category)).size).toBe(5);
+      expect(new Set(actual.map((entry) => entry.category)).size).toBe(6);
       expect(actual.some((entry) => entry.isolated && entry.path.endsWith(".test.ts"))).toBe(true);
       expect(actual.some((entry) => !entry.isolated)).toBe(true);
     });
@@ -357,6 +359,20 @@ describe("unit process planning", () => {
     expect(sourceRequiresExclusiveSharedPostgres("// shared postgres exclusive")).toBe(false);
   });
 
+  test("recognizes only the explicit CPU-saturation marker", () => {
+    expect(sourceSaturatesCpu("// opengeni:test-saturates-cpu: cargo test")).toBe(true);
+    expect(sourceSaturatesCpu('Bun.spawn(["cargo", "test"]);')).toBe(false);
+    expect(sourceSaturatesCpu("// saturates cpu")).toBe(false);
+  });
+
+  test("the native Rust build test in the real corpus runs alone", () => {
+    const root = join(import.meta.dir, "../..");
+    const path = "scripts/test/native-codemode-approval.test.ts";
+    const plan = planUnitTestProcesses(root, [path], [], 1);
+    expect(plan.parallel).toEqual([]);
+    expect(plan.cpuSaturating).toEqual([{ files: [path], isolated: false }]);
+  });
+
   test("classifies generated and helper-driven shared-cluster role DDL in the real corpus", () => {
     const root = join(import.meta.dir, "../..");
     for (const path of [
@@ -386,12 +402,20 @@ describe("unit process planning", () => {
     ]);
   });
 
-  test("keeps explicit concurrency, wall clocks, shared PostgreSQL, and cluster roles out of the parallel pool", () => {
+  test("keeps explicit concurrency, CPU saturation, wall clocks, shared PostgreSQL, and cluster roles out of the parallel pool", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-unit-process-plan-"));
     try {
       for (const path of ["batch-a.test.ts", "isolated-a.test.ts"]) {
         writeFileSync(join(root, path), "test('ordinary', () => {});\n");
       }
+      writeFileSync(
+        join(root, "native-build.test.ts"),
+        "// opengeni:test-saturates-cpu\nconst started = performance.now(); expect(performance.now() - started).toBeLessThan(100);\n",
+      );
+      writeFileSync(
+        join(root, "native-build-isolated.test.ts"),
+        "// opengeni:test-saturates-cpu\ntest('native', () => {});\n",
+      );
       writeFileSync(
         join(root, "timed.test.ts"),
         "const started = performance.now(); expect(performance.now() - started).toBeLessThan(100);\n",
@@ -414,11 +438,12 @@ describe("unit process planning", () => {
         [
           "batch-a.test.ts",
           "nested/concurrent.test.ts",
+          "native-build.test.ts",
           "timed.test.ts",
           "shared-postgres.test.ts",
           "role.test.ts",
         ],
-        ["isolated-a.test.ts"],
+        ["isolated-a.test.ts", "native-build-isolated.test.ts"],
         1,
       );
 
@@ -428,6 +453,10 @@ describe("unit process planning", () => {
           { files: ["isolated-a.test.ts"], isolated: true },
         ],
         explicitConcurrency: [{ files: ["nested/concurrent.test.ts"], isolated: false }],
+        cpuSaturating: [
+          { files: ["native-build.test.ts"], isolated: false },
+          { files: ["native-build-isolated.test.ts"], isolated: true },
+        ],
         wallClockSensitive: [{ files: ["timed.test.ts"], isolated: false }],
         sharedPostgresExclusive: [{ files: ["shared-postgres.test.ts"], isolated: false }],
         clusterRoleSensitive: [{ files: ["role.test.ts"], isolated: false }],

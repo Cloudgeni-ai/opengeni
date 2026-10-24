@@ -65,9 +65,10 @@ const ORGANIZATION_AUTHORITY_TABLES = [
  * `workspaces` and `workspace_memberships` are the tenancy *directory* the
  * access resolver itself reads before an RLS context exists, and
  * `auth_identities` is the Better Auth subject mapping.
- * `automation_webhook_endpoints` and `pr_review_managed_github_routes` are
- * exact global ingress keys used to discover tenant context before loading the
- * protected automation source or PR-review binding. Their organization
+ * `automation_webhook_endpoints`, `event_ingress_routes` and
+ * `pr_review_managed_github_routes` are exact global ingress keys used to
+ * discover tenant context before loading the protected automation source,
+ * event source or PR-review binding. Their organization
  * boundary is enforced above the database, by authenticated ingress and
  * `@opengeni/core` access resolution. The four account-carrying MCP OAuth
  * protocol tables are likewise exact hash-keyed state used before the bearer,
@@ -82,6 +83,7 @@ const ORGANIZATION_AUTHORITY_TABLES = [
 const REVIEWED_UNPROTECTED_ACCOUNT_TABLES = [
   "auth_identities",
   "automation_webhook_endpoints",
+  "event_ingress_routes",
   "mcp_oauth_access_tokens",
   "mcp_oauth_authorization_codes",
   "mcp_oauth_authorization_requests",

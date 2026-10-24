@@ -101,6 +101,53 @@ describe("interaction attempt tools", () => {
       },
     });
   });
+  test("a nested step field one platform lacks merges into the steps instead of an anyOf", () => {
+    const steps = (extra: Record<string, unknown>, required: string[]) => ({
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            required,
+            additionalProperties: true,
+            properties: { tool: { type: "string" }, ...extra },
+          },
+        },
+      },
+    });
+    const merged = nativeCuaSchema([
+      steps({ toggle_to: { type: "boolean" } }, ["tool"]),
+      steps({}, ["tool"]),
+      steps({ timeout_ms: { type: "integer" } }, ["tool", "timeout_ms"]),
+    ]);
+    expect(merged).toEqual({
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            required: ["tool"],
+            additionalProperties: true,
+            properties: {
+              tool: { type: "string" },
+              toggle_to: { type: "boolean" },
+              timeout_ms: { type: "integer" },
+            },
+          },
+        },
+      },
+    });
+    // A real constraint difference around the nested fields still keeps both.
+    const differing = nativeCuaSchema([
+      steps({ toggle_to: { type: "boolean" } }, ["tool"]),
+      { type: "object", properties: { steps: { type: "array", maxItems: 8, items: {} } } },
+    ]);
+    expect((differing.properties as any).steps.anyOf).toHaveLength(2);
+  });
   test.each(["browser_read", "browser_act"] as const)(
     "%s preserves the definite tab diagnosis at the model boundary",
     async (tool) => {
@@ -3170,6 +3217,75 @@ describe("interaction attempt tools", () => {
     expect(retried.structuredContent).toEqual(result.structuredContent);
   });
 
+  test("a computer action can leave out its type and name elements as role:name", async () => {
+    const target = computerTarget();
+    const after = { ...computerObservation(target), observationId: "after-batch" };
+    const requests: ComputerActionRequest[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerActionReceipt: noRecordedReceipt,
+        getComputerSession: async () => ({ capabilities: { actionBatches: true } }) as never,
+        listComputerTargets: async () => ({ targets: [target] }) as never,
+        observeComputerTarget: async () => after,
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          return computerReceipt(value.operationId, after);
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      {
+        computerSessionId,
+        targetId: target.id,
+        action: {
+          actions: [
+            { locator: "link:Accounts", action: "invoke" },
+            { locator: "textbox:Search accounts", action: "set_value", value: "AC-1" },
+            { type: "keyboard", action: "press", value: "enter" },
+          ],
+        },
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result.isError).not.toBe(true);
+    expect(requests[0]?.action).toEqual({
+      type: "batch",
+      actions: [
+        {
+          type: "semantic",
+          locator: { kind: "role", role: "link", name: "Accounts", exact: true },
+          action: "invoke",
+        },
+        {
+          type: "semantic",
+          locator: { kind: "role", role: "textbox", name: "Search accounts", exact: true },
+          action: "set_value",
+          value: "AC-1",
+        },
+        { type: "keyboard", action: "press", value: "enter" },
+      ],
+    });
+    // The model view says so: type is optional, on an action and in a batch.
+    const schema = definitions[0]!.inputSchema as {
+      properties: {
+        action: {
+          required?: string[];
+          description?: string;
+          properties: Record<string, { items?: { required?: string[] } }>;
+        };
+      };
+    };
+    expect(schema.properties.action.required).toBeUndefined();
+    expect(schema.properties.action.description).toStartWith(
+      "type defaults to semantic when locator is set and to batch when actions is.",
+    );
+    expect(schema.properties.action.properties.actions?.items?.required).toBeUndefined();
+  });
+
   test("a computer that runs batches gets the whole batch as one operation", async () => {
     const target = computerTarget();
     const initial = computerObservation(target);
@@ -3291,32 +3407,50 @@ describe("interaction attempt tools", () => {
     expect(sessionReads).toBe(1);
   });
 
-  test("a retried Computer batch runs the way its first try did when the computer's batch support changes", async () => {
+  test("a retried Computer batch reports what its first try ran without sending it again", async () => {
     const target = computerTarget();
-    const observation = computerObservation(target);
-    const journal = new Map<string, ComputerActionReceipt>();
+    // Like CUA, every read is a new observation, and the computer's journal
+    // refuses one operation ID sent with different fences.
+    let reads = 0;
+    const read = () => ({ ...computerObservation(target), observationId: `obs-${++reads}` });
+    const journal = new Map<
+      string,
+      { request: ComputerActionRequest; receipt: ComputerActionReceipt }
+    >();
     const sent: ComputerActionRequest[] = [];
-    // Each try is a fresh process that asks the computer whether it runs
-    // batches: the answer changes between tries, or cannot be read.
+    let receiptReads = 0;
+    let windowGone = false;
     const tryOnce = async (operationId: string, support: boolean | "unreadable") =>
       await createInteractionAttemptToolDefinitions({
         transport: partialTransport({
+          // The computer fixes its answer for the session's life.
           getComputerSession: async () => {
             if (support === "unreadable") throw new Error("api unavailable");
             return { capabilities: { actionBatches: support } } as never;
           },
           listComputerTargets: async () => ({ targets: [target] }) as never,
-          observeComputerTarget: async () => observation,
+          observeComputerTarget: async () => {
+            if (windowGone) throw new Error("window closed");
+            return read();
+          },
           actInComputer: async (_workspaceId, _computerSessionId, value) => {
             const existing = journal.get(value.operationId);
-            if (existing) return existing;
+            if (existing) {
+              if (existing.request.expectedObservationId !== value.expectedObservationId)
+                throw new OpenGeniApiError(409, "operation id is already bound", {
+                  code: "operation_conflict",
+                });
+              return existing.receipt;
+            }
             sent.push(value);
-            const receipt = computerReceipt(value.operationId, observation);
-            journal.set(value.operationId, receipt);
+            const receipt = computerReceipt(value.operationId, read());
+            journal.set(value.operationId, { request: value, receipt });
             return receipt;
           },
-          getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) =>
-            journal.get(id) ?? (await noRecordedReceipt()),
+          getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) => {
+            receiptReads += 1;
+            return journal.get(id)?.receipt ?? (await noRecordedReceipt());
+          },
         }),
         workspaceId,
         sessionId,
@@ -3326,7 +3460,6 @@ describe("interaction attempt tools", () => {
         {
           computerSessionId,
           targetId: target.id,
-          expectedObservationId: observation.observationId,
           action: {
             type: "batch",
             actions: [
@@ -3338,26 +3471,37 @@ describe("interaction attempt tools", () => {
         { operationId, caller: { kind: "model", subjectId: "model:test" } },
       );
 
-    // Run one action at a time, then retried on a computer that now runs
-    // batches: the recorded actions are reported, and nothing is sent again.
+    // Run as one operation: nothing is read before it is sent.
+    const native = randomUUID();
+    const whole = await tryOnce(native, true);
+    expect(sent.map((request) => request.action.type)).toEqual(["batch"]);
+    expect(receiptReads).toBe(0);
+    sent.length = 0;
+    // A retry reads the window again, so the journal refuses its new fence,
+    // and the recorded receipt says what ran.
+    const again = await tryOnce(native, true);
+    expect(sent).toEqual([]);
+    expect(again.structuredContent).toEqual(whole.structuredContent);
+    // So does a retry once the batch closed the window.
+    windowGone = true;
+    const gone = await tryOnce(native, true);
+    expect(sent).toEqual([]);
+    expect(gone.structuredContent).toEqual(whole.structuredContent);
+    // A retry that cannot read how the computer runs batches sends nothing.
+    await expect(tryOnce(native, "unreadable")).rejects.toThrow(
+      "so the batch was not sent; retry the call",
+    );
+    expect(sent).toEqual([]);
+
+    // One action at a time: a retry reuses the recorded actions.
+    windowGone = false;
     const sequential = randomUUID();
     const first = await tryOnce(sequential, false);
     expect(sent.map((request) => request.action.type)).toEqual(["keyboard", "keyboard"]);
     sent.length = 0;
-    const retried = await tryOnce(sequential, true);
+    const retried = await tryOnce(sequential, false);
     expect(sent).toEqual([]);
     expect(retried.structuredContent).toEqual(first.structuredContent);
-
-    // Run as one operation, then retried where support cannot be read.
-    const native = randomUUID();
-    const whole = await tryOnce(native, true);
-    expect(sent.map((request) => request.action.type)).toEqual(["batch"]);
-    sent.length = 0;
-    for (const support of ["unreadable", false] as const) {
-      const again = await tryOnce(native, support);
-      expect(sent).toEqual([]);
-      expect(again.structuredContent).toEqual(whole.structuredContent);
-    }
   });
 
   test("does not send a Computer batch whose way of running cannot be read", async () => {
@@ -3467,42 +3611,6 @@ describe("interaction attempt tools", () => {
     const held = await first;
     expect(sent.map((request) => request.action.type)).toEqual(["batch"]);
     expect(held.structuredContent).toEqual(second.structuredContent);
-  });
-
-  test("does not send a retried Computer batch when an earlier try's other way cannot be read", async () => {
-    const target = computerTarget();
-    const observation = computerObservation(target);
-    let sent = 0;
-    const definitions = createInteractionAttemptToolDefinitions({
-      transport: partialTransport({
-        getComputerSession: async () => ({ capabilities: { actionBatches: true } }) as never,
-        listComputerTargets: async () => ({ targets: [target] }) as never,
-        observeComputerTarget: async () => observation,
-        actInComputer: async (_workspaceId, _computerSessionId, value) => {
-          sent += 1;
-          return computerReceipt(value.operationId, observation);
-        },
-        getComputerActionReceipt: async () => {
-          throw new Error("controller unreachable");
-        },
-      }),
-      workspaceId,
-      sessionId,
-      selectedTools: ["computer_act"],
-      permissions: ["sessions:control"],
-    });
-    await expect(
-      definitions[0]!.execute(
-        {
-          computerSessionId,
-          targetId: target.id,
-          expectedObservationId: observation.observationId,
-          action: { type: "batch", actions: [{ type: "keyboard", action: "press", value: "5" }] },
-        },
-        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
-      ),
-    ).rejects.toThrow("whether an earlier try of this batch already ran could not be read");
-    expect(sent).toBe(0);
   });
 
   test("a retried Computer batch reuses actions that ran even when the window can no longer be read", async () => {
@@ -3948,8 +4056,8 @@ describe("interaction attempt tools", () => {
     expect(action.properties.actions.items).toEqual({
       type: "object",
       properties: { type: { type: "string", enum: ["semantic", "keyboard"] } },
-      required: ["type"],
-      description: "One semantic or keyboard action with the same fields as action.",
+      description:
+        "One semantic or keyboard action with the same fields as action; a semantic one can leave out type.",
     });
     expect(action.description).toContain("batch: actions");
   });
@@ -5533,7 +5641,11 @@ describe("interaction attempt tools", () => {
     })[0]!;
     const action = (act.inputSchema.properties as Record<string, Record<string, unknown>>).action!;
     const locator = (action.properties as Record<string, { anyOf?: unknown[] }>).locator!;
-    expect(locator.anyOf?.[0]).toEqual({ type: "string", description: "An element ref." });
+    expect(locator.anyOf?.[0]).toEqual({
+      type: "string",
+      description:
+        'An element ref, or role:name for the element with that role and exact name ("link:Sign in").',
+    });
     expect(JSON.stringify(locator.anyOf?.[1])).toContain('"ref"');
   });
 });

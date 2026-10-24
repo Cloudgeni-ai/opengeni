@@ -238,7 +238,11 @@ test("denied check reads fail closed without anonymous or credential fallback", 
       expect(result.ready).toHaveLength(0);
       expect(result.excluded[0]?.reason).toBe("Exact-head hosted run or job no longer readable");
     } else await expect(f.reader.ready()).rejects.toThrow();
-    expect(f.state.checkAuthorization).toEqual(["Bearer fixture"]);
+    // Transient reads retry with the same credential; never fall back to an
+    // anonymous read or a different identity to manufacture admission evidence.
+    expect(f.state.checkAuthorization).toEqual(
+      Array(status === 500 ? 5 : 1).fill("Bearer fixture"),
+    );
   }
 });
 test("latest attempt must contain the required check, not an older successful job", async () => {

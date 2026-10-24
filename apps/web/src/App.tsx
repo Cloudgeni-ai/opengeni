@@ -160,6 +160,10 @@ const LazyConnectAgentRoute = lazyRouteComponent(
 );
 const LazySecretsRoute = lazyRouteComponent(() => import("@/routes/secrets"), "SecretsRoute");
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
+const LazyComputerUseRoute = lazyRouteComponent(
+  () => import("@/routes/computer-use"),
+  "ComputerUseRoute",
+);
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
@@ -609,6 +613,11 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+const workspaceComputerUseRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "computer-use",
+  component: LazyComputerUseRoute,
+});
 // Mirrors the UsageSearch keys in components/insights/usage-search.ts (kept here
 // so the route table doesn't import the lazy Insights chunk).
 const INSIGHTS_SEARCH_KEYS = [
@@ -874,11 +883,14 @@ const workspaceArtifactsRoute = createRoute({
 });
 const workspaceArtifactDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
+  // A Site's details, by tab; without a tab it opens the Site view instead.
   path: "artifacts/$artifactId",
   validateSearch: artifactReturnSearch,
   component: ArtifactDetail,
 });
-// A Site with its conversations beside it; the rail's Site rows open it.
+// A Site with its conversations beside it, where it is edited live. Every
+// way into a Site opens it: the rail, the Artifacts list, links and Edit with
+// Opengeni (`?new`, a new conversation with its composer focused).
 const workspaceSiteViewRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sites/$siteId",
@@ -1035,6 +1047,7 @@ const routeTree = rootRoute.addChildren([
     workspaceReadOnlyChatsRoute,
     workspaceInboxRoute,
     workspaceMachinesRoute,
+    workspaceComputerUseRoute,
     workspaceInsightsRoute,
     workspaceCapabilitiesRoute,
     workspaceLegacyCapabilitiesRoute,
@@ -1482,13 +1495,14 @@ function ArtifactDetail() {
 
 function SiteViewPage() {
   const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
-  const { conversation } = workspaceSiteViewRoute.useSearch();
+  const { conversation, new: startNew } = workspaceSiteViewRoute.useSearch();
   return (
     <LazySiteViewRoute
       key={`${workspaceId}:${siteId}`}
       workspaceId={workspaceId}
       siteId={siteId}
       conversation={conversation}
+      startNew={startNew === true}
     />
   );
 }

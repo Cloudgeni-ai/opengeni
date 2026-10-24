@@ -16,7 +16,7 @@ import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
-import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import {
   requireWorkspace,
   sessionScheduleTargets,
@@ -27,6 +27,7 @@ import {
 import {
   currentSiteSessionOrigin,
   isVerifiedDelegatedHumanAuthorization,
+  scheduledTaskViewerSubjectForGrant,
   withSiteSessionOrigin,
 } from "@opengeni/core";
 import {
@@ -41,7 +42,11 @@ import {
 import type { CreditDebitAttribution, SessionForkPointRefusal } from "@opengeni/db";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
-import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
+import {
+  resolveSiteSessionOrigin,
+  siteViewConversationContext,
+  withOptionalSiteCommandOrigin,
+} from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
 import { SandboxRecoveryConflictError } from "@opengeni/db";
@@ -421,7 +426,29 @@ const NO_SESSION_SCHEDULE_TARGETS: SessionScheduleTargets = {
   scheduled: new Set<string>(),
   upcoming: new Set<string>(),
   waitingForEvents: new Set<string>(),
+  waits: null,
 };
+
+/**
+ * The automations posting into these sessions, for a reader allowed to run
+ * schedules and control chats; wait details cover what that person can see.
+ */
+async function sessionScheduleTargetsForGrant(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<SessionScheduleTargets> {
+  if (
+    !hasPermission(grant.permissions, "scheduled_tasks:run") ||
+    !hasPermission(grant.permissions, "sessions:control")
+  ) {
+    return NO_SESSION_SCHEDULE_TARGETS;
+  }
+  return await sessionScheduleTargets(db, workspaceId, sessionIds, {
+    viewer: async () => await scheduledTaskViewerSubjectForGrant(db, grant),
+  });
+}
 
 /** What the session list and header show about the automations posting into a chat. */
 function sessionAutomationFacts(targets: SessionScheduleTargets, sessionId: string) {
@@ -429,6 +456,7 @@ function sessionAutomationFacts(targets: SessionScheduleTargets, sessionId: stri
     hasSchedules: targets.scheduled.has(sessionId),
     hasUpcomingSchedules: targets.upcoming.has(sessionId),
     waitingForEvents: targets.waitingForEvents.has(sessionId),
+    ...(targets.waits ? { automationWait: targets.waits.get(sessionId) ?? null } : {}),
   };
 }
 const VIEWER_LIFECYCLE_PERMISSIONS = ["stream:view", "terminal:attach", "files:write"] as const;
@@ -804,6 +832,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         // additionally restricts that execution to the parent's real owner.
         if (grant.principalKind !== "agent_attempt")
           (payload as Record<string, unknown>).visibility = "private";
+        // Started beside the Site in the console's Site view (its id and
+        // version without a frame marker: not Site code, which the bridge
+        // always marks), by someone who may publish it: the first message
+        // says which Site "the Site" is. Later messages carry the console's
+        // own context. Server-authored; the caller's context was refused above.
+        if (
+          siteOrigin.siteId &&
+          c.req.header(SITE_FRAME_HEADER) === undefined &&
+          hasPermission(grant.permissions, "artifacts:publish", grant.permissionMode) &&
+          typeof (payload as { initialMessage?: unknown }).initialMessage === "string"
+        ) {
+          const context = await siteViewConversationContext(db, grant, siteOrigin);
+          if (context) (payload as Record<string, unknown>).modelContext = context;
+        }
       }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
@@ -1091,15 +1133,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       sessionIds: [...page.pinned, ...page.sessions].map((session) => session.id),
     });
-    const scheduleTargets =
-      hasPermission(grant.permissions, "scheduled_tasks:run") &&
-      hasPermission(grant.permissions, "sessions:control")
-        ? await sessionScheduleTargets(
-            db,
-            workspaceId,
-            [...page.pinned, ...page.sessions].map((session) => session.id),
-          )
-        : NO_SESSION_SCHEDULE_TARGETS;
+    const scheduleTargets = await sessionScheduleTargetsForGrant(
+      db,
+      grant,
+      workspaceId,
+      [...page.pinned, ...page.sessions].map((session) => session.id),
+    );
     if ("projection" in page) {
       const decorateEntry = (session: (typeof page.sessions)[number]) => ({
         ...session,
@@ -1369,10 +1408,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             workspaceId,
             sessionIds: [sessionId],
           }),
-          hasPermission(grant.permissions, "scheduled_tasks:run") &&
-          hasPermission(grant.permissions, "sessions:control")
-            ? sessionScheduleTargets(db, workspaceId, [sessionId])
-            : Promise.resolve(NO_SESSION_SCHEDULE_TARGETS),
+          sessionScheduleTargetsForGrant(db, grant, workspaceId, [sessionId]),
           loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
         ]),
       () => sessionUsageLimitForRead(db, session, { subjectId: grant.subjectId }),
@@ -2463,11 +2499,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     };
     collect(lineage.children);
-    const targets =
-      hasPermission(grant.permissions, "scheduled_tasks:run") &&
-      hasPermission(grant.permissions, "sessions:control")
-        ? await sessionScheduleTargets(db, workspaceId, sessionIds)
-        : NO_SESSION_SCHEDULE_TARGETS;
+    const targets = await sessionScheduleTargetsForGrant(db, grant, workspaceId, sessionIds);
     const decorateNodes = (nodes: LineageNode[]): LineageNode[] =>
       nodes.map((node) => ({
         ...node,
@@ -2489,6 +2521,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       sessionHasSchedules: targets.scheduled.has(c.req.param("sessionId")),
       sessionHasUpcomingSchedules: targets.upcoming.has(c.req.param("sessionId")),
       sessionWaitingForEvents: targets.waitingForEvents.has(c.req.param("sessionId")),
+      ...(targets.waits
+        ? { sessionAutomationWait: targets.waits.get(c.req.param("sessionId")) ?? null }
+        : {}),
       ancestors: lineage.ancestors.map((session) =>
         sessionResponse(
           {
@@ -4245,6 +4280,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             authorization.canonicalManagedHumanSession ||
             authorization.canonicalLocalHumanSession ||
             isVerifiedDelegatedHumanAuthorization(authorization),
+          // An agent or personal key acting as the person is not the person
+          // for a secret approval card.
+          personSignedIn:
+            authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
           mcpCredentialUpdates,

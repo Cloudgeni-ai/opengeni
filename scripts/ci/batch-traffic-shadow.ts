@@ -14,8 +14,6 @@ import {
   DEFAULT_PROVIDER_JOB_LIMIT,
   digest,
   emptyLedger,
-  MAX_RUNNER_RELEVANT_RUNS,
-  MAX_SCANNED_ACTIVE_RUNS,
   scanRunnerDemand,
   type CapacityHold,
   type CapacityObservation,
@@ -993,12 +991,10 @@ export function capacitySetting(raw: string | undefined, fallback: number): numb
   return raw.trim() !== "" && Number.isSafeInteger(n) && n >= 0 ? n : Number.NaN;
 }
 const TRAFFIC_HEADROOM_HOLD_REASONS: Record<RunnerScanHold, string> = {
-  "incomplete-runs": "Runner observation exceeds bounded scan or is incomplete",
+  "incomplete-runs": "Runner observation is incomplete or inconsistent",
   // A non-object run entry; malformed run IDs throw in the validator below.
   "invalid-run": "Invalid active run identity",
   "batch-slot": "Another Batch CI run already occupies hosted headroom",
-  "scan-bound": `Runner observation exceeds bounded scan of ${MAX_SCANNED_ACTIVE_RUNS} active runs`,
-  "runner-run-bound": `Too many active workflows for bounded runner observation (over ${MAX_RUNNER_RELEVANT_RUNS} excluding proven approval-only runs)`,
   "incomplete-jobs": "Active job scan incomplete; no publication",
   "unknown-job-status": "Unrecognized job status in active job scan; no publication",
   deadline: "Runner observation exceeded its scan deadline; no publication",

@@ -5,11 +5,9 @@
  * current: the sidebar keeps its own workspace's rows live, and other rows
  * are read again when a list opens.
  */
-import {
-  sessionAutomationWait,
-  type SessionAutomationWait,
-  type SessionListRow,
-} from "../../../session-list-model";
+import { sessionAutomationWaitWords } from "../../../components/automations/automation-model";
+import { type SessionAutomationWait, type SessionListRow } from "../../../session-list-model";
+import { t } from "../console-text";
 import { railRowCreator, type CreatorRef } from "../creator-initials";
 import { summarizeRailNodes, type RailAggregateStatus } from "../sessions-group";
 import type { ChatRecord } from "./chat-directory";
@@ -20,18 +18,22 @@ export const CHAT_STATUS_FRESH_MS = 90_000;
 export type ChatStatus = {
   summary: RailAggregateStatus;
   automationWait: SessionAutomationWait | null;
+  /** What that automation waits for, in words ("Waiting for deploy.finished from Deploys"). */
+  automationWaitLabel: string | null;
   creator: CreatorRef | null;
 };
 
 /** Exactly the sidebar row's marker: the chat and everything it started. */
 export function chatRowStatus(row: SessionListRow, now: Date = new Date()): ChatStatus {
+  const automationWait = sessionAutomationWaitWords(t, row, { now });
   return {
     summary: summarizeRailNodes(
       [{ session: row, children: [], hasActiveDescendant: false }],
       undefined,
       now,
     ),
-    automationWait: sessionAutomationWait(row),
+    automationWait: automationWait?.kind ?? null,
+    automationWaitLabel: automationWait?.label ?? null,
     creator: railRowCreator(row),
   };
 }

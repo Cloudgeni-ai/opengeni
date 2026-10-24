@@ -40,6 +40,7 @@ export {
   automationListensForEvents,
   automationName,
   automationNextRun,
+  automationRunErrorText,
   automationRunEventsLabel,
   automationRunStatusLabel,
   automationRunTriggerLabel,
@@ -55,6 +56,7 @@ export {
   isAgentAutomation,
   isFinishedOnce,
   newAutomationDraft,
+  sessionAutomationWaitWords,
   sortAutomations,
   validateAutomationDraft,
   viewerTimeZone,
@@ -64,6 +66,7 @@ export type {
   AutomationDraft,
   AutomationDraftIssues,
   AutomationScheduleWords,
+  SessionAutomationWaitWords,
 } from "./components/automations/automation-model";
 export {
   EventArgumentsField,

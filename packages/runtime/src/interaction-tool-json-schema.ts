@@ -33,11 +33,19 @@ const flattenedVariants = new WeakMap<JsonSchemaNode, Array<[string, string[]]>>
 
 const LOCATOR_FIELDS = new Set(["locator", "from", "to"]);
 
+/** How a bare locator string reads, wherever a locator is expected. */
+const LOCATOR_STRING = {
+  type: "string",
+  description:
+    'An element ref, or role:name for the element with that role and exact name ("link:Sign in").',
+} as const;
+
 /**
- * Let the model pass an element ref as a bare string wherever a locator is
- * expected (`"locator":"e1a2b3c4d"`). It is the common case and a third of
- * the output tokens of `{kind:'ref',ref}`. The tool expands it before
- * validation.
+ * Let the model pass an element ref or `role:name` as a bare string wherever
+ * a locator is expected (`"locator":"e1a2b3c4d"`, `"locator":"button:Save"`).
+ * They are the common cases, and a third of the output tokens of
+ * `{kind:'ref',ref}` or `{kind:'role',role,name,exact}`. The tool expands
+ * them before validation.
  */
 function withRefShorthandLocators(schema: AttemptToolJsonSchema): JsonSchemaNode {
   return refShorthand(schema) as JsonSchemaNode;
@@ -62,7 +70,7 @@ export function browserActModelInputSchema(schema: AttemptToolJsonSchema): Attem
     if (!isNode(fields[field])) continue;
     fields[field] = {
       anyOf: [
-        { type: "string", description: "An element ref." },
+        LOCATOR_STRING,
         {
           type: "object",
           properties: kind ? { kind } : {},
@@ -93,8 +101,11 @@ export function browserActModelInputSchema(schema: AttemptToolJsonSchema): Attem
 }
 
 /**
- * computer_act's model view: ref shorthand, and a batch item takes the same
- * fields as action, described once, with only the action types a batch runs.
+ * computer_act's model view: locator shorthand, and a batch item takes the
+ * same fields as action, described once, with only the action types a batch
+ * runs. The type can be left out where the fields say it (see
+ * withComputerActionTypes): an action with a locator is semantic, one with
+ * actions is a batch.
  */
 export function computerActModelInputSchema(schema: AttemptToolJsonSchema): AttemptToolJsonSchema {
   const shorthand = withRefShorthandLocators(schema);
@@ -103,12 +114,15 @@ export function computerActModelInputSchema(schema: AttemptToolJsonSchema): Atte
   const fields = action && isNode(action.properties) ? action.properties : null;
   const actions = fields && isNode(fields.actions) ? fields.actions : null;
   if (!top || !action || !fields || !actions) return shorthand as AttemptToolJsonSchema;
+  const { required: _required, ...untypedAction } = action;
+  const summary = typeof action.description === "string" ? ` ${action.description}` : "";
   return {
     ...shorthand,
     properties: {
       ...top,
       action: {
-        ...action,
+        ...untypedAction,
+        description: `type defaults to semantic when locator is set and to batch when actions is.${summary}`,
         properties: {
           ...fields,
           actions: {
@@ -116,8 +130,8 @@ export function computerActModelInputSchema(schema: AttemptToolJsonSchema): Atte
             items: {
               type: "object",
               properties: { type: { type: "string", enum: ["semantic", "keyboard"] } },
-              required: ["type"],
-              description: "One semantic or keyboard action with the same fields as action.",
+              description:
+                "One semantic or keyboard action with the same fields as action; a semantic one can leave out type.",
             },
           },
         },
@@ -151,7 +165,7 @@ function refShorthand(node: unknown): unknown {
     for (const [field, schema] of Object.entries(value)) {
       properties[field] =
         LOCATOR_FIELDS.has(field) && isRefLocator(schema)
-          ? { anyOf: [{ type: "string", description: "An element ref." }, refShorthand(schema)] }
+          ? { anyOf: [LOCATOR_STRING, refShorthand(schema)] }
           : refShorthand(schema);
     }
     out[key] = properties;

@@ -50,6 +50,12 @@ export function parseAgentVersion(output: string): string | null {
 export type AgentPermissionId = "screenRecording" | "accessibility" | "inputMonitoring";
 
 /**
+ * Present when the agent honours `OPENGENI_AGENT_SCREEN_CONTROL=off`, the
+ * desktop app's Control the screen switch. Older agents leave it out.
+ */
+export type ScreenControlSwitch = { screenControlSwitch?: true };
+
+/**
  * `opengeni-agent permissions` prints one JSON line. Screen control on a Mac
  * needs Screen Recording (to see), Accessibility (to click and type) and Input
  * Monitoring (so the agent's input gives way to the person's own); other
@@ -57,13 +63,18 @@ export type AgentPermissionId = "screenRecording" | "accessibility" | "inputMoni
  */
 export function parsePermissions(
   output: string,
-): { required: false } | { required: true; granted: Record<AgentPermissionId, boolean> } | null {
+):
+  | ({ required: false } & ScreenControlSwitch)
+  | ({ required: true; granted: Record<AgentPermissionId, boolean> } & ScreenControlSwitch)
+  | null {
   for (const line of output.split(/\r?\n/u).reverse()) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("{")) continue;
     try {
       const value = JSON.parse(trimmed) as Record<string, unknown>;
-      if (value.required === false) return { required: false };
+      const switchable: ScreenControlSwitch =
+        value.screenControlSwitch === true ? { screenControlSwitch: true } : {};
+      if (value.required === false) return { required: false, ...switchable };
       if (
         value.required === true &&
         typeof value.screenRecording === "boolean" &&
@@ -77,6 +88,7 @@ export function parsePermissions(
             accessibility: value.accessibility,
             inputMonitoring: value.inputMonitoring,
           },
+          ...switchable,
         };
       }
     } catch {

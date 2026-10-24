@@ -247,6 +247,49 @@ impl DesktopBackend for NoDesktop {
     }
 }
 
+/// The desktop backend of a computer whose owner turned screen control off on
+/// the computer itself (in the desktop app that runs this agent). It never
+/// touches the screen: no probe, no capture, no input, so the system is never
+/// asked for Screen Recording or Accessibility either. `reason` is what the
+/// control plane shows instead of the screen.
+#[derive(Debug, Clone)]
+pub struct TurnedOffDesktop {
+    reason: String,
+}
+
+impl TurnedOffDesktop {
+    /// A turned-off desktop that reports `reason` instead of the screen.
+    #[must_use]
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl DesktopBackend for TurnedOffDesktop {
+    fn probe(&self) -> Option<v1::Display> {
+        None
+    }
+
+    fn can_offer_display(&self) -> bool {
+        false
+    }
+
+    async fn capture(&self) -> PlatformResult<CapturedFrame> {
+        Err(PlatformError::Unsupported(self.reason.clone()))
+    }
+
+    async fn inject(&self, _input: &v1::DesktopInput) -> PlatformResult<()> {
+        Err(PlatformError::Unsupported(self.reason.clone()))
+    }
+
+    fn capture_blocked_reason(&self) -> Option<String> {
+        Some(self.reason.clone())
+    }
+}
+
 /// Resolves the desktop backend for the current host.
 ///
 /// On Linux, attempts to open the X11 display named by `$DISPLAY` (real screen or
@@ -303,6 +346,25 @@ mod tests {
         let input = v1::DesktopInput::default();
         assert!(matches!(
             d.inject(&input).await,
+            Err(PlatformError::Unsupported(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn turned_off_desktop_never_offers_captures_or_injects_and_says_why() {
+        let d = TurnedOffDesktop::new("Screen control is turned off on this computer.");
+        assert!(d.probe().is_none());
+        assert!(!d.can_offer_display());
+        assert_eq!(
+            d.capture_blocked_reason().as_deref(),
+            Some("Screen control is turned off on this computer.")
+        );
+        assert!(matches!(
+            d.capture().await,
+            Err(PlatformError::Unsupported(reason)) if reason.contains("turned off")
+        ));
+        assert!(matches!(
+            d.inject(&v1::DesktopInput::default()).await,
             Err(PlatformError::Unsupported(_))
         ));
     }

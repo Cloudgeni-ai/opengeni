@@ -106,6 +106,27 @@ least one transcription provider are ready. Workspace settings store
 `settings.transcription.enabled` maps forward for one compatibility release;
 new writes use `voiceInput`.
 
+Client config passes the account from its verified workspace grant into
+`TranscriptionAvailabilityContext`. Subscription providers use that account
+instead of hydrating the workspace again solely to discover its owner. Callers
+without the optional account retain the existing workspace lookup. This is an
+identity hint, not cached readiness or admission: each provider still checks its
+current route, scoped pool and eligible connections. Audio submission keeps its
+independent operation lease and credential checks.
+
+The real-PostgreSQL test
+`apps/api/test/transcription-readiness-scope-postgres.test.ts` checks empty,
+active, revoked and maintenance pools, crossed-account/deleted-workspace refusal,
+the authenticated HTTP context, and statement savings. Its opt-in diagnostic
+(`OPENGENI_BENCH_VOICE_READINESS=1 bun test` on that file) alternates 20 measured
+config-request pairs after five warmups for organization keys and external
+actors. It removes only the optional hint for the baseline, exercising the
+unchanged fallback on the same fixture. With both subscription providers enabled
+and empty pools, responses are byte-identical and the hint saves 12 statements
+and two transactions per request. This local result is not a production latency
+claim; enabled providers, pool sizes and preference/fallback settings affect the
+total request budget.
+
 ## Server lifecycle
 
 | State | Meaning |
