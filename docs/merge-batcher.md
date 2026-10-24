@@ -433,14 +433,18 @@ and the full suite remain in Batch CI, whose impact plan is not capped.
 
 There is no global PR admission lock, permit system or synthetic runner reserve.
 GitHub queues bursts under its hosted capacity limits. Keep the fast gate small;
-add a global cap only if measured main/Batch starvation justifies it. The Batch
-capacity gate below is unchanged. Already-created runs retain their scheduled
+add a global cap only if measured main/Batch starvation justifies it. The live
+Batch policy below also delegates runner scheduling to GitHub. Already-created runs retain their scheduled
 definition, so backlog recovery must use current exact-head checks, not a false
 success or blanket cancellation of main, Batch, Version or unrelated work.
 
-Further checks protect the organization's shared hosted pool. They do not
-change the 52/30/18 allocation, and the two main holds apply before any
-arithmetic:
+The following capacity observations remain visible but are **informational for
+live Batch submission**. After a complete valid inventory with no active Batch
+reservation, one ready candidate may enter GitHub's queue. `capacityInformational`
+marks this policy; `capacity.hold` retains the historical capacity heuristic for
+diagnostics, not an admission rejection. Invalid capacity configuration and
+incomplete/unknown evidence still hold. Traffic-shadow capacity comparisons
+retain their existing conservative decisions.
 
 - **Main before fan-out.** `ci.yml` first creates only automation-admission,
   merge-content and plan; every other job needs plan and appears together, about
@@ -448,27 +452,31 @@ arithmetic:
   An active full-main push run whose complete job list has at most those 3 jobs
   (any status, including a just-pushed run without jobs or a run held by its
   concurrency group) is pre-fan-out: its observed demand understates what it is
-  about to request, so no new candidate is admitted until its fan-out exists.
+  about to request; this is reported without withholding a ready candidate.
   A drained run still lists its completed fan-out jobs, so it is not pre-fan-out.
   A run proven approval-only (an old rerun waiting for environment approval) is
-  idle and never freezes admission; once approved, a later observation sees it
-  queue and holds. A job-less waiting or pending main run fails closed until it
-  materializes. A test checks the 3-job constant against `ci.yml`.
+  idle; once approved, a later observation sees its demand. A job-less waiting
+  or pending main run is reported as pre-fan-out. A test checks the 3-job constant
+  against `ci.yml`.
 - **Main jobs waiting for runners.** If any active full-main push CI run, newest
-  or an older rerun, has a `queued` or `requested` job, no new candidate is
-  admitted. Main CI itself is never gated, cancelled or skipped.
+  or an older rerun, has a `queued` or `requested` job, its count and oldest wait
+  are retained. Main CI itself is never gated, cancelled or skipped.
 - **Provider pool fit.** Observed repository demand (main + other) plus
-  `BATCHER_OTHER_REPOSITORY_ALLOWANCE` plus the 18 candidate slots must fit
+  `BATCHER_OTHER_REPOSITORY_ALLOWANCE` plus the 18 candidate slots is compared with
   `BATCHER_PROVIDER_JOB_LIMIT`. With the defaults, 60 - 28 - 18 = 14 observed
   repository jobs at most. Combined with 52/30/18 (other + max(30, main) + 18 <= 52,
-  so other <= 4 while main <= 30), admission needs other <= 4 and main + other <= 14.
+  so other <= 4 while main <= 30), the historical estimate fits at other <= 4 and
+  main + other <= 14. Exceeding these estimates no longer withholds live submission.
 
 The per-PR fast workflow does not impose a global PR concurrency cap. Live Batch
 admission excludes exact `pr-ci.yml` pull-request and workflow-dispatch runs from
 PR demand, including legacy definitions, so five or more PR jobs do not withhold
-submission. The remaining non-PR demand and completeness safeguards above still
-apply. GitHub queues submitted work when provider capacity is busy; the smaller
-PR gate does not eliminate provider queue wait.
+submission. Non-PR demand remains measured and completeness safeguards still
+apply. GitHub queues submitted work when provider capacity is busy; neither
+capacity nor fairness is guaranteed. Preserve max-inflight1, exact tree/provenance,
+CAS and unknown-effect holds. Measure actual Batch wait from run creation to the
+first runner job start, separately from CI execution and landing; do not report
+submission as execution or a landing.
 
 The batcher's App is installed only on this repository, so it cannot read other
 repositories' jobs and does not try. The allowance replaces that observation. It is

@@ -222,6 +222,8 @@ export interface Headroom {
   approvalOnlyRuns?: number;
   /** Provider capacity fields; see `capacityDecision`. */
   capacity?: CapacityObservation;
+  /** Live admission uses provider queueing; valid capacity holds are telemetry only. */
+  capacityInformational?: boolean;
 }
 // GitHub job statuses. Only jobs that hold or are about to request a hosted
 // runner are demand: queued and in_progress jobs, plus requested jobs (created

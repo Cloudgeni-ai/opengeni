@@ -319,10 +319,14 @@ export class GitHubReader {
     });
     result.reservedMain = decision.reservedMain;
     result.capacity = decision.capacity;
-    result.allowed = decision.allowed;
-    result.reason = decision.capacity.hold
-      ? CAPACITY_HOLD_REASONS[decision.capacity.hold]
-      : "Observed jobs plus full-main reserve and 18 candidate slots fit the configured budget and hosted job limit";
+    // A complete observation and the single Batch slot are still mandatory.
+    // Valid runner-demand estimates do not withhold submission: GitHub queues
+    // the one candidate. This does not promise capacity or scheduling fairness.
+    result.capacityInformational = decision.capacity.hold !== "invalid-capacity";
+    result.allowed = result.capacityInformational;
+    result.reason = result.allowed
+      ? `Single Batch may enter the provider queue; capacity observation: ${decision.capacity.hold ? CAPACITY_HOLD_REASONS[decision.capacity.hold] : "observed demand fits configured estimates"}`
+      : CAPACITY_HOLD_REASONS["invalid-capacity"];
     return result;
   }
   async findFollowup(request: FollowupRequest): Promise<FollowupPull | null> {
