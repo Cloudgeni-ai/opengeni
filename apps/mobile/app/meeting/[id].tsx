@@ -37,14 +37,16 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
-import { isCapturing, meetingDateLabel, useMeetingRecorder } from "@/meetings";
+import { isCapturing, meetingDateLabel, useMeetingRecorder, WorkspaceGate } from "@/meetings";
 import { NativeMenu, type MenuAction } from "@/native-menu";
 import { AppThemeProvider } from "@/theme";
 
 export default function MeetingScreen() {
   return (
     <AppThemeProvider>
-      <Meeting />
+      <WorkspaceGate title="Meeting">
+        {(workspaceId) => <Meeting workspaceId={workspaceId} />}
+      </WorkspaceGate>
     </AppThemeProvider>
   );
 }
@@ -53,13 +55,13 @@ type Sheet = { kind: "title" } | { kind: "speaker"; label: string } | null;
 
 /* One meeting: what it is, where its transcript is, and the transcript read
    as turns. Speakers are named by tapping them. */
-function Meeting() {
+function Meeting({ workspaceId }: { workspaceId: string }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { client, workspaceId } = useAccount();
-  const scope = { client, workspaceId: workspaceId ?? undefined };
+  const { client } = useAccount();
+  const scope = { client, workspaceId };
   const meeting = useRecording(id ?? null, scope);
   const recording = meeting.recording;
   const phase = recording ? meetingPhase(recording) : null;
@@ -575,7 +577,7 @@ function SpeakerSheet(props: {
   label: string | null;
   speakers: RecordingSpeaker[];
   tracks: RecordingTrack[];
-  scope: { client: object; workspaceId: string | undefined };
+  scope: { client: object; workspaceId: string };
   onClose: () => void;
   onName: (label: string, name: { personId: string } | { name: string } | null) => Promise<void>;
 }) {

@@ -10,7 +10,10 @@
  */
 import { useRecorder, type UseRecorderResult } from "@opengeni/react/recordings";
 import { useNativeRecorderPlatform } from "@opengeni/react-native/recordings";
+import { fontStyle, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
+import { Stack } from "expo-router";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { ActivityIndicator, Text, View } from "react-native";
 import { useAccount } from "@/account";
 
 export type MeetingRecorder = UseRecorderResult & {
@@ -66,6 +69,53 @@ function AccountRecorder({
 /** The live recorder, or null before an account and workspace are ready. */
 export function useMeetingRecorder(): MeetingRecorder | null {
   return useContext(MeetingRecorderContext);
+}
+
+/**
+ * Meetings belong to a workspace. Until one is chosen (a new account, or the
+ * workspace list still loading) say so instead of rendering the screen.
+ */
+export function WorkspaceGate({
+  title,
+  children,
+}: {
+  title: string;
+  children: (workspaceId: string) => ReactNode;
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const { status, workspaceId } = useAccount();
+  if (workspaceId) return <>{children(workspaceId)}</>;
+  return (
+    <>
+      <Stack.Screen
+        options={{
+          title,
+          headerStyle: { backgroundColor: c.bg },
+          headerTintColor: c.fg,
+          headerShadowVisible: false,
+        }}
+      />
+      <View style={{ flex: 1, backgroundColor: c.bg, padding: 24, alignItems: "center" }}>
+        {status === "loading" ? (
+          <ActivityIndicator style={{ marginTop: 24 }} color={c["fg-muted"]} />
+        ) : (
+          <Text
+            style={{
+              ...fontStyle(theme),
+              fontSize: 15,
+              lineHeight: 21,
+              color: c["fg-muted"],
+              textAlign: "center",
+              marginTop: 24,
+            }}
+          >
+            Choose a workspace to record and see its meetings.
+          </Text>
+        )}
+      </View>
+    </>
+  );
 }
 
 /** True while capture holds the microphone. */

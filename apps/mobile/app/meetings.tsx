@@ -36,6 +36,7 @@ import {
   phoneRecorderErrorText,
   phoneUploadLine,
   useMeetingRecorder,
+  WorkspaceGate,
   type MeetingRecorder,
 } from "@/meetings";
 import { AppThemeProvider } from "@/theme";
@@ -43,20 +44,22 @@ import { AppThemeProvider } from "@/theme";
 export default function MeetingsScreen() {
   return (
     <AppThemeProvider>
-      <Meetings />
+      <WorkspaceGate title="Meetings">
+        {(workspaceId) => <Meetings workspaceId={workspaceId} />}
+      </WorkspaceGate>
     </AppThemeProvider>
   );
 }
 
 /* The web Meetings page at phone width: the recorder on top, then every
    meeting the person can see, newest first. */
-function Meetings() {
+function Meetings({ workspaceId }: { workspaceId: string }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { client, workspaceId } = useAccount();
+  const { client } = useAccount();
   const recorder = useMeetingRecorder();
-  const list = useRecordings({ client, workspaceId: workspaceId ?? undefined });
+  const list = useRecordings({ client, workspaceId });
   const refreshList = list.refresh;
   const [pulling, setPulling] = useState(false);
 
