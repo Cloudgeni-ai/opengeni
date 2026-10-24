@@ -20,6 +20,7 @@ import {
   listStalledRecordingWork,
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
+  nestedPostgresSqlState,
   purgeDeletingRecording,
   recordingPreparedTrackObjectKey,
   RecordingNotFoundError,
@@ -419,7 +420,14 @@ export function createRecordingActivities(
     return { deleted, purged: await purgeDeletingRecording(db, actor) };
   }
 
-  /** Start workflows for transcripts and deletions that never got one. */
+  let reportedRecoveryWithheld = false;
+
+  /**
+   * Start workflows for transcripts and deletions that never got one. While
+   * the runtime's EXECUTE on the stalled-work inventory is still withheld
+   * (migration 0937), a pass is a no-op, logged once at debug level, so the
+   * rest of the reaper runs.
+   */
   async function recoverRecordingWorkflows(): Promise<{
     found: number;
     started: number;
@@ -427,7 +435,19 @@ export function createRecordingActivities(
   }> {
     const { db, startRecordingWorkflow, observability } = await services();
     if (!startRecordingWorkflow) return { found: 0, started: 0, failed: 0 };
-    const work = await listStalledRecordingWork(db, 50);
+    let work: StalledRecordingWork[];
+    try {
+      work = await listStalledRecordingWork(db, 50);
+    } catch (error) {
+      if (nestedPostgresSqlState(error) !== "42501") throw error;
+      if (!reportedRecoveryWithheld) {
+        reportedRecoveryWithheld = true;
+        observability.debug(
+          "Recording workflow recovery skipped: runtime EXECUTE is not granted yet",
+        );
+      }
+      return { found: 0, started: 0, failed: 0 };
+    }
     let started = 0;
     let failed = 0;
     for (const item of work) {

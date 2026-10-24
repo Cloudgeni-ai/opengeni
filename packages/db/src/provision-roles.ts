@@ -2,6 +2,7 @@ import postgres from "postgres";
 import { databaseBootConnectOptions } from "./boot-connect";
 import type { RlsStrategy } from "./database";
 import {
+  DEFERRED_RUNTIME_PRIVATE_ROUTINES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_INSERT_UPDATE_TABLES,
@@ -2285,6 +2286,14 @@ BEGIN
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
     FOREACH routine_signature IN ARRAY ARRAY[${MAINTENANCE_PROBE_OWNER_ROUTINES.map(literal).join(",")} ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION opengeni_private.%s FROM PUBLIC, %I',
+          routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
+    -- Deferred definers stay withheld until the previous release knows them
+    -- (DEFERRED_RUNTIME_PRIVATE_ROUTINES, migration 0937).
+    FOREACH routine_signature IN ARRAY ARRAY[${DEFERRED_RUNTIME_PRIVATE_ROUTINES.map(literal).join(",")} ] LOOP
       IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
         EXECUTE format('REVOKE EXECUTE ON FUNCTION opengeni_private.%s FROM PUBLIC, %I',
           routine_signature, ${literal(role)});

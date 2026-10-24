@@ -1,4 +1,6 @@
 -- deployment-mode: rolling
+-- online-safety-exception: constraint-validation: 0929/0932 tables unreleased anywhere; no production rows
+-- online-safety-exception: nonconcurrent-index: 0929/0932 tables unreleased anywhere; no production rows
 -- MCP Events subscriptions. An MCP event source is one person's connection to
 -- an MCP server that offers the events extension (SEP-3415). Each distinct
 -- (event name, arguments) its automations' triggers ask for is one

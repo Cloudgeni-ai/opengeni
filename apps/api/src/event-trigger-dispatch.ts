@@ -16,6 +16,7 @@ import {
   claimEventTriggerDispatch,
   listDueEventTriggerTasks,
   markEventOccurrenceStarted,
+  nestedPostgresSqlState,
   pruneEventIntake,
   recordEventOccurrenceStartFailure,
   type Database,
@@ -197,19 +198,35 @@ export function startEventSubscriptionPump(
 /**
  * Deletes raw delivery bodies after 7 days and events and deliveries after 30,
  * in bounded batches. Runs whether or not event triggers are on, so turning
- * them off never keeps people's messages longer.
+ * them off never keeps people's messages longer. While the runtime's EXECUTE
+ * on the retention routine is still withheld (migration 0937), a pass is a
+ * no-op, logged once at debug level: nothing can be stored without the intake
+ * grants either.
  */
 export function startEventIntakePrunePump(
-  deps: { db: Database; observability?: Pick<Observability, "error"> },
+  deps: { db: Database; observability?: Pick<Observability, "error" | "debug"> },
   intervalMs = 10 * 60_000,
 ): () => Promise<void> {
+  let reportedWithheld = false;
   return startLoop(
     async () => {
       for (let pass = 0; pass < 20; pass += 1) {
-        const changed = await pruneEventIntake(deps.db, {
-          bodyRetentionSeconds: EVENT_DELIVERY_BODY_RETENTION_DAYS * DAY_SECONDS,
-          eventRetentionSeconds: EVENT_RETENTION_DAYS * DAY_SECONDS,
-        });
+        let changed: number;
+        try {
+          changed = await pruneEventIntake(deps.db, {
+            bodyRetentionSeconds: EVENT_DELIVERY_BODY_RETENTION_DAYS * DAY_SECONDS,
+            eventRetentionSeconds: EVENT_RETENTION_DAYS * DAY_SECONDS,
+          });
+        } catch (error) {
+          if (nestedPostgresSqlState(error) !== "42501") throw error;
+          if (!reportedWithheld) {
+            reportedWithheld = true;
+            deps.observability?.debug(
+              "Event intake retention skipped: runtime EXECUTE is not granted yet",
+            );
+          }
+          return;
+        }
         if (changed === 0) return;
       }
     },

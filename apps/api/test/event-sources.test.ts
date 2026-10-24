@@ -13,7 +13,11 @@ import {
   ensureExternalIdentity,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   type FakeMcpEventsServer,
@@ -31,6 +35,7 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("event-sources");
   if (!acquired) throw new Error("Event source tests require real PostgreSQL");
   shared = acquired;
+  await grantDeferredRuntimeAccess(shared.admin);
   db = createDb(shared.appUrl);
 }, 180_000);
 afterAll(async () => {

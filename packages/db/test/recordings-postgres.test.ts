@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import {
   acceptOrganizationInvitation,
   claimRecordingTranscriptVersion,
@@ -40,6 +44,7 @@ beforeAll(async () => {
   shared = await acquireSharedTestDatabase("recordings-postgres");
   if (!shared) return;
   await migrate(shared.adminUrl);
+  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl);
 }, 180_000);
 
