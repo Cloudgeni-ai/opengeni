@@ -33,6 +33,7 @@ import type {
   ScheduledTaskEvents,
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
+  SessionAutomationWaitSummary,
 } from "@opengeni/contracts";
 export type {
   ClaudeSubscriptionOAuthStartResponse,
@@ -1811,6 +1812,12 @@ export type Session = {
   hasUpcomingSchedules?: boolean | undefined;
   /** An active automation targeting this session will run when one of its events arrives. */
   waitingForEvents?: boolean | undefined;
+  /**
+   * What the automations the reader can see are waiting for before they
+   * continue this session: the next scheduled run and the first event. Null
+   * when none of them can start a run.
+   */
+  automationWait?: SessionAutomationWaitSummary | null | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
@@ -1997,6 +2004,7 @@ export type SessionListEntry = Pick<
   | "hasSchedules"
   | "hasUpcomingSchedules"
   | "waitingForEvents"
+  | "automationWait"
   | "title"
   | "titleSource"
   | "createdBy"
@@ -2278,6 +2286,8 @@ export type SessionLineageResponse = {
   sessionHasSchedules?: boolean | undefined;
   sessionHasUpcomingSchedules?: boolean | undefined;
   sessionWaitingForEvents?: boolean | undefined;
+  /** What the automations continuing the requested session are waiting for. */
+  sessionAutomationWait?: SessionAutomationWaitSummary | null | undefined;
   ancestors: SessionSummary[];
   children: LineageNode[];
   truncated: boolean;

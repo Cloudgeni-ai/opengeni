@@ -71,7 +71,7 @@ import { Skeleton } from "../../../ui/skeleton";
 import { requestConversationFind } from "../../lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "../../lib/open-in-app";
 import { sessionControlPaused, sessionInputWait } from "../../lib/session-rail";
-import { sessionAutomationWait, sessionAutomationWaitLabel } from "../../../session-list-model";
+import { sessionAutomationWaitWords } from "../../../components/automations/automation-model";
 import { useSessionStartup } from "../../../lib/session-startup";
 import { isCodexProductModel } from "../../lib/session-model";
 import {
@@ -195,7 +195,7 @@ export function SessionHeader({
   const page = usePage();
   const waiting = sessionInputWait({ ...session, status });
   // A paused or finished automation still links to its settings, marked inactive.
-  const automationWait = sessionAutomationWait(session);
+  const automationWait = sessionAutomationWaitWords(t, session, { now: new Date() });
   // A session the runtime could not start reads as stuck, not "Waiting on you".
   const displayStatus = sessionDisplayStatus({
     status,
@@ -294,19 +294,22 @@ export function SessionHeader({
             <button
               type="button"
               onClick={onOpenAutomations}
-              className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
-              title={`${
-                automationWait ? sessionAutomationWaitLabel(t, automationWait) : "Nothing upcoming"
-              }. Open automations for this chat`}
+              data-automation-wait={automationWait?.kind ?? "none"}
+              className="inline-flex min-w-0 max-w-56 shrink items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
+              title={t("automations.wait.openPanel", {
+                wait: automationWait?.label ?? t("automations.wait.none"),
+              })}
             >
-              {automationWait === "event" ? (
-                <ZapIcon aria-hidden className="size-3" />
-              ) : automationWait === "schedule" ? (
-                <CalendarClockIcon aria-hidden className="size-3" />
+              {automationWait?.kind === "event" ? (
+                <ZapIcon aria-hidden className="size-3 shrink-0" />
+              ) : automationWait?.kind === "schedule" ? (
+                <CalendarClockIcon aria-hidden className="size-3 shrink-0" />
               ) : (
-                <ZapOffIcon aria-hidden className="size-3" />
+                <ZapOffIcon aria-hidden className="size-3 shrink-0" />
               )}
-              Automation
+              <span className="truncate">
+                {automationWait?.short ?? t("sessionChrome.automation")}
+              </span>
             </button>
           ) : null}
         </div>

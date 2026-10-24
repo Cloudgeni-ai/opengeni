@@ -784,6 +784,8 @@ import type {
   ScheduledTaskTriggerType,
   SlackInstallationBinding,
   Session,
+  EventSourceKind,
+  SessionAutomationWaitSummary,
   SessionAgentAccess,
   SessionAgentAccessViewer,
   SessionAuthorizationListScope,
@@ -19312,27 +19314,255 @@ export type SessionScheduleTargets = {
    * has an active event trigger and, if it runs once, has not run yet.
    */
   waitingForEvents: Set<string>;
+  /**
+   * What the automations the reader can see are waiting for, per session that
+   * one of them can still continue. Sessions without such an automation are
+   * absent. Null when the reader was not given schedule access at all.
+   */
+  waits: Map<string, SessionAutomationWaitSummary> | null;
 };
+
+const CALENDAR_DAYS = [
+  "SUNDAY",
+  "MONDAY",
+  "TUESDAY",
+  "WEDNESDAY",
+  "THURSDAY",
+  "FRIDAY",
+  "SATURDAY",
+] as const;
+const wallClockFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function wallClockFormatter(timeZone: string): Intl.DateTimeFormat | null {
+  const cached = wallClockFormatters.get(timeZone);
+  if (cached) return cached;
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "numeric",
+      hourCycle: "h23",
+    });
+    if (wallClockFormatters.size >= 256) wallClockFormatters.clear();
+    wallClockFormatters.set(timeZone, formatter);
+    return formatter;
+  } catch {
+    return null;
+  }
+}
+
+/** The wall clock in a time zone at an instant, as a UTC timestamp of the same fields. */
+function wallClockAsUtc(formatter: Intl.DateTimeFormat, instantMs: number): number {
+  const parts: Record<string, number> = {};
+  for (const part of formatter.formatToParts(new Date(instantMs))) {
+    if (part.type !== "literal") parts[part.type] = Number(part.value);
+  }
+  return Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour!, parts.minute!);
+}
+
+/** The instant a wall-clock minute happens in a time zone (the later side of a DST gap). */
+function zonedWallClockToUtc(formatter: Intl.DateTimeFormat, wallClockMs: number): number {
+  let guess = wallClockMs;
+  for (let step = 0; step < 3; step += 1) {
+    const drift = wallClockMs - wallClockAsUtc(formatter, guess);
+    if (drift === 0) break;
+    guess += drift;
+  }
+  return guess;
+}
+
+/**
+ * A schedule's next run strictly after `now`, as the Temporal schedule it
+ * becomes fires it: a one-time run at its instant, intervals aligned to
+ * `startAt` (otherwise the Unix epoch) until `endAt`, and calendar runs at a
+ * wall-clock time in the schedule's time zone. Null for a manual schedule, a
+ * one-time run that has passed, an interval past its end, or a malformed spec.
+ */
+export function scheduledTaskNextRunAt(schedule: unknown, now: Date): Date | null {
+  const spec =
+    schedule && typeof schedule === "object" ? (schedule as Record<string, unknown>) : null;
+  const nowMs = now.getTime();
+  const instant = (value: unknown) => (typeof value === "string" ? Date.parse(value) : Number.NaN);
+  switch (spec?.type) {
+    case "once": {
+      const at = instant(spec.runAt);
+      return Number.isFinite(at) && at > nowMs ? new Date(at) : null;
+    }
+    case "interval": {
+      const everyMs = Number(spec.everySeconds) * 1_000;
+      if (!Number.isSafeInteger(everyMs) || everyMs <= 0) return null;
+      const startMs = spec.startAt == null ? null : instant(spec.startAt);
+      const endMs = spec.endAt == null ? null : instant(spec.endAt);
+      if (Number.isNaN(startMs) || Number.isNaN(endMs)) return null;
+      const phase = startMs === null ? 0 : ((startMs % everyMs) + everyMs) % everyMs;
+      const from = Math.max(nowMs + 1, startMs ?? Number.NEGATIVE_INFINITY);
+      const next = phase + Math.ceil((from - phase) / everyMs) * everyMs;
+      return endMs !== null && next > endMs ? null : new Date(next);
+    }
+    case "calendar": {
+      const hour = Number(spec.hour);
+      const minute = Number(spec.minute);
+      if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+      const formatter = wallClockFormatter(
+        typeof spec.timeZone === "string" && spec.timeZone ? spec.timeZone : "UTC",
+      );
+      if (!formatter) return null;
+      const days =
+        Array.isArray(spec.daysOfWeek) && spec.daysOfWeek.length > 0
+          ? new Set(spec.daysOfWeek)
+          : null;
+      const today = new Date(wallClockAsUtc(formatter, nowMs));
+      for (let offset = 0; offset <= 7; offset += 1) {
+        const day = Date.UTC(
+          today.getUTCFullYear(),
+          today.getUTCMonth(),
+          today.getUTCDate() + offset,
+        );
+        if (days && !days.has(CALENDAR_DAYS[new Date(day).getUTCDay()]!)) continue;
+        const run = zonedWallClockToUtc(formatter, day + (hour * 60 + minute) * 60_000);
+        if (run > nowMs) return new Date(run);
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+type AutomationWaitRow = {
+  taskId: string;
+  sessionId: string | null;
+  status: string;
+  schedule: unknown;
+  createdAt: Date;
+  visibility: string;
+  ownerSubjectId: string | null;
+  triggerStatus: string | null;
+  triggerPosition: number | null;
+  eventTypes: string[] | null;
+  sourceKind: string | null;
+  sourceName: string | null;
+  sourceVisibility: string | null;
+  sourceOwnerSubjectId: string | null;
+  eventsOnce: boolean | null;
+  eventsCompletedAt: Date | null;
+  hasEventSettings: string | null;
+};
+
+/**
+ * What the automations the reader can see are waiting for, per session. A
+ * trusted reader (undefined) sees every automation and source; null sees
+ * shared ones; a subject also sees their own.
+ */
+function automationWaitSummaries(
+  rows: readonly AutomationWaitRow[],
+  now: Date,
+  viewerSubjectId: string | null | undefined,
+): Map<string, SessionAutomationWaitSummary> {
+  const visible = (visibility: string | null, owner: string | null, shared: string) =>
+    viewerSubjectId === undefined ||
+    visibility === shared ||
+    (viewerSubjectId !== null && owner === viewerSubjectId);
+  const tasks = new Map<string, { sessionId: string; rows: AutomationWaitRow[] }>();
+  for (const row of rows) {
+    if (!row.sessionId || !visible(row.visibility, row.ownerSubjectId, "workspace_shared"))
+      continue;
+    const task = tasks.get(row.taskId) ?? { sessionId: row.sessionId, rows: [] };
+    task.rows.push(row);
+    tasks.set(row.taskId, task);
+  }
+  const ordered = [...tasks.values()].sort(
+    (left, right) =>
+      left.rows[0]!.createdAt.getTime() - right.rows[0]!.createdAt.getTime() ||
+      left.rows[0]!.taskId.localeCompare(right.rows[0]!.taskId),
+  );
+  const waits = new Map<string, SessionAutomationWaitSummary>();
+  for (const { sessionId, rows: taskRows } of ordered) {
+    const task = taskRows[0]!;
+    if (task.status !== "active" || (task.eventsOnce && task.eventsCompletedAt)) continue;
+    const nextRun = scheduledTaskHasUpcomingRun(task, now)
+      ? scheduledTaskNextRunAt(task.schedule, now)
+      : null;
+    const trigger = task.hasEventSettings
+      ? taskRows
+          .filter((row) => row.triggerStatus === "active")
+          .sort((left, right) => left.triggerPosition! - right.triggerPosition!)[0]
+      : undefined;
+    if (!nextRun && !trigger) continue;
+    const wait = waits.get(sessionId) ?? { nextRunAt: null, event: null, automations: 0 };
+    wait.automations += 1;
+    if (nextRun && (!wait.nextRunAt || nextRun.getTime() < Date.parse(wait.nextRunAt))) {
+      wait.nextRunAt = nextRun.toISOString();
+    }
+    if (trigger && !wait.event) {
+      wait.event = {
+        source:
+          trigger.sourceKind &&
+          trigger.sourceName !== null &&
+          visible(trigger.sourceVisibility, trigger.sourceOwnerSubjectId, "workspace")
+            ? {
+                kind: trigger.sourceKind as EventSourceKind,
+                name: trigger.sourceName,
+              }
+            : null,
+        eventTypes: trigger.eventTypes ?? [],
+      };
+    }
+    waits.set(sessionId, wait);
+  }
+  return waits;
+}
 
 export async function sessionScheduleTargets(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
-  now: Date = new Date(),
+  options: {
+    now?: Date;
+    /**
+     * Who is reading, for the wait summaries. Omitted (trusted callers): every
+     * automation and source is described. Given: it is asked only when an
+     * Only me automation or a private source targets these sessions; null
+     * then describes shared ones, a subject also their own.
+     */
+    viewer?: () => Promise<string | null>;
+  } = {},
 ): Promise<SessionScheduleTargets> {
+  const now = options.now ?? new Date();
   if (sessionIds.length === 0)
-    return { scheduled: new Set(), upcoming: new Set(), waitingForEvents: new Set() };
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
+    return {
+      scheduled: new Set(),
+      upcoming: new Set(),
+      waitingForEvents: new Set(),
+      waits: new Map(),
+    };
+  const rows = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    scopedDb
       .select({
+        taskId: schema.scheduledTasks.id,
         sessionId: schema.scheduledTasks.reusableSessionId,
         status: schema.scheduledTasks.status,
         schedule: schema.scheduledTasks.schedule,
+        createdAt: schema.scheduledTasks.createdAt,
+        visibility: schema.scheduledTasks.visibility,
+        ownerSubjectId: schema.scheduledTasks.ownerSubjectId,
         triggerStatus: schema.eventTriggers.status,
+        triggerPosition: schema.eventTriggers.position,
+        eventTypes: schema.eventTriggers.eventTypes,
+        sourceKind: schema.eventSources.kind,
+        sourceName: schema.eventSources.name,
+        sourceVisibility: schema.eventSources.visibility,
+        sourceOwnerSubjectId: schema.eventSources.ownerSubjectId,
+        eventsOnce: schema.scheduledTaskEventSettings.once,
         eventsCompletedAt: schema.scheduledTaskEventSettings.completedAt,
+        hasEventSettings: schema.scheduledTaskEventSettings.taskId,
       })
       .from(schema.scheduledTasks)
       .leftJoin(schema.eventTriggers, eq(schema.eventTriggers.taskId, schema.scheduledTasks.id))
+      .leftJoin(schema.eventSources, eq(schema.eventSources.id, schema.eventTriggers.sourceId))
       .leftJoin(
         schema.scheduledTaskEventSettings,
         eq(schema.scheduledTaskEventSettings.taskId, schema.scheduledTasks.id),
@@ -19344,22 +19574,29 @@ export async function sessionScheduleTargets(
           inArray(schema.scheduledTasks.runMode, ["existing_session", "reusable_session"]),
           anyOf(schema.scheduledTasks.reusableSessionId, sessionIds),
         ),
-      );
-    const targets: SessionScheduleTargets = {
-      scheduled: new Set(),
-      upcoming: new Set(),
-      waitingForEvents: new Set(),
-    };
-    for (const row of rows) {
-      if (!row.sessionId) continue;
-      targets.scheduled.add(row.sessionId);
-      if (scheduledTaskHasUpcomingRun(row, now)) targets.upcoming.add(row.sessionId);
-      if (row.status === "active" && row.triggerStatus === "active" && !row.eventsCompletedAt) {
-        targets.waitingForEvents.add(row.sessionId);
-      }
+      ),
+  );
+  const restricted = rows.some(
+    (row) =>
+      row.visibility !== "workspace_shared" ||
+      (row.sourceVisibility !== null && row.sourceVisibility !== "workspace"),
+  );
+  const viewerSubjectId = options.viewer ? (restricted ? await options.viewer() : null) : undefined;
+  const targets: SessionScheduleTargets = {
+    scheduled: new Set(),
+    upcoming: new Set(),
+    waitingForEvents: new Set(),
+    waits: automationWaitSummaries(rows, now, viewerSubjectId),
+  };
+  for (const row of rows) {
+    if (!row.sessionId) continue;
+    targets.scheduled.add(row.sessionId);
+    if (scheduledTaskHasUpcomingRun(row, now)) targets.upcoming.add(row.sessionId);
+    if (row.status === "active" && row.triggerStatus === "active" && !row.eventsCompletedAt) {
+      targets.waitingForEvents.add(row.sessionId);
     }
-    return targets;
-  });
+  }
+  return targets;
 }
 
 export async function listScheduledTasks(

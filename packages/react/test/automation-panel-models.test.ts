@@ -25,6 +25,7 @@ import {
   isAgentAutomation,
   newAutomationDraft,
   newEventTriggerDraft,
+  sessionAutomationWaitWords,
   sortAutomations,
   validateAutomationDraft,
   withEventArgument,
@@ -398,5 +399,95 @@ describe("event arguments", () => {
     ).toContain('"mine"');
     expect(eventArgumentsForEvent(undefined, "not json", { projectId: "p-9" })).toBe("not json");
     expect(eventArgumentsForEvent(schema, "", undefined)).toBe("");
+  });
+});
+
+describe("sessionAutomationWaitWords", () => {
+  const at = { now: NOW, timeZone: "UTC" };
+
+  test("a chat no automation will post into waits for nothing", () => {
+    expect(sessionAutomationWaitWords(t, {}, at)).toBeNull();
+    expect(
+      sessionAutomationWaitWords(
+        t,
+        { hasSchedules: true, hasUpcomingSchedules: false, waitingForEvents: false },
+        at,
+      ),
+    ).toBeNull();
+  });
+
+  test("without the details the plain wait is named", () => {
+    expect(sessionAutomationWaitWords(t, { waitingForEvents: true }, at)).toEqual({
+      kind: "event",
+      label: "Waiting for an event",
+      short: "Waiting on an event",
+    });
+    expect(
+      sessionAutomationWaitWords(t, { hasUpcomingSchedules: true, automationWait: null }, at),
+    ).toEqual({ kind: "schedule", label: "On a schedule", short: "On a schedule" });
+  });
+
+  test("an event names what it waits for and where from, then the next run", () => {
+    expect(
+      sessionAutomationWaitWords(
+        t,
+        {
+          waitingForEvents: true,
+          hasUpcomingSchedules: true,
+          automationWait: {
+            nextRunAt: "2026-10-22T09:00:00.000Z",
+            event: {
+              source: { kind: "mcp", name: "Deploys" },
+              eventTypes: ["deploy.finished", "deploy.failed"],
+            },
+            automations: 2,
+          },
+        },
+        at,
+      ),
+    ).toEqual({
+      kind: "event",
+      label:
+        "Waiting for deploy.finished or deploy.failed from Deploys. Next run: Tomorrow, 09:00. 1 more automation is waiting too.",
+      short: "Waiting on Deploys",
+    });
+  });
+
+  test("a schedule names its next run in the viewer's time zone", () => {
+    expect(
+      sessionAutomationWaitWords(
+        t,
+        {
+          hasUpcomingSchedules: true,
+          automationWait: { nextRunAt: "2026-10-21T14:00:00.000Z", event: null, automations: 3 },
+        },
+        { now: NOW, timeZone: "Europe/Oslo" },
+      ),
+    ).toEqual({
+      kind: "schedule",
+      label: "Next run: Today, 16:00. 2 more automations are waiting too.",
+      short: "Next: Today, 16:00",
+    });
+  });
+
+  test("a source the viewer can't see stays unnamed", () => {
+    expect(
+      sessionAutomationWaitWords(
+        t,
+        {
+          waitingForEvents: true,
+          automationWait: {
+            nextRunAt: null,
+            event: { source: null, eventTypes: ["*"] },
+            automations: 1,
+          },
+        },
+        at,
+      ),
+    ).toEqual({
+      kind: "event",
+      label: "Waiting for every event from a source you can't see",
+      short: "Waiting on an event",
+    });
   });
 });

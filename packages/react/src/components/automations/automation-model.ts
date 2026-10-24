@@ -16,10 +16,18 @@ import type {
 } from "@opengeni/sdk";
 
 import type { OpenGeniMessageKey, OpenGeniText } from "../../messages/runtime";
+import { inSentence } from "../../ui/relative-time";
+import {
+  sessionAutomationWait,
+  sessionAutomationWaitLabel,
+  type SessionAutomationWait,
+  type SessionListRow,
+} from "../../session-list-model";
 import {
   DEFAULT_CADENCE_TIME,
   cadenceFromScheduleSpec,
   describeCadence,
+  formatRunTime,
   nextRuns,
   toScheduleSpec,
   validateCadence,
@@ -31,6 +39,7 @@ import {
   eventTriggersDraftFrom,
   eventTriggersInputFrom,
   eventTriggersShortLabel,
+  eventTypesLabel,
   hasEventTriggerIssues,
   sameEventTriggers,
   validateEventTriggers,
@@ -543,5 +552,87 @@ export function automationUpdateRequest(
               ? eventTriggersInputFrom(draft.events)
               : { triggers: [] },
         }),
+  };
+}
+
+/* ----------------------------------------------------------------------------
+   What a chat waits for.
+   -------------------------------------------------------------------------- */
+
+export interface SessionAutomationWaitWords {
+  /** An event can start a run (it wins when both apply), or only the schedule will. */
+  kind: SessionAutomationWait;
+  /**
+   * A sentence for a tooltip or hover card: "Waiting for deploy.finished from
+   * Deploys", "Next run: Tomorrow, 09:00", both, and how many more automations
+   * wait. Servers without the details get the plain "Waiting for an event".
+   */
+  label: string;
+  /** A few words for a chip: "Waiting on Deploys", "Next: Tomorrow, 09:00". */
+  short: string;
+}
+
+/**
+ * What the automations posting into a chat are waiting for, in words, or null
+ * when none of them will start a run. Times are in `timeZone` (the viewer's).
+ */
+export function sessionAutomationWaitWords(
+  t: OpenGeniText,
+  session: Pick<
+    SessionListRow,
+    "hasSchedules" | "hasUpcomingSchedules" | "waitingForEvents" | "automationWait"
+  >,
+  { now, timeZone = viewerTimeZone() }: { now: Date; timeZone?: string },
+): SessionAutomationWaitWords | null {
+  const summary = session.automationWait;
+  // The details cover only automations this person can see; without them the
+  // plain facts still say a chat waits on someone else's Only me automation.
+  const kind: SessionAutomationWait | null = summary
+    ? summary.event
+      ? "event"
+      : "schedule"
+    : sessionAutomationWait(session);
+  if (!kind) return null;
+  if (!summary) {
+    const label = sessionAutomationWaitLabel(t, kind);
+    return {
+      kind,
+      label,
+      short: kind === "event" ? t("automations.wait.chip.anyEvent") : label,
+    };
+  }
+  const source = summary.event?.source?.name ?? null;
+  const types = summary.event ? eventTypesLabel(t, summary.event.eventTypes) : null;
+  const event =
+    summary.event && types
+      ? t("automations.trigger.short", {
+          // "Every event" reads "every event" mid-sentence; event names keep their case.
+          events: summary.event.eventTypes[0]?.endsWith("*") ? inSentence(types, t) : types,
+          source: source ?? t("automations.trigger.hiddenSourceInline"),
+        })
+      : null;
+  const time = summary.nextRunAt
+    ? formatRunTime(new Date(summary.nextRunAt), { timeZone, now, text: t })
+    : null;
+  const wait =
+    event && time
+      ? t("automations.wait.eventOrNextRun", { event, time })
+      : event
+        ? t("automations.wait.eventFrom", { event })
+        : time
+          ? t("automations.wait.nextRun", { time })
+          : sessionAutomationWaitLabel(t, kind);
+  const more = summary.automations - 1;
+  return {
+    kind,
+    label: more > 0 ? t("automations.wait.more", { wait, count: more }) : wait,
+    short:
+      kind === "event"
+        ? source
+          ? t("automations.wait.chip.event", { source })
+          : t("automations.wait.chip.anyEvent")
+        : time
+          ? t("automations.wait.chip.nextRun", { time })
+          : sessionAutomationWaitLabel(t, kind),
   };
 }

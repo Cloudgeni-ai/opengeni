@@ -2334,15 +2334,19 @@ test("session schedule projections follow current targets and schedule permissio
   expect(await read(`/sessions/${value.child.id}`)).toMatchObject({
     hasSchedules: true,
     hasUpcomingSchedules: false,
+    automationWait: null,
   });
   expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
     sessionHasSchedules: true,
     sessionHasUpcomingSchedules: false,
+    sessionAutomationWait: null,
   });
-  expect(await read(`/sessions/${value.child.id}`, value.authorization)).toMatchObject({
+  const withoutScheduleAccess = await read(`/sessions/${value.child.id}`, value.authorization);
+  expect(withoutScheduleAccess).toMatchObject({
     hasSchedules: false,
     hasUpcomingSchedules: false,
   });
+  expect(withoutScheduleAccess).not.toHaveProperty("automationWait");
   expect(await read(`/scheduled-tasks?sessionId=${value.child.id}`)).toMatchObject([
     { id: task.id },
   ]);
@@ -2365,17 +2369,23 @@ test("session schedule projections follow current targets and schedule permissio
     createdBy: { kind: "service", subjectId: "scheduler" },
     metadata: {},
   });
+  const nextNine = new Date();
+  nextNine.setUTCHours(9, 0, 0, 0);
+  if (nextNine.getTime() <= Date.now()) nextNine.setUTCDate(nextNine.getUTCDate() + 1);
+  const dailyWait = { nextRunAt: nextNine.toISOString(), event: null, automations: 1 };
   expect(await read(`/sessions/${value.child.id}`)).toMatchObject({
     hasSchedules: true,
     hasUpcomingSchedules: true,
+    automationWait: dailyWait,
   });
   expect(
     (await read("/sessions?view=page")).sessions.find(
       (session: { id: string }) => session.id === value.child.id,
     ),
-  ).toMatchObject({ hasSchedules: true, hasUpcomingSchedules: true });
+  ).toMatchObject({ hasSchedules: true, hasUpcomingSchedules: true, automationWait: dailyWait });
   expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
     sessionHasUpcomingSchedules: true,
+    sessionAutomationWait: dailyWait,
   });
   await deleteScheduledTask(client.db, value.grant.workspaceId, upcoming.id);
   const denied = await app.request(`${base}/scheduled-tasks?sessionId=${value.child.id}`, {
