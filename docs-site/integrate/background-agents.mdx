@@ -91,6 +91,51 @@ Your backend sends `{ "type": "ticket.created", "timestamp": "â€¦", "data": { â€
 - Events made by Opengeni's own bots don't fire a trigger unless it sets `includeOwnEvents: true`.
 - `listEventDeliveries`, `replayEventDelivery` and `sendTestEvent` show what arrived, process a delivery again, and send a test event. `listEventSourceTypes` lists the event types a trigger can name.
 
+### Events from your own MCP server
+
+If your product already gives the agent an MCP server, that server can publish events too, and nothing has to sign webhooks. Opengeni implements the client side of the MCP Events extension ([SEP-3415](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415), `io.modelcontextprotocol/events`):
+
+- Advertise the extension in `initialize` and answer `events/list` with each event type's `name`, `description`, `delivery` modes, `inputSchema` (the subscription arguments) and `payloadSchema`.
+- Offer `poll` (`events/poll`), `webhook` (`events/subscribe` and `events/unsubscribe`), or both. Opengeni prefers a webhook, refreshes it before its TTL runs out, and polls instead when your server can't reach Opengeni's address. `push` (`events/stream`) is not used yet.
+- Return a cursor with each page or delivery. Opengeni resumes from it and treats `truncated: true` as missed events, which the run says. Repeated `eventId`s are ignored.
+- Errors use the extension's codes. Servers built for ChatGPT's earlier sketch of the extension (`capabilities.events` and errors -32011 to -32015) work as well.
+
+```ts
+const { source } = await og.createEventSource(workspaceId, { kind: "mcp", serverId: acmeServerId });
+
+await og.createScheduledTask(workspaceId, {
+  name: "Tell me when the project changes",
+  schedule: { type: "manual" },
+  targetSessionId: session.id, // continue this chat
+  prompt: "Say what changed in the project and whether it needs me.",
+  events: {
+    once: true,
+    triggers: [{ sourceId: source.id, eventTypes: ["project.updated"], arguments: { projectId } }],
+  },
+});
+```
+
+Each trigger names one event type and its `arguments`, checked against the type's `inputSchema`. Opengeni subscribes as the event source's owner, through their connection to your server, so your server decides which events that person may see just as it does for their tool calls. When no automation listens any more, Opengeni unsubscribes.
+
+### Automations in your UI
+
+`AutomationsPanel` from `@opengeni/react/automations` lists, creates and edits automations inside your own dialog or page. Given a `sessionId`, new automations continue that chat; without one, each run starts a new chat with the workspace's defaults and the owner's access. It offers event triggers whenever the deployment runs them; pass `eventTriggers={false}` to offer schedules only.
+
+```tsx
+import { AutomationsPanel } from "@opengeni/react/automations";
+
+<AutomationsPanel
+  client={client}
+  workspaceId={workspaceId}
+  sessionId={chatId}
+  eventServers={[{ serverId: acmeServerId, name: "Acme" }]} // offered before a source exists
+  argumentDefaults={{ projectId }} // subscription arguments new triggers start with
+  onOpenSession={(id) => openChat(id)}
+/>;
+```
+
+Its words come from the `automations.*` message keys, so `OpenGeniMessagesProvider` translates it. Sessions and session list entries carry `automationWait`: the next run, or the event and source the chat waits for. `sessionAutomationWaitWords(t, session, { now })` turns it into "Waiting for project.updated from Acme" or "Next run: Tomorrow, 09:00" for your own chat list.
+
 ### Moving from the first automation API
 
 `@opengeni/sdk/automations`, `@opengeni/sdk/pr-review`, the `/v1/workspaces/:workspaceId/automations/*` and `/pr-review/*` routes, and `POST /v1/webhooks/automations/:endpointId` are deprecated. Their responses carry `Deprecation` and `Sunset` headers; they keep working until January 25, 2027 and are removed in the next major SDK.
