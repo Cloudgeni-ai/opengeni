@@ -48,9 +48,11 @@ export function groupLiveTurns(lines: readonly LiveTranscriptLine[]): LiveTurn[]
   return turns;
 }
 
+const NO_PARTIALS: readonly { trackNumber: number; text: string }[] = [];
+
 export function LiveTranscript({
   lines,
-  partials = [],
+  partials = NO_PARTIALS,
   speakerName,
   status,
   empty,
@@ -75,8 +77,7 @@ export function LiveTranscript({
     const element = scrollRef.current;
     if (!element) return;
     const onScroll = () => {
-      following.current =
-        element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+      following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
     };
     element.addEventListener("scroll", onScroll, { passive: true });
     return () => element.removeEventListener("scroll", onScroll);

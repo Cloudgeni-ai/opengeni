@@ -334,8 +334,7 @@ describe("ElevenLabs provider", () => {
 
   test("a rejected key fails the live grant as unauthorized", async () => {
     const provider = createElevenLabsRecordingTranscriptionProvider({
-      fetch: (async () =>
-        new Response("{}", { status: 401 })) as unknown as typeof fetch,
+      fetch: (async () => new Response("{}", { status: 401 })) as unknown as typeof fetch,
     });
     await expect(
       provider.createLiveSession!({ model: "scribe_v2_realtime" }, { apiKey: "k" }),
@@ -362,7 +361,9 @@ describe("registry and cost", () => {
 
   test("live and batch models are only found for their own use", () => {
     const registry = createRecordingTranscriptionProviderRegistry();
-    expect(findRecordingTranscriptionModel(registry, "elevenlabs", "scribe_v2_realtime")).toBeNull();
+    expect(
+      findRecordingTranscriptionModel(registry, "elevenlabs", "scribe_v2_realtime"),
+    ).toBeNull();
     expect(findRecordingTranscriptionModel(registry, "elevenlabs", "scribe_v2", "live")).toBeNull();
     const live = findRecordingTranscriptionModel(
       registry,

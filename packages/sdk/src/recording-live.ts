@@ -121,7 +121,8 @@ function base64(bytes: Uint8Array): string {
 function pcmBytes(samples: Int16Array): Uint8Array {
   const bytes = new Uint8Array(samples.length * 2);
   const view = new DataView(bytes.buffer);
-  for (let index = 0; index < samples.length; index++) view.setInt16(index * 2, samples[index]!, true);
+  for (let index = 0; index < samples.length; index++)
+    view.setInt16(index * 2, samples[index]!, true);
   return bytes;
 }
 
@@ -164,9 +165,7 @@ type ProviderMessage = {
  */
 export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTranscriber {
   const Socket =
-    options.WebSocket ??
-    (globalThis as { WebSocket?: LiveWebSocketConstructor }).WebSocket ??
-    null;
+    options.WebSocket ?? (globalThis as { WebSocket?: LiveWebSocketConstructor }).WebSocket ?? null;
   let snapshot: LiveTranscriptTrackSnapshot = {
     trackNumber: options.trackNumber,
     state: Socket ? "connecting" : "unavailable",
@@ -226,15 +225,11 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
       const batch = unsaved.slice(0, 100);
       const streamedMilliseconds = Math.round((streamedSamples / sampleRate) * 1_000);
       try {
-        await options.client.appendRecordingLiveSegments(
-          options.workspaceId,
-          options.recordingId,
-          {
-            trackNumber: options.trackNumber,
-            streamedMilliseconds,
-            segments: batch.map(({ trackNumber: _track, ...segment }) => segment),
-          },
-        );
+        await options.client.appendRecordingLiveSegments(options.workspaceId, options.recordingId, {
+          trackNumber: options.trackNumber,
+          streamedMilliseconds,
+          segments: batch.map(({ trackNumber: _track, ...segment }) => segment),
+        });
       } catch {
         // Saving is for other viewers only; try again a little later.
         if (!closed) scheduleSave();
@@ -303,7 +298,15 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
           finished?.();
         }, UNTIMED_COMMIT_MILLISECONDS),
       };
-    } else if (type.endsWith("_error") || type.includes("exceeded") || type === "throttled" || type === "rate_limited" || type === "queue_overflow" || type === "resource_exhausted" || type === "insufficient_audio_activity") {
+    } else if (
+      type.endsWith("_error") ||
+      type.includes("exceeded") ||
+      type === "throttled" ||
+      type === "rate_limited" ||
+      type === "queue_overflow" ||
+      type === "resource_exhausted" ||
+      type === "insufficient_audio_activity"
+    ) {
       const detail =
         typeof message.error === "string"
           ? message.error
@@ -390,7 +393,9 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
       return;
     }
     const chunk = Math.round((sampleRate * SEND_MILLISECONDS) / 1_000);
-    while (pending.length > 0 && (force || pendingSamples >= chunk)) {
+    // Whole chunks only, unless asked to send the remainder too.
+    const minimum = force ? 1 : chunk;
+    while (pending.length > 0 && pendingSamples >= minimum) {
       const take = Math.min(pendingSamples, Math.max(chunk, 1));
       const out = new Int16Array(take);
       let filled = 0;

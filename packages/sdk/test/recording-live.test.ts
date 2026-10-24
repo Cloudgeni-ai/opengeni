@@ -1,11 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AppendRecordingLiveSegmentsRequest, RecordingLiveSession } from "@opengeni/contracts";
 import { OpenGeniApiError } from "../src/errors";
-import {
-  createLiveTranscriber,
-  resamplePcm16,
-  type LiveWebSocket,
-} from "../src/recording-live";
+import { createLiveTranscriber, resamplePcm16, type LiveWebSocket } from "../src/recording-live";
 
 class FakeSocket implements LiveWebSocket {
   static opened: FakeSocket[] = [];
@@ -150,7 +146,8 @@ describe("live transcriber", () => {
         JSON.stringify({
           error: {
             code: "conflict",
-            message: "Add an ElevenLabs API key to this workspace's models to see a live transcript.",
+            message:
+              "Add an ElevenLabs API key to this workspace's models to see a live transcript.",
             details: { code: "credential_unavailable" },
           },
         }),
@@ -205,7 +202,10 @@ describe("live transcriber", () => {
       words: [{ text: "Back.", start: 0.05, end: 0.15, type: "word" }],
     });
     // The new session's clock starts where its first held audio was recorded.
-    expect(live.snapshot.segments[0]).toMatchObject({ startMilliseconds: 150, endMilliseconds: 250 });
+    expect(live.snapshot.segments[0]).toMatchObject({
+      startMilliseconds: 150,
+      endMilliseconds: 250,
+    });
     live.abort();
     expect(live.snapshot.state).toBe("closed");
   });
@@ -223,7 +223,10 @@ describe("live transcriber", () => {
     await settle();
     FakeSocket.opened[0]!.open();
     FakeSocket.opened[0]!.receive({ message_type: "quota_exceeded", error: "No credit" });
-    expect(live.snapshot).toMatchObject({ state: "unavailable", error: { code: "quota_exceeded" } });
+    expect(live.snapshot).toMatchObject({
+      state: "unavailable",
+      error: { code: "quota_exceeded" },
+    });
   });
 });
 

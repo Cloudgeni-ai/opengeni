@@ -181,7 +181,9 @@ export function registerRecordingRoutes(
       (requested.providerId
         ? registry.get(providerId)?.models.find((spec) => spec.capabilities.live)?.model
         : DEFAULT_RECORDING_LIVE_TRANSCRIPTION.model);
-    const found = model ? findRecordingTranscriptionModel(registry, providerId, model, "live") : null;
+    const found = model
+      ? findRecordingTranscriptionModel(registry, providerId, model, "live")
+      : null;
     if (!found) {
       throw new ApiHttpError(400, {
         code: "validation_failed",

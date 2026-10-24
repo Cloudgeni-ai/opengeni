@@ -254,9 +254,9 @@ describe("Live transcript", () => {
     );
     try {
       await waitForText(view.container, "Live transcript");
-      const box = [...view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(
-        (element) => element.closest("label")?.textContent?.includes("Live transcript"),
-      );
+      const box = [
+        ...view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+      ].find((element) => element.closest("label")?.textContent?.includes("Live transcript"));
       expect(box?.checked).toBe(true);
     } finally {
       await view.unmount();

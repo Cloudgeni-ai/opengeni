@@ -206,8 +206,8 @@ function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
     // Nothing to read, so no empty box: one line says it and that nothing is lost.
     return (
       <p className="mt-3 text-xs leading-4.5 text-fg-muted" aria-live="polite">
-        Live text isn't available right now. The meeting is still recorded and transcribed after
-        you stop.
+        Live text isn't available right now. The meeting is still recorded and transcribed after you
+        stop.
       </p>
     );
   }

@@ -671,14 +671,17 @@ export function useLiveTranscript(
               left.startMilliseconds - right.startMilliseconds || left.sequence - right.sequence,
           );
         }
-        setState({ recordingId, segments: page.ended ? [] : segments, ended: page.ended, error: null });
+        setState({
+          recordingId,
+          segments: page.ended ? [] : segments,
+          ended: page.ended,
+          error: null,
+        });
         if (page.ended) return;
       } catch (error) {
         if (cancelled) return;
         setState((previous) => ({
-          ...(previous.recordingId === recordingId
-            ? previous
-            : { segments: [], ended: false }),
+          ...(previous.recordingId === recordingId ? previous : { segments: [], ended: false }),
           recordingId,
           error: error instanceof Error ? error : new Error(String(error)),
         }));

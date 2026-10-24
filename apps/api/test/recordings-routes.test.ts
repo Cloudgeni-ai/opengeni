@@ -373,9 +373,8 @@ describe("recording routes", () => {
       available: false,
     });
     expect(
-      models.body.models.find(
-        (model: { model: string }) => model.model === "scribe_v2_realtime",
-      ).capabilities,
+      models.body.models.find((model: { model: string }) => model.model === "scribe_v2_realtime")
+        .capabilities,
     ).toMatchObject({ batch: false, live: true });
     // A live-only model cannot make a transcript.
     expect(

@@ -581,7 +581,11 @@ export function createElevenLabsRecordingTranscriptionProvider(
         throw new RecordingTranscriptionError("Could not reach ElevenLabs", "network", true);
       }
       if (!response.ok) {
-        throw elevenLabsError(response.status, await errorDetail(response), "start a live transcript");
+        throw elevenLabsError(
+          response.status,
+          await errorDetail(response),
+          "start a live transcript",
+        );
       }
       const body = (await response.json().catch(() => null)) as { token?: unknown } | null;
       if (typeof body?.token !== "string" || body.token.length === 0) {
@@ -680,6 +684,7 @@ export function findRecordingTranscriptionModel(
   const provider = registry.get(providerId);
   const spec = provider?.models.find((candidate) => candidate.model === model);
   if (!provider || !spec) return null;
-  if (use === "live") return spec.capabilities.live && provider.createLiveSession ? { provider, spec } : null;
+  if (use === "live")
+    return spec.capabilities.live && provider.createLiveSession ? { provider, spec } : null;
   return spec.capabilities.batch ? { provider, spec } : null;
 }
