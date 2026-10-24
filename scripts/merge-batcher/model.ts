@@ -470,9 +470,35 @@ export async function scanRunnerDemand(input: {
     mainQueuedJobs = 0;
   const preFanoutMainRuns: number[] = [];
   let latestMain: { id: number; jobs: unknown[] } | null = null;
-  for (const [id, run] of runs) {
+  // Bound independent read-only job observations without serializing provider
+  // latency across the entire inventory. Pagination within each run remains
+  // sequential and validated by list(); the shared deadline is unchanged.
+  const entries = [...runs];
+  const pages: Awaited<ReturnType<typeof list>>[] = new Array(entries.length);
+  let next = 0;
+  let failed = false;
+  let failure: unknown;
+  await Promise.all(
+    Array.from({ length: Math.min(4, entries.length) }, async () => {
+      while (!failed) {
+        const index = next++;
+        if (index >= entries.length) return;
+        try {
+          pages[index] = await list(
+            `actions/runs/${entries[index]![0]}/jobs?filter=latest`,
+            "jobs",
+          );
+        } catch (error) {
+          failed = true;
+          failure = error;
+        }
+      }
+    }),
+  );
+  if (failed) throw failure;
+  for (const [index, [id, run]] of entries.entries()) {
     if (now() - started > deadline) return hold("deadline");
-    const page = await list(`actions/runs/${id}/jobs?filter=latest`, "jobs");
+    const page = pages[index]!;
     if ("error" in page) return hold(page.error === "incomplete" ? "incomplete-jobs" : page.error);
     scannedRuns++;
     const jobs = page.items;
