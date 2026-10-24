@@ -285,6 +285,16 @@ describe("Live transcript", () => {
     expect(liveUnavailableText([{ error: null }])).not.toContain("  ");
   });
 
+  test("a stopped upload says why the server refused it", async () => {
+    const { recorderErrorText } = await import("./recorder-panel");
+    expect(
+      recorderErrorText({ code: "upload_failed", message: "Recording not found" }).body,
+    ).toContain("The meeting was deleted, or you no longer have access to it.");
+    expect(
+      recorderErrorText({ code: "upload_failed", message: "Chunk index out of range." }).body,
+    ).toContain("The server refused the audio: Chunk index out of range.");
+  });
+
   test("turns from one track read as one turn, in time order", async () => {
     const { groupLiveTurns } = await import("./live-transcript");
     const turns = groupLiveTurns([
