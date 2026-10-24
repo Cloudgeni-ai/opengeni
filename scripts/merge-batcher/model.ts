@@ -359,7 +359,9 @@ export interface LatestMainObservation {
  * readers. It keeps the complete run inventory (every status page must be a
  * complete single page, and every status is listed `RUN_LIST_PASSES` times)
  * and reads the complete latest-job page of every
- * active run up to `MAX_SCANNED_ACTIVE_RUNS`. Only runs proven
+ * active run up to `MAX_SCANNED_ACTIVE_RUNS`. The live reader can explicitly
+ * exclude recognized PR CI demand after complete inventory and Batch-slot
+ * validation; the traffic-shadow default still observes it. Only runs proven
  * approval-only are excluded from `MAX_RUNNER_RELEVANT_RUNS`; their demand is
  * still computed from their jobs (and is zero by construction). Mixed,
  * job-less, queued, otherwise unproven runs, and runs listed with any
@@ -373,6 +375,8 @@ export async function scanRunnerDemand(input: {
   get: (path: string) => Promise<unknown>;
   batchWorkflow: string;
   baseBranch: string;
+  /** PR fast checks use the provider queue, not Batch submission backpressure. */
+  excludePrCiDemand?: boolean;
   /** Run ID validator; return null to hold, or throw. Defaults to positive safe integers. */
   runId?: (value: unknown) => number | null;
   now?: () => number;
@@ -432,6 +436,17 @@ export async function scanRunnerDemand(input: {
     }
   }
   if ([...runs.values()].some((run) => run.path === input.batchWorkflow)) return hold("batch-slot");
+  if (input.excludePrCiDemand) {
+    for (const [id, run] of runs) {
+      if (
+        run.path === ".github/workflows/pr-ci.yml" &&
+        (run.event === "pull_request" || run.event === "workflow_dispatch") &&
+        ACTIVE_RUN_STATUSES.includes(run.status as (typeof ACTIVE_RUN_STATUSES)[number])
+      ) {
+        runs.delete(id);
+      }
+    }
+  }
   if (runs.size > maxScanned) return hold("scan-bound");
   let mainDemand = 0,
     otherDemand = 0,

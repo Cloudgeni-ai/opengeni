@@ -462,12 +462,12 @@ arithmetic:
   repository jobs at most. Combined with 52/30/18 (other + max(30, main) + 18 <= 52,
   so other <= 4 while main <= 30), admission needs other <= 4 and main + other <= 14.
 
-The per-PR fast workflow does not impose a global PR concurrency cap. With the
-currently deployed 52/30/60/28 Batch capacity settings, five or more observed PR
-jobs therefore still hold new Batch submission. Removing global PR serialization
-does not remove that separate Batch hold; a focused follow-up will address Batch
-submission independently. GitHub provider queue wait is not eliminated by the
-smaller PR gate.
+The per-PR fast workflow does not impose a global PR concurrency cap. Live Batch
+admission excludes exact `pr-ci.yml` pull-request and workflow-dispatch runs from
+PR demand, including legacy definitions, so five or more PR jobs do not withhold
+submission. The remaining non-PR demand and completeness safeguards above still
+apply. GitHub queues submitted work when provider capacity is busy; the smaller
+PR gate does not eliminate provider queue wait.
 
 The batcher's App is installed only on this repository, so it cannot read other
 repositories' jobs and does not try. The allowance replaces that observation. It is
@@ -483,6 +483,16 @@ that starts after admission can exceed 60. The pre-fan-out and main-queued holds
 a new candidate from adding to main's demand once a main run is observed; they do
 not preempt a running candidate. Invalid limit or
 allowance values reject configuration; allowance plus 18 above the limit never admits.
+
+The live batcher excludes every `.github/workflows/pr-ci.yml` run triggered
+by `pull_request` or `workflow_dispatch` from this demand and scan-slot accounting,
+regardless of its definition, including older legacy runs and heavier PR or
+dispatch-ref workflow edits. These bursts are queued by GitHub rather than withholding a ready Batch
+solely because PR jobs occupy runners. This is not a provider capacity guarantee:
+the Batch may wait for runners. Active Batch reservations, complete-inventory
+checks, unknown workflow/status handling and non-PR/main capacity holds remain.
+The traffic-shadow reader keeps its original all-workflow accounting. Observe
+actual run/job creation and start timestamps to measure provider queue delay.
 
 `stage.json` headroom now also records `capacity`: the configured limit and
 allowance, `providerRequired`, the hold reason, `mainQueuedJobs` (queued or
