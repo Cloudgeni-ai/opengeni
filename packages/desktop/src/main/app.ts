@@ -75,6 +75,7 @@ import { buildApplicationMenu, readMenuActions } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
+import { SystemAudioCaptures } from "./system-audio";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
 import { MainWindow, openExternalSafely } from "./window";
@@ -165,6 +166,10 @@ export class DesktopShell {
   private readonly inbox: InboxNotifier;
   /** The shortcut that sends the window in front into the composer. */
   private readonly appShots: AppShots;
+  /** Other apps' audio for the web app's meeting recorder. */
+  private readonly systemAudio: SystemAudioCaptures;
+  /** Pages whose system audio captures end when they navigate or close. */
+  private readonly systemAudioPages = new WeakSet<WebContents>();
   private tray: AppTray | null = null;
   private updates: AppUpdates | null = null;
   private quitting = false;
@@ -293,6 +298,15 @@ export class DesktopShell {
       },
     });
     const appShotStore = new AppShotSettingsStore(app.getPath("userData"), process.platform);
+    this.systemAudio = new SystemAudioCaptures({
+      helperPath: config.systemAudioHelperPath ?? null,
+      excludePid: process.pid,
+      excludeBundlePrefix: config.appId,
+      channels: {
+        samples: DESKTOP_IPC.systemAudioSamples,
+        ended: DESKTOP_IPC.systemAudioEnded,
+      },
+    });
     this.appShots = new AppShots({
       platform:
         process.platform === "darwin"
@@ -412,6 +426,7 @@ export class DesktopShell {
     // However the app ends, its agent doesn't outlive it.
     app.on("will-quit", () => {
       this.appShots.stop();
+      this.systemAudio.stopAll();
       this.computer.shutdownNow();
     });
     app.on("window-all-closed", () => {
@@ -646,7 +661,12 @@ export class DesktopShell {
       this.unreachable.retrying = false;
     } else {
       this.clearUnreachable();
-      this.unreachable = { accountId, attempt: 0, retrying: false, timer: null };
+      this.unreachable = {
+        accountId,
+        attempt: 0,
+        retrying: false,
+        timer: null,
+      };
     }
     this.welcomeError = null;
     this.window?.showWelcome();
@@ -707,7 +727,10 @@ export class DesktopShell {
       else void this.beginSignIn(computerLink.origin, computerLink);
       return;
     }
-    const link = parseAppLink(raw, { scheme: this.config.scheme, paths: this.paths });
+    const link = parseAppLink(raw, {
+      scheme: this.config.scheme,
+      paths: this.paths,
+    });
     if (!link) {
       this.reveal();
       return;
@@ -756,7 +779,12 @@ export class DesktopShell {
     }
     const { verifier, challenge } = pkcePair();
     const state = randomState();
-    this.pending = { state, verifier, baseUrl, ...(computerLink ? { computerLink } : {}) };
+    this.pending = {
+      state,
+      verifier,
+      baseUrl,
+      ...(computerLink ? { computerLink } : {}),
+    };
     this.welcomeError = null;
     this.pushWelcome();
     openExternalSafely(
@@ -1142,6 +1170,27 @@ export class DesktopShell {
         await this.appShots.requestPermission(id as DesktopAppShotPermissionId);
       }
     });
+    ipcMain.handle(DESKTOP_IPC.systemAudioStart, async (event) => {
+      this.senderAccount(event);
+      const page = event.sender;
+      if (!this.systemAudioPages.has(page)) {
+        this.systemAudioPages.add(page);
+        const end = () => this.systemAudio.stopFor(page);
+        page.once("destroyed", end);
+        page.on("did-start-navigation", (details) => {
+          if (details.isMainFrame && !details.isSameDocument) end();
+        });
+      }
+      try {
+        return { ok: true as const, ...(await this.systemAudio.start(page)) };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    });
+    ipcMain.handle(DESKTOP_IPC.systemAudioStop, (event, captureId: unknown) => {
+      this.senderAccount(event);
+      if (typeof captureId === "string") this.systemAudio.stop(captureId, event.sender);
+    });
 
     ipcMain.handle(DESKTOP_IPC.welcomeState, (event) => {
       this.senderWelcome(event);
@@ -1246,7 +1295,10 @@ export class DesktopShell {
         if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.menuAction, id);
       },
       updates: this.updates
-        ? { state: this.updates.menuState, run: () => this.updates?.menuAction() }
+        ? {
+            state: this.updates.menuState,
+            run: () => this.updates?.menuAction(),
+          }
         : null,
       contents: () => {
         const id = this.window?.accountId;

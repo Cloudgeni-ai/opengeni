@@ -9,11 +9,14 @@ import type {
 import {
   createIndexedDbRecordingChunkStore,
   createMemoryRecordingChunkStore,
+  desktopSystemAudioSource,
+  RecorderCaptureError,
   RecordingUploader,
   sha256Hex,
   type RecordingChunk,
   type RecordingTransport,
 } from "../src/recordings";
+import type { DesktopBridge } from "../src/desktop-bridge";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const RECORDING = "22222222-2222-4222-8222-222222222222";
@@ -114,7 +117,10 @@ function fakeServer() {
       }
       state.finalized = request;
       state.capturing = false;
-      return { recording: { id: RECORDING }, transcript: { id: "v1" } } as never;
+      return {
+        recording: { id: RECORDING },
+        transcript: { id: "v1" },
+      } as never;
     },
     async deleteRecording() {
       state.calls.push("delete");
@@ -157,7 +163,11 @@ async function testChunk(
 const create: CreateRecordingRequest = {
   recordingId: RECORDING,
   tracks: [
-    { trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" },
+    {
+      trackNumber: 0,
+      source: "microphone",
+      mimeType: "audio/webm;codecs=opus",
+    },
     { trackNumber: 1, source: "system", mimeType: "audio/webm;codecs=opus" },
   ],
 };
@@ -180,7 +190,11 @@ describe("RecordingUploader", () => {
   test("stores chunks locally, uploads them straight to storage and finalizes with the counts", async () => {
     const server = fakeServer();
     const { uploader, store } = uploaderFor(server);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await uploader.addChunk(await testChunk(0, 0, "mic-0"));
     await uploader.addChunk(await testChunk(1, 0, "sys-0"));
     await uploader.addChunk(await testChunk(0, 1, "mic-1"));
@@ -204,7 +218,11 @@ describe("RecordingUploader", () => {
     const { uploader } = uploaderFor(server);
     const seen: Array<string | null> = [];
     uploader.subscribe((status) => seen.push(status.retryingAfterError));
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await uploader.addChunk(await testChunk(0, 0, "a"));
     await uploader.addChunk(await testChunk(0, 1, "b"));
     const status = await uploader.finish(RECORDING);
@@ -222,7 +240,11 @@ describe("RecordingUploader", () => {
     const server = fakeServer();
     server.state.dropStorageOnce = true;
     const { uploader } = uploaderFor(server);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await uploader.addChunk(await testChunk(0, 0, "a"));
     const status = await uploader.finish(RECORDING);
     expect(status.finalized).toBe(true);
@@ -239,7 +261,11 @@ describe("RecordingUploader", () => {
     uploader.subscribe((status) => {
       if (status.created && server.stored.size === 0) createdBeforeAudio.push(true);
     });
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     expect(uploader.status(RECORDING)?.created).toBe(false);
     await uploader.addChunk(await testChunk(0, 0, "a"));
     const status = await uploader.finish(RECORDING);
@@ -259,7 +285,11 @@ describe("RecordingUploader", () => {
       }) as unknown as typeof fetch,
       sleep: () => new Promise(() => {}),
     });
-    await earlier.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await earlier.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await earlier.addChunk(await testChunk(0, 0, "a"));
     await earlier.addChunk(await testChunk(1, 0, "b"));
     earlier.dispose();
@@ -285,7 +315,11 @@ describe("RecordingUploader", () => {
       fetch: server.fetchImpl,
       sleep: async () => {},
     });
-    await live.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await live.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     const other = new RecordingUploader({
       client: server.client,
       store,
@@ -300,7 +334,11 @@ describe("RecordingUploader", () => {
     const server = fakeServer();
     server.state.refuse = { status: 403, code: "forbidden" };
     const { uploader, store } = uploaderFor(server);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await uploader.addChunk(await testChunk(0, 0, "a"));
     const status = await uploader.finish(RECORDING);
     expect(status.finalized).toBe(false);
@@ -321,7 +359,11 @@ describe("RecordingUploader", () => {
     });
     const seen: Array<string | null> = [];
     uploader.subscribe((status) => seen.push(status.retryingAfterError));
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await uploader.addChunk(await testChunk(0, 0, "a"));
     for (let attempt = 0; attempt < 50 && !seen.some(Boolean); attempt += 1) {
       await new Promise((done) => setTimeout(done, 1));
@@ -337,7 +379,11 @@ describe("RecordingUploader", () => {
   test("a recording stopped before any audio is removed instead of finalized", async () => {
     const server = fakeServer();
     const { uploader, store } = uploaderFor(server);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     const status = await uploader.finish(RECORDING);
     expect(status.discarded).toBe(true);
     expect(status.finalized).toBe(false);
@@ -351,7 +397,11 @@ describe("RecordingUploader", () => {
     const server = fakeServer();
     const store = createMemoryRecordingChunkStore();
     const first = uploaderFor(server, store).uploader;
-    await first.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await first.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     for (let attempt = 0; attempt < 20 && server.state.created === 0; attempt += 1) {
       await new Promise((done) => setTimeout(done, 1));
     }
@@ -369,7 +419,11 @@ describe("RecordingUploader", () => {
   test("discard removes the local copy and the server's", async () => {
     const server = fakeServer();
     const { uploader, store } = uploaderFor(server);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await uploader.addChunk(await testChunk(0, 0, "a"));
     // Let the background pass create it on the server.
     for (let attempt = 0; attempt < 20 && server.state.created === 0; attempt += 1) {
@@ -382,7 +436,10 @@ describe("RecordingUploader", () => {
 
   test("the IndexedDB store survives a reopen and keeps chunks in order", async () => {
     const factory = new IDBFactory();
-    const first = createIndexedDbRecordingChunkStore({ indexedDB: factory, databaseName: "t" });
+    const first = createIndexedDbRecordingChunkStore({
+      indexedDB: factory,
+      databaseName: "t",
+    });
     const server = fakeServer();
     const capture = new RecordingUploader({
       client: server.client,
@@ -392,14 +449,21 @@ describe("RecordingUploader", () => {
       }) as unknown as typeof fetch,
       sleep: () => new Promise(() => {}),
     });
-    await capture.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await capture.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await capture.addChunk(await testChunk(1, 0, "s0"));
     await capture.addChunk(await testChunk(0, 1, "m1"));
     await capture.addChunk(await testChunk(0, 0, "m0"));
     capture.dispose();
 
     // A new page opens the same database.
-    const reopened = createIndexedDbRecordingChunkStore({ indexedDB: factory, databaseName: "t" });
+    const reopened = createIndexedDbRecordingChunkStore({
+      indexedDB: factory,
+      databaseName: "t",
+    });
     const chunks = await reopened.listChunks(RECORDING);
     expect(chunks.map((item) => `${item.trackNumber}/${item.chunkNumber}`)).toEqual([
       "0/0",
@@ -409,7 +473,10 @@ describe("RecordingUploader", () => {
     expect(chunks[0]).not.toHaveProperty("bytes");
     expect(chunks[0]!.byteLength).toBe(2);
     expect(new TextDecoder().decode((await reopened.readChunk(RECORDING, 0, 0))!)).toBe("m0");
-    expect((await reopened.getRecording(RECORDING))?.chunkCounts).toEqual({ 0: 2, 1: 1 });
+    expect((await reopened.getRecording(RECORDING))?.chunkCounts).toEqual({
+      0: 2,
+      1: 1,
+    });
 
     const { uploader } = uploaderFor(server, reopened);
     await uploader.resume();
@@ -451,7 +518,10 @@ describe("RecordingUploader", () => {
       };
       request.onerror = () => reject(request.error);
     });
-    const store = createIndexedDbRecordingChunkStore({ indexedDB: factory, databaseName: "old" });
+    const store = createIndexedDbRecordingChunkStore({
+      indexedDB: factory,
+      databaseName: "old",
+    });
     expect(await store.listChunks(RECORDING)).toEqual([
       {
         recordingId: RECORDING,
@@ -464,5 +534,148 @@ describe("RecordingUploader", () => {
       },
     ]);
     expect(new TextDecoder().decode((await store.readChunk(RECORDING, 0, 0))!)).toBe("old");
+  });
+});
+
+describe("desktopSystemAudioSource", () => {
+  type Frame = {
+    numberOfFrames: number;
+    sampleRate: number;
+    timestamp: number;
+    data: Float32Array;
+  };
+
+  function fakeDesktop(start: () => Promise<{ captureId: string; sampleRate: number }>) {
+    const sampleListeners = new Set<(id: string, samples: Float32Array) => void>();
+    const endedListeners = new Set<(id: string, error: unknown) => void>();
+    const stopped: string[] = [];
+    const bridge = {
+      version: 1,
+      capabilities: ["systemAudio"],
+      systemAudio: {
+        start,
+        stop: async (id: string) => {
+          stopped.push(id);
+        },
+        onSamples: (listener: (id: string, samples: Float32Array) => void) => {
+          sampleListeners.add(listener);
+          return () => sampleListeners.delete(listener);
+        },
+        onEnded: (listener: (id: string, error: unknown) => void) => {
+          endedListeners.add(listener);
+          return () => endedListeners.delete(listener);
+        },
+      },
+    } as unknown as DesktopBridge;
+    return {
+      bridge,
+      stopped,
+      listeners: () => sampleListeners.size + endedListeners.size,
+      samples: (id: string, values: number[]) => {
+        for (const listener of sampleListeners) listener(id, new Float32Array(values));
+      },
+      end: (id: string) => {
+        for (const listener of [...endedListeners]) listener(id, null);
+      },
+    };
+  }
+
+  function withMediaGlobals<T>(run: (frames: Frame[], tracks: EventTarget[]) => Promise<T>) {
+    const frames: Frame[] = [];
+    const tracks: EventTarget[] = [];
+    const scope = globalThis as Record<string, unknown>;
+    const saved = ["MediaStreamTrackGenerator", "AudioData", "MediaStream"].map(
+      (name) => [name, scope[name]] as const,
+    );
+    scope.MediaStreamTrackGenerator = class extends EventTarget {
+      readyState = "live";
+      writable = {
+        getWriter: () => ({
+          write: async (frame: Frame) => {
+            frames.push(frame);
+          },
+          close: async () => undefined,
+        }),
+      };
+      constructor() {
+        super();
+        tracks.push(this);
+      }
+      stop() {
+        this.readyState = "ended";
+      }
+    };
+    scope.AudioData = class {
+      constructor(init: Frame) {
+        Object.assign(this, init);
+      }
+    };
+    scope.MediaStream = class {
+      constructor(readonly members: unknown[]) {}
+    };
+    return run(frames, tracks).finally(() => {
+      for (const [name, value] of saved) scope[name] = value;
+    });
+  }
+
+  test("none outside a desktop app that can record other apps' audio", () => {
+    expect(desktopSystemAudioSource(null)).toBeNull();
+    expect(
+      desktopSystemAudioSource({
+        version: 1,
+        capabilities: [],
+      } as unknown as DesktopBridge),
+    ).toBeNull();
+  });
+
+  test("turns the app's samples into a track, keeping samples that beat the start", async () => {
+    await withMediaGlobals(async (frames, tracks) => {
+      let desktop!: ReturnType<typeof fakeDesktop>;
+      desktop = fakeDesktop(async () => {
+        // The app's first samples can arrive before start() resolves.
+        desktop.samples("cap-1", [0.1, 0.2]);
+        desktop.samples("other", [9]);
+        return { captureId: "cap-1", sampleRate: 4 };
+      });
+      const source = desktopSystemAudioSource(desktop.bridge);
+      expect(source?.kind).toBe("desktop");
+      const capture = await source!.open();
+      desktop.samples("cap-1", [0.3, 0.4, 0.5, 0.6]);
+      expect(frames.map((frame) => [...frame.data])).toEqual([
+        [0.1, 0.2].map(Math.fround),
+        [0.3, 0.4, 0.5, 0.6].map(Math.fround),
+      ]);
+      // Timestamps in microseconds follow the samples: 2 samples at 4 Hz.
+      expect(frames.map((frame) => frame.timestamp)).toEqual([0, 500_000]);
+      let ended = false;
+      tracks[0]!.addEventListener("ended", () => {
+        ended = true;
+      });
+      desktop.end("cap-1");
+      expect(ended).toBe(true);
+      capture.stop();
+      expect(desktop.stopped).toEqual(["cap-1"]);
+      expect(desktop.listeners()).toBe(0);
+    });
+  });
+
+  test("a refused start becomes the recorder's system audio error", async () => {
+    await withMediaGlobals(async () => {
+      const desktop = fakeDesktop(async () => {
+        throw {
+          code: "permission_denied",
+          message: "Allow it in System Settings.",
+        };
+      });
+      const error = await desktopSystemAudioSource(desktop.bridge)!
+        .open()
+        .catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(RecorderCaptureError);
+      expect(error).toMatchObject({
+        code: "system_audio_unavailable",
+        message: "Allow it in System Settings.",
+      });
+      expect(desktop.listeners()).toBe(0);
+    });
   });
 });

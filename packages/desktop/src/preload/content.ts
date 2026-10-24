@@ -15,6 +15,7 @@ import {
   type DesktopCommand,
   type DesktopMenuAction,
   type DesktopPlatform,
+  type DesktopSystemAudioError,
   type DesktopUpdateState,
   type ThisComputerStatus,
 } from "../contract";
@@ -39,6 +40,7 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const origin = argument("opengeni-origin");
+const systemAudio = process.argv.includes("--opengeni-system-audio");
 
 if (origin && window.location.origin === origin) {
   // Menu commands go to the page's newest listener. A page without one (an
@@ -88,6 +90,7 @@ if (origin && window.location.origin === origin) {
       "appShots",
       "menuActions",
       "updates",
+      ...(systemAudio ? (["systemAudio"] as const) : []),
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
     accounts: {
@@ -159,6 +162,46 @@ if (origin && window.location.origin === origin) {
       install: () => ipcRenderer.invoke(DESKTOP_IPC.updatesInstall),
       onChange: (listener) => subscribe(DESKTOP_IPC.updatesChanged, listener),
     },
+    ...(systemAudio
+      ? {
+          systemAudio: {
+            start: async () => {
+              const result = (await ipcRenderer.invoke(DESKTOP_IPC.systemAudioStart)) as
+                | { ok: true; captureId: string; sampleRate: number }
+                | { ok: false; error: DesktopSystemAudioError };
+              if (!result.ok) throw result.error;
+              return {
+                captureId: result.captureId,
+                sampleRate: result.sampleRate,
+              };
+            },
+            stop: async (captureId: string) => {
+              await ipcRenderer.invoke(DESKTOP_IPC.systemAudioStop, captureId);
+            },
+            onSamples: (listener: (captureId: string, samples: Float32Array) => void) => {
+              const handler = (_event: IpcRendererEvent, id: string, samples: Float32Array) =>
+                listener(id, samples);
+              ipcRenderer.on(DESKTOP_IPC.systemAudioSamples, handler);
+              return () => {
+                ipcRenderer.removeListener(DESKTOP_IPC.systemAudioSamples, handler);
+              };
+            },
+            onEnded: (
+              listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
+            ) => {
+              const handler = (
+                _event: IpcRendererEvent,
+                id: string,
+                error: DesktopSystemAudioError | null,
+              ) => listener(id, error);
+              ipcRenderer.on(DESKTOP_IPC.systemAudioEnded, handler);
+              return () => {
+                ipcRenderer.removeListener(DESKTOP_IPC.systemAudioEnded, handler);
+              };
+            },
+          },
+        }
+      : {}),
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);
 }

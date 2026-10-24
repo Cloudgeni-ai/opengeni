@@ -76,6 +76,13 @@ export interface DesktopAppConfig {
   agentSigningKey: string;
   /** Where packaged builds look for app updates, or false for none. */
   updates: DesktopUpdateFeed | false;
+  /**
+   * The bundled system audio helper (`opengeni-audio-capture` from the
+   * desktop app's sources). With it, meeting recordings in the app can include
+   * other apps' audio (the other participants) as their own track; without
+   * it, they record the microphone only.
+   */
+  systemAudioHelperPath?: string;
 }
 
 /** Where the app finds its update files (`latest-mac.yml` and the like). */

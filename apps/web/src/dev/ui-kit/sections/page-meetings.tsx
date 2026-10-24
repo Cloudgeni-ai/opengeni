@@ -17,7 +17,11 @@ import { createMeetingsFixture } from "../pages/meetings/fixture";
 type View = "list" | "meeting" | "settings";
 type RecorderMode = "idle" | "recording" | "paused" | "offline" | "denied";
 
-function fakeRecorder(mode: RecorderMode, startedAt: number): MeetingRecorder {
+function fakeRecorder(
+  mode: RecorderMode,
+  startedAt: number,
+  audio: "desktop" | "display",
+): MeetingRecorder {
   const live = mode === "recording" || mode === "paused" || mode === "offline";
   return {
     state: live
@@ -31,8 +35,16 @@ function fakeRecorder(mode: RecorderMode, startedAt: number): MeetingRecorder {
     elapsedMilliseconds: live ? Date.now() - startedAt : 0,
     tracks: live
       ? [
-          { trackNumber: 0, source: "microphone", label: "MacBook Pro Microphone" },
-          { trackNumber: 1, source: "system", label: "Meet tab" },
+          {
+            trackNumber: 0,
+            source: "microphone",
+            label: "MacBook Pro Microphone",
+          },
+          {
+            trackNumber: 1,
+            source: "system",
+            label: audio === "desktop" ? "Computer audio" : "Meet tab",
+          },
         ]
       : [],
     upload: live
@@ -51,6 +63,7 @@ function fakeRecorder(mode: RecorderMode, startedAt: number): MeetingRecorder {
     error: mode === "denied" ? { code: "microphone_denied", message: "Permission denied" } : null,
     supported: true,
     systemAudioSupported: true,
+    systemAudioKind: audio,
     recovered: [],
     start: async () => {},
     pause: () => {},
@@ -59,7 +72,10 @@ function fakeRecorder(mode: RecorderMode, startedAt: number): MeetingRecorder {
     discard: async () => {},
     levels: () => {
       const t = Date.now() / 180;
-      return { 0: 0.35 + 0.3 * Math.abs(Math.sin(t)), 1: 0.2 + 0.25 * Math.abs(Math.cos(t * 0.7)) };
+      return {
+        0: 0.35 + 0.3 * Math.abs(Math.sin(t)),
+        1: 0.2 + 0.25 * Math.abs(Math.cos(t * 0.7)),
+      };
     },
   };
 }
@@ -83,12 +99,14 @@ export default function PageMeetingsSection() {
   const fixture = useMemo(() => createMeetingsFixture({ state: data }), [data]);
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
+  // ?audio=desktop previews the desktop app, which records other apps' audio.
+  const audio = initial.get("audio") === "desktop" ? "desktop" : "display";
   useEffect(() => {
-    store.set(fakeRecorder(mode, startedAt));
+    store.set(fakeRecorder(mode, startedAt, audio));
     if (mode !== "recording") return;
-    const timer = window.setInterval(() => store.set(fakeRecorder(mode, startedAt)), 250);
+    const timer = window.setInterval(() => store.set(fakeRecorder(mode, startedAt, audio)), 250);
     return () => window.clearInterval(timer);
-  }, [mode, startedAt, store]);
+  }, [mode, startedAt, store, audio]);
   const [openId, setOpenId] = useState(fixture.readyId);
 
   return (

@@ -164,3 +164,22 @@ describe("Meeting page", () => {
     }
   });
 });
+
+describe("Recorder errors", () => {
+  test("the desktop app points to the computer's settings, not the browser's", async () => {
+    const { recorderErrorText } = await import("./recorder-panel");
+    const denied = { code: "microphone_denied", message: "Permission denied" } as Parameters<
+      typeof recorderErrorText
+    >[0];
+    expect(recorderErrorText(denied, "desktop").body).toContain("your computer's privacy settings");
+    expect(recorderErrorText(denied, "display").body).toContain("browser");
+    const helper = {
+      code: "system_audio_unavailable",
+      message: "Turn on System Audio Recording for Opengeni in System Settings.",
+    } as Parameters<typeof recorderErrorText>[0];
+    expect(recorderErrorText(helper, "desktop")).toEqual({
+      title: "Can't record computer audio",
+      body: "Turn on System Audio Recording for Opengeni in System Settings.",
+    });
+  });
+});

@@ -19,6 +19,7 @@ import {
   type RecorderPlatform,
   type RecorderSnapshot,
   type RecordingChunkStore,
+  type SystemAudioKind,
   type RecordingTransport,
   type OpenGeniRecordingsTransport,
 } from "@opengeni/sdk/recordings";
@@ -173,6 +174,11 @@ export type UseRecorderResult = RecorderSnapshot & {
   /** This browser can share a tab's or the system's audio. */
   systemAudioSupported: boolean;
   /**
+   * How: `desktop` records other apps' audio directly (inside a desktop app);
+   * `display` asks the browser to share a tab or screen. Null when it can't.
+   */
+  systemAudioKind: SystemAudioKind | null;
+  /**
    * Recordings from an earlier page or app run this hook is still finishing in
    * the background. Each leaves the list once it is uploaded, removed for having
    * no audio, or failed for good.
@@ -243,7 +249,12 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
   const platform = options.platform ?? defaultPlatform;
   const platformRef = useRef(platform);
   platformRef.current = platform;
-  const support = { supported: platform.supported, systemAudio: platform.systemAudioSupported };
+  const support = {
+    supported: platform.supported,
+    systemAudio: platform.systemAudioSupported,
+    systemAudioKind:
+      platform.systemAudioKind ?? (platform.systemAudioSupported ? ("display" as const) : null),
+  };
   const storeRef = useRef<RecordingChunkStore | null>(null);
   const store = useCallback(
     (): RecordingChunkStore =>
@@ -356,6 +367,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
     ...snapshot,
     supported: support.supported,
     systemAudioSupported: support.systemAudio,
+    systemAudioKind: support.systemAudioKind,
     recovered,
     start,
     pause: useCallback(() => recorderRef.current?.pause(), []),
@@ -477,7 +489,9 @@ export function useRecordings(options: UseRecordingsOptions = {}): UseRecordings
   };
 }
 
-export type UseRecordingOptions = RecordingsClientOverride & { enabled?: boolean };
+export type UseRecordingOptions = RecordingsClientOverride & {
+  enabled?: boolean;
+};
 
 export type UseRecordingResult = {
   recording: Recording | null;
@@ -723,7 +737,10 @@ export function useTranscript(
 
 /** The organization's people directory, to name speakers with. */
 export function useRecordingPeople(
-  options: RecordingsClientOverride & { query?: string; enabled?: boolean } = {},
+  options: RecordingsClientOverride & {
+    query?: string;
+    enabled?: boolean;
+  } = {},
 ): {
   people: RecordingPerson[];
   loading: boolean;
