@@ -61,8 +61,26 @@ export class GitStore {
   commandTimeoutMs(args: string[]): number {
     return args[0] === "fetch" ? this.fetchTimeoutSeconds * 1000 : 60_000;
   }
-  async fetch(remote: string, refs: string[]): Promise<void> {
-    await this.exec(["fetch", "--no-tags", "--no-write-fetch-head", remote, ...refs]);
+  async fetch(
+    remote: string,
+    refs: string[],
+    cache: "state" | "candidate" | "objects" = "objects",
+  ): Promise<void> {
+    // Raw-SHA fetches without refs cannot advertise their existing history on
+    // the next fetch. Main churn then downloads the full history repeatedly.
+    // These bounded LOCAL refs are negotiation hints, never queue/state proof.
+    // Keep state roots separate so a one-off candidate read cannot evict main.
+    const targets = refs.map((ref, index) =>
+      index < 64 ? `+${ref}:refs/batcher-cache/${cache}/${index}` : ref,
+    );
+    await this.exec([
+      "fetch",
+      "--atomic",
+      "--no-tags",
+      "--no-write-fetch-head",
+      remote,
+      ...targets,
+    ]);
   }
   async ancestor(base: string, tip: string): Promise<boolean> {
     try {

@@ -167,7 +167,7 @@ export class GitHubActiveExecutor implements Executor {
     const main = refs.get(this.writer.baseRef);
     if (!main) throw new Error("Main ref missing");
     const sha = refs.get(this.writer.stateRef) ?? null;
-    await this.git.fetch(this.writer.remote, [main, ...(sha ? [sha] : [])]);
+    await this.git.fetch(this.writer.remote, [main, ...(sha ? [sha] : [])], "state");
     const ledger = sha ? await this.git.readLedger(sha) : emptyLedger();
     requireInitializedState(sha, ledger);
     return { main, sha, ledger };

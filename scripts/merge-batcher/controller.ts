@@ -82,14 +82,17 @@ export class LiveReader implements Reader {
       });
     // Exact SHAs, not mutable ref names: a racing fetch cannot silently change
     // the base or candidate bound by the remote-ref observation.
-    await this.git.fetch(remote, [
-      ...new Set([baseSha, ...(stateSha ? [stateSha] : []), ...queue.map(([, sha]) => sha)]),
-    ]);
+    await this.git.fetch(
+      remote,
+      [...new Set([baseSha, ...(stateSha ? [stateSha] : []), ...queue.map(([, sha]) => sha)])],
+      "state",
+    );
     const admission = await this.github.ready();
     if (admission.ready.length)
       await this.git.fetch(
         remote,
         admission.ready.map((p) => p.headSha),
+        "candidate",
       );
     const ledger = stateSha ? await this.git.readLedger(stateSha) : emptyLedger();
     if (this.config.mode === "active") requireInitializedState(stateSha, ledger);
