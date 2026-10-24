@@ -4,14 +4,21 @@ import {
   listingDatabase,
   seedListingFixture,
 } from "../../packages/db/test/fixtures/knowledge-collection-listing";
-import { installPreBatchKnowledgeBaseline } from "../../packages/db/test/fixtures/knowledge-batch-visibility-baseline";
+import { installKnowledgeVisibilityPlanBaseline } from "../../packages/db/test/fixtures/knowledge-visibility-plan-baseline";
 
 const shared = await listingDatabase();
-const app = postgres(shared.appUrl, { max: 1, prepare: false });
+const planMode = process.env.OPENGENI_BENCH_PLAN_MODE ?? "auto";
+if (!["auto", "force_custom_plan", "force_generic_plan"].includes(planMode))
+  throw new Error("Invalid benchmark plan mode");
+const app = postgres(shared.appUrl, {
+  max: 1,
+  prepare: false,
+  connection: { plan_cache_mode: planMode },
+});
 const median = (values: number[]) =>
   values.toSorted((a, b) => a - b)[Math.floor(values.length / 2)]!;
 try {
-  await installPreBatchKnowledgeBaseline(shared.admin, shared.appUrl, true);
+  await installKnowledgeVisibilityPlanBaseline(shared.admin, shared.appUrl);
   for (const members of [0, 1, 240]) {
     const fixture = await seedListingFixture(shared.admin, members);
     for (const [shape, request] of [
@@ -33,7 +40,7 @@ try {
               set_config('opengeni.subject_id',${fixture.subjectId},true),set_config('opengeni.principal_kind','human_session',true)`;
             const [row] =
               variant === "base"
-                ? await tx`SELECT knowledge_entry_read_before_parents(${fixture.accountId},${fixture.workspaceId},${tx.json(fixture.actor)},${tx.json(request)}) AS result`
+                ? await tx`SELECT knowledge_entry_read_before_plan(${fixture.accountId},${fixture.workspaceId},${tx.json(fixture.actor)},${tx.json(request)}) AS result`
                 : await tx`SELECT knowledge_entry_read(${fixture.accountId},${fixture.workspaceId},${tx.json(fixture.actor)},${tx.json(request)}) AS result`;
             return row!.result;
           });
@@ -52,6 +59,7 @@ try {
       console.log(
         JSON.stringify({
           members,
+          planMode,
           shape,
           samples: 30,
           equalResults: true,

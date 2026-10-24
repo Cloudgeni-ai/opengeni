@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import type postgres from "postgres";
 
 /** Capture the real pre-batch reader in a rolled-back disposable-fixture repair. */
-export async function installPreBatchKnowledgeBaseline(admin: postgres.Sql, appUrl: string, beforeParents = false) {
+export async function installPreBatchKnowledgeBaseline(admin: postgres.Sql, appUrl: string) {
   const unified = await readFile(new URL("../../drizzle/0461_unified_knowledge.sql", import.meta.url), "utf8");
   const start = unified.indexOf("CREATE FUNCTION knowledge_entry_read(");
   const end = unified.indexOf("\nEND $$;", start);
@@ -24,11 +24,6 @@ export async function installPreBatchKnowledgeBaseline(admin: postgres.Sql, appU
       await tx.unsafe(`${discovery.slice(discoveryStart, discoveryEnd)}\nEND $migration$;`);
       await tx.unsafe(await readFile(new URL("../../drizzle/0640_knowledge_entry_created_since.sql", import.meta.url), "utf8"));
       await tx.unsafe(await readFile(new URL("../../drizzle/0878_keyed_knowledge_visibility.sql", import.meta.url), "utf8"));
-      if (beforeParents) {
-        const batch = await readFile(new URL("../../drizzle/0902_batched_knowledge_visibility.sql", import.meta.url), "utf8");
-        await tx.unsafe(batch.replace("CREATE FUNCTION knowledge_revisions_visible(", "CREATE OR REPLACE FUNCTION knowledge_revisions_visible("));
-        await tx.unsafe(await readFile(new URL("../../drizzle/0914_knowledge_group_summary_projection.sql", import.meta.url), "utf8"));
-      }
       for (const [name, signature] of [
         ["knowledge_revision_visible", "uuid,uuid,uuid,boolean"],
         ["knowledge_entry_visible_body", "uuid,jsonb,boolean"],
@@ -46,12 +41,11 @@ export async function installPreBatchKnowledgeBaseline(admin: postgres.Sql, appU
   const quoted = `"${schema.replaceAll('"', '""')}"`;
   const appRole = decodeURIComponent(new URL(appUrl).username);
   for (const { name, signature, definition } of definitions) {
-    const suffix = beforeParents ? "before_parents" : "before_batch";
-    let copy = definition.replace(definition.slice(0, definition.indexOf("(")), `CREATE OR REPLACE FUNCTION ${quoted}.${name}_${suffix}`);
-    if (name !== "knowledge_revision_visible") copy = copy.replaceAll("knowledge_revision_visible(", `knowledge_revision_visible_${suffix}(`);
-    if (name === "knowledge_entry_read") copy = copy.replaceAll("knowledge_entry_visible_body(", `knowledge_entry_visible_body_${suffix}(`);
+    let copy = definition.replace(definition.slice(0, definition.indexOf("(")), `CREATE OR REPLACE FUNCTION ${quoted}.${name}_before_batch`);
+    if (name !== "knowledge_revision_visible") copy = copy.replaceAll("knowledge_revision_visible(", "knowledge_revision_visible_before_batch(");
+    if (name === "knowledge_entry_read") copy = copy.replaceAll("knowledge_entry_visible_body(", "knowledge_entry_visible_body_before_batch(");
     await admin.unsafe(copy);
-    const qualified = `${quoted}.${name}_${suffix}(${signature})`;
+    const qualified = `${quoted}.${name}_before_batch(${signature})`;
     await admin`ALTER FUNCTION ${admin.unsafe(qualified)} OWNER TO ${admin(metadata!.owner as string)}`;
     await admin`ALTER FUNCTION ${admin.unsafe(qualified)} SET search_path = ${admin(schema)},pg_catalog,pg_temp`;
     await admin`REVOKE ALL ON FUNCTION ${admin.unsafe(qualified)} FROM PUBLIC`;
