@@ -19,7 +19,11 @@ import {
   reserveRecordingChunks,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { createHash } from "node:crypto";
 import { createRecordingActivities } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -338,5 +342,71 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 6, purged: true });
     expect(storage.objects.size).toBe(0);
     expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 0, purged: false });
+  });
+});
+
+describe("stalled recording recovery", () => {
+  test("is a quiet no-op while 0937 withholds EXECUTE, and restarts work once granted", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(db, {
+      accountExternalSource: "recording-recovery",
+      accountExternalId: suffix,
+      accountName: "Recording recovery",
+      workspaceExternalSource: "recording-recovery",
+      workspaceExternalId: suffix,
+      workspaceName: "Recording recovery",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const actor = { workspaceId: grant.workspaceId!, subjectId: grant.subjectId };
+    const recordingId = crypto.randomUUID();
+    await createRecording(db, {
+      ...actor,
+      accountId: grant.accountId,
+      recordingId,
+      title: "Stalled",
+      visibility: "private",
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }],
+    });
+    await markRecordingDeleting(db, { ...actor, recordingId });
+    await shared.admin`
+      UPDATE recordings SET updated_at = now() - interval '10 minutes' WHERE id = ${recordingId}
+    `;
+    const starts: string[] = [];
+    const debug: string[] = [];
+    const services = async () =>
+      ({
+        db,
+        observability: {
+          warn: () => undefined,
+          info: () => undefined,
+          debug: (message: string) => debug.push(message),
+        },
+        startRecordingWorkflow: async (work: { recordingId: string }) => {
+          starts.push(work.recordingId);
+          return "started";
+        },
+      }) as unknown as ControlActivityServices;
+    const run = createRecordingActivities(services, {
+      registry: createRecordingTranscriptionProviderRegistry([]),
+      loadApiKey: async () => null,
+      heartbeat: () => undefined,
+      cancellationSignal: () => undefined,
+    });
+
+    for (let pass = 0; pass < 2; pass += 1) {
+      expect(await run.recoverRecordingWorkflows()).toEqual({ found: 0, started: 0, failed: 0 });
+    }
+    expect(starts).toEqual([]);
+    expect(debug).toEqual([
+      "Recording workflow recovery skipped: runtime EXECUTE is not granted yet",
+    ]);
+
+    await grantDeferredRuntimeAccess(shared.admin);
+    const recovered = await run.recoverRecordingWorkflows();
+    expect(recovered.failed).toBe(0);
+    expect(starts).toContain(recordingId);
   });
 });
