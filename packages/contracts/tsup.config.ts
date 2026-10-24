@@ -69,6 +69,7 @@ export default defineConfig({
     "src/subscription-personal-authority-v2.ts",
     "src/video-generation.ts",
     "src/xai-provider-account-authority.ts",
+    "src/event-triggers.ts",
   ],
   format: ["esm"],
   target: "es2022",

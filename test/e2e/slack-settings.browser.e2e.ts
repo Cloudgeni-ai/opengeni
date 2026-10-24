@@ -30,7 +30,11 @@ beforeAll(async () => {
       timeoutMs: 45_000,
     },
   );
-  browser = await chromium.launch();
+  browser = await chromium.launch(
+    process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+      ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
+      : undefined,
+  );
 }, 90_000);
 afterAll(async () => {
   await Promise.allSettled([browser?.close(), web?.stop()]);
@@ -188,8 +192,8 @@ test("schedule keeps the task and timing visible with secondary settings collaps
   const page = await context.newPage();
   try {
     await installApi(page, { installed: true, multiple: true, routingSaves: 0, disconnects: 0 });
-    await page.goto(`${baseUrl}/workspaces/${siblingId}/schedules/new`);
-    await page.getByRole("heading", { name: "New schedule", exact: true }).waitFor();
+    await page.goto(`${baseUrl}/workspaces/${siblingId}/automations/new`);
+    await page.getByRole("heading", { name: "New automation", exact: true }).waitFor();
     await page
       .getByRole("textbox", { name: "Message", exact: true })
       .fill(
@@ -283,7 +287,7 @@ test("workspace default machine saves once and schedules show its current name",
     await page.getByRole("menuitem", { name: /Runs on.*Build Mac/ }).waitFor();
     expect(state.draft?.options).toMatchObject({ targetSandboxId: machineId });
     await page.screenshot({ path: `${evidence}/new-chat-default-machine.png` });
-    await page.goto(`${baseUrl}/workspaces/${siblingId}/schedules/new`);
+    await page.goto(`${baseUrl}/workspaces/${siblingId}/automations/new`);
     await page.getByRole("button", { name: /^Settings / }).click();
     await page
       .getByText("Currently: Build Mac. Follows changes to the workspace default.")
@@ -298,7 +302,7 @@ test("workspace default machine saves once and schedules show its current name",
     await page.getByRole("button", { name: /^Settings / }).click();
     await page.getByText("Machine unavailable. Choose a replacement or reconnect it.").waitFor();
     expect(
-      await page.getByRole("button", { name: "Create schedule", exact: true }).isDisabled(),
+      await page.getByRole("button", { name: "Create automation", exact: true }).isDisabled(),
     ).toBe(true);
     state.sessions = [
       {
