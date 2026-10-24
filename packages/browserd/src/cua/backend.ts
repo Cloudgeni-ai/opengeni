@@ -120,6 +120,9 @@ export class CuaComputerBackend implements ComputerBackend {
   /** The signs of work in progress each semantic reading shows (see
    * progressSigns), read from its elements and its Markdown rows. */
   private readonly progress = new WeakMap<ComputerBackendObservation, ProgressSigns>();
+  /** The title of the document each semantic reading shows (see
+   * documentTitle). */
+  private readonly documents = new WeakMap<ComputerBackendObservation, string>();
   /** Recent semantic observations per window, newest last. A ref names the
    * observation the model read it from; an action that omits its fence is
    * checked against a fresh observation, which mints new refs, so the ref is
@@ -1164,15 +1167,13 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
       );
     }
-    const roots = this.stabilizeRefs(
-      targetId,
-      target.native.title,
-      projectElements(
-        state.elements,
-        this.identity.platform,
-        unindexedTextByElement(state.tree_markdown, this.identity.platform),
-      ),
+    const projected = projectElements(
+      state.elements,
+      this.identity.platform,
+      unindexedTextByElement(state.tree_markdown, this.identity.platform),
     );
+    const document = documentTitle(projected, target.native.title);
+    const roots = this.stabilizeRefs(targetId, document, projected);
     // The rows folded into a field are its text, typed by the person.
     const refTokens = this.tokens.get(targetId);
     const fieldTokens = new Set(
@@ -1246,6 +1247,7 @@ export class CuaComputerBackend implements ComputerBackend {
     this.observations.delete(targetId);
     this.observations.set(targetId, observation);
     this.progress.set(observation, signs);
+    this.documents.set(observation, document);
     while (this.observations.size > 32)
       this.observations.delete(this.observations.keys().next().value!);
     const recent = (this.recentObservations.get(targetId) ?? []).slice(-(RECENT_OBSERVATIONS - 1));
@@ -1264,15 +1266,17 @@ export class CuaComputerBackend implements ComputerBackend {
    * are as many as before, matched in order: one added or removed among them
    * could otherwise move a ref onto a neighbour. A window whose title changed
    * shows another document, where a button alike (Delete) acts on something
-   * else, so none of its refs carry over. Every other element gets a new ref.
-   * CUA's token for each ref is kept for the action that names it. */
+   * else, so none of its refs carry over. The title is the one each reading
+   * shows (see documentTitle), so two readings of a page an action opened
+   * compare alike. Every other element gets a new ref. CUA's token for each
+   * ref is kept for the action that names it. */
   private stabilizeRefs(
     targetId: string,
     title: string,
     roots: InteractionSemanticNodeValue[],
   ): InteractionSemanticNodeValue[] {
     const last = this.recentObservations.get(targetId)?.at(-1);
-    const previous = last?.target.title === title ? last : undefined;
+    const previous = last && this.documents.get(last) === title ? last : undefined;
     const identity = (node: InteractionSemanticNodeValue) =>
       JSON.stringify([
         node.ref.startsWith("read-only:"),
@@ -2229,6 +2233,15 @@ function inProgressText(text: string): boolean {
   if (!TRAILING_ELLIPSIS.test(text)) return false;
   const words = text.replace(TRAILING_ELLIPSIS, "").trim().split(/\s+/u).filter(Boolean);
   return words.length > 0 && words.length <= MAX_PROGRESS_WORDS;
+}
+
+/** The title of the document a reading shows: its window element's, which
+ * the reading itself carries, or else the window's listed title. A window's
+ * listed title is the one it had when the windows were last listed, so after
+ * an action that opened another page it still names the page before. */
+function documentTitle(nodes: readonly InteractionSemanticNodeValue[], listed: string): string {
+  const window = nodes.find((node) => node.role === "window" && node.name);
+  return window ? `window\u0000${window.name}` : listed;
 }
 
 /** A button among the rows CUA leaves unindexed: on macOS a disabled button
