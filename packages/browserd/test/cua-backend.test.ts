@@ -185,10 +185,14 @@ describe("CUA desktop boundary", () => {
   test("set_value true or false presses a checkbox only when it reads the other state", async () => {
     class CheckboxFixture extends Fixture {
       checked = false;
+      /** "Select all" reads mixed until pressed, then checked. */
+      selectAllPressed = false;
       async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
         const args = JSON.parse(argumentsJson) as Record<string, unknown>;
         if (name === "click" && args.element_token === `s${this.snapshot}:2`)
           this.checked = !this.checked;
+        if (name === "click" && args.element_token === `s${this.snapshot}:6`)
+          this.selectAllPressed = true;
         const response = await super.callTool(name, argumentsJson);
         if (name !== "get_window_state" || !response.structuredJson) return response;
         const data = JSON.parse(response.structuredJson);
@@ -226,6 +230,14 @@ describe("CUA desktop boundary", () => {
               role: "AXCheckBox",
               label: "Stuck",
               value: "0",
+            },
+            {
+              ...data.elements[0],
+              element_index: 6,
+              element_token: `s${this.snapshot}:6`,
+              role: "AXCheckBox",
+              label: "Select all",
+              value: this.selectAllPressed ? "1" : "2",
             },
           );
         response.structuredJson = JSON.stringify(data);
@@ -293,6 +305,21 @@ describe("CUA desktop boundary", () => {
         message: `The value was written, but the checkbox or switch ${stuck.ref} still reads not checked after its press; observe it before pressing it again`,
       });
       expect(clicks()).toHaveLength(3);
+      // A mixed checkbox is in neither state, so either is pressed for, and
+      // where the press lands is checked: here checked, not what deselect asks.
+      const selectAll = (await backend.observe(target.id)).roots.find(
+        (root) => root.name === "Select all",
+      )!;
+      expect(selectAll.value).toBe("2");
+      await expect(toggle("deselect", undefined, "Select all")).rejects.toMatchObject({
+        code: "driver_failed",
+        message: `The value was written, but the checkbox or switch ${selectAll.ref} still reads checked after its press; observe it before pressing it again`,
+      });
+      expect(clicks()).toHaveLength(4);
+      fixture.selectAllPressed = false;
+      await toggle("select", undefined, "Select all");
+      expect(clicks()).toHaveLength(5);
+      expect(fixture.selectAllPressed).toBe(true);
     } finally {
       await backend.close();
     }
@@ -3001,6 +3028,48 @@ describe("CUA desktop boundary", () => {
         expect(steps[1]!.args).toMatchObject({ role: "textfield", name: "Seats", exact: true });
         expect(steps[2]!.args).toMatchObject({ role: "button", name: "Apply", exact: true });
         expect(steps[2]!.args).not.toHaveProperty("element_token");
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a later select or deselect of a checkbox the batch does not show yet sets its state as the step runs", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      const later = (role: string, action: "select" | "deselect") => ({
+        type: "semantic" as const,
+        locator: { kind: "role" as const, role, name: "Newsletter", exact: true },
+        action,
+      });
+      const enter = { type: "keyboard" as const, action: "press" as const, value: "enter" };
+      try {
+        await backend.dispatch({
+          ...batch(observation),
+          action: {
+            type: "batch",
+            actions: [enter, later("checkbox", "deselect"), later("switch", "select")],
+          },
+        });
+        const { steps } = fixture.calls.find((call) => call.name === "run_steps")!.args as {
+          steps: { tool: string; args: Record<string, unknown>; toggle_to?: boolean }[];
+        };
+        expect(steps[1]).toMatchObject({
+          tool: "click",
+          args: { role: "checkbox", name: "Newsletter", exact: true },
+          toggle_to: false,
+        });
+        expect(steps[2]).toMatchObject({ tool: "click", toggle_to: true });
+        // On any other role, select is no press of an element not seen yet.
+        fixture.calls.length = 0;
+        const fresh = await backend.observe(observation.target.id);
+        const failure = await backend
+          .dispatch({
+            ...batch(fresh),
+            action: { type: "batch", actions: [enter, later("button", "select")] },
+          })
+          .catch((error: unknown) => error);
+        expect(failure).toMatchObject({ code: "locator_not_found", dispatched: false });
+        expect(fixture.calls.some((call) => call.name === "run_steps")).toBe(false);
       } finally {
         await backend.close();
       }

@@ -1658,7 +1658,11 @@ export class CuaComputerBackend implements ComputerBackend {
           (laterInBatch || (inBatch && mayStandIn(observed.roots, action))) &&
           error instanceof ComputerBackendError &&
           error.code === "locator_not_found" &&
-          ACTIONS_ON_UNSEEN.has(action.action)
+          (ACTIONS_ON_UNSEEN.has(action.action) ||
+            // select or deselect means a state only on a checkbox or switch.
+            ((action.action === "select" || action.action === "deselect") &&
+              action.locator.kind === "role" &&
+              TOGGLE_ROLES.has(action.locator.role)))
             ? namedOperation(this.identity.platform, args, action, null)
             : null;
         if (!named) throw error;
@@ -2268,11 +2272,13 @@ export function toggleWanted(role: string, action: SemanticAction): boolean | nu
   return wanted;
 }
 
-/** Whether an observed checkbox or switch reads checked, when its value says. */
-function checkedState(node: InteractionSemanticNodeValue): boolean | undefined {
-  return typeof node.value === "string"
-    ? CHECKED_WORDS[node.value.trim().toLowerCase()]
-    : undefined;
+/** Whether an observed checkbox or switch reads checked, when its value says,
+ * or "mixed". */
+function checkedState(node: InteractionSemanticNodeValue): boolean | "mixed" | undefined {
+  if (typeof node.value !== "string") return undefined;
+  const value = node.value.trim().toLowerCase();
+  // Neither state (indeterminate; "2" on macOS): never already as asked.
+  return value === "2" || value === "mixed" ? "mixed" : CHECKED_WORDS[value];
 }
 /** The app name CUA's worker process lists its own overlay windows under. */
 const CUA_WORKER_APP = "cua-driver";
@@ -2550,7 +2556,7 @@ function inputFailures(
       if (state !== undefined && state !== expected.wanted)
         failures.push(
           `the checkbox or switch ${expected.ref} still reads ${
-            state ? "checked" : "not checked"
+            state === "mixed" ? "mixed" : state ? "checked" : "not checked"
           } after its press; observe it before pressing it again`,
         );
     }
