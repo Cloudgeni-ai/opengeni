@@ -9,7 +9,14 @@ import type {
 } from "@opengeni/sdk";
 
 import * as selectMenu from "../src/ui/select-menu";
-import { actRun, flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import {
+  actRun,
+  flush,
+  registerDom,
+  renderComponent,
+  withVirtualClock,
+  type RenderedComponent,
+} from "./render-hook";
 
 registerDom();
 
@@ -97,6 +104,22 @@ const orderCreated: EventTypeDescriptor = {
 
 function notFound(): Error {
   return Object.assign(new Error("Not found"), { status: 404 });
+}
+
+function run(overrides: Partial<ScheduledTaskRun> = {}): ScheduledTaskRun {
+  return {
+    id: "3e4f5a6b-7c8d-4e9f-8a0b-1c2d3e4f5a6b",
+    workspaceId: WORKSPACE_ID,
+    taskId: task().id,
+    status: "dispatched",
+    triggerType: "manual",
+    scheduledAt: null,
+    firedAt: TIMESTAMP,
+    sessionId: SESSION_ID,
+    triggerEventId: null,
+    error: null,
+    ...overrides,
+  } as unknown as ScheduledTaskRun;
 }
 
 function fakeClient(options: { tasks?: ScheduledTask[]; sources?: EventSource[] | "off" } = {}) {
@@ -221,6 +244,46 @@ test("runs one now from its page and says so", async () => {
   expect(container.querySelector('[role="status"]')?.textContent).toContain("Morning digest");
   expect(client.listScheduledTaskRuns).toHaveBeenCalledWith(WORKSPACE_ID, task().id, { limit: 10 });
 });
+
+function recentRuns(container: ParentNode): string {
+  return container.querySelector('section[aria-labelledby$="-runs"]')?.textContent ?? "";
+}
+
+test("a run started with Run now shows up in recent runs without leaving the page", async () =>
+  await withVirtualClock(async () => {
+    const client = fakeClient({ tasks: [task()] });
+    // The run starts in the background, so the first reads don't have it yet.
+    const reads: ScheduledTaskRun[][] = [[], []];
+    client.listScheduledTaskRuns.mockImplementation(async () => reads.shift() ?? [run()]);
+    const container = await render(client, { sessionId: SESSION_ID });
+    await click(container.querySelector<HTMLButtonElement>("[data-row-action]")!);
+    expect(recentRuns(container)).toContain("No runs yet.");
+    await click(button(container, "Run now"));
+    expect(recentRuns(container)).toContain("No runs yet.");
+    await flush(1_500);
+    expect(recentRuns(container)).toContain("Started");
+    // Found it: no more reads.
+    const readsSoFar = client.listScheduledTaskRuns.mock.calls.length;
+    await flush(30_000);
+    expect(client.listScheduledTaskRuns.mock.calls.length).toBe(readsSoFar);
+  }));
+
+test("a queued run's status keeps up while its automation is open", async () =>
+  await withVirtualClock(async () => {
+    const client = fakeClient({ tasks: [task()] });
+    const reads: ScheduledTaskRun[][] = [[run({ status: "queued", sessionId: null })]];
+    client.listScheduledTaskRuns.mockImplementation(async () => reads.shift() ?? [run()]);
+    const container = await render(client, { sessionId: SESSION_ID });
+    await click(container.querySelector<HTMLButtonElement>("[data-row-action]")!);
+    expect(recentRuns(container)).toContain("Queued");
+    await flush(5_000);
+    expect(recentRuns(container)).toContain("Started");
+    expect(recentRuns(container)).not.toContain("Queued");
+    // Nothing is waiting any more: the list stops reading.
+    const readsSoFar = client.listScheduledTaskRuns.mock.calls.length;
+    await flush(30_000);
+    expect(client.listScheduledTaskRuns.mock.calls.length).toBe(readsSoFar);
+  }));
 
 test("a new automation in a chat continues it, on the default schedule when events are off", async () => {
   const client = fakeClient({ sources: "off" });
