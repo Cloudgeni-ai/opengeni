@@ -14,6 +14,7 @@ import {
   type BaseCiEvidence,
 } from "./model";
 import { verifyResult, type VerifiedResult } from "./result";
+import { baseJobClasses } from "./base-failure";
 import type { MainOutcome } from "./shadow-ci";
 import { join } from "node:path";
 import { DiskCache } from "./cache";
@@ -739,6 +740,7 @@ export class GitHubReader {
         let trusted = false;
         let retryable = false;
         let infrastructureRetryReason: Run["infrastructureRetryReason"];
+        let failedClasses: Run["failedClasses"];
         if (status === "completed" && details.conclusion !== "cancelled") {
           const attested = await this.resultArtifact(manifest, Number(run.id), attempt);
           if (
@@ -750,6 +752,7 @@ export class GitHubReader {
             outcome = attested.outcome;
             retryable = attested.retryable;
             trusted = true;
+            failedClasses = attested.failedClasses;
             if (outcome === "infrastructure" && attested.infrastructureOnly === true)
               infrastructureRetryReason = "verified-infrastructure";
           }
@@ -808,6 +811,7 @@ export class GitHubReader {
           trusted,
           retryable,
           ...(infrastructureRetryReason ? { infrastructureRetryReason } : {}),
+          ...(failedClasses ? { failedClasses } : {}),
           startedAt: details.run_started_at ?? null,
           completedAt: status === "completed" ? details.updated_at : null,
         };
@@ -893,6 +897,10 @@ export class GitHubReader {
     if (details.conclusion === "failure") {
       evidence.status = "red";
       evidence.reason = "Exact-base main CI failed; no member attribution";
+      evidence.classes = baseJobClasses(
+        await this.pages(`actions/runs/${id}/attempts/${attempt}/jobs`, "jobs"),
+        id,
+      );
     } else {
       const artifacts = await this.pages(`actions/runs/${id}/artifacts`, "artifacts");
       const matches = artifacts.filter(

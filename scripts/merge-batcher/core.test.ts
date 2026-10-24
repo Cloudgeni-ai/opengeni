@@ -142,6 +142,17 @@ function observation(ready = [pull(1)], candidates: Candidate[] = []): Observati
     ledger: emptyLedger(),
   };
 }
+test("only complete verified receipts identify failed task classes for base comparison", () => {
+  const c = candidate();
+  const data = receiptResult(c);
+  Object.assign(data.tasks[1]!, { exitCode: 1, outcome: "code_failure", retryable: true });
+  Object.assign(data.jobs, { source: "failure" });
+  Object.assign(data, { outcome: "code_failure", retryable: true });
+  expect(verifyResult(data, c.manifest, 100, 1)?.failedClasses).toEqual(["source"]);
+  data.tasks.shift();
+  expect(verifyResult(data, c.manifest, 100, 1)?.outcome).toBe("code_failure");
+  expect(verifyResult(data, c.manifest, 100, 1)?.failedClasses).toBeUndefined();
+});
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "merge-batcher-"));
   roots.push(root);
@@ -1068,6 +1079,18 @@ describe("wire adapters and CLI", () => {
         });
       }
       if (url.endsWith("/attempts/2")) return Response.json(row);
+      if (url.includes("/attempts/2/jobs"))
+        return Response.json({
+          jobs: [
+            {
+              id: 501,
+              run_id: id,
+              name: "Source and type contracts",
+              status: "completed",
+              conclusion: "failure",
+            },
+          ],
+        });
       if (url.endsWith("/artifacts?per_page=100&page=1"))
         return Response.json({
           artifacts:
@@ -1088,6 +1111,7 @@ describe("wire adapters and CLI", () => {
       ["green", "prior-and-current"].includes(kind) ? "green" : kind === "red" ? "red" : "unknown",
     );
     expect(result.sha).toBe(sha);
+    if (kind === "red") expect(result.classes).toEqual({ source: "red", units: "unknown" });
   });
   test.each([
     "success",
@@ -1309,7 +1333,7 @@ describe("integration boundaries and queue-only shadow CI", () => {
     });
     expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
   });
-  test.each(["unknown", "green"] as const)(
+  test.each(["green"] as const)(
     "#5243 inherited %s base splits without ejecting or blaming innocent members",
     (status) => {
       const c = candidate([pull(5436), pull(5439), pull(5440)]);
@@ -1346,7 +1370,7 @@ describe("integration boundaries and queue-only shadow CI", () => {
       { ...o.baseCI!, runId: null },
       { ...o.baseCI!, attempt: 0 },
     ]) {
-      expect(plan({ ...o, baseCI: invalid }, { ...cfg, mode: "active" }).kind).toBe("record");
+      expect(plan({ ...o, baseCI: invalid }, { ...cfg, mode: "active" }).kind).toBe("wait");
     }
     c.runs = [run(c, "success")];
     expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");

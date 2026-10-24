@@ -67,6 +67,8 @@ export interface Run {
   retryable: boolean;
   startedAt?: string | null;
   infrastructureRetryReason?: InfrastructureRetryReason;
+  /** Complete trusted failing task classes; absent means comparison unavailable. */
+  failedClasses?: ("source" | "units")[];
 }
 export interface Candidate {
   manifest: Manifest;
@@ -708,6 +710,7 @@ export interface BaseCiEvidence {
   runId: number | null;
   attempt: number | null;
   reason: string;
+  classes?: Record<"source" | "units", "green" | "red" | "unknown">;
 }
 export interface Config {
   repository: string;
