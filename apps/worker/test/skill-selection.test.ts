@@ -166,6 +166,32 @@ test("schedule guidance respects the configured workflow and host exclusions", (
   ).toEqual(["builtin:schedules"]);
 });
 
+test("event-trigger guidance appears only where the session can set up event triggers", () => {
+  const context = { videoGenerationEnabled: false };
+  const withEvents = loadConfiguredBundledSkills({
+    ...context,
+    firstPartyTools: ["scheduled_tasks_create", "event_sources_list", "events_get"],
+  });
+  const selected = withEvents.find((entry) => entry.id === "builtin:event-triggers")!;
+  expect(selected).toBeDefined();
+  expect(withEvents.map((entry) => entry.id)).toContain("builtin:schedules");
+  const content = readSkillFiles(selected.artifact.files).files[0]!.content;
+  for (const tool of ["event_sources_list", "events_get", "scheduled_tasks_create", "once"])
+    expect(content).toContain(tool);
+  for (const configuration of [
+    { ...context, firstPartyTools: ["scheduled_tasks_create"] },
+    { ...context, firstPartyTools: ["event_sources_list", "events_get"] },
+    {
+      ...context,
+      firstPartyTools: ["scheduled_tasks_create", "event_sources_list"],
+      bundledSkillIds: ["builtin:schedules" as const],
+    },
+  ])
+    expect(loadConfiguredBundledSkills(configuration).map((entry) => entry.id)).not.toContain(
+      "builtin:event-triggers",
+    );
+});
+
 test("secrets guidance follows the selected secret_search tool and host selection", () => {
   const context = { firstPartyTools: ["secret_search"], videoGenerationEnabled: false };
   expect(configuredBundledSkillNames(context)).toContain("secrets");

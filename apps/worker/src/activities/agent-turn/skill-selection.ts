@@ -21,6 +21,10 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
     { name: "skill-management", include: () => true },
     { name: "projects", include: () => true },
     { name: "schedules", include: () => tools.has("scheduled_tasks_create") },
+    {
+      name: "event-triggers",
+      include: () => tools.has("scheduled_tasks_create") && tools.has("event_sources_list"),
+    },
     { name: "documents", include: artifacts },
     { name: "spreadsheets", include: artifacts },
     { name: "presentations", include: artifacts },
@@ -46,7 +50,7 @@ export function loadConfiguredBundledSkills(context: BundledSkillConfiguration) 
   if (names.size === 0) return [];
   const artifacts = loadNativeToolSkillArtifacts({
     projects: names.has("projects"),
-    schedules: names.has("schedules"),
+    schedules: names.has("schedules") || names.has("event-triggers"),
     editableArtifacts: ["documents", "spreadsheets", "presentations"].some((name) =>
       names.has(name),
     ),

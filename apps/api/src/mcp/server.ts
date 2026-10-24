@@ -188,7 +188,9 @@ import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
   scheduledTaskCreateToolValidation,
+  scheduledTaskEventsToolInput,
 } from "./scheduled-task-input";
+import { registerEventTools } from "./event-tools";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { vaultProviderRegistryFor } from "../routes/vault-providers";
@@ -267,6 +269,7 @@ import {
 import {
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
+  eventTriggersEnabled,
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskForGrant,
@@ -289,6 +292,8 @@ import {
   updateScheduledTaskForApi,
   triggerScheduledTaskForGrant,
   validatedScheduledTaskUpdate,
+  withScheduledTaskEvents,
+  withScheduledTaskRunEventOccurrences,
 } from "@opengeni/core";
 import {
   acceptSessionUserMessageWithOutcome,
@@ -648,8 +653,16 @@ function staticToolInput<T>(build: () => T): () => T {
   return () => (value ??= build());
 }
 
-const scheduledTaskCreateToolProjection = staticToolInput(buildScheduledTaskCreateToolInput);
-const scheduledTaskUpdateToolInput = staticToolInput(() =>
+const scheduledTaskCreateToolProjections = {
+  withEvents: staticToolInput(() => buildScheduledTaskCreateToolInput({ events: true })),
+  withoutEvents: staticToolInput(() => buildScheduledTaskCreateToolInput({ events: false })),
+};
+const scheduledTaskCreateToolProjection = (events: boolean) =>
+  events
+    ? scheduledTaskCreateToolProjections.withEvents()
+    : scheduledTaskCreateToolProjections.withoutEvents();
+
+const buildScheduledTaskUpdateToolInput = (events: boolean) =>
   contractToolInput(
     z4
       .object({
@@ -661,10 +674,9 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
           .omit({ slackBotChannelId: true, toolPolicy: true })
           .strict()
           .optional(),
+        ...(events ? { events: scheduledTaskEventsToolInput() } : {}),
       })
       // Only a person pins connector accounts; agents never do.
-      // Event triggers are not part of this tool; how agents set them is
-      // designed with the agent tools and their guidance.
       .omit({
         agentLearning: true,
         connectionAuthorities: true,
@@ -672,12 +684,19 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
         pinnedAccountsRequired: true,
         variableSetId: true,
         environmentId: true,
-        events: true,
+        ...(events ? {} : { events: true as const }),
       })
       .strict(),
     UpdateScheduledTaskRequest,
-  ),
-);
+  );
+const scheduledTaskUpdateToolInputs = {
+  withEvents: staticToolInput(() => buildScheduledTaskUpdateToolInput(true)),
+  withoutEvents: staticToolInput(() => buildScheduledTaskUpdateToolInput(false)),
+};
+const scheduledTaskUpdateToolInput = (events: boolean) =>
+  events
+    ? scheduledTaskUpdateToolInputs.withEvents()
+    : scheduledTaskUpdateToolInputs.withoutEvents();
 
 const sessionCreateToolInputs = new Map<string, ReturnType<typeof buildSessionCreateToolInput>>();
 
@@ -1866,6 +1885,12 @@ export function buildOpenGeniMcpServer(
   }
 
   if (can("scheduled_tasks:manage") || can("scheduled_tasks:run")) {
+    // Where the deployment runs event triggers, reads show them. Setting them
+    // belongs to sessions that can also find sources (event_sources_list).
+    const eventsRun = eventTriggersEnabled(deps.settings);
+    const eventTriggers = eventsRun && server.holdsSelectableTool("event_sources_list");
+    const withEvents = (tasks: ScheduledTask[]) =>
+      eventsRun ? withScheduledTaskEvents(deps.db, tasks) : Promise.resolve(tasks);
     // Someone else's Only me schedule is indistinguishable from a missing one.
     const requireVisibleTask = async (id: string) => {
       try {
@@ -1900,7 +1925,9 @@ export function buildOpenGeniMcpServer(
         );
         return json(
           boundScheduledTaskMcpPage({
-            tasks: rows.slice(0, limit).map((task) => scheduledTaskForGrant(task, grant)),
+            tasks: (await withEvents(rows.slice(0, limit))).map((task) =>
+              scheduledTaskForGrant(task, grant),
+            ),
             limit,
             offset,
             sourceHasMore: rows.length > limit,
@@ -1922,7 +1949,8 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ id, includeEntity, promptOffset, expectedExecutionDigest }) => {
-        const task = scheduledTaskForGrant(await requireVisibleTask(id), grant);
+        const [visible] = await withEvents([await requireVisibleTask(id)]);
+        const task = scheduledTaskForGrant(visible!, grant);
         if (promptOffset !== undefined)
           return json(scheduledTaskPromptPage(task, promptOffset, expectedExecutionDigest));
         return json(
@@ -1935,9 +1963,12 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Schedule a message in this chat by supplying name, schedule and prompt. Omitted destination uses the calling chat, with its model, tools, machine and attachments at run time. Choose reusable_session or new_session_per_run and agentConfig only when the user explicitly wants a separate agent; omit agentConfig.tools so each run gets the workspace's default connectors at that time, like a new chat, or list tools to give it exactly those. Each run uses the schedule owner’s current connected accounts; it never uses another chat owner’s credentials.",
+          "Schedule a message in this chat by supplying name, schedule and prompt. Omitted destination uses the calling chat, with its model, tools, machine and attachments at run time. Choose reusable_session or new_session_per_run and agentConfig only when the user explicitly wants a separate agent; omit agentConfig.tools so each run gets the workspace's default connectors at that time, like a new chat, or list tools to give it exactly those. Each run uses the schedule owner’s current connected accounts; it never uses another chat owner’s credentials." +
+          (eventTriggers
+            ? " To run when something happens in another app, add events with triggers on sources from event_sources_list, with or without a schedule. For “wake me when…”, set events.once and keep this chat as the destination."
+            : ""),
         inputSchema: contractToolInput(
-          scheduledTaskCreateToolProjection(),
+          scheduledTaskCreateToolProjection(eventTriggers),
           scheduledTaskCreateToolValidation(sessionId),
         ),
       },
@@ -1986,8 +2017,11 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_update",
       {
         description:
-          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. For separate-agent model defaults use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input. A schedule whose configuration.connectors is workspace_default keeps following the workspace's default connectors; its agentConfig.tools lists only connectors added on top.",
-        inputSchema: scheduledTaskUpdateToolInput(),
+          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. For separate-agent model defaults use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input. A schedule whose configuration.connectors is workspace_default keeps following the workspace's default connectors; its agentConfig.tools lists only connectors added on top." +
+          (eventTriggers
+            ? " events replaces the event triggers and their run policy; triggers: [] removes them."
+            : ""),
+        inputSchema: scheduledTaskUpdateToolInput(eventTriggers),
       },
       async ({ id, ...raw }) => {
         const existing = await requireVisibleTask(id);
@@ -2029,7 +2063,8 @@ export function buildOpenGeniMcpServer(
           };
         }
         const update = updateOrError;
-        if (!scheduledTaskUpdateChangesState(existing, update)) {
+        // events always rewrites the triggers, so it always counts as a change.
+        if (payload.events === undefined && !scheduledTaskUpdateChangesState(existing, update)) {
           return json(
             scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false, {
               warnings: patchWarnings(existing),
@@ -2287,13 +2322,28 @@ export function buildOpenGeniMcpServer(
       },
       async ({ taskId, limit }) => {
         await requireVisibleTask(taskId);
+        const runs = await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100);
         return json({
-          runs: (await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100)).map(
-            (run) => scheduledTaskRunForGrant(run, grant),
+          runs: (eventsRun ? await withScheduledTaskRunEventOccurrences(deps.db, runs) : runs).map(
+            (run) => {
+              const visible = scheduledTaskRunForGrant(run, grant);
+              // Counts only: events_get with the run id reads its events.
+              return visible.eventOccurrence
+                ? {
+                    ...visible,
+                    eventOccurrence: {
+                      triggerIds: visible.eventOccurrence.triggerIds,
+                      eventCount: visible.eventOccurrence.eventCount,
+                    },
+                  }
+                : visible;
+            },
           ),
         });
       },
     );
+
+    registerEventTools(server, deps, grant, json, requireVisibleTask);
   }
 
   server.ensureToolsListHandler();

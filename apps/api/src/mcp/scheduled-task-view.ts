@@ -1,11 +1,14 @@
 import type {
   ResourceRef,
   ScheduledTask,
+  ScheduledTaskEvents,
   ScheduledTaskScheduleSpec,
   ToolRef,
 } from "@opengeni/contracts";
 
 export const SCHEDULED_TASK_MCP_MAX_BYTES = 64 * 1024;
+/** Event triggers keep their conditions in a summary while they fit this. */
+export const SCHEDULED_TASK_EVENTS_MCP_MAX_BYTES = 8 * 1024;
 export const SCHEDULED_TASK_NAME_MAX_BYTES = 512;
 export const SCHEDULED_TASK_PROMPT_MAX_BYTES = 8 * 1024;
 export const SCHEDULED_TASK_SCHEDULE_FIELD_MAX_BYTES = 256;
@@ -253,6 +256,45 @@ function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
+/**
+ * An automation's event triggers and run policy. Conditions and MCP arguments
+ * give way to their counts when they would not fit.
+ */
+function scheduledTaskEventsMcp(events: ScheduledTaskEvents) {
+  const policy = {
+    once: events.once,
+    maxRunsPerHour: events.maxRunsPerHour,
+    completedAt: events.completedAt,
+    throttledSince: events.throttledSince,
+  };
+  const trigger = (entry: ScheduledTaskEvents["triggers"][number]) => ({
+    id: entry.id,
+    sourceId: entry.sourceId,
+    sourceKind: entry.sourceKind,
+    eventTypes: entry.eventTypes,
+    includeOwnEvents: entry.includeOwnEvents,
+    status: entry.status,
+    ...(entry.statusReason ? { statusReason: entry.statusReason } : {}),
+  });
+  const full = {
+    ...policy,
+    triggers: events.triggers.map((entry) => ({
+      ...trigger(entry),
+      conditions: entry.conditions,
+      ...(entry.arguments ? { arguments: entry.arguments } : {}),
+    })),
+  };
+  if (jsonBytes(full) <= SCHEDULED_TASK_EVENTS_MCP_MAX_BYTES) return full;
+  return {
+    ...policy,
+    triggers: events.triggers.map((entry) => ({
+      ...trigger(entry),
+      conditionCount: entry.conditions.length,
+      hasArguments: entry.arguments !== null,
+    })),
+  };
+}
+
 function mcpJsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value, null, 2), "utf8");
 }
@@ -351,6 +393,7 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
     reusableSessionId: task.reusableSessionId,
     variableSetId: task.variableSetId,
     rigId: task.rigId,
+    ...(task.events ? { events: scheduledTaskEventsMcp(task.events) } : {}),
     createdAt: createdAt.value,
     updatedAt: updatedAt.value,
     configuration: {

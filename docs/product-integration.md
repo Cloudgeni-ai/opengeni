@@ -935,6 +935,9 @@ selection does not wait for lazy tool discovery or sandbox startup.
 `builtin:schedules` provides schedule-creation guidance when
 `scheduled_tasks_create` is configured. Like other bundles, it can be excluded
 by an explicit selection and does not grant tool permissions.
+`builtin:event-triggers` does the same for event triggers when the session also
+has `event_sources_list`. Leave `event_sources_list` and `events_get` out of a
+session's `firstPartyMcpTools` to keep its agent from setting event triggers.
 
 For an embedded support bot, start the agent from `capabilities: "none"`, which
 already omits the bundled guides; for any other agent, put

@@ -1,9 +1,24 @@
 import {
   CreateScheduledTaskRequest,
+  EVENT_TRIGGERS_PER_AUTOMATION_MAX,
+  EventTriggerInput,
+  ScheduledTaskEventsInput,
   ScheduledTaskAgentConfigInput,
   ScheduledTaskRunMode,
+  ScheduledTaskScheduleSpec,
 } from "@opengeni/contracts";
 import { z } from "zod/v4";
+
+/** An automation with event triggers and no schedule runs on events (and by hand) only. */
+function hasEventTriggers(input: Record<string, unknown>): boolean {
+  const events = input.events;
+  return (
+    typeof events === "object" &&
+    events !== null &&
+    Array.isArray((events as { triggers?: unknown }).triggers) &&
+    (events as { triggers: unknown[] }).triggers.length > 0
+  );
+}
 
 /** The calling session is supplied by the signed grant, never by model text. */
 export function resolveScheduledTaskCreateInput(
@@ -20,14 +35,65 @@ export function resolveScheduledTaskCreateInput(
     );
   if (runMode === "existing_session" && !targetSessionId)
     throw new Error("Choose the chat that should receive scheduled messages");
+  if (input.schedule === undefined && !hasEventTriggers(input))
+    throw new Error("Add a schedule, or event triggers for an automation that runs on events");
   return CreateScheduledTaskRequest.parse({
     ...input,
+    schedule: input.schedule ?? { type: "manual" },
     runMode,
     ...(targetSessionId ? { targetSessionId } : {}),
   });
 }
 
-export function scheduledTaskCreateToolInput() {
+/**
+ * The `events` field of the create and update tools: the contract's own
+ * schema, described for the model. Present only where event triggers run.
+ */
+export function scheduledTaskEventsToolInput() {
+  const trigger = z
+    .object({
+      ...EventTriggerInput.shape,
+      sourceId: EventTriggerInput.shape.sourceId.describe(
+        "An event source from event_sources_list.",
+      ),
+      eventTypes: EventTriggerInput.shape.eventTypes.describe(
+        "Event types the source offers (event_sources_list with its sourceId). An MCP source takes exactly one.",
+      ),
+      conditions: EventTriggerInput.shape.conditions.describe(
+        "Optional filters; every one must hold. field is type, subject, summary, url, actor.kind, actor.name or data.<path>.",
+      ),
+      includeOwnEvents: EventTriggerInput.shape.includeOwnEvents.describe(
+        "Also fire on events Opengeni's own bots made. Off by default, which prevents loops.",
+      ),
+      arguments: EventTriggerInput.shape.arguments.describe(
+        "MCP sources: subscription arguments that match the event type's argumentsSchema.",
+      ),
+    })
+    .strict();
+  return z
+    .object({
+      ...ScheduledTaskEventsInput.shape,
+      triggers: z
+        .array(trigger)
+        .max(EVENT_TRIGGERS_PER_AUTOMATION_MAX)
+        .describe(
+          "Run when any trigger matches an event. On update, the list replaces all triggers.",
+        ),
+      once: ScheduledTaskEventsInput.shape.once.describe(
+        "Finish after the first run, whichever trigger fires first. Use it for “wake me when…”.",
+      ),
+      maxRunsPerHour: ScheduledTaskEventsInput.shape.maxRunsPerHour.describe(
+        "Event runs allowed in a rolling hour (default 30). Further events wait and arrive together in the next run.",
+      ),
+    })
+    .strict()
+    .optional()
+    .describe(
+      "Run when something happens in another app. Each run receives the events that caused it.",
+    );
+}
+
+export function scheduledTaskCreateToolInput(options: { events: boolean } = { events: false }) {
   return (
     z
       .object({
@@ -55,11 +121,17 @@ export function scheduledTaskCreateToolInput() {
           .describe(
             "Creation settings for a separate scheduled agent. For an existing chat, supply prompt instead.",
           ),
+        ...(options.events
+          ? {
+              schedule: ScheduledTaskScheduleSpec.optional().describe(
+                "When it runs on a clock. Omit when it runs only on events.",
+              ),
+              events: scheduledTaskEventsToolInput(),
+            }
+          : {}),
       })
       // Only a person pins connector accounts; agents never do.
       // Variable Sets were removed (RM-1); agents choose vaults via vaultPolicy.
-      // Event triggers are not part of this tool; how agents set them is
-      // designed with the agent tools and their guidance.
       .omit({
         agentLearning: true,
         connectionAuthorities: true,
@@ -67,7 +139,7 @@ export function scheduledTaskCreateToolInput() {
         pinnedAccountsRequired: true,
         variableSetId: true,
         environmentId: true,
-        events: true,
+        ...(options.events ? {} : { events: true as const }),
       })
       .strict()
   );
