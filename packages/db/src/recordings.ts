@@ -200,6 +200,21 @@ function defaultTitle(startedAt: Date): string {
   return `Recording ${startedAt.toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
+/**
+ * A `to_tsquery('simple', …)` source that finds every word of `text` as a word
+ * prefix, so search finds "onboarding" while someone is still typing "onboard".
+ * Words are split as the simple parser splits them. Null when `text` has no
+ * letters or digits.
+ */
+function transcriptSearchQuery(text: string): string | null {
+  const words = text
+    .toLowerCase()
+    .match(/[\p{L}\p{N}]+/gu)
+    ?.slice(0, 16);
+  if (!words || words.length === 0) return null;
+  return words.map((word) => `'${word}':*`).join(" & ");
+}
+
 async function lockRecording(
   tx: Database,
   workspaceId: string,
@@ -412,18 +427,28 @@ export async function listRecordings(
     const query = input.query?.trim();
     if (query) {
       const pattern = `%${query.replace(/[\\%_]/gu, (match) => `\\${match}`)}%`;
+      const words = transcriptSearchQuery(query);
       conditions.push(
-        or(
-          sql`${schema.recordings.title} ILIKE ${pattern}`,
-          sql`EXISTS (
-            SELECT 1 FROM recording_transcript_segments segment
-            JOIN recording_transcript_versions version
-              ON version.id = segment.version_id AND version.is_current
-            WHERE segment.workspace_id = ${schema.recordings.workspaceId}
-              AND segment.recording_id = ${schema.recordings.id}
-              AND segment.search @@ plainto_tsquery('simple', ${query})
-          )`,
-        )!,
+        words === null
+          ? sql`${schema.recordings.title} ILIKE ${pattern}`
+          : or(
+              sql`${schema.recordings.title} ILIKE ${pattern}`,
+              // A corrected segment is found by its corrected words, not the original ones.
+              sql`EXISTS (
+                SELECT 1 FROM recording_transcript_segments segment
+                JOIN recording_transcript_versions version
+                  ON version.id = segment.version_id AND version.is_current
+                LEFT JOIN recording_segment_edits edit
+                  ON edit.version_id = segment.version_id
+                  AND edit.segment_index = segment.segment_index
+                WHERE segment.workspace_id = ${schema.recordings.workspaceId}
+                  AND segment.recording_id = ${schema.recordings.id}
+                  AND (
+                    (edit.text IS NULL AND segment.search @@ to_tsquery('simple', ${words}))
+                    OR to_tsvector('simple', coalesce(edit.text, '')) @@ to_tsquery('simple', ${words})
+                  )
+              )`,
+            )!,
       );
     }
     const rows = await tx

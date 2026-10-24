@@ -491,6 +491,65 @@ describe("recordings", () => {
     expect(after.version.versionNumber).toBe(1);
   });
 
+  test("search finds title words, transcript word prefixes and corrected words", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "private");
+    const owner = crypto.randomUUID();
+    await claimRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      leaseSeconds: 600,
+    });
+    await completeRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      languages: ["en"],
+      diarized: true,
+      diarization: "provider",
+      audioMilliseconds: 10_000,
+      segments: [
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 2_000,
+          trackNumber: 0,
+          speakerLabel: "track-0",
+          text: "The onboarding numbers are up.",
+        },
+        {
+          startMilliseconds: 2_100,
+          endMilliseconds: 4_000,
+          trackNumber: 1,
+          speakerLabel: "speaker_0",
+          text: "Pricing page next.",
+        },
+      ],
+      trackSpeakers: [{ label: "track-0", displayName: "Recording owner" }],
+    });
+    const found = async (query: string) =>
+      (await listRecordings(db, { ...recording.actor, query })).recordings.map((entry) => entry.id);
+    expect(await found("weekly sy")).toEqual([recording.recordingId]);
+    // While someone is still typing a word, and with words out of order.
+    expect(await found("onboard")).toEqual([recording.recordingId]);
+    expect(await found("numbers ONBOARD")).toEqual([recording.recordingId]);
+    expect(await found("onboarding budget")).toEqual([]);
+    // Punctuation alone searches titles only, and quotes can't break the query.
+    expect(await found("!!")).toEqual([]);
+    expect(await found("o'nboard & pricing")).toEqual([]);
+    expect(await found("'pricing'")).toEqual([recording.recordingId]);
+    // A corrected segment is found by its new words and no longer by the old ones.
+    await updateRecordingSegments(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      edits: [{ segmentIndex: 1, text: "Packaging page next." }],
+    });
+    expect(await found("packag")).toEqual([recording.recordingId]);
+    expect(await found("pricing")).toEqual([]);
+  });
+
   test("a failed first version fails the recording and records the event", async () => {
     if (!client || !shared) return;
     const db = client.db;
