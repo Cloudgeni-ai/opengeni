@@ -458,6 +458,39 @@ test("a read that keeps failing gives up after bounded retries", async () => {
   expect(clock.sleeps).toEqual([1500, 3000, 6000, 12000, 22500]);
 });
 
+test("a read that times out is repeated", async () => {
+  const { clock, timing } = fakeTiming();
+  let calls = 0;
+  const transport = (async () => {
+    calls++;
+    if (calls === 1) throw new DOMException("The operation timed out.", "TimeoutError");
+    return Response.json({ total_count: 0, workflow_runs: [] });
+  }) as unknown as typeof fetch;
+  await runPrCiCommand("priority", priorityEnv, transport, "pr", timing);
+  expect(calls).toBe(11);
+  expect(clock.sleeps).toEqual([1500]);
+});
+
+test("a failed read is not repeated past the admission deadline", async () => {
+  const { clock, timing } = fakeTiming();
+  const deadline = 5 * 60 * 60 * 1000;
+  let calls = 0;
+  const transport = (async () => {
+    calls++;
+    // The first read starts the admission clock; the next fails a second before the deadline.
+    if (calls === 1) {
+      clock.now = deadline - 1000;
+      return Response.json({ total_count: 0, workflow_runs: [] });
+    }
+    return new Response("", { status: 504 });
+  }) as unknown as typeof fetch;
+  await expect(runPrCiCommand("priority", priorityEnv, transport, "pr", timing)).rejects.toThrow(
+    "GitHub GET 504",
+  );
+  expect(calls).toBe(2);
+  expect(clock.sleeps).toEqual([]);
+});
+
 test("a mutation that hits a gateway error is never repeated", async () => {
   const f = await fixture();
   const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
