@@ -390,6 +390,40 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("the frontmost ordinary window is the focused target", async () => {
+    class StackFixture extends LinuxPermissionsFixture {
+      windows: Array<Record<string, unknown>> = [];
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        if (name !== "list_windows") return await super.callTool(name, argumentsJson);
+        return result({ windows: this.windows });
+      }
+    }
+    const window = (window_id: number, extra: Record<string, unknown>) => ({
+      pid: 42,
+      window_id,
+      title: `Window ${window_id}`,
+      app_name: "Fixture",
+      bounds: { x: 0, y: 0, width: 200, height: 100 },
+      ...extra,
+    });
+    const fixture = new StackFixture();
+    const backend = await CuaComputerBackend.open(fixture, "linux");
+    const focused = async () =>
+      (await backend.targets()).filter((target) => target.focused).map((target) => target.id);
+    try {
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 7 })];
+      expect(await focused()).toEqual(["cua:window:42:2"]);
+      // A menu or overlay above the windows is not the window in front.
+      fixture.windows = [window(1, { z_index: 3, layer: 0 }), window(2, { z_index: 9, layer: 25 })];
+      expect(await focused()).toEqual(["cua:window:42:1"]);
+      // Without stacking, no window is marked.
+      fixture.windows = [window(1, {}), window(2, { z_index: null })];
+      expect(await focused()).toEqual([]);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("a checkbox named in a batch step is pressed into its state as the step runs", () => {
     const args = { pid: 42, window_id: 1 };
     const named = (locator: Record<string, unknown>, action: string, value?: unknown) =>

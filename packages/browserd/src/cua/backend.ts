@@ -814,6 +814,20 @@ export class CuaComputerBackend implements ComputerBackend {
         !(macos && window.is_on_screen === false && window.space_ids === null),
     );
     const presences = await this.offScreenPresences(windows);
+    // The frontmost ordinary window is the one the person has in front: CUA
+    // reports stacking, not keyboard focus, on every platform.
+    let front: { id: string; z: number } | null = null;
+    for (const window of windows) {
+      const id = `cua:window:${window.pid}:${window.window_id}`;
+      if (
+        typeof window.z_index !== "number" ||
+        (window.layer ?? 0) !== 0 ||
+        presences.has(id) ||
+        (macos && window.is_on_screen === false)
+      )
+        continue;
+      if (!front || window.z_index > front.z) front = { id, z: window.z_index };
+    }
     const live = new Set<string>();
     for (const window of windows) {
       const id = `cua:window:${window.pid}:${window.window_id}`;
@@ -840,7 +854,7 @@ export class CuaComputerBackend implements ComputerBackend {
           processId: window.pid,
           title: window.title || window.app_name,
           bounds: window.bounds,
-          focused: false,
+          focused: id === front?.id,
           ...(onScreen || restorable ? {} : { offScreen: true as const }),
         },
       });
