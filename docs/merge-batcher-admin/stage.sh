@@ -45,7 +45,7 @@
   }
   reissue=false
   case "$action" in
-    reissue-restore-admission|reissue-delete-namespace|reissue-delete-guard)
+    reissue-restore-admission|reissue-delete-namespace|reissue-delete-guard|reissue-restore-legacy-admission|reissue-restore-upgrade-admission|reissue-delete-legacy-namespace)
       reissue=true; action=${action#reissue-} ;;
   esac
   case "$action" in
@@ -58,12 +58,25 @@
       test -d "$PLAN/admit-attempt"
       touch "$PLAN/admit-attempt/verified"
       exit ;;
+    reconcile-upgrade-admission)
+      verify_stable upgrade-admission
+      test -d "$PLAN/upgrade-admission-attempt"
+      touch "$PLAN/upgrade-admission-attempt/verified"
+      exit ;;
+    reconcile-upgrade-namespace)
+      verify_stable applied
+      test -d "$PLAN/upgrade-namespace-attempt"
+      touch "$PLAN/upgrade-namespace-attempt/verified"
+      exit ;;
     reconcile-guard) reconcile_created guard; exit ;;
     reconcile-namespace) reconcile_created namespace; exit ;;
     create-guard) before=original; after=guard; method=POST; payload=guard; id='' ;;
     create-namespace) before=guard; after=namespace; method=POST; payload=namespace; id='' ;;
     admit) before=namespace; after=applied; method=PUT; payload=admission; id=$(jq -er '.admissionId' "$INPUT_PLAN/plan.json") ;;
     restore-admission) before=applied; after=namespace; method=PUT; payload=restore; id=$(jq -er '.admissionId' "$INPUT_PLAN/plan.json") ;;
+    restore-legacy-admission) before=legacy-applied; after=legacy-namespace; method=PUT; payload=restore; id=$(jq -er '.admissionId' "$INPUT_PLAN/plan.json") ;;
+    restore-upgrade-admission) before=upgrade-admission; after=legacy-namespace; method=PUT; payload=restore; id=$(jq -er '.admissionId' "$INPUT_PLAN/plan.json") ;;
+    delete-legacy-namespace) before=legacy-namespace; after=guard; method=DELETE; payload=''; id=$(jq -er '.id' "$INPUT_PLAN/namespace-receipt.json") ;;
     delete-namespace) before=namespace; after=guard; method=DELETE; payload=''; id=$(jq -er '.id' "$INPUT_PLAN/namespace-receipt.json") ;;
     delete-guard) before=guard; after=restored; method=DELETE; payload=''; id=$(jq -er '.id' "$INPUT_PLAN/guard-receipt.json") ;;
     *) echo 'Unknown action; no API writes' >&2; exit 1 ;;
@@ -80,7 +93,16 @@
     jq -e --arg key "$payload" --slurpfile body "$INPUT_PLAN/$payload.json" '.[$key] == $body[0]' "$INPUT_PLAN/plan.json" >/dev/null
   fi
   case "$action" in
-    delete-namespace|delete-guard)
+    restore-admission|restore-legacy-admission|restore-upgrade-admission|delete-namespace|delete-legacy-namespace|delete-guard)
+      for forward in upgrade-admission upgrade-namespace; do
+        if [ -d "$PLAN/$forward-attempt" ] && [ ! -f "$PLAN/$forward-attempt/verified" ]; then
+          echo 'Unresolved upgrade write: retain protection; reconcile its exact outcome before reverse writes.' >&2
+          exit 1
+        fi
+      done ;;
+  esac
+  case "$action" in
+    delete-namespace|delete-legacy-namespace|delete-guard)
       if [ -d "$PLAN/admit-attempt" ] && [ ! -f "$PLAN/admit-attempt/verified" ]; then
         echo 'Unresolved forward admission write: keep guards. Readback absence cannot rule out a late PUT.' >&2
         exit 1

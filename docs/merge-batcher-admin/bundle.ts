@@ -21,7 +21,15 @@ export type Plan = {
   guard: ObjectValue;
   namespace: ObjectValue;
 };
-export type Phase = "original" | "guard" | "namespace" | "applied" | "restored";
+export type Phase =
+  | "original"
+  | "guard"
+  | "namespace"
+  | "applied"
+  | "restored"
+  | "legacy-applied"
+  | "upgrade-admission"
+  | "legacy-namespace";
 const writableKeys = ["name", "target", "enforcement", "bypass_actors", "conditions", "rules"];
 const guardName = "Opengeni batcher immutable refs";
 const namespaceName = "Merges go through the batcher: add the queue-ready label";
@@ -187,19 +195,36 @@ export function verify(
   validatePlan(plan);
   equal(current.repository, plan.before.repository, "Repository configuration");
   equal(current.classic, plan.before.classic, "Classic protection");
+  const legacyPhase = ["legacy-applied", "upgrade-admission", "legacy-namespace"].includes(phase);
+  if (legacyPhase && plan.schemaVersion !== 4)
+    throw new Error("Legacy upgrade phases require an explicit version 4 plan");
+  const legacy =
+    plan.schemaVersion === 4 ? prepare(plan.before, plan.appId, plan.installationId) : undefined;
   const expected = index(plan.before.rulesets);
-  const includeGuard = phase === "guard" || phase === "namespace" || phase === "applied";
-  const includeNamespace = phase === "namespace" || phase === "applied";
+  const includeGuard =
+    phase === "guard" || phase === "namespace" || phase === "applied" || legacyPhase;
+  const includeNamespace = phase === "namespace" || phase === "applied" || legacyPhase;
   function add(receipt: RuleSet | undefined, payload: ObjectValue, name: string) {
     if (!receipt) throw new Error(`Missing ${name} creation receipt`);
     const id = positiveId(receipt.id);
     if (expected.has(id)) throw new Error("Creation receipt collides with an existing ID");
-    equal(writable(receipt), payload, `${name} creation receipt`);
+    // A retained creation receipt is historical evidence, not a claim that the
+    // namespace PUT already occurred. Only the exact v3 predecessor is accepted
+    // as an alternative receipt for this explicitly versioned upgrade.
+    const retained = writable(receipt);
+    if (name === "namespace" && legacy && canonical(retained) === canonical(legacy.namespace)) {
+      equal(retained, legacy.namespace, "Legacy namespace creation receipt");
+    } else {
+      equal(retained, name === "namespace" ? plan.namespace : payload, `${name} creation receipt`);
+    }
     expected.set(id, payload);
   }
   if (includeGuard) add(receipts.guard, plan.guard, "guard");
-  if (includeNamespace) add(receipts.namespace, plan.namespace, "namespace");
-  if (phase === "applied") expected.set(plan.admissionId, plan.admission);
+  if (includeNamespace)
+    add(receipts.namespace, legacyPhase ? legacy!.namespace : plan.namespace, "namespace");
+  if (phase === "applied" || phase === "upgrade-admission")
+    expected.set(plan.admissionId, plan.admission);
+  if (phase === "legacy-applied") expected.set(plan.admissionId, legacy!.admission);
   const actual = index(current.rulesets);
   equal([...actual.keys()], [...expected.keys()], "Full ruleset inventory");
   for (const [id, payload] of expected) equal(actual.get(id)!, payload, `Ruleset ${id}`);
@@ -312,14 +337,38 @@ export async function cli(args: string[]): Promise<void> {
   }
   if (command === "verify" && rest.length === 3) {
     const [directory, snapshot, phase] = rest as [string, string, string];
-    if (!["original", "guard", "namespace", "applied", "restored"].includes(phase))
+    if (
+      ![
+        "original",
+        "guard",
+        "namespace",
+        "applied",
+        "restored",
+        "legacy-applied",
+        "upgrade-admission",
+        "legacy-namespace",
+      ].includes(phase)
+    )
       throw new Error("Unknown phase");
     const receipts: { guard?: RuleSet; namespace?: RuleSet } = {};
-    if (["guard", "namespace", "applied"].includes(phase))
+    if (
+      [
+        "guard",
+        "namespace",
+        "applied",
+        "legacy-applied",
+        "upgrade-admission",
+        "legacy-namespace",
+      ].includes(phase)
+    )
       receipts.guard = await json(
         join(process.env.BATCHER_VERIFIED_PLAN || directory, "guard-receipt.json"),
       );
-    if (["namespace", "applied"].includes(phase))
+    if (
+      ["namespace", "applied", "legacy-applied", "upgrade-admission", "legacy-namespace"].includes(
+        phase,
+      )
+    )
       receipts.namespace = await json(
         join(process.env.BATCHER_VERIFIED_PLAN || directory, "namespace-receipt.json"),
       );

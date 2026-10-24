@@ -34,6 +34,23 @@ an active version 3 watchdog. A live in-place upgrade still requires reviewed
 transition handling, a qualified image/plan binding and rollback qualification.
 The offline plan command does not authorize or implement that transition.
 
+Version 4 recovery also recognizes three exact inventories for a reviewed
+in-place upgrade: `legacy-applied` (both v3 payloads), `upgrade-admission`
+(v4 Protection, v3 namespace), and `legacy-namespace` (saved Manual Protection,
+v3 namespace). These are recovery states, never ordinary ON clearance. The
+historical namespace creation receipt remains unchanged; it must match either
+the exact predecessor or v4 payload, and the live full inventory must match the
+selected phase. Unknown combinations and drift still refuse restoration writes.
+OFF uses the exact saved restore payload and reverse-only stages for these states.
+An unresolved upgrade write blocks reverse writes unless its exact destination
+has been reconciled; absence or a different later inventory is not finality proof.
+
+This recovery support does not add forward upgrade writes. Before a live upgrade,
+the rollout owner must resolve single-writer coordination with scheduled OFF,
+qualify the new image and immutable binding, and retain provider/enforcement and
+rollback evidence. Do not pause the live Scheduler or introduce a claim reset to
+work around that requirement.
+
 ## Legacy version 3 boundaries
 
 | Ruleset | Refs | Bypass | Rules |

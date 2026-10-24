@@ -85,6 +85,40 @@ function staged(plan: Plan, phase: "guard" | "namespace" | "applied") {
 }
 
 describe("offline batcher administration contract", () => {
+  test("v4 recovery identifies only the exact legacy and ordered partial upgrade inventories", () => {
+    const legacy = prepare(fixture(), 5425399, 174101112);
+    const next = prepareAppOnly(fixture(), 5425399, 174101112);
+    const { current, receipts } = staged(legacy, "applied");
+    const retained = JSON.stringify(receipts);
+    expect(() => verify(next, current, "legacy-applied", receipts)).not.toThrow();
+    expect(() => verify(legacy, current, "legacy-applied", receipts)).toThrow();
+    expect(() => verify(next, current, "applied", receipts)).toThrow();
+    current.rulesets[0] = { ...next.admission, id: next.admissionId };
+    expect(() => verify(next, current, "upgrade-admission", receipts)).not.toThrow();
+    expect(() => verify(next, current, "legacy-applied", receipts)).toThrow();
+    expect(() => verify(next, current, "applied", receipts)).toThrow();
+    current.rulesets[0] = { ...next.restore, id: next.admissionId };
+    expect(() => verify(next, current, "legacy-namespace", receipts)).not.toThrow();
+    expect(() => verify(next, current, "namespace", receipts)).toThrow();
+    current.rulesets[0] = { ...next.admission, id: next.admissionId };
+    current.rulesets[current.rulesets.length - 1] = {
+      ...next.namespace,
+      id: receipts.namespace.id,
+    };
+    expect(() => verify(next, current, "applied", receipts)).not.toThrow();
+    expect(JSON.stringify(receipts)).toBe(retained);
+    current.rulesets[0] = { ...legacy.admission, id: legacy.admissionId };
+    for (const phase of [
+      "legacy-applied",
+      "upgrade-admission",
+      "legacy-namespace",
+      "applied",
+    ] as const)
+      expect(() => verify(next, current, phase, receipts)).toThrow();
+    expect(mergeMode("legacy-applied")).toBe("hold");
+    expect(mergeMode("upgrade-admission")).toBe("hold");
+  });
+
   test("App-only v4 binds the guiding check and both bypass lists to the App", () => {
     const before = fixture();
     const plan = prepareAppOnly(before, 5425399, 174101112);
