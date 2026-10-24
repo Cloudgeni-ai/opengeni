@@ -609,6 +609,7 @@ describe("desktopSystemAudioSource", () => {
       constructor(init: Frame) {
         Object.assign(this, init);
       }
+      close() {}
     };
     scope.MediaStream = class {
       constructor(readonly members: unknown[]) {}
