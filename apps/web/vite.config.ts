@@ -514,6 +514,16 @@ export default defineConfig({
               priority: 20,
             },
             {
+              // The meeting recordings client and hooks load only with the
+              // lazy recorder host and the Meetings pages. Entry-aware merging
+              // otherwise folds them into the shared chunk that carries the
+              // session page's media icons, so a direct session downloads them.
+              name: "recordings",
+              test: /packages[\\/](?:sdk[\\/]src[\\/]recordings|react[\\/]src[\\/](?:recordings|hooks[\\/]use-recordings))\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.

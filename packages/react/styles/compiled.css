@@ -1296,6 +1296,9 @@
 :where(.og-root).ml-5,:where(.og-root) .ml-5 {
     margin-left: calc(var(--spacing) * 5);
   }
+:where(.og-root).ml-5\.5,:where(.og-root) .ml-5\.5 {
+    margin-left: calc(var(--spacing) * 5.5);
+  }
 :where(.og-root).ml-7,:where(.og-root) .ml-7 {
     margin-left: calc(var(--spacing) * 7);
   }

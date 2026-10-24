@@ -161,10 +161,104 @@ release is required for this presentation and desktop-host change.
 
 ## This computer
 
-Revised 2026-10-20. New installs remain app-hosted. A working standalone
-installation is service-backed instead: changing its responsible process would
-discard the usefulness of its existing macOS grants. Launch and status reads
-are non-mutating; only explicit signed-in setup enables desktop management.
+Revised 2026-10-23. New installs are app-hosted. A status read takes over a
+standalone installation only when it is already registered to the open
+workspace and the server lists that registration (for example, set up earlier
+from the web app's install command): the app records it as its own, asks the
+server to allow the person's agents if that is still missing, and shows
+computer use on with nothing for the person to do.
+
+On macOS the app then moves that agent into the app (`hostServiceAgent`), so
+one set of permissions, the app's, covers app-shots and computer use. It moves
+it only when that loses nothing: on its own (once per launch, in the
+background) when a check run by the app shows the app already holds every
+screen permission the service has and its own access to the protected
+folders, and otherwise as the first step of asking
+for a missing permission, so macOS gives that grant to Opengeni.app instead of
+"Opengeni Agent". A move turns the service off (kept installed, also off at
+login) and starts the same binary as the app's helper with the same config
+folder, so the connections and registration are unchanged: no new enrollment
+and no new machine. Actions such as turning computer use off wait for a move
+in progress, so they apply to the agent as it then is.
+
+The computer never has two agents or none:
+
+- The helper must keep running, with the same process, for the whole settle
+  time; otherwise the app stops it and turns the service back on, and doesn't
+  try again in that launch.
+- Quitting the app hands the agent back to its service (Off stays off), so the
+  computer stays available while the app is closed and quitting doesn't ask.
+  When the app ends without asking (log out, restart), it turns the service
+  back on as it goes; the next launch finds the service enabled and leaves the
+  agent there. While permissions are being asked for, quitting doesn't hand
+  back: macOS quits and reopens the app to apply a grant, and the reopened app
+  takes the agent straight back and goes on asking.
+- At launch, a moved agent starts as the helper again; if its program is gone
+  or the helper doesn't stay up, the service runs it again.
+
+Each move and hand-back restarts the agent, so work an agent is doing on this
+computer at that moment is interrupted, as with any agent restart.
+
+Hosting was chosen over keeping the service because the app can keep its
+helper running: it opens hidden at login while this computer is in use and
+keeps running in the menu bar with the window closed, and handing back on quit
+covers the time it isn't running. While the service runs the agent, grants
+given only to Opengeni.app don't apply, so screen control waits for the app;
+files and commands keep working. An agent that stays a service (another
+platform, a move not made or failed) keeps working as before, and System
+Settings guidance names "Opengeni Agent".
+
+In the app this is **Computer use**: one switch (`ComputerUseRow` in
+`packages/react/src/app/components/desktop/computer-use.tsx`, state from
+`useComputerUse`/`computerUseState` in `@opengeni/react/this-computer`). The app
+never asks the person to connect, disconnect or reconnect the computer it runs
+on. The switch shows one state at a time:
+
+| State | Switch | What shows |
+| --- | --- | --- |
+| Off | off | "Let agents use {computer}." The same whether never set up, turned off, or removed on the server. |
+| Turning on | on | "Turning on…", no buttons. Includes asking macOS for a missing permission. |
+| On | on | "Agents can use {computer}" with a green dot. |
+| Needs permission | on | Calm, not an error: "To let agents see and control the screen, allow {app} in System Settings." and **Open System Settings**. Files and commands work meanwhile. |
+| Problem | on | In red text: the problem and exactly one fix: **Sign in** (signed out) or **Try again** (server unreachable, or the server's or agent's own error). |
+
+Off is pause: it persists across restarts and log-ins and keeps the
+installation and registration, so turning on is instant. Turning on is the
+whole step and does what is needed without asking: resumes a paused agent,
+registers this computer afresh when it never was or its registration is gone,
+starts the agent, then asks macOS for each missing permission in turn
+(`useThisComputer().asking`): the system prompt the first time, else the exact
+System Settings list with the app's floating guide. As each grant is detected
+the next missing one is asked for, and with none left it is on. When the person
+comes back to the app without allowing one, asking stops there and the switch
+shows **Needs permission**; nothing is asked again until they choose **Open
+System Settings** or turn the switch on again. If macOS quits and reopens the
+app to apply a grant, asking continues once for the next missing permission,
+unless that one was already asked for (`requestedPermissions`); only an ask from
+the last few minutes continues (`setupPending`). Asking also ends when no
+system window comes up (macOS already decided) and the app keeps focus. Removing the
+computer from the workspace stays on its entry in the Machines list. The sidebar
+shows a small notice only while computer use turns on, needs a permission (same
+calm tone) or has a problem, with the same one fix.
+
+The server decides whether the local connection is still valid. Status reads
+the account's Machines view (`readMachine`): a machine the server no longer
+lists was removed there, so it shows as off, and turning it on mints a fresh
+token and runs `connect --non-interactive` again (the agent replaces that
+deployment/workspace connection in place and a running service reloads it). A
+failed read keeps its own meaning (offline, signed out, or the server's error)
+and is never shown as a network failure when the server answered. A just-made
+enrollment the server doesn't list yet is still turning on, not removed. Only
+the view of the account that owns the enrollment (the one that made it, or the
+first whose view listed it) can say it was removed: enrollments are the
+person's own, so another account signed in to the same workspace doesn't see
+it. A removed enrollment's agent keeps running without access until turning on
+enrolls the computer again. The
+setup dialog shows one state at a time and follows the computer's own status, so
+"You're all set" only stands while it is ready. Inside the app, **Connect a
+machine** shows the same computer-use switch for this computer instead of
+downloads and the app hand-off; other computers and servers still connect with a
+command or a code.
 
 ### What the agent needs
 

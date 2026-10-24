@@ -12,6 +12,7 @@ import type { UseThisComputerResult } from "./use-this-computer";
 /** What the status pieces show for a computer, in order of what matters. */
 export type ThisComputerView =
   | "hidden"
+  /** Not on: never set up, turned off, or removed on the server (e.g. from Machines). */
   | "off"
   | "setting_up"
   | "finish_setup"
@@ -30,8 +31,36 @@ export function thisComputerView(status: ThisComputerStatus | null): ThisCompute
   return status.busy ? "setting_up" : "off";
 }
 
+/**
+ * The error to show beside a view, or null. Removal on the server isn't one:
+ * the computer is simply off, and turning it on registers it again.
+ */
+export function thisComputerError(
+  computer: Pick<UseThisComputerResult, "status" | "actionError">,
+  labels: ThisComputerLabels,
+): string | null {
+  const { status, actionError } = computer;
+  if (status?.errorCode === "removed" && !status.busy) {
+    return actionError ? labels.error(null, actionError) : null;
+  }
+  return actionError !== null || status?.error
+    ? labels.error(status?.errorCode ?? null, status?.error || actionError || null)
+    : null;
+}
+
 function percent(status: ThisComputerStatus | null): string {
   return status?.setupProgress === undefined ? "" : ` ${Math.round(status.setupProgress * 100)}%`;
+}
+
+/**
+ * While turning it on: the download's progress for the app's own agent, or
+ * connecting for an existing agent, which has nothing to download.
+ */
+function settingUpLine(status: ThisComputerStatus | null, labels: ThisComputerLabels): string {
+  const machineName = status?.machineName ?? "";
+  return status?.management === "service"
+    ? labels.reconnecting(machineName)
+    : `${labels.settingUp(machineName)}${percent(status)}`;
 }
 
 function storageKey(workspaceId: string) {
@@ -96,15 +125,17 @@ export function ThisComputerOffer({
   const classes = ["og-tc-offer", className].filter(Boolean).join(" ");
 
   if (view === "setting_up" || view === "resuming" || view === "reconnecting") {
+    // A connection the app can't verify says why, like the settings panel does.
+    const error = view === "reconnecting" ? thisComputerError(computer, labels) : null;
     return (
-      <div className={classes} data-view={view} role="status">
+      <div className={classes} data-view={view} role="status" title={error ?? undefined}>
         <span className="og-tc-spinner" aria-hidden />
         <span className="og-tc-offer-line">
           {view === "resuming"
             ? labels.resuming
             : view === "reconnecting"
               ? labels.reconnecting(machineName)
-              : `${labels.settingUp(machineName)}${percent(status)}`}
+              : settingUpLine(status, labels)}
         </span>
       </div>
     );
@@ -210,10 +241,7 @@ export function ThisComputerPanel({
   }, [view]);
   if (view === "hidden") return null;
   const machineName = status?.machineName ?? "";
-  const error =
-    computer.actionError !== null || status?.error
-      ? labels.error(status?.errorCode ?? null, status?.error || computer.actionError || null)
-      : null;
+  const error = thisComputerError(computer, labels);
 
   let line: string;
   let actions: ReactNode;
@@ -258,7 +286,7 @@ export function ThisComputerPanel({
       );
       break;
     case "setting_up":
-      line = `${labels.settingUp(machineName)}${percent(status)}`;
+      line = settingUpLine(status, labels);
       actions = <span className="og-tc-spinner" aria-hidden />;
       break;
     default:
@@ -328,7 +356,7 @@ export function ThisComputerPanel({
           </p>
         )
       ) : null}
-      {!connected && status?.management === "service" ? (
+      {view === "off" && status?.management === "service" ? (
         <p className="og-tc-panel-foot">{catalogText("thisComputer.existingService")}</p>
       ) : null}
     </section>

@@ -180,13 +180,15 @@ export function SessionChromeCapabilityCard({
           }
           if (!offerThisComputer) return setSetupOpen(true);
           if (desktop.computer.acting) return;
-          if (thisComputerNeedsPermissions(desktop.computer.status)) return desktop.openSetup();
-          void (
-            desktop.computer.status?.state === "paused"
-              ? desktop.computer.resume().then(() => desktop.computer.status)
-              : desktop.computer.connect({ screenControl: false })
-          ).then((next) => {
-            if (thisComputerNeedsPermissions(next)) desktop.openSetup();
+          if (thisComputerNeedsPermissions(desktop.computer.status))
+            return desktop.allowPermissions();
+          // Paused is Off: turning on resumes it and asks for anything missing.
+          if (desktop.computer.status?.state === "paused") {
+            void desktop.computer.turnOn().then(() => void fleet.refresh());
+            return;
+          }
+          void desktop.computer.connect({ screenControl: false }).then((next) => {
+            if (thisComputerNeedsPermissions(next)) desktop.allowPermissions(next);
             void fleet.refresh();
           });
         }}
