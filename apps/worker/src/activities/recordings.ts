@@ -172,7 +172,10 @@ export function createRecordingActivities(
       leaseSeconds: TRANSCRIPT_LEASE_SECONDS,
     });
     if (!job) return { outcome: "skipped" };
-    const fail = async (errorCode: string): Promise<RecordingTranscriptOutcome> => {
+    const fail = async (
+      errorCode: string,
+      cause?: unknown,
+    ): Promise<RecordingTranscriptOutcome> => {
       await failRecordingTranscriptVersion(db, {
         ...actor,
         versionId: input.versionId,
@@ -184,6 +187,10 @@ export function createRecordingActivities(
         recordingId: input.recordingId,
         versionId: input.versionId,
         errorCode,
+        // The stored code is all the user sees; the cause is what an operator needs.
+        providerId: job.version.providerId,
+        model: job.version.model,
+        ...(cause instanceof Error ? { error: cause.message.slice(0, 1_000) } : {}),
       });
       return { outcome: "failed", errorCode };
     };
@@ -352,15 +359,15 @@ export function createRecordingActivities(
       return completed ? { outcome: "complete" } : { outcome: "skipped" };
     } catch (error) {
       if (error instanceof RecordingNotFoundError) return { outcome: "skipped" };
-      if (error instanceof PermanentRecordingFailure) return await fail(error.code);
+      if (error instanceof PermanentRecordingFailure) return await fail(error.code, error);
       if (error instanceof RecordingAudioError) {
         if (error.code === "missing_chunk") {
           throw ApplicationFailure.retryable(error.message, "missing_chunk");
         }
-        return await fail(error.code);
+        return await fail(error.code, error);
       }
       if (error instanceof RecordingTranscriptionError) {
-        if (!error.retryable) return await fail(`provider_${error.code}`);
+        if (!error.retryable) return await fail(`provider_${error.code}`, error);
         throw ApplicationFailure.retryable(error.message, `provider_${error.code}`);
       }
       throw error;
@@ -464,9 +471,16 @@ export function createRecordingActivities(
 
   /** Retries ran out on a retryable failure: fail the version with its last cause. */
   async function failRecordingTranscript(
-    input: RecordingTranscriptInput & { errorCode: string },
+    input: RecordingTranscriptInput & { errorCode: string; errorMessage?: string },
   ): Promise<void> {
-    const { db } = await services();
+    const { db, observability } = await services();
+    observability.warn("recording transcript failed after retries", {
+      workspaceId: input.workspaceId,
+      recordingId: input.recordingId,
+      versionId: input.versionId,
+      errorCode: input.errorCode,
+      ...(input.errorMessage ? { error: input.errorMessage.slice(0, 1_000) } : {}),
+    });
     await failRecordingTranscriptVersion(db, {
       workspaceId: input.workspaceId,
       subjectId: input.ownerSubjectId,

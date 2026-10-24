@@ -61,11 +61,25 @@ export function recorderErrorText(
     case "upload_failed":
       return {
         title: "Upload stopped",
-        body: "The recording is saved on this device. It uploads again when you reopen Meetings.",
+        body: `${uploadFailureReason(error.message)} The recording is saved on this device. It uploads again when you reopen Meetings.`,
       };
     default:
       return { title: "Recording stopped", body: error.message };
   }
+}
+
+/** Why the server refused the audio, as a sentence; the server's own words when it's not a known case. */
+export function uploadFailureReason(message: string): string {
+  const text = message.trim();
+  if (/not.?found|\b404\b/i.test(text)) {
+    return "The meeting was deleted, or you no longer have access to it.";
+  }
+  if (/forbidden|permission|\b403\b/i.test(text)) {
+    return "You no longer have permission to add recordings to this workspace.";
+  }
+  if (/too large|\b413\b/i.test(text)) return "A piece of the audio was too large to upload.";
+  if (!text) return "The server refused the audio.";
+  return `The server refused the audio: ${text.replace(/[.\s]+$/, "")}.`;
 }
 
 /** Where the audio is right now, in one short line. */

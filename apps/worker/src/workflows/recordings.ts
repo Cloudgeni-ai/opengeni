@@ -107,7 +107,11 @@ export async function recordingTranscriptWorkflow(
   try {
     await transcriptActivity.transcribeRecordingVersion(job);
   } catch (error) {
-    await settleActivity.failRecordingTranscript({ ...job, errorCode: failureCode(error) });
+    await settleActivity.failRecordingTranscript({
+      ...job,
+      errorCode: failureCode(error),
+      errorMessage: failureMessage(error),
+    });
   }
 }
 
