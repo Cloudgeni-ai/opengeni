@@ -515,7 +515,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await expect(f.publish()).rejects.toThrow();
     expect((await f.state()).sha).toBe(f.initializedSha);
   });
-  test("main headroom blocks hosted publication, retry and landing", async () => {
+  test("blocking reader evidence prevents hosted publication, retry and landing", async () => {
+    // This stub models incomplete/unknown evidence or an occupied Batch slot.
+    // Valid numeric/main-capacity estimates are informational in the live reader.
     const f = await fixture();
     f.api.busy = true;
     const local = await f.controller().step();
@@ -533,6 +535,60 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect((await f.controller().step()).action.kind).toBe("wait");
     expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
   });
+  test.each(["publish", "retry", "land"] as const)(
+    "live capacity observation permits %s while preserving executor checks",
+    async (phase) => {
+      const f = await fixture();
+      const live = new GitHubReader(
+        config({ BATCHER_MODE: "active", BATCHER_RUNNER_BUDGET: "52", BATCHER_MAIN_RESERVE: "30" }),
+        new GitHubAuth({}),
+        (async (url: string | URL | Request) => {
+          const path = String(url);
+          if (path.includes("/jobs?"))
+            return Response.json({
+              total_count: 4,
+              jobs: [
+                { status: "queued" },
+                ...Array.from({ length: 3 }, () => ({ status: "completed" })),
+              ],
+            });
+          const status = new URL(path).searchParams.get("status");
+          const runs =
+            status === "in_progress"
+              ? [
+                  {
+                    id: 900,
+                    status,
+                    path: ".github/workflows/ci.yml",
+                    head_branch: "main",
+                    event: "push",
+                  },
+                ]
+              : [];
+          return Response.json({ total_count: runs.length, workflow_runs: runs });
+        }) as typeof fetch,
+      );
+      f.api.mainBusy = () => live.mainBusy();
+      const m = await f.publish();
+      if (phase === "retry") {
+        f.verdict(m, "infrastructure");
+        f.advance(61);
+        expect((await f.controller().step()).action.kind).toBe("retry");
+        await f.executor().maintain();
+        expect(f.api.calls).toHaveLength(1);
+        expect(f.api.calls[0]).toEndWith("/rerun");
+      } else if (phase === "land") {
+        f.verdict(m);
+        expect((await f.controller().step()).action.kind).toBe("land");
+        expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
+      }
+      expect(live.lastHeadroom).toMatchObject({
+        allowed: true,
+        capacityInformational: true,
+        capacity: { hold: "main-queued", mainQueuedJobs: 1 },
+      });
+    },
+  );
   test("whole-run retry lost response is observed by attempt after restart, never duplicated", async () => {
     const f = await fixture(),
       m = await f.publish();

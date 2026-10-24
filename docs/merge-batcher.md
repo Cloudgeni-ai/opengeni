@@ -380,15 +380,18 @@ successor **locally**, based on the predecessor tip, without publishing it and
 starting another CI run. A speculative candidate is deterministic and can be
 rebuilt after cache loss. The hosted runner guard permits only one Batch CI run,
 even if a higher legacy max-inflight planner setting is present.
-Full-main CI retains explicit reserved capacity, but its mere presence does not
-block progress. Before publication/retry/landing, the reader scans current
+Full-main capacity estimates remain observable rather than reserving runners.
+Before publication, the existing single trusted retry, and landing, the reader scans current
 repository runs and their latest jobs (100 entries per page, paginated through
 the reported total; incomplete observations hold). Each of the five active run statuses
 is listed twice, so a run whose status changes once during the listing (in either
 direction, for example `in_progress` to `waiting` while other jobs still run) is
 still listed; the latest active listing is used, and a run listed as `completed`
 is skipped. Two passes do not rule out more changes during the listing or
-provider snapshot lag. Every distinct relevant active run's complete latest-job
+provider snapshot lag or same-total substitutions. GitHub's status-filtered
+listing can itself cap accessible results at 1000; an inaccessible remainder
+holds as incomplete, so pagination does not promise unlimited inventory.
+Every distinct relevant active run's complete latest-job
 inventory is then read. There are no 64-run or 32-run admission limits. A
 120-second scan deadline is checked before each request and after the last
 response; an overrun or provider error holds. Each listing requires a stable
@@ -439,12 +442,19 @@ definition, so backlog recovery must use current exact-head checks, not a false
 success or blanket cancellation of main, Batch, Version or unrelated work.
 
 The following capacity observations remain visible but are **informational for
-live Batch submission**. After a complete valid inventory with no active Batch
-reservation, one ready candidate may enter GitHub's queue. `capacityInformational`
+live Batch submission, the existing single trusted retry, and landing**. After a
+complete valid inventory with no active Batch reservation, one ready candidate
+may enter GitHub's queue; a tested candidate need not wait for main capacity to
+land. `capacityInformational`
 marks this policy; `capacity.hold` retains the historical capacity heuristic for
 diagnostics, not an admission rejection. Invalid capacity configuration and
 incomplete/unknown evidence still hold. Traffic-shadow capacity comparisons
 retain their existing conservative decisions.
+
+The exact tested tree, lease/CAS, provenance, max-inflight1 and unknown-outcome
+checks still apply to those actions. Historical latency credit for a blocked
+main-capacity wait no longer accrues when capacity is informational; latency
+comparisons across this policy change are therefore not like-for-like.
 
 - **Main before fan-out.** `ci.yml` first creates only automation-admission,
   merge-content and plan; every other job needs plan and appears together, about
