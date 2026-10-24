@@ -713,7 +713,9 @@ export class CuaComputerBackend implements ComputerBackend {
           outcome.message,
         )))
       : null;
-    const reason = refusal?.message ?? outcome.message;
+    const reason =
+      refusal?.message ??
+      (outcome.cuaCode === "ambiguous" ? ambiguityForRefs(outcome.message) : outcome.message);
     const message = single
       ? `CUA stopped part way through the input: ${reason}`
       : `CUA stopped the batch at action ${action + 1}: ${reason}`;
@@ -1654,10 +1656,18 @@ export class CuaComputerBackend implements ComputerBackend {
         // Not in the batch's observation: an earlier action may bring it up,
         // or the element shown under the other role pressed alike may be the
         // one meant, which CUA's step decides once the window has settled.
-        const named =
-          (laterInBatch || (inBatch && mayStandIn(observed.roots, action))) &&
+        // Several shown by that name: an earlier action may narrow them (a
+        // search filtering a list), and CUA's step waits for the window to
+        // settle before it reports them.
+        const unseen = error instanceof ComputerBackendError && error.code === "locator_not_found";
+        const several =
+          laterInBatch &&
           error instanceof ComputerBackendError &&
-          error.code === "locator_not_found" &&
+          error.code === "locator_ambiguous" &&
+          action.locator.kind !== "ref" &&
+          action.locator.kind !== "identifier";
+        const named =
+          (unseen ? laterInBatch || (inBatch && mayStandIn(observed.roots, action)) : several) &&
           (ACTIONS_ON_UNSEEN.has(action.action) ||
             // select or deselect means a state only on a checkbox or switch.
             ((action.action === "select" || action.action === "deselect") &&
@@ -2114,6 +2124,28 @@ const NAMED_STEP_FIND_MS = 1_000;
 /** Roles pressed alike: CUA's step that names one may use the one element
  * of the other with that name, once the window has settled. */
 const PRESSED_ALIKE_ROLES: ReadonlySet<string> = new Set(["button", "link"]);
+
+/** CUA's ambiguity message, worded for an action here: CUA's lookup can take
+ * an `nth`, while an action here names one element of several by its ref.
+ * CUA's `nth` and element numbers are left out of each candidate the message
+ * lists; names and window titles are kept as they are. */
+export function ambiguityForRefs(message: string): string {
+  const reworded = message.replace(
+    "; add `nth` or a more exact name: ",
+    "; give a more exact name, or observe the window and act on the one meant by its ref: ",
+  );
+  for (const lead of ["act on the one meant by its ref: ", "name the role of the one meant: "]) {
+    const at = reworded.lastIndexOf(lead);
+    if (at < 0) continue;
+    const listStart = at + lead.length;
+    const candidates = reworded
+      .slice(listStart)
+      .split("; ")
+      .map((candidate) => candidate.replace(/^(?:nth \d+: )?(?:\[\d+\] )?/, ""));
+    return reworded.slice(0, listStart) + candidates.join("; ");
+  }
+  return reworded;
+}
 
 /** Whether the first action of a batch, naming a button or link its
  * observation does not show, may mean an element shown with that name under
