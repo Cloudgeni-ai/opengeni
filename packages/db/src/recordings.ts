@@ -15,6 +15,16 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, lt, ne, or, sql } from "dri
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
 import * as schema from "./schema";
 import type { RecordingWordTiming } from "./recordings-schema";
+import {
+  consentedVoiceprints,
+  forgetPersonVoice,
+  learnConfirmedVoices,
+  rejectedVoices,
+  rejectVoiceSuggestion,
+  suggestSpeakersByVoice,
+  syncSpeakerVoice,
+  type RecordingSpeakerVoice,
+} from "./recording-voices";
 
 type RecordingRow = typeof schema.recordings.$inferSelect;
 type TrackRow = typeof schema.recordingTracks.$inferSelect;
@@ -123,7 +133,7 @@ function recordingView(
   };
 }
 
-function personView(row: PersonRow): RecordingPerson {
+function personView(row: PersonRow, learned?: { updatedAt: Date } | null): RecordingPerson {
   return {
     id: row.id,
     displayName: row.displayName,
@@ -131,7 +141,41 @@ function personView(row: PersonRow): RecordingPerson {
     email: row.email,
     externalRef: row.externalRef,
     createdAt: row.createdAt.toISOString(),
+    voice:
+      row.voiceConsent && row.voiceConsentedAt
+        ? {
+            consent: row.voiceConsent,
+            consentedAt: row.voiceConsentedAt.toISOString(),
+            learned: Boolean(learned),
+            updatedAt: learned ? learned.updatedAt.toISOString() : null,
+          }
+        : null,
   };
+}
+
+/** When each person's voiceprint last changed, for people who have one. */
+async function voiceprintUpdates(
+  tx: Database,
+  workspaceId: string,
+  personIds: readonly string[],
+): Promise<Map<string, { updatedAt: Date }>> {
+  if (personIds.length === 0) return new Map();
+  const rows = await tx
+    .select({
+      personId: schema.recordingVoiceprints.personId,
+      updatedAt: sql<Date>`max(${schema.recordingVoiceprints.updatedAt})`.mapWith(
+        (value: string | Date) => new Date(value),
+      ),
+    })
+    .from(schema.recordingVoiceprints)
+    .where(
+      and(
+        eq(schema.recordingVoiceprints.workspaceId, workspaceId),
+        inArray(schema.recordingVoiceprints.personId, [...personIds]),
+      ),
+    )
+    .groupBy(schema.recordingVoiceprints.personId);
+  return new Map(rows.map((row) => [row.personId, { updatedAt: row.updatedAt }]));
 }
 
 function defaultTitle(startedAt: Date): string {
@@ -1284,6 +1328,12 @@ export async function completeRecordingTranscriptVersion(
     segments: readonly CompletedRecordingSegment[];
     /** Speakers the capture itself identifies, such as the microphone's owner. */
     trackSpeakers?: ReadonlyArray<{ label: string; displayName: string; personId?: string | null }>;
+    /**
+     * Diarized speakers' voices, passed only while the workspace recognizes
+     * voices. They are kept with the version and matched against the
+     * voiceprints of people who agreed to be remembered.
+     */
+    voices?: readonly RecordingSpeakerVoice[];
   },
 ): Promise<RecordingTranscriptVersion | null> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
@@ -1439,6 +1489,46 @@ export async function completeRecordingTranscriptVersion(
             assignedBySubjectId: assignment.assignedBySubjectId,
           });
         }
+      }
+    }
+    const voices = (input.voices ?? []).filter((voice) => labels.has(voice.label));
+    if (voices.length > 0) {
+      await tx.insert(schema.recordingSpeakerVoices).values(
+        voices.map((voice) => ({
+          accountId: recording.accountId,
+          workspaceId: input.workspaceId,
+          recordingId: recording.id,
+          versionId: version.id,
+          speakerLabel: voice.label,
+          channel: voice.channel,
+          model: voice.model,
+          embedding: [...voice.embedding],
+          speechMilliseconds: Math.max(0, Math.round(voice.speechMilliseconds)),
+        })),
+      );
+      const suggestions = suggestSpeakersByVoice({
+        voices,
+        known: await consentedVoiceprints(tx, input.workspaceId),
+        rejected: await rejectedVoices(tx, input.workspaceId, recording.id),
+        namedLabels: new Set(assignments.keys()),
+        namedPeople: new Set(
+          [...assignments.values()]
+            .map((assignment) => assignment.personId)
+            .filter((personId): personId is string => !!personId),
+        ),
+      });
+      for (const [label, suggestion] of suggestions) {
+        assignments.set(label, {
+          accountId: recording.accountId,
+          workspaceId: input.workspaceId,
+          recordingId: recording.id,
+          versionId: version.id,
+          speakerLabel: label,
+          personId: suggestion.personId,
+          displayName: null,
+          source: "suggested",
+          confidence: suggestion.confidence,
+        });
       }
     }
     if (assignments.size > 0) {
@@ -1698,6 +1788,8 @@ export type UpdateRecordingSpeakersInput = RecordingActor & {
       }>
     | undefined;
   segmentOverrides?: ReadonlyArray<{ segmentIndex: number; label: string }> | undefined;
+  /** Suggested names to turn down; the person is not suggested for that voice again. */
+  rejectSuggestions?: ReadonlyArray<{ label: string }> | undefined;
 };
 
 /**
@@ -1726,6 +1818,12 @@ export async function updateRecordingSpeakers(
               eq(schema.recordingSpeakerAssignments.speakerLabel, assignment.label),
             ),
           );
+        await syncSpeakerVoice(tx, {
+          workspaceId: input.workspaceId,
+          versionId: version.id,
+          label: assignment.label,
+          personId: null,
+        });
         continue;
       }
       if (personId) {
@@ -1765,6 +1863,22 @@ export async function updateRecordingSpeakers(
           ],
           set: values,
         });
+      await syncSpeakerVoice(tx, {
+        workspaceId: input.workspaceId,
+        versionId: version.id,
+        label: assignment.label,
+        personId,
+      });
+    }
+    for (const rejection of input.rejectSuggestions ?? []) {
+      await rejectVoiceSuggestion(tx, {
+        accountId: version.accountId,
+        workspaceId: input.workspaceId,
+        recordingId: input.recordingId,
+        versionId: version.id,
+        label: rejection.label,
+        subjectId: input.subjectId,
+      });
     }
     const overrides = input.segmentOverrides ?? [];
     if (overrides.length > 0) {
@@ -2000,7 +2114,12 @@ export async function listRecordingPeople(
       .where(and(...conditions))
       .orderBy(asc(schema.recordingPeople.displayName), asc(schema.recordingPeople.id))
       .limit(limit);
-    return rows.map(personView);
+    const learned = await voiceprintUpdates(
+      tx,
+      input.workspaceId,
+      rows.filter((row) => row.voiceConsent).map((row) => row.id),
+    );
+    return rows.map((row) => personView(row, learned.get(row.id)));
   });
 }
 
@@ -2048,6 +2167,118 @@ export async function createRecordingPerson(
       throw new RecordingConflictError("This person id is already used", "person_id_taken");
     }
     return { person: personView(existing), created: false };
+  });
+}
+
+async function lockPerson(tx: Database, workspaceId: string, personId: string): Promise<PersonRow> {
+  const [person] = await tx
+    .select()
+    .from(schema.recordingPeople)
+    .where(
+      and(
+        eq(schema.recordingPeople.workspaceId, workspaceId),
+        eq(schema.recordingPeople.id, personId),
+      ),
+    )
+    .for("update");
+  if (!person) throw new RecordingNotFoundError("Person not found");
+  return person;
+}
+
+/**
+ * Agree to have a person's voice remembered, then learn it from every
+ * speaker already confirmed as them. A member agrees only for themselves
+ * (`self`); for someone outside the workspace, the caller attests that they
+ * agreed (`attested`). The caller checks the workspace recognizes voices.
+ */
+export async function rememberRecordingPersonVoice(
+  db: Database,
+  input: RecordingActor & { personId: string; consent: "self" | "attested" },
+): Promise<RecordingPerson> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const person = await lockPerson(tx, input.workspaceId, input.personId);
+    if (person.memberSubjectId) {
+      if (input.consent !== "self" || person.memberSubjectId !== input.subjectId) {
+        throw new RecordingForbiddenError(
+          `Only ${person.displayName} can agree to have their voice remembered`,
+        );
+      }
+    } else if (input.consent !== "attested") {
+      throw new RecordingForbiddenError(
+        "Confirm that this person agreed to have their voice remembered",
+      );
+    }
+    const [updated] = await tx
+      .update(schema.recordingPeople)
+      .set({
+        voiceConsent: input.consent,
+        voiceConsentBySubjectId: input.subjectId,
+        voiceConsentedAt: person.voiceConsentedAt ?? sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(eq(schema.recordingPeople.id, person.id))
+      .returning();
+    await learnConfirmedVoices(tx, { workspaceId: input.workspaceId, personId: person.id });
+    const learned = await voiceprintUpdates(tx, input.workspaceId, [person.id]);
+    return personView(updated!, learned.get(person.id));
+  });
+}
+
+/**
+ * Forget a person's voice and withdraw their agreement. Members decide for
+ * themselves; anyone in the workspace may forget someone from outside it.
+ */
+export async function forgetRecordingPersonVoice(
+  db: Database,
+  input: RecordingActor & { personId: string },
+): Promise<RecordingPerson> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const person = await lockPerson(tx, input.workspaceId, input.personId);
+    if (person.memberSubjectId && person.memberSubjectId !== input.subjectId) {
+      throw new RecordingForbiddenError(`Only ${person.displayName} can forget their own voice`);
+    }
+    await forgetPersonVoice(tx, { workspaceId: input.workspaceId, personId: person.id });
+    const [updated] = await tx
+      .select()
+      .from(schema.recordingPeople)
+      .where(eq(schema.recordingPeople.id, person.id));
+    return personView(updated!);
+  });
+}
+
+/**
+ * Forget every voice in the workspace, for when it stops recognizing
+ * voices: voiceprints, stored speaker voices, turned-down suggestions and
+ * every agreement.
+ */
+export async function forgetWorkspaceRecordingVoices(
+  db: Database,
+  input: RecordingActor,
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    await tx
+      .delete(schema.recordingVoiceprints)
+      .where(eq(schema.recordingVoiceprints.workspaceId, input.workspaceId));
+    await tx
+      .delete(schema.recordingSpeakerVoices)
+      .where(eq(schema.recordingSpeakerVoices.workspaceId, input.workspaceId));
+    await tx
+      .delete(schema.recordingVoiceRejections)
+      .where(eq(schema.recordingVoiceRejections.workspaceId, input.workspaceId));
+    await tx
+      .update(schema.recordingPeople)
+      .set({
+        voiceConsent: null,
+        voiceConsentBySubjectId: null,
+        voiceConsentedAt: null,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schema.recordingPeople.workspaceId, input.workspaceId),
+          isNotNull(schema.recordingPeople.voiceConsent),
+        ),
+      );
   });
 }
 

@@ -5,6 +5,7 @@ import {
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
   FinalizeRecordingRequest,
+  RememberRecordingPersonVoiceRequest,
   resolveWorkspaceRecordingSettings,
   UpdateRecordingRequest,
   UpdateRecordingSegmentsRequest,
@@ -27,6 +28,7 @@ import {
   createRecordingPerson,
   createRecordingTranscriptVersion,
   finalizeRecording,
+  forgetRecordingPersonVoice,
   getRecording,
   getRecordingTrackPreparedObject,
   getRecordingTranscriptPage,
@@ -39,6 +41,7 @@ import {
   markRecordingDeleting,
   recordAuditEvent,
   RecordingConflictError,
+  rememberRecordingPersonVoice,
   RecordingForbiddenError,
   RecordingNotFoundError,
   reserveRecordingChunks,
@@ -436,6 +439,7 @@ export function registerRecordingRoutes(
           versionId: versionIdQuery(c),
           assignments: body.assignments,
           segmentOverrides: body.segmentOverrides,
+          rejectSuggestions: body.rejectSuggestions,
         }),
       ),
     });
@@ -516,6 +520,59 @@ export function registerRecordingRoutes(
       createRecordingPerson(db, { ...actor, personId: personId ?? crypto.randomUUID(), ...person }),
     );
     return c.json(result.person, result.created ? 201 : 200);
+  });
+
+  function personIdParam(c: Context): string {
+    const personId = c.req.param("personId") ?? "";
+    if (!z.string().uuid().safeParse(personId).success) throw notFound("Person not found");
+    return personId;
+  }
+
+  /** Agree to have a person's voice remembered (members for themselves). */
+  app.put("/v1/workspaces/:workspaceId/recording-people/:personId/voice", async (c) => {
+    const actor = await actorFor(c, "sessions:create");
+    const personId = personIdParam(c);
+    const body = await parseRequestJson(c, RememberRecordingPersonVoiceRequest);
+    const workspace = await getWorkspace(db, actor.workspaceId);
+    if (resolveWorkspaceRecordingSettings(workspace?.settings).voiceprints !== true) {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message:
+          "This workspace does not recognize voices. An admin can turn it on in Meetings settings.",
+        retryable: false,
+        details: { code: "voice_recognition_off" },
+      });
+    }
+    const person = await guard(() =>
+      rememberRecordingPersonVoice(db, { ...actor, personId, consent: body.consent }),
+    );
+    await recordAuditEvent(db, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      action: "recording.voice.remembered",
+      targetType: "recording_person",
+      targetId: personId,
+      metadata: { personId, consent: body.consent },
+    });
+    return c.json(person);
+  });
+
+  /** Forget a person's voice and withdraw their agreement. */
+  app.delete("/v1/workspaces/:workspaceId/recording-people/:personId/voice", async (c) => {
+    const actor = await actorFor(c, "sessions:create");
+    const personId = personIdParam(c);
+    const person = await guard(() => forgetRecordingPersonVoice(db, { ...actor, personId }));
+    await recordAuditEvent(db, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      action: "recording.voice.forgotten",
+      targetType: "recording_person",
+      targetId: personId,
+      metadata: { personId },
+    });
+    return c.json(person);
   });
 
   app.get("/v1/workspaces/:workspaceId/recording-models", async (c) => {

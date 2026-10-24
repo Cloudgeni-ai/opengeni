@@ -128,6 +128,13 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
         .optional(),
       /** Who tells speakers apart in new transcripts. */
       diarizer: RecordingDiarizer.optional(),
+      /**
+       * Recognize people by voice. Off by default. While on, Opengeni keeps
+       * each diarized speaker's voice vector with the transcript and
+       * suggests who a speaker is from the voices of people who agreed to be
+       * remembered. Turning it off forgets every remembered voice.
+       */
+      voiceprints: z.boolean().optional(),
     })
     .strict(),
 );
@@ -340,10 +347,35 @@ export const UpdateRecordingSpeakersRequest = /* @__PURE__ */ defineSchema(() =>
         )
         .max(500)
         .optional(),
+      /**
+       * Turn down a voice suggestion: the label loses its suggested name, and
+       * that person is not suggested for this voice in this recording again.
+       */
+      rejectSuggestions: z
+        .array(z.object({ label: z.string().min(1).max(128) }).strict())
+        .max(64)
+        .optional(),
     })
     .strict(),
 );
 export type UpdateRecordingSpeakersRequest = z.infer<typeof UpdateRecordingSpeakersRequest>;
+
+/**
+ * Agree to have a person's voice remembered. `self` is a member agreeing
+ * for themselves; `attested` is someone confirming that a person outside
+ * the workspace agreed. Members can only agree for themselves.
+ */
+export const RecordingVoiceprintConsent = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["self", "attested"]),
+);
+export type RecordingVoiceprintConsent = z.infer<typeof RecordingVoiceprintConsent>;
+
+export const RememberRecordingPersonVoiceRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ consent: RecordingVoiceprintConsent }).strict(),
+);
+export type RememberRecordingPersonVoiceRequest = z.infer<
+  typeof RememberRecordingPersonVoiceRequest
+>;
 
 /**
  * Correct the text of segments in one version. The version itself never
@@ -474,6 +506,19 @@ export const RecordingPerson = /* @__PURE__ */ defineSchema(() =>
     email: z.string().nullable(),
     externalRef: z.string().nullable(),
     createdAt: z.string(),
+    /**
+     * Whether this person's voice is remembered. `consent` is present once
+     * they agreed; `learned` is false until a confirmed speaker taught it
+     * their voice. The voice vectors themselves are never returned.
+     */
+    voice: z
+      .object({
+        consent: RecordingVoiceprintConsent,
+        consentedAt: z.string(),
+        learned: z.boolean(),
+        updatedAt: z.string().nullable(),
+      })
+      .nullable(),
   }),
 );
 export type RecordingPerson = z.infer<typeof RecordingPerson>;

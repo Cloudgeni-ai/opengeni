@@ -89,7 +89,9 @@ export default function PageMeetingsSection() {
         ? "settings"
         : "list",
   );
-  const [settings, setSettings] = useState<WorkspaceRecordingSettings>({});
+  const [settings, setSettings] = useState<WorkspaceRecordingSettings>(
+    initial.get("voices") === "off" ? {} : { voiceprints: true },
+  );
   const [mode, setMode] = useState<RecorderMode>(
     (initial.get("recorder") as RecorderMode | null) ?? "idle",
   );
@@ -161,6 +163,7 @@ export default function PageMeetingsSection() {
                   settings={settings}
                   personal={false}
                   canManage
+                  viewer={{ subjectId: fixture.viewerSubjectId, name: "Ingrid Solberg" }}
                   onConnectModels={() => {}}
                   onSave={async (next) => {
                     setSettings(next);
@@ -185,6 +188,7 @@ export default function PageMeetingsSection() {
                 workspaceId={fixture.workspaceId}
                 recordingId={openId}
                 viewerSubjectId={fixture.viewerSubjectId}
+                voiceRecognition={settings.voiceprints === true}
                 recordings={fixture.client}
                 onBack={() => setView("list")}
               />

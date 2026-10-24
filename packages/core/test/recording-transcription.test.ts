@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildRecordingSegments,
+  recordingSpeakerLabels,
   createElevenLabsRecordingTranscriptionProvider,
   createRecordingTranscriptionProviderRegistry,
   estimateRecordingTranscriptionCostMicros,
@@ -127,6 +128,39 @@ describe("buildRecordingSegments", () => {
     expect(segments[0]!.words).toEqual([
       { text: "Hello", startMs: 0, endMs: 300 },
       { text: "there.", startMs: 350, endMs: 700 },
+    ]);
+  });
+
+  test("speaker ids map to the labels the segments carry", () => {
+    const tracks = [
+      { trackNumber: 1, fixedLabel: "track-1", words: [word("Hello", 0, 300, null)] },
+      {
+        trackNumber: 2,
+        fixedLabel: null,
+        words: [
+          word(" ", 900, 950, "S4"),
+          word("Hi", 1000, 1200, "S2"),
+          word("Bye", 1300, 1500, "S4"),
+          word("Ok", 1600, 1700, "S2"),
+        ],
+      },
+    ];
+    expect(recordingSpeakerLabels(tracks)).toEqual(
+      new Map([
+        [
+          2,
+          new Map([
+            ["S2", "speaker_0"],
+            ["S4", "speaker_1"],
+          ]),
+        ],
+      ]),
+    );
+    expect(buildRecordingSegments(tracks).map((segment) => segment.speakerLabel)).toEqual([
+      "track-1",
+      "speaker_0",
+      "speaker_1",
+      "speaker_0",
     ]);
   });
 

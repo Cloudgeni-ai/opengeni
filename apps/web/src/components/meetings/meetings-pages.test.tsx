@@ -136,9 +136,39 @@ describe("Meeting page", () => {
       expect(text).toContain("Tomas Eriksen");
       expect(text).toContain("Speaker 2");
       expect(text).toContain("Version 1");
-      expect(text).toContain("3 speakers");
+      expect(text).toContain("4 speakers");
       // The owner controls who can see it.
       expect(view.container.querySelector('[aria-label^="Who can see this"]')).not.toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a voice suggestion is marked and can be turned down", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        voiceRecognition
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Lea Haugen");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Suggested from their voice");
+      const notThem = view.container.querySelector<HTMLButtonElement>(
+        '[aria-label="Not Lea Haugen"]',
+      );
+      expect(notThem).not.toBeNull();
+      await act(async () => notThem!.click());
+      await settle(400);
+      const after = view.container.textContent ?? "";
+      expect(after).not.toContain("Suggested from their voice");
+      expect(after).toContain("Speaker 3");
     } finally {
       await view.unmount();
     }

@@ -18,11 +18,15 @@ import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@ope
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
   resolveRealtimeVoiceSettings,
+  resolveWorkspaceRecordingSettings,
   resolveWorkspaceRealtimeDefaultModel,
   resolveWorkspaceRealtimeVoiceSettings,
   WorkspacePauseTimerRequest,
 } from "@opengeni/contracts";
-import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
+import {
+  forgetWorkspaceRecordingVoices,
+  getWorkspaceConnectionModelRestrictions,
+} from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
   AddWorkspaceMemberRequest,
@@ -601,6 +605,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         },
       );
+      // Meetings that stop recognizing voices forget every remembered voice.
+      if (
+        parsed.data.recordings !== undefined &&
+        resolveWorkspaceRecordingSettings(workspace.settings).voiceprints !== true
+      ) {
+        await forgetWorkspaceRecordingVoices(deps.db, { workspaceId, subjectId: grant.subjectId });
+      }
       return c.json(Workspace.parse(workspace));
     } catch (error) {
       if (nestedPostgresSqlState(error) === "0A000") {

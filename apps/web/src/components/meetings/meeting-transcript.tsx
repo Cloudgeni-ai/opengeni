@@ -2,10 +2,12 @@
  * The transcript as a person reads it: turns of one speaker, each with its
  * time, the line playing now highlighted. A speaker's name opens "Who is
  * this?" (someone from the people directory, or a new name); a turn's ⋯ menu
- * moves it to another speaker or corrects its words.
+ * moves it to another speaker or corrects its words. A name recognized by
+ * voice is marked suggested until someone confirms or turns it down.
  */
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
+  AudioLinesIcon,
   CheckIcon,
   ChevronDownIcon,
   MoreHorizontalIcon,
@@ -75,10 +77,39 @@ export type TranscriptActions = {
     label: string,
     name: { personId: string } | { name: string } | null,
   ) => Promise<void>;
+  /** Turn down a name suggested from a voice. */
+  rejectSuggestion: (label: string) => Promise<void>;
   createPerson: (displayName: string) => Promise<RecordingPerson>;
   moveSegment: (segmentIndex: number, label: string) => Promise<void>;
   editSegment: (segmentIndex: number, text: string | null) => Promise<void>;
+  /** Null when the workspace doesn't recognize people by voice. */
+  voices: VoiceActions | null;
 };
+
+/** Remembering and forgetting voices, from a named speaker's menu. */
+export type VoiceActions = {
+  viewerSubjectId: string;
+  /** Asks first when the person is someone from outside the workspace. */
+  remember: (person: RecordingPerson) => void;
+  forget: (person: RecordingPerson) => Promise<void>;
+};
+
+/** The speaker's name came from their voice and nobody has confirmed it yet. */
+export function speakerIsSuggested(
+  label: string | null,
+  speakers: readonly RecordingSpeaker[],
+): RecordingSpeaker | null {
+  if (!label) return null;
+  const speaker = speakers.find((candidate) => candidate.label === label);
+  return speaker?.source === "suggested" && speaker.personId ? speaker : null;
+}
+
+/** "92% match", from the voice similarity behind a suggestion. */
+export function suggestionMatch(speaker: RecordingSpeaker): string | null {
+  return speaker.confidence === null
+    ? null
+    : `${Math.round(Math.max(0, Math.min(1, speaker.confidence)) * 100)}% match`;
+}
 
 async function withToast(failure: string, work: () => Promise<void>): Promise<boolean> {
   try {
@@ -116,6 +147,7 @@ export function SpeakerNameMenu({
 }) {
   const current = speakers.find((speaker) => speaker.label === label);
   const named = speakerIsNamed(label, speakers);
+  const suggested = speakerIsSuggested(label, speakers);
   const inMeeting = useMemo(() => {
     const ids = new Set(
       speakers
@@ -127,20 +159,68 @@ export function SpeakerNameMenu({
   const others = useMemo(
     () =>
       people
-        .filter((person) => !inMeeting.includes(person))
+        // A suggested person is already the first choice above.
+        .filter(
+          (person) =>
+            !inMeeting.includes(person) &&
+            !(current?.source === "suggested" && person.id === current.personId),
+        )
         .sort((a, b) => a.displayName.localeCompare(b.displayName))
         .slice(0, 12),
-    [people, inMeeting],
+    [people, inMeeting, current?.source, current?.personId],
   );
   const pick = (person: RecordingPerson) =>
     void withToast("Couldn't name this speaker", () =>
       actions.nameSpeaker(label, { personId: person.id }),
     );
+  const currentPerson = current?.personId
+    ? (people.find((candidate) => candidate.id === current.personId) ?? null)
+    : null;
+  const voiceItem =
+    !suggested && currentPerson && actions.voices
+      ? voiceMenuItem(currentPerson, actions.voices)
+      : null;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
       <DropdownMenuContent align={align} className="max-h-80 min-w-56">
-        <DropdownMenuLabel>Who is {displayName}?</DropdownMenuLabel>
+        {suggested ? (
+          <>
+            <DropdownMenuLabel className="grid gap-0.5">
+              <span>Is this {displayName}?</span>
+              <span className="text-xs leading-4 font-normal text-fg-muted">
+                Suggested because the voice sounds like theirs
+                {suggestionMatch(suggested) ? ` (${suggestionMatch(suggested)})` : ""}
+              </span>
+            </DropdownMenuLabel>
+            <DropdownMenuItem
+              onSelect={() =>
+                void withToast("Couldn't confirm this name", () =>
+                  actions.nameSpeaker(label, { personId: suggested.personId! }),
+                )
+              }
+            >
+              <CheckIcon aria-hidden="true" />
+              Yes, it's {displayName}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                void withToast("Couldn't turn down this name", () =>
+                  actions.rejectSuggestion(label),
+                )
+              }
+            >
+              <XIcon aria-hidden="true" />
+              No, leave unnamed
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-xs leading-4 font-normal text-fg-muted">
+              Or pick who it is
+            </DropdownMenuLabel>
+          </>
+        ) : (
+          <DropdownMenuLabel>Who is {displayName}?</DropdownMenuLabel>
+        )}
         {inMeeting.map((person) => (
           <DropdownMenuItem key={person.id} onSelect={() => pick(person)}>
             <span className="min-w-0 flex-1 truncate">Same person as {person.displayName}</span>
@@ -150,7 +230,7 @@ export function SpeakerNameMenu({
         {others.map((person) => (
           <DropdownMenuItem key={person.id} onSelect={() => pick(person)}>
             <span className="min-w-0 flex-1 truncate">{person.displayName}</span>
-            {current?.personId === person.id ? (
+            {current?.personId === person.id && !suggested ? (
               <CheckIcon aria-hidden="true" className="text-brand" />
             ) : null}
           </DropdownMenuItem>
@@ -160,7 +240,7 @@ export function SpeakerNameMenu({
           <UserPlusIcon aria-hidden="true" />
           Someone new…
         </DropdownMenuItem>
-        {named ? (
+        {named && !suggested ? (
           <DropdownMenuItem
             onSelect={() =>
               void withToast("Couldn't clear this name", () => actions.nameSpeaker(label, null))
@@ -170,8 +250,46 @@ export function SpeakerNameMenu({
             Remove name
           </DropdownMenuItem>
         ) : null}
+        {voiceItem ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-xs leading-4 font-normal text-fg-muted">
+              Used to suggest names in later meetings
+            </DropdownMenuLabel>
+            {voiceItem}
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/**
+ * "Remember my voice", "Remember Maja's voice…" or "Forget …": members only
+ * decide for themselves, so another member's voice offers nothing here.
+ */
+function voiceMenuItem(person: RecordingPerson, voices: VoiceActions): React.ReactNode {
+  const self = person.memberSubjectId === voices.viewerSubjectId;
+  if (person.memberSubjectId && !self) return null;
+  if (person.voice) {
+    return (
+      <DropdownMenuItem
+        onSelect={() => void withToast("Couldn't forget this voice", () => voices.forget(person))}
+      >
+        <AudioLinesIcon aria-hidden="true" />
+        <span className="min-w-0 flex-1 truncate">
+          {self ? "Forget my voice" : `Forget ${person.displayName}'s voice`}
+        </span>
+      </DropdownMenuItem>
+    );
+  }
+  return (
+    <DropdownMenuItem onSelect={() => voices.remember(person)}>
+      <AudioLinesIcon aria-hidden="true" />
+      <span className="min-w-0 flex-1 truncate">
+        {self ? "Remember my voice" : `Remember ${person.displayName}'s voice…`}
+      </span>
+    </DropdownMenuItem>
   );
 }
 
@@ -361,6 +479,7 @@ export function MeetingTranscript({
         {turns.map((turn) => {
           const name = nameOf(turn.speakerLabel);
           const unnamed = turn.speakerLabel ? !speakerIsNamed(turn.speakerLabel, speakers) : false;
+          const suggested = speakerIsSuggested(turn.speakerLabel, speakers);
           const active = turn.segments.some((segment) => segment.index === activeSegment);
           return (
             <li key={turn.key} className="group/turn grid min-w-0 gap-1.5">
@@ -377,7 +496,11 @@ export function MeetingTranscript({
                     <button
                       type="button"
                       aria-label={
-                        unnamed ? `${name}, name this speaker` : `${name}, change who this is`
+                        unnamed
+                          ? `${name}, name this speaker`
+                          : suggested
+                            ? `${name}, suggested from their voice. Confirm or correct`
+                            : `${name}, change who this is`
                       }
                       className="group/speaker -mx-1.5 flex min-w-0 items-center gap-2 rounded-[6px] px-1.5 py-0.5 text-sm leading-5 font-semibold text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11"
                     >
@@ -391,6 +514,11 @@ export function MeetingTranscript({
                       >
                         {name}
                       </span>
+                      {suggested ? (
+                        <span className="shrink-0 rounded-full border border-dashed border-border-strong px-1.5 text-xs leading-4 font-normal text-fg-muted">
+                          Suggested
+                        </span>
+                      ) : null}
                       <ChevronDownIcon
                         aria-hidden="true"
                         className="size-3.5 shrink-0 text-fg-subtle opacity-0 transition-opacity duration-[120ms] group-hover/speaker:opacity-100 group-focus-visible/speaker:opacity-100 group-data-[state=open]/speaker:opacity-100 pointer-coarse:opacity-100 motion-reduce:transition-none"

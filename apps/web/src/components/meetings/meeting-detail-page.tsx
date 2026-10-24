@@ -22,6 +22,7 @@ import {
 import { toast } from "sonner";
 import type {
   Recording,
+  RecordingPerson,
   RecordingTranscriptVersion,
   RecordingVisibility,
 } from "@opengeni/contracts";
@@ -43,6 +44,7 @@ import {
 } from "@opengeni/react/recordings";
 
 import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import {
   DetailAside,
   DetailAsideItem,
@@ -69,6 +71,7 @@ import { formatAbsoluteTime } from "@opengeni/react/ui/relative-time";
 import { NativeSelect, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
 import {
@@ -81,6 +84,7 @@ import {
   NewSpeakerNameDialog,
   SpeakerDot,
   SpeakerNameMenu,
+  speakerIsSuggested,
   type TranscriptActions,
 } from "./meeting-transcript";
 import { uploadLine } from "./recorder-panel";
@@ -489,12 +493,15 @@ export function MeetingDetailPage({
   workspaceId,
   recordingId,
   viewerSubjectId,
+  voiceRecognition = false,
   recordings: recordingsClient,
   onBack,
 }: {
   workspaceId: string;
   recordingId: string;
   viewerSubjectId: string;
+  /** The workspace recognizes people by voice, so speakers can be suggested and voices remembered. */
+  voiceRecognition?: boolean;
   /** A recordings client to use instead of the app's, for previews. */
   recordings?: RecordingsClientOverride["recordings"];
   onBack: () => void;
@@ -524,6 +531,7 @@ export function MeetingDetailPage({
   const [rerunning, setRerunning] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [namingFromAside, setNamingFromAside] = useState<string | null>(null);
+  const [rememberingVoice, setRememberingVoice] = useState<RecordingPerson | null>(null);
 
   const { sources, reload } = useTrackSources(recording, (trackNumber) =>
     client.getRecordingTrackAudio(workspaceId, recordingId, trackNumber),
@@ -538,14 +546,65 @@ export function MeetingDetailPage({
   );
 
   const createPerson = people.create;
+  const { rememberVoice, forgetVoice } = people;
+  const refreshTranscript = transcript.refresh;
+  const rejectSuggestion = transcript.rejectSuggestion;
+  const transcriptSpeakers = transcript.speakers;
   const actions: TranscriptActions = useMemo(
     () => ({
       nameSpeaker: transcript.nameSpeaker,
+      rejectSuggestion: async (label: string) => {
+        const suggested = speakerIsSuggested(label, transcriptSpeakers);
+        await rejectSuggestion(label);
+        toast.success(
+          suggested
+            ? `Left unnamed. ${suggested.name} won't be suggested for this voice again`
+            : "Left unnamed",
+        );
+      },
       moveSegment: transcript.moveSegment,
       editSegment: transcript.editSegment,
       createPerson: async (displayName: string) => await createPerson({ displayName }),
+      voices: voiceRecognition
+        ? {
+            viewerSubjectId,
+            remember: (person) => {
+              if (person.memberSubjectId !== viewerSubjectId) {
+                setRememberingVoice(person);
+                return;
+              }
+              void rememberVoice(person.id, "self").then(
+                () => toast.success("Your voice will be remembered"),
+                (error: unknown) =>
+                  toast.error("Couldn't remember your voice", { description: errorText(error) }),
+              );
+            },
+            forget: async (person) => {
+              await forgetVoice(person.id);
+              // Forgetting also removes the names it suggested in this meeting.
+              await refreshTranscript();
+              toast.success(
+                person.memberSubjectId === viewerSubjectId
+                  ? "Your voice is forgotten"
+                  : `${person.displayName}'s voice is forgotten`,
+              );
+            },
+          }
+        : null,
     }),
-    [transcript.nameSpeaker, transcript.moveSegment, transcript.editSegment, createPerson],
+    [
+      transcript.nameSpeaker,
+      rejectSuggestion,
+      transcriptSpeakers,
+      transcript.moveSegment,
+      transcript.editSegment,
+      createPerson,
+      voiceRecognition,
+      viewerSubjectId,
+      rememberVoice,
+      forgetVoice,
+      refreshTranscript,
+    ],
   );
 
   if (!recording) {
@@ -628,10 +687,17 @@ export function MeetingDetailPage({
   const unnamedCount = speakerLabels.filter(
     (label) => !speakerIsNamed(label, transcript.speakers),
   ).length;
+  const suggestedCount = speakerLabels.filter((label) =>
+    speakerIsSuggested(label, transcript.speakers),
+  ).length;
 
   const speakerButtons = (variant: "list" | "chips") =>
     speakerLabels.map((label) => {
       const name = speakerDisplayName(label, transcript.speakers, recording.tracks);
+      const suggested = speakerIsSuggested(label, transcript.speakers);
+      const menuLabel = suggested
+        ? `${name}, suggested from their voice. Confirm or correct`
+        : `${name}, change who this is`;
       return (
         <li key={label} className="min-w-0">
           <SpeakerNameMenu
@@ -646,34 +712,90 @@ export function MeetingDetailPage({
             {variant === "list" ? (
               <button
                 type="button"
-                aria-label={`${name}, change who this is`}
+                aria-label={menuLabel}
                 className="-mx-1.5 flex w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-[6px] px-1.5 py-1 text-left text-sm leading-5 text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11"
               >
                 <SpeakerDot slot={slots.get(label)} />
-                <span className="min-w-0 flex-1 truncate">{name}</span>
+                <span className="grid min-w-0 flex-1">
+                  <span className="truncate">{name}</span>
+                  {suggested ? (
+                    <span className="truncate text-xs leading-4 text-fg-muted">
+                      Suggested from their voice
+                    </span>
+                  ) : null}
+                </span>
                 <PencilIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-subtle" />
               </button>
             ) : (
               <button
                 type="button"
-                aria-label={`${name}, change who this is`}
-                className="flex max-w-52 min-w-0 items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-sm leading-5 text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11"
+                aria-label={menuLabel}
+                className={cn(
+                  "flex max-w-52 min-w-0 items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-sm leading-5 text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11",
+                  suggested && "border-dashed border-border-strong",
+                )}
               >
                 <SpeakerDot slot={slots.get(label)} />
-                <span className="min-w-0 truncate">{name}</span>
+                <span className="min-w-0 truncate">
+                  {name}
+                  {suggested ? "?" : ""}
+                </span>
                 <PencilIcon aria-hidden="true" className="size-3 shrink-0 text-fg-subtle" />
               </button>
             )}
           </SpeakerNameMenu>
+          {suggested && variant === "list" ? (
+            <div className="mt-1 flex flex-wrap gap-1.5 pl-4">
+              <Button
+                type="button"
+                size="xs"
+                className="pointer-coarse:h-11"
+                variant="outline"
+                aria-label={`Yes, it's ${name}`}
+                onClick={() =>
+                  void actions
+                    .nameSpeaker(label, { personId: suggested.personId! })
+                    .catch((error: unknown) =>
+                      toast.error("Couldn't confirm this name", { description: errorText(error) }),
+                    )
+                }
+              >
+                <CheckIcon aria-hidden="true" />
+                Confirm
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                className="pointer-coarse:h-11"
+                variant="ghost"
+                aria-label={`Not ${name}`}
+                onClick={() =>
+                  void actions.rejectSuggestion(label).catch((error: unknown) =>
+                    toast.error("Couldn't turn down this name", {
+                      description: errorText(error),
+                    }),
+                  )
+                }
+              >
+                Not them
+              </Button>
+            </div>
+          ) : null}
         </li>
       );
     });
-  const unnamedHint =
+  const unnamedLine =
     unnamedCount > 0
       ? unnamedCount === 1
         ? "One speaker has no name yet. Pick a speaker to name them."
         : `${unnamedCount} speakers have no name yet. Pick a speaker to name them.`
       : null;
+  // The chips have no Confirm buttons of their own, so they say where to go.
+  const chipsHint =
+    [unnamedLine, suggestedCount > 0 ? "Tap a name marked ? to confirm or change it." : null]
+      .filter(Boolean)
+      .join(" ") || null;
+  const unnamedHint = unnamedLine;
 
   const update = async (
     request: Parameters<typeof meeting.update>[0],
@@ -858,8 +980,8 @@ export function MeetingDetailPage({
                 <ul aria-label="Speakers" className="flex flex-wrap gap-2">
                   {speakerButtons("chips")}
                 </ul>
-                {unnamedHint ? (
-                  <p className="text-xs leading-4.5 text-fg-muted">{unnamedHint}</p>
+                {chipsHint ? (
+                  <p className="text-xs leading-4.5 text-fg-muted">{chipsHint}</p>
                 ) : null}
               </div>
             </div>
@@ -940,6 +1062,28 @@ export function MeetingDetailPage({
         }
         actions={actions}
         onClose={() => setNamingFromAside(null)}
+      />
+      <ConfirmDialog
+        open={rememberingVoice !== null}
+        onOpenChange={(open) => {
+          if (!open) setRememberingVoice(null);
+        }}
+        destructive={false}
+        title={`Remember ${rememberingVoice?.displayName ?? "their"}'s voice?`}
+        description={`Only do this if ${rememberingVoice?.displayName ?? "they"} agreed. Opengeni learns their voice from every meeting in this workspace where they're named as a speaker, earlier ones included, and suggests their name in later meetings. It keeps a voice summary, not audio, until someone forgets it in Settings or voice recognition is turned off.`}
+        confirmLabel="They agreed. Remember"
+        pendingLabel="Saving…"
+        onConfirm={async () => {
+          const person = rememberingVoice;
+          if (!person) return;
+          try {
+            await rememberVoice(person.id, "attested");
+            toast.success(`${person.displayName}'s voice will be remembered`);
+          } catch (error) {
+            toast.error("Couldn't remember this voice", { description: errorText(error) });
+            return false;
+          }
+        }}
       />
       <DeleteMeetingDialog
         recording={deleting ? recording : null}

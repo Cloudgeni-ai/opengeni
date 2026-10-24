@@ -1335,6 +1335,12 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 4;
   }
+:where(.og-root).line-clamp-6,:where(.og-root) .line-clamp-6 {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 6;
+  }
 :where(.og-root).\!inline,:where(.og-root) .\!inline {
     display: inline !important;
   }
@@ -6587,6 +6593,11 @@
 :where(.og-root).first\:pt-0,:where(.og-root) .first\:pt-0 {
     &:first-child {
       padding-top: calc(var(--spacing) * 0);
+    }
+  }
+:where(.og-root).first\:pt-1,:where(.og-root) .first\:pt-1 {
+    &:first-child {
+      padding-top: calc(var(--spacing) * 1);
     }
   }
 :where(.og-root).first\:pl-0,:where(.og-root) .first\:pl-0 {

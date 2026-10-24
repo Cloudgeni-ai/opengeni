@@ -125,6 +125,8 @@ export type DiarizedVoice = {
 export type RecordingDiarizerResult = {
   turns: SpeakerTurn[];
   voices: DiarizedVoice[];
+  /** The speaker model behind `voices`; vectors only compare within one model. */
+  voiceModel: string;
 };
 
 /**
@@ -265,6 +267,29 @@ function trackLabeler(track: RecordingTrackWords, prefixTracks: boolean) {
     }
     return prefixTracks ? `t${track.trackNumber}_speaker_${number}` : `speaker_${number}`;
   };
+}
+
+/**
+ * The transcript label each diarized speaker id gets on each track, as
+ * buildRecordingSegments assigns them, so per-speaker data (such as voices)
+ * can follow the speakers into the transcript.
+ */
+export function recordingSpeakerLabels(
+  tracks: readonly RecordingTrackWords[],
+): Map<number, Map<string, string>> {
+  const diarizedTracks = tracks.filter((track) => !track.fixedLabel).length;
+  const labels = new Map<number, Map<string, string>>();
+  for (const track of tracks) {
+    if (track.fixedLabel) continue;
+    const label = trackLabeler(track, diarizedTracks > 1);
+    const byId = new Map<string, string>();
+    for (const word of track.words) {
+      if (!word.text.trim() || word.speaker === null || byId.has(word.speaker)) continue;
+      byId.set(word.speaker, label(word.speaker)!);
+    }
+    labels.set(track.trackNumber, byId);
+  }
+  return labels;
 }
 
 /**

@@ -2,6 +2,7 @@
 // live in components/meetings; these route components own navigation.
 import { useNavigate } from "@tanstack/react-router";
 
+import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
 import { MeetingDetailPage } from "@/components/meetings/meeting-detail-page";
 import { MeetingsListPage } from "@/components/meetings/meetings-list-page";
 import { useAppContext } from "@opengeni/react/app/app-context";
@@ -40,7 +41,10 @@ export function MeetingDetailRoute({
   recordingId: string;
 }) {
   const navigate = useNavigate();
-  const { accessContext } = useAppContext();
+  const { accessContext, workspaces } = useAppContext();
+  const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+  const voiceRecognition =
+    resolveWorkspaceRecordingSettings(workspace?.settings).voiceprints === true;
   return (
     <ContentPage width="standard" className={PAGE_FRAME}>
       <MeetingDetailPage
@@ -48,6 +52,7 @@ export function MeetingDetailRoute({
         workspaceId={workspaceId}
         recordingId={recordingId}
         viewerSubjectId={accessContext.subjectId}
+        voiceRecognition={voiceRecognition}
         onBack={() =>
           void navigate({ to: "/workspaces/$workspaceId/meetings", params: { workspaceId } })
         }

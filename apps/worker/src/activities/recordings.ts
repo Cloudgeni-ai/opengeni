@@ -7,7 +7,9 @@ import {
   labelWordsFromTurns,
   planRecordingTracks,
   recordingDiarizationKind,
+  recordingSpeakerLabels,
   RecordingTranscriptionError,
+  type RecordingDiarizerResult,
   type RecordingDiarizer,
   type RecordingTranscribedWord,
   type RecordingTranscriptionProviderRegistry,
@@ -18,6 +20,7 @@ import {
   completeRecordingTranscriptVersion,
   failRecordingTranscriptVersion,
   getRecordingTrackPreparedObject,
+  getWorkspace,
   listDeletingRecordingObjectKeys,
   listStalledRecordingWork,
   loadOrganizationModelProviderApiKey,
@@ -26,10 +29,13 @@ import {
   purgeDeletingRecording,
   recordingPreparedTrackObjectKey,
   RecordingNotFoundError,
+  recordingVoiceChannel,
   setRecordingTrackPrepared,
   type Database,
+  type RecordingSpeakerVoice,
   type StalledRecordingWork,
 } from "@opengeni/db";
+import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
@@ -205,6 +211,17 @@ export function createRecordingActivities(
       let audioMilliseconds = 0;
       const languages = new Set<string>();
       const ourDiarizer = diarizerFor(settings);
+      // Recognizing voices needs every speaker's voice vector, which only
+      // our diarizer gives, so it tells the speakers apart whatever the model.
+      const recognizeVoices =
+        ourDiarizer !== null &&
+        resolveWorkspaceRecordingSettings((await getWorkspace(db, input.workspaceId))?.settings)
+          .voiceprints === true;
+      const trackVoices: Array<{
+        trackNumber: number;
+        source: (typeof job.recording.tracks)[number]["source"];
+        result: RecordingDiarizerResult;
+      }> = [];
       for (const plan of plans) {
         const track = job.recording.tracks.find((item) => item.trackNumber === plan.trackNumber)!;
         const chunks = job.chunks.filter((chunk) => chunk.trackNumber === plan.trackNumber);
@@ -230,7 +247,7 @@ export function createRecordingActivities(
         const useOurs =
           plan.diarize &&
           ourDiarizer !== null &&
-          (requested.diarizer === "ours" || !capabilities.diarization);
+          (requested.diarizer === "ours" || !capabilities.diarization || recognizeVoices);
         const trackAudio = {
           bytes: audio.bytes,
           mimeType: audio.mimeType,
@@ -271,6 +288,7 @@ export function createRecordingActivities(
         if (ours) {
           words = labelWordsFromTurns(result.words, ours.turns);
           ourDiarized = true;
+          trackVoices.push({ trackNumber: plan.trackNumber, source: track.source, result: ours });
         } else if (diarize && result.diarized) {
           providerDiarized = true;
         }
@@ -283,6 +301,23 @@ export function createRecordingActivities(
         });
       }
       const segments = buildRecordingSegments(trackWords);
+      const voices: RecordingSpeakerVoice[] = [];
+      if (recognizeVoices) {
+        const labels = recordingSpeakerLabels(trackWords);
+        for (const { trackNumber, source, result } of trackVoices) {
+          for (const voice of result.voices) {
+            const label = labels.get(trackNumber)?.get(voice.speaker);
+            if (!label || voice.embedding.length === 0) continue;
+            voices.push({
+              label,
+              channel: recordingVoiceChannel(source),
+              model: result.voiceModel,
+              embedding: voice.embedding,
+              speechMilliseconds: voice.speechMilliseconds,
+            });
+          }
+        }
+      }
       const diarization = recordingDiarizationKind({
         plans,
         providerDiarized,
@@ -312,6 +347,7 @@ export function createRecordingActivities(
           text: segment.text,
           words: segment.words,
         })),
+        voices,
       });
       return completed ? { outcome: "complete" } : { outcome: "skipped" };
     } catch (error) {

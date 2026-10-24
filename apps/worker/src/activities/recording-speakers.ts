@@ -10,7 +10,8 @@ import type {
   RecordingTranscriptionAudio,
 } from "@opengeni/core";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -166,9 +167,10 @@ async function runSpeakers(
 }
 
 /** Parse the executable's diarization into turns and voices keyed `S0`, `S1`, … */
-export function parseDiarization(json: string): RecordingDiarizerResult {
+export function parseDiarization(json: string, voiceModel: string): RecordingDiarizerResult {
   const raw = JSON.parse(json) as RawDiarization;
   return {
+    voiceModel,
     turns: raw.turns.map((turn) => ({
       startMilliseconds: turn.startMs,
       endMilliseconds: turn.endMs,
@@ -182,8 +184,21 @@ export function parseDiarization(json: string): RecordingDiarizerResult {
   };
 }
 
+/**
+ * Names the voice vector space by the embedding model's bytes, so a model
+ * swap never compares vectors from two different models.
+ */
+async function embeddingModelId(modelsDir: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(join(modelsDir, "embedding.onnx"))) {
+    hash.update(chunk as Buffer);
+  }
+  return `opengeni-cpu:${hash.digest("hex").slice(0, 16)}`;
+}
+
 /** Our CPU diarizer. */
 export function createLocalDiarizer(config: RecordingSpeakersConfig): RecordingDiarizer {
+  let voiceModel: Promise<string> | null = null;
   return {
     id: "opengeni-cpu",
     async diarize(audio, options) {
@@ -196,7 +211,11 @@ export function createLocalDiarizer(config: RecordingSpeakersConfig): RecordingD
         ],
         options.signal,
       );
-      return parseDiarization(json);
+      voiceModel ??= embeddingModelId(config.modelsDir).catch((error: unknown) => {
+        voiceModel = null;
+        throw error;
+      });
+      return parseDiarization(json, await voiceModel);
     },
   };
 }

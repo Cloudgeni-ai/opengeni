@@ -61,8 +61,10 @@ describe("recording speaker models", () => {
     expect(
       parseDiarization(
         '{"turns":[{"startMs":10,"endMs":20,"speaker":1}],"speakers":[{"speaker":1,"speechMs":10,"embedding":[0.6,0.8]}]}',
+        "model-a",
       ),
     ).toEqual({
+      voiceModel: "model-a",
       turns: [{ startMilliseconds: 10, endMilliseconds: 20, speaker: "S1" }],
       voices: [{ speaker: "S1", speechMilliseconds: 10, embedding: [0.6, 0.8] }],
     });
@@ -80,6 +82,7 @@ describe("recording speaker models", () => {
     expect(result.turns[0]!.endMilliseconds).toBeGreaterThan(1_900);
     expect(result.turns[0]!.endMilliseconds).toBeLessThan(2_100);
     expect(result.voices).toEqual([{ speaker: "S0", speechMilliseconds: 5, embedding: [1, 0] }]);
+    expect(result.voiceModel).toMatch(/^opengeni-cpu:[0-9a-f]{16}$/u);
     await expect(diarizer.diarize(audio, { maxSpeakers: 1 })).rejects.toThrow(
       "speaker models failed: no voices",
     );

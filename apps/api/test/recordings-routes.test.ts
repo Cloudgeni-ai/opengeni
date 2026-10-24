@@ -131,11 +131,21 @@ async function fixture() {
     };
     return { subjectId: identity.subjectId, call };
   };
+  const admin = async (method: string, path: string, body?: unknown) => {
+    const response = await app.request(`/v1/workspaces/${workspace.id}${path}`, {
+      method,
+      headers: service,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await response.text();
+    return { status: response.status, body: text ? JSON.parse(text) : null };
+  };
   return {
     accountId,
     workspaceId: workspace.id,
     objects,
     started,
+    admin,
     owner: await person(),
     other: await person(),
   };
@@ -297,6 +307,45 @@ describe("recording routes", () => {
     expect((await scope.owner.call("DELETE", `/recordings/${recordingId}`)).status).toBe(204);
     expect(scope.started.at(-1)).toMatchObject({ kind: "deletion", recordingId, versionId: null });
     expect((await scope.owner.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
+  });
+
+  test("remembering a voice needs recognition on and the person's agreement", async () => {
+    const scope = await fixture();
+    const outsider = await scope.owner.call("POST", "/recording-people", { displayName: "Ingrid" });
+    const member = await scope.owner.call("POST", "/recording-people", {
+      displayName: "Owner",
+      memberSubjectId: scope.owner.subjectId,
+    });
+    const voice = (id: string) => `/recording-people/${id}/voice`;
+    expect(
+      await scope.owner.call("PUT", voice(outsider.body.id), { consent: "attested" }),
+    ).toMatchObject({
+      status: 409,
+      body: { error: { details: { code: "voice_recognition_off" } } },
+    });
+
+    expect(
+      (await scope.admin("PATCH", "/settings", { recordings: { voiceprints: true } })).status,
+    ).toBe(200);
+    expect(
+      await scope.owner.call("PUT", voice(outsider.body.id), { consent: "attested" }),
+    ).toMatchObject({ status: 200, body: { voice: { consent: "attested", learned: false } } });
+    expect((await scope.other.call("PUT", voice(member.body.id), { consent: "self" })).status).toBe(
+      403,
+    );
+    expect(await scope.owner.call("PUT", voice(member.body.id), { consent: "self" })).toMatchObject(
+      { status: 200, body: { voice: { consent: "self" } } },
+    );
+    expect((await scope.other.call("DELETE", voice(member.body.id))).status).toBe(403);
+    expect(await scope.other.call("DELETE", voice(outsider.body.id))).toMatchObject({
+      status: 200,
+      body: { voice: null },
+    });
+
+    // Turning recognition off withdraws every agreement.
+    expect((await scope.admin("PATCH", "/settings", { recordings: {} })).status).toBe(200);
+    const people = (await scope.owner.call("GET", "/recording-people")).body.people;
+    expect(people.map((person: { voice: unknown }) => person.voice)).toEqual([null, null]);
   });
 
   test("people and models", async () => {

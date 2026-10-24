@@ -37,6 +37,7 @@ import type {
   RecordingTranscriptionOptions,
   RecordingTranscriptVersion,
   RecordingVisibility,
+  RememberRecordingPersonVoiceRequest,
   UpdateRecordingRequest,
   UpdateRecordingSegmentsRequest,
   UpdateRecordingSegmentsResponse,
@@ -301,6 +302,35 @@ export class OpenGeniRecordingsClient {
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recording-people`,
       request,
+    );
+  }
+
+  /**
+   * Agree to have a person's voice remembered, so later meetings suggest
+   * them by voice. Members agree for themselves (`self`); for someone outside
+   * the workspace, the caller confirms they agreed (`attested`). Needs the
+   * workspace to recognize voices (`settings.recordings.voiceprints`).
+   */
+  async rememberRecordingPersonVoice(
+    workspaceId: string,
+    personId: string,
+    request: RememberRecordingPersonVoiceRequest,
+  ): Promise<RecordingPerson> {
+    return await this.client.requestJson<RecordingPerson>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/recording-people/${encodeURIComponent(personId)}/voice`,
+      request,
+    );
+  }
+
+  /** Forget a person's voice and withdraw their agreement. */
+  async forgetRecordingPersonVoice(
+    workspaceId: string,
+    personId: string,
+  ): Promise<RecordingPerson> {
+    return await this.client.requestJson<RecordingPerson>(
+      "DELETE",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/recording-people/${encodeURIComponent(personId)}/voice`,
     );
   }
 

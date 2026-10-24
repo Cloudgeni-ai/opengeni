@@ -1,22 +1,34 @@
-// Workspace settings → General → Meetings: who sees new meetings, and which
-// model transcribes them. Both live under the workspace's `recordings`
-// settings, which a patch replaces as a whole.
+// Workspace settings → General → Meetings: who sees new meetings, which
+// model transcribes them, and whether people are recognized by voice. All
+// live under the workspace's `recordings` settings, which a patch replaces as
+// a whole.
 import { useState } from "react";
 import { toast } from "sonner";
 
 import {
   resolveWorkspaceRecordingSettings,
+  type RecordingPerson,
   type RecordingVisibility,
   type WorkspaceRecordingSettings,
 } from "@opengeni/contracts";
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { useRecordingModels, type RecordingsClientOverride } from "@opengeni/react/recordings";
+import {
+  useRecordingModels,
+  useRecordingPeople,
+  type RecordingsClientOverride,
+} from "@opengeni/react/recordings";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { Section } from "@opengeni/react/ui/section";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { NativeSelect, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 
 const DEFAULT = "default";
+
+/** Who is looking at the settings, so they can agree to have their own voice remembered. */
+export type MeetingSettingsViewer = { subjectId: string; name: string };
 
 export function MeetingDefaultsSection({
   workspaceId,
@@ -33,12 +45,14 @@ export function MeetingDefaultsSection({
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const viewer = context.accessContext;
   return (
     <MeetingDefaultsView
       workspaceId={workspaceId}
       settings={resolveWorkspaceRecordingSettings(workspace?.settings)}
       personal={personal}
       canManage={canManage}
+      viewer={{ subjectId: viewer.subjectId, name: viewer.subjectLabel?.trim() || "Me" }}
       onConnectModels={onConnectModels}
       onSave={async (next) => {
         const accepted = context.captureWorkspaceInvocation(workspaceId);
@@ -56,6 +70,7 @@ export function MeetingDefaultsView({
   settings: current,
   personal,
   canManage,
+  viewer,
   onConnectModels,
   onSave,
   recordings,
@@ -64,6 +79,7 @@ export function MeetingDefaultsView({
   settings: WorkspaceRecordingSettings;
   personal: boolean;
   canManage: boolean;
+  viewer: MeetingSettingsViewer;
   onConnectModels?: (() => void) | undefined;
   /** Saves the whole `recordings` settings; false when a newer change took over. */
   onSave: (next: WorkspaceRecordingSettings) => Promise<boolean>;
@@ -74,12 +90,16 @@ export function MeetingDefaultsView({
   const [saving, setSaving] = useState(false);
   const reason = canManage ? undefined : "Only workspace admins can change this.";
 
-  async function save(next: WorkspaceRecordingSettings, success: string) {
+  /** False when the change failed or a newer one took over. */
+  async function save(next: WorkspaceRecordingSettings, success: string): Promise<boolean> {
     setSaving(true);
     try {
-      if (await onSave(next)) toast.success(success);
+      const saved = await onSave(next);
+      if (saved) toast.success(success);
+      return saved;
     } catch {
       toast.error("Couldn't update meeting settings");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -134,6 +154,17 @@ export function MeetingDefaultsView({
   };
   const noneAvailable =
     !models.loading && !models.error && !models.models.some((entry) => entry.available);
+
+  const voiceprints = current.voiceprints === true;
+  const [confirmingOff, setConfirmingOff] = useState(false);
+  const chooseVoiceprints = (next: boolean) => {
+    if (next === voiceprints) return;
+    if (!next) {
+      setConfirmingOff(true);
+      return;
+    }
+    void save({ ...current, voiceprints: true }, "People are recognized by voice");
+  };
 
   return (
     <Section title="Meetings" description="Applied to meetings recorded from now on.">
@@ -190,6 +221,180 @@ export function MeetingDefaultsView({
           />
         }
       />
+      <SettingRow
+        label="Recognize people by voice"
+        description={
+          voiceprints
+            ? "Suggests names for speakers it has heard before. Only people who agreed are recognized, and someone confirms each suggestion. Turning this off forgets every voice."
+            : "Suggests names for speakers it has heard before. Only people who agreed are recognized."
+        }
+        control={
+          <Switch
+            aria-label="Recognize people by voice"
+            checked={voiceprints}
+            pending={saving}
+            disabled={!canManage}
+            {...(reason ? { disabledReason: reason } : {})}
+            onCheckedChange={chooseVoiceprints}
+          />
+        }
+      />
+      {voiceprints ? (
+        <VoiceRows
+          workspaceId={workspaceId}
+          viewer={viewer}
+          {...(recordings ? { recordings } : {})}
+        />
+      ) : null}
+      <ConfirmDialog
+        open={confirmingOff}
+        onOpenChange={setConfirmingOff}
+        title="Stop recognizing people by voice?"
+        description="Every voice remembered in this workspace is forgotten, and pending suggestions are removed. Names people already gave to speakers stay. Turning it back on starts from nothing."
+        confirmLabel="Turn off and forget voices"
+        pendingLabel="Forgetting…"
+        onConfirm={async () => {
+          const { voiceprints: _previous, ...rest } = current;
+          return await save(rest, "Voices forgotten. People aren't recognized by voice anymore");
+        }}
+      />
     </Section>
+  );
+}
+
+/**
+ * "Your voice": each member decides for themselves. Agreeing lets Opengeni
+ * learn the voice from meetings where they're named as a speaker.
+ */
+function VoiceRows({
+  workspaceId,
+  viewer,
+  recordings,
+}: {
+  workspaceId: string;
+  viewer: MeetingSettingsViewer;
+  recordings?: RecordingsClientOverride["recordings"];
+}) {
+  const people = useRecordingPeople({ workspaceId, ...(recordings ? { recordings } : {}) });
+  const [busy, setBusy] = useState(false);
+  const me: RecordingPerson | null =
+    people.people.find((person) => person.memberSubjectId === viewer.subjectId) ?? null;
+  const voice = me?.voice ?? null;
+
+  async function run(work: () => Promise<unknown>, success: string, failure: string) {
+    setBusy(true);
+    try {
+      await work();
+      toast.success(success);
+    } catch (error) {
+      toast.error(failure, { description: error instanceof Error ? error.message : undefined });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const remember = () =>
+    void run(
+      async () => {
+        const person =
+          me ??
+          (await people.create({ displayName: viewer.name, memberSubjectId: viewer.subjectId }));
+        await people.rememberVoice(person.id, "self");
+      },
+      "Your voice will be remembered",
+      "Couldn't remember your voice",
+    );
+  const forget = () =>
+    void run(
+      async () => {
+        if (me) await people.forgetVoice(me.id);
+      },
+      "Your voice is forgotten",
+      "Couldn't forget your voice",
+    );
+
+  const others = people.people
+    .filter((person) => person.voice && person.id !== me?.id)
+    .sort((left, right) => left.displayName.localeCompare(right.displayName));
+  const forgetOther = (person: RecordingPerson) =>
+    void run(
+      async () => await people.forgetVoice(person.id),
+      `${person.displayName}'s voice is forgotten`,
+      "Couldn't forget this voice",
+    );
+
+  return (
+    <>
+      <SettingRow
+        label="Your voice"
+        description={
+          voice
+            ? voice.learned
+              ? "Remembered. Meetings suggest your name when you speak. Forgetting it removes your voice right away."
+              : "You agreed. Opengeni learns your voice the next time you're named as a speaker in a meeting."
+            : "Lets meetings suggest your name when you speak. Opengeni learns your voice from meetings where you're named as a speaker. Only you can agree for yourself."
+        }
+        controlWidth="auto"
+        control={
+          voice ? (
+            <Button type="button" size="sm" variant="outline" disabled={busy} onClick={forget}>
+              Forget my voice
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={busy || people.loading}
+              onClick={remember}
+            >
+              Remember my voice
+            </Button>
+          )
+        }
+      />
+      <SettingRow
+        label="Remembered voices"
+        description={
+          others.length === 0
+            ? "Nobody else yet. People can agree for themselves here, and you can remember someone from outside the workspace from a speaker's menu in a meeting, once they agree."
+            : "People whose voices suggest names in meetings. Members decide for themselves; anyone here can forget someone from outside the workspace."
+        }
+        controlWidth="auto"
+      />
+      {others.length > 0 ? (
+        <ul aria-label="Remembered voices" className="grid gap-1 pb-2">
+          {others.map((person) => (
+            <li key={person.id} className="flex min-w-0 items-center gap-3 py-1">
+              <span className="grid min-w-0 flex-1">
+                <span className="truncate text-sm leading-5 text-fg">{person.displayName}</span>
+                <span className="truncate text-xs leading-4 text-fg-muted">
+                  {person.voice?.consent === "self"
+                    ? "Agreed for themselves"
+                    : "Someone confirmed they agreed"}
+                  {person.voice?.learned ? "" : " · Not heard in a meeting yet"}
+                </span>
+              </span>
+              {person.memberSubjectId ? (
+                <span className="shrink-0 text-xs leading-4 text-fg-muted">
+                  Only they can forget it
+                </span>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  aria-label={`Forget ${person.displayName}'s voice`}
+                  onClick={() => forgetOther(person)}
+                >
+                  Forget
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </>
   );
 }

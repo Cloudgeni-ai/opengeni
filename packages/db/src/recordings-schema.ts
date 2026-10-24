@@ -49,6 +49,9 @@ export const recordingEventTypeValues = [
   "recording.deleted",
 ] as const;
 export const recordingDiarizationValues = ["provider", "ours", "tracks", "none"] as const;
+// Migration 0940. The kind of audio a voice was heard in.
+export const recordingVoiceChannelValues = ["microphone", "call", "room"] as const;
+export const recordingVoiceConsentValues = ["self", "attested"] as const;
 
 const tsvector = customType<{ data: string }>({ dataType: () => "tsvector" });
 
@@ -209,11 +212,62 @@ export const recordingPeople = pgTable(
     email: text("email"),
     externalRef: text("external_ref"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
+    voiceConsent: text("voice_consent", { enum: recordingVoiceConsentValues }),
+    voiceConsentBySubjectId: text("voice_consent_by_subject_id"),
+    voiceConsentedAt: timestamp("voice_consented_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [unique("recording_people_workspace_id_uq").on(table.workspaceId, table.id)],
 );
+
+export const recordingVoiceprints = pgTable(
+  "recording_voiceprints",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    personId: uuid("person_id").notNull(),
+    channel: text("channel", { enum: recordingVoiceChannelValues }).notNull(),
+    model: text("model").notNull(),
+    embedding: real("embedding").array().notNull(),
+    speechMilliseconds: bigint("speech_milliseconds", { mode: "number" }).notNull().default(0),
+    sampleCount: integer("sample_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.personId, table.channel, table.model] }),
+  ],
+);
+
+export const recordingSpeakerVoices = pgTable(
+  "recording_speaker_voices",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    recordingId: uuid("recording_id").notNull(),
+    versionId: uuid("version_id").notNull(),
+    speakerLabel: text("speaker_label").notNull(),
+    channel: text("channel", { enum: recordingVoiceChannelValues }).notNull(),
+    model: text("model").notNull(),
+    embedding: real("embedding").array().notNull(),
+    speechMilliseconds: integer("speech_milliseconds").notNull(),
+    learnedPersonId: uuid("learned_person_id"),
+  },
+  (table) => [primaryKey({ columns: [table.versionId, table.speakerLabel] })],
+);
+
+export const recordingVoiceRejections = pgTable("recording_voice_rejections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull(),
+  workspaceId: uuid("workspace_id").notNull(),
+  recordingId: uuid("recording_id").notNull(),
+  personId: uuid("person_id").notNull(),
+  model: text("model").notNull(),
+  embedding: real("embedding").array().notNull(),
+  rejectedBySubjectId: text("rejected_by_subject_id").notNull(),
+  rejectedAt: timestamp("rejected_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const recordingSpeakerAssignments = pgTable(
   "recording_speaker_assignments",
