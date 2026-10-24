@@ -81,8 +81,32 @@ export function unindexedTextByElement(
   platform: Platform = "macos",
 ): Map<number, string[]> {
   const texts = new Map<number, string[]>();
-  if (!markdown || platform === "windows") return texts;
-  const ancestors: Array<{ indent: number; index: number | null; protected: boolean }> = [];
+  for (const row of unindexedRows(markdown, platform)) {
+    const list = texts.get(row.owner) ?? [];
+    if (list.length < MAX_ROW_TEXTS) list.push(row.text);
+    texts.set(row.owner, list);
+  }
+  return texts;
+}
+
+/** One unindexed row of CUA's Markdown tree that has text: the element_index
+ * of its nearest indexed ancestor, its own role, and whether it is, or sits
+ * inside, a menu. Protected rows are left out, as unindexedTextByElement
+ * describes. */
+export type UnindexedRow = { owner: number; role: string; text: string; inMenu: boolean };
+
+export function unindexedRows(
+  markdown: string | undefined,
+  platform: Platform = "macos",
+): UnindexedRow[] {
+  const rows: UnindexedRow[] = [];
+  if (!markdown || platform === "windows") return rows;
+  const ancestors: Array<{
+    indent: number;
+    index: number | null;
+    protected: boolean;
+    menu: boolean;
+  }> = [];
   for (const line of markdown.split("\n")) {
     const row = MARKDOWN_ROW.exec(line);
     if (!row) continue;
@@ -91,7 +115,8 @@ export function unindexedTextByElement(
     const index = row[2] === undefined ? null : Number(row[2]);
     const isProtected =
       protectionFor(row[3]!, platform) !== null || (ancestors.at(-1)?.protected ?? false);
-    ancestors.push({ indent, index, protected: isProtected });
+    const inMenu = /menu/iu.test(row[3]!) || (ancestors.at(-1)?.menu ?? false);
+    ancestors.push({ indent, index, protected: isProtected, menu: inMenu });
     if (index !== null || isProtected) continue;
     const rest = row[4] ?? "";
     const label = MARKDOWN_LABEL.exec(rest);
@@ -111,11 +136,9 @@ export function unindexedTextByElement(
       .reverse()
       .find((ancestor) => ancestor.index !== null);
     if (!owner) continue;
-    const list = texts.get(owner.index!) ?? [];
-    if (list.length < MAX_ROW_TEXTS) list.push(text);
-    texts.set(owner.index!, list);
+    rows.push({ owner: owner.index!, role: row[3]!, text, inMenu });
   }
-  return texts;
+  return rows;
 }
 
 type CuaElement = z.infer<typeof Element>;

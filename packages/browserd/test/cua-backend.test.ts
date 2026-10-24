@@ -1334,8 +1334,10 @@ describe("CUA desktop boundary", () => {
       loadingBefore = false;
       /** How the save shows: the button's own label, or (as Chrome on macOS
        * does) a disabled button folded into the web area with the others the
-       * save disables, so the web area reads "Saving... | Delete". */
-      shows: "label" | "folded" = "label";
+       * save disables, so the web area reads "Saving... | Delete". Or not
+       * as a save: a web menu with a disabled "Move to…" item folded into
+       * the web area, or the button ("Options…") turning disabled as it was. */
+      shows: "label" | "folded" | "menu" | "disabled" = "label";
       /** The press reveals a long preview cut short with "…" instead. */
       preview = false;
       reads = 0;
@@ -1359,6 +1361,12 @@ describe("CUA desktop boundary", () => {
           extra.push({ role: "AXWebArea", label: "Billing", actions: [] });
           state.tree_markdown =
             '- [2] AXWebArea "Billing"\n  - AXButton "Saving..."\n  - AXButton "Delete"\n';
+        } else if (busy && this.shows === "menu") {
+          extra.push({ role: "AXWebArea", label: "Billing", actions: [] });
+          state.tree_markdown =
+            '- [2] AXWebArea "Billing"\n  - AXMenu\n    - AXMenuItem "Move to…"\n';
+        } else if (busy && this.shows === "disabled") {
+          Object.assign(state.elements[0], { enabled: false });
         } else if (busy) {
           Object.assign(state.elements[0], { label: "Saving...", enabled: false });
           extra.push({ role: "AXStaticText", label: "Loading billing details…", actions: [] });
@@ -1435,6 +1443,56 @@ describe("CUA desktop boundary", () => {
       expect(preview.reads).toBe(1);
     } finally {
       await previewBackend.close();
+    }
+
+    // A disabled menu item ("Move to…") and a control that turns disabled as
+    // it was ("Options…") are not work in progress.
+    for (const shows of ["menu", "disabled"] as const) {
+      const quiet = new SavingFixture();
+      quiet.shows = shows;
+      quiet.busyReads = 1000;
+      if (shows === "disabled") quiet.applyLabel = "Options…";
+      const quietBackend = await CuaComputerBackend.open(quiet, "macos");
+      try {
+        const target = (await quietBackend.targets())[0]!;
+        await quietBackend.dispatch(command(await quietBackend.observe(target.id)));
+        expect(quiet.reads).toBe(1);
+      } finally {
+        await quietBackend.close();
+      }
+    }
+
+    // Work shown only by text gets 2.5 s: a "Saving..." that never clears
+    // does not hold the reading for the 5 s a busy element gets.
+    const stuck = new SavingFixture();
+    stuck.busyReads = 1000;
+    const stuckBackend = await CuaComputerBackend.open(stuck, "macos");
+    try {
+      const target = (await stuckBackend.targets())[0]!;
+      const started = Date.now();
+      const after = await stuckBackend.dispatch(command(await stuckBackend.observe(target.id)));
+      expect(Date.now() - started).toBeLessThan(3_500);
+      expect(names(after)).toContain("Saving...");
+      expect(stuck.reads).toBeGreaterThan(3);
+    } finally {
+      await stuckBackend.close();
+    }
+
+    // The readings taken while waiting do not push out the one the model
+    // planned from: after a save that took five readings, a ref of the
+    // reading before it still acts, and the button keeps its ref.
+    const long = new SavingFixture();
+    long.busyReads = 4;
+    const longBackend = await CuaComputerBackend.open(long, "macos");
+    try {
+      const target = (await longBackend.targets())[0]!;
+      const planned = await longBackend.observe(target.id);
+      const after = await longBackend.dispatch(command(planned));
+      expect(long.reads).toBe(5);
+      expect(after?.roots[0]!.ref).toBe(planned.roots[0]!.ref);
+      await longBackend.dispatch(command(planned));
+    } finally {
+      await longBackend.close();
     }
   });
 
