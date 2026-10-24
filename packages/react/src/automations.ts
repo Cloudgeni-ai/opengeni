@@ -4,10 +4,22 @@
 // behind them. A host renders these inside its own automation form and pages,
 // and passes its client's event-source reads in, so nothing here fetches on
 // its own or assumes a router.
+import type { EventDelivery } from "@opengeni/sdk";
+import { createOpenGeniText } from "./messages/runtime";
+import type { RowListColumn } from "./ui/list-row";
+import type { ProductStatus } from "./ui/status-badge";
+import { eventRowColumns as rowColumns } from "./components/automations/event-rows";
+import {
+  eventDeliveryStatusBadge as deliveryStatusBadge,
+  eventSourceChoices as sourceChoices,
+  type EventSourceChoiceMeta as ChoiceMeta,
+} from "./components/automations/event-source-model";
+import { eventCommonFields as commonFields } from "./components/automations/event-trigger-model";
+
 export {
   DEFAULT_EVENT_RUNS_PER_HOUR,
   EVENT_CONDITION_OPERATORS,
-  EVENT_COMMON_FIELDS,
+  eventCommonFields,
   EVENT_TRIGGER_CONDITIONS_MAX,
   EVENT_TRIGGER_TYPES_MAX,
   EVENT_TRIGGERS_PER_AUTOMATION_MAX,
@@ -17,6 +29,7 @@ export {
   eventConditionFieldSuggestions,
   eventConditionFromDraft,
   eventConditionOperator,
+  eventConditionOperatorLabel,
   eventConditionsLabel,
   eventTriggerDraftFrom,
   eventTriggersDraftFrom,
@@ -43,17 +56,18 @@ export type {
   EventTriggerWords,
 } from "./components/automations/event-trigger-model";
 export {
-  EVENT_DELIVERY_STATUS,
-  EVENT_SOURCE_CHOICES,
   WEBHOOK_ADAPTER_OF,
   byteSizeLabel,
   createEventSourceRequest,
   deliveryEventsLabel,
   deliveryTitle,
   eventActorLabel,
+  eventDeliveryStatusBadge,
   eventSourceAddLabel,
   eventSourceChoiceMeta,
+  eventSourceChoiceName,
   eventSourceChoiceOf,
+  eventSourceChoices,
   eventSourceKindLabel,
   eventSourceProviderDomain,
   eventSourceStatusBadge,
@@ -91,15 +105,43 @@ export {
   type EventTriggerSummaryProps,
 } from "./components/automations/event-trigger-summary";
 export {
-  EVENT_DELIVERY_COLUMNS,
   EventDeliveryRow,
-  INBOUND_EVENT_COLUMNS,
   InboundEventDetail,
   InboundEventRow,
+  eventRowColumns,
   inboundEventMeta,
 } from "./components/automations/event-rows";
 export {
   SESSION_AUTOMATION_WAIT_LABEL,
   sessionAutomationWait,
+  sessionAutomationWaitLabel,
   type SessionAutomationWait,
 } from "./session-list-model";
+
+// English-only constants from before the automation parts took the host's text.
+// They stay until the next major; new code calls the functions above with `t`.
+const english = createOpenGeniText();
+
+/** @deprecated English only. Use `eventSourceChoices(t)`. */
+export const EVENT_SOURCE_CHOICES: readonly ChoiceMeta[] = sourceChoices(english);
+
+/** @deprecated English only. Use `eventDeliveryStatusBadge(t, status)`. */
+export const EVENT_DELIVERY_STATUS: Record<
+  EventDelivery["status"],
+  { status: ProductStatus; label: string }
+> = {
+  accepted: deliveryStatusBadge(english, "accepted"),
+  ignored: deliveryStatusBadge(english, "ignored"),
+  rejected: deliveryStatusBadge(english, "rejected"),
+  failed: deliveryStatusBadge(english, "failed"),
+};
+
+/** @deprecated English only. Use `eventCommonFields(t)`. */
+export const EVENT_COMMON_FIELDS: ReadonlyArray<{ field: string; description: string }> =
+  commonFields(english);
+
+/** @deprecated English only. Use `eventRowColumns(t)`. */
+export const INBOUND_EVENT_COLUMNS: RowListColumn[] = rowColumns(english);
+
+/** @deprecated English only. Use `eventRowColumns(t)`. */
+export const EVENT_DELIVERY_COLUMNS: RowListColumn[] = rowColumns(english);

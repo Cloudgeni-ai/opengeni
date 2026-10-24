@@ -17,12 +17,12 @@ import {
 import { toast } from "sonner";
 
 import { EVENT_RETENTION_DAYS } from "@opengeni/contracts/event-triggers";
+import { t } from "@opengeni/react/app/lib/console-text";
 import {
-  EVENT_DELIVERY_COLUMNS,
   EventDeliveryRow,
   EventSourceTile,
-  INBOUND_EVENT_COLUMNS,
   InboundEventRow,
+  eventRowColumns,
   eventSourceKindLabel,
   eventSourceStatusBadge,
   eventTriggerWords,
@@ -164,8 +164,8 @@ export function EventSourceDetailPage({
 
   const source = load.source;
   const manage = source.viewerAccess === "manage";
-  const badge = eventSourceStatusBadge(source);
-  const setup = pastedWebhookSetup(source);
+  const badge = eventSourceStatusBadge(t, source);
+  const setup = pastedWebhookSetup(t, source);
   const replaceSource = (next: EventSource) => setLoad({ status: "ready", source: next });
 
   const setActive = async (active: boolean) => {
@@ -227,7 +227,7 @@ export function EventSourceDetailPage({
             ) : undefined
           }
           meta={[
-            eventSourceKindLabel(source),
+            eventSourceKindLabel(t, source),
             source.visibility === "private" ? "Only its owner" : "Everyone in this workspace",
           ]}
           actions={
@@ -446,7 +446,7 @@ function Overview({
   onPasteSecret: () => void;
 }) {
   const manage = source.viewerAccess === "manage";
-  const setup = pastedWebhookSetup(source);
+  const setup = pastedWebhookSetup(t, source);
   const waiting = source.awaitingSigningSecret && setup;
   return (
     <>
@@ -533,7 +533,7 @@ function Overview({
 
 function Connection({ source }: { source: EventSource }) {
   if (source.kind === "webhook") {
-    const setup = pastedWebhookSetup(source);
+    const setup = pastedWebhookSetup(t, source);
     return (
       <FieldStack>
         <WebhookUrlField
@@ -602,7 +602,7 @@ function UsedBy({
           (trigger) => trigger.sourceId === source.id,
         );
         const words = triggers.map((trigger) => {
-          const described = eventTriggerWords(trigger, [source]);
+          const described = eventTriggerWords(t, trigger, [source]);
           return described.conditions
             ? `${described.events}, ${described.conditions}`
             : described.events;
@@ -762,7 +762,7 @@ function EventsTab({ workspaceId, source }: { workspaceId: string; source: Event
   return (
     <PagedList
       label={`Events from ${source.name}`}
-      columns={INBOUND_EVENT_COLUMNS}
+      columns={eventRowColumns(t)}
       pages={pages}
       errorTitle="Couldn't load its events"
       empty={{
@@ -827,7 +827,7 @@ function DeliveriesTab({
   return (
     <PagedList
       label={`Deliveries to ${source.name}`}
-      columns={EVENT_DELIVERY_COLUMNS}
+      columns={eventRowColumns(t)}
       pages={pages}
       errorTitle="Couldn't load its deliveries"
       empty={{
@@ -927,7 +927,7 @@ function PasteSecretDialog({
   source: EventSource;
   onSave: (secret: string) => Promise<void>;
 }) {
-  const setup = pastedWebhookSetup(source)!;
+  const setup = pastedWebhookSetup(t, source)!;
   const [secret, setSecret] = useState("");
   const [error, setError] = useState<string | undefined>();
   useEffect(() => {

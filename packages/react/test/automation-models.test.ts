@@ -35,6 +35,9 @@ import {
   validateEventTriggers,
   type EventTriggersDraft,
 } from "../src/automations";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const t = createOpenGeniText();
 
 const SOURCE_ID = "8f0c2a4e-0d55-4b8e-9d55-1a2b3c4d5e6f";
 const MCP_SOURCE_ID = "1b2c3d4e-5f60-4a7b-8c9d-0e1f2a3b4c5d";
@@ -146,7 +149,7 @@ describe("event trigger drafts and requests", () => {
 
 describe("event trigger validation", () => {
   test("a complete draft has no issues", () => {
-    const issues = validateEventTriggers(eventTriggersDraftFrom(savedEvents), sources);
+    const issues = validateEventTriggers(t, eventTriggersDraftFrom(savedEvents), sources);
     expect(hasEventTriggerIssues(issues)).toBe(false);
   });
 
@@ -155,6 +158,7 @@ describe("event trigger validation", () => {
     const gone = newEventTriggerDraft("5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a");
     gone.eventTypes = ["push"];
     const issues = validateEventTriggers(
+      t,
       { ...emptyEventTriggersDraft(), triggers: [unpicked, gone] },
       sources,
     );
@@ -176,6 +180,7 @@ describe("event trigger validation", () => {
       (_, index) => `e${index}`,
     );
     const issues = validateEventTriggers(
+      t,
       { ...emptyEventTriggersDraft(), triggers: [mcp, many] },
       sources,
     );
@@ -196,12 +201,11 @@ describe("event trigger validation", () => {
     const noValueNeeded = { ...newEventConditionDraft("data.assignee"), op: "exists" as const };
     trigger.conditions = [unnamed, unknownField, noValue, noList, noValueNeeded];
     const issues = validateEventTriggers(
+      t,
       { ...emptyEventTriggersDraft(), triggers: [trigger] },
       sources,
     ).triggers[trigger.key];
-    expect(issues?.arguments).toBe(
-      "Write the settings as a JSON object, like {} or a filled-in example.",
-    );
+    expect(issues?.arguments).toBe("Write the settings as a JSON object.");
     expect(issues?.conditions).toEqual({
       [unnamed.key]: "Name the field to check.",
       [unknownField.key]:
@@ -214,6 +218,7 @@ describe("event trigger validation", () => {
   test("the storm guard takes a whole number of runs within the deployment's range", () => {
     for (const maxRunsPerHour of [0, 1.5, MAX_EVENT_RUNS_PER_HOUR + 1, Number.NaN]) {
       const issues = validateEventTriggers(
+        t,
         { ...emptyEventTriggersDraft(), maxRunsPerHour },
         sources,
       );
@@ -222,52 +227,52 @@ describe("event trigger validation", () => {
       );
     }
     expect(
-      validateEventTriggers({ ...emptyEventTriggersDraft(), maxRunsPerHour: 1 }, sources)
+      validateEventTriggers(t, { ...emptyEventTriggersDraft(), maxRunsPerHour: 1 }, sources)
         .maxRunsPerHour,
     ).toBeUndefined();
   });
 
   test("event types have no spaces and a bounded length", () => {
-    expect(eventTypeIssue("")).toBe("Enter an event type.");
-    expect(eventTypeIssue("pull request")).toBe("Event types have no spaces.");
-    expect(eventTypeIssue("x".repeat(201))).toBe("That event type is too long.");
-    expect(eventTypeIssue("pull_request.*")).toBeNull();
+    expect(eventTypeIssue(t, "")).toBe("Enter an event type.");
+    expect(eventTypeIssue(t, "pull request")).toBe("Event types have no spaces.");
+    expect(eventTypeIssue(t, "x".repeat(201))).toBe("That event type is too long.");
+    expect(eventTypeIssue(t, "pull_request.*")).toBeNull();
   });
 });
 
 describe("event trigger words", () => {
   test("types read as a short phrase with wildcards spelled out", () => {
-    expect(eventTypesLabel([])).toBe("No events picked");
-    expect(eventTypesLabel(["*"])).toBe("Every event");
-    expect(eventTypesLabel(["pull_request.*", "issues.opened"])).toBe(
+    expect(eventTypesLabel(t, [])).toBe("No events picked");
+    expect(eventTypesLabel(t, ["*"])).toBe("Every event");
+    expect(eventTypesLabel(t, ["pull_request.*", "issues.opened"])).toBe(
       "Every pull_request event or issues.opened",
     );
-    expect(eventTypesLabel(["a", "b", "c"])).toBe("a and 2 more");
+    expect(eventTypesLabel(t, ["a", "b", "c"])).toBe("a and 2 more");
   });
 
   test("conditions read as one only-when clause", () => {
-    expect(eventConditionsLabel([])).toBeNull();
-    expect(eventConditionsLabel([{ field: "data.labels", op: "in", value: ["bug", "p1"] }])).toBe(
-      "only when data.labels is one of bug, p1",
-    );
-    expect(eventConditionsLabel([{ field: "data.assignee", op: "not_exists" }])).toBe(
+    expect(eventConditionsLabel(t, [])).toBeNull();
+    expect(
+      eventConditionsLabel(t, [{ field: "data.labels", op: "in", value: ["bug", "p1"] }]),
+    ).toBe("only when data.labels is one of bug, p1");
+    expect(eventConditionsLabel(t, [{ field: "data.assignee", op: "not_exists" }])).toBe(
       "only when data.assignee is not set",
     );
-    expect(eventConditionsLabel(savedEvents.triggers[0]!.conditions)).toBe(
+    expect(eventConditionsLabel(t, savedEvents.triggers[0]!.conditions)).toBe(
       "only when 4 conditions hold",
     );
   });
 
   test("a trigger on a source the viewer can't see still reads cleanly", () => {
     const hidden = { sourceId: "hidden", eventTypes: ["push"], conditions: [] };
-    expect(eventTriggerWords(hidden, sources)).toEqual({
+    expect(eventTriggerWords(t, hidden, sources)).toEqual({
       source: "A source you can't see",
       events: "push",
       conditions: null,
       short: "push from a source you can't see",
     });
-    expect(eventTriggersShortLabel([], sources)).toBeNull();
-    expect(eventTriggersShortLabel([savedEvents.triggers[0]!, hidden], sources)).toBe(
+    expect(eventTriggersShortLabel(t, [], sources)).toBeNull();
+    expect(eventTriggersShortLabel(t, [savedEvents.triggers[0]!, hidden], sources)).toBe(
       "pull_request.opened or pull_request.reopened from Acme GitHub · 1 more",
     );
   });
@@ -294,7 +299,7 @@ describe("event trigger words", () => {
         unavailableReason: null,
       },
     ];
-    const fields = eventConditionFieldSuggestions(["pull_request.opened"], descriptors).map(
+    const fields = eventConditionFieldSuggestions(t, ["pull_request.opened"], descriptors).map(
       (entry) => entry.field,
     );
     expect(fields).toEqual([
@@ -313,45 +318,47 @@ describe("event sources", () => {
     expect(eventSourceChoiceOf({ kind: "webhook", adapter: "linear" })).toBe("linear");
     expect(eventSourceChoiceOf({ kind: "webhook", adapter: "standard" })).toBe("webhook");
     expect(eventSourceChoiceOf({ kind: "gmail", adapter: null })).toBe("gmail");
-    expect(eventSourceKindLabel({ kind: "webhook", adapter: "sentry" })).toBe("Sentry webhook");
-    expect(eventSourceKindLabel({ kind: "webhook", adapter: "standard" })).toBe("Webhook");
-    expect(eventSourceKindLabel({ kind: "mcp", adapter: null })).toBe("MCP server");
+    expect(eventSourceKindLabel(t, { kind: "webhook", adapter: "sentry" })).toBe("Sentry webhook");
+    expect(eventSourceKindLabel(t, { kind: "webhook", adapter: "standard" })).toBe("Webhook");
+    expect(eventSourceKindLabel(t, { kind: "mcp", adapter: null })).toBe("MCP server");
     expect(eventSourceProviderDomain({ kind: "github", adapter: null })).toBe("github.com");
     expect(eventSourceProviderDomain({ kind: "webhook", adapter: "standard" })).toBeNull();
-    expect(eventSourceSubjectOfChoice("linear")).toEqual({
+    expect(eventSourceSubjectOfChoice(t, "linear")).toEqual({
       kind: "webhook",
       adapter: "linear",
       name: "Linear",
       mcp: null,
     });
-    expect(eventSourceAddLabel("webhook")).toBe("Add a webhook");
-    expect(eventSourceAddLabel("github")).toBe("Add GitHub");
+    expect(eventSourceAddLabel(t, "webhook")).toBe("Add a webhook");
+    expect(eventSourceAddLabel(t, "github")).toBe("Add GitHub");
     expect(isEventSourceChoice("sentry")).toBe(true);
     expect(isEventSourceChoice("zapier")).toBe(false);
   });
 
   test("a healthy source shows no badge; a held one says why", () => {
-    expect(eventSourceStatusBadge({ status: "active", statusReason: null })).toBeNull();
+    expect(eventSourceStatusBadge(t, { status: "active", statusReason: null })).toBeNull();
     expect(
-      eventSourceStatusBadge({ status: "blocked", statusReason: "Paste the secret." }),
+      eventSourceStatusBadge(t, { status: "blocked", statusReason: "Paste the secret." }),
     ).toEqual({ status: "needs_you", label: "Needs attention", reason: "Paste the secret." });
-    expect(eventSourceStatusBadge({ status: "disabled", statusReason: null })?.label).toBe("Off");
+    expect(eventSourceStatusBadge(t, { status: "disabled", statusReason: null })?.label).toBe(
+      "Off",
+    );
   });
 
   test("only pasted Linear and Sentry webhooks explain where the URL and secret go", () => {
-    expect(pastedWebhookSetup({ kind: "webhook", adapter: "linear" })?.secretName).toBe(
+    expect(pastedWebhookSetup(t, { kind: "webhook", adapter: "linear" })?.secretName).toBe(
       "signing secret",
     );
-    expect(pastedWebhookSetup({ kind: "webhook", adapter: "sentry" })?.secretName).toBe(
+    expect(pastedWebhookSetup(t, { kind: "webhook", adapter: "sentry" })?.secretName).toBe(
       "client secret",
     );
-    expect(pastedWebhookSetup({ kind: "webhook", adapter: "standard" })).toBeNull();
-    expect(pastedWebhookSetup({ kind: "github", adapter: null })).toBeNull();
+    expect(pastedWebhookSetup(t, { kind: "webhook", adapter: "standard" })).toBeNull();
+    expect(pastedWebhookSetup(t, { kind: "github", adapter: null })).toBeNull();
   });
 
   test("each choice becomes the request that adds it", () => {
     expect(
-      createEventSourceRequest({
+      createEventSourceRequest(t, {
         choice: "linear",
         name: "  ",
         visibility: "workspace",
@@ -365,10 +372,10 @@ describe("event sources", () => {
       signingSecret: "lin_wh_secret",
     });
     expect(
-      createEventSourceRequest({ choice: "sentry", name: "Errors", visibility: "private" }),
+      createEventSourceRequest(t, { choice: "sentry", name: "Errors", visibility: "private" }),
     ).toEqual({ kind: "webhook", adapter: "sentry", name: "Errors", visibility: "private" });
     expect(
-      createEventSourceRequest({
+      createEventSourceRequest(t, {
         choice: "webhook",
         name: "Deploys",
         visibility: "workspace",
@@ -376,7 +383,7 @@ describe("event sources", () => {
       }),
     ).toEqual({ kind: "webhook", adapter: "standard", name: "Deploys", visibility: "workspace" });
     expect(
-      createEventSourceRequest({
+      createEventSourceRequest(t, {
         choice: "mcp",
         name: "",
         visibility: "private",
@@ -384,43 +391,45 @@ describe("event sources", () => {
         connectionId: "conn-1",
       }),
     ).toEqual({ kind: "mcp", serverId: "orders", connectionId: "conn-1" });
-    expect(createEventSourceRequest({ choice: "gmail", name: "", visibility: "private" })).toEqual({
+    expect(
+      createEventSourceRequest(t, { choice: "gmail", name: "", visibility: "private" }),
+    ).toEqual({
       kind: "gmail",
     });
     expect(
-      createEventSourceRequest({ choice: "github", name: "Repos", visibility: "workspace" }),
+      createEventSourceRequest(t, { choice: "github", name: "Repos", visibility: "workspace" }),
     ).toEqual({ kind: "github", name: "Repos" });
   });
 
   test("deliveries, sizes and actors read in plain words", () => {
-    expect(deliveryEventsLabel({ eventIds: [] })).toBe("No events");
-    expect(deliveryEventsLabel({ eventIds: ["a"] })).toBe("1 event");
-    expect(deliveryEventsLabel({ eventIds: ["a", "b"] })).toBe("2 events");
-    expect(deliveryTitle({ eventIds: [], eventTypes: [] })).toBe("No events");
-    expect(deliveryTitle({ eventIds: ["a"], eventTypes: ["push"] })).toBe("push");
+    expect(deliveryEventsLabel(t, { eventIds: [] })).toBe("No events");
+    expect(deliveryEventsLabel(t, { eventIds: ["a"] })).toBe("1 event");
+    expect(deliveryEventsLabel(t, { eventIds: ["a", "b"] })).toBe("2 events");
+    expect(deliveryTitle(t, { eventIds: [], eventTypes: [] })).toBe("No events");
+    expect(deliveryTitle(t, { eventIds: ["a"], eventTypes: ["push"] })).toBe("push");
     expect(
-      deliveryTitle({
+      deliveryTitle(t, {
         eventIds: ["a", "b"],
         eventTypes: ["issues.opened", "issue_comment.created"],
       }),
     ).toBe("issues.opened and issue_comment.created");
     expect(
-      deliveryTitle({
+      deliveryTitle(t, {
         eventIds: ["a", "b", "c"],
         eventTypes: ["push", "check_run.completed", "release.published"],
       }),
     ).toBe("push and 2 more");
     // A server that does not name the types still gets a count.
-    expect(deliveryTitle({ eventIds: ["a", "b"] })).toBe("2 events");
-    expect(byteSizeLabel(512)).toBe("512 B");
-    expect(byteSizeLabel(1536)).toBe("1.5 KB");
-    expect(byteSizeLabel(20 * 1024)).toBe("20 KB");
-    expect(byteSizeLabel(3 * 1024 * 1024)).toBe("3.0 MB");
-    expect(eventActorLabel({ kind: "opengeni", name: null })).toBe("Opengeni");
-    expect(eventActorLabel({ kind: "opengeni", name: "Reviewer" })).toBe("Reviewer (Opengeni)");
-    expect(eventActorLabel({ kind: "bot", name: "dependabot" })).toBe("dependabot (bot)");
-    expect(eventActorLabel({ kind: "bot", name: null })).toBe("A bot");
-    expect(eventActorLabel({ kind: "person", name: "Ada" })).toBe("Ada");
-    expect(eventActorLabel({ kind: "unknown", name: null })).toBeNull();
+    expect(deliveryTitle(t, { eventIds: ["a", "b"] })).toBe("2 events");
+    expect(byteSizeLabel(t, 512)).toBe("512 B");
+    expect(byteSizeLabel(t, 1536)).toBe("1.5 KB");
+    expect(byteSizeLabel(t, 20 * 1024)).toBe("20 KB");
+    expect(byteSizeLabel(t, 3 * 1024 * 1024)).toBe("3.0 MB");
+    expect(eventActorLabel(t, { kind: "opengeni", name: null })).toBe("Opengeni");
+    expect(eventActorLabel(t, { kind: "opengeni", name: "Reviewer" })).toBe("Reviewer (Opengeni)");
+    expect(eventActorLabel(t, { kind: "bot", name: "dependabot" })).toBe("dependabot (bot)");
+    expect(eventActorLabel(t, { kind: "bot", name: null })).toBe("A bot");
+    expect(eventActorLabel(t, { kind: "person", name: "Ada" })).toBe("Ada");
+    expect(eventActorLabel(t, { kind: "unknown", name: null })).toBeNull();
   });
 });

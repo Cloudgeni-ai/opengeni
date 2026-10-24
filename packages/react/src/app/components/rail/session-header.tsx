@@ -71,7 +71,7 @@ import { Skeleton } from "../../../ui/skeleton";
 import { requestConversationFind } from "../../lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "../../lib/open-in-app";
 import { sessionControlPaused, sessionInputWait } from "../../lib/session-rail";
-import { SESSION_AUTOMATION_WAIT_LABEL, sessionAutomationWait } from "../../../session-list-model";
+import { sessionAutomationWait, sessionAutomationWaitLabel } from "../../../session-list-model";
 import { useSessionStartup } from "../../../lib/session-startup";
 import { isCodexProductModel } from "../../lib/session-model";
 import {
@@ -296,7 +296,7 @@ export function SessionHeader({
               onClick={onOpenAutomations}
               className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
               title={`${
-                automationWait ? SESSION_AUTOMATION_WAIT_LABEL[automationWait] : "Nothing upcoming"
+                automationWait ? sessionAutomationWaitLabel(t, automationWait) : "Nothing upcoming"
               }. Open automations for this chat`}
             >
               {automationWait === "event" ? (

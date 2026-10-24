@@ -3,6 +3,7 @@
  * page: its URL to copy, the steps in Linear or Sentry with the secret to
  * paste back, and how your own app signs its requests.
  */
+import { t } from "@opengeni/react/app/lib/console-text";
 import { pastedWebhookSetup } from "@opengeni/react/automations";
 import { CopyField } from "@opengeni/react/ui/copy-field";
 import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
@@ -46,7 +47,7 @@ export function PastedWebhookSteps({
   error?: string | undefined;
   onSecretChange: (value: string) => void;
 }) {
-  const setup = pastedWebhookSetup(source);
+  const setup = pastedWebhookSetup(t, source);
   if (!setup) return null;
   const label = setup.secretName.charAt(0).toUpperCase() + setup.secretName.slice(1);
   return (

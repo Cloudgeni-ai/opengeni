@@ -1,6 +1,7 @@
 /**
  * Event sources in the product's words: what each kind is, where its events
- * come from, its status, and its deliveries. Pure.
+ * come from, its status, and its deliveries. Pure; text comes from the host's
+ * message catalog through the `t` each function takes first.
  */
 import type {
   CreateEventSourceRequest,
@@ -10,6 +11,7 @@ import type {
   WebhookEventAdapter,
 } from "@opengeni/sdk";
 
+import type { OpenGeniText } from "../../messages/runtime";
 import type { ProductStatus } from "../../ui/status-badge";
 import { eventTypeLabel } from "./event-trigger-model";
 
@@ -37,74 +39,81 @@ export interface EventSourceChoiceMeta {
   audience: "workspace" | "personal" | "choice";
 }
 
-export const EVENT_SOURCE_CHOICES: readonly EventSourceChoiceMeta[] = [
-  {
-    choice: "github",
-    name: "GitHub",
-    description:
-      "Pull requests, issues, pushes, reviews and checks in the repositories you connected.",
-    providerDomain: "github.com",
-    setup: "automatic",
-    audience: "workspace",
-  },
-  {
-    choice: "slack",
-    name: "Slack",
-    description: "Mentions, messages and reactions in channels the Opengeni bot is in.",
-    providerDomain: "slack.com",
-    setup: "automatic",
-    audience: "workspace",
-  },
-  {
-    choice: "gmail",
-    name: "Gmail",
-    description: "New messages in your connected mailbox. Only you can see them.",
-    providerDomain: "mail.google.com",
-    setup: "automatic",
-    audience: "personal",
-  },
-  {
-    choice: "linear",
-    name: "Linear",
-    description: "Issues, comments and projects. You paste a webhook URL into Linear once.",
-    providerDomain: "linear.app",
-    setup: "paste",
-    audience: "choice",
-  },
-  {
-    choice: "sentry",
-    name: "Sentry",
-    description: "New and changed issues and alerts. You paste a webhook URL into Sentry once.",
-    providerDomain: "sentry.io",
-    setup: "paste",
-    audience: "choice",
-  },
-  {
-    choice: "mcp",
-    name: "MCP server",
-    description:
-      "Events from a connected MCP server that offers them, such as new tickets or orders.",
-    providerDomain: null,
-    setup: "automatic",
-    audience: "personal",
-  },
-  {
-    choice: "webhook",
-    name: "Your own app",
-    description: "Anything that can send a signed webhook, using the Standard Webhooks format.",
-    providerDomain: null,
-    setup: "paste",
-    audience: "choice",
-  },
+type EventSourceChoiceFacts = Omit<EventSourceChoiceMeta, "name" | "description">;
+
+/** Every choice in the order "Add a source" offers them. */
+const CHOICE_FACTS: readonly EventSourceChoiceFacts[] = [
+  { choice: "github", providerDomain: "github.com", setup: "automatic", audience: "workspace" },
+  { choice: "slack", providerDomain: "slack.com", setup: "automatic", audience: "workspace" },
+  { choice: "gmail", providerDomain: "mail.google.com", setup: "automatic", audience: "personal" },
+  { choice: "linear", providerDomain: "linear.app", setup: "paste", audience: "choice" },
+  { choice: "sentry", providerDomain: "sentry.io", setup: "paste", audience: "choice" },
+  { choice: "mcp", providerDomain: null, setup: "automatic", audience: "personal" },
+  { choice: "webhook", providerDomain: null, setup: "paste", audience: "choice" },
 ];
 
-export function eventSourceChoiceMeta(choice: EventSourceChoice): EventSourceChoiceMeta {
-  return EVENT_SOURCE_CHOICES.find((entry) => entry.choice === choice)!;
+function choiceFacts(choice: EventSourceChoice): EventSourceChoiceFacts {
+  return CHOICE_FACTS.find((entry) => entry.choice === choice)!;
+}
+
+/** The choice's name: the app's own name, or what the kind is called. */
+export function eventSourceChoiceName(t: OpenGeniText, choice: EventSourceChoice): string {
+  switch (choice) {
+    case "github":
+      return "GitHub";
+    case "slack":
+      return "Slack";
+    case "gmail":
+      return "Gmail";
+    case "linear":
+      return "Linear";
+    case "sentry":
+      return "Sentry";
+    case "mcp":
+      return t("automations.source.mcp.name");
+    case "webhook":
+      return t("automations.source.webhook.name");
+  }
+}
+
+function choiceDescription(t: OpenGeniText, choice: EventSourceChoice): string {
+  switch (choice) {
+    case "github":
+      return t("automations.source.github.description");
+    case "slack":
+      return t("automations.source.slack.description");
+    case "gmail":
+      return t("automations.source.gmail.description");
+    case "linear":
+      return t("automations.source.linear.description");
+    case "sentry":
+      return t("automations.source.sentry.description");
+    case "mcp":
+      return t("automations.source.mcp.description");
+    case "webhook":
+      return t("automations.source.webhook.description");
+  }
+}
+
+export function eventSourceChoiceMeta(
+  t: OpenGeniText,
+  choice: EventSourceChoice,
+): EventSourceChoiceMeta {
+  return {
+    ...choiceFacts(choice),
+    name: eventSourceChoiceName(t, choice),
+    description: choiceDescription(t, choice),
+  };
+}
+
+/** Every kind of source a person can add, in the order to offer them. */
+export function eventSourceChoices(t: OpenGeniText): EventSourceChoiceMeta[] {
+  return CHOICE_FACTS.map((facts) => eventSourceChoiceMeta(t, facts.choice));
 }
 
 /** True for a known choice, for example a `?kind=` link parameter. */
 export function isEventSourceChoice(value: unknown): value is EventSourceChoice {
-  return EVENT_SOURCE_CHOICES.some((entry) => entry.choice === value);
+  return CHOICE_FACTS.some((entry) => entry.choice === value);
 }
 
 export function eventSourceChoiceOf(
@@ -122,6 +131,7 @@ export const WEBHOOK_ADAPTER_OF: Partial<Record<EventSourceChoice, WebhookEventA
 
 /** A stand-in source of the chosen kind, for its tile before one exists. */
 export function eventSourceSubjectOfChoice(
+  t: OpenGeniText,
   choice: EventSourceChoice,
 ): Pick<EventSource, "kind" | "adapter" | "name" | "mcp"> {
   const adapter = WEBHOOK_ADAPTER_OF[choice] ?? null;
@@ -130,43 +140,55 @@ export function eventSourceSubjectOfChoice(
       ? "webhook"
       : (choice as Exclude<EventSourceChoice, "webhook" | "linear" | "sentry">),
     adapter,
-    name: eventSourceChoiceMeta(choice).name,
+    name: eventSourceChoiceName(t, choice),
     mcp: null,
   };
 }
 
 /** What adding one is called: "Add GitHub", "Add a webhook". */
-export function eventSourceAddLabel(choice: EventSourceChoice): string {
-  if (choice === "webhook") return "Add a webhook";
-  if (choice === "mcp") return "Add an MCP server";
-  return `Add ${eventSourceChoiceMeta(choice).name}`;
+export function eventSourceAddLabel(t: OpenGeniText, choice: EventSourceChoice): string {
+  if (choice === "webhook") return t("automations.source.addWebhook");
+  if (choice === "mcp") return t("automations.source.addMcp");
+  return t("automations.source.add", { name: eventSourceChoiceName(t, choice) });
 }
 
 /** "GitHub", "Linear webhook", "Webhook", "MCP server": the kind, not the name. */
-export function eventSourceKindLabel(source: Pick<EventSource, "kind" | "adapter">): string {
+export function eventSourceKindLabel(
+  t: OpenGeniText,
+  source: Pick<EventSource, "kind" | "adapter">,
+): string {
   const choice = eventSourceChoiceOf(source);
-  if (choice === "linear") return "Linear webhook";
-  if (choice === "sentry") return "Sentry webhook";
-  if (choice === "webhook") return "Webhook";
-  return eventSourceChoiceMeta(choice).name;
+  if (choice === "linear" || choice === "sentry")
+    return t("automations.source.kind.appWebhook", { app: eventSourceChoiceName(t, choice) });
+  if (choice === "webhook") return t("automations.source.kind.webhook");
+  return eventSourceChoiceName(t, choice);
 }
 
 /** The domain whose logo stands for the source, when it has one. */
 export function eventSourceProviderDomain(
   source: Pick<EventSource, "kind" | "adapter">,
 ): string | null {
-  return eventSourceChoiceMeta(eventSourceChoiceOf(source)).providerDomain;
+  return choiceFacts(eventSourceChoiceOf(source)).providerDomain;
 }
 
 /** The badge a source's row shows; a healthy source shows none. */
 export function eventSourceStatusBadge(
+  t: OpenGeniText,
   source: Pick<EventSource, "status" | "statusReason">,
 ): { status: ProductStatus; label: string; reason: string | null } | null {
   if (source.status === "blocked") {
-    return { status: "needs_you", label: "Needs attention", reason: source.statusReason };
+    return {
+      status: "needs_you",
+      label: t("automations.source.status.blocked"),
+      reason: source.statusReason,
+    };
   }
   if (source.status === "disabled") {
-    return { status: "off", label: "Off", reason: source.statusReason };
+    return {
+      status: "off",
+      label: t("automations.source.status.off"),
+      reason: source.statusReason,
+    };
   }
   return null;
 }
@@ -184,46 +206,48 @@ export interface PastedWebhookSetup {
 }
 
 export function pastedWebhookSetup(
+  t: OpenGeniText,
   source: Pick<EventSource, "kind" | "adapter">,
 ): PastedWebhookSetup | null {
   if (source.kind !== "webhook") return null;
   if (source.adapter === "linear") {
     return {
       app: "Linear",
-      secretName: "signing secret",
-      urlStep:
-        "In Linear, open Settings, then API, and add a webhook with this URL. Pick what it sends, such as issues and comments.",
-      secretStep: "Linear then shows the webhook's signing secret. Copy it and paste it here.",
+      secretName: t("automations.paste.linear.secretName"),
+      urlStep: t("automations.paste.linear.urlStep"),
+      secretStep: t("automations.paste.linear.secretStep"),
     };
   }
   if (source.adapter === "sentry") {
     return {
       app: "Sentry",
-      secretName: "client secret",
-      urlStep:
-        "In Sentry, open Settings, then Custom Integrations, and create an internal integration with this webhook URL. Turn on the issue and alert events you want.",
-      secretStep: "Sentry then shows the integration's client secret. Copy it and paste it here.",
+      secretName: t("automations.paste.sentry.secretName"),
+      urlStep: t("automations.paste.sentry.urlStep"),
+      secretStep: t("automations.paste.sentry.secretStep"),
     };
   }
   return null;
 }
 
-/** The request that adds a source of the chosen kind. */
-export function createEventSourceRequest(input: {
-  choice: EventSourceChoice;
-  name: string;
-  visibility: "private" | "workspace";
-  signingSecret?: string | undefined;
-  mcpServerId?: string | undefined;
-  connectionId?: string | undefined;
-}): CreateEventSourceRequest {
+/** The request that adds a source of the chosen kind; an unnamed webhook takes the kind's name. */
+export function createEventSourceRequest(
+  t: OpenGeniText,
+  input: {
+    choice: EventSourceChoice;
+    name: string;
+    visibility: "private" | "workspace";
+    signingSecret?: string | undefined;
+    mcpServerId?: string | undefined;
+    connectionId?: string | undefined;
+  },
+): CreateEventSourceRequest {
   const name = input.name.trim();
   const adapter = WEBHOOK_ADAPTER_OF[input.choice];
   if (adapter) {
     return {
       kind: "webhook",
       adapter,
-      name: name || eventSourceChoiceMeta(input.choice).name,
+      name: name || eventSourceChoiceName(t, input.choice),
       visibility: input.visibility,
       ...(adapter !== "standard" && input.signingSecret
         ? { signingSecret: input.signingSecret.trim() }
@@ -252,21 +276,31 @@ export function createEventSourceRequest(input: {
    Deliveries and events.
    -------------------------------------------------------------------------- */
 
-export const EVENT_DELIVERY_STATUS: Record<
-  EventDelivery["status"],
-  { status: ProductStatus; label: string }
-> = {
-  accepted: { status: "succeeded", label: "Accepted" },
-  ignored: { status: "off", label: "Ignored" },
-  rejected: { status: "failed", label: "Rejected" },
-  failed: { status: "failed", label: "Failed" },
-};
+/** What became of a delivery, as its badge. */
+export function eventDeliveryStatusBadge(
+  t: OpenGeniText,
+  status: EventDelivery["status"],
+): { status: ProductStatus; label: string } {
+  switch (status) {
+    case "accepted":
+      return { status: "succeeded", label: t("automations.delivery.accepted") };
+    case "ignored":
+      return { status: "off", label: t("automations.delivery.ignored") };
+    case "rejected":
+      return { status: "failed", label: t("automations.delivery.rejected") };
+    case "failed":
+      return { status: "failed", label: t("automations.delivery.failed") };
+  }
+}
 
 /** "3 events", "No events", "1 event". */
-export function deliveryEventsLabel(delivery: Pick<EventDelivery, "eventIds">): string {
+export function deliveryEventsLabel(
+  t: OpenGeniText,
+  delivery: Pick<EventDelivery, "eventIds">,
+): string {
   const count = delivery.eventIds.length;
-  if (count === 0) return "No events";
-  return count === 1 ? "1 event" : `${count} events`;
+  if (count === 0) return t("automations.delivery.noEvents");
+  return t("automations.delivery.events", { count });
 }
 
 /**
@@ -275,26 +309,48 @@ export function deliveryEventsLabel(delivery: Pick<EventDelivery, "eventIds">): 
  * when the server does not say which types.
  */
 export function deliveryTitle(
+  t: OpenGeniText,
   delivery: Pick<EventDelivery, "eventIds"> & { eventTypes?: readonly string[] | undefined },
 ): string {
   const types = delivery.eventTypes ?? [];
-  if (types.length === 0) return deliveryEventsLabel(delivery);
+  if (types.length === 0) return deliveryEventsLabel(t, delivery);
   const [first, second] = types as [string, ...string[]];
-  if (types.length === 1) return eventTypeLabel(first);
-  if (types.length === 2) return `${eventTypeLabel(first)} and ${eventTypeLabel(second!)}`;
-  return `${eventTypeLabel(first)} and ${types.length - 1} more`;
+  if (types.length === 1) return eventTypeLabel(t, first);
+  if (types.length === 2)
+    return t("automations.delivery.titleTwo", {
+      first: eventTypeLabel(t, first),
+      second: eventTypeLabel(t, second!),
+    });
+  return t("automations.eventTypes.firstAndMore", {
+    first: eventTypeLabel(t, first),
+    count: types.length - 1,
+  });
 }
 
-/** "1.2 KB". */
-export function byteSizeLabel(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+/** "1.2 KB", with the host locale's decimal separator. */
+export function byteSizeLabel(t: OpenGeniText, bytes: number): string {
+  const number = (value: number, digits: number) =>
+    new Intl.NumberFormat(t.locale, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    }).format(value);
+  if (bytes < 1024) return t("automations.bytes.bytes", { size: number(bytes, 0) });
+  if (bytes < 1024 * 1024)
+    return t("automations.bytes.kilobytes", {
+      size: number(bytes / 1024, bytes < 10 * 1024 ? 1 : 0),
+    });
+  return t("automations.bytes.megabytes", { size: number(bytes / (1024 * 1024), 1) });
 }
 
 /** Who caused an event, in words; null when unknown. */
-export function eventActorLabel(actor: EventActor): string | null {
-  if (actor.kind === "opengeni") return actor.name ? `${actor.name} (Opengeni)` : "Opengeni";
-  if (actor.name) return actor.kind === "bot" ? `${actor.name} (bot)` : actor.name;
-  return actor.kind === "bot" ? "A bot" : null;
+export function eventActorLabel(t: OpenGeniText, actor: EventActor): string | null {
+  if (actor.kind === "opengeni")
+    return actor.name
+      ? t("automations.actor.selfNamed", { name: actor.name })
+      : t("automations.actor.self");
+  if (actor.name)
+    return actor.kind === "bot"
+      ? t("automations.actor.botNamed", { name: actor.name })
+      : actor.name;
+  return actor.kind === "bot" ? t("automations.actor.bot") : null;
 }

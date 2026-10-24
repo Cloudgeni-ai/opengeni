@@ -5,9 +5,10 @@
  */
 import { LockIcon, PlusIcon, RadioTowerIcon } from "lucide-react";
 
+import { t } from "@opengeni/react/app/lib/console-text";
 import {
-  EVENT_SOURCE_CHOICES,
   EventSourceTile,
+  eventSourceChoices,
   eventSourceKindLabel,
   eventSourceStatusBadge,
   eventSourceSubjectOfChoice,
@@ -133,7 +134,7 @@ function EventSourceListRow({
   href: string;
   onOpen: () => void;
 }) {
-  const badge = eventSourceStatusBadge(source);
+  const badge = eventSourceStatusBadge(t, source);
   return (
     <ListRow
       leading={<EventSourceTile source={source} logo={logo} />}
@@ -143,7 +144,7 @@ function EventSourceListRow({
           <MetaChip icon={<LockIcon />}>Only me</MetaChip>
         ) : undefined
       }
-      description={eventSourceKindLabel(source)}
+      description={eventSourceKindLabel(t, source)}
       status={
         badge ? (
           <StatusBadge variant="dot" status={badge.status} reason={badge.reason ?? undefined}>
@@ -165,10 +166,9 @@ function EventSourceListRow({
 }
 
 /** The sources that connect without leaving Opengeni come first. */
-const STARTER_CHOICES = EVENT_SOURCE_CHOICES.filter((choice) => choice.setup === "automatic").slice(
-  0,
-  3,
-);
+const STARTER_CHOICES = eventSourceChoices(t)
+  .filter((choice) => choice.setup === "automatic")
+  .slice(0, 3);
 
 function EventSourcesEmpty({
   canManage,
@@ -206,7 +206,7 @@ function EventSourcesEmpty({
                 key={choice.choice}
                 tile={
                   <EventSourceTile
-                    source={eventSourceSubjectOfChoice(choice.choice)}
+                    source={eventSourceSubjectOfChoice(t, choice.choice)}
                     logo={logo}
                     size="md"
                   />

@@ -7,6 +7,7 @@ import type { MouseEvent } from "react";
 
 import type { EventSource, EventTrigger } from "@opengeni/sdk";
 
+import { useOpenGeniText } from "../../messages/runtime";
 import { StatusBadge } from "../../ui/status-badge";
 import { eventSourceStatusBadge } from "./event-source-model";
 import { EventSourceTile, type EventSourceLogoResolver } from "./event-source-tile";
@@ -30,12 +31,13 @@ export function EventTriggerSummary({
   sourceHref,
   onOpenSource,
 }: EventTriggerSummaryProps) {
+  const t = useOpenGeniText();
   return (
     <ul className="m-0 flex min-w-0 list-none flex-col gap-3 p-0">
       {triggers.map((trigger) => {
         const source = sources?.find((candidate) => candidate.id === trigger.sourceId);
-        const words = eventTriggerWords(trigger, sources ?? []);
-        const held = eventSourceStatusBadge(trigger);
+        const words = eventTriggerWords(t, trigger, sources ?? []);
+        const held = eventSourceStatusBadge(t, trigger);
         return (
           <li key={trigger.id} className="flex min-w-0 items-start gap-3">
             <EventSourceTile
@@ -48,9 +50,9 @@ export function EventTriggerSummary({
             <div className="min-w-0 flex-1">
               <p className="m-0 text-sm leading-5 break-words text-fg">{words.events}</p>
               <p className="m-0 text-xs leading-4.5 break-words text-fg-muted">
-                From{" "}
+                {t("automations.summary.from")}{" "}
                 {!source ? (
-                  "a source you can't see"
+                  t("automations.trigger.hiddenSourceInline")
                 ) : sourceHref ? (
                   <a
                     className="og-link"

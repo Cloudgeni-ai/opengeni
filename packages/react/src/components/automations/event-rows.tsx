@@ -7,30 +7,35 @@ import { ExternalLinkIcon, RotateCcwIcon } from "lucide-react";
 import { EVENT_DELIVERY_BODY_RETENTION_DAYS } from "@opengeni/contracts/event-triggers";
 import type { EventDelivery, InboundEvent, InboundEventSummary } from "@opengeni/sdk";
 
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 import { DropdownMenuItem } from "../../ui/dropdown-menu";
 import { ListRow, type RowListColumn } from "../../ui/list-row";
 import { RelativeTime } from "../../ui/relative-time";
 import { StatusBadge } from "../../ui/status-badge";
 import {
-  EVENT_DELIVERY_STATUS,
   byteSizeLabel,
-  deliveryEventsLabel,
   deliveryTitle,
   eventActorLabel,
+  eventDeliveryStatusBadge,
 } from "./event-source-model";
 import { eventTypeLabel } from "./event-trigger-model";
 
-export const INBOUND_EVENT_COLUMNS: RowListColumn[] = [
-  { id: "received", label: "Received", width: 132, align: "end", hideLabel: true },
-];
-
-export const EVENT_DELIVERY_COLUMNS: RowListColumn[] = [
-  { id: "received", label: "Received", width: 132, align: "end", hideLabel: true },
-];
+/** The columns of a RowList of InboundEventRow or EventDeliveryRow: when it arrived. */
+export function eventRowColumns(t: OpenGeniText): RowListColumn[] {
+  return [
+    {
+      id: "received",
+      label: t("automations.rows.received"),
+      width: 132,
+      align: "end",
+      hideLabel: true,
+    },
+  ];
+}
 
 /** The quiet facts under an event: its type, who caused it and what it is about. */
-export function inboundEventMeta(event: InboundEventSummary): string[] {
-  return [eventTypeLabel(event.type), eventActorLabel(event.actor), event.subject].filter(
+export function inboundEventMeta(t: OpenGeniText, event: InboundEventSummary): string[] {
+  return [eventTypeLabel(t, event.type), eventActorLabel(t, event.actor), event.subject].filter(
     (part): part is string => Boolean(part),
   );
 }
@@ -45,18 +50,15 @@ export function InboundEventRow({
   expanded: boolean;
   onToggle: () => void;
 }) {
+  const t = useOpenGeniText();
   return (
     <ListRow
       title={event.summary}
-      meta={inboundEventMeta(event)}
+      meta={inboundEventMeta(t, event)}
       status={
         event.gapBefore ? (
-          <StatusBadge
-            variant="dot"
-            tone="attention"
-            reason="The source may have missed events just before this one, for example while it was disconnected."
-          >
-            Events may be missing
+          <StatusBadge variant="dot" tone="attention" reason={t("automations.rows.gapReason")}>
+            {t("automations.rows.gap")}
           </StatusBadge>
         ) : undefined
       }
@@ -69,18 +71,19 @@ export function InboundEventRow({
 }
 
 export function InboundEventDetail({ event }: { event: InboundEvent }) {
+  const t = useOpenGeniText();
   return (
     <div className="flex min-w-0 flex-col gap-2 pb-3">
       <dl className="m-0 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs leading-4.5">
-        <dt className="text-fg-muted">Type</dt>
+        <dt className="text-fg-muted">{t("automations.rows.type")}</dt>
         <dd className="m-0 min-w-0 font-mono break-all text-fg">{event.type}</dd>
-        <dt className="text-fg-muted">Happened</dt>
+        <dt className="text-fg-muted">{t("automations.rows.happened")}</dt>
         <dd className="m-0 text-fg">
           <RelativeTime date={event.occurredAt} format="absolute" />
         </dd>
         {event.url ? (
           <>
-            <dt className="text-fg-muted">Link</dt>
+            <dt className="text-fg-muted">{t("automations.rows.link")}</dt>
             <dd className="m-0 min-w-0">
               <a
                 href={event.url}
@@ -100,7 +103,7 @@ export function InboundEventDetail({ event }: { event: InboundEvent }) {
       </pre>
       {event.dataTruncated ? (
         <p className="m-0 text-xs leading-4.5 text-fg-muted">
-          The app sent more than Opengeni keeps for one event, so the data was cut.
+          {t("automations.rows.dataTruncated")}
         </p>
       ) : null}
     </div>
@@ -124,17 +127,18 @@ export function EventDeliveryRow({
   expanded: boolean;
   onToggle: () => void;
 }) {
-  const status = EVENT_DELIVERY_STATUS[delivery.status];
+  const t = useOpenGeniText();
+  const status = eventDeliveryStatusBadge(t, delivery.status);
   const meta = [
-    byteSizeLabel(delivery.bodyBytes),
+    byteSizeLabel(t, delivery.bodyBytes),
     delivery.duplicateCount > 0
-      ? `Sent again ${delivery.duplicateCount === 1 ? "once" : `${delivery.duplicateCount} times`}`
+      ? t("automations.rows.sentAgain", { count: delivery.duplicateCount })
       : null,
-    delivery.replayOfDeliveryId ? "Replay" : null,
+    delivery.replayOfDeliveryId ? t("automations.rows.replay") : null,
   ].filter((part): part is string => Boolean(part));
   return (
     <ListRow
-      title={deliveryTitle(delivery)}
+      title={deliveryTitle(t, delivery)}
       description={delivery.reason ?? undefined}
       meta={meta}
       status={
@@ -147,21 +151,21 @@ export function EventDeliveryRow({
         canReplay ? (
           <DropdownMenuItem disabled={replaying} onSelect={onReplay}>
             <RotateCcwIcon />
-            Replay
+            {t("automations.rows.replay")}
           </DropdownMenuItem>
         ) : undefined
       }
-      menuLabel="Delivery actions"
+      menuLabel={t("automations.rows.deliveryActions")}
       expanded={expanded}
       onOpen={onToggle}
       panel={
         <div className="pb-3 text-xs leading-4.5 text-fg-muted">
           {delivery.bodyRetained
-            ? `Opengeni keeps what was sent for ${EVENT_DELIVERY_BODY_RETENTION_DAYS} days, so it can be replayed until then.`
-            : "What was sent is no longer kept, so it can't be replayed."}{" "}
+            ? t("automations.rows.bodyKept", { days: EVENT_DELIVERY_BODY_RETENTION_DAYS })
+            : t("automations.rows.bodyGone")}{" "}
           {delivery.eventIds.length > 0
-            ? `It became ${deliveryEventsLabel(delivery).toLowerCase()}.`
-            : "No events came from it."}
+            ? t("automations.rows.became", { count: delivery.eventIds.length })
+            : t("automations.rows.noEvents")}
         </div>
       }
     />
