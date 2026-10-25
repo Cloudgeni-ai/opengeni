@@ -454,6 +454,34 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a window target names the app that owns it", async () => {
+    class OwnerFixture extends WindowsFixture {
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        if (name !== "list_windows") return await super.callTool(name, argumentsJson);
+        const window = (window_id: number, app_name: string) => ({
+          pid: 40 + window_id,
+          window_id,
+          title: `Window ${window_id}`,
+          app_name,
+          bounds: { x: 0, y: 0, width: 200, height: 100 },
+        });
+        return result({
+          windows: [window(1, "notepad.exe"), window(2, "  "), window(3, "x".repeat(1_025))],
+        });
+      }
+    }
+    const backend = await CuaComputerBackend.open(new OwnerFixture(), "windows");
+    try {
+      expect((await backend.targets()).map((target) => target.applicationId)).toEqual([
+        "notepad.exe",
+        null,
+        null,
+      ]);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("a checkbox named in a batch step is pressed into its state as the step runs", () => {
     const args = { pid: 42, window_id: 1 };
     const named = (locator: Record<string, unknown>, action: string, value?: unknown) =>

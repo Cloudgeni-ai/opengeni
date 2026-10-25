@@ -4672,9 +4672,20 @@ describe("interaction attempt tools", () => {
       "mac-window",
     );
     expect(openComputerAppWindow([screen, calculator], "Calculator")?.id).toBe("mac-window");
-    // Windows (CUA): no app ID; a document window's title ends with the app name.
-    const notepad = target({ id: "win-notepad", applicationId: null, title: "Untitled - Notepad" });
-    const calc = target({ id: "win-calc", applicationId: null, title: "Calculator", processId: 7 });
+    // Reverse-DNS IDs name the same app only in full.
+    expect(openComputerAppWindow([screen, calculator], "com.example.calculator")).toBeNull();
+    // Windows (CUA): the window names its process's executable.
+    const notepad = target({
+      id: "win-notepad",
+      applicationId: "Notepad.exe",
+      title: "Untitled - Notepad",
+    });
+    const calc = target({
+      id: "win-calc",
+      applicationId: "CalculatorApp.exe",
+      title: "Calculator",
+      processId: 7,
+    });
     for (const id of ["notepad", "Notepad.exe", "C:\\Windows\\System32\\notepad.exe"])
       expect(openComputerAppWindow([screen, notepad, calc], id)?.id).toBe("win-notepad");
     expect(
@@ -4683,7 +4694,15 @@ describe("interaction attempt tools", () => {
         "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
       ),
     ).toBeNull();
-    expect(openComputerAppWindow([screen, notepad, calc], "calculator")?.id).toBe("win-calc");
+    // A window with an identity is never matched by its title.
+    expect(openComputerAppWindow([screen, notepad, calc], "calculator")).toBeNull();
+    expect(openComputerAppWindow([screen, notepad, calc], "calculatorapp")?.id).toBe("win-calc");
+    // A window with no identity is matched only by the app's name as its
+    // title, or its title's last part.
+    const untitled = target({ id: "win-untitled", applicationId: null, title: "Calculator" });
+    expect(openComputerAppWindow([screen, untitled], "calculator")?.id).toBe("win-untitled");
+    const page = target({ id: "page", applicationId: null, title: "Calculator help - Browser" });
+    expect(openComputerAppWindow([screen, page], "calculator")).toBeNull();
     // Linux (AT-SPI): an app target names the app; its windows share its process.
     const geditApp = target({
       id: "app-gedit",
@@ -4704,13 +4723,19 @@ describe("interaction attempt tools", () => {
     expect(openComputerAppWindow([screen, geditApp, geditWindow], "gedit.desktop")?.id).toBe(
       "linux-window",
     );
-    // Linux (CUA): only the title names it.
+    // Linux (CUA): the window names its window class.
     const cuaGedit = target({
       id: "cua-gedit",
-      applicationId: null,
+      applicationId: "Gedit",
       title: "Untitled Document 1 - gedit",
     });
     expect(openComputerAppWindow([screen, cuaGedit], "gedit")?.id).toBe("cua-gedit");
+    expect(openComputerAppWindow([screen, cuaGedit], "org.gnome.gedit")?.id).toBe("cua-gedit");
+    const textEditor = target({ id: "cua-text", applicationId: "org.gnome.TextEditor" });
+    expect(openComputerAppWindow([screen, textEditor], "org.gnome.TextEditor")?.id).toBe(
+      "cua-text",
+    );
+    expect(openComputerAppWindow([screen, textEditor], "org.kde.TextEditor")).toBeNull();
     // A window of another app is never matched by its title, nor an unreadable one.
     const other = target({ id: "other", applicationId: "com.example.editor", title: "Notepad" });
     expect(openComputerAppWindow([screen, other], "notepad")).toBeNull();
@@ -4737,7 +4762,7 @@ describe("interaction attempt tools", () => {
       title: "Untitled - Notepad",
       focused: false,
     };
-    const session = activeComputerSession();
+    let session = activeComputerSession();
     const launches: ComputerActionRequest[] = [];
     const observed: string[] = [];
     const definitions = createInteractionAttemptToolDefinitions({
@@ -4794,6 +4819,18 @@ describe("interaction attempt tools", () => {
     // The open window is the current target for the next read.
     await definitions[1]!.execute({}, context());
     expect(observed.at(-1)).toBe(notepad.id);
+
+    // A macOS launch finds the running app itself, so no window is guessed.
+    session = { ...session, platform: "macos" };
+    observed.length = 0;
+    const mac = await definitions[0]!.execute(
+      { computerSessionId, applicationId: "notepad.exe" },
+      context(),
+    );
+    expect(launches).toHaveLength(1);
+    expect(observed).toEqual([]);
+    expect(mac.structuredContent).toMatchObject({ launch: { state: "completed" } });
+    expect(mac.structuredContent).not.toHaveProperty("existing");
   });
 
   test("computer_open never reports a launch that ran, or may have run, as failed", async () => {
@@ -4873,6 +4910,17 @@ describe("interaction attempt tools", () => {
     });
     const timedOut = await open();
     expect(timedOut.content[1]).toEqual({ type: "text", text: unknownNote });
+
+    // A launch that completed but read no window says the app started.
+    act = async () => ({
+      ...computerReceipt(randomUUID(), computerObservation(screen)),
+      observation: null,
+    });
+    const unread = await open();
+    expect(unread.content[1]).toEqual({
+      type: "text",
+      text: "The computer opened and com.example.app started, but its window could not be read. Check computer_targets for its window.",
+    });
 
     // A definite refusal still says it could not launch.
     act = async () => {

@@ -2595,6 +2595,11 @@ export function createInteractionAttemptToolDefinitions(
             // Later reads and actions without a target start in the app.
             currentComputer.use(opened.session.id, observed.id);
             if (observed.kind === "window") appWindow = observed;
+          } else if (launched.launch.state === "completed") {
+            notes.push({
+              type: "text",
+              text: `The computer opened and ${applicationId} started, but its window could not be read. Check computer_targets for its window.`,
+            });
           } else if (launched.launch.state !== "failed") {
             notes.push({ type: "text", text: launchMayHaveRunNote(applicationId) });
           }
@@ -4242,9 +4247,9 @@ async function openComputer(
 
 /**
  * Find `applicationId` already open in a computer `computer_open` just opened,
- * or launch it. Only macOS finds a running app when it is launched; Windows
- * and Linux start another copy, so a window of the app already listed is
- * observed instead. A launch acts on no window's contents, so any listed
+ * or launch it. A macOS launch finds a running app exactly, so there it is
+ * always launched. Windows and Linux start another copy, so a listed window of
+ * the app is observed instead. A launch acts on no window's contents, so any listed
  * target carries it: the screen when there is one. Its receipt observes the
  * app's window. A launch that cannot run is a note on the opened result, never
  * an error that would hide the open computer. A retried call sends the same
@@ -4254,7 +4259,10 @@ async function openComputer(
 async function launchOpenedComputerApp(
   transport: InteractionTransport,
   workspaceId: string,
-  opened: { session: { id: string }; targets: readonly ComputerTarget[] },
+  opened: {
+    session: { id: string; platform: "linux" | "macos" | "windows" | null };
+    targets: readonly ComputerTarget[];
+  },
   applicationId: string,
   context: AttemptToolExecutionContext,
 ): Promise<
@@ -4262,7 +4270,10 @@ async function launchOpenedComputerApp(
   | { existing: z.input<typeof ComputerObservation> }
   | { note: string }
 > {
-  const open = openComputerAppWindow(opened.targets, applicationId);
+  const open =
+    opened.session.platform === "macos"
+      ? null
+      : openComputerAppWindow(opened.targets, applicationId);
   if (open) {
     const existing = await Promise.resolve()
       .then(() => transport.observeComputerTarget(workspaceId, opened.session.id, open.id))
@@ -4315,42 +4326,55 @@ function appKey(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/gu, "");
 }
 
-/** The forms an app name or ID can take: as given, its file name without path
- * or extension (C:\\Windows\\notepad.exe, gedit.desktop), a packaged app's
- * family name (Family_publisher!App), and the last part of a reverse-DNS ID
- * (com.apple.calculator, org.gnome.gedit). */
-function appNameForms(value: string): Set<string> {
-  const forms = new Set<string>();
+/** An app name or ID as it is compared. A reverse-DNS ID (org.gnome.gedit)
+ * keeps its full form as `id`, and only its last part as a plain name. Any
+ * other value's plain names are the value as given, its file name without
+ * path or extension (C:\\Windows\\notepad.exe, gedit.desktop) and a packaged
+ * app's family name (Family_publisher!App). */
+type AppNameForms = { id: string | null; names: Set<string> };
+
+function appNameForms(value: string): AppNameForms {
+  const names = new Set<string>();
   const add = (form: string | undefined) => {
     const key = form === undefined ? "" : appKey(form);
-    if (key) forms.add(key);
+    if (key) names.add(key);
   };
-  add(value);
   const file = value.trim().split(/[\\/]/u).at(-1) ?? "";
-  add(file);
   const bare = file.replace(/\.(?:exe|app|desktop)$/iu, "");
-  add(bare);
   const family = bare.includes("!") ? bare.split("!")[0]!.replace(/_[a-z0-9]+$/iu, "") : bare;
+  if (/^[^.\s]+(?:\.[^.\s]+){2,}$/u.test(family)) {
+    add(family.split(".").at(-1));
+    return { id: appKey(family), names };
+  }
+  add(value);
+  add(file);
+  add(bare);
   add(family);
-  if (/^[^.\s]+(?:\.[^.\s]+){2,}$/u.test(family)) add(family.split(".").at(-1));
-  return forms;
+  return { id: null, names };
+}
+
+/** Whether two app names or IDs name the same app: two reverse-DNS IDs only
+ * in full, anything else by a shared plain name. */
+function sameApp(wanted: AppNameForms, value: string): boolean {
+  const other = appNameForms(value);
+  if (wanted.id !== null && other.id !== null) return wanted.id === other.id;
+  return [...other.names].some((name) => wanted.names.has(name));
 }
 
 /**
- * A listed window of `applicationId`, or null: a window whose app ID names it,
- * else a window of a listed app target that names it (by ID or name), else a
- * window without an app ID whose title is the app's name or ends with it as a
- * document window's does ("Untitled - Notepad"). The window used last, then
- * the focused one, is preferred. A window on another Space cannot be read and
- * is skipped.
+ * A listed window of `applicationId`, or null: a window whose app identity
+ * names it, else a window of a listed app target that names it (by ID or
+ * name), else a window with no app identity whose title is the app's name or
+ * ends with it as a document window's does ("Untitled - Notepad"). The window
+ * used last, then the focused one, is preferred. A window on another Space
+ * cannot be read and is skipped.
  */
 export function openComputerAppWindow(
   targets: readonly ComputerTarget[],
   applicationId: string,
 ): ComputerTarget | null {
   const wanted = appNameForms(applicationId);
-  const names = (id: string | null) =>
-    id !== null && [...appNameForms(id)].some((form) => wanted.has(form));
+  const names = (id: string | null) => id !== null && sameApp(wanted, id);
   const windows = targets.filter((target) => target.kind === "window" && !target.offScreen);
   const best = (found: readonly ComputerTarget[]) =>
     found.find((target) => target.current) ??
@@ -4365,7 +4389,7 @@ export function openComputerAppWindow(
         (target) =>
           target.kind === "app" &&
           target.processId !== null &&
-          (names(target.applicationId) || wanted.has(appKey(target.title))),
+          (names(target.applicationId) || wanted.names.has(appKey(target.title))),
       )
       .map((target) => target.processId),
   );
@@ -4375,7 +4399,7 @@ export function openComputerAppWindow(
     windows.filter((target) => {
       if (target.applicationId !== null) return false;
       const title = appKey(target.title);
-      return [...wanted].some(
+      return [...wanted.names].some(
         (form) =>
           title === form ||
           title.endsWith(`-${form}`) ||
