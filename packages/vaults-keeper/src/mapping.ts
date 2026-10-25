@@ -1,3 +1,4 @@
+import { providerUsernameHint } from "@opengeni/vaults";
 import {
   type ProviderItemMeta,
   type ProviderWriteField,
@@ -178,6 +179,11 @@ export function mapRecord(record: KeeperRecord): MappedKeeperRecord {
       externalItemId: record.recordUid,
       name: safeSecretName(typeof data.title === "string" ? data.title : "", record.recordUid),
       type: itemTypeForRecordType(typeof data.type === "string" ? data.type : undefined),
+      username: providerUsernameHint(
+        collector.fields.find(
+          (field) => field.externalFieldId === "f:login" && field.kind === "text",
+        )?.value,
+      ),
       websites,
       fields: collector.fields.map(({ externalFieldId, name, kind }) => ({
         externalFieldId,

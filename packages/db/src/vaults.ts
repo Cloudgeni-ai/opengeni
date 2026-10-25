@@ -211,6 +211,8 @@ export type VaultItemRow = {
   name: string;
   nameKey: string;
   websites: string[];
+  /** Encrypted provider display hint; never a locally resolvable field value. */
+  usernameHintEncrypted?: string | null;
   expiresAt: string | null;
   archivedAt: string | null;
   lastUsedAt: string | null;
@@ -771,6 +773,7 @@ export async function releaseVaultPasskeyLeases(
 
 export type ProviderVaultItemMirror = {
   providerItemRef: string;
+  usernameHintEncrypted?: string | null;
   providerVersion?: string | null;
   type: Exclude<VaultItemType, "passkey">;
   name: string;

@@ -580,6 +580,7 @@ export function createSecretResolver(
       if (refreshProviders) {
         const report = await refreshLinkedVaults({
           db: deps.db,
+          encryptionKey: deps.encryptionKey,
           context,
           vaults: [...relevant.values()],
           providers: refreshProviders,

@@ -85,6 +85,7 @@ export const VAULT_LIMITS = {
   descriptionMaxChars: 2_000,
   websitesPerItem: 20,
   websiteMaxChars: 2_048,
+  usernameMaxChars: 1_024,
   textValueMaxBytes: 65_536,
   fileValueMaxBytes: 262_144,
   referenceMaxChars: 300,
@@ -242,7 +243,7 @@ export const VaultItemSummary = /* @__PURE__ */ defineSchema(() =>
     type: VaultItemType,
     name: primitives.string,
     websites: z.array(primitives.string),
-    /** Value of a text field named "username". */
+    /** Native username text field or the connected provider's display hint. */
     username: primitives.nullableString,
     hasTotp: primitives.boolean,
     hasPasskey: primitives.boolean,

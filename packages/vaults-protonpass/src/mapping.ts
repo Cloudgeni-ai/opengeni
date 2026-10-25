@@ -1,3 +1,4 @@
+import { providerUsernameHint } from "@opengeni/vaults";
 import {
   type ProviderFieldMeta,
   type ProviderItemMeta,
@@ -234,6 +235,9 @@ export function mapItem(item: Item, attachments: readonly Attachment[] = []): Ma
     externalItemId: item.id,
     name: safeSecretName(item.content.title, item.id),
     type: itemTypeForVariant(variant),
+    username: providerUsernameHint(
+      typeof content === "object" && "Login" in content ? content.Login.username : null,
+    ),
     websites,
     fields: collector.fields.map(({ externalFieldId, name, kind }) => ({
       externalFieldId,

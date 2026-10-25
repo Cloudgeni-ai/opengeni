@@ -195,6 +195,25 @@ describe("Bitwarden setup", () => {
 });
 
 describe("Bitwarden adapter beyond the contract", () => {
+  test("inventory includes only the username display hint from login values", async () => {
+    const fake = await FakeBitwarden.create();
+    fake.addCipher(
+      fake.login("Login", {
+        username: "alice@example.com",
+        password: "must-not-leak",
+        totp: TOTP_SEED,
+      }),
+    );
+    fake.addCipher(fake.login("No username", {}));
+    fake.addCipher(typedCipher(fake, 2, "Note", { notes: "private-note" }));
+    const { provider } = await connect(fake);
+    const items = await provider.listItems(context(), PERSONAL_VAULT_ID);
+    expect(items.find((item) => item.name === "Login")!.username).toBe("alice@example.com");
+    expect(items.find((item) => item.name === "No username")!.username).toBeNull();
+    expect(items.find((item) => item.name === "Note")!.username).toBeNull();
+    for (const secret of ["must-not-leak", TOTP_SEED, "private-note"])
+      expect(JSON.stringify(items)).not.toContain(secret);
+  });
   test("lists My vault first, then the collections this account can open", async () => {
     const fake = await FakeBitwarden.create();
     fake.addCipher(fake.login("Mine", { password: "p" }));

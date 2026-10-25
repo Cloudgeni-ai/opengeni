@@ -215,7 +215,10 @@ function usernameOf(row: VaultItemRow, key: Uint8Array | null): string | null {
   const field = row.fields.find(
     (candidate) => candidate.kind === "text" && secretNameKey(candidate.name) === "username",
   );
-  return field ? decryptOrNull(key, field.valueEncrypted) : null;
+  if (field?.valueEncrypted != null) return decryptOrNull(key, field.valueEncrypted);
+  return row.vaultSource !== "opengeni"
+    ? decryptOrNull(key, row.usernameHintEncrypted ?? null)
+    : null;
 }
 
 export function toVaultItemSummary(row: VaultItemRow, key: Uint8Array | null): VaultItemSummary {

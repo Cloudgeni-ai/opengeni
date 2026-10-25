@@ -427,6 +427,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       db: deps.db,
       context: subjectContext(actor, workspaceId),
       providers: deps.providers ?? EMPTY_VAULT_PROVIDER_REGISTRY,
+      encryptionKey: deps.encryptionKey,
       resolveReference: humanReferenceResolver(actor, workspaceId),
     };
   }
@@ -944,6 +945,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         const vault = await getVault(deps.db, context, { vaultId });
         await refreshStaleLinkedVaults({
           db: deps.db,
+          encryptionKey: deps.encryptionKey,
           context,
           vaults: [vault],
           providers: deps.providers,
@@ -1148,6 +1150,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (deps.providers && connected.length > 0) {
         const report = await refreshLinkedVaults({
           db: deps.db,
+          encryptionKey: deps.encryptionKey,
           context,
           vaults: connected,
           providers: deps.providers,
@@ -1335,6 +1338,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
             db: deps.db,
             context,
             providers: deps.providers ?? EMPTY_VAULT_PROVIDER_REGISTRY,
+            encryptionKey: deps.encryptionKey,
             resolveReference: (raw) => resolveTextReference(principal, raw, "secret_save"),
           },
           {

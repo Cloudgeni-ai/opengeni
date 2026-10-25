@@ -1,3 +1,4 @@
+import { providerUsernameHint } from "@opengeni/vaults";
 import {
   type ProviderFieldMeta,
   type ProviderItemMeta,
@@ -188,6 +189,9 @@ export function toProviderItemMeta(item: SdkItem): ProviderItemMeta {
     externalItemId: item.id,
     name: safeSecretName(item.title, item.id),
     type: itemTypeForCategory(item.category),
+    username: providerUsernameHint(
+      item.fields.find((field) => field.id === "username" && field.fieldType === "Text")?.value,
+    ),
     websites: (item.websites ?? []).map((website) => website.url).filter(Boolean),
     fields: mapItemFields(item).map(({ externalFieldId, name, kind }) => ({
       externalFieldId,

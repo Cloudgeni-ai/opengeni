@@ -321,7 +321,11 @@ read-write) or create a managed vault with
   `provider_conflict`.
 - `DELETE /connections/:connectionId/1password` unlinks every vault linked
   through the connection, then revokes it. Nothing is deleted in 1Password.
-- Opengeni mirrors item metadata only; values are fetched live and cached per
+- Opengeni mirrors item metadata, including a username display hint when the
+  provider already has it in its inventory. This hint is encrypted with the
+  existing vault envelope key, bounded to 1,024 characters (empty or longer hints are
+  omitted), and cleared when the provider stops reporting it. Old providers
+  may omit it. Passwords and other field values are fetched live and cached per
   attempt for at most 60 seconds, with at most 50 provider reads per attempt.
 - Edits in a read-write linked vault are written to 1Password first, then the
   mirror refreshes. A changed item returns `provider_conflict`.

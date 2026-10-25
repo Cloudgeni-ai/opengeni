@@ -95,6 +95,7 @@ describe("1Password adapter", () => {
     expect(fake.calls.map((call) => call.op)).toEqual(["items.list", "items.getAll"]);
     const login = items.find((item) => item.name === "Test Login")!;
     expect(login.type).toBe("login");
+    expect(login.username).toBe("alice");
     expect(login.websites).toEqual(["https://example.test"]);
     expect(login.fields).toEqual([
       { externalFieldId: "username", name: "username", kind: "text" },
@@ -104,6 +105,7 @@ describe("1Password adapter", () => {
     const note = items.find((item) => item.externalItemId === "note00000000000000000000000")!;
     expect(note.name).toBe("Deploy - notes -x-");
     expect(note.type).toBe("note");
+    expect(note.username).toBeNull();
     expect(note.fields).toEqual([{ externalFieldId: "@notes", name: "note", kind: "concealed" }]);
     const doc = items.find((item) => item.name === "kubeconfig")!;
     expect(doc.type).toBe("file");

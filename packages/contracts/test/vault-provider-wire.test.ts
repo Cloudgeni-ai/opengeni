@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  VAULT_LIMITS,
   VAULT_PROVIDER_WIRE_LIMITS,
   VAULT_PROVIDER_WIRE_VERSION,
   VaultProviderWireItemMeta,
@@ -32,6 +33,20 @@ const meta = {
 };
 
 describe("opengeni.vault.v1 wire", () => {
+  test("username display hints are optional, nullable and bounded", () => {
+    expect(VaultProviderWireItemMeta.parse(meta).username).toBeUndefined();
+    for (const username of [
+      null,
+      "",
+      "alice@example.com",
+      "u".repeat(VAULT_LIMITS.usernameMaxChars),
+    ]) {
+      expect(VaultProviderWireItemMeta.parse({ ...meta, username }).username).toBe(username);
+    }
+    for (const username of [42, {}, "u".repeat(VAULT_LIMITS.usernameMaxChars + 1)]) {
+      expect(VaultProviderWireItemMeta.safeParse({ ...meta, username }).success).toBe(false);
+    }
+  });
   test("requests are strict and bounded", () => {
     expect(VaultProviderWireRequest.safeParse(request({ op: "describe" })).success).toBe(true);
     expect(

@@ -36,6 +36,7 @@ import {
 } from "@opengeni/contracts/workspace-integration-wire";
 import {
   VaultProviderError,
+  providerUsernameHint,
   type ProviderCallOperation,
   type ProviderFieldValue,
   type ProviderItemMeta,
@@ -345,6 +346,7 @@ function toProviderItem(item: VaultProviderWireItemMeta): ProviderItemMeta {
     externalItemId: item.externalItemId,
     name: item.name,
     type: item.type,
+    username: providerUsernameHint(item.username),
     websites: [...item.websites],
     fields: item.fields.map((field) => ({
       externalFieldId: field.externalFieldId,

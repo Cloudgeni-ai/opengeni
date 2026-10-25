@@ -326,6 +326,7 @@ describe("items", () => {
     expect(login).toMatchObject({
       externalItemId: "loginItem1",
       type: "login",
+      username: "alice",
       websites: ["https://login.example.test"],
       version: "2026-10-15T09:00:00",
       updatedAt: "2026-10-15T09:00:00.000Z",
@@ -340,6 +341,7 @@ describe("items", () => {
     ]);
     const custom = items[1]!;
     expect(custom.type).toBe("api_key");
+    expect(custom.username).toBeNull();
     expect(custom.fields).toEqual([
       { externalFieldId: "s:Fields/value", name: "value", kind: "concealed" },
       { externalFieldId: "s:Fields/value#2", name: "value (2)", kind: "concealed" },

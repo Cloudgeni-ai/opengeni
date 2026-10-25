@@ -362,6 +362,7 @@ describe("reads", () => {
     expect(meta).toMatchObject({
       name: "Test Login",
       type: "login",
+      username: "alice",
       websites: ["https://login.example.test"],
       version: "1",
     });
@@ -380,6 +381,7 @@ describe("reads", () => {
     ]);
     const note = items.find((item) => item.externalItemId === subRecord)!;
     expect(note.type).toBe("note");
+    expect(note.username).toBeNull();
     const text = JSON.stringify(items);
     for (const secret of ["pw-123", "rc-1", SEED, "4111", "rotate monthly", "deep"])
       expect(text).not.toContain(secret);
