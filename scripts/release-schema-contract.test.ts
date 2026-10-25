@@ -2340,6 +2340,8 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0958_session_event_tool_call_fallback_pages.sql",
+      "0957_session_event_tool_call_pages.sql",
       "0956_vault_username_hints.sql",
       "0955_recording_notes_event_types_validate.sql",
       "0954_recording_notes.sql",

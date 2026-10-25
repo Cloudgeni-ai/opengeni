@@ -9810,6 +9810,16 @@ export const sessionEvents = pgTable(
       .where(
         sql`${table.type} = 'agent.toolCall.created' and (${table.toolName} is null or octet_length(${table.toolName}) > 2048)`,
       ),
+    toolCallPage: index("session_events_tool_call_page_idx")
+      .on(table.workspaceId, table.sessionId, table.toolCallId, table.sequence)
+      .where(
+        sql`${table.type} in ('agent.toolCall.created', 'agent.toolCall.output') and ${table.toolCallId} is not null and octet_length(${table.toolCallId}) <= 2048`,
+      ),
+    toolCallFallbackPage: index("session_events_tool_call_fallback_page_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(
+        sql`${table.type} in ('agent.toolCall.created', 'agent.toolCall.output') and (${table.toolCallId} is null or octet_length(${table.toolCallId}) > 2048)`,
+      ),
     // Pre-0527 attention probes (which still counted commentary) during a rolling
     // deploy. Drop it in a later rolling migration once no pre-0527 API can run.
     meaningfulAttention: index("session_events_meaningful_attention_idx")

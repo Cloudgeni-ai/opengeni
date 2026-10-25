@@ -1,4 +1,4 @@
-# Exact tool-name event paging
+# Exact tool-name and call-ID event paging
 
 `packages/db/src/session-event-slices.ts` keeps the existing workspace/session
 filters, prompt visibility, event types, call identity, direction and keyset.
@@ -29,6 +29,56 @@ wait. Storage and insert/update maintenance increase for created-call rows.
 The fallback still scans matching session/keyset fallback candidates, potentially
 all of them for an absent name. This is not constant-time lookup or a universal
 planner guarantee. An all-legacy history receives no promised speedup.
+
+## Exact call IDs
+
+Migrations 0957 and 0958 add the corresponding call-ID indexes for created/output
+tool events: `(workspace_id, session_id, tool_call_id, sequence)` for non-NULL
+projections of at most 2048 bytes, and `(workspace_id, session_id, sequence)` for
+NULL/oversized fallbacks. The reader uses these branches only for ordinary IDs
+and an explicit nonempty type selection containing solely those two event types.
+Other type selections keep the existing coalesce predicate. A simultaneous tool
+name filter keeps the existing name-index path with its call-ID filter.
+
+ID equality retains `coalesce(tool_call_id,payload->>'callId',payload->>'call_id',
+payload->>'id')`, including historical NULLs, oversized and collation-equivalent
+spellings. The branch limit plus outer limit preserves the global ordered page.
+Neither projection is authorization; scope, RLS, prompt visibility and scalar
+hydration are unchanged. No backfill, old-index removal or payload rewrite occurs.
+As with name indexes, concurrent builds can wait for old snapshots beyond five
+seconds. New indexes add storage and maintenance to tool-event writes.
+
+Pre-implementation diagnostics on 12,000 local events plus 24,000 foreign-tenant
+events sharing an ID measured generic-plan rare lookup buffers at 25,679 before
+versus 1,240 with scoped projected/fallback branches. An expression-only hash
+index was not used by the unchanged application-role query. A projection hash
+index worked, but its work depended on other tenants' ID density; the scoped
+B-tree was chosen to keep that lookup local. These are synthetic proposal-query
+observations, not production or complete-reader timings.
+
+Fresh scoped indexes occupied 2,433,024 and 57,344 bytes in that fixture. Twenty
+measured 1,000-row rollback insert samples per sequential phase, with identity
+and cursor triggers retained, had medians 129.45 versus 150.08 ms. This is about
+20.6 microseconds extra per inserted row in that fixture, not a universal or
+live write-cost forecast. Rollback churn was vacuumed only in the disposable
+database between read-plan phases. Legacy fallback scanning remains unbounded
+within the requested session/keyset range.
+
+Run `bun test packages/db/test/tool-call-event-pages.test.ts` for generated-query,
+restricted-role plan, migration, scope, paging and collation checks. Set
+`OPENGENI_BENCH_TOOL_CALL_PAGES=1` to print the fixture's actual plan observations.
+The existing exact-base full-reader benchmark also accepts a `callId` mode:
+`bun scripts/operator/bench-tool-name-pages.ts <exact-base-commit> callId`.
+It alternates baseline/candidate reads, checks complete serialized pages including
+arguments and output, and keeps the original tool-name benchmark as its default.
+
+Against exact base `8643df9f0`, all 420 alternating full-page pairs matched
+(five warmup and 30 measured pairs in each of 12 cases). For 12,000 events,
+projected-ID matching pages measured 49.74 → 7.52 ms; with 5% legacy projections,
+51.64 → 10.01 ms. Absent IDs measured 47.60 → 4.03 and 45.76 → 5.38 ms,
+respectively. Empty and one-event histories were slower by approximately
+0.95–2.01 ms: the extra branch has a real fixed cost. These are local full-reader
+medians on one migrated fixture, not live latency, server CPU or memory savings.
 
 ## Verification
 
