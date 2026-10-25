@@ -250,12 +250,10 @@ describe("session control surface architecture", () => {
       source("../../../packages/react/src/app/lib/create-composer-focus.tsx"),
       source("../../../packages/react/src/app/routes/sessions-index-hydration.tsx"),
     ]);
-    expect(rail).toContain(
-      'props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }',
-    );
+    expect(rail).toContain('channelId === undefined ? {} : { channelId: channelId ?? "default" }');
     expect(rail).toContain("channelId={props.channelId}");
     expect(rail).not.toContain("channelId={props.channelId ?? undefined}");
-    expect(rail).toContain("requestCreateComposerFocus(windowEvents, props.channelId)");
+    expect(rail).toContain("requestCreateComposerFocus(windowEvents, channelId)");
     expect(focusRequest).toContain("new CustomEvent<CreateComposerFocusIntent>(");
     expect(route).toContain("const requestedChannelId = (");
     expect(route).toContain("nextFocusedNewSessionProjectLaunchIntent(");

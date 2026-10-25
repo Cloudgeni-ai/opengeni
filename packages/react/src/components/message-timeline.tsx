@@ -80,6 +80,7 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../lib/cn";
+import { inertProps } from "../lib/inert";
 import {
   MessageSenderContext,
   MessageSenderSlot,
@@ -3357,7 +3358,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
           noteFolded !== undefined && group.kind === "item" ? group.item.id : undefined
         }
         aria-hidden={noteFolded || undefined}
-        inert={noteFolded || undefined}
+        {...inertProps(noteFolded)}
         className={
           noteFolded ? "-mt-5 h-0 overflow-hidden opacity-0 [overflow-anchor:none]" : undefined
         }

@@ -1,5 +1,12 @@
 import { ChevronLeftIcon } from "lucide-react";
-import { lazy, useState, type ComponentProps, type ComponentType, type ReactNode } from "react";
+import {
+  lazy,
+  useState,
+  type ComponentType,
+  type ReactNode,
+  forwardRef,
+  type ComponentPropsWithoutRef,
+} from "react";
 
 import { MENU_BACK_BUTTON_CLASS, MENU_BACK_HEADER_CLASS, MENU_SURFACE_CLASS } from "./menu-styles";
 import { cn } from "../lib/cn";
@@ -14,22 +21,22 @@ export const COMPOSER_MENU_PANEL_CLASS = cn(
 );
 
 /** The back control of every drill-in header. */
-export function MenuBackButton({
-  label = "Back",
-  className,
-  ...props
-}: Omit<ComponentProps<"button">, "children"> & { label?: string }) {
+export const MenuBackButton = /* @__PURE__ */ forwardRef<
+  HTMLButtonElement,
+  Omit<ComponentPropsWithoutRef<"button">, "children"> & { label?: string }
+>(function MenuBackButton({ label = "Back", className, ...props }, ref) {
   return (
     <button
       type="button"
       aria-label={label}
       className={cn(MENU_BACK_BUTTON_CLASS, className)}
+      ref={ref}
       {...props}
     >
       <ChevronLeftIcon aria-hidden="true" className="size-4" />
     </button>
   );
-}
+});
 
 /** A drill-in's header: back, the submenu's title, optional trailing control. */
 export function ComposerMenuHeader(props: {

@@ -16,11 +16,14 @@ import {
   useMemo,
   useRef,
   useState,
-  type ComponentProps,
   type CSSProperties,
+  forwardRef,
+  type ComponentRef,
+  type ComponentPropsWithoutRef,
 } from "react";
 
 import { cn } from "../lib/cn";
+import { useMergedRefs } from "../lib/refs";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 
 const TooltipContainedPortal = containedPortal(TooltipPrimitive.Portal);
@@ -35,11 +38,11 @@ const TooltipSourceContext = createContext<TooltipSourceContextValue | null>(nul
 function TooltipProvider({
   delayDuration = 300,
   ...props
-}: ComponentProps<typeof TooltipPrimitive.Provider>) {
+}: ComponentPropsWithoutRef<typeof TooltipPrimitive.Provider>) {
   return <TooltipPrimitive.Provider delayDuration={delayDuration} {...props} />;
 }
 
-function Tooltip({ children, ...props }: ComponentProps<typeof TooltipPrimitive.Root>) {
+function Tooltip({ children, ...props }: ComponentPropsWithoutRef<typeof TooltipPrimitive.Root>) {
   const { onOpenChange, ...rootProps } = props;
   const sourceRef = useRef<HTMLElement | null>(null);
   const sourcePublishedRef = useRef(false);
@@ -74,35 +77,26 @@ function Tooltip({ children, ...props }: ComponentProps<typeof TooltipPrimitive.
   );
 }
 
-function TooltipTrigger({
-  asChild = true,
-  ...props
-}: ComponentProps<typeof TooltipPrimitive.Trigger>) {
+const TooltipTrigger = /* @__PURE__ */ forwardRef<
+  ComponentRef<typeof TooltipPrimitive.Trigger>,
+  ComponentPropsWithoutRef<typeof TooltipPrimitive.Trigger>
+>(function TooltipTrigger({ asChild = true, ...props }, forwardedRef) {
   const sourceRef = useContext(TooltipSourceContext);
+  const ref = useMergedRefs<HTMLButtonElement>(sourceRef?.ref, forwardedRef);
   return (
-    <TooltipPrimitive.Trigger
-      data-slot="tooltip-trigger"
-      asChild={asChild}
-      ref={(node) => {
-        sourceRef?.ref(node);
-      }}
-      {...props}
-    />
+    <TooltipPrimitive.Trigger data-slot="tooltip-trigger" asChild={asChild} ref={ref} {...props} />
   );
-}
+});
 
 const tooltipSurfaceStyle: CSSProperties = {
   backgroundColor: "var(--og-color-fg)",
   color: "var(--og-color-bg)",
 };
 
-function TooltipContent({
-  className,
-  sideOffset = 6,
-  children,
-  style,
-  ...props
-}: ComponentProps<typeof TooltipPrimitive.Content>) {
+const TooltipContent = /* @__PURE__ */ forwardRef<
+  ComponentRef<typeof TooltipPrimitive.Content>,
+  ComponentPropsWithoutRef<typeof TooltipPrimitive.Content>
+>(function TooltipContent({ className, sideOffset = 6, children, style, ...props }, ref) {
   const source = useContext(TooltipSourceContext);
   const portalStyle = usePortalTokenStyle(source?.source ?? null);
 
@@ -118,6 +112,7 @@ function TooltipContent({
           className,
         )}
         style={{ ...portalStyle, ...tooltipSurfaceStyle, ...style }}
+        ref={ref}
         {...props}
       >
         {children}
@@ -131,6 +126,6 @@ function TooltipContent({
       </TooltipPrimitive.Content>
     </TooltipContainedPortal>
   );
-}
+});
 
 export { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger };
