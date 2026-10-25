@@ -1776,6 +1776,168 @@ describe("interaction attempt tools", () => {
     );
   });
 
+  describe("tools that name a session directly give the same hint", () => {
+    const browserMissing = () => new OpenGeniApiError(404, "BrowserSession not found");
+    const computerMissing = () => new OpenGeniApiError(404, "ComputerSession not found");
+    const openBrowser = () => {
+      const browser = discoveredBrowserSession(randomUUID(), sessionId);
+      browser.lifecycle = "active";
+      browser.name = "Research";
+      return browser;
+    };
+    const openComputer = () => {
+      const computer = discoveredComputerSession(randomUUID(), sessionId);
+      computer.lifecycle = "active";
+      computer.name = "Desktop";
+      return computer;
+    };
+    const run = async (
+      tool: string,
+      args: Record<string, unknown>,
+      transport: Parameters<typeof partialTransport>[0],
+    ) => {
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport(transport),
+        workspaceId,
+        sessionId,
+        selectedTools: [
+          tool,
+          ...(tool.startsWith("interaction__cua_") ? ["computer_open", "computer_act"] : []),
+        ],
+        permissions: ["sessions:read", "sessions:control", "files:upload", "identities:write"],
+      });
+      const definition = definitions.find(
+        (candidate) => candidate.identity.toolName === tool || candidate.modelName === tool,
+      )!;
+      const result = await definition.execute(args, {
+        operationId: randomUUID(),
+        caller: { kind: "model", subjectId: "model:test" },
+      });
+      expect(result).toMatchObject({ isError: true });
+      return (result.structuredContent as { error: { message: string } }).error.message;
+    };
+
+    test.each([
+      ["browser_clipboard", {}],
+      ["browser_downloads", { operation: "list" }],
+      [
+        "browser_download_save",
+        { downloadId: randomUUID(), destinationPath: "downloads/report.pdf" },
+      ],
+      ["browser_publish", { identityId: randomUUID(), expectedHeadGeneration: 0 }],
+      ["browser_lifecycle", { action: "suspend" }],
+      ["browser_lifecycle", { action: "end" }],
+    ] as const)("%s %j lists the open BrowserSessions to use instead", async (tool, args) => {
+      const open = openBrowser();
+      const message = await run(
+        tool,
+        { browserSessionId: randomUUID(), ...args },
+        {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          readBrowserClipboard: async () => {
+            throw browserMissing();
+          },
+          listBrowserDownloads: async () => {
+            throw browserMissing();
+          },
+          saveBrowserDownload: async () => {
+            throw browserMissing();
+          },
+          publishBrowserRevision: async () => {
+            throw browserMissing();
+          },
+          suspendBrowserSession: async () => {
+            throw browserMissing();
+          },
+          endBrowserSession: async () => {
+            throw browserMissing();
+          },
+        },
+      );
+      // The id is required here, so there is no "omit it" alternative.
+      expect(message).toBe(
+        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${open.id} "Research". Use one of these ids.`,
+      );
+    });
+
+    test("browser_open attaching to a missing BrowserSession offers the open ones or a new one", async () => {
+      const open = openBrowser();
+      let sessions = [open];
+      const transport = {
+        listBrowserSessions: async () => ({ revision: 1, sessions }) as never,
+        getBrowserSession: async () => {
+          throw browserMissing();
+        },
+      };
+      expect(await run("browser_open", { browserSessionId: randomUUID() }, transport)).toBe(
+        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${open.id} "Research". Use one of these ids, or omit browserSessionId to open or reuse one.`,
+      );
+      sessions = [];
+      expect(await run("browser_open", { browserSessionId: randomUUID() }, transport)).toBe(
+        "API 404: BrowserSession not found. This chat has no open BrowserSession; omit browserSessionId to open one.",
+      );
+    });
+
+    test("computer_open and computer_lifecycle name the open ComputerSessions", async () => {
+      const open = openComputer();
+      const transport = {
+        listComputerSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+        getComputerSession: async () => {
+          throw computerMissing();
+        },
+        endComputerSession: async () => {
+          throw computerMissing();
+        },
+      };
+      const listed = `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids`;
+      expect(await run("computer_open", { computerSessionId: randomUUID() }, transport)).toBe(
+        `${listed}, or omit computerSessionId to open or reuse one.`,
+      );
+      expect(
+        await run(
+          "computer_lifecycle",
+          { computerSessionId: randomUUID(), action: "end" },
+          transport,
+        ),
+      ).toBe(`${listed}.`);
+    });
+
+    test("a native computer tool naming a missing ComputerSession lists the open ones", async () => {
+      const open = openComputer();
+      const message = await run(
+        "interaction__cua_list_windows",
+        { computerSessionId: randomUUID() },
+        {
+          listComputerSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          callNativeComputerTool: async () => {
+            throw computerMissing();
+          },
+        },
+      );
+      expect(message).toBe(
+        `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+      );
+    });
+
+    test("a long label is cut by character, never inside an emoji", async () => {
+      const open = openBrowser();
+      // The cut falls exactly where a surrogate pair starts in UTF-16.
+      open.name = `${"x".repeat(58)}🧭🧭 and more`;
+      const message = await run(
+        "browser_clipboard",
+        { browserSessionId: randomUUID() },
+        {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          readBrowserClipboard: async () => {
+            throw browserMissing();
+          },
+        },
+      );
+      expect(message).toContain(`${open.id} "${"x".repeat(58)}🧭…"`);
+      expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+    });
+  });
+
   test("an action never runs on a browser resumed while it was in flight", async () => {
     const browser = stoppedBrowser();
     // The restored tab's outline is slow, so the resume stays unreported while

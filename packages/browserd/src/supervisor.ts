@@ -2418,10 +2418,6 @@ export class BrowserSupervisor {
           recoveredReceipt?.operationId,
         );
       }
-      // The tabs the previous browser on this profile had when it was stopped
-      // or let go. Every launch takes the record, so it never outlives the
-      // launch right after the stop it describes.
-      const stoppedTabs = await takeStoppedBrowserTabs(sessionDirectory);
       driver = await this.createDriver(driverContext);
       const runtime: Runtime = {
         options: runtimeOptions(options),
@@ -2476,15 +2472,6 @@ export class BrowserSupervisor {
           runtime.lastTargets = [observation.target];
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
         }
-        // A relaunch reopened the stopped browser's tabs with new IDs; a
-        // reattached browser kept them, so the record no longer applies.
-        if (stoppedTabs && relaunchesProfile && !restoredManifest) {
-          await noteRelaunchedTabs(driver, stoppedTabs.reason, stoppedTabs.tabs, {
-            ...(stoppedTabs.idleReleaseMinutes !== undefined
-              ? { idleReleaseMinutes: stoppedTabs.idleReleaseMinutes }
-              : {}),
-          });
-        }
       } finally {
         startupPresence();
       }
@@ -2505,6 +2492,20 @@ export class BrowserSupervisor {
         workingReceiptCompleted = true;
         if (recoveredReceipt)
           runtime.options.restoreAuthorityDigest = recoveredReceipt.restoreAuthorityDigest;
+      }
+      // The tabs the previous browser on this profile had when it was stopped
+      // or let go. Every successful launch takes the record, so it never
+      // outlives the launch right after the stop it describes, while a failed
+      // launch leaves it for its retry. A relaunch reopened those tabs with
+      // new IDs; a reattached browser kept them, so the record no longer
+      // applies.
+      const stoppedTabs = await takeStoppedBrowserTabs(sessionDirectory);
+      if (stoppedTabs && relaunchesProfile && !restoredManifest) {
+        await noteRelaunchedTabs(driver, stoppedTabs.reason, stoppedTabs.tabs, {
+          ...(stoppedTabs.idleReleaseMinutes !== undefined
+            ? { idleReleaseMinutes: stoppedTabs.idleReleaseMinutes }
+            : {}),
+        });
       }
       return runtime;
     } catch (error) {
