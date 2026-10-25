@@ -1810,6 +1810,14 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       runs(count, "queued", OTHER, page(jobs("in_progress", "completed")));
     const idleOther = (count: number) =>
       runs(count, "queued", OTHER, page(jobs("pending", "completed")));
+    // Provider errors go through the real read-retry schedule; record its
+    // backoff instead of sleeping through it (about 4 s per failed read).
+    const backoff = { sleeps: [] as number[] };
+    const retryClock = {
+      now: Date.now,
+      sleep: async (ms: number) => void backoff.sleeps.push(ms),
+      random: () => 0,
+    };
     // Production allocation: 52 runners, 30 reserved for full main CI, 18 candidate slots.
     const reader = (fixtures: Fixture[], budget = "52", reserve = "30") => {
       const requests: string[] = [];
@@ -1834,7 +1842,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           workflow_runs: listed.map((entry) => entry.run),
         });
       }) as typeof fetch;
-      return { requests, github: new GitHubReader(cfg, new GitHubAuth({}), transport) };
+      return {
+        requests,
+        github: new GitHubReader(cfg, new GitHubAuth({}), transport, retryClock),
+      };
     };
     test("approval-only proof requires a waiting run and a complete idle job set", () => {
       const waitingRun = { id: 1, status: "waiting" };
@@ -2037,15 +2048,27 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ]);
       }
       // Provider errors on a job page or a run-list page reject; callers hold.
+      // Each failed read makes all five bounded attempts with real backoff.
       nextId = 1;
+      backoff.sleeps = [];
       const jobError = reader([...approvalMain(3), ...runs(1, "waiting", MAIN, "provider-error")]);
       await expect(jobError.github.mainBusy()).rejects.toThrow();
+      expect(jobError.requests.filter((url) => url.includes("/runs/4/jobs?")).length).toBe(5);
+      expect(backoff.sleeps).toEqual([250, 500, 1000, 2000]);
+      backoff.sleeps = [];
+      let listAttempts = 0;
       const listError = new GitHubReader(
         config({ BATCHER_MODE: "active", BATCHER_RUNNER_BUDGET: "52", BATCHER_MAIN_RESERVE: "30" }),
         new GitHubAuth({}),
-        (async () => new Response("unavailable", { status: 503 })) as unknown as typeof fetch,
+        (async () => {
+          listAttempts++;
+          return new Response("unavailable", { status: 503 });
+        }) as unknown as typeof fetch,
+        retryClock,
       );
       await expect(listError.mainBusy()).rejects.toThrow();
+      expect(listAttempts).toBe(5);
+      expect(backoff.sleeps).toEqual([250, 500, 1000, 2000]);
     });
     // A run whose status flips once during the inventory listing, served by a
     // transport that changes the run after the first listing of `flipAfter`.
