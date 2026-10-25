@@ -3,6 +3,7 @@
 mod bench;
 mod fleet_cli;
 mod observing;
+mod readying;
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -25,8 +26,8 @@ use compute_host::protocol::{
     step_name,
 };
 use compute_host::{
-    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PagerConfig,
-    PoolConfig, Store, Threads, serve,
+    BusyRule, Chunked, Directory, GuestChecks, GuestPort, HostAgent, HostConfig, Keep, NoStore,
+    PagerConfig, PoolConfig, Store, Threads, serve,
 };
 use tokio::signal::unix::SignalKind;
 
@@ -292,6 +293,10 @@ struct ServeArgs {
     stream_idle_secs: u64,
     /// Guest vsock port to tell about each restore from a memory image, so
     /// the guest can set its clock, reconnect and learn its sandbox id.
+    /// Every guest must listen on it: the agent also connects to it to
+    /// find guests that stopped while their VMs run on (a power-off, a
+    /// halt, a hung kernel), and ends the VM of one that takes no
+    /// connection for five checks thirty seconds apart, as if it crashed.
     #[arg(long)]
     restore_notice_port: Option<u32>,
     /// Keep warm templates: a guest vsock port that accepts connections
@@ -736,10 +741,10 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .with_memory_profile(memory_profile)
     .with_context(|| format!("memory profile {memory_profile}"))?;
     let processor_share = guarantee_vm_processors(share, &mut policy)?;
-    check_huge_pages(memory_profile)?;
-    check_zswap(memory_profile.compress && !args.no_compress)?;
-    raise_open_file_limit();
-    protect_from_oom()?;
+    readying::check_huge_pages(memory_profile)?;
+    readying::check_zswap(memory_profile.compress && !args.no_compress)?;
+    readying::raise_open_file_limit();
+    readying::protect_from_oom()?;
     let about = describe(memory_profile, &args.base_image);
     let budget = policy
         .admission
@@ -778,6 +783,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         stream_idle: Duration::from_secs(args.stream_idle_secs),
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
+        guest_checks: GuestChecks::DEFAULT,
         first_uid: args.first_uid,
         host_lock: Some(args.host_lock),
         pool,
@@ -805,6 +811,9 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         observer: observer.clone(),
         summary_every: HostConfig::SUMMARY_EVERY,
         lease: prepared.as_ref().map(|prepared| prepared.gate.clone()),
+        guard_freezes: fleet
+            .as_ref()
+            .map(|fleet| compute_host::fleet::Freezes::beside(&fleet.guard_lock)),
         agent_link,
         processor_share,
     };
@@ -948,42 +957,6 @@ async fn run_agent<S: Store>(
 
 /// How long a stopping agent waits for its last events to be exported.
 const FLUSH_WITHIN: Duration = Duration::from_secs(5);
-
-/// Lets the agent hold as many open files as the system allows it. Every VM
-/// keeps several open here (its process, pager, image files and store
-/// connections), so the usual soft limit of 1024 runs out near a hundred
-/// VMs.
-fn raise_open_file_limit() {
-    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
-    let limit = getrlimit(Resource::Nofile);
-    if limit.current == limit.maximum {
-        return;
-    }
-    let raised = Rlimit {
-        current: limit.maximum,
-        maximum: limit.maximum,
-    };
-    match setrlimit(Resource::Nofile, raised) {
-        Ok(()) => tracing::info!(limit = ?limit.maximum, "open-file limit raised"),
-        Err(error) => {
-            tracing::warn!(%error, current = ?limit.current, "could not raise the open-file limit");
-        }
-    }
-}
-
-/// What the out-of-memory killer adds to the agent's badness, in
-/// thousandths of the memory it weighs: the agent outlasts every VM
-/// process (VMMs and pagers raise theirs to -900) and nearly anything
-/// else on a short host. Not -1000: that makes a process unkillable even
-/// inside its own service unit, so an agent that leaked up to the unit's
-/// `MemoryMax` would hang in reclaim instead of being killed and restarted.
-/// Its helpers inherit it.
-const OOM_SCORE_ADJ: i32 = -999;
-
-fn protect_from_oom() -> anyhow::Result<()> {
-    std::fs::write("/proc/self/oom_score_adj", OOM_SCORE_ADJ.to_string())
-        .context("lowering the agent's oom_score_adj (needs CAP_SYS_RESOURCE)")
-}
 
 /// One number from `/proc/meminfo`, such as `MemTotal:` (in KiB) or
 /// `HugePages_Total:`; 0 when missing.
@@ -1162,44 +1135,6 @@ fn disk_policy(
         "disk kept back from saves"
     );
     Ok(policy)
-}
-
-/// Refuses a huge-page memory profile on a host without a reserved pool of
-/// 2 MiB pages: every VM's memory would fail to allocate.
-fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
-    if profile.pages != compute_engine::PageSize::Huge {
-        return Ok(());
-    }
-    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
-    let field = |name: &str| meminfo_field(&meminfo, name);
-    if field("Hugepagesize:") != 2048 {
-        bail!("the {profile} memory profile needs 2 MiB default huge pages");
-    }
-    let total = field("HugePages_Total:");
-    if total == 0 {
-        bail!(
-            "the {profile} memory profile needs reserved huge pages; set \
-             /proc/sys/vm/nr_hugepages, or choose a profile with --memory-profile"
-        );
-    }
-    tracing::info!(
-        pool_mib = total * 2,
-        free_mib = field("HugePages_Free:") * 2,
-        "huge-page pool"
-    );
-    Ok(())
-}
-
-/// Compressing paused VMs needs zswap: without it the memory pushed out
-/// would go to the swap device, and `memory.zswap.writeback` would mean
-/// nothing.
-fn check_zswap(compress: bool) -> anyhow::Result<()> {
-    if compress
-        && !compute_engine::cgroup::zswap_enabled().context("reading whether zswap is on")?
-    {
-        bail!("compressing paused VMs needs zswap; turn it on or pass --no-compress");
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -32,6 +32,20 @@ pub fn boot_now() -> At {
     At::from_duration(Duration::new(seconds, nanos))
 }
 
+/// How long the machine has been suspended since it started: how far the
+/// boot clock is ahead of the monotonic one, which stops while it is
+/// suspended. Read a moment apart, the two clocks can make it seem a
+/// little longer, never shorter.
+#[must_use]
+pub fn slept() -> Duration {
+    let monotonic = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    let monotonic = Duration::new(
+        u64::try_from(monotonic.tv_sec).unwrap_or(0),
+        u32::try_from(monotonic.tv_nsec).unwrap_or(0),
+    );
+    boot_now().since_origin().saturating_sub(monotonic)
+}
+
 /// Nanoseconds since the clock's start, saturating.
 pub(crate) fn nanos(at: At) -> u64 {
     u64::try_from(at.since_origin().as_nanos()).unwrap_or(u64::MAX)

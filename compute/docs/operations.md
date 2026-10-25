@@ -760,6 +760,33 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   the fleet), `agent_link` (a request for its agent, a message with a
   reply subject; acknowledgements and other messages nobody waits on never
   wake one) or `guest_port` (data for the guest on a port that wakes it).
+- **Find a guest that stopped.** A guest can power off, halt or hang
+  while its VM process runs on. On a host with `--restore-notice-port`,
+  whose guests must all listen on it, the agent connects to each running
+  guest's notice port every thirty seconds. It logs a warning for each
+  check a guest takes no connection on, and after five in a row an error
+  naming the sandbox (`guest took no connection on its notice port`).
+  It then ends the VM as a crashed one: a `compute.alarm` for programs
+  lost, files kept, and the next wake boots from the disk. A host whose
+  guest image does not listen on the notice port must not set it.
+  A check counts only if the guest could run all through it: no step
+  paused it meanwhile, the guard did not freeze it, and the machine did
+  not suspend. The guard says when it freezes the VMs, which it does on
+  its own steps, when the lease is about to run out and while a suspend
+  is prepared: it keeps a count of its freezes beside its lock
+  (`/run/compute-host/guard.lock.freezes`), odd while the VMs may not
+  run and even while they do, and writes it at each of its steps with the
+  time it wrote it. On a host with a lease a check counts only if the
+  count was even when it began and the guard still writes the same after
+  it ended. A guard that cannot write the file logs `the guard could not
+  write its freeze count` once, and until it can, no check counts.
+  A guard from before the count keeps none, and then no check counts:
+  since an upgrade never restarts the guard, a host upgraded in place
+  finds stopped guests only from its next boot. It also
+  needs the host to be able to ask the VMM for the connection at all: a
+  host that cannot reach a VM's vsock socket, as when it is out of
+  descriptors, logs `could not check the guest` and counts nothing
+  against it.
 
 ## Upgrades
 
