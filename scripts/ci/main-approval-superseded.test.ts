@@ -52,7 +52,7 @@ test("never cancels runs with running jobs or other pending environments", () =>
 });
 
 test("cancels only not-started main runs older than the newest main run", () => {
-  const run = (
+  const queuedRun = (
     id: number,
     created: number,
     extra: Partial<QueuedRun> = {},
@@ -67,10 +67,10 @@ test("cancels only not-started main runs older than the newest main run", () => 
     ...extra,
   });
   const queued = [
-    run(1, 30),
-    run(2, 20, { runAttempt: 2, runStartedAt: hoursAgo(2) }),
-    run(3, 20, { runAttempt: 3, runStartedAt: hoursAgo(7) }),
-    run(4, 1),
+    queuedRun(1, 30),
+    queuedRun(2, 20, { runAttempt: 2, runStartedAt: hoursAgo(2) }),
+    queuedRun(3, 20, { runAttempt: 3, runStartedAt: hoursAgo(7) }),
+    queuedRun(4, 1),
   ];
   // The newest main run is itself queued: it is kept. A recent re-run is kept.
   expect(
@@ -111,13 +111,35 @@ test("keeps started runs, the main SHA and Version merges", () => {
 });
 
 test("counts started jobs and treats an incomplete page as started", () => {
-  const jobs = (statuses: string[], total = statuses.length) => ({
-    total_count: total,
-    jobs: statuses.map((status) => ({ status })),
+  const job = (status: string, conclusion: string | null = null) => ({
+    status,
+    conclusion,
   });
-  expect(startedJobCount(jobs(["queued", "waiting", "pending"]))).toBe(0);
-  expect(startedJobCount(jobs(["queued", "in_progress", "completed"]))).toBe(2);
-  expect(startedJobCount(jobs(["queued"], 101))).toBe(Infinity);
+  const page = (jobs: ReturnType<typeof job>[], total = jobs.length) => ({
+    total_count: total,
+    jobs,
+  });
+  // A main push skips the dispatch-only admission job within a second.
+  expect(
+    startedJobCount(
+      page([job("completed", "skipped"), job("queued"), job("waiting")]),
+    ),
+  ).toBe(0);
+  expect(
+    startedJobCount(
+      page([job("queued"), job("in_progress"), job("completed", "success")]),
+    ),
+  ).toBe(2);
+  expect(startedJobCount(page([job("queued")], 101))).toBe(Infinity);
   expect(isVersionMerge("chore: version packages (#5772)")).toBe(true);
+  expect(
+    isVersionMerge(
+      "Merge pull request #5786 from Cloudgeni-ai/changeset-release/main\n\nVersion",
+    ),
+  ).toBe(true);
+  expect(
+    isVersionMerge("Batch 1a2b: PR #5786 from changeset-release/main"),
+  ).toBe(true);
   expect(isVersionMerge("fix: version packages are read")).toBe(false);
+  expect(isVersionMerge("docs: x\n\nfrom changeset-release/main")).toBe(false);
 });

@@ -62,18 +62,29 @@ export type QueuedRun = {
 };
 
 export const KEEP_RERUN_YOUNGER_THAN_MS = 6 * 60 * 60 * 1000;
-const NOT_STARTED = new Set(["queued", "waiting", "pending", "requested"]);
+type Job = { status: string; conclusion?: string | null };
 
+/** Jobs that took a runner: running, or finished other than as skipped. */
 export function startedJobCount(jobs: {
   total_count: number;
-  jobs: { status: string }[];
+  jobs: Job[];
 }): number {
   if (jobs.total_count > jobs.jobs.length) return Infinity;
-  return jobs.jobs.filter((j) => !NOT_STARTED.has(j.status)).length;
+  return jobs.jobs.filter(
+    (j) =>
+      j.status === "in_progress" ||
+      (j.status === "completed" && j.conclusion !== "skipped"),
+  ).length;
 }
 
-export const isVersionMerge = (message: string | undefined) =>
-  /^chore: version packages\b/i.test(message ?? "");
+/** A Version PR merge, squashed, merged or batched: releases may need its receipt. */
+export const isVersionMerge = (message: string | undefined) => {
+  const title = (message ?? "").split("\n", 1)[0] ?? "";
+  return (
+    /^chore: version packages\b/i.test(title) ||
+    /\bfrom (Cloudgeni-ai\/)?changeset-release\/main\b/i.test(title)
+  );
+};
 
 /**
  * Main CI runs whose jobs have not started and that are older than the newest
@@ -206,7 +217,7 @@ async function main() {
           startedJobs: startedJobCount(
             (await api(
               `actions/runs/${r.id}/jobs?filter=latest&per_page=100`,
-            )) as { total_count: number; jobs: { status: string }[] },
+            )) as { total_count: number; jobs: Job[] },
           ),
           versionMerge: isVersionMerge(r.head_commit?.message),
         })),
