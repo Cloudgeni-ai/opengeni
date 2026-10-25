@@ -474,118 +474,130 @@ impl Aligner {
         frame_from: usize,
         frames: usize,
     ) -> Option<Vec<Option<Span>>> {
-        // The usual CTC trellis (a blank around every token), with an
-        // optional gap token before, between and after the words. A gap is a
-        // space or speech the transcript left out (crosstalk, a murmur), so
-        // such speech is not smeared over the neighbouring words.
-        let mut tokens: Vec<u32> = Vec::new();
-        let mut word_of: Vec<Option<usize>> = Vec::new();
-        for (index, (_, ids)) in block.iter().enumerate() {
-            if ids.is_empty() {
-                continue;
-            }
-            tokens.push(GAP);
-            word_of.push(None);
-            for &id in ids {
-                tokens.push(id);
-                word_of.push(Some(index));
-            }
-        }
-        if tokens.is_empty() {
-            return Some(vec![None; block.len()]);
+        viterbi(self.blank, emissions, block, frame_from, frames)
+    }
+}
+
+/// The most likely placement of `block`'s words on `frames` frames from
+/// `frame_from`; see [`Aligner::viterbi`].
+fn viterbi(
+    blank: u32,
+    emissions: &Emissions,
+    block: &[(String, Vec<u32>)],
+    frame_from: usize,
+    frames: usize,
+) -> Option<Vec<Option<Span>>> {
+    // The usual CTC trellis (a blank around every token), with an
+    // optional gap token before, between and after the words. A gap is a
+    // space or speech the transcript left out (crosstalk, a murmur), so
+    // such speech is not smeared over the neighbouring words.
+    let mut tokens: Vec<u32> = Vec::new();
+    let mut word_of: Vec<Option<usize>> = Vec::new();
+    for (index, (_, ids)) in block.iter().enumerate() {
+        if ids.is_empty() {
+            continue;
         }
         tokens.push(GAP);
         word_of.push(None);
-        // State 2k is a blank, 2k + 1 is token k.
-        let states = 2 * tokens.len() + 1;
-        let token_of = |s: usize| {
-            if s.is_multiple_of(2) {
-                self.blank
-            } else {
-                tokens[s / 2]
-            }
-        };
-        let optional = |s: usize| s % 2 == 1 && tokens[s / 2] == GAP;
-        let predecessors = |s: usize| -> [Option<usize>; 5] {
-            let mut list = [Some(s), s.checked_sub(1), None, None, None];
-            if s % 2 == 1 && s >= 2 && token_of(s - 2) != token_of(s) {
-                list[2] = Some(s - 2);
-            }
-            // Past an optional token: from the blank before it, and from the
-            // token before it when the two differ.
-            if s >= 3 && optional(s - 2) && s % 2 == 1 {
-                list[3] = Some(s - 3);
-                if s >= 4 && token_of(s - 4) != token_of(s) {
-                    list[4] = Some(s - 4);
-                }
-            } else if s >= 2 && s.is_multiple_of(2) && optional(s - 1) {
-                list[3] = Some(s - 2);
-            }
-            list
-        };
-        let score = |frame: usize, s: usize| -> f32 {
-            match token_of(s) {
-                GAP => emissions.gap(frame),
-                token => emissions.score(frame, token),
-            }
-        };
-        let mut back = vec![0u8; frames * states];
-        let mut previous = vec![NEG; states];
-        let mut current = vec![NEG; states];
-        // The path starts on the first blank or gap, or skips the gap.
-        for s in [0, 1, 2, 3] {
-            previous[s] = score(frame_from, s);
+        for &id in ids {
+            tokens.push(id);
+            word_of.push(Some(index));
         }
-        for t in 1..frames {
-            let frame = frame_from + t;
-            for s in 0..states {
-                let (mut best, mut which) = (NEG, 0u8);
-                for (slot, p) in predecessors(s).iter().enumerate() {
-                    if let Some(p) = *p
-                        && previous[p] > best
-                    {
-                        (best, which) = (previous[p], slot as u8);
-                    }
-                }
-                current[s] = if best <= NEG / 2.0 {
-                    NEG
-                } else {
-                    best + score(frame, s)
-                };
-                back[t * states + s] = which;
-            }
-            std::mem::swap(&mut previous, &mut current);
-        }
-        // It ends on the last blank or gap, or before the gap.
-        let mut s = (states - 4..states)
-            .max_by(|a, b| previous[*a].total_cmp(&previous[*b]))
-            .unwrap();
-        if previous[s] <= NEG / 2.0 {
-            return None;
-        }
-        let mut spans: Vec<Option<Span>> = vec![None; block.len()];
-        let mut sums = vec![(0f32, 0usize); block.len()];
-        for t in (0..frames).rev() {
-            if s % 2 == 1
-                && let Some(word) = word_of[s / 2]
-            {
-                let frame = frame_from + t;
-                let span = spans[word].get_or_insert((frame, frame + 1, None));
-                span.0 = frame;
-                sums[word].0 += score(frame, s);
-                sums[word].1 += 1;
-            }
-            if t > 0 {
-                s = predecessors(s)[back[t * states + s] as usize].unwrap_or(s);
-            }
-        }
-        for (span, (sum, count)) in spans.iter_mut().zip(sums) {
-            if let Some(span) = span {
-                span.2 = Some(sum / count.max(1) as f32);
-            }
-        }
-        Some(spans)
     }
+    if tokens.is_empty() {
+        return Some(vec![None; block.len()]);
+    }
+    tokens.push(GAP);
+    word_of.push(None);
+    // State 2k is a blank, 2k + 1 is token k.
+    let states = 2 * tokens.len() + 1;
+    let token_of = |s: usize| {
+        if s.is_multiple_of(2) {
+            blank
+        } else {
+            tokens[s / 2]
+        }
+    };
+    let optional = |s: usize| s % 2 == 1 && tokens[s / 2] == GAP;
+    let predecessors = |s: usize| -> [Option<usize>; 5] {
+        let mut list = [Some(s), s.checked_sub(1), None, None, None];
+        if s % 2 == 1 && s >= 2 && token_of(s - 2) != token_of(s) {
+            list[2] = Some(s - 2);
+        }
+        // Past an optional token: from the blank before it, and from the
+        // token before it when the two differ.
+        if s >= 3 && optional(s - 2) && s % 2 == 1 {
+            list[3] = Some(s - 3);
+            if s >= 4 && token_of(s - 4) != token_of(s) {
+                list[4] = Some(s - 4);
+            }
+        } else if s >= 2 && s.is_multiple_of(2) && optional(s - 1) {
+            list[3] = Some(s - 2);
+        }
+        list
+    };
+    let score = |frame: usize, s: usize| -> f32 {
+        match token_of(s) {
+            GAP => emissions.gap(frame),
+            token => emissions.score(frame, token),
+        }
+    };
+    let mut back = vec![0u8; frames * states];
+    let mut previous = vec![NEG; states];
+    let mut current = vec![NEG; states];
+    // The path starts on the first blank or gap, or skips the gap.
+    for s in [0, 1, 2, 3] {
+        previous[s] = score(frame_from, s);
+    }
+    for t in 1..frames {
+        let frame = frame_from + t;
+        for s in 0..states {
+            let (mut best, mut which) = (NEG, 0u8);
+            for (slot, p) in predecessors(s).iter().enumerate() {
+                if let Some(p) = *p
+                    && previous[p] > best
+                {
+                    (best, which) = (previous[p], slot as u8);
+                }
+            }
+            current[s] = if best <= NEG / 2.0 {
+                NEG
+            } else {
+                best + score(frame, s)
+            };
+            back[t * states + s] = which;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    // It ends on the last blank or gap, or before the gap.
+    let mut s = (states - 4..states)
+        .max_by(|a, b| previous[*a].total_cmp(&previous[*b]))
+        .unwrap();
+    if previous[s] <= NEG / 2.0 {
+        return None;
+    }
+    let mut spans: Vec<Option<Span>> = vec![None; block.len()];
+    let mut sums = vec![(0f32, 0usize); block.len()];
+    for t in (0..frames).rev() {
+        if s % 2 == 1
+            && let Some(word) = word_of[s / 2]
+        {
+            let frame = frame_from + t;
+            let span = spans[word].get_or_insert((frame, frame + 1, None));
+            span.0 = frame;
+            sums[word].0 += score(frame, s);
+            sums[word].1 += 1;
+        }
+        if t > 0 {
+            s = predecessors(s)[back[t * states + s] as usize].unwrap_or(s);
+        }
+    }
+    for (span, (sum, count)) in spans.iter_mut().zip(sums) {
+        if let Some(span) = span {
+            span.2 = Some(sum / count.max(1) as f32);
+        }
+    }
+    Some(spans)
 }
 
 /// How sure a run of agreeing words must be to anchor the audio: its words
@@ -744,7 +756,14 @@ fn anchors(
             .len();
         // A long run anchors its inner words, whose neighbours agree too; a
         // short one, allowed only at the looser levels, anchors them all.
-        if run.len() >= min_run && letters >= min_letters {
+        let longest = run
+            .iter()
+            .map(|&(i, _)| transcript[keyed[i]].0.chars().count())
+            .max()
+            .unwrap_or(0);
+        // Short words alone ("yes yes no") agree as well with the wrong
+        // occurrence; a run needs one word long enough to be unmistakable.
+        if run.len() >= min_run && letters >= min_letters && longest >= 4 {
             if run.len() >= 3 && distinct >= 2 {
                 for &(i, j) in &run[1..run.len() - 1] {
                     result.push((keyed[i], heard[j].1));
@@ -758,4 +777,88 @@ fn anchors(
         start = end;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Emissions over tokens 0 (blank), 1 and 2 where each frame is sure of
+    /// the token `script` gives it (`.` for the blank).
+    fn emissions(script: &str) -> Emissions {
+        let column: HashMap<u32, usize> = [(0, 0), (1, 1), (2, 2)].into_iter().collect();
+        let mut scores = Vec::new();
+        let mut best = Vec::new();
+        for c in script.chars() {
+            let token = match c {
+                'a' => 1,
+                'b' => 2,
+                _ => 0,
+            };
+            for column in 0..3 {
+                scores.push(if column == token { -0.01 } else { -8.0 });
+            }
+            best.push(token as u32);
+        }
+        let frames = script.len();
+        Emissions {
+            scores,
+            columns: 3,
+            column,
+            best,
+            gaps: vec![-9.0; frames],
+            frames,
+            samples: frames * FRAME,
+        }
+    }
+
+    fn word(text: &str, ids: &[u32]) -> (String, Vec<u32>) {
+        (text.to_string(), ids.to_vec())
+    }
+
+    #[test]
+    fn places_each_word_on_its_sound() {
+        let block = [word("a", &[1]), word("b", &[2])];
+        let spans = viterbi(0, &emissions("..aa...bb.."), &block, 0, 11).unwrap();
+        let frames: Vec<_> = spans.iter().map(|span| span.map(|s| (s.0, s.1))).collect();
+        assert_eq!(frames, vec![Some((2, 4)), Some((7, 9))]);
+        assert!(spans.iter().all(|span| span.unwrap().2.unwrap() > -1.0));
+    }
+
+    #[test]
+    fn a_word_with_no_sound_of_its_own_is_left_untimed() {
+        let block = [word("a", &[1]), word("…", &[]), word("b", &[2])];
+        let spans = viterbi(0, &emissions(".a..b."), &block, 0, 6).unwrap();
+        assert_eq!(spans[1], None);
+        assert_eq!(spans[0].map(|s| s.0), Some(1));
+        assert_eq!(spans[2].map(|s| s.0), Some(4));
+    }
+
+    fn heard(words: &[&str]) -> Vec<(String, usize, usize)> {
+        words
+            .iter()
+            .enumerate()
+            .map(|(index, text)| (text.to_string(), index * 10, index * 10 + 5))
+            .collect()
+    }
+
+    fn transcript(words: &[&str]) -> Vec<(String, Vec<u32>)> {
+        words
+            .iter()
+            .map(|text| (text.to_string(), vec![1; text.len()]))
+            .collect()
+    }
+
+    #[test]
+    fn a_long_agreeing_run_anchors_its_inner_words() {
+        let words = ["so", "the", "remote", "control", "needs", "buttons"];
+        let found = anchors(&transcript(&words), &heard(&words), ANCHOR_LEVELS[0]);
+        assert_eq!(found, vec![(1, 10), (2, 20), (3, 30), (4, 40)]);
+    }
+
+    #[test]
+    fn repeated_short_words_never_anchor_at_first() {
+        let words = ["yes", "yes", "yes", "no", "no"];
+        assert!(anchors(&transcript(&words), &heard(&words), ANCHOR_LEVELS[0]).is_empty());
+    }
 }
