@@ -39,9 +39,12 @@ timeout, configurable with `--lock-timeout-ms` and `--statement-timeout-ms`.
 These timeouts also cover the initial inspection. Timeouts/pacing apply only to
 this maintenance job, not other workloads.
 
-The job owns one session advisory lock unrelated to application locking. Each
-batch verifies the backend identity so a disconnected/reconnected client cannot
-continue after losing ownership. There is no new database role or schema object.
+The job owns one session advisory lock unrelated to application locking. Its
+dedicated connection disables automatic lifetime and idle rotation, so a long
+run or pacing interval does not deliberately discard that lock. Each batch still
+verifies the backend identity: genuine disconnection/reconnection exits instead
+of continuing after losing ownership. Resume from the checkpoint after inspecting
+that failure. There is no new database role or schema object.
 
 ## Correctness and costs
 
