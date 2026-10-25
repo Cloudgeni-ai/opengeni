@@ -2654,6 +2654,11 @@ earlier navigation at limits, never auto-pages forward; Jump to latest restores
 live tails. Provider-identity chunk normalization completes each message
 once, in order, with `phase` (see `docs/run-lifecycle.md`).
 Pre-transfer metadata planning caps batches at 256 events; full-payload pages default to 1 MiB.
+Large and explicitly batched reads discover candidate IDs first and size only
+the usable payload prefix plus its first overflow row. Their separate payload
+read, count/byte decisions, and continuation semantics remain unchanged. The
+recursive sizing step uses scoped keyed lookups, not repeated event-table scans;
+this avoids sizing hundreds of large outputs for a page that can hold only a few.
 
 Lazy rail/Find search retained user/completed-assistant text through the browser SDK,
 excluding DOM/tools/reasoning/unfinished deltas. Rail providers preserve dialog state

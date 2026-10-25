@@ -1626,6 +1626,14 @@ Interactive pages select bounded candidates, then size only the payload prefix
 needed for the page. They retain the exact full event and durable cursor; one
 oversized event is delivered alone. Explicit continuation determines completion;
 a short page never substitutes for that durable read result.
+Larger and explicitly batched full reads also size only the needed prefix,
+including its first byte-overflow row, while retaining their separate metadata
+and payload statements. Candidate discovery still examines the ordinary filter
+range; this does not make sparse filtering constant-time or provide a coherent
+multi-statement snapshot. Compare exact-base results and local timings with
+`bun scripts/operator/bench-event-metadata.ts <exact-base-commit>` using the
+disposable PostgreSQL test environment. Keyed prefix planning adds overhead for
+small payloads; the intended saving is avoiding unnecessary large-payload sizing.
 The downstream one-frame queue cannot substitute for this upstream read bound.
 
 Generic OpenAI-compatible model streams (the built-in OpenAI/Azure client and
