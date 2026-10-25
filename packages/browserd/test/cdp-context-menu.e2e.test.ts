@@ -8,7 +8,11 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
-import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
+import {
+  ACCESSIBILITY_CHEAP_REBUILD_NODES,
+  AgentBrowserDriver,
+  ManagedBrowserRunner,
+} from "../src";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
@@ -172,3 +176,75 @@ for (const [index, [variant, html]] of Object.entries(FIXTURES).entries()) {
     90_000,
   );
 }
+
+// On a page too large for routine rebuilds, the outline may miss the
+// late-slotted menu, but a locator for one of its items still finds it: the
+// look before "not found" rebuilds Chromium's tree.
+e2e(
+  "on a large page a late-slotted menu item is found before locator_not_found",
+  async () => {
+    const filler = Array.from(
+      { length: 80 },
+      (_, index) =>
+        `<section><h2>Note ${index}</h2><p>Body ${index} with <a href="#n${index}">a link</a>.</p><ul><li>One</li><li>Two</li><li>Three</li></ul></section>`,
+    ).join("");
+    const html = FIXTURES["late slotted shadow-root menu"]!.replace("</main>", `${filler}</main>`);
+    const directory = await mkdtemp("/tmp/ogb-context-menu-");
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    const run = async (
+      observation: BrowserObservation,
+      action: BrowserActionCommand["action"],
+    ): Promise<BrowserObservation> => {
+      const result = await controller.run({
+        protocolVersion: 1,
+        operationId: randomUUID(),
+        browserSessionId,
+        controllerGeneration,
+        targetId: observation.target.id,
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration!,
+        expectedFrameId: observation.frameId!,
+        actor: { kind: "human", subjectId: "context-menu-fixture" },
+        observationMode: "full",
+        action,
+      });
+      expect(result.error ?? null).toBeNull();
+      expect(result.state).toBe("completed");
+      return result.observation!;
+    };
+    try {
+      let observation = await driver.start(`data:text/html,${encodeURIComponent(html)}`);
+      expect(nodes(observation).length).toBeGreaterThan(ACCESSIBILITY_CHEAP_REBUILD_NODES / 4);
+      observation = await run(observation, {
+        type: "click",
+        button: "right",
+        locator: { kind: "role", role: "treeitem", name: "Invoices", exact: true },
+      });
+      observation = await run(observation, {
+        type: "click",
+        locator: { kind: "role", role: "menuitem", name: "Duplicate", exact: true },
+      });
+      expect(nodes(observation).find((node) => node.name?.startsWith("Last action:"))?.name).toBe(
+        "Last action: Duplicate Invoices",
+      );
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
