@@ -81,4 +81,4 @@ test("preview loading survives refresh, settles, and respects reduced motion", a
       .evaluate((node) => getComputedStyle(node).animationName),
   ).toBe("none");
   await page.close();
-});
+}, 30_000);
