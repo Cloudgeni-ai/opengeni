@@ -146,11 +146,17 @@ export class CuaComputerBackend implements ComputerBackend {
    * element (AXOpen) instead of pressing it. */
   private readonly openingTokens = new Map<string, Set<string>>();
   /** Per window, the web date and time fields of its latest reading: each
-   * field's parts by its CUA token, the field each part (or its date picker
-   * button) belongs to, and those picker buttons. */
+   * field's parts by its CUA token, the tokens of those parts in order, the
+   * field each part (or its date picker button) belongs to, and those picker
+   * buttons. */
   private readonly dateFieldTokens = new Map<
     string,
-    { fields: Map<string, DateSegment[]>; owners: Map<string, string>; pickers: Set<string> }
+    {
+      fields: Map<string, DateSegment[]>;
+      parts: Map<string, string[]>;
+      owners: Map<string, string>;
+      pickers: Set<string>;
+    }
   >();
   /** Per window, the element's own label behind each CUA token of its latest
    * reading: what CUA's lookup by name matches. An observed name can instead
@@ -1256,6 +1262,7 @@ export class CuaComputerBackend implements ComputerBackend {
     if (this.identity.platform === "macos") {
       const byIndex = new Map(state.elements.map((element) => [element.element_index, element]));
       const fields = new Map<string, DateSegment[]>();
+      const parts = new Map<string, string[]>();
       const owners = new Map<string, string>();
       const pickers = new Set<string>();
       const dateFieldByIndex = new Map<number, string>();
@@ -1263,10 +1270,10 @@ export class CuaComputerBackend implements ComputerBackend {
         const token = byIndex.get(index)!.element_token!;
         fields.set(token, field.segments);
         dateFieldByIndex.set(index, token);
-        for (const part of field.parts) {
-          const partToken = byIndex.get(part)?.element_token;
-          if (partToken) owners.set(partToken, token);
-        }
+        const partTokens = field.parts.map((part) => byIndex.get(part)?.element_token);
+        for (const partToken of partTokens) if (partToken) owners.set(partToken, token);
+        if (partTokens.every((partToken) => partToken !== undefined))
+          parts.set(token, partTokens as string[]);
       }
       // Chrome shows a "Show date picker" button inside the field. Its menu
       // would bring the browser in front, so it is refused, as a <select> is.
@@ -1280,7 +1287,7 @@ export class CuaComputerBackend implements ComputerBackend {
           pickers.add(element.element_token);
         }
       }
-      if (fields.size) this.dateFieldTokens.set(targetId, { fields, owners, pickers });
+      if (fields.size) this.dateFieldTokens.set(targetId, { fields, parts, owners, pickers });
       while (this.dateFieldTokens.size > 32)
         this.dateFieldTokens.delete(this.dateFieldTokens.keys().next().value!);
     }
@@ -1418,20 +1425,41 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /**
-   * The input that fills a web date or time field: press the field, which
-   * focuses it, then for each part move to it and type its digits. A browser
-   * moves on to the next part by itself after some parts and not after
-   * others (a month part of a month field, a year that may take six digits),
-   * so each part is reached from the first one: Left as many times as there
-   * are parts stops at the first, then Right to the part. Typing over a part
-   * replaces what it held, so a filled field is changed the same way.
+   * The input that fills a web date or time field: for each part, give it
+   * the keyboard focus through accessibility and type its digits. Pressing
+   * the field instead focuses no part while the browser is not the active
+   * app, so its keys are dropped; and a browser moves on to the next part by
+   * itself after some parts only, so each part is focused on its own. Typing
+   * over a part replaces what it held, so a filled field is changed the same
+   * way. Without a token for every part, the field is pressed and each part
+   * reached from the first one with Left and Right.
    */
   private dateFieldInput(
     args: Record<string, unknown>,
     token: string,
+    parts: readonly string[] | undefined,
     texts: readonly string[],
   ): Operation[] {
     const delivery_mode = this.inputDelivery();
+    const type = (text: string): Operation => ({
+      name: "type_text",
+      args: { ...args, text, delivery_mode },
+      fillsField: true,
+    });
+    if (parts?.length === texts.length)
+      return texts.flatMap((text, index): Operation[] => [
+        {
+          name: "click",
+          args: {
+            ...args,
+            element_token: parts[index]!,
+            action: "focus",
+            delivery_mode: "background",
+          },
+          fillsField: true,
+        },
+        type(text),
+      ]);
     const key = (name: "left" | "right"): Operation => ({
       name: "press_key",
       args: { ...args, key: name, modifiers: [], delivery_mode },
@@ -1448,7 +1476,7 @@ export class CuaComputerBackend implements ComputerBackend {
       if (texts.length > 1)
         for (let step = 0; step < texts.length - 1; step++) input.push(key("left"));
       for (let step = 0; step < index; step++) input.push(key("right"));
-      input.push({ name: "type_text", args: { ...args, text, delivery_mode }, fillsField: true });
+      input.push(type(text));
     });
     return input;
   }
@@ -1875,12 +1903,13 @@ export class CuaComputerBackend implements ComputerBackend {
             false,
           );
         const token = this.elementToken(command.targetId, node.ref);
-        const segments = this.dateFieldTokens.get(command.targetId)?.fields.get(token);
+        const known = this.dateFieldTokens.get(command.targetId);
+        const segments = known?.fields.get(token);
         if (segments) {
           const typing = dateFieldTyping(segments, String(action.value));
           if ("error" in typing)
             throw new ComputerBackendError("invalid_action", typing.error, false, false);
-          const input = this.dateFieldInput(args, token, typing.texts);
+          const input = this.dateFieldInput(args, token, known!.parts.get(token), typing.texts);
           input[0]!.expectDate = { ref: node.ref, value: String(action.value), segments };
           return input;
         }

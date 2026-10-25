@@ -3943,6 +3943,8 @@ describe("CUA desktop boundary", () => {
         partsAfterRun: string[] | null = null;
         /** Whether the field shows Chrome's "Show date picker" button. */
         picker = false;
+        /** Whether CUA gives the field's parts their own tokens. */
+        partTokens = true;
         async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
           const response = await super.callTool(name, argumentsJson);
           if (name === "run_steps" && !this.reply && !this.partsAfterRun)
@@ -3966,7 +3968,7 @@ describe("CUA desktop boundary", () => {
             },
             ...parts.map((part, index) => ({
               element_index: 2 + index,
-              element_token: `${s}:${2 + index}`,
+              ...(this.partTokens ? { element_token: `${s}:${2 + index}` } : {}),
               parent_index: 1,
               role: "AXIncrementor",
               label: `${part} Meeting`,
@@ -4001,7 +4003,7 @@ describe("CUA desktop boundary", () => {
       const field = (observation: ComputerBackendObservation) =>
         observation.roots.find((node) => node.role === "AXDateField")!;
 
-      test("set_value presses the field, then reaches and types each part, as one run_steps", async () => {
+      test("set_value focuses and types each part, as one run_steps", async () => {
         const fixture = new DateFixture();
         const { backend, observation } = await open(fixture);
         try {
@@ -4015,11 +4017,47 @@ describe("CUA desktop boundary", () => {
           expect(mutations(fixture)).toHaveLength(0);
           const steps = calls[0]!.args.steps as { tool: string; args: Record<string, unknown> }[];
           const s = observation.observationId.split(":").pop();
+          // Pressing the field focuses no part while Chrome is in the
+          // background, so each part is focused through accessibility.
+          expect(
+            steps.map((step) =>
+              step.tool === "type_text"
+                ? String(step.args.text)
+                : `${step.tool}:${String(step.args.action)}:${String(step.args.element_token)}:${String(step.args.delivery_mode)}`,
+            ),
+          ).toEqual([
+            `click:focus:${s}:2:background`,
+            "07",
+            `click:focus:${s}:3:background`,
+            "03",
+            `click:focus:${s}:4:background`,
+            "2027",
+            `click:focus:${s}:5:background`,
+            "14",
+            `click:focus:${s}:6:background`,
+            "05",
+          ]);
+          expect(steps.some((step) => step.tool === "press_key")).toBe(false);
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("parts without tokens are reached from the pressed field with Left and Right", async () => {
+        const fixture = new DateFixture();
+        fixture.partTokens = false;
+        const { backend, observation } = await open(fixture);
+        try {
+          await backend.dispatch(setDate(observation, field(observation).ref, "2027-03-07T14:05"));
+          const steps = fixture.calls.find((call) => call.name === "run_steps")!.args.steps as {
+            tool: string;
+            args: Record<string, unknown>;
+          }[];
+          const s = observation.observationId.split(":").pop();
           expect(steps[0]).toMatchObject({
             tool: "click",
             args: { element_token: `${s}:1`, delivery_mode: "background" },
           });
-          // Each part is reached from the first: four Lefts, then Rights.
           const compact = steps
             .slice(1)
             .map((step) =>
@@ -4210,22 +4248,23 @@ describe("CUA desktop boundary", () => {
           const one = setDate(observation, field(observation).ref, "2027-03-07T14:05").action;
           const many: ComputerBackendActionCommand = {
             ...command(observation),
-            action: { type: "batch", actions: [one, one, one] as never },
+            action: { type: "batch", actions: Array.from({ length: 7 }, () => one) as never },
           };
           await backend.dispatch(many);
           const calls = fixture.calls.filter((call) => call.name === "run_steps");
-          expect(calls.map((call) => (call.args.steps as unknown[]).length)).toEqual([64, 44]);
+          // Ten steps for each action, at most 64 for each run_steps call.
+          expect(calls.map((call) => (call.args.steps as unknown[]).length)).toEqual([64, 6]);
           // Stopped inside the second action's input: it ran in part.
           const stopping = new DateFixture();
           stopping.reply = {
             ok: true,
             total: 64,
-            executed: 41,
-            failed_step: 40,
+            executed: 16,
+            failed_step: 15,
             steps: [
-              ...Array.from({ length: 40 }, (_, index) => ({ index, ok: true, message: "ok" })),
+              ...Array.from({ length: 15 }, (_, index) => ({ index, ok: true, message: "ok" })),
               {
-                index: 40,
+                index: 15,
                 ok: false,
                 phase: "action",
                 code: "stale_element_token",
