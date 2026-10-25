@@ -8,6 +8,7 @@ export async function reconcileRetainedStop(
   controlSecret: string,
   api: (url: string) => Promise<any>,
   get: (path: string) => Promise<any>,
+  scope: { project: string; region: string },
 ) {
   const w = original?.drainWitness;
   if (
@@ -30,14 +31,21 @@ export async function reconcileRetainedStop(
     original.stateBefore !== original.stateAfter
   )
     throw Error("No exact retained drain; no STOP replay");
-  if (!/^[a-z0-9-]+$/.test(service) || !/^[a-z0-9-]+$/.test(controlSecret))
+  if (
+    typeof scope.project !== "string" ||
+    typeof scope.region !== "string" ||
+    !/^[a-z0-9-]+$/.test(service) ||
+    !/^[a-z0-9-]+$/.test(controlSecret) ||
+    !/^[a-z0-9-]+$/.test(scope.project) ||
+    !/^[a-z0-9-]+$/.test(scope.region)
+  )
     throw Error("Invalid pinned control scope");
   async function current() {
     const live = await api(
-      `https://run.googleapis.com/v2/projects/cloudgeni-gecko/locations/europe-west1/services/${service}`,
+      `https://run.googleapis.com/v2/projects/${scope.project}/locations/${scope.region}/services/${service}`,
     );
     const secret = await api(
-      `https://secretmanager.googleapis.com/v1/projects/511938371043/secrets/${controlSecret}/versions/latest:access`,
+      `https://secretmanager.googleapis.com/v1/projects/${scope.project}/secrets/${controlSecret}/versions/latest:access`,
     );
     const control = JSON.parse(Buffer.from(secret.payload.data, "base64").toString());
     if (

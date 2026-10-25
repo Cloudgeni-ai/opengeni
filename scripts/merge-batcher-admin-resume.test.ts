@@ -7,6 +7,7 @@ import { reconcileRetainedStop } from "../docs/merge-batcher-admin/resume-stop";
 import { verifyStop } from "../docs/merge-batcher-admin/off";
 const stateSha = "a".repeat(40),
   mainSha = "b".repeat(40);
+const scope = { project: "fixture-project", region: "fixture-region" };
 const obsolete = {
   kind: "rerun",
   status: "blocked",
@@ -69,11 +70,15 @@ function fixture() {
     effects: { old: obsolete },
   };
   const get = async (path: string) =>
-    path.startsWith("contents/")
+    path.startsWith("git/blobs/")
       ? { encoding: "base64", content: Buffer.from(JSON.stringify(state)).toString("base64") }
-      : path.includes("matching-refs")
-        ? []
-        : { object: { sha: path.endsWith("main") ? mainSha : stateSha } };
+      : path.startsWith("git/commits/")
+        ? { tree: { sha: "d".repeat(40) } }
+        : path.startsWith("git/trees/")
+          ? { tree: [{ path: "state.json", type: "blob", sha: "c".repeat(40) }] }
+          : path.includes("matching-refs")
+            ? []
+            : { object: { sha: path.endsWith("main") ? mainSha : stateSha } };
   const api = async (url: string) =>
     url.includes("secretmanager")
       ? {
@@ -87,24 +92,28 @@ function fixture() {
       : live;
   return { target, witness, stop, receipt, live, state, get, api };
 }
-test("exact obsolete pre-submit retry is settled; uncertain posts never are", () => {
-  expect(settledEffect(obsolete)).toBe(true);
-  for (const patch of [
-    { attempts: 1 },
-    { attempts: undefined },
-    { lastError: "timeout" },
-    { kind: "comment" },
-    { status: "uncertain" },
-    { status: "pending" },
-  ])
-    expect(settledEffect({ ...obsolete, ...patch })).toBe(false);
-  expect(settledEffect({ kind: "disable-auto-merge", status: "done" })).toBe(true);
+test("REST-only uncertainty is retained but never blocks Manual; ref effects still block", () => {
+  for (const kind of ["rerun", "comment", "followup", "disable-auto-merge"])
+    for (const status of ["pending", "blocked", "uncertain", "done"])
+      for (const attempts of [0, 1])
+        expect(settledEffect({ kind, status, attempts, checks: 0 })).toBe(true);
+  for (const kind of ["publish", "land", "record", "unknown"])
+    expect(settledEffect({ kind, status: "pending", attempts: 0 })).toBe(false);
 });
-test("stopped recovery accepts exact unsent retries but preserves ambiguous attempts", async () => {
+test("stopped recovery leaves REST effects unchanged and refuses possible ref writes", async () => {
   const f = fixture();
   expect((await reconcileStopped("active", stateSha, f.get)).effects).toBe(1);
   f.state.effects.old = { ...obsolete, attempts: 1 };
+  const original = JSON.stringify(f.state);
+  expect((await reconcileStopped("active", stateSha, f.get)).effects).toBe(1);
+  expect(JSON.stringify(f.state)).toBe(original);
+  f.state.effects.old = { ...obsolete, kind: "publish" };
   await expect(reconcileStopped("active", stateSha, f.get)).rejects.toThrow("Unresolved");
+});
+test("blob reads support state larger than the Contents API inline limit", async () => {
+  const f = fixture();
+  Object.assign(f.state, { padding: "x".repeat(1_100_000) });
+  expect((await reconcileStopped("active", stateSha, f.get)).stateSha).toBe(stateSha);
 });
 test("proof-only continuation retains unknown original and verifies real drain", async () => {
   const f = fixture(),
@@ -117,6 +126,7 @@ test("proof-only continuation retains unknown original and verifies real drain",
     "control",
     f.api,
     f.get,
+    scope,
   );
   expect(() => verifyStop(out.result, out.receipt, f.target)).not.toThrow();
   expect(JSON.stringify(f.stop)).toBe(original);
@@ -131,13 +141,13 @@ test("proof-only continuation refuses live writer, generation changes and tagged
     const f = fixture();
     Object.assign(f.live, patch);
     await expect(
-      reconcileRetainedStop(f.stop, f.receipt, f.target, "batcher", "control", f.api, f.get),
+      reconcileRetainedStop(f.stop, f.receipt, f.target, "batcher", "control", f.api, f.get, scope),
     ).rejects.toThrow();
   }
   const f = fixture();
   f.stop.writer.writerActive = true;
   await expect(
-    reconcileRetainedStop(f.stop, f.receipt, f.target, "batcher", "control", f.api, f.get),
+    reconcileRetainedStop(f.stop, f.receipt, f.target, "batcher", "control", f.api, f.get, scope),
   ).rejects.toThrow();
 });
 test("changed control or moving refs cannot authorize restoration", async () => {
@@ -154,7 +164,7 @@ test("changed control or moving refs cannot authorize restoration", async () => 
         }
       : f.live;
   await expect(
-    reconcileRetainedStop(f.stop, f.receipt, f.target, "batcher", "control", api, f.get),
+    reconcileRetainedStop(f.stop, f.receipt, f.target, "batcher", "control", api, f.get, scope),
   ).rejects.toThrow();
   let reads = 0;
   const get = async (path: string) =>
@@ -162,6 +172,6 @@ test("changed control or moving refs cannot authorize restoration", async () => 
       ? { object: { sha: ++reads === 1 ? mainSha : "d".repeat(40) } }
       : f.get(path);
   await expect(
-    reconcileRetainedStop(f.stop, f.receipt, f.target, "batcher", "control", f.api, get),
+    reconcileRetainedStop(f.stop, f.receipt, f.target, "batcher", "control", f.api, get, scope),
   ).rejects.toThrow("snapshot changed");
 });

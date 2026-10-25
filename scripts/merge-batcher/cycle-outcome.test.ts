@@ -5,7 +5,6 @@ import {
   observeDurableUncertainty,
   writeAttempted,
   writeResolved,
-  LeasePreparationExpired,
 } from "./cycle-outcome";
 import { ReadUnavailable } from "./read-retry";
 
@@ -61,16 +60,4 @@ test("unclassified errors never become safe read completions", async () => {
     }),
   ).rejects.toBe(error);
   expect(observationDeferred(error)).toBe(false);
-});
-test("pre-submit lease expiry defers only without unresolved writes", async () => {
-  for (const unknown of [false, true]) {
-    const error = new LeasePreparationExpired("expired locally");
-    await expect(
-      observeCycle(async () => {
-        if (unknown) writeAttempted("earlier-write");
-        throw error;
-      }),
-    ).rejects.toBe(error);
-    expect(observationDeferred(error)).toBe(!unknown);
-  }
 });

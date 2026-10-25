@@ -49,6 +49,7 @@
       reissue=true; action=${action#reissue-} ;;
   esac
   case "$action" in
+    read-json) batcher_read_json "${3:?Read path required}"; exit ;;
     snapshot) batcher_snapshot; exit ;;
     identity) batcher_identity; exit ;;
     check) verify_phase "${3:?Phase required}"; exit ;;

@@ -96,6 +96,11 @@ test("consumed claim may finish proven reverse stages without another OFF", asyn
 });
 test("unproven resumed drain remains held without replay", async () => {
   const { ports, calls } = fixture();
+  const events: unknown[] = [];
+  ports.record = async (event) => {
+    events.push(event);
+    calls.push(event.outcome);
+  };
   ports.off = async () => {
     calls.push("off");
     throw Error("unknown");
@@ -106,6 +111,11 @@ test("unproven resumed drain remains held without replay", async () => {
   expect(await tick(ports)).toBe("held");
   expect(await tick(ports)).toBe("held");
   expect(calls.filter((x) => x === "off")).toHaveLength(1);
+  expect(events).toContainEqual({
+    outcome: "held",
+    reason: "stopped",
+    recoveryError: "no current matching drain",
+  });
 });
 test("binding or indeterminate claim failure never reaches OFF", async () => {
   for (const target of ["verifyBinding", "claim"] as const) {

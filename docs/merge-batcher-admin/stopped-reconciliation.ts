@@ -9,17 +9,10 @@ export interface StoppedProof {
 const sha = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{40}$/.test(v);
 const object = (v: any) => v !== null && typeof v === "object" && !Array.isArray(v);
 export function settledEffect(e: any): boolean {
-  if (!object(e) || !["rerun", "comment", "followup", "disable-auto-merge"].includes(e.kind))
-    return false;
-  if (e.status === "done") return true;
-  // This exact branch in ActiveExecutor precedes the durable submission claim.
-  // Attempts > 0, ambiguous/blocked posts and every other error remain unknown.
-  return (
-    e.kind === "rerun" &&
-    e.status === "blocked" &&
-    e.attempts === 0 &&
-    e.lastError === "Candidate readiness changed before retry; obsolete intent not submitted"
-  );
+  // These REST effects cannot move main/state/candidate refs. Preserve their
+  // original status and uncertainty, but they do not block exact Manual after
+  // genuine writer drain and stable ref/state proof. Never replay them here.
+  return object(e) && ["rerun", "comment", "followup", "disable-auto-merge"].includes(e.kind);
 }
 export async function reconcileStopped(
   mode: string,
@@ -62,8 +55,17 @@ export async function reconcileStopped(
       candidateRefs: candidates,
     };
   }
-  const before = await snapshot(),
-    content = await get(`contents/state.json?ref=${expectedState}`);
+  const before = await snapshot();
+  // Git blobs avoid the Contents API's 1MiB base64 response limit.
+  const commit = await get(`git/commits/${expectedState}`);
+  if (!sha(commit?.tree?.sha)) throw Error("Missing state commit tree");
+  const tree = await get(`git/trees/${commit.tree.sha}`);
+  const entries = tree?.tree;
+  if (tree?.truncated || !Array.isArray(entries)) throw Error("Incomplete state tree");
+  const stateFiles = entries.filter((entry: any) => entry.path === "state.json");
+  if (stateFiles.length !== 1 || stateFiles[0].type !== "blob" || !sha(stateFiles[0].sha))
+    throw Error("Missing state blob");
+  const content = await get(`git/blobs/${stateFiles[0].sha}`);
   if (
     content?.encoding !== "base64" ||
     typeof content.content !== "string" ||

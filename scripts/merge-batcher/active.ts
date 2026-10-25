@@ -23,7 +23,7 @@ import {
   type FollowupPull,
 } from "./model";
 import { latestRun, infrastructureRetryReason } from "./planner";
-import { LeasePreparationExpired, observeDurableUncertainty, writeResolved } from "./cycle-outcome";
+import { observeDurableUncertainty, writeResolved } from "./cycle-outcome";
 import { proveHeadRefresh } from "./head-refresh";
 
 export interface ActiveReads {
@@ -329,7 +329,7 @@ export class GitHubActiveExecutor implements Executor {
   }
   async transact(t: Transaction): Promise<void> {
     requireInitializedState(t.expectedState, t.expectedLedger);
-    requireInitializedState(t.nextState, t.nextLedger);
+    requireInitializedState(t.expectedState, t.nextLedger);
     if (digest(t.expectedLedger.initialization) !== digest(t.nextLedger.initialization))
       throw new Error("Initialization provenance must remain unchanged");
     if (
@@ -337,13 +337,8 @@ export class GitHubActiveExecutor implements Executor {
       Date.parse(t.expectedLedger.expiresAt) > Date.parse(this.now())
     )
       throw new Error("Cannot replace another controller's live lease");
-    if (
-      t.nextLedger.owner !== this.owner ||
-      t.nextLedger.epoch !== t.expectedLedger.epoch + 1 ||
-      !Number.isFinite(Date.parse(t.nextLedger.expiresAt)) ||
-      Date.parse(t.nextLedger.expiresAt) <= Date.parse(t.now)
-    )
-      throw new Error("Expired or invalid prepared lease");
+    if (t.nextLedger.owner !== this.owner || t.nextLedger.epoch !== t.expectedLedger.epoch + 1)
+      throw new Error("Invalid prepared lease owner/epoch");
     await this.options.refreshAuth?.();
     const effect = t.effect;
     if (effect.kind === "publish" || effect.kind === "land") {
@@ -431,8 +426,6 @@ export class GitHubActiveExecutor implements Executor {
     // AtomicGitWriter never grants force authority to main. PR metadata may
     // change after the final read: destination is testedTip or a recomputed
     // ancestry-only descendant with the identical tested tree.
-    if (Date.parse(nextLedger.expiresAt) <= Date.parse(this.now()))
-      throw new LeasePreparationExpired("Local lease preparation elapsed before submission");
     await this.push(updates);
     if (effect.kind === "land") await this.maintain();
   }

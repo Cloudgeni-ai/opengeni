@@ -1,9 +1,8 @@
 /** Operator-only STOP + exact reverse stages. Importing this file does nothing. */
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rmdir, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rmdir, writeFile, rm, rename } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { validatePlan, verify, type Phase, type Plan, type RuleSet, type Snapshot } from "./bundle";
-import { reconcileRetainedStop } from "./resume-stop";
 
 const controlFiles = [
   "control.ts",
@@ -394,6 +393,8 @@ export async function off(
       const original = await json<Stop>(join(admin, retained.name, "stop.stdout"));
       const cloud = await import(join(contract.directory, "cloud-auth.ts"));
       const config = await import(join(contract.directory, "service-config.ts"));
+      const { reconcileRetainedStop } = await import("./resume-stop");
+      let reads = 0;
       const supplemental = await reconcileRetainedStop(
         original,
         receipt,
@@ -401,19 +402,15 @@ export async function off(
         config.serviceId,
         config.controlSecret,
         cloud.api,
-        async (path) => {
-          const response = await fetch(
-            `https://api.github.com/repos/Cloudgeni-ai/opengeni/${path}`,
-            {
-              signal: AbortSignal.timeout(15000),
-              headers: { Accept: "application/vnd.github+json" },
-            },
-          );
-          if (!response.ok) throw Error("Read-only STOP reconciliation unavailable");
-          const text = await response.text();
-          if (text.length > 22000000) throw Error("Reconciliation response exceeds bound");
-          return JSON.parse(text);
-        },
+        async (path) =>
+          JSON.parse(
+            await command(
+              ["bash", join(code, "stage.sh"), admin, "read-json", path],
+              attempt,
+              `reconciliation-${++reads}`,
+            ),
+          ),
+        { project: cloud.project, region: cloud.region },
       );
       await writeFile(join(attempt, "stop-supplement.json"), JSON.stringify(supplemental), {
         flag: "wx",
@@ -422,18 +419,15 @@ export async function off(
       result = supplemental.result;
       receipt = supplemental.receipt;
     } else {
-      // Retain one STOP identity for proof-only continuation. Never replace it.
-      try {
-        await writeFile(pointer, JSON.stringify({ name: attempt.slice(admin.length + 1) }), {
-          flag: "wx",
-          mode: 0o600,
-        });
-      } catch (error) {
-        // Explicit operator OFF retains its established reentrant semantics.
-        // Watchdog repeats never enter this branch: they use resumeOnly, and
-        // the first original STOP pointer remains immutable.
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      }
+      // The lock serializes writers. Point to this attempt atomically BEFORE
+      // STOP, so later activations never reconcile an older drain. Every old
+      // attempt directory and its original outcome remain unchanged.
+      const nextPointer = join(attempt, "stop-attempt-pointer.json");
+      await writeFile(nextPointer, JSON.stringify({ name: attempt.slice(admin.length + 1) }), {
+        flag: "wx",
+        mode: 0o600,
+      });
+      await rename(nextPointer, pointer);
       result = JSON.parse(
         await command(
           [process.execPath, join(contract.directory, "control.ts"), "stop"],

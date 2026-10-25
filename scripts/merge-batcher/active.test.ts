@@ -33,6 +33,28 @@ import {
 
 const NOW = "2026-10-21T12:00:00.000Z";
 const roots: string[] = [];
+test("a build slower than the lease before transact still publishes with a fresh lease", async () => {
+  const f = await fixture();
+  const build = f.git.build.bind(f.git);
+  let builds = 0;
+  f.git.build = async (...args) => {
+    const result = await build(...args);
+    builds++;
+    f.advance(f.cfg.leaseSeconds + 1);
+    return result;
+  };
+  const manifest = await f.publish(false);
+  expect((await f.state()).ledger.expiresAt).toBe(
+    new Date(
+      Date.parse(NOW) + (builds * (f.cfg.leaseSeconds + 1) + f.cfg.leaseSeconds) * 1000,
+    ).toISOString(),
+  );
+  expect(
+    (await f.git.remoteRefs(f.origin.dir)).get(
+      `refs/heads/${f.cfg.branchPrefix}${manifest.batchId}`,
+    ),
+  ).toBe(manifest.tipSha);
+});
 test("slow final provider reads acquire a fresh lease, not an observation-aged lease", async () => {
   const f = await fixture();
   let reads = 0;
@@ -899,12 +921,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     ledger.owner = "controller-a";
     ledger.epoch++;
     ledger.expiresAt = "2026-10-21T13:00:00.000Z";
-    const nextState = await f.git.stateCommit(ledger, observation.stateSha, NOW);
     const tx = {
       expectedState: observation.stateSha,
       expectedLedger: observation.ledger,
       nextLedger: ledger,
-      nextState,
       now: NOW,
       bindings: m.pulls,
       effect: { kind: "land" as const, manifest: m, expectedBase: f.base },

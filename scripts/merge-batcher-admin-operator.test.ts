@@ -196,7 +196,15 @@ if(method !== "GET") {
   if(process.env.FAIL_WRITE === "after") process.exit(1);
   output(result); process.exit(0);
 }
-if(endpoint === "/app") output({id:501,owner:{login:"Cloudgeni-ai"},...JSON.parse(process.env.APP_OVERRIDE || "{}")});
+if(endpoint.startsWith('/repos/Cloudgeni-ai/opengeni/git/')) {
+ if(process.env.GH_TOKEN!=='fixture-admin'||!process.env.FIXTURE_LEDGER)process.exit(3);
+ if(endpoint.includes('/commits/')) output({tree:{sha:'d'.repeat(40)}});
+ else if(endpoint.includes('/trees/')) output({tree:[{path:'state.json',type:'blob',sha:'c'.repeat(40)}]});
+ else if(endpoint.includes('/blobs/')) output({encoding:'base64',content:Buffer.from(process.env.FIXTURE_LEDGER).toString('base64')});
+ else if(endpoint.includes('matching-refs')) output([]);
+ else output({object:{sha:'a'.repeat(40)}});
+}
+else if(endpoint === "/app") output({id:501,owner:{login:"Cloudgeni-ai"},...JSON.parse(process.env.APP_OVERRIDE || "{}")});
 else if(endpoint === "/app/installations/999") output({id:999,app_id:501,account:{login:"Cloudgeni-ai"},repository_selection:"selected",suspended_at:null,permissions:{...JSON.parse(process.env.FIXTURE_PERMISSIONS),metadata:"read"},...JSON.parse(process.env.INSTALLATION_OVERRIDE || "{}")});
 else if(endpoint === "/installation/repositories") output({repositories:[{full_name:"Cloudgeni-ai/opengeni"},...JSON.parse(process.env.EXTRA_REPOS || "[]")]});
 else if(endpoint === "graphql") output(process.env.FAIL_CLASSIC ? {errors:[{message:"inaccessible"}]} : {data:{repository:{branchProtectionRules:state.classic}}});
@@ -973,12 +981,13 @@ test("one-command OFF stops first, reconciles ambiguous admit, restores exact or
   }
 });
 
-test("watchdog continuation restores exact Manual after a held STOP without replaying STOP", async () => {
+test("two activations in one plan retain the current STOP and resume without replay", async () => {
   const h = await harness(true);
   try {
     const original = JSON.parse(await readFile(h.state, "utf8"));
     for (const action of ["create-guard", "create-namespace", "admit"])
       expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const applied = await readFile(h.state, "utf8");
     const operator = await offHarness(h);
     const witness = {
       uid: deployment.uid,
@@ -1008,7 +1017,7 @@ test("watchdog continuation restores exact Manual after a held STOP without repl
     await writeFile(join(operator.runtime, "deployment-receipt.json"), JSON.stringify(receipt));
     await writeFile(
       join(operator.runtime, "cloud-auth.ts"),
-      `export async function api(url){return url.includes('secretmanager')?${JSON.stringify(secret)}:${JSON.stringify(live)}}`,
+      `export const project='fixture-project',region='fixture-region'; export async function api(url){return url.includes('secretmanager')?${JSON.stringify(secret)}:${JSON.stringify(live)}}`,
     );
     await writeFile(
       join(operator.runtime, "service-config.ts"),
@@ -1045,29 +1054,64 @@ test("watchdog continuation restores exact Manual after a held STOP without repl
         },
       },
     };
-    const content = {
-      encoding: "base64",
-      content: Buffer.from(JSON.stringify(ledger)).toString("base64"),
-    };
-    const script = `import {resumeOff} from ${JSON.stringify(join(directory, "off.ts"))}; globalThis.fetch=async(url)=>Response.json(String(url).includes('contents/')?${JSON.stringify(content)}:String(url).includes('matching-refs')?[]:{object:{sha:'${"a".repeat(40)}'}}); await resumeOff(process.argv[1],'--apply-after-go');`;
-    const child = Bun.spawn(["bun", "-e", script, h.root], {
-      env: h.fixtureEnv,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [exit, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stderr).text(),
-      new Response(child.stdout).text(),
-    ]);
-    expect(stderr).toBe("");
-    expect(exit).toBe(0);
+    const script = `import {resumeOff} from ${JSON.stringify(join(directory, "off.ts"))}; await resumeOff(process.argv[1],'--apply-after-go');`;
+    async function resume() {
+      const child = Bun.spawn(["bun", "-e", script, h.root], {
+        env: { ...h.fixtureEnv, FIXTURE_LEDGER: JSON.stringify(ledger) },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [exit, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+        new Response(child.stdout).text(),
+      ]);
+      expect(stderr).toBe("");
+      expect(exit).toBe(0);
+    }
+    await resume();
     expect((await h.events()).filter((e) => e.method === "STOP")).toHaveLength(1);
     expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
     const pointer = JSON.parse(await readFile(join(h.root, "plan/off-stop-attempt.json"), "utf8"));
     expect(
       JSON.parse(await readFile(join(h.root, pointer.name, "stop.stdout"), "utf8")).outcome,
     ).toBe("unknown");
+    // Simulate a second activation with the SAME plan directory and a new
+    // actual control/generation. Retain all first-attempt receipts unchanged.
+    witness.generation = "68";
+    witness.instance = "second-exited";
+    witness.controlGeneration = "stop-74643aaa-b111-4333-8abc-112233445566";
+    live.generation = "68";
+    live.observedGeneration = "68";
+    held.writer.instance = witness.instance;
+    held.writer.control.generation = witness.controlGeneration;
+    secret.payload.data = Buffer.from(
+      JSON.stringify({ state: "stopped", generation: witness.controlGeneration }),
+    ).toString("base64");
+    await writeFile(h.state, applied);
+    await writeFile(join(operator.runtime, "deployment-receipt.json"), JSON.stringify(receipt));
+    await writeFile(
+      join(operator.runtime, "cloud-auth.ts"),
+      `export const project='fixture-project',region='fixture-region'; export async function api(url){return url.includes('secretmanager')?${JSON.stringify(secret)}:${JSON.stringify(live)}}`,
+    );
+    await rm(join(h.root, "stop-contract.json"));
+    await bindStop(h.root, operator.runtime);
+    expect(
+      (await operator.run({ STOP_FAILURE: "1", STOP_OVERRIDE: JSON.stringify(held) })).code,
+    ).not.toBe(0);
+    const second = JSON.parse(await readFile(join(h.root, "plan/off-stop-attempt.json"), "utf8"));
+    expect(second.name).not.toBe(pointer.name);
+    await resume();
+    expect((await h.events()).filter((e) => e.method === "STOP")).toHaveLength(2);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+    expect(
+      JSON.parse(await readFile(join(h.root, pointer.name, "stop.stdout"), "utf8")).drainWitness
+        .generation,
+    ).toBe("66");
+    expect(
+      JSON.parse(await readFile(join(h.root, second.name, "stop.stdout"), "utf8")).drainWitness
+        .generation,
+    ).toBe("68");
   } finally {
     await h.close();
   }

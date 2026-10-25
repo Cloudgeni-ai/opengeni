@@ -5,10 +5,8 @@ import { ReadUnavailable } from "./read-retry";
 // durable effect journal or the supervisor's prior unknown-outcome checkpoint.
 const cycles = new AsyncLocalStorage<{ writes: Set<string>; durable: Set<string> }>();
 const deferred = new WeakSet<object>();
-/** Local preparation elapsed before any transaction submission; observe again. */
-export class LeasePreparationExpired extends Error {}
 function deferrable(error: unknown): error is Error {
-  return error instanceof ReadUnavailable || error instanceof LeasePreparationExpired;
+  return error instanceof ReadUnavailable;
 }
 export const OBSERVATION_DEFERRED_EXIT = 75;
 export function writeAttempted(key: string): void {
