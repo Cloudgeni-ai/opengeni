@@ -565,6 +565,42 @@ async fn ready_sandboxes_go_with_a_stale_template_and_the_create_boots() {
     lab.assert_clean();
 }
 
+/// A fill that finds the image changed under its template has not failed:
+/// the template is rebuilt, and the pool fills from the new one as soon as
+/// it is ready, not after a failed fill's wait (ten seconds, in which every
+/// create would boot cold).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fill_that_finds_its_template_stale_fills_from_the_new_one_at_once() {
+    let lab = ready_lab(Lab::root(), Arc::default(), 2).await;
+    wait_filled(&lab, 2).await;
+    let stale = ready_dirs(&lab);
+
+    // The image changes and nothing has looked yet; a ready sandbox's VM
+    // dies, so its replacement copies the old template and finds it stale.
+    std::fs::write(lab.root.join("base.img"), "base two").unwrap();
+    lab.world.crash(&stale[0]);
+    let started = tokio::time::Instant::now();
+    lab.wait_until("filled from the new template", |status| {
+        pool(status) == (2, 0, 2)
+            && directories_of(status, &lab)
+                .iter()
+                .all(|dir| !stale.contains(dir))
+    })
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the pool waited {:?} to fill from the new template",
+        started.elapsed()
+    );
+    lab.create(id(1), NEVER).await;
+    assert_eq!(
+        lab.run(id(1), &["sandbox?", "disk"]).await,
+        [id(1).to_string(), "base two".to_owned()],
+        "claimed from the new template"
+    );
+    lab.assert_clean();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_removes_ready_sandboxes_and_keeps_claimed_ones() {
     let lab = ready_lab(Lab::root(), Arc::default(), 3).await;

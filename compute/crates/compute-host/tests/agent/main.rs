@@ -1115,11 +1115,13 @@ impl Lab {
 
     async fn wait_until(&self, what: &str, done: impl Fn(&HostStatus) -> bool) -> HostStatus {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last = None;
         loop {
-            // A status that never comes times out too.
-            let status = tokio::time::timeout_at(deadline, self.status())
-                .await
-                .unwrap_or_else(|_| panic!("timed out waiting for {what}: no status"));
+            // A status that never comes times out too, showing the last
+            // one that came.
+            let Ok(status) = tokio::time::timeout_at(deadline, self.status()).await else {
+                panic!("timed out waiting for {what}; the last status: {last:#?}");
+            };
             if done(&status) {
                 return status;
             }
@@ -1127,6 +1129,7 @@ impl Lab {
                 Instant::now() < deadline,
                 "timed out waiting for {what}: {status:#?}"
             );
+            last = Some(status);
             sleep(Duration::from_millis(5)).await;
         }
     }
