@@ -415,6 +415,52 @@ describe("structured human-input history", () => {
     }
   });
 
+  test("an answered question renders its Markdown prompt like a chat reply", async () => {
+    timelineSequence = 0;
+    const fileId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    const r = await renderComponent(
+      <MessageTimeline
+        resolveLink={(target) =>
+          target.kind === "file" ? { href: `/files/${target.fileId}` } : null
+        }
+        events={[
+          timelineEvent("session.humanInput.requested", {
+            request: {
+              id: "request-markdown",
+              questions: [
+                {
+                  id: "dish",
+                  kind: "text",
+                  prompt: `Is the **soup** in [the cookbook](artifact:${fileId}) or \`notes.md\`? [x](javascript:alert(1))`,
+                  options: [],
+                },
+              ],
+            },
+          }),
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-markdown",
+            response: { outcome: "answered", answers: [{ questionId: "dish", values: ["ok"] }] },
+          }),
+          timelineEvent("turn.completed", {}),
+        ]}
+      />,
+    );
+    await flush();
+    try {
+      const history = r.container.querySelector('[data-human-input-history="request-markdown"]');
+      expect(history?.querySelector("strong")?.textContent).toBe("soup");
+      expect(history?.querySelector("code")?.textContent).toBe("notes.md");
+      const anchors = [...(history?.querySelectorAll<HTMLAnchorElement>("a") ?? [])];
+      expect(anchors.map((anchor) => [anchor.textContent, anchor.getAttribute("href")])).toEqual([
+        ["the cookbook", `/files/${fileId}`],
+      ]);
+      expect(history?.textContent).not.toContain("](");
+      expect(history?.textContent).not.toContain("**");
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("keeps an answered request visible outside the collapsed steps", async () => {
     timelineSequence = 0;
     const r = await renderComponent(
