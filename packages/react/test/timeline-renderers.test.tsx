@@ -1,5 +1,5 @@
 import { setStartupDetails } from "../src/timeline/startup-preference";
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { EMPTY_FINAL_REPLY_NOTICE, type SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush, actRun } from "./render-hook";
@@ -28,6 +28,20 @@ const englishText = createOpenGeniText();
    -------------------------------------------------------------------------- */
 
 registerDom({ clock: "virtual" });
+
+// The timeline's lazy rows load with real I/O, but this file runs on the
+// virtual clock, where Date.now(), performance.now() and even Bun.nanoseconds()
+// advance with every flush. A wait for a row is therefore a budget of flush
+// steps, which a loaded runner can spend in a few real milliseconds before a
+// cold import finishes. Load the modules once up front so no render waits on I/O.
+beforeAll(async () => {
+  await Promise.all([
+    import("../src/timeline/fleet-decision-row"),
+    import("../src/timeline/platform-activity-row"),
+    import("../src/components/timeline-annotation-selection"),
+    import("../src/components/timeline-annotation-markers"),
+  ]);
+});
 
 // Radix chooses its layout-effect implementation at import time. Load the real
 // renderers only after the DOM exists so close/open assertions test browser
@@ -139,8 +153,8 @@ function timelineEvent(
 }
 
 async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElement> {
-  const deadline = performance.now() + 5_000;
-  while (performance.now() < deadline) {
+  // Virtual time (see the preload above): 500 flush steps, not five real seconds.
+  for (let step = 0; step < 500; step += 1) {
     const disclosure = Array.from(
       container.querySelectorAll<HTMLElement>('[role="button"][aria-expanded]'),
     ).find((candidate) => candidate.textContent?.includes("Fleet policy shadow"));
@@ -148,7 +162,7 @@ async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElem
     await flush(10);
   }
 
-  throw new Error("Fleet policy shadow disclosure did not load within 5 seconds");
+  throw new Error("Fleet policy shadow disclosure did not render within 500 flush steps");
 }
 
 describe("allowance refusal rendering", () => {
