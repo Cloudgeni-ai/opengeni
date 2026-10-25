@@ -10,6 +10,7 @@ import {
   type McpEventDeliveryMode,
   type McpEventType,
 } from "./mcp-events-protocol";
+import { inboundWebhookBaseUrl } from "./webhook-url";
 
 /**
  * The event types an MCP source offers, the delivery mode Opengeni uses for
@@ -53,11 +54,12 @@ export function forgetMcpSourceEventTypes(sourceId: string): void {
 
 /** The callback base for webhook delivery: only a public https address can receive it. */
 export function mcpWebhookBaseUrl(
-  settings: Pick<Settings, "publicBaseUrl" | "environmentsEncryptionKey">,
+  settings: Pick<Settings, "publicBaseUrl" | "webhookBaseUrl" | "environmentsEncryptionKey">,
 ): string | null {
-  if (!settings.publicBaseUrl || !settings.environmentsEncryptionKey) return null;
+  const baseUrl = inboundWebhookBaseUrl(settings);
+  if (!baseUrl || !settings.environmentsEncryptionKey) return null;
   try {
-    return new URL(settings.publicBaseUrl).protocol === "https:" ? settings.publicBaseUrl : null;
+    return new URL(baseUrl).protocol === "https:" ? baseUrl : null;
   } catch {
     return null;
   }

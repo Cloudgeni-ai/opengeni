@@ -19,6 +19,7 @@ import {
   eventSourceAccess,
   eventSourceForClient,
   GITHUB_WEBHOOK_PATH,
+  inboundWebhookBaseUrl,
   listEventSourceTypes,
   receiveEventWebhook,
   receiveGitHubWebhook,
@@ -49,7 +50,7 @@ import { parseRequestJson, readBoundedRawBody } from "../http/request-body";
 export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db } = deps;
   const baseUrl = (c: Context): string =>
-    integrationBaseUrl(deps.settings.publicBaseUrl, c.req.url);
+    integrationBaseUrl(inboundWebhookBaseUrl(deps.settings), c.req.url);
 
   async function viewerFor(
     c: Context,

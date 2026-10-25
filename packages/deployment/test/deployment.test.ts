@@ -1838,8 +1838,11 @@ describe("deployment contract", () => {
     expect(absent.missingEnvVars).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED");
   });
 
-  test("renders the event triggers flag only when configured", () => {
-    expect(EVENT_TRIGGERS_PASSTHROUGH_ENV).toEqual(["OPENGENI_EVENT_TRIGGERS_ENABLED"]);
+  test("renders the event triggers flag and webhook address only when configured", () => {
+    expect(EVENT_TRIGGERS_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_EVENT_TRIGGERS_ENABLED",
+      "OPENGENI_WEBHOOK_BASE_URL",
+    ]);
     const outputs = {
       temporal_host: { value: "host:7233" },
       object_storage_bucket: { value: "opengeni-files" },
@@ -1848,11 +1851,16 @@ describe("deployment contract", () => {
     };
     const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
       OPENGENI_EVENT_TRIGGERS_ENABLED: "true",
+      OPENGENI_WEBHOOK_BASE_URL: "https://hooks.opengeni.example.com",
     });
     expect(configured.runtimeEnv).toContain("OPENGENI_EVENT_TRIGGERS_ENABLED=true");
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_WEBHOOK_BASE_URL=https://hooks.opengeni.example.com",
+    );
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     expect(absent.runtimeEnv).not.toContain("OPENGENI_EVENT_TRIGGERS_ENABLED=");
     expect(absent.missingEnvVars).not.toContain("OPENGENI_EVENT_TRIGGERS_ENABLED");
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_WEBHOOK_BASE_URL=");
   });
 
   test("renders configured external browser providers without making them mandatory", () => {

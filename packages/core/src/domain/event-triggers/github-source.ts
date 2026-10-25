@@ -22,6 +22,7 @@ import {
 } from "./github-events";
 import { eventMatchesTrigger } from "./matching";
 import { WebhookBodyError } from "./webhook-adapters";
+import { inboundWebhookBaseUrl } from "./webhook-url";
 
 /**
  * The GitHub source: the deployment's GitHub App delivers its webhooks to one
@@ -77,7 +78,7 @@ function githubUnavailable(error: unknown): HTTPException {
  */
 async function ensureGitHubAppWebhook(
   app: GitHubAppWebhookPort,
-  settings: Pick<Settings, "publicBaseUrl">,
+  settings: Pick<Settings, "publicBaseUrl" | "webhookBaseUrl">,
 ): Promise<void> {
   let current: string | null;
   try {
@@ -85,7 +86,8 @@ async function ensureGitHubAppWebhook(
   } catch (error) {
     throw githubUnavailable(error);
   }
-  const receiver = settings.publicBaseUrl ? githubWebhookUrl(settings.publicBaseUrl) : null;
+  const baseUrl = inboundWebhookBaseUrl(settings);
+  const receiver = baseUrl ? githubWebhookUrl(baseUrl) : null;
   if (current !== null) {
     if (receiver === null || sameUrl(current, receiver)) return;
     throw new HTTPException(409, {
@@ -95,7 +97,7 @@ async function ensureGitHubAppWebhook(
   if (receiver === null) {
     throw new HTTPException(422, {
       message:
-        "This deployment has no public address for GitHub to send events to. Set OPENGENI_PUBLIC_BASE_URL first.",
+        "This deployment has no public address for GitHub to send events to. Set OPENGENI_PUBLIC_BASE_URL (or OPENGENI_WEBHOOK_BASE_URL) first.",
     });
   }
   try {

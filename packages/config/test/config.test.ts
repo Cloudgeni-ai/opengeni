@@ -645,6 +645,22 @@ describe("Google Drive integration settings", () => {
     expect(settings.googleDriveClientSecret).toBe("client-secret");
   });
 
+  test("loads a webhook address separate from the public address", () => {
+    const separate = withEnv(
+      {
+        OPENGENI_PUBLIC_BASE_URL: "https://console.example.test",
+        OPENGENI_WEBHOOK_BASE_URL: "https://hooks.example.test:8443",
+      },
+      () => getSettings(),
+    );
+    expect(separate.publicBaseUrl).toBe("https://console.example.test");
+    expect(separate.webhookBaseUrl).toBe("https://hooks.example.test:8443");
+    const same = withEnv({ OPENGENI_PUBLIC_BASE_URL: "https://console.example.test" }, () =>
+      getSettings(),
+    );
+    expect(same.webhookBaseUrl).toBeUndefined();
+  });
+
   test("requires the Google OAuth client id and secret together", () => {
     expect(() =>
       withEnv(
