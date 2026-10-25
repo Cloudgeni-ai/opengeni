@@ -609,6 +609,7 @@ export const englishMessages = {
   "automations.triggers.shortAndMore_other": "{words} · {count} more",
   "automations.wait.chip.anyEvent": "Waiting on an event",
   "automations.wait.chip.event": "Waiting on {source}",
+  "automations.wait.chip.more_other": "{count} more",
   "automations.wait.chip.nextRun": "Next: {time}",
   "automations.wait.event": "Waiting for an event",
   "automations.wait.eventFrom": "Waiting for {event}",

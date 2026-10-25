@@ -255,6 +255,47 @@ test("reuses the compact Schedule button without requiring creation metadata", a
       "Waiting for check_suite.completed from GitHub. Open this chat's automations.",
     );
     expect(detailed?.textContent?.trim()).toBe("Waiting on GitHub");
+    // Two automations on two apps: the pill names both, not only the first.
+    const checks = {
+      source: { kind: "github" as const, name: "GitHub" },
+      eventTypes: ["check_suite.completed"],
+    };
+    const mail = {
+      source: { kind: "gmail" as const, name: "Gmail" },
+      eventTypes: ["message.received"],
+    };
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{
+            ...session,
+            hasSchedules: true,
+            waitingForEvents: true,
+            automationWait: {
+              nextRunAt: null,
+              event: checks,
+              events: [checks, mail],
+              automations: 2,
+            },
+          }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          onOpenAutomations={() => undefined}
+        />,
+      ),
+    );
+    const both = container.querySelector<HTMLButtonElement>('button[data-automation-wait="event"]');
+    expect(both?.title).toBe(
+      "Waiting for check_suite.completed from GitHub or message.received from Gmail. Open this chat's automations.",
+    );
+    expect(both?.textContent?.trim()).toBe("Waiting on GitHub and Gmail");
   } finally {
     await act(async () => root.unmount());
     container.remove();
