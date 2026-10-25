@@ -264,6 +264,49 @@ completes, at the model's price per hour of audio; workspace keys and
 subscriptions are not. Transcripts that are not charged in credits count
 toward the usage allowance instead.
 
+### What processing costs
+
+Every transcript attempt is measured stage by stage and published as
+Prometheus metrics, labelled by purpose (`meeting` or `dictation`),
+provider, model and who pays (`deployment`, `workspace_key`,
+`workspace_subscription`):
+
+| Stage | What runs |
+| --- | --- |
+| `prepare` | Download the chunks and write one seekable file per track (ffmpeg) |
+| `convert` | Re-encode a track, or cut it into pieces a model accepts (ffmpeg) |
+| `diarize` | Opengeni's speaker models, decoding included |
+| `transcribe` | Waiting on the transcription provider |
+| `segment` | Cut a dictation into the voice input's pieces (ffmpeg) |
+| `finish` | Store the transcript and settle its charge |
+
+- `opengeni_recording_stage_cpu_seconds_total`,
+  `opengeni_recording_stage_wall_seconds_total` and
+  `opengeni_recording_stage_memory_byte_seconds_total` count each stage's
+  CPU (user plus system, of the programs it runs), time, and peak memory
+  times run time. `opengeni_recording_stage_peak_memory_bytes` is the most
+  memory a stage held at once, per version.
+- `opengeni_recording_audio_seconds_total`,
+  `opengeni_recording_provider_cost_usd_total` (list price) and
+  `opengeni_recording_credits_total` give the audio and what it cost;
+  `opengeni_recording_stored_bytes_total` counts uploaded chunks and
+  prepared files.
+- `opengeni_recording_transcripts_total` (by outcome and error code),
+  `opengeni_recording_queue_seconds`, `opengeni_recording_processing_seconds`,
+  `opengeni_recording_transcript_reruns_total`,
+  `opengeni_recording_diarization_total`,
+  `opengeni_recording_diarizer_fallbacks_total` and
+  `opengeni_recording_speakers` show speed and quality next to cost.
+- The live preview counts `opengeni_recording_live_sessions_total`,
+  `opengeni_recording_live_audio_seconds_total` and
+  `opengeni_recording_live_cost_usd_total`. The browser streams to the
+  provider itself, so it costs the servers almost nothing.
+
+Each attempt also logs one `recording processed` line with the same
+breakdown, to look at a single recording. The **Opengeni · Meetings &
+Transcription** Grafana dashboard prices it all per audio hour, with CPU,
+memory and storage at rates you set to your cloud's prices.
+
 ## Transcripts, speakers and edits
 
 - `GET …/recordings/:recordingId/transcript?version=&after=` reads segments a

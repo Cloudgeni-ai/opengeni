@@ -77,6 +77,14 @@ import {
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import {
+  measureRecordingStage,
+  RecordingUsage,
+  reportRecordingProcessing,
+  runMeasuredCommand,
+  withRecordingUsage,
+  type RecordingProcessingReport,
+} from "./recording-usage";
+import {
   prepareRecordingTrackAudio,
   preparedAudioFormat,
   recordingAudioContainer,
@@ -223,31 +231,33 @@ export async function transcribeTrack(input: {
     const audio =
       whole && !format
         ? input.audio
-        : await renderRecordingAudioPiece({
-            audio: input.audio,
-            startMilliseconds: piece.startMilliseconds,
-            endMilliseconds: piece.endMilliseconds,
-            whole,
-            format: format ?? source,
-            ffmpegPath: input.ffmpegPath,
-            tempRoot: input.tempRoot,
-            signal: input.request.signal,
-          }).then((rendered) => ({
+        : await measureRecordingStage("convert", () =>
+            renderRecordingAudioPiece({
+              audio: input.audio,
+              startMilliseconds: piece.startMilliseconds,
+              endMilliseconds: piece.endMilliseconds,
+              whole,
+              format: format ?? source,
+              ffmpegPath: input.ffmpegPath,
+              tempRoot: input.tempRoot,
+              signal: input.request.signal,
+            }),
+          ).then((rendered) => ({
             bytes: rendered.bytes,
             mimeType: rendered.mimeType,
             fileName: `${input.audio.fileName.replace(/\.[^.]+$/u, "")}-${index}.${rendered.extension}`,
           }));
-    const result = await input.provider
-      .transcribe(
+    const result = await measureRecordingStage("transcribe", () =>
+      input.provider.transcribe(
         {
           ...input.request,
           audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
         },
         input.credentials,
-      )
-      .catch((error: unknown) => {
-        throw asRecordingTranscriptionError(error);
-      });
+      ),
+    ).catch((error: unknown) => {
+      throw asRecordingTranscriptionError(error);
+    });
     parts.push({ piece, result });
   }
   return mergeRecordingTranscriptionPieces(parts);
@@ -358,7 +368,10 @@ export function createRecordingActivities(
           : createTranscriptionService({ settings, db, deployment: deploymentFor(settings, db) }),
         segmenter: options.dictationSegmenter
           ? options.dictationSegmenter(settings)
-          : createFfmpegTranscriptionSegmenter({ ffmpegPath: settings.voiceInputFfmpegPath }),
+          : createFfmpegTranscriptionSegmenter({
+              ffmpegPath: settings.voiceInputFfmpegPath,
+              runCommand: runMeasuredCommand,
+            }),
       };
     }
     return defaultDictation;
@@ -383,13 +396,14 @@ export function createRecordingActivities(
   ): Promise<RecordingTranscriptOutcome> {
     const { db, objectStorage, settings, observability } = await services();
     const actor = { workspaceId: input.workspaceId, subjectId: input.ownerSubjectId };
-    const job = await claimRecordingTranscriptVersion(db, {
+    const leased = await claimRecordingTranscriptVersion(db, {
       ...actor,
       versionId: input.versionId,
       processingOwner: input.processingOwner,
       leaseSeconds: TRANSCRIPT_LEASE_SECONDS,
     });
-    if (!job) return { outcome: "skipped" };
+    if (!leased) return { outcome: "skipped" };
+    const job = leased;
     // A dictation is kept only long enough for its owner to take the text.
     const expiry =
       job.recording.purpose === "dictation"
@@ -417,124 +431,182 @@ export function createRecordingActivities(
       });
       return { outcome: "failed", errorCode, ...expiry };
     };
+    const usage = new RecordingUsage();
+    const startedAt = performance.now();
+    const telemetry: Omit<
+      RecordingProcessingReport,
+      "outcome" | "errorCode" | "wallSeconds" | "stages"
+    > = {
+      purpose: job.recording.purpose === "dictation" ? "dictation" : "meeting",
+      provider: job.version.providerId,
+      model: job.version.model,
+      funding: "none",
+      audioSeconds: 0,
+      queueSeconds: job.queuedMilliseconds === null ? null : job.queuedMilliseconds / 1_000,
+      preparedBytes: 0,
+      providerCostUsd: null,
+      credits: null,
+      diarization: null,
+      speakers: null,
+      ourDiarizerFailed: false,
+    };
+    let finished: RecordingTranscriptOutcome | null = null;
+    let retryCode = "unknown";
     try {
-      if (!objectStorage) throw new PermanentRecordingFailure("storage_unavailable");
-      if (job.recording.purpose === "dictation") {
-        return await transcribeDictation(objectStorage, job);
-      }
-      const deployment = deploymentFor(settings, db);
-      const found = findRecordingTranscriptionModel(
-        deployment.registry,
-        job.version.providerId,
-        job.version.model,
+      finished = await withRecordingUsage(usage, transcribeClaimed);
+      return finished;
+    } catch (error) {
+      if (error instanceof ApplicationFailure && error.type) retryCode = error.type;
+      throw error;
+    } finally {
+      reportRecordingProcessing(
+        observability,
+        {
+          ...telemetry,
+          outcome: finished?.outcome ?? "retry",
+          errorCode: finished
+            ? finished.outcome === "failed"
+              ? finished.errorCode
+              : null
+            : retryCode,
+          wallSeconds: (performance.now() - startedAt) / 1_000,
+          stages: usage.stages(),
+        },
+        {
+          workspaceId: input.workspaceId,
+          recordingId: input.recordingId,
+          versionId: input.versionId,
+        },
       );
-      if (!found) throw new PermanentRecordingFailure("model_unavailable");
-      // A pinned deployment sends audio to no other model, even for an
-      // older version that named one.
-      if (
-        deployment.pinned &&
-        (deployment.pinned.providerId !== found.provider.id ||
-          deployment.pinned.model !== found.spec.model)
-      ) {
-        throw new PermanentRecordingFailure("model_unavailable");
-      }
-      // A meeting transcript places every word in time, to tell speakers
-      // apart and to play from; a model that returns only text can't yet.
-      if (!found.spec.capabilities.wordTimestamps) {
-        throw new PermanentRecordingFailure("model_unavailable");
-      }
-      const resolved = await deployment.credentials(job.version.providerId, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-      });
-      if (resolved === "missing") throw new PermanentRecordingFailure("missing_provider_key");
-      const credentials = resolved.credentials;
-      if (
-        found.provider.available &&
-        !(await deployment.available(found.provider.id, {
+    }
+
+    async function transcribeClaimed(): Promise<RecordingTranscriptOutcome> {
+      try {
+        if (!objectStorage) throw new PermanentRecordingFailure("storage_unavailable");
+        if (job.recording.purpose === "dictation") {
+          return await transcribeDictation(objectStorage, job);
+        }
+        const deployment = deploymentFor(settings, db);
+        const found = findRecordingTranscriptionModel(
+          deployment.registry,
+          job.version.providerId,
+          job.version.model,
+        );
+        if (!found) throw new PermanentRecordingFailure("model_unavailable");
+        telemetry.funding = found.provider.funding;
+        // A pinned deployment sends audio to no other model, even for an
+        // older version that named one.
+        if (
+          deployment.pinned &&
+          (deployment.pinned.providerId !== found.provider.id ||
+            deployment.pinned.model !== found.spec.model)
+        ) {
+          throw new PermanentRecordingFailure("model_unavailable");
+        }
+        // A meeting transcript places every word in time, to tell speakers
+        // apart and to play from; a model that returns only text can't yet.
+        if (!found.spec.capabilities.wordTimestamps) {
+          throw new PermanentRecordingFailure("model_unavailable");
+        }
+        const resolved = await deployment.credentials(job.version.providerId, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          subjectId: input.ownerSubjectId,
-        }))
-      ) {
-        // A subscription the workspace is no longer signed in to.
-        throw new PermanentRecordingFailure("missing_provider_key");
-      }
-      const charge = meetingCharge(settings, found.provider, found.spec);
-      const plans = planRecordingTracks(job.recording.tracks);
-      const capabilities = found.spec.capabilities;
-      const requested = job.version.options;
-      const signal = cancellation();
-      const trackWords: RecordingTrackWords[] = [];
-      let providerDiarized = false;
-      let ourDiarized = false;
-      let audioMilliseconds = 0;
-      const languages = new Set<string>();
-      const ourDiarizer = diarizerFor(settings);
-      // Recognizing voices needs every speaker's voice vector, which only
-      // our diarizer gives, so it tells the speakers apart whatever the model.
-      const recognizeVoices =
-        ourDiarizer !== null &&
-        resolveWorkspaceRecordingSettings((await getWorkspace(db, input.workspaceId))?.settings)
-          .voiceprints === true;
-      const trackVoices: Array<{
-        trackNumber: number;
-        source: (typeof job.recording.tracks)[number]["source"];
-        result: RecordingDiarizerResult;
-      }> = [];
-      for (const plan of plans) {
-        const track = job.recording.tracks.find((item) => item.trackNumber === plan.trackNumber)!;
-        const chunks = job.chunks.filter((chunk) => chunk.trackNumber === plan.trackNumber);
-        if (chunks.length === 0) continue;
-        const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
-        const audio = await preparedTrackAudio({
-          db,
-          objectStorage,
-          settings,
-          actor,
-          recordingId: input.recordingId,
-          trackNumber: plan.trackNumber,
-          mimeType: track.mimeType,
-          chunks,
-          offsetMilliseconds,
-          knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
-          signal,
         });
-        heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber });
-        // The model's own diarization is still requested when it has one, so
-        // a failure of ours falls back to it.
-        const diarize = plan.diarize && capabilities.diarization;
-        const useOurs =
-          plan.diarize &&
-          ourDiarizer !== null &&
-          (requested.diarizer === "ours" || !capabilities.diarization || recognizeVoices);
-        const trackAudio = {
-          bytes: audio.bytes,
-          mimeType: audio.mimeType,
-          fileName: `track-${plan.trackNumber}.${audio.extension}`,
-        };
-        const request = {
-          model: found.spec.model,
-          language: requested.language,
-          diarize,
-          maxSpeakers: requested.maxSpeakers,
-          keyterms: capabilities.keyterms ? requested.keyterms : undefined,
-          signal,
-          scope: {
+        if (resolved === "missing") throw new PermanentRecordingFailure("missing_provider_key");
+        const credentials = resolved.credentials;
+        if (
+          found.provider.available &&
+          !(await deployment.available(found.provider.id, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             subjectId: input.ownerSubjectId,
-            requestId: `${input.versionId}:${plan.trackNumber}`,
-          },
-        };
-        const onPiece = (piece: number) =>
-          heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber, piece });
-        const runOurs = () =>
-          useOurs
-            ? ourDiarizer
-                .diarize(trackAudio, { maxSpeakers: requested.maxSpeakers, signal })
-                .catch((error: unknown) => {
+          }))
+        ) {
+          // A subscription the workspace is no longer signed in to.
+          throw new PermanentRecordingFailure("missing_provider_key");
+        }
+        const charge = meetingCharge(settings, found.provider, found.spec);
+        const plans = planRecordingTracks(job.recording.tracks);
+        const capabilities = found.spec.capabilities;
+        const requested = job.version.options;
+        const signal = cancellation();
+        const trackWords: RecordingTrackWords[] = [];
+        let providerDiarized = false;
+        let ourDiarized = false;
+        let audioMilliseconds = 0;
+        const languages = new Set<string>();
+        const ourDiarizer = diarizerFor(settings);
+        // Recognizing voices needs every speaker's voice vector, which only
+        // our diarizer gives, so it tells the speakers apart whatever the model.
+        const recognizeVoices =
+          ourDiarizer !== null &&
+          resolveWorkspaceRecordingSettings((await getWorkspace(db, input.workspaceId))?.settings)
+            .voiceprints === true;
+        const trackVoices: Array<{
+          trackNumber: number;
+          source: (typeof job.recording.tracks)[number]["source"];
+          result: RecordingDiarizerResult;
+        }> = [];
+        for (const plan of plans) {
+          const track = job.recording.tracks.find((item) => item.trackNumber === plan.trackNumber)!;
+          const chunks = job.chunks.filter((chunk) => chunk.trackNumber === plan.trackNumber);
+          if (chunks.length === 0) continue;
+          const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
+          const audio = await measureRecordingStage("prepare", () =>
+            preparedTrackAudio({
+              db,
+              objectStorage,
+              settings,
+              actor,
+              recordingId: input.recordingId,
+              trackNumber: plan.trackNumber,
+              mimeType: track.mimeType,
+              chunks,
+              offsetMilliseconds,
+              knownDurationMilliseconds: Math.max(
+                0,
+                track.durationMilliseconds - offsetMilliseconds,
+              ),
+              signal,
+            }),
+          );
+          telemetry.preparedBytes += audio.storedBytes;
+          heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber });
+          // The model's own diarization is still requested when it has one, so
+          // a failure of ours falls back to it.
+          const diarize = plan.diarize && capabilities.diarization;
+          const useOurs =
+            plan.diarize &&
+            ourDiarizer !== null &&
+            (requested.diarizer === "ours" || !capabilities.diarization || recognizeVoices);
+          const trackAudio = {
+            bytes: audio.bytes,
+            mimeType: audio.mimeType,
+            fileName: `track-${plan.trackNumber}.${audio.extension}`,
+          };
+          const request = {
+            model: found.spec.model,
+            language: requested.language,
+            diarize,
+            maxSpeakers: requested.maxSpeakers,
+            keyterms: capabilities.keyterms ? requested.keyterms : undefined,
+            signal,
+            scope: {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.ownerSubjectId,
+              requestId: `${input.versionId}:${plan.trackNumber}`,
+            },
+          };
+          const onPiece = (piece: number) =>
+            heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber, piece });
+          const runOurs = () =>
+            useOurs
+              ? measureRecordingStage("diarize", () =>
+                  ourDiarizer.diarize(trackAudio, { maxSpeakers: requested.maxSpeakers, signal }),
+                ).catch((error: unknown) => {
                   if (signal?.aborted) throw error;
+                  telemetry.ourDiarizerFailed = true;
                   observability.warn("our diarizer failed; using the model's speakers", {
                     workspaceId: input.workspaceId,
                     recordingId: input.recordingId,
@@ -544,124 +616,134 @@ export function createRecordingActivities(
                   });
                   return null;
                 })
-            : Promise.resolve(null);
-        const [result, ours] = await withHeartbeat(async () => {
-          return await Promise.all([
-            transcribeTrack({
-              provider: found.provider,
-              spec: found.spec,
-              audio: { ...trackAudio, extension: audio.extension },
-              durationMilliseconds: audio.durationMilliseconds,
-              ffmpegPath: settings.voiceInputFfmpegPath,
-              credentials,
-              onPiece,
-              request,
-            }),
-            runOurs(),
-          ]);
-        });
-        let words = result.words;
-        if (ours) {
-          words = labelWordsFromTurns(result.words, ours.turns);
-          ourDiarized = true;
-          trackVoices.push({ trackNumber: plan.trackNumber, source: track.source, result: ours });
-        } else if (diarize && result.diarized) {
-          providerDiarized = true;
+              : Promise.resolve(null);
+          const [result, ours] = await withHeartbeat(async () => {
+            return await Promise.all([
+              transcribeTrack({
+                provider: found.provider,
+                spec: found.spec,
+                audio: { ...trackAudio, extension: audio.extension },
+                durationMilliseconds: audio.durationMilliseconds,
+                ffmpegPath: settings.voiceInputFfmpegPath,
+                credentials,
+                onPiece,
+                request,
+              }),
+              runOurs(),
+            ]);
+          });
+          let words = result.words;
+          if (ours) {
+            words = labelWordsFromTurns(result.words, ours.turns);
+            ourDiarized = true;
+            trackVoices.push({ trackNumber: plan.trackNumber, source: track.source, result: ours });
+          } else if (diarize && result.diarized) {
+            providerDiarized = true;
+          }
+          for (const language of result.languages) languages.add(language);
+          audioMilliseconds += result.audioMilliseconds ?? audio.durationMilliseconds;
+          trackWords.push({
+            trackNumber: plan.trackNumber,
+            fixedLabel: plan.fixedLabel,
+            words: shiftWords(words, offsetMilliseconds),
+          });
         }
-        for (const language of result.languages) languages.add(language);
-        audioMilliseconds += result.audioMilliseconds ?? audio.durationMilliseconds;
-        trackWords.push({
-          trackNumber: plan.trackNumber,
-          fixedLabel: plan.fixedLabel,
-          words: shiftWords(words, offsetMilliseconds),
-        });
-      }
-      const segments = buildRecordingSegments(trackWords);
-      const voices: RecordingSpeakerVoice[] = [];
-      if (recognizeVoices) {
-        const labels = recordingSpeakerLabels(trackWords);
-        for (const { trackNumber, source, result } of trackVoices) {
-          for (const voice of result.voices) {
-            const label = labels.get(trackNumber)?.get(voice.speaker);
-            if (!label || voice.embedding.length === 0) continue;
-            voices.push({
-              label,
-              channel: recordingVoiceChannel(source),
-              model: result.voiceModel,
-              embedding: voice.embedding,
-              speechMilliseconds: voice.speechMilliseconds,
-            });
+        const segments = buildRecordingSegments(trackWords);
+        const voices: RecordingSpeakerVoice[] = [];
+        if (recognizeVoices) {
+          const labels = recordingSpeakerLabels(trackWords);
+          for (const { trackNumber, source, result } of trackVoices) {
+            for (const voice of result.voices) {
+              const label = labels.get(trackNumber)?.get(voice.speaker);
+              if (!label || voice.embedding.length === 0) continue;
+              voices.push({
+                label,
+                channel: recordingVoiceChannel(source),
+                model: result.voiceModel,
+                embedding: voice.embedding,
+                speechMilliseconds: voice.speechMilliseconds,
+              });
+            }
           }
         }
-      }
-      const diarization = recordingDiarizationKind({
-        plans,
-        providerDiarized,
-        ourDiarizer: ourDiarized,
-      });
-      const costUsdMicros = estimateRecordingTranscriptionCostMicros(
-        found.spec,
-        audioMilliseconds,
-        {
-          keyterms: capabilities.keyterms && (requested.keyterms?.length ?? 0) > 0,
-        },
-      );
-      const creditCostMicros = charge
-        ? await settleMeetingCredits({
-            billing: billingFor(settings, db),
-            pricing: charge.pricing,
-            providerId: found.provider.id,
-            model: found.spec.model,
+        const diarization = recordingDiarizationKind({
+          plans,
+          providerDiarized,
+          ourDiarizer: ourDiarized,
+        });
+        const costUsdMicros = estimateRecordingTranscriptionCostMicros(
+          found.spec,
+          audioMilliseconds,
+          {
+            keyterms: capabilities.keyterms && (requested.keyterms?.length ?? 0) > 0,
+          },
+        );
+        telemetry.audioSeconds = audioMilliseconds / 1_000;
+        telemetry.diarization = diarization;
+        telemetry.speakers = new Set(
+          segments.flatMap((segment) => (segment.speakerLabel ? [segment.speakerLabel] : [])),
+        ).size;
+        telemetry.providerCostUsd = costUsdMicros === null ? null : costUsdMicros / 1_000_000;
+        return await measureRecordingStage("finish", async () => {
+          const creditCostMicros = charge
+            ? await settleMeetingCredits({
+                billing: billingFor(settings, db),
+                pricing: charge.pricing,
+                providerId: found.provider.id,
+                model: found.spec.model,
+                audioMilliseconds,
+                attribution: job.creditAttribution ?? { kind: "unknown" },
+              })
+            : null;
+          const completed = await completeRecordingTranscriptVersion(db, {
+            ...actor,
+            versionId: input.versionId,
+            processingOwner: input.processingOwner,
+            languages: [...languages],
+            diarized: diarization === "provider" || diarization === "ours",
+            diarization,
+            costUsdMicros,
+            creditCostMicros,
             audioMilliseconds,
-            attribution: job.creditAttribution ?? { kind: "unknown" },
-          })
-        : null;
-      const completed = await completeRecordingTranscriptVersion(db, {
-        ...actor,
-        versionId: input.versionId,
-        processingOwner: input.processingOwner,
-        languages: [...languages],
-        diarized: diarization === "provider" || diarization === "ours",
-        diarization,
-        costUsdMicros,
-        creditCostMicros,
-        audioMilliseconds,
-        segments: segments.map((segment) => ({
-          startMilliseconds: segment.startMilliseconds,
-          endMilliseconds: segment.endMilliseconds,
-          trackNumber: segment.trackNumber,
-          speakerLabel: segment.speakerLabel,
-          text: segment.text,
-          words: segment.words,
-        })),
-        voices,
-      });
-      return completed ? { outcome: "complete" } : { outcome: "skipped" };
-    } catch (error) {
-      if (error instanceof RecordingNotFoundError) return { outcome: "skipped" };
-      if (error instanceof PermanentRecordingFailure) return await fail(error.code, error);
-      if (error instanceof RecordingAudioError) {
-        if (error.code === "missing_chunk") {
-          throw ApplicationFailure.retryable(error.message, "missing_chunk");
+            segments: segments.map((segment) => ({
+              startMilliseconds: segment.startMilliseconds,
+              endMilliseconds: segment.endMilliseconds,
+              trackNumber: segment.trackNumber,
+              speakerLabel: segment.speakerLabel,
+              text: segment.text,
+              words: segment.words,
+            })),
+            voices,
+          });
+          telemetry.credits = creditCostMicros === null ? null : creditCostMicros / 1_000_000;
+          return completed ? { outcome: "complete" } : { outcome: "skipped" };
+        });
+      } catch (error) {
+        if (error instanceof RecordingNotFoundError) return { outcome: "skipped" };
+        if (error instanceof PermanentRecordingFailure) return await fail(error.code, error);
+        if (error instanceof RecordingAudioError) {
+          if (error.code === "missing_chunk") {
+            throw ApplicationFailure.retryable(error.message, "missing_chunk");
+          }
+          return await fail(error.code, error);
         }
-        return await fail(error.code, error);
+        if (error instanceof RecordingTranscriptionError) {
+          if (!error.retryable) return await fail(`provider_${error.code}`, error);
+          throw ApplicationFailure.retryable(error.message, `provider_${error.code}`);
+        }
+        // A dictation's voice input refused to bill it: nothing was sent, and
+        // retrying won't change the answer until the payer's credits do.
+        if (error instanceof TranscriptionBillingRefusedError) return await fail(error.code, error);
+        if (error instanceof TranscriptionServiceError) {
+          if (!error.retryable) return await fail(`voice_${error.code}`, error);
+          throw ApplicationFailure.retryable(error.message, `voice_${error.code}`);
+        }
+        if (error instanceof TranscriptionSegmenterError) {
+          if (!error.retryable) return await fail(error.code, error);
+          throw ApplicationFailure.retryable(error.message, error.code);
+        }
+        throw error;
       }
-      if (error instanceof RecordingTranscriptionError) {
-        if (!error.retryable) return await fail(`provider_${error.code}`, error);
-        throw ApplicationFailure.retryable(error.message, `provider_${error.code}`);
-      }
-      // A dictation's voice input refused to bill it: nothing was sent, and
-      // retrying won't change the answer until the payer's credits do.
-      if (error instanceof TranscriptionBillingRefusedError) return await fail(error.code, error);
-      if (error instanceof TranscriptionServiceError) {
-        if (!error.retryable) return await fail(`voice_${error.code}`, error);
-        throw ApplicationFailure.retryable(error.message, `voice_${error.code}`);
-      }
-      if (error instanceof TranscriptionSegmenterError) {
-        if (!error.retryable) return await fail(error.code, error);
-        throw ApplicationFailure.retryable(error.message, error.code);
-      }
-      throw error;
     }
 
     /**
@@ -698,19 +780,22 @@ export function createRecordingActivities(
       const offered = dictationProviders(deploymentFor(settings, db));
       if (track && chunks.length > 0) {
         const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
-        const audio = await preparedTrackAudio({
-          db,
-          objectStorage: storage,
-          settings,
-          actor: actor,
-          recordingId: input.recordingId,
-          trackNumber: track.trackNumber,
-          mimeType: track.mimeType,
-          chunks,
-          offsetMilliseconds,
-          knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
-          signal,
-        });
+        const audio = await measureRecordingStage("prepare", () =>
+          preparedTrackAudio({
+            db,
+            objectStorage: storage,
+            settings,
+            actor: actor,
+            recordingId: input.recordingId,
+            trackNumber: track.trackNumber,
+            mimeType: track.mimeType,
+            chunks,
+            offsetMilliseconds,
+            knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
+            signal,
+          }),
+        );
+        telemetry.preparedBytes += audio.storedBytes;
         if (!(await segmenter.available())) throw new PermanentRecordingFailure("unavailable");
         const providerSegmentSeconds = Math.min(
           TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
@@ -719,7 +804,7 @@ export function createRecordingActivities(
         const pinned = claimed.version.providerId !== "host" ? claimed.version.providerId : null;
         const attribution = claimed.creditAttribution ?? { kind: "unknown" as const };
         heartbeat({ phase: "transcribing", trackNumber: track.trackNumber });
-        for await (const piece of segmenter.segment({
+        const segmented = segmenter.segment({
           sourceMimeType: audio.mimeType,
           totalDurationMilliseconds: Math.max(1, Math.round(audio.durationMilliseconds)),
           providerSegmentSeconds,
@@ -727,68 +812,93 @@ export function createRecordingActivities(
             yield audio.bytes;
           })(),
           signal,
-        })) {
-          const trustedSeconds = wavDurationSeconds(piece.bytes) ?? undefined;
-          const result = await withHeartbeat(() =>
-            service.transcribe({
-              workspaceId: input.workspaceId,
-              accountId: input.accountId,
-              subjectId: input.ownerSubjectId,
-              audio: piece.bytes,
-              mimeType: piece.mimeType,
-              durationSeconds: piece.durationMilliseconds / 1_000,
-              requestId: `${input.versionId}:${piece.segmentNumber}`,
-              ...(signal ? { signal } : {}),
-              preferredProvider: pinned ?? voiceInput?.preferredProvider,
-              fallbackEnabled: voiceInput?.fallbackEnabled,
-              billing: {
-                // One settlement per piece of this version, however many
-                // attempts the activity takes: a retry that hears it again
-                // settles the same unit, so the payer is billed once.
-                sourceId: `${input.recordingId}:${input.versionId}:${piece.segmentNumber}`,
-                attribution,
-                trustedDurationSeconds: trustedSeconds,
-              },
-            }),
-          );
-          creditCostMicros += result.creditCostMicros ?? 0;
-          const heard = offered.find((provider) => provider.id === result.providerId);
-          if (heard?.provider.funding === "deployment" && voiceInputCreditBillingActive(settings)) {
-            charged = true;
+        });
+        // Stepped by hand so cutting the pieces is measured apart from hearing them.
+        const pieces = segmented[Symbol.asyncIterator]();
+        try {
+          for (;;) {
+            const next = await measureRecordingStage("segment", () => pieces.next());
+            if (next.done) break;
+            const piece = next.value;
+            const trustedSeconds = wavDurationSeconds(piece.bytes) ?? undefined;
+            const result = await withHeartbeat(() =>
+              measureRecordingStage("transcribe", () =>
+                service.transcribe({
+                  workspaceId: input.workspaceId,
+                  accountId: input.accountId,
+                  subjectId: input.ownerSubjectId,
+                  audio: piece.bytes,
+                  mimeType: piece.mimeType,
+                  durationSeconds: piece.durationMilliseconds / 1_000,
+                  requestId: `${input.versionId}:${piece.segmentNumber}`,
+                  ...(signal ? { signal } : {}),
+                  preferredProvider: pinned ?? voiceInput?.preferredProvider,
+                  fallbackEnabled: voiceInput?.fallbackEnabled,
+                  billing: {
+                    // One settlement per piece of this version, however many
+                    // attempts the activity takes: a retry that hears it again
+                    // settles the same unit, so the payer is billed once.
+                    sourceId: `${input.recordingId}:${input.versionId}:${piece.segmentNumber}`,
+                    attribution,
+                    trustedDurationSeconds: trustedSeconds,
+                  },
+                }),
+              ),
+            );
+            creditCostMicros += result.creditCostMicros ?? 0;
+            const heard = offered.find((provider) => provider.id === result.providerId);
+            if (heard) {
+              telemetry.provider = heard.id;
+              telemetry.model = heard.model.model;
+              telemetry.funding = heard.provider.funding;
+            }
+            if (
+              heard?.provider.funding === "deployment" &&
+              voiceInputCreditBillingActive(settings)
+            ) {
+              charged = true;
+            }
+            const pieceCost = heard
+              ? estimateRecordingTranscriptionCostMicros(heard.model, piece.durationMilliseconds)
+              : null;
+            if (pieceCost !== null) listCostMicros = (listCostMicros ?? 0) + pieceCost;
+            for (const language of result.languages ?? []) languages.add(language);
+            audioMilliseconds += piece.durationMilliseconds;
+            const text = result.text.trim();
+            if (!text) continue;
+            const startMilliseconds = offsetMilliseconds + piece.startMilliseconds;
+            segments.push({
+              startMilliseconds,
+              endMilliseconds: startMilliseconds + piece.durationMilliseconds,
+              trackNumber: track.trackNumber,
+              speakerLabel: null,
+              text,
+              words: [],
+            });
           }
-          const pieceCost = heard
-            ? estimateRecordingTranscriptionCostMicros(heard.model, piece.durationMilliseconds)
-            : null;
-          if (pieceCost !== null) listCostMicros = (listCostMicros ?? 0) + pieceCost;
-          for (const language of result.languages ?? []) languages.add(language);
-          audioMilliseconds += piece.durationMilliseconds;
-          const text = result.text.trim();
-          if (!text) continue;
-          const startMilliseconds = offsetMilliseconds + piece.startMilliseconds;
-          segments.push({
-            startMilliseconds,
-            endMilliseconds: startMilliseconds + piece.durationMilliseconds,
-            trackNumber: track.trackNumber,
-            speakerLabel: null,
-            text,
-            words: [],
-          });
+        } finally {
+          await pieces.return?.();
         }
       }
-      const completed = await completeRecordingTranscriptVersion(db, {
-        ...actor,
-        versionId: input.versionId,
-        processingOwner: input.processingOwner,
-        languages: [...languages],
-        diarized: false,
-        diarization: "none",
-        // The list price, like a meeting's; a version charged in credits
-        // also records the credits, and its ledger debit is what counts.
-        costUsdMicros: listCostMicros,
-        creditCostMicros: charged ? creditCostMicros : null,
-        audioMilliseconds,
-        segments,
-      });
+      telemetry.audioSeconds = audioMilliseconds / 1_000;
+      telemetry.providerCostUsd = listCostMicros === null ? null : listCostMicros / 1_000_000;
+      telemetry.credits = charged ? creditCostMicros / 1_000_000 : null;
+      const completed = await measureRecordingStage("finish", () =>
+        completeRecordingTranscriptVersion(db, {
+          ...actor,
+          versionId: input.versionId,
+          processingOwner: input.processingOwner,
+          languages: [...languages],
+          diarized: false,
+          diarization: "none",
+          // The list price, like a meeting's; a version charged in credits
+          // also records the credits, and its ledger debit is what counts.
+          costUsdMicros: listCostMicros,
+          creditCostMicros: charged ? creditCostMicros : null,
+          audioMilliseconds,
+          segments,
+        }),
+      );
       return completed ? { outcome: "complete", ...expiry } : { outcome: "skipped" };
     }
 
@@ -874,6 +984,8 @@ export function createRecordingActivities(
     mimeType: string;
     extension: string;
     durationMilliseconds: number;
+    /** Bytes this call wrote to storage: 0 when an earlier version's file was reused. */
+    storedBytes: number;
   }> {
     const container = recordingAudioContainer(input.mimeType);
     if (!container) throw new PermanentRecordingFailure("invalid_audio");
@@ -891,6 +1003,7 @@ export function createRecordingActivities(
           mimeType: format.mimeType,
           extension: format.extension,
           durationMilliseconds: input.knownDurationMilliseconds,
+          storedBytes: 0,
         };
       }
     }
@@ -931,7 +1044,7 @@ export function createRecordingActivities(
         await input.objectStorage.deleteObject(objectKey);
       throw error;
     }
-    return prepared;
+    return { ...prepared, storedBytes: prepared.bytes.byteLength };
   }
 
   /** Retries ran out on a retryable failure: fail the version with its last cause. */

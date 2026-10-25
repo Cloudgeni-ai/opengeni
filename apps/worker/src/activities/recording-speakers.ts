@@ -9,12 +9,12 @@ import type {
   RecordingDiarizerResult,
   RecordingTranscriptionAudio,
 } from "@opengeni/core";
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readTail, trackRecordingProcesses } from "./recording-usage";
 
 export type RecordingSpeakersConfig = {
   binaryPath: string;
@@ -68,102 +68,85 @@ async function runSpeakers(
     // A file, not a pipe: MP4 audio keeps its index at the end.
     const input = join(directory, `audio.${audio.fileName.split(".").pop() || "bin"}`);
     await writeFile(input, audio.bytes);
-    return await new Promise<string>((resolve, reject) => {
-      const decoder = spawn(
+    const decoder = Bun.spawn(
+      [
         config.ffmpegPath,
-        [
-          "-nostdin",
-          "-loglevel",
-          "error",
-          "-i",
-          input,
-          "-f",
-          "f32le",
-          "-ac",
-          "1",
-          "-ar",
-          "16000",
-          "pipe:1",
-        ],
-        { stdio: ["ignore", "pipe", "pipe"] },
-      );
-      const speakers = spawn(
-        config.binaryPath,
-        [
-          ...args,
-          "--models",
-          config.modelsDir,
-          ...(config.threads ? ["--threads", String(config.threads)] : []),
-        ],
-        { stdio: ["pipe", "pipe", "pipe"] },
-      );
-      decoder.stdout.pipe(speakers.stdin);
-      // The executable may exit early on an error; a closed pipe is not ours to report.
-      speakers.stdin.on("error", () => undefined);
-      let stdout = "";
-      let speakersError = "";
-      let decoderError = "";
-      speakers.stdout.setEncoding("utf8");
-      speakers.stdout.on("data", (data: string) => {
-        stdout += data;
-      });
-      speakers.stderr.setEncoding("utf8");
-      speakers.stderr.on("data", (data: string) => {
-        speakersError = (speakersError + data).slice(-8_192);
-      });
-      decoder.stderr.setEncoding("utf8");
-      decoder.stderr.on("data", (data: string) => {
-        decoderError = (decoderError + data).slice(-8_192);
-      });
-      const kill = () => {
-        decoder.kill("SIGKILL");
-        speakers.kill("SIGKILL");
-      };
-      signal?.addEventListener("abort", kill, { once: true });
-      const timer = setTimeout(kill, SPEAKERS_TIMEOUT_MS);
-      let decoderCode: number | null = null;
-      decoder.on("close", (code) => {
-        decoderCode = code;
-      });
-      const settle = (error: Error | null) => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", kill);
-        if (error) reject(error);
-        else resolve(stdout);
-      };
-      decoder.on("error", (error) => {
-        kill();
-        settle(error);
-      });
-      speakers.on("error", (error) => {
-        kill();
-        settle(error);
-      });
-      speakers.on("close", (code) => {
-        if (code === 0 && decoderCode !== null && decoderCode !== 0) {
-          settle(
-            new RecordingSpeakersError(
-              `ffmpeg could not decode the audio: ${decoderError.trim().slice(0, 400)}`,
-            ),
-          );
-        } else if (code === 0) {
-          settle(null);
-        } else {
-          let message = speakersError.trim() || decoderError.trim() || `exit ${code}`;
-          try {
-            message = (
-              JSON.parse(speakersError.trim().split("\n").pop() ?? "") as { error: string }
-            ).error;
-          } catch {
-            // Not the executable's JSON error line; keep the raw text.
-          }
-          settle(new RecordingSpeakersError(`speaker models failed: ${message.slice(0, 400)}`));
-        }
-      });
-    });
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-i",
+        input,
+        "-f",
+        "f32le",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "pipe:1",
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    let speakers: ReturnType<typeof spawnSpeakers>;
+    try {
+      speakers = spawnSpeakers(config, args, decoder.stdout);
+    } catch (error) {
+      decoder.kill("SIGKILL");
+      throw error;
+    }
+    trackRecordingProcesses([decoder, speakers]);
+    const kill = () => {
+      decoder.kill("SIGKILL");
+      speakers.kill("SIGKILL");
+    };
+    signal?.addEventListener("abort", kill, { once: true });
+    const timer = setTimeout(kill, SPEAKERS_TIMEOUT_MS);
+    try {
+      const [decoderCode, code, stdout, speakersError, decoderError] = await Promise.all([
+        decoder.exited,
+        speakers.exited,
+        new Response(speakers.stdout).text(),
+        readTail(speakers.stderr, 8_192),
+        readTail(decoder.stderr, 8_192),
+      ]);
+      if (code === 0 && decoderCode !== 0) {
+        throw new RecordingSpeakersError(
+          `ffmpeg could not decode the audio: ${decoderError.trim().slice(0, 400)}`,
+        );
+      }
+      if (code === 0) return stdout;
+      let message = speakersError.trim() || decoderError.trim() || `exit ${code}`;
+      try {
+        message = (JSON.parse(speakersError.trim().split("\n").pop() ?? "") as { error: string })
+          .error;
+      } catch {
+        // Not the executable's JSON error line; keep the raw text.
+      }
+      throw new RecordingSpeakersError(`speaker models failed: ${message.slice(0, 400)}`);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", kill);
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+/** The speaker models, reading decoded audio from `stdin`. */
+function spawnSpeakers(
+  config: RecordingSpeakersConfig,
+  args: string[],
+  stdin: ReadableStream<Uint8Array>,
+) {
+  return Bun.spawn(
+    [
+      config.binaryPath,
+      ...args,
+      "--models",
+      config.modelsDir,
+      ...(config.threads ? ["--threads", String(config.threads)] : []),
+    ],
+    { stdin, stdout: "pipe", stderr: "pipe" },
+  );
 }
 
 /** Parse the executable's diarization into turns and voices keyed `S0`, `S1`, … */
