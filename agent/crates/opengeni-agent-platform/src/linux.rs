@@ -623,7 +623,11 @@ impl LinuxDesktop {
     }
 
     /// Establishes a fresh X11 connection plus the default screen for one op.
+    /// A desktop found through a login session refuses once that session is
+    /// no longer the one on the screen, so nothing is captured from or typed
+    /// into a desktop nobody sees.
     fn connect(&self) -> PlatformResult<(x11rb::rust_connection::RustConnection, Screen)> {
+        self.require_current_session()?;
         let (conn, screen_num) = self.display.connect().map_err(|e| {
             PlatformError::os(format!("connect X display {}: {e}", self.display.name))
         })?;
@@ -631,7 +635,27 @@ impl LinuxDesktop {
         Ok((conn, screen))
     }
 
+    fn require_current_session(&self) -> PlatformResult<()> {
+        match &self.display.session {
+            Some(session) => crate::linux_session::require_current_session(session)
+                .map_err(PlatformError::Unsupported),
+            None => Ok(()),
+        }
+    }
+
+    /// Why this desktop may not be used right now, in plain words: its login
+    /// session is no longer the one on the screen, or it ended. `None` while
+    /// it may be used.
+    #[must_use]
+    pub fn session_unavailable_reason(&self) -> Option<String> {
+        self.display
+            .session
+            .as_deref()
+            .and_then(|session| crate::linux_session::require_current_session(session).err())
+    }
+
     fn composite(&self) -> PlatformResult<MutexGuard<'_, CompositeState>> {
+        self.require_current_session()?;
         self.composite
             .as_ref()
             .ok_or_else(|| {

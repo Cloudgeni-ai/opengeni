@@ -124,9 +124,11 @@ test.skipIf(process.platform !== "linux")(
   "a controller started before anyone signed in joins the desktop found when a session opens",
   async () => {
     let lookups = 0;
+    const lookupEnvironments: NodeJS.ProcessEnv[] = [];
     const allocator = new ExistingComputerEnvironmentAllocator({
-      findLinuxDesktop: async () => {
+      findLinuxDesktop: async (environment) => {
         lookups += 1;
+        lookupEnvironments.push(environment);
         return { display: ":0", xauthority: "/home/user/.Xauthority" };
       },
     });
@@ -140,13 +142,24 @@ test.skipIf(process.platform !== "linux")(
     expect(lookups).toBe(1);
 
     // An inherited DISPLAY may be one an earlier login left behind: the
-    // helper checks it (it tries it first) and its answer is used.
+    // helper checks it (it tries it first) and its answer is used. The lookup
+    // sees the session's own environment, not the controller's secrets.
     const inherited = await allocator.allocate(
-      sessionContext({ PATH: "/usr/bin", DISPLAY: ":1", XAUTHORITY: "/tmp/stale-auth" }),
+      sessionContext({
+        PATH: "/usr/bin",
+        DISPLAY: ":1",
+        XAUTHORITY: "/tmp/stale-auth",
+        OPENGENI_API_KEY: "secret",
+      }),
     );
     expect(inherited.displayId).toBe(":0");
     expect(inherited.environment.XAUTHORITY).toBe("/home/user/.Xauthority");
     expect(lookups).toBe(2);
+    expect(lookupEnvironments[1]).toEqual({
+      PATH: "/usr/bin",
+      DISPLAY: ":1",
+      XAUTHORITY: "/tmp/stale-auth",
+    });
 
     // A Wayland session without Xwayland keeps its own path.
     const wayland = await allocator.allocate(
@@ -175,10 +188,23 @@ test.skipIf(process.platform !== "linux")(
         throw new Error("helper missing");
       },
     });
-    await expect(broken.allocate(sessionContext({ PATH: "/usr/bin" }))).rejects.toMatchObject({
-      code: "resource_unavailable",
-      message: "connected Linux ComputerSession has no active graphical display",
-    });
+    const logged: unknown[][] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      await expect(broken.allocate(sessionContext({ PATH: "/usr/bin" }))).rejects.toMatchObject({
+        code: "resource_unavailable",
+        message: "connected Linux ComputerSession has no active graphical display",
+      });
+    } finally {
+      console.error = consoleError;
+    }
+    // The failed lookup leaves a diagnostic rather than vanishing.
+    expect(logged).toHaveLength(1);
+    expect(logged[0]?.[0]).toBe("computer desktop session lookup failed");
+    expect(String(logged[0]?.[1])).toContain("helper missing");
   },
 );
 
@@ -195,17 +221,23 @@ test.skipIf(process.platform === "win32")(
       };
       const found = await helper(
         "found",
-        `[ "$1" = desktop-session ] && printf '%s\\n' '{"display":":0","xauthority":null}'`,
+        `[ "$1" = desktop-session ] && printf '{"display":"%s","xauthority":null}\\n' "$DISPLAY"`,
       );
-      expect(await nativeLinuxDesktopSession(found)()).toEqual({ display: ":0", xauthority: null });
+      // The helper runs with the environment it is given.
+      expect(await nativeLinuxDesktopSession(found)({ DISPLAY: ":7" })).toEqual({
+        display: ":7",
+        xauthority: null,
+      });
       const none = await helper("none", `printf '%s\\n' '{"unavailable":"Nobody is signed in."}'`);
-      expect(await nativeLinuxDesktopSession(none)()).toEqual({
+      expect(await nativeLinuxDesktopSession(none)({})).toEqual({
         unavailable: "Nobody is signed in.",
       });
       const garbage = await helper("garbage", `printf '%s\\n' '{"display":""}'`);
-      await expect(nativeLinuxDesktopSession(garbage)()).rejects.toThrow();
+      await expect(nativeLinuxDesktopSession(garbage)({})).rejects.toThrow();
       const hung = await helper("hung", "exec sleep 30");
-      await expect(nativeLinuxDesktopSession(hung, 200)()).rejects.toThrow("timed out");
+      await expect(
+        nativeLinuxDesktopSession(hung, 200)({ PATH: process.env.PATH }),
+      ).rejects.toThrow("timed out");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

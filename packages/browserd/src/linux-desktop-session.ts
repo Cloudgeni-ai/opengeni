@@ -7,7 +7,10 @@ export type LinuxDesktopSession =
   | { display: string; xauthority: string | null }
   | { unavailable: string };
 
-export type LinuxDesktopSessionFinder = () => Promise<LinuxDesktopSession>;
+/** Looks up the desktop with the environment the ComputerSession will use. */
+export type LinuxDesktopSessionFinder = (
+  environment: NodeJS.ProcessEnv,
+) => Promise<LinuxDesktopSession>;
 
 const LOOKUP_TIMEOUT_MS = 5_000;
 const MAX_OUTPUT_BYTES = 16_384;
@@ -30,11 +33,19 @@ export function nativeLinuxDesktopSession(
   binaryPath: string,
   timeoutMs = LOOKUP_TIMEOUT_MS,
 ): LinuxDesktopSessionFinder {
-  return async () => Answer.parse(JSON.parse(await runLookup(binaryPath, timeoutMs)));
+  return async (environment) =>
+    Answer.parse(JSON.parse(await runLookup(binaryPath, environment, timeoutMs)));
 }
 
-async function runLookup(binaryPath: string, timeoutMs: number): Promise<string> {
-  const child = spawn(binaryPath, ["desktop-session"], { stdio: ["ignore", "pipe", "pipe"] });
+async function runLookup(
+  binaryPath: string,
+  environment: NodeJS.ProcessEnv,
+  timeoutMs: number,
+): Promise<string> {
+  const child = spawn(binaryPath, ["desktop-session"], {
+    env: environment,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   const stdout: Buffer[] = [];
   let bytes = 0;
   child.stdout.on("data", (chunk: Buffer) => {

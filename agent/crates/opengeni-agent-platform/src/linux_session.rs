@@ -5,16 +5,24 @@
 //! `XAUTHORITY`. Instead of trusting only its inherited environment, the agent
 //! asks logind which graphical sessions its own user has, reads each session's
 //! display and authority file from the environment of a process in that
-//! session, and connects with that authority. An explicit `DISPLAY` (for
-//! example the Xvfb `--virtual-desktop` starts) keeps priority.
+//! session, and connects with that authority. The agent's own virtual desktop
+//! (the Xvfb `--virtual-desktop` starts) is used alone.
+//!
+//! Only the user's own sessions that are active (in front on their seat) are
+//! used: never another user's screen, the display manager's login screen, or
+//! the user's own session while the screen shows another one. An inherited
+//! `DISPLAY` is used when it names one of those sessions' displays, or when it
+//! is an X server the user runs themselves that no login session claims (a
+//! user-started Xvfb or VNC server).
 //!
 //! logind's session state is read the way sd-login reads it, from
 //! `/run/systemd/users/<uid>`, `/run/systemd/sessions/<id>` and
 //! `/run/systemd/seats/<seat>`, so no D-Bus round trip or extra dependency is
-//! needed. A host without logind keeps the old behaviour: display `:0` with the
-//! default authority.
+//! needed. A host without logind has no sessions to check against and keeps
+//! the old behaviour: the inherited `DISPLAY`, else `:0`, with the default
+//! authority.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead as _, BufReader, Read};
 use std::path::{Path, PathBuf};
 
@@ -31,6 +39,10 @@ pub struct X11Display {
     /// The authority file to read the cookie from; `None` uses the X11
     /// default (`$XAUTHORITY`, then `~/.Xauthority`).
     pub authority: Option<PathBuf>,
+    /// The logind session this display belongs to, when it was found through
+    /// one. A desktop opened on it stops working once that session is no
+    /// longer the one on the screen.
+    pub session: Option<String>,
 }
 
 impl X11Display {
@@ -40,6 +52,7 @@ impl X11Display {
         Self {
             name: name.into(),
             authority: None,
+            session: None,
         }
     }
 
@@ -160,6 +173,8 @@ impl AgentIdentity {
 pub(crate) struct SessionRoots {
     pub(crate) logind: PathBuf,
     pub(crate) proc: PathBuf,
+    /// Where local X servers put their sockets (`X<number>`).
+    pub(crate) x11_sockets: PathBuf,
 }
 
 impl Default for SessionRoots {
@@ -167,6 +182,7 @@ impl Default for SessionRoots {
         Self {
             logind: PathBuf::from("/run/systemd"),
             proc: PathBuf::from("/proc"),
+            x11_sockets: PathBuf::from("/tmp/.X11-unix"),
         }
     }
 }
@@ -180,6 +196,9 @@ pub(crate) enum Absence {
     Explicit,
     /// The user has no graphical login session.
     NoLogin,
+    /// The user's desktop session exists but another session or console is
+    /// on the screen.
+    Inactive,
     /// Another user is signed in to the machine's screen.
     OtherUser,
     /// The user's graphical session runs Wayland with no X11 display.
@@ -205,6 +224,7 @@ struct LogindSession {
     class: String,
     state: String,
     display: Option<String>,
+    seat: Option<String>,
     active: bool,
     remote: bool,
 }
@@ -218,62 +238,88 @@ struct SessionEnvironment {
 
 /// Finds the displays this agent's user may use, best first.
 pub(crate) fn display_candidates(agent: &AgentIdentity, roots: &SessionRoots) -> DisplayCandidates {
-    let Some(name) = &agent.display else {
-        return session_candidates(agent, roots);
-    };
-    let inherited = X11Display {
+    let inherited = agent.display.as_ref().map(|name| X11Display {
         name: name.clone(),
         authority: agent.xauthority.clone(),
-    };
+        session: None,
+    });
     // The agent's own virtual desktop is the only display it may use: falling
     // back to the person's screen would surprise them.
-    if agent.virtual_display.as_ref() == Some(name) {
+    if let Some(inherited) = inherited
+        .as_ref()
+        .filter(|inherited| agent.virtual_display.as_ref() == Some(&inherited.name))
+    {
         return DisplayCandidates {
-            displays: vec![inherited],
+            displays: vec![inherited.clone()],
             absence: Absence::Explicit,
         };
     }
-    // A display inherited from whatever started the agent (a terminal, or a
-    // service manager that a past login exported it to) comes first but may be
-    // stale, so the user's current session follows it.
-    let session = session_candidates(agent, roots);
-    match session.absence {
-        Absence::NoLogind | Absence::Explicit => DisplayCandidates {
-            displays: vec![inherited],
-            absence: Absence::Explicit,
-        },
-        Absence::None => {
-            let mut displays = vec![inherited];
-            for display in session.displays {
-                if !displays.contains(&display) {
-                    displays.push(display);
-                }
-            }
-            DisplayCandidates {
-                displays,
-                absence: Absence::None,
+    if !roots.logind.join("sessions").is_dir() {
+        // Without logind there is no session to check a display against.
+        return match inherited {
+            Some(inherited) => DisplayCandidates {
+                displays: vec![inherited],
+                absence: Absence::Explicit,
+            },
+            None => DisplayCandidates {
+                displays: vec![X11Display {
+                    authority: agent.xauthority.clone(),
+                    ..X11Display::named(":0")
+                }],
+                absence: Absence::NoLogind,
+            },
+        };
+    }
+    let sessions = session_displays(agent, roots);
+    let mut absence = sessions.absence;
+    let mut displays: Vec<X11Display> = Vec::new();
+    if let Some((inherited, number)) = inherited.and_then(|inherited| {
+        let number = display_number(&inherited.name)?;
+        Some((inherited, number))
+    }) {
+        if let Some(session) = sessions
+            .active
+            .iter()
+            .find(|display| display_number(&display.name) == Some(number))
+        {
+            // A display inherited from whatever started the agent (a terminal,
+            // or a service manager a past login exported it to) names the
+            // session's display; its authority is tried first, and the
+            // session's own follows in case it is stale.
+            displays.push(X11Display {
+                session: session.session.clone(),
+                ..inherited
+            });
+        } else if !sessions.named.contains(&number)
+            && !logind_names_display(&roots.logind, number)
+            && x11_socket_owner(&roots.x11_sockets, number) == Some(agent.uid)
+        {
+            // An X server the user runs themselves (an Xvfb or VNC server)
+            // that is no login session's screen.
+            displays.push(inherited);
+            if sessions.active.is_empty() {
+                absence = Absence::Explicit;
             }
         }
-        absence => DisplayCandidates {
-            displays: vec![inherited],
-            absence,
-        },
     }
+    for display in sessions.active {
+        if !displays.contains(&display) {
+            displays.push(display);
+        }
+    }
+    DisplayCandidates { displays, absence }
 }
 
-/// The displays of the user's login sessions, or the default display and why
-/// the session state suggests it may not open.
-fn session_candidates(agent: &AgentIdentity, roots: &SessionRoots) -> DisplayCandidates {
-    let fallback = X11Display {
-        name: ":0".to_string(),
-        authority: agent.xauthority.clone(),
-    };
-    if !roots.logind.join("sessions").is_dir() {
-        return DisplayCandidates {
-            displays: vec![fallback],
-            absence: Absence::NoLogind,
-        };
-    }
+/// The displays of the user's active login sessions, the display numbers any
+/// of the user's sessions use, and why the session state suggests there is no
+/// desktop when no session is active.
+struct SessionDisplays {
+    active: Vec<X11Display>,
+    named: BTreeSet<u16>,
+    absence: Absence,
+}
+
+fn session_displays(agent: &AgentIdentity, roots: &SessionRoots) -> SessionDisplays {
     let sessions = user_sessions(agent.uid, &roots.logind);
     let environments = if sessions.is_empty() {
         BTreeMap::new()
@@ -287,16 +333,19 @@ fn session_candidates(agent: &AgentIdentity, roots: &SessionRoots) -> DisplayCan
             .map(|dir| dir.join("gdm").join("Xauthority"))
             .filter(|path| path.is_file())
     });
-    let mut displays: Vec<X11Display> = Vec::new();
+    let mut active: Vec<X11Display> = Vec::new();
+    let mut named = BTreeSet::new();
     let mut wayland = false;
+    let mut inactive = false;
     let graphical = |session: &&LogindSession| matches!(session.kind.as_str(), "x11" | "wayland");
-    // Graphical sessions, then text sessions that started an X server
-    // themselves (startx from a console login).
-    for session in sessions
-        .iter()
-        .filter(graphical)
-        .chain(sessions.iter().filter(|session| !graphical(session)))
-    {
+    // Graphical sessions, then text sessions on the machine's own seat that
+    // started an X server themselves (startx from a console login). A remote
+    // text login (SSH) is never the person's screen, whatever it exports.
+    for session in sessions.iter().filter(graphical).chain(
+        sessions
+            .iter()
+            .filter(|session| !graphical(session) && session.seat.is_some() && !session.remote),
+    ) {
         let environment = environments.get(&session.id);
         let name = environment
             .and_then(|environment| environment.display.clone())
@@ -306,6 +355,15 @@ fn session_candidates(agent: &AgentIdentity, roots: &SessionRoots) -> DisplayCan
                     .flatten()
                     .filter(|display| is_local_display(display))
             });
+        if let Some(number) = name.as_deref().and_then(display_number) {
+            named.insert(number);
+        }
+        // The user's own session while the screen shows another session or a
+        // console: driving it would type into a desktop nobody sees.
+        if !session.active {
+            inactive |= name.is_some() || graphical(&session);
+            continue;
+        }
         let Some(name) = name else {
             wayland |= session.kind == "wayland";
             continue;
@@ -315,31 +373,26 @@ fn session_candidates(agent: &AgentIdentity, roots: &SessionRoots) -> DisplayCan
             authority: environment
                 .and_then(|environment| environment.authority.clone())
                 .or_else(|| default_authority.clone()),
+            session: Some(session.id.clone()),
         };
-        if !displays.contains(&display) {
-            displays.push(display);
+        if !active.contains(&display) {
+            active.push(display);
         }
     }
-    if !displays.is_empty() {
-        return DisplayCandidates {
-            displays,
-            absence: Absence::None,
-        };
-    }
-    let absence = if wayland {
+    let absence = if !active.is_empty() {
+        Absence::None
+    } else if wayland {
         Absence::Wayland
+    } else if inactive {
+        Absence::Inactive
     } else if seat_user(&roots.logind, "seat0").is_some_and(|uid| uid != agent.uid) {
         Absence::OtherUser
     } else {
         Absence::NoLogin
     };
-    // An X server that logind does not know about (started outside any login
-    // session) still opens as before.
-    DisplayCandidates {
-        displays: vec![X11Display {
-            authority: default_authority.or(fallback.authority),
-            ..fallback
-        }],
+    SessionDisplays {
+        active,
+        named,
         absence,
     }
 }
@@ -360,7 +413,7 @@ fn user_sessions(uid: u32, logind: &Path) -> Vec<LogindSession> {
         .into_iter()
         .chain((!primary.is_empty()).then(|| primary.clone()))
         .filter(|id| is_session_id(id))
-        .collect::<std::collections::BTreeSet<_>>()
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .map(|id| read_session(logind, &id))
         .filter(|session| {
@@ -369,6 +422,99 @@ fn user_sessions(uid: u32, logind: &Path) -> Vec<LogindSession> {
         .collect();
     sessions.sort_by_key(|session| (!session.active, session.remote, session.id != primary));
     sessions
+}
+
+const MAX_SESSIONS: usize = 4_096;
+
+/// Whether any logind session, of any user, names display `number` as its
+/// screen.
+fn logind_names_display(logind: &Path, number: u16) -> bool {
+    let Ok(entries) = std::fs::read_dir(logind.join("sessions")) else {
+        return false;
+    };
+    entries.flatten().take(MAX_SESSIONS).any(|entry| {
+        let name = entry.file_name();
+        // Skip the `<id>.ref` FIFOs next to the state files: opening one
+        // would block.
+        name.to_str().is_some_and(is_session_id)
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+            && read_session(logind, &name.to_string_lossy())
+                .display
+                .as_deref()
+                .and_then(display_number)
+                == Some(number)
+    })
+}
+
+/// The user that owns local X server `number`'s socket, which is the user the
+/// server runs as.
+fn x11_socket_owner(sockets: &Path, number: u16) -> Option<u32> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    std::fs::symlink_metadata(sockets.join(format!("X{number}")))
+        .ok()
+        .filter(|metadata| metadata.file_type().is_socket())
+        .map(|metadata| metadata.uid())
+}
+
+/// The display number of a local display name (`:0`, `:1.0`, `unix:2`).
+fn display_number(name: &str) -> Option<u16> {
+    name.strip_prefix("unix")
+        .unwrap_or(name)
+        .strip_prefix(':')?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Whether a logind session is still the one on the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionState {
+    Current,
+    /// Another session or a console is on the screen.
+    Inactive,
+    /// The session ended or is closing.
+    Ended,
+}
+
+pub(crate) fn session_state(logind: &Path, uid: u32, id: &str) -> SessionState {
+    if !is_session_id(id) {
+        return SessionState::Ended;
+    }
+    let session = read_session(logind, id);
+    if session.uid != Some(uid) || session.state == "closing" {
+        SessionState::Ended
+    } else if session.active {
+        SessionState::Current
+    } else {
+        SessionState::Inactive
+    }
+}
+
+const INACTIVE_REASON: &str = "The desktop session of the user the agent runs as is not the one \
+                               on this machine's screen right now (the screen was switched to \
+                               another session or console). It works once that session is back \
+                               on the screen.";
+
+const ENDED_REASON: &str = "The desktop session the agent was using has ended (its user signed \
+                            out). It works again once they sign in.";
+
+/// Why a desktop opened on `session` may no longer be used, or `Ok` while it
+/// is still the session on the screen.
+///
+/// # Errors
+///
+/// The plain reason when the session is no longer on the screen or ended.
+pub(crate) fn require_current_session(session: &str) -> Result<(), String> {
+    match session_state(
+        &SessionRoots::default().logind,
+        nix::unistd::getuid().as_raw(),
+        session,
+    ) {
+        SessionState::Current => Ok(()),
+        SessionState::Inactive => Err(INACTIVE_REASON.to_string()),
+        SessionState::Ended => Err(ENDED_REASON.to_string()),
+    }
 }
 
 /// The plain reason no desktop is available, from what the session state
@@ -390,6 +536,7 @@ pub(crate) fn unavailable_reason(
                              agent runs as. It works once that user signs in to an X11 desktop \
                              session on the machine's screen."
             .to_string(),
+        Absence::Inactive => INACTIVE_REASON.to_string(),
         Absence::OtherUser => "Another user is signed in to this machine's screen. The agent can \
                                only use the desktop of the user it runs as, so it works once \
                                that user signs in."
@@ -446,12 +593,15 @@ fn read_session(logind: &Path, id: &str) -> LogindSession {
             .get("DISPLAY")
             .filter(|value| !value.is_empty())
             .cloned(),
+        seat: values
+            .get("SEAT")
+            .filter(|value| !value.is_empty())
+            .cloned(),
         active: text("ACTIVE") == "1",
         remote: text("REMOTE") == "1",
     }
 }
 
-/// The user whose session is in front on a seat.
 /// The user signed in on `seat`'s screen. `None` when nobody is, which
 /// includes the display manager's login screen: its greeter session runs as
 /// a system user but is no one's desktop.
@@ -498,9 +648,18 @@ fn session_environments(proc: &Path, uid: u32) -> BTreeMap<String, SessionEnviro
         else {
             continue;
         };
+        // DISPLAY and XAUTHORITY come from one process, so a cookie is never
+        // paired with another process's display: the first that names a
+        // display, preferring one that also names its authority.
+        let rank = |environment: &SessionEnvironment| {
+            (
+                environment.display.is_some(),
+                environment.authority.is_some(),
+            )
+        };
         if environments
             .get(&session)
-            .is_some_and(|known| known.display.is_some() && known.authority.is_some())
+            .is_some_and(|known| rank(known) == (true, true))
         {
             continue;
         }
@@ -508,11 +667,8 @@ fn session_environments(proc: &Path, uid: u32) -> BTreeMap<String, SessionEnviro
             continue;
         };
         let known = environments.entry(session).or_default();
-        if known.display.is_none() {
-            known.display = found.display;
-        }
-        if known.authority.is_none() {
-            known.authority = found.authority;
+        if rank(&found) > rank(known) {
+            *known = found;
         }
     }
     environments
@@ -564,10 +720,9 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root = tempfile::tempdir().expect("fixture root");
-            std::fs::create_dir_all(root.path().join("run/sessions")).unwrap();
-            std::fs::create_dir_all(root.path().join("run/users")).unwrap();
-            std::fs::create_dir_all(root.path().join("run/seats")).unwrap();
-            std::fs::create_dir_all(root.path().join("proc")).unwrap();
+            for dir in ["run/sessions", "run/users", "run/seats", "proc", "x11"] {
+                std::fs::create_dir_all(root.path().join(dir)).unwrap();
+            }
             Self { root }
         }
 
@@ -575,6 +730,7 @@ mod tests {
             SessionRoots {
                 logind: self.root.path().join("run"),
                 proc: self.root.path().join("proc"),
+                x11_sockets: self.root.path().join("x11"),
             }
         }
 
@@ -606,6 +762,14 @@ mod tests {
             );
             self.write(&format!("proc/{pid}/environ"), &environ.join("\0"));
         }
+
+        /// The socket of a local X server run by the agent's own user.
+        fn own_x_server(&self, number: u16) {
+            std::os::unix::net::UnixListener::bind(
+                self.root.path().join("x11").join(format!("X{number}")),
+            )
+            .unwrap();
+        }
     }
 
     fn agent() -> AgentIdentity {
@@ -615,44 +779,110 @@ mod tests {
         }
     }
 
+    fn in_session(name: &str, session: &str) -> X11Display {
+        X11Display {
+            session: Some(session.into()),
+            ..X11Display::named(name)
+        }
+    }
+
     #[test]
-    fn an_inherited_display_comes_first_and_a_virtual_desktop_is_used_alone() {
+    fn a_virtual_desktop_is_used_alone_and_an_inherited_display_only_for_the_users_screen() {
         let fixture = Fixture::new();
-        let agent = AgentIdentity {
-            display: Some(":99".into()),
-            ..agent()
-        };
+        let agent = agent();
         fixture.user(agent.uid, "c1", "c1");
         fixture.session("c1", agent.uid, "TYPE=x11\nDISPLAY=:0\nACTIVE=1\n");
+        fixture.process(500, "c1", &["DISPLAY=:0", "XAUTHORITY=/tmp/session"]);
         // The agent's own virtual desktop is used alone.
         let virtual_desktop = AgentIdentity {
+            display: Some(":99".into()),
             virtual_display: Some(":99".into()),
             ..agent.clone()
         };
         let found = display_candidates(&virtual_desktop, &fixture.roots());
         assert_eq!(found.displays, vec![X11Display::named(":99")]);
         assert_eq!(found.absence, Absence::Explicit);
-        // An inherited display comes first, and the current session follows in
-        // case it is stale (left behind by an earlier login).
-        let found = display_candidates(&agent, &fixture.roots());
+        // An inherited display naming the session's screen comes first with its
+        // own authority, and the session's follows in case that one is stale.
+        let inherited = AgentIdentity {
+            display: Some(":0".into()),
+            xauthority: Some("/tmp/stale".into()),
+            ..agent.clone()
+        };
+        let found = display_candidates(&inherited, &fixture.roots());
+        let session = X11Display {
+            authority: Some("/tmp/session".into()),
+            ..in_session(":0", "c1")
+        };
         assert_eq!(
             found.displays,
-            vec![X11Display::named(":99"), X11Display::named(":0")]
+            vec![
+                X11Display {
+                    authority: Some("/tmp/stale".into()),
+                    ..in_session(":0", "c1")
+                },
+                session.clone(),
+            ]
         );
         assert_eq!(found.absence, Absence::None);
-        // With nobody signed in, the reason says so rather than blaming the
-        // inherited display.
+        // Any other inherited display is not the user's screen and is not tried
+        // unless the user runs that X server themselves.
+        let other = AgentIdentity {
+            display: Some(":5".into()),
+            ..agent.clone()
+        };
+        let found = display_candidates(&other, &fixture.roots());
+        assert_eq!(found.displays, vec![session.clone()]);
+        fixture.own_x_server(5);
+        let found = display_candidates(&other, &fixture.roots());
+        assert_eq!(found.displays, vec![X11Display::named(":5"), session]);
+        // With nobody signed in, a display a past login left in the service
+        // manager's environment is not tried at all.
         let empty = Fixture::new();
-        let found = display_candidates(&agent, &empty.roots());
-        assert_eq!(found.displays, vec![X11Display::named(":99")]);
+        let stale = AgentIdentity {
+            display: Some(":0".into()),
+            ..agent.clone()
+        };
+        let found = display_candidates(&stale, &empty.roots());
+        assert!(found.displays.is_empty());
         assert_eq!(found.absence, Absence::NoLogin);
-        // Without logind there is nothing else to try.
+        // A user-run X server still opens, and the reason names it.
+        empty.own_x_server(5);
+        let found = display_candidates(&other, &empty.roots());
+        assert_eq!(found.displays, vec![X11Display::named(":5")]);
+        assert_eq!(found.absence, Absence::Explicit);
+        // Without logind there is nothing to check against.
         let no_logind = SessionRoots {
             logind: empty.root.path().join("absent"),
-            proc: empty.root.path().join("proc"),
+            ..empty.roots()
         };
-        let found = display_candidates(&agent, &no_logind);
+        let found = display_candidates(&stale, &no_logind);
+        assert_eq!(found.displays, vec![X11Display::named(":0")]);
         assert_eq!(found.absence, Absence::Explicit);
+    }
+
+    #[test]
+    fn a_user_run_x_server_that_a_login_session_claims_is_not_taken_for_a_spare_one() {
+        let fixture = Fixture::new();
+        let agent = AgentIdentity {
+            display: Some(":1".into()),
+            ..agent()
+        };
+        fixture.own_x_server(1);
+        // The user's own startx session on :1, while the screen shows a console.
+        fixture.user(agent.uid, "3", "3");
+        fixture.session("3", agent.uid, "TYPE=tty\nSEAT=seat0\nACTIVE=0\n");
+        fixture.process(700, "3", &["DISPLAY=:1"]);
+        let found = display_candidates(&agent, &fixture.roots());
+        assert!(found.displays.is_empty());
+        assert_eq!(found.absence, Absence::Inactive);
+        // Another user's session naming it in logind is the same.
+        let other = Fixture::new();
+        other.own_x_server(1);
+        other.session("c9", agent.uid + 1, "TYPE=x11\nDISPLAY=:1\nACTIVE=1\n");
+        assert!(display_candidates(&agent, &other.roots())
+            .displays
+            .is_empty());
     }
 
     #[test]
@@ -660,13 +890,15 @@ mod tests {
         let fixture = Fixture::new();
         let agent = agent();
         fixture.user(agent.uid, "c1", "9 c1");
-        // An SSH login with X forwarding is not the person's screen.
+        // An SSH login with X forwarding is not the person's screen, nor is one
+        // that exports the seat's display itself.
         fixture.session("9", agent.uid, "TYPE=tty\nREMOTE=1\nACTIVE=1\n");
         fixture.process(
             400,
             "9",
             &["DISPLAY=localhost:10.0", "XAUTHORITY=/tmp/ssh-auth"],
         );
+        fixture.process(401, "9", &["DISPLAY=:1", "XAUTHORITY=/tmp/ssh-auth"]);
         fixture.session(
             "c1",
             agent.uid,
@@ -686,10 +918,34 @@ mod tests {
         assert_eq!(
             found.displays,
             vec![X11Display {
-                name: ":0".into(),
                 authority: Some("/home/user/.Xauthority".into()),
+                ..in_session(":0", "c1")
             }]
         );
+    }
+
+    #[test]
+    fn display_and_authority_come_from_the_same_process() {
+        let fixture = Fixture::new();
+        let agent = agent();
+        fixture.user(agent.uid, "c1", "c1");
+        fixture.session("c1", agent.uid, "TYPE=x11\nDISPLAY=:0\nACTIVE=1\n");
+        // An authority alone, a display alone, then a process with both.
+        fixture.process(800, "c1", &["XAUTHORITY=/tmp/other"]);
+        fixture.process(801, "c1", &["DISPLAY=:0"]);
+        fixture.process(802, "c1", &["DISPLAY=:0", "XAUTHORITY=/tmp/session"]);
+        let found = display_candidates(&agent, &fixture.roots());
+        assert_eq!(
+            found.displays,
+            vec![X11Display {
+                authority: Some("/tmp/session".into()),
+                ..in_session(":0", "c1")
+            }]
+        );
+        // A display alone is never given another process's authority.
+        std::fs::remove_dir_all(fixture.root.path().join("proc/802")).unwrap();
+        let found = display_candidates(&agent, &fixture.roots());
+        assert_eq!(found.displays, vec![in_session(":0", "c1")]);
     }
 
     #[test]
@@ -708,21 +964,21 @@ mod tests {
         assert_eq!(
             found.displays,
             vec![X11Display {
-                name: ":1".into(),
                 authority: Some(runtime.join("gdm/Xauthority")),
+                ..in_session(":1", "2")
             }]
         );
     }
 
     #[test]
-    fn no_graphical_login_says_so_and_still_tries_the_default_display() {
+    fn no_graphical_login_says_so_and_tries_nothing() {
         let fixture = Fixture::new();
         let agent = agent();
         fixture.user(agent.uid, "", "9");
         fixture.session("9", agent.uid, "TYPE=tty\nREMOTE=1\nACTIVE=1\n");
         let found = display_candidates(&agent, &fixture.roots());
         assert_eq!(found.absence, Absence::NoLogin);
-        assert_eq!(found.displays, vec![X11Display::named(":0")]);
+        assert!(found.displays.is_empty());
         // A lingering user with no session at all is the same.
         std::fs::remove_file(fixture.root.path().join(format!("run/users/{}", agent.uid))).unwrap();
         assert_eq!(
@@ -736,24 +992,27 @@ mod tests {
             agent.uid,
             "TYPE=x11\nCLASS=greeter\nDISPLAY=:0\nACTIVE=1\n",
         );
-        assert_eq!(
-            display_candidates(&agent, &fixture.roots()).absence,
-            Absence::NoLogin
-        );
+        let found = display_candidates(&agent, &fixture.roots());
+        assert_eq!(found.absence, Absence::NoLogin);
+        assert!(found.displays.is_empty());
     }
 
     #[test]
     fn another_users_screen_and_wayland_have_their_own_reasons() {
         let fixture = Fixture::new();
-        let agent = agent();
+        // The agent inherited the seat's display, which belongs to someone else.
+        let agent = AgentIdentity {
+            display: Some(":0".into()),
+            ..agent()
+        };
         fixture.write(
             "run/seats/seat0",
             &format!("ACTIVE=c7\nACTIVE_UID={}\n", agent.uid + 1),
         );
-        assert_eq!(
-            display_candidates(&agent, &fixture.roots()).absence,
-            Absence::OtherUser
-        );
+        fixture.session("c7", agent.uid + 1, "TYPE=x11\nDISPLAY=:0\nACTIVE=1\n");
+        let found = display_candidates(&agent, &fixture.roots());
+        assert_eq!(found.absence, Absence::OtherUser);
+        assert!(found.displays.is_empty());
         // The display manager's login screen after a sign-out is nobody's
         // desktop, not another user's.
         fixture.write(
@@ -772,26 +1031,44 @@ mod tests {
             Absence::Wayland
         );
         // A Wayland session with Xwayland names its X11 display.
-        fixture.process(600, "4", &["WAYLAND_DISPLAY=wayland-0", "DISPLAY=:0"]);
+        fixture.process(600, "4", &["WAYLAND_DISPLAY=wayland-0", "DISPLAY=:1"]);
         let found = display_candidates(&agent, &fixture.roots());
         assert_eq!(found.absence, Absence::None);
-        assert_eq!(found.displays, vec![X11Display::named(":0")]);
+        assert_eq!(found.displays, vec![in_session(":1", "4")]);
     }
 
     #[test]
-    fn a_closing_session_does_not_count_and_the_active_one_comes_first() {
+    fn only_active_sessions_count_and_an_inactive_one_says_so() {
         let fixture = Fixture::new();
         let agent = agent();
         fixture.user(agent.uid, "5", "5 6 7");
         fixture.session("5", agent.uid, "TYPE=x11\nDISPLAY=:0\nSTATE=closing\n");
         fixture.session("6", agent.uid, "TYPE=x11\nDISPLAY=:1\nACTIVE=0\n");
         fixture.session("7", agent.uid, "TYPE=x11\nDISPLAY=:2\nACTIVE=1\n");
-        let names: Vec<String> = display_candidates(&agent, &fixture.roots())
-            .displays
-            .into_iter()
-            .map(|display| display.name)
-            .collect();
-        assert_eq!(names, vec![":2", ":1"]);
+        let found = display_candidates(&agent, &fixture.roots());
+        assert_eq!(found.displays, vec![in_session(":2", "7")]);
+        // Fast user switching moves the screen to another session.
+        fixture.session("7", agent.uid, "TYPE=x11\nDISPLAY=:2\nACTIVE=0\n");
+        let found = display_candidates(&agent, &fixture.roots());
+        assert!(found.displays.is_empty());
+        assert_eq!(found.absence, Absence::Inactive);
+        assert_eq!(unavailable_reason(&found, ":0", ""), INACTIVE_REASON);
+    }
+
+    #[test]
+    fn an_open_desktop_follows_its_sessions_state() {
+        let fixture = Fixture::new();
+        let uid = agent().uid;
+        let logind = fixture.roots().logind;
+        fixture.session("c1", uid, "TYPE=x11\nACTIVE=1\n");
+        assert_eq!(session_state(&logind, uid, "c1"), SessionState::Current);
+        fixture.session("c1", uid, "TYPE=x11\nACTIVE=0\n");
+        assert_eq!(session_state(&logind, uid, "c1"), SessionState::Inactive);
+        fixture.session("c1", uid, "TYPE=x11\nSTATE=closing\nACTIVE=1\n");
+        assert_eq!(session_state(&logind, uid, "c1"), SessionState::Ended);
+        assert_eq!(session_state(&logind, uid, "c2"), SessionState::Ended);
+        assert_eq!(session_state(&logind, uid + 1, "c1"), SessionState::Ended);
+        assert_eq!(session_state(&logind, uid, "../c1"), SessionState::Ended);
     }
 
     #[test]
@@ -801,6 +1078,15 @@ mod tests {
         let found = display_candidates(&agent(), &fixture.roots());
         assert_eq!(found.absence, Absence::NoLogind);
         assert_eq!(found.displays, vec![X11Display::named(":0")]);
+    }
+
+    #[test]
+    fn display_numbers_of_local_names() {
+        assert_eq!(display_number(":0"), Some(0));
+        assert_eq!(display_number(":1.0"), Some(1));
+        assert_eq!(display_number("unix:2"), Some(2));
+        assert_eq!(display_number("localhost:10.0"), None);
+        assert_eq!(display_number("/tmp/launch-abc/org.x:0"), None);
     }
 
     #[test]

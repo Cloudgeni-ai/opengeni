@@ -423,8 +423,14 @@ export class ExistingComputerEnvironmentAllocator implements ComputerEnvironment
     const waylandOnly = Boolean(environment.WAYLAND_DISPLAY) && !environment.DISPLAY;
     if (platform === "linux" && !waylandOnly && this.options.findLinuxDesktop) {
       // This controller may have started before anyone signed in, or inherited
-      // a DISPLAY an earlier login left behind: join the desktop there now.
-      const session = await this.options.findLinuxDesktop().catch(() => null);
+      // a DISPLAY an earlier login left behind: join the desktop there now. The
+      // lookup runs with the session's own environment, the one the native
+      // adapter gets. When the lookup itself fails, the adapter still applies
+      // the same session rules to the inherited display when it opens.
+      const session = await this.options.findLinuxDesktop(environment).catch((error: unknown) => {
+        console.error("computer desktop session lookup failed", error);
+        return null;
+      });
       if (session && "unavailable" in session) {
         throw new InteractionControllerError("resource_unavailable", session.unavailable, true);
       }

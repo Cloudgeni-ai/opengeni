@@ -412,17 +412,36 @@ impl<D: DesktopBackend + Clone> ReopeningInner<D> {
 }
 
 impl<D: DesktopBackend + Clone + 'static> ReopeningDesktop<D> {
-    /// The open desktop, opened on the blocking pool when there is none.
-    async fn ensure_async(&self) -> PlatformResult<D> {
-        if let Some((_, desktop)) = self.inner.lock().current.clone() {
-            return Ok(desktop);
+    /// The open desktop and its generation, opened on the blocking pool when
+    /// there is none.
+    async fn ensure_async(&self) -> PlatformResult<(u64, D)> {
+        if let Some(current) = self.inner.lock().current.clone() {
+            return Ok(current);
         }
         let inner = std::sync::Arc::clone(&self.inner);
         crate::spawn_blocking_reserved(move || inner.ensure())
             .await
             .map_err(|error| PlatformError::os(format!("desktop open task join: {error}")))?
-            .map(|(_, desktop)| desktop)
             .map_err(PlatformError::Unsupported)
+    }
+
+    /// After a capture or input failed: when the desktop opened in
+    /// `generation` no longer answers, drops it and looks for the current
+    /// one. `None` while the failed desktop still answers (the failure was the
+    /// operation's own), else the desktop found now or why there is none.
+    async fn recheck_after_failure(
+        &self,
+        generation: u64,
+        failed: D,
+    ) -> Option<PlatformResult<(u64, D)>> {
+        let answering = crate::spawn_blocking_reserved(move || failed.probe().is_some())
+            .await
+            .unwrap_or(false);
+        if answering {
+            return None;
+        }
+        self.inner.lost(generation);
+        Some(self.ensure_async().await)
     }
 }
 
@@ -441,11 +460,30 @@ impl<D: DesktopBackend + Clone + 'static> DesktopBackend for ReopeningDesktop<D>
     }
 
     async fn capture(&self) -> PlatformResult<CapturedFrame> {
-        self.ensure_async().await?.capture().await
+        let (generation, desktop) = self.ensure_async().await?;
+        let error = match desktop.capture().await {
+            Ok(frame) => return Ok(frame),
+            Err(error) => error,
+        };
+        match self.recheck_after_failure(generation, desktop).await {
+            None => Err(error),
+            // A capture of whichever desktop is there now is still a capture.
+            Some(Ok((_, current))) => current.capture().await,
+            Some(Err(reason)) => Err(reason),
+        }
     }
 
     async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
-        self.ensure_async().await?.inject(input).await
+        let (generation, desktop) = self.ensure_async().await?;
+        let error = match desktop.inject(input).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        match self.recheck_after_failure(generation, desktop).await {
+            // Input meant for the lost desktop is never replayed on another.
+            None | Some(Ok(_)) => Err(error),
+            Some(Err(reason)) => Err(reason),
+        }
     }
 
     fn capture_blocked_reason(&self) -> Option<String> {
@@ -691,6 +729,9 @@ mod tests {
         }
 
         async fn capture(&self) -> PlatformResult<CapturedFrame> {
+            if self.probe().is_none() {
+                return Err(PlatformError::os("the display stopped answering"));
+            }
             Ok(CapturedFrame {
                 png: self.name.clone().into_bytes(),
                 width: 1280,
@@ -699,7 +740,10 @@ mod tests {
         }
 
         async fn inject(&self, _input: &v1::DesktopInput) -> PlatformResult<()> {
-            Ok(())
+            match self.probe() {
+                Some(_) => Ok(()),
+                None => Err(PlatformError::os("the display stopped answering")),
+            }
         }
     }
 
@@ -816,5 +860,47 @@ mod tests {
             Some(":1")
         );
         assert_eq!(desktop.capture_blocked_reason(), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_capture_or_input_drops_a_desktop_that_went_away() {
+        let screen = std::sync::Arc::new(Screen::default());
+        screen.set(Ok(":0"));
+        let desktop = screen.desktop();
+        // The person signs out between two captures: the capture fails, the
+        // dead desktop is dropped at once, and the error says why.
+        screen
+            .answering
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        screen.set(Err("No one is signed in to a desktop on this machine."));
+        assert!(matches!(
+            desktop.capture().await,
+            Err(PlatformError::Unsupported(reason)) if reason.starts_with("No one is signed in")
+        ));
+        assert_eq!(screen.opens(), 2);
+        assert!(desktop.capture_blocked_reason().is_some());
+        // They sign in again: the next capture finds the new desktop.
+        screen.set(Ok(":1"));
+        after_reopen_interval();
+        assert_eq!(desktop.capture().await.unwrap().png, b":1");
+        // Input to a desktop that went away fails and is not replayed on the
+        // desktop found in its place, which becomes the current one.
+        screen
+            .answering
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        screen.set(Ok(":2"));
+        assert!(matches!(
+            desktop.inject(&v1::DesktopInput::default()).await,
+            Err(PlatformError::Os { .. })
+        ));
+        assert_eq!(
+            desktop.probe().map(|display| display.id).as_deref(),
+            Some(":2")
+        );
+        // A failure while the desktop still answers is the operation's own and
+        // does not reopen anything.
+        let opens = screen.opens();
+        assert!(desktop.capture().await.is_ok());
+        assert_eq!(screen.opens(), opens);
     }
 }

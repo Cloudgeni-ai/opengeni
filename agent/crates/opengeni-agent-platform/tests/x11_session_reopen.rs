@@ -91,6 +91,7 @@ mod linux {
         let display = X11Display {
             name: format!(":{number}"),
             authority: Some(client_authority.clone()),
+            session: None,
         };
         let desktop = ReopeningDesktop::new({
             let display = display.clone();
