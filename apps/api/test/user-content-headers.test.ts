@@ -33,6 +33,7 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
   "company-brain.ts": { count: 1, userContent: true, why: "Company Brain export" },
   "computer-sessions.ts": { count: 1, userContent: true, why: "live computer frame" },
   "editable-artifacts.ts": { count: 1, userContent: true, why: "materialized export download" },
+  "feedback.ts": { count: 1, userContent: true, why: "the author's own feedback screenshot bytes" },
   "files.ts": { count: 1, userContent: true, why: "retained file and screenshot content" },
   "install.ts": { count: 2, userContent: false, why: "operator-built install script and assets" },
   "managed-auth-session-sets.ts": {

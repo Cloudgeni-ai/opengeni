@@ -24,6 +24,7 @@ import {
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { userContentResponseHeaders } from "../http/user-content";
 
 /** The image really is the type it claims: JPEG and PNG signatures. */
 function matchesSignature(bytes: Uint8Array, contentType: string): boolean {
@@ -175,9 +176,9 @@ export function registerFeedbackRoutes(app: Hono, deps: ApiRouteDeps): void {
       : null;
     if (!screenshot || !object) throw new HTTPException(404, { message: "Screenshot not found" });
     return c.body(Uint8Array.from(object.bytes).buffer, 200, {
+      ...userContentResponseHeaders(screenshot.contentType),
       "content-type": screenshot.contentType,
       "cache-control": "private, no-store",
-      "x-content-type-options": "nosniff",
     });
   });
 }
