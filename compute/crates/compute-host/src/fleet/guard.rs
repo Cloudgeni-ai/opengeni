@@ -11,10 +11,18 @@
 //!
 //! Beside its lock it keeps [`Freezes`], the count of what it did to the
 //! VMs' freezer, for the agent's checks of its guests.
+//!
+//! Asked to stop (as an upgrade hands it over to a new release's guard),
+//! it stops only at a step that may feed the watchdog, since closing the
+//! device feeds it once more: the watchdog stays armed (`nowayout`), and
+//! the kernel pings it as it stays so. A guard that ended at any other
+//! time, with the lease run out and the VMs still running, would give
+//! them one more watchdog timeout than the fleet's margin allows for.
 
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -224,9 +232,12 @@ fn held(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Runs the guard until it fails to feed the watchdog, which then reboots
-/// the machine; that is the point.
-pub fn run_guard(config: &GuardConfig) -> anyhow::Result<()> {
+/// Runs the guard until `stop` is set and it may stop, at a step that fed
+/// the watchdog (the lease was valid or the VMs had stopped), or until it
+/// fails to feed the watchdog, which then reboots the machine; that is the
+/// point. Until it may stop it goes on as before, stopping the VMs, and if
+/// they never stop, the watchdog resets the machine.
+pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> {
     if let Some(dir) = config.lock.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -246,10 +257,11 @@ pub fn run_guard(config: &GuardConfig) -> anyhow::Result<()> {
     saying.say(true);
     let mut last = None;
     let mut ready = None;
+    let mut waiting = false;
     tracing::info!(cgroup = %config.cgroup.display(), "guard running");
     loop {
-        let step = step_once(&guard, &cgroup, config, &mut last, &mut saying);
-        if step && let Some(watchdog) = &mut watchdog {
+        let feed = step_once(&guard, &cgroup, config, &mut last, &mut saying);
+        if feed && let Some(watchdog) = &mut watchdog {
             watchdog.feed().context("feeding the watchdog")?;
         }
         if ready.is_none() {
@@ -257,6 +269,21 @@ pub fn run_guard(config: &GuardConfig) -> anyhow::Result<()> {
             // look at whether a guard is ready (the agent's, at its start)
             // holds the lock for a moment; then it is taken a step later.
             ready = try_hold_lock(&ready_lock(&config.lock))?;
+        }
+        if stop.load(Ordering::Relaxed) {
+            // Closing the watchdog now feeds it as this step just did. The
+            // lock goes last, so the next guard opens the watchdog only
+            // once this one has closed it.
+            if feed {
+                tracing::info!("guard stopping");
+                return Ok(());
+            }
+            if !waiting {
+                tracing::warn!(
+                    "asked to stop with the lease run out and the VMs running: stopping them first"
+                );
+                waiting = true;
+            }
         }
         std::thread::sleep(STEP);
     }
@@ -467,7 +494,7 @@ mod tests {
                 }
             })
         };
-        assert!(run_guard(&broken).is_err());
+        assert!(run_guard(&broken, &AtomicBool::new(false)).is_err());
         watcher.join().unwrap();
         assert!(!guard_ready(&broken.lock).unwrap());
         assert!(!held(&broken.lock).unwrap(), "its lock went with it");
@@ -481,7 +508,7 @@ mod tests {
         // odd while it cannot read the freezer, saying so at every step.
         Freezes::beside(&lock).say(1, 6).unwrap();
         let earlier = Freezes::beside(&lock).read().unwrap();
-        std::thread::spawn(move || run_guard(&working));
+        std::thread::spawn(move || run_guard(&working, &AtomicBool::new(false)));
         let started = std::time::Instant::now();
         while !guard_ready(&lock).unwrap() {
             assert!(started.elapsed() < Duration::from_secs(5), "never ready");
@@ -511,7 +538,7 @@ mod tests {
         // One look, held for longer than a moment.
         let watcher = File::create(ready_lock(&lock)).unwrap();
         flock(&watcher, FlockOperation::NonBlockingLockShared).unwrap();
-        let guard = std::thread::spawn(move || run_guard(&working));
+        let guard = std::thread::spawn(move || run_guard(&working, &AtomicBool::new(false)));
         std::thread::sleep(STEP * 3);
         assert!(!guard.is_finished(), "the guard runs on");
         assert!(!guard_ready(&lock).unwrap(), "not ready while looked at");
@@ -522,5 +549,66 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!guard.is_finished());
+    }
+
+    /// Asked to stop with its lease run out and the VMs still running, a
+    /// guard goes on killing them and stops only once they are gone, at a
+    /// step that may feed the watchdog, as closing it does. With a lease
+    /// that is valid it stops at its first step.
+    #[test]
+    fn a_guard_asked_to_stop_stops_only_at_a_step_that_may_feed_the_watchdog() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = dir.path().join("vms");
+        std::fs::create_dir(&group).unwrap();
+        std::fs::write(group.join("cgroup.freeze"), "0").unwrap();
+        let events = group.join("cgroup.events");
+        std::fs::write(&events, "populated 1\nfrozen 0\n").unwrap();
+        let mut lapsed = config(dir.path(), None);
+        lapsed.cgroup = group.clone();
+        // No lease file: the lease has run out.
+        let valid = lapsed.clone();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let guard = {
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || run_guard(&lapsed, &stop))
+        };
+        let started = std::time::Instant::now();
+        while !guard_ready(&valid.lock).unwrap() {
+            assert!(started.elapsed() < Duration::from_secs(5), "never ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        stop.store(true, Ordering::Relaxed);
+        std::thread::sleep(STEP * 5);
+        assert!(!guard.is_finished(), "it stopped with the VMs running");
+        assert_eq!(
+            std::fs::read_to_string(group.join("cgroup.kill")).unwrap(),
+            "1",
+            "it goes on killing them"
+        );
+        // They are gone: it may feed the watchdog, and stops.
+        std::fs::write(&events, "populated 0\nfrozen 0\n").unwrap();
+        let started = std::time::Instant::now();
+        while !guard.is_finished() {
+            assert!(started.elapsed() < Duration::from_secs(5), "never stopped");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        guard.join().unwrap().unwrap();
+        assert!(!held(&valid.lock).unwrap(), "its lock went with it");
+
+        std::fs::write(&events, "populated 1\nfrozen 0\n").unwrap();
+        LeaseFile {
+            host: Some(1),
+            epoch: Some(1),
+            deadline_ns: nanos(boot_now() + Duration::from_secs(600)),
+            seq: 1,
+        }
+        .write(&valid.lease_file)
+        .unwrap();
+        let started = std::time::Instant::now();
+        run_guard(&valid, &AtomicBool::new(true)).unwrap();
+        assert!(
+            started.elapsed() < STEP * 5,
+            "a valid lease, it stops at once"
+        );
     }
 }

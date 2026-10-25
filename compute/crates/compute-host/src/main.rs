@@ -606,7 +606,22 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         Command::BuildImage(args) => compute_host::rootfs::build(*args).await,
         Command::Guard(args) => {
             let config = args.config();
-            tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config)).await?
+            // Asked to stop, the guard stops at its first step that may
+            // feed the watchdog (see `run_guard`), not where the signal
+            // finds it.
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
+            let mut interrupt = tokio::signal::unix::signal(SignalKind::interrupt())?;
+            let asked = Arc::clone(&stop);
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = terminate.recv() => {}
+                    _ = interrupt.recv() => {}
+                }
+                asked.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config, &stop))
+                .await?
         }
         Command::Sweep { store, delete } => {
             let chunked = Chunked::from_url(&store)?

@@ -4,10 +4,14 @@
 # which is what keeps a host that lost its lease from running sandboxes
 # the fleet has already given to another host; so it is never restarted
 # on failure. An upgrade hands it over: install.sh restarts it when it
-# runs from another release. Stopping it closes the watchdog, which stays
-# armed (nowayout), and the new guard reopens it and goes on from what the
-# lease file and the freezer show, as any guard starting does, well inside
-# the watchdog's timeout. Installed by install.sh.
+# runs another binary. Stopping it closes the watchdog, which stays armed
+# (nowayout) and is fed once more as it closes, so asked to stop the guard
+# ends only at a step that may feed it: at once while the lease is valid,
+# otherwise once the VMs have stopped (if they never do, the watchdog
+# resets the machine, well before the stop times out). The new guard
+# reopens it and goes on from what the lease file and the freezer show,
+# as any guard starting does, well inside the watchdog's timeout.
+# Installed by install.sh.
 [Unit]
 Description=Opengeni compute host guard: stops the VMs when the fleet lease ends
 Documentation=https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/operations.md

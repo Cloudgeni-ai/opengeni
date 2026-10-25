@@ -855,12 +855,15 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   configuration stays):
   it installs the release beside the old ones, points
   `/opt/compute/current` at it and restarts the agent; VMs keep running.
-  A guard running from another release is handed over to this one's:
-  stopping it closes the watchdog, which stays armed, and the new guard
-  reopens it within milliseconds and goes on from what the lease file and
-  the freezer show (the watchdog resets the machine if it does not within
-  its 3 s). Without that, a fix to the guard would reach a host only at
-  its next boot. Old releases stay under `/opt/compute/releases`;
+  A guard running another binary (of another release, or one replaced
+  in this one) is handed over to this one's. Closing the watchdog feeds
+  it once more (it stays armed), so the old guard stops only at a step
+  that may feed it: at once while the lease is valid, and otherwise once
+  it has stopped the VMs. The new guard reopens the watchdog within
+  milliseconds and goes on from what the lease file and the freezer show
+  (the watchdog resets the machine if it does not within its 3 s).
+  Without that, a fix to the guard would reach a host only at its next
+  boot. Old releases stay under `/opt/compute/releases`;
   remove one once no pager runs from it (`fuser
   /opt/compute/releases/<version>/compute-host`). On GCP, set the new
   bundle in Terraform and apply it, so hosts created from then on install

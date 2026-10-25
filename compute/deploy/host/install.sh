@@ -39,9 +39,9 @@
 #     guard if they are not running, and restarts the agent
 #
 # An upgrade is the same command with a newer bundle. Restarting the agent
-# leaves its VMs running (ADR 9); a guard of another release is handed over
-# to this one's, which picks up the watchdog well inside its timeout. See
-# docs/operations.md.
+# leaves its VMs running (ADR 9); a guard running another binary is handed
+# over to this one's, which picks up the watchdog well inside its timeout.
+# See docs/operations.md.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -232,19 +232,20 @@ if [ -n "$start" ]; then
   /opt/compute/current/compute-host-certificate
   systemctl start compute-host-certificate.timer
   systemctl start compute-host-setup.service
-  # The guard runs from the release it was started from, so one of another
-  # release is handed over to this one's (see compute-guard.service). The
+  # The guard runs the binary it was started from, so one running any
+  # other file, of another release or replaced in this one, is handed over
+  # to this one's (see compute-guard.service). Files are told apart by
+  # device and inode, which a replaced binary's path does not change. The
   # agent, restarted with it, joins once the new guard is ready.
-  guard_runs=
-  if systemctl is-active -q compute-guard.service; then
-    guard_pid=$(systemctl show -p MainPID --value compute-guard.service)
-    guard_runs=$(readlink "/proc/$guard_pid/exe" || true)
-  fi
-  if [ -z "$guard_runs" ]; then
+  if ! systemctl is-active -q compute-guard.service; then
     systemctl start compute-guard.service
-  elif [ "${guard_runs% (deleted)}" != "$(readlink -f /opt/compute/current/compute-host)" ]; then
-    log "handing the guard over from ${guard_runs%/compute-host*} to release $version"
-    systemctl restart compute-guard.service
+  else
+    guard_pid=$(systemctl show -p MainPID --value compute-guard.service)
+    guard_runs=$(stat -L -c %d:%i "/proc/$guard_pid/exe" 2>/dev/null || true)
+    if [ "$guard_runs" != "$(stat -L -c %d:%i /opt/compute/current/compute-host)" ]; then
+      log "handing the guard over to release $version"
+      systemctl restart compute-guard.service
+    fi
   fi
   systemctl restart compute-host.service
   for _ in $(seq 60); do
