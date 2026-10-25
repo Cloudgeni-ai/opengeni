@@ -2783,13 +2783,106 @@ describe("buildTimeline", () => {
     expect(presentTurnFailureText(englishText, recorded)).toEqual({
       summary: "Couldn’t compact conversation history",
       detail: recorded,
+      compaction: true,
     });
-    // Every other reason passes through as-is.
+    // Copy written for people passes through as-is.
     expect(presentTurnFailureText(englishText, "Model request rejected")).toEqual({
       summary: "Model request rejected",
     });
+    // A diagnostic names the given outcome and keeps its text as detail.
+    expect(
+      presentTurnFailureText(
+        englishText,
+        "connect ECONNREFUSED 10.0.0.1:443",
+        "Sandbox didn’t start",
+      ),
+    ).toEqual({ summary: "Sandbox didn’t start", detail: "connect ECONNREFUSED 10.0.0.1:443" });
     expect(presentTurnFailureText(englishText, "  ")).toBeNull();
     expect(presentTurnFailureText(englishText, undefined)).toBeNull();
+  });
+
+  test("a sandbox that didn't start names that outcome and keeps operator text behind Details", () => {
+    reset();
+    const operatorText =
+      "This compute sandbox's agent is too old: it does not support releasing command output (capabilities.op_release). Rebuild the sandbox image.";
+    const events = [
+      event("turn.started", {}),
+      event("turn.startup.phase.started", { phase: "model_preparation" }),
+      event("sandbox.operation.started", { name: "sandbox.provision" }),
+      event("sandbox.operation.failed", {
+        name: "sandbox.provision",
+        error: operatorText,
+        failureCategory: "unknown",
+        failureCode: "unknown",
+        durationMs: 1_000,
+      }),
+      // The lazy start failed inside model preparation, which fails after it.
+      event("turn.startup.phase.failed", { phase: "model_preparation", error: operatorText }),
+      event("turn.failed", { error: operatorText }),
+    ];
+    const stored = JSON.stringify(events);
+    const items = buildTimeline(englishText, events);
+    expect(items.find((item) => item.kind === "turn-end")).toMatchObject({
+      outcome: "failed",
+      failureText: "Sandbox didn’t start",
+      failureDetail: operatorText,
+    });
+    expect(
+      items.find((item) => item.kind === "startup-phase" && item.phase === "sandbox"),
+    ).toMatchObject({ status: "failed", detail: operatorText });
+    // The turn had visible startup activity: no separate notice repeats it.
+    expect(items.some((item) => item.kind === "notice")).toBe(false);
+    expect(JSON.stringify(events)).toBe(stored);
+  });
+
+  test("copy written for people stays the failure headline; diagnostic codes do not", () => {
+    reset();
+    const authored = buildTimeline(englishText, [
+      event("sandbox.operation.started", { name: "sandbox.provision" }),
+      event("sandbox.operation.failed", { name: "sandbox.provision", error: "quota" }),
+      event("turn.failed", {
+        code: "mcp_server_unavailable",
+        error: "The GitHub connection is unavailable. Reconnect it and try again.",
+      }),
+    ]);
+    expect(authored.find((item) => item.kind === "turn-end")).toEqual(
+      expect.objectContaining({
+        failureText: "The GitHub connection is unavailable. Reconnect it and try again.",
+      }),
+    );
+    expect(authored.find((item) => item.kind === "turn-end")).not.toHaveProperty("failureDetail");
+    reset();
+    const recorded = "Responses stream ended without a terminal event (response.in_progress).";
+    const diagnostic = buildTimeline(englishText, [
+      event("turn.failed", { code: "invalid_sse_terminal", error: recorded }),
+    ]);
+    expect(diagnostic.find((item) => item.kind === "turn-end")).toMatchObject({
+      failureText: "The turn stopped unexpectedly",
+      failureDetail: recorded,
+    });
+    expect(diagnostic.find((item) => item.kind === "notice")).toMatchObject({
+      text: "The turn stopped unexpectedly",
+      details: { label: "Details", value: recorded },
+    });
+  });
+
+  test("a retried attempt is not named by the previous attempt's failed sandbox start", () => {
+    reset();
+    const first = { turnAttemptId: "attempt-1" };
+    const second = { turnAttemptId: "attempt-2" };
+    const items = buildTimeline(englishText, [
+      event("turn.started", {}, first),
+      event("sandbox.operation.started", { name: "sandbox.provision" }, first),
+      event("sandbox.operation.failed", { name: "sandbox.provision", error: "boom" }, first),
+      event("turn.failed", { error: "boom" }, first),
+      event("turn.started", {}, second),
+      event("turn.failed", { error: "worker lost its lease" }, second),
+    ]);
+    const ends = items.filter((item): item is TurnEndItem => item.kind === "turn-end");
+    expect(ends.map(({ failureText, failureDetail }) => ({ failureText, failureDetail }))).toEqual([
+      { failureText: "Sandbox didn’t start", failureDetail: "boom" },
+      { failureText: "The turn stopped unexpectedly", failureDetail: "worker lost its lease" },
+    ]);
   });
 
   test("a capacity-recovery failure reads in the host's language in the timeline", () => {
@@ -3374,7 +3467,7 @@ describe("buildTimeline", () => {
       event("session.status.changed", { status: "requires_action" }),
       event("session.status.changed", { status: "requires_action" }),
       event("turn.started", { triggerEventId: "evt-start" }),
-      event("turn.failed", { error: "model provider unavailable" }),
+      event("turn.failed", { code: "provider_unavailable", error: "model provider unavailable" }),
       event("turn.cancelled", {}),
     ]);
     expect(items.map((item) => item.kind)).toEqual([
@@ -3409,7 +3502,11 @@ describe("buildTimeline", () => {
     reset();
     const items = buildTimeline(englishText, [
       event("turn.completed", {}, { turnId: "turn-complete" }),
-      event("turn.failed", { error: "model provider unavailable" }, { turnId: "turn-failed" }),
+      event(
+        "turn.failed",
+        { code: "provider_unavailable", error: "model provider unavailable" },
+        { turnId: "turn-failed" },
+      ),
       event("turn.started", { triggerEventId: "evt-cancelled" }, { turnId: "turn-cancelled" }),
       event("turn.cancelled", {}, { turnId: "turn-cancelled" }),
     ]);
@@ -3434,9 +3531,12 @@ describe("buildTimeline", () => {
       event("turn.failed", { error: "model provider unavailable" }),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["tool-call", "turn-end"]);
+    // Unclassified text is a diagnostic: the chip names the outcome and keeps
+    // the recorded text as its detail.
     expect(items[1]).toMatchObject({
       outcome: "failed",
-      failureText: "model provider unavailable",
+      failureText: "The turn stopped unexpectedly",
+      failureDetail: "model provider unavailable",
     });
   });
 
@@ -3446,7 +3546,11 @@ describe("buildTimeline", () => {
       event("turn.failed", { error: "model provider unavailable" }),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["turn-end", "notice"]);
-    expect(items[1]).toMatchObject({ tone: "failed", text: "model provider unavailable" });
+    expect(items[1]).toMatchObject({
+      tone: "failed",
+      text: "The turn stopped unexpectedly",
+      details: { label: "Details", value: "model provider unavailable" },
+    });
   });
 
   test("cancelled turns with activity fold interruption into turn-end instead of emitting a duplicate notice", () => {

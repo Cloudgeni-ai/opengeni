@@ -4771,6 +4771,7 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.workerStartupFailed": "Worker startup failed",
   "timeline.platformActivityPresentation.workerWaitInterrupted": "Worker wait interrupted",
   "timeline.platformActivityRow.command": "Command",
+  "timeline.platformActivityRow.details": "Details",
   "timeline.platformActivityRow.includesOverlappingSandboxStartupCustom":
     "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup shown below.",
   "timeline.platformActivityRow.output": "Output",
@@ -4787,6 +4788,7 @@ export const englishMessages = {
     "Switched to another subscription account.",
   "timeline.projection.theTurnFailed": "The turn failed.",
   "timeline.projection.theTurnFailedBeforeRetrying": "The turn failed before retrying.",
+  "timeline.projection.theTurnStoppedUnexpectedly": "The turn stopped unexpectedly",
   "timeline.projection.thisTaskSUsageLimit":
     "This task's usage limit is reached. A person can raise or remove the limit to continue.",
   "timeline.projection.tryAgainAfterYourQuota":

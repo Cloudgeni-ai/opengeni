@@ -441,3 +441,30 @@ test("preclaim presentation preserves existing authored database and structural 
     }).reason,
   ).toBe("The model provider declined this request.");
 });
+
+test("a sandbox that didn't start says so and keeps the operator text behind Details", () => {
+  const detail =
+    "This compute sandbox's agent is too old: it does not support releasing command output (capabilities.op_release).";
+  expect(
+    failedSessionCopy({
+      ...summary,
+      reason: detail,
+      recordedDetail: detail,
+      sandboxStartFailed: true,
+    }),
+  ).toEqual({ reason: "The sandbox didn’t start.", unavailableModel: false, detail });
+});
+
+test("codes that record operator text get the plain headline, like unclassified failures", () => {
+  const detail = "Retired interrupted turn after operator review (lease 42 expired).";
+  for (const failureCode of [
+    "interrupted_turn_retired",
+    "worker_death_redispatch_exhausted",
+    "sandbox_command_observation_unavailable",
+    "invalid_sse_terminal",
+  ]) {
+    expect(
+      failedSessionCopy({ ...summary, reason: detail, recordedDetail: detail, failureCode }),
+    ).toEqual({ reason: "The session stopped unexpectedly.", unavailableModel: false, detail });
+  }
+});
