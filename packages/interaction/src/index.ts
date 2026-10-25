@@ -34,6 +34,7 @@ import {
   secretFreeCommandDigest,
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
+  type InteractionDriverConnectionState,
   type InteractionOperationJournalRecord,
 } from "./controller-core";
 
@@ -44,6 +45,7 @@ export {
   secretFreeCommandDigest,
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
+  type InteractionDriverConnectionState,
 };
 
 export type BrowserInteractionDriver = {
@@ -55,6 +57,9 @@ export type BrowserInteractionDriver = {
     command: BrowserActionCommandValue,
     trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null>;
+  /** Bounded probe of the browser connection. Without it, a dispatch error
+   * the driver did not classify counts as a lost controller. */
+  connectionState?(): Promise<InteractionDriverConnectionState>;
 };
 
 export type BrowserInteractionAuthority = {

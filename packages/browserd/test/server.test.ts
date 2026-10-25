@@ -832,6 +832,18 @@ describe("BrowserControlServer", () => {
           message: "page loaded; its network was still busy after 30 s, so the wait ended there",
         },
       ]);
+      // Each note kind goes only to callers whose receipt version knows it.
+      const newer = await json(
+        await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptNotes=2`,
+          { method: "POST", token: controlToken, body: command(observation) },
+        ),
+      );
+      expect((newer.data.notes as Array<{ kind: string }>).map((note) => note.kind)).toEqual([
+        "network_busy",
+        "observation_unavailable",
+      ]);
 
       // Protected fill is gone; logins use ordinary fill actions.
       expect(
@@ -1708,6 +1720,11 @@ function fakeDriver(
         actionIndex: 0,
         kind: "network_busy",
         message: "page loaded; its network was still busy after 30 s, so the wait ended there",
+      });
+      trace?.record({
+        actionIndex: 0,
+        kind: "observation_unavailable",
+        message: "the action completed, but the page could not be read after it",
       });
       return observation();
     },
