@@ -1,10 +1,14 @@
-import type { Recording } from "@opengeni/contracts";
+import { resolveWorkspaceRecordingSettings, type Recording } from "@opengeni/contracts";
 import {
   defaultMeetingTitle,
   formatClock,
   formatDuration,
+  groupLiveTurns,
   meetingPhase,
   meetingStatusLabel,
+  tidyLiveText,
+  tidyPartialText,
+  useRecordingModels,
   useRecordings,
 } from "@opengeni/react/recordings";
 import {
@@ -16,7 +20,7 @@ import {
 } from "@opengeni/react-native/timeline";
 import * as Haptics from "expo-haptics";
 import { Stack, router, useFocusEffect } from "expo-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -25,6 +29,7 @@ import {
   Pressable,
   RefreshControl,
   ScrollView,
+  Switch,
   Text,
   View,
 } from "react-native";
@@ -32,7 +37,9 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import {
   isCapturing,
+  liveCostHint,
   meetingDateLabel,
+  phoneLiveStatus,
   phoneRecorderErrorText,
   phoneUploadLine,
   useMeetingRecorder,
@@ -57,9 +64,15 @@ function Meetings({ workspaceId }: { workspaceId: string }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { client } = useAccount();
+  const { client, workspace } = useAccount();
   const recorder = useMeetingRecorder();
   const list = useRecordings({ client, workspaceId });
+  // The live preview is offered only where the workspace has a live model.
+  const models = useRecordingModels({ client, workspaceId });
+  const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
+  const liveDefault =
+    resolveWorkspaceRecordingSettings(workspace?.id === workspaceId ? workspace.settings : null)
+      .liveTranscript === true;
   const refreshList = list.refresh;
   const [pulling, setPulling] = useState(false);
 
@@ -107,7 +120,14 @@ function Meetings({ workspaceId }: { workspaceId: string }) {
         }
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: insets.bottom + 32 }}
       >
-        {recorder ? <RecorderCard recorder={recorder} /> : null}
+        {recorder ? (
+          <RecorderCard
+            recorder={recorder}
+            liveTranscript={
+              liveModel ? { defaultOn: liveDefault, usdPerHour: liveModel.usdPerHour } : null
+            }
+          />
+        ) : null}
         <Text
           accessibilityRole="header"
           style={{
@@ -263,7 +283,14 @@ function StatusText(props: { label: string; color: string; spinning?: boolean })
 
 /* Idle, one large Record button. Live, the clock, a level meter, Pause or
    Resume and Stop, and one line saying where the audio is. */
-function RecorderCard({ recorder }: { recorder: MeetingRecorder }) {
+function RecorderCard({
+  recorder,
+  liveTranscript,
+}: {
+  recorder: MeetingRecorder;
+  /** Offer the live preview, switched on or off to start with. */
+  liveTranscript: { defaultOn: boolean; usdPerHour: number | null } | null;
+}) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const live = recorder.state === "recording" || recorder.state === "paused";
@@ -271,10 +298,15 @@ function RecorderCard({ recorder }: { recorder: MeetingRecorder }) {
   const line = phoneUploadLine(recorder);
   const error = recorder.error ? phoneRecorderErrorText(recorder.error) : null;
   const silent = useSilentMicrophone(recorder, recorder.state === "recording");
+  const [liveChoice, setLiveChoice] = useState<boolean | null>(null);
+  const liveOn = liveTranscript ? (liveChoice ?? liveTranscript.defaultOn) : false;
 
   const start = () => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    void recorder.start({ title: defaultMeetingTitle(new Date()) });
+    void recorder.start({
+      title: defaultMeetingTitle(new Date()),
+      ...(liveOn ? { liveTranscript: true } : {}),
+    });
   };
   const stop = () => {
     Alert.alert("Stop recording?", "The meeting is uploaded and transcribed.", [
@@ -335,6 +367,7 @@ function RecorderCard({ recorder }: { recorder: MeetingRecorder }) {
             </Text>
           </View>
           <LevelMeter recorder={recorder} active={recorder.state === "recording"} />
+          <LivePreview recorder={recorder} />
           <View style={{ flexDirection: "row", gap: 10 }}>
             {recorder.state === "paused" ? (
               <Button
@@ -401,6 +434,32 @@ function RecorderCard({ recorder }: { recorder: MeetingRecorder }) {
             Records with this phone's microphone, even when the screen is locked. When you stop, you
             get a transcript of who said what.
           </Text>
+          {liveTranscript ? (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 12, minHeight: 44 }}>
+              <View style={{ flex: 1, gap: 2 }}>
+                <Text style={{ ...fontStyle(theme, 500), fontSize: 15, color: c.fg }}>
+                  Live transcript
+                </Text>
+                <Text
+                  style={{
+                    ...fontStyle(theme),
+                    fontSize: 13,
+                    lineHeight: 18,
+                    color: c["fg-muted"],
+                  }}
+                >
+                  {liveOn
+                    ? `Shows what's said as it's said. ${liveCostHint(liveTranscript.usdPerHour)}`
+                    : "Shows what's said as it's said."}
+                </Text>
+              </View>
+              <Switch
+                accessibilityLabel="Live transcript"
+                value={liveOn}
+                onValueChange={setLiveChoice}
+              />
+            </View>
+          ) : null}
         </>
       )}
       {error ? (
@@ -468,6 +527,106 @@ function RecordingDot({ paused }: { paused: boolean }) {
         opacity,
       }}
     />
+  );
+}
+
+/* What's being said while recording, newest at the bottom. A preview: the
+   meeting's transcript, with speakers told apart, comes after Stop. */
+function LivePreview({ recorder }: { recorder: MeetingRecorder }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const live = recorder.live;
+  const turns = useMemo(
+    () => groupLiveTurns((live ?? []).flatMap((track) => track.segments)),
+    [live],
+  );
+  const scroll = useRef<ScrollView>(null);
+  // Follow the newest words unless the person scrolled up to reread.
+  const following = useRef(true);
+  if (!live || live.length === 0) return null;
+  const partial = live
+    .map((track) => tidyPartialText(track.partial))
+    .filter(Boolean)
+    .join(" ");
+  const textStyle = { ...fontStyle(theme), fontSize: 15, lineHeight: 21 };
+  if (turns.length === 0 && live.every((track) => track.state === "unavailable")) {
+    return (
+      <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-muted"] }}>
+        Live text isn't available for this recording. Nothing is lost: it's still transcribed after
+        you stop.
+      </Text>
+    );
+  }
+  const status = phoneLiveStatus(live, recorder.state === "paused");
+  return (
+    <View style={{ gap: 6 }}>
+      <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
+        <Text style={{ ...fontStyle(theme, 600), fontSize: 12, color: c["fg-muted"], flex: 1 }}>
+          Live transcript · preview
+        </Text>
+        {status ? (
+          <Text
+            accessibilityLiveRegion="polite"
+            style={{ ...fontStyle(theme), fontSize: 12, color: c["fg-muted"] }}
+          >
+            {status}
+          </Text>
+        ) : null}
+      </View>
+      <ScrollView
+        ref={scroll}
+        nestedScrollEnabled
+        accessibilityLabel="Live transcript text"
+        style={{
+          maxHeight: 220,
+          borderRadius: theme.radius.md,
+          borderWidth: 1,
+          borderColor: c.border,
+          backgroundColor: c["surface-2"],
+        }}
+        contentContainerStyle={{ paddingHorizontal: 12, paddingVertical: 10, gap: 10 }}
+        scrollEventThrottle={100}
+        onScroll={(event) => {
+          const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+          following.current = contentSize.height - contentOffset.y - layoutMeasurement.height < 24;
+        }}
+        onContentSizeChange={() => {
+          if (following.current) scroll.current?.scrollToEnd({ animated: false });
+        }}
+      >
+        {turns.length === 0 && !partial ? (
+          <Text style={{ ...textStyle, color: c["fg-muted"] }}>
+            {recorder.state === "paused"
+              ? "Paused. Nothing is heard until you resume."
+              : "Listening. What's said shows up here within a few seconds."}
+          </Text>
+        ) : (
+          turns.map((turn, index) => (
+            <View key={turn.key} style={{ gap: 2 }}>
+              <Text
+                style={{
+                  ...fontStyle(theme),
+                  fontSize: 12,
+                  color: c["fg-subtle"],
+                  fontVariant: ["tabular-nums"],
+                }}
+              >
+                {formatClock(turn.startMilliseconds)}
+              </Text>
+              <Text selectable style={{ ...textStyle, color: c.fg }}>
+                {tidyLiveText(turn.texts)}
+                {partial && index === turns.length - 1 ? (
+                  <Text style={{ color: c["fg-muted"] }}> {partial}</Text>
+                ) : null}
+              </Text>
+            </View>
+          ))
+        )}
+        {partial && turns.length === 0 ? (
+          <Text style={{ ...textStyle, color: c["fg-muted"] }}>{partial}</Text>
+        ) : null}
+      </ScrollView>
+    </View>
   );
 }
 

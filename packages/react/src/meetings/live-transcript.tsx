@@ -10,72 +10,21 @@ import { ArrowDownIcon } from "lucide-react";
 
 import { Button } from "../ui/button";
 import { cn } from "../app/lib/utils";
-import { formatClock } from "../recordings";
+import {
+  formatClock,
+  groupLiveTurns,
+  tidyLiveText,
+  tidyPartialText,
+  type LiveTranscriptLine,
+} from "../recordings";
 
 import { SpeakerDot } from "./meeting-transcript";
 
 const defaultText = createOpenGeniText();
 
-export type LiveTranscriptLine = {
-  trackNumber: number;
-  startMilliseconds: number;
-  text: string;
-};
-
-type LiveTurn = {
-  key: string;
-  trackNumber: number;
-  startMilliseconds: number;
-  texts: string[];
-};
-
-/** Consecutive lines from one track read as one turn. */
-export function groupLiveTurns(lines: readonly LiveTranscriptLine[]): LiveTurn[] {
-  const sorted = [...lines].sort(
-    (a, b) => a.startMilliseconds - b.startMilliseconds || a.trackNumber - b.trackNumber,
-  );
-  const turns: LiveTurn[] = [];
-  for (const line of sorted) {
-    const text = line.text.trim();
-    if (!text) continue;
-    const last = turns.at(-1);
-    if (last && last.trackNumber === line.trackNumber) {
-      last.texts.push(text);
-      continue;
-    }
-    turns.push({
-      key: `${line.trackNumber}:${line.startMilliseconds}`,
-      trackNumber: line.trackNumber,
-      startMilliseconds: line.startMilliseconds,
-      texts: [text],
-    });
-  }
-  return turns;
-}
+export { groupLiveTurns, tidyLiveText, tidyPartialText, type LiveTranscriptLine };
 
 const NO_PARTIALS: readonly { trackNumber: number; text: string }[] = [];
-
-/**
- * Joins a turn's pieces into readable text. Streaming providers send pieces
- * that end in a trailing ellipsis while they wait, or a space before a full
- * stop; joined naively those read as "between you…." or "dog .".
- */
-export function tidyLiveText(pieces: readonly string[]): string {
-  return pieces
-    .map((piece) => piece.trim())
-    .filter(Boolean)
-    .join(" ")
-    .replace(/\s+([.,!?;:])/g, "$1")
-    .replace(/(?:…|\.{3})(?=[.,!?;:…])/g, "")
-    .replace(/([,!?;:])\1+/g, "$1")
-    .replace(/(?<!\.)\.\.(?!\.)/g, ".")
-    .replace(/\s{2,}/g, " ");
-}
-
-/** Words still being heard, without the provider's "still listening" ellipsis. */
-export function tidyPartialText(text: string): string {
-  return tidyLiveText([text]).replace(/\s*(?:…|\.{3})$/, "");
-}
 
 export function LiveTranscript({
   lines,
