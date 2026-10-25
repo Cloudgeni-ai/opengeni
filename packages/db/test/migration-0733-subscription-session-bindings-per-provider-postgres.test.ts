@@ -537,6 +537,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       // Nor the replacement-attempt machine carry (0948).
       "owner-internal target-schema helper carry_session_attempt_machine_authorization(uuid, uuid, uuid) is missing or ambiguous",
       "owner-internal target-schema helper assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean) is missing or ambiguous",
+      // Nor the shared unbilled allowance counter (0976).
+      "owner-internal target-schema helper count_unbilled_allowance_usage(uuid, uuid, text, bigint, text) is missing or ambiguous",
       // Nor per-task usage limits (0773).
       ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES.map(
         (routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`,
