@@ -152,14 +152,24 @@ enabling it changes no session's backend.
    it from there; only service account key files are supported. Rotate
    the key as any long-lived credential, and delete it when the service
    moves onto Google Cloud.
-8. **Images.** Sandboxes start from stored images
-   (`computeControl.storedImages`, `name: <image id>`). Build each with
-   `compute-host build-image <oci-ref> --guest <bundle>/guest --output
-   image.ext4 --store gs://bucket/prefix` on any host (or a build machine
-   with the bundle), which prints the image id; the Opengeni sandbox and
-   desktop images (with `opengeni-agent`, ADR 21) are built this way from
-   the same Opengeni commit as the deployment. Hosts fetch an image from
-   the store on its first create.
+8. **Images.** Sandboxes start from stored images. Set
+   `computeControl.imageSources` (`name: registry/repository@sha256:<hex>`)
+   to the release's OCI images, normally the Opengeni sandbox and desktop
+   images (with `opengeni-agent`, ADR 21) of the same Opengeni commit as
+   the deployment. When a release names an OCI image no stored image was
+   built from, the service has a live host build it (a few minutes, one
+   at a time per host; the host's log says `built and stored a sandbox
+   image`), records it, and new creates of that name start from it; until
+   then they start from the image the name had before. Existing sandboxes
+   keep theirs. A host builds into its state directory's `prepare/`
+   scratch space and needs `REGISTRY_TOKEN` (and `--registry-user`) only
+   for a private registry. `computeControl.storedImages` (`name: <image
+   id>`) still pins an image by hand, and is what a name starts from
+   before anything is built for it: build one with `compute-host
+   build-image <oci-ref> --guest <bundle>/guest --output image.ext4
+   --store gs://bucket/prefix` on any host (or a build machine with the
+   bundle), which prints the image id. Hosts fetch an image from the store
+   on its first create.
 9. **Checkpoints.** A running sandbox whose create names no sleep config
    (Opengeni's never does) is checkpointed to the store after every ten
    minutes it runs: losing its host costs it what it did since its newest
@@ -203,9 +213,9 @@ computeControl:
       networking.gke.io/load-balancer-type: Internal
   archive: gs://example-compute-archive/archive
   gcpGroup: projects/example/zones/europe-west4-a/instanceGroupManagers/opengeni-compute-hosts
-  storedImages:
-    opengeni: "<image id>"
-    opengeni-desktop: "<image id>"
+  imageSources:
+    opengeni: ghcr.io/example/opengeni-sandbox@sha256:…
+    opengeni-desktop: ghcr.io/example/opengeni-desktop@sha256:…
   serviceAccount:
     annotations:
       iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com

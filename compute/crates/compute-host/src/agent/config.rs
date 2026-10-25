@@ -108,6 +108,9 @@ pub struct HostConfig {
     /// [`crate::cpu_share`]). `None` leaves both as they are, as in tests
     /// with fake VMs.
     pub processor_share: Option<crate::cpu_share::ProcessorShare>,
+    /// How the host builds the sandbox images the control service asks for
+    /// (see [`crate::rootfs::PrepareConfig`]); `None` refuses to.
+    pub prepare: Option<crate::rootfs::PrepareConfig>,
 }
 
 impl HostConfig {

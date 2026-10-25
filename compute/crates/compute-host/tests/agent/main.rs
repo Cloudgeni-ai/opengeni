@@ -1100,6 +1100,7 @@ impl Lab {
             summary_every: HostConfig::SUMMARY_EVERY,
             agent_link: None,
             processor_share: None,
+            prepare: None,
         }
     }
 

@@ -8,6 +8,7 @@
 //! another replica's decides again from the row as it is then.
 
 mod holds;
+mod images;
 mod moves;
 mod reach;
 mod requests;
@@ -114,8 +115,9 @@ pub struct Settings {
     /// The images creates may name, by the fleet's names for them: the id
     /// of each stored image (ADR 19), which hosts fetch by it, or `None`
     /// for the hosts' own base image. The default image is always known,
-    /// as the base image unless named here.
-    pub images: BTreeMap<String, Option<ImageId>>,
+    /// as the base image unless named here. Images built for a release
+    /// ([`crate::images`]) join it as they are built.
+    pub images: crate::images::Images,
     /// The agent link's keys and each team's gateway, if sandboxes may run
     /// Opengeni's agent.
     pub links: Option<Arc<Links>>,
@@ -127,7 +129,7 @@ impl Settings {
     #[must_use]
     pub fn image_named(&self, name: &str) -> Option<Option<ImageId>> {
         match self.images.get(name) {
-            Some(image) => Some(*image),
+            Some(image) => Some(image),
             None => (name == self.image).then_some(None),
         }
     }
@@ -141,7 +143,7 @@ impl Default for Settings {
             wake_within: Duration::from_secs(60),
             image: "base".into(),
             sleep: DEFAULT_SLEEP,
-            images: BTreeMap::new(),
+            images: crate::images::Images::default(),
             links: None,
         }
     }

@@ -36,6 +36,7 @@ impl Handle {
         stream_idle: Duration,
         lease: Option<LeaseGate>,
         observer: Observer,
+        preparer: Option<Arc<crate::rootfs::Preparer>>,
     ) -> Self {
         Self {
             commands,
@@ -45,6 +46,7 @@ impl Handle {
             lease,
             observer,
             trace: None,
+            preparer,
         }
     }
 
@@ -230,6 +232,21 @@ impl Handle {
     #[must_use]
     pub fn observer(&self) -> &Observer {
         &self.observer
+    }
+
+    /// How the sandbox image of the OCI image `image` stands on this host,
+    /// starting its build if nothing has (see
+    /// [`crate::protocol::Request::Prepare`]).
+    pub fn prepare(
+        &self,
+        image: &str,
+    ) -> Result<crate::rootfs::Progress, crate::rootfs::PrepareError> {
+        match &self.preparer {
+            Some(preparer) => preparer.prepare(image),
+            None => Err(crate::rootfs::PrepareError::Unavailable(
+                "it has no guest programs to build with, or no store to keep images in",
+            )),
+        }
     }
 
     /// Deletes a sandbox and everything it stores, waiting until it is gone.

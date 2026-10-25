@@ -595,6 +595,19 @@ pub enum Request {
     },
     /// Report every sandbox and host counters.
     Status,
+    /// Build a sandbox image (ADR 19) from the OCI image `image` with this
+    /// host's guest programs and store it. Answered at once: with
+    /// [`Reply::Preparing`] while the build, which takes minutes, is under
+    /// way or waiting for the one before it (ask again to learn how it
+    /// went); with [`Reply::Prepared`] and the image's id once it is
+    /// stored, which every later ask gets too; and with the error of a
+    /// build that failed, after which asking again builds again. Refused
+    /// (`Unavailable`) by a host that cannot build or store images.
+    Prepare {
+        /// The OCI image, pinned by digest: `registry/repository@sha256:…`,
+        /// optionally with its tag before the digest.
+        image: String,
+    },
 }
 
 /// One reply.
@@ -628,6 +641,16 @@ pub enum Reply {
     },
     /// The host's state.
     Status(Box<HostStatus>),
+    /// The image [`Request::Prepare`] named is being built: ask again.
+    Preparing,
+    /// The stored sandbox image built from what [`Request::Prepare`] named.
+    Prepared {
+        /// Its id, which creates name it by.
+        image: ImageId,
+        /// The digest of the image manifest built, for an index the one
+        /// for this host's platform.
+        digest: String,
+    },
     /// The request failed.
     Error {
         /// What went wrong.

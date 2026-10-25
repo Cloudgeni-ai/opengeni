@@ -9,7 +9,7 @@ use std::str::FromStr as _;
 
 use compute_fleet::{AnsweredAt, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends};
 use compute_protocol::fleet::{Capacity, HostInfo, Register, Renew, Report, Ruling};
-use compute_protocol::host::Id;
+use compute_protocol::host::{Id, ImageId};
 use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Pool, RecyclingMethod};
 use serde_json::Value;
 use tokio_postgres::Row;
@@ -21,6 +21,7 @@ use super::{
 };
 use crate::e2b::lifecycle::Record;
 
+mod images;
 mod schema;
 
 /// The advisory lock the leader holds for as long as its connection lives.
@@ -1057,6 +1058,24 @@ impl Store for PostgresStore {
             .iter()
             .map(lifecycle_row)
             .collect()
+    }
+
+    async fn image_built(&self, source: &str) -> Result<Option<ImageId>> {
+        self.image_built_now(source).await
+    }
+
+    async fn record_built(
+        &self,
+        source: &str,
+        name: &str,
+        image: ImageId,
+        at_ms: u64,
+    ) -> Result<ImageId> {
+        self.record_built_now(source, name, image, at_ms).await
+    }
+
+    async fn latest_built(&self, name: &str) -> Result<Option<ImageId>> {
+        self.latest_built_now(name).await
     }
 }
 
