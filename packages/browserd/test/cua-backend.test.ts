@@ -430,6 +430,10 @@ describe("CUA desktop boundary", () => {
       const palette = { bounds: { x: 0, y: 0, width: 90, height: 60 } };
       fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, ...palette })];
       expect(await focused()).toEqual(["cua:window:42:2"]);
+      // An untitled window of ordinary size, such as a message dialog, is.
+      const dialog = { title: "", bounds: { x: 0, y: 0, width: 300, height: 150 } };
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, ...dialog })];
+      expect(await focused()).toEqual(["cua:window:42:2"]);
       // A reading does not carry the mark, which only a listing keeps current.
       expect((await backend.observe("cua:window:42:1")).target.focused).toBe(false);
     } finally {
