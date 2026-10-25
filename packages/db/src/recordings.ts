@@ -1688,7 +1688,7 @@ export async function listRecordingTranscriptVersions(
 export type RecordingTranscriptionJob = {
   recording: Recording;
   version: RecordingTranscriptVersion;
-  /** Who a deployment-funded transcript is billed to; null for versions made before 0956. */
+  /** Who a deployment-funded transcript is billed to; null for versions made before 0958. */
   creditAttribution: CreditDebitAttribution | null;
   chunks: RecordingChunk[];
   processingOwner: string;
