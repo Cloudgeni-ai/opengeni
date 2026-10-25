@@ -157,7 +157,12 @@ for (const persistence of ["committed", "failed", "independent"] as const) {
             initialModelWireDispatch: { record() {} },
             publish: async () => {},
           },
-          historySink: { seedHistory() {}, reconcileConversationTruth: async () => {} },
+          historySink: {
+            seedHistory() {},
+            seedHistoryFootprint() {},
+            historyFootprintCompactionSignal: () => null,
+            reconcileConversationTruth: async () => {},
+          },
           billingState: { isCodexTurn: true },
           providerTurn: { codexSubscriptionCore: { titleRequests } },
           sandboxState: {},

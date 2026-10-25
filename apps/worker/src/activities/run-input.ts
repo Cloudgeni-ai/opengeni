@@ -14,13 +14,16 @@ import {
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import {
-  getActiveSessionHistoryItemsPaged,
   getFilesForSubject,
   getSandboxSessionEnvelope,
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
   listTurnOpenSuffixToolCalls,
+  readActiveSessionHistory,
   readSubscriptionHistoryProvenance,
+  type ActiveSessionHistoryFootprint,
+  type ActiveSessionHistoryRead,
+  type ActiveSessionHistoryRecovery,
   type Database,
 } from "@opengeni/db";
 import {
@@ -136,6 +139,14 @@ export function resumeRunState(state: {
 export type PreparedTurnInput = {
   input: Awaited<ReturnType<OpenGeniRuntime["prepareInput"]>>;
   persistedHistoryCount: number;
+  /** Stored footprint of the complete active history this input was read from. */
+  historyFootprint: ActiveSessionHistoryFootprint;
+  /**
+   * Set when the stored history exceeded its materialization guard and this
+   * input holds only the bounded recovery view. Such input exists solely so the
+   * first model boundary can compact; it must never be sent as inference.
+   */
+  historyRecovery: ActiveSessionHistoryRecovery | null;
   providerArtifactCandidates: {
     knownHistoryItemIds: string[];
     historyItemIds: string[];
@@ -166,10 +177,24 @@ export type TurnInputOptions = {
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   projectModelHistory?: ModelHistoryAttachmentProjector;
-  loadActiveHistory?: typeof getActiveSessionHistoryItemsPaged;
+  loadActiveHistory?: ActiveHistoryLoader;
   /** Bounded critical-path timings; telemetry failures never affect preparation. */
   onPreparationPhase?: (measurement: HistoryPreparationPhaseMeasurement) => void;
 };
+
+export type ActiveHistoryLoader = (
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+) => Promise<ActiveSessionHistoryRead>;
+
+/**
+ * Turn input reads the complete active history. Over the materialization guard
+ * it gets the bounded recovery view instead of failing, so the turn's first
+ * model boundary compacts the session and continues.
+ */
+export const loadActiveHistoryForTurn: ActiveHistoryLoader = (db, workspaceId, sessionId) =>
+  readActiveSessionHistory(db, workspaceId, sessionId, { overLimit: "bounded_recovery" });
 
 export type HistoryPreparationPhase =
   | "system_update_load"
@@ -856,11 +881,11 @@ async function messageInput(
   projectCanonicalHistory?: ModelHistoryAttachmentProjector,
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
-  loadActiveHistory: typeof getActiveSessionHistoryItemsPaged = getActiveSessionHistoryItemsPaged,
+  loadActiveHistory: ActiveHistoryLoader = loadActiveHistoryForTurn,
   preparationOptions: Pick<TurnInputOptions, "onPreparationPhase" | "servingProviderId"> = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
-  const [stored, envelope] = await Promise.all([
+  const [activeHistory, envelope] = await Promise.all([
     measureHistoryPreparationPhase(preparationOptions, "durable_history_load", async () =>
       loadActiveHistory(db, trigger.workspaceId, trigger.sessionId),
     ),
@@ -868,6 +893,7 @@ async function messageInput(
       getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId),
     ),
   ]);
+  const stored = activeHistory.items;
   const canonicalView = await measureHistoryPreparationPhase(
     preparationOptions,
     "canonical_projection",
@@ -961,6 +987,8 @@ async function messageInput(
   return {
     input: prepared,
     persistedHistoryCount: prepared.persistedHistoryCount,
+    historyFootprint: activeHistory.footprint,
+    historyRecovery: activeHistory.recovery,
     providerArtifactCandidates,
   };
 }

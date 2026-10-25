@@ -579,6 +579,7 @@ import {
   contextRobustnessFilterForSettings,
   incrementalModelInputProjectionFilter,
   stripProviderItemId,
+  type HistoryFootprintCompactionOptions,
 } from "./model-input";
 import {
   recordModelPreparationManifestInventory,
@@ -757,7 +758,12 @@ export {
   restoreLazyToolProviderHistoryFilter,
   stripProviderItemIdsFilter,
 } from "./model-input";
-export type { ContextRobustnessFilterOptions, ModelInputProjectionPolicy } from "./model-input";
+export type {
+  ContextRobustnessFilterOptions,
+  HistoryFootprintCompactionOptions,
+  ModelInputProjectionPolicy,
+} from "./model-input";
+export { providerRequestImageLimit } from "./request-image-limits";
 export {
   AssistantMessagePhaseTracker,
   HUMAN_INPUT_TOOL_NAME,
@@ -887,6 +893,7 @@ export {
   estimateCompleteModelInput,
   estimateCompleteModelInputTokens,
   estimateSerializedValueTokens,
+  countModelInputImages,
   hasModelGeneratedItem,
   renderCompactionPromptInputForChat,
   COMPACTION_SUMMARY_MARKER,
@@ -909,6 +916,7 @@ export {
 } from "./context-compaction";
 export type {
   CompactionDecision,
+  HistoryFootprintCompactionSignal,
   ModelInputTokenBreakdown,
   NativeImageEstimateReason,
   NativeImageTokenEstimate,
@@ -9631,6 +9639,8 @@ export type RunAgentStreamOptions = {
   onSandboxSessionReady?: (session: SandboxSessionLike) => Promise<void> | void;
   contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
+  /** Stored-size and per-request image compaction triggers. */
+  contextHistoryFootprint?: HistoryFootprintCompactionOptions;
   // Host-managed git credential renewal registration. Called only after the
   // initial token-file seed completed on a real provisioned box. The worker
   // owns the multi-day timer and uses this pinned, un-proxied session to
@@ -10085,8 +10095,13 @@ async function runAgentStreamInternal(
           deferCompactionToModelBoundary(
             contextRobustnessFilterForSettings(settings, {
               throwOnCompactionNeeded: Boolean(
-                overrides.contextCompactionSignal || overrides.contextCompactionRequested,
+                overrides.contextCompactionSignal ||
+                overrides.contextCompactionRequested ||
+                overrides.contextHistoryFootprint,
               ),
+              ...(overrides.contextHistoryFootprint
+                ? { historyFootprintCompaction: overrides.contextHistoryFootprint }
+                : {}),
               ...(overrides.contextCompactionSignal
                 ? { contextCompactionSignal: overrides.contextCompactionSignal }
                 : {}),
@@ -10248,8 +10263,13 @@ async function runAgentStreamInternal(
         deferCompactionToModelBoundary(
           contextRobustnessFilterForSettings(settings, {
             throwOnCompactionNeeded: Boolean(
-              overrides.contextCompactionSignal || overrides.contextCompactionRequested,
+              overrides.contextCompactionSignal ||
+              overrides.contextCompactionRequested ||
+              overrides.contextHistoryFootprint,
             ),
+            ...(overrides.contextHistoryFootprint
+              ? { historyFootprintCompaction: overrides.contextHistoryFootprint }
+              : {}),
             ...(overrides.contextCompactionSignal
               ? { contextCompactionSignal: overrides.contextCompactionSignal }
               : {}),

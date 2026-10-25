@@ -1,5 +1,16 @@
-import { appendSessionHistoryItems, upsertSandboxSessionEnvelope } from "@opengeni/db";
-import { sandboxStateEntryFromRunState, type OpenGeniRuntime } from "@opengeni/runtime";
+import {
+  activeSessionHistoryCompactionPressure,
+  addActiveSessionHistoryFootprint,
+  appendSessionHistoryItems,
+  upsertSandboxSessionEnvelope,
+  type ActiveSessionHistoryFootprint,
+  type ActiveSessionHistoryRecovery,
+} from "@opengeni/db";
+import {
+  sandboxStateEntryFromRunState,
+  type HistoryFootprintCompactionSignal,
+  type OpenGeniRuntime,
+} from "@opengeni/runtime";
 import { sandboxManifestEnvironmentNamePredicate, type Settings } from "@opengeni/config";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type { SharedActivityServices } from "../types";
@@ -73,6 +84,55 @@ export class TurnHistorySink {
   }
   persistedHistoryCount = 0;
   nextHistoryPosition = 0;
+  /**
+   * Stored active-history footprint: measured by the read that prepared this
+   * attempt's input, plus every row this sink has appended since, as measured
+   * by PostgreSQL on insert. Rows written by other writers are picked up at
+   * the next preparation.
+   */
+  private historyFootprint: ActiveSessionHistoryFootprint | null = null;
+  private historyRecovery: ActiveSessionHistoryRecovery | null = null;
+
+  seedHistoryFootprint(
+    footprint: ActiveSessionHistoryFootprint,
+    recovery: ActiveSessionHistoryRecovery | null,
+  ) {
+    this.historyFootprint = footprint;
+    this.historyRecovery = recovery;
+  }
+
+  /**
+   * The stored-size compaction signal for the next model request, or null. A
+   * bounded recovery view must never reach ordinary inference, so it always
+   * signals.
+   */
+  historyFootprintCompactionSignal = (): HistoryFootprintCompactionSignal | null => {
+    if (this.historyRecovery) {
+      return {
+        dimension: this.historyRecovery.limitKind,
+        actual: this.historyRecovery.actual,
+        threshold: this.historyRecovery.maximum,
+        exceeded: true,
+      };
+    }
+    const pressure = this.historyFootprint
+      ? activeSessionHistoryCompactionPressure(this.historyFootprint)
+      : null;
+    return pressure
+      ? {
+          dimension: pressure.limitKind,
+          actual: pressure.actual,
+          threshold: pressure.threshold,
+          ...(pressure.exceeded ? { exceeded: true } : {}),
+        }
+      : null;
+  };
+
+  private recordAppendedFootprint = (delta: ActiveSessionHistoryFootprint) => {
+    if (this.historyFootprint) {
+      this.historyFootprint = addActiveSessionHistoryFootprint(this.historyFootprint, delta);
+    }
+  };
   providerArtifactCandidates: Awaited<ReturnType<typeof turnInput>>["providerArtifactCandidates"] =
     {
       knownHistoryItemIds: [],
@@ -148,6 +208,7 @@ export class TurnHistorySink {
               ...(options.completedToolCallIds
                 ? { completedToolCallIds: options.completedToolCallIds }
                 : {}),
+              onAppendedFootprint: this.recordAppendedFootprint,
             });
             if (!appended) {
               throw new TurnAttemptFencedError(
