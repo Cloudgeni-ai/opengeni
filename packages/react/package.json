@@ -225,6 +225,10 @@
       "types": "./src/session-list-model.ts",
       "default": "./src/session-list-model.ts"
     },
+    "./session-admin-access-model": {
+      "types": "./src/session-admin-access-model.ts",
+      "default": "./src/session-admin-access-model.ts"
+    },
     "./model-mark-paths": {
       "types": "./src/model-mark-paths.ts",
       "default": "./src/model-mark-paths.ts"

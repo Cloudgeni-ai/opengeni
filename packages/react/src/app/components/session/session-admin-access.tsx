@@ -15,6 +15,16 @@ import { FormDialog } from "../../../ui/form-dialog";
 import { SegmentedControl } from "../../../ui/segmented-control";
 import { useAppContext } from "../../app-context";
 import { hasInbox } from "../../lib/inbox";
+import {
+  ADMIN_ACCESS_DURATIONS,
+  ADMIN_ACCESS_GRANT_DESCRIPTION,
+  adminAccessDurationHours as durationHours,
+  adminAccessGrantedByText as grantedByText,
+  endsText,
+  type AdminAccessDuration,
+} from "../../../session-admin-access-model";
+
+export { ADMIN_ACCESS_DURATIONS, endsText, type AdminAccessDuration };
 
 /* ----------------------------------------------------------------------------
    Full access for one session (named "admin access" in the API). Any member
@@ -24,23 +34,6 @@ import { hasInbox } from "../../lib/inbox";
    the app, as them, and never more. The header shows a small shield while it is on,
    with when it ends and a one-click way to turn it off.
    -------------------------------------------------------------------------- */
-
-/** How long full access lasts, as offered in the app. */
-export type AdminAccessDuration = "1" | "8" | "24" | "none";
-
-export const ADMIN_ACCESS_DURATIONS: ReadonlyArray<{
-  value: AdminAccessDuration;
-  label: string;
-}> = [
-  { value: "1", label: "1 hour" },
-  { value: "8", label: "8 hours" },
-  { value: "24", label: "1 day" },
-  { value: "none", label: "No limit" },
-];
-
-function durationHours(duration: AdminAccessDuration): number | null {
-  return duration === "none" ? null : Number(duration);
-}
 
 export type SessionAdminAccessControl = {
   state: SessionAdminAccess;
@@ -131,27 +124,6 @@ export function useSessionAdminAccess(session: {
   if (!state) return null;
   if (!state.active && !state.canGrant) return null;
   return { state, busy, grant, revoke };
-}
-
-/** "Ends at 21:30", "Ends tomorrow at 09:00", "Ends Oct 14 at 09:00" or "No time limit". */
-export function endsText(expiresAt: string | null, now: Date = new Date()): string {
-  if (!expiresAt) return "No time limit";
-  const end = new Date(expiresAt);
-  if (Number.isNaN(end.getTime())) return "No time limit";
-  const time = end.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  const day = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const days = Math.round((day(end).getTime() - day(now).getTime()) / 86_400_000);
-  if (days <= 0) return `Ends at ${time}`;
-  if (days === 1) return `Ends tomorrow at ${time}`;
-  const date = end.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  return `Ends ${date} at ${time}`;
-}
-
-function grantedByText(state: SessionAdminAccess): string {
-  const name = state.grantedBy?.name;
-  return name
-    ? `This agent can do what ${name} can in the app, and acts as them.`
-    : "This agent can do what the person who gave it access can in the app, and acts as them.";
 }
 
 /** The small shield beside the title while the session has full access. */
@@ -255,7 +227,7 @@ export function GrantSessionAdminAccessDialog({
       description={
         changing
           ? "The new limit for full access starts now."
-          : "Its agent can then do what you can in the app: your chats, workspace settings, connections and anything else you manage. Everything it does runs as you, and never goes beyond your own access. You can turn it off at any time from the shield beside the title."
+          : `${ADMIN_ACCESS_GRANT_DESCRIPTION} You can turn it off at any time from the shield beside the title.`
       }
       submitLabel={changing ? "Save" : "Give full access"}
       pendingLabel={changing ? "Saving…" : "Giving access…"}
