@@ -108,6 +108,8 @@ describe("onboarding use case text", () => {
     expect(storedOnboardingUseCase()).toBeNull();
     storeOnboardingUseCase("embed");
     expect(storedOnboardingUseCase()).toBe("embed");
+    storeOnboardingUseCase("everyday");
+    expect(storedOnboardingUseCase()).toBe("everyday");
     window.sessionStorage.setItem("opengeni.onboardingUseCase.v1", "bogus");
     expect(storedOnboardingUseCase()).toBeNull();
     storeOnboardingUseCase(null);

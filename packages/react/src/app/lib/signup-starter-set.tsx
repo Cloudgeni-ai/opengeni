@@ -1,4 +1,4 @@
-import type { OnboardingUseCase } from "./onboarding-use-case";
+import { isOnboardingUseCase, type OnboardingUseCase } from "./onboarding-use-case";
 
 /**
  * The signup answer ("Add AI agents to my product" or "Run agents in the
@@ -28,9 +28,8 @@ function readEntries(): Record<string, OnboardingUseCase> {
     const parsed: unknown = JSON.parse(storage()?.getItem(STORAGE_KEY) ?? "{}");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     return Object.fromEntries(
-      Object.entries(parsed).filter(
-        (entry): entry is [string, OnboardingUseCase] =>
-          entry[1] === "embed" || entry[1] === "cloud",
+      Object.entries(parsed).filter((entry): entry is [string, OnboardingUseCase] =>
+        isOnboardingUseCase(entry[1]),
       ),
     );
   } catch {

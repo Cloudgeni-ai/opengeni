@@ -1665,7 +1665,11 @@ describe("organization onboarding UI", () => {
       const choices = Array.from(container.querySelectorAll("li button")).map(
         (button) => button.querySelector("span.font-medium")?.textContent,
       );
-      expect(choices).toEqual(["Add AI agents to my product", "Run agents in the cloud"]);
+      expect(choices).toEqual([
+        "Get help with everyday things",
+        "Add AI agents to my product",
+        "Run agents in the cloud",
+      ]);
       await act(async () =>
         Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
           .find((button) => button.textContent?.includes("Run agents in the cloud"))!
@@ -1746,6 +1750,53 @@ describe("organization onboarding UI", () => {
       // later tests start fresh.
       clearPendingDeveloperSetup();
       window.sessionStorage.clear();
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("everyday help goes straight to the model step with an organization named after the person", async () => {
+    completeSelfServiceSetup.mockClear();
+    const onComplete = mock((_destination?: unknown) => undefined);
+    const createOrganizationApiKey = mock(async () => {
+      throw new Error("everyday help creates no key");
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={{ ...setupClient, createOrganizationApiKey } as never}
+            billingMode="stripe"
+            activeName="Anna Berg"
+            activeEmail="anna@example.test"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await flush();
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Get help with everyday things"))!
+          .click(),
+      );
+      await flush();
+      await flush();
+      expect(container.querySelector("#organization-onboarding-name")).toBeNull();
+      expect(completeSelfServiceSetup).toHaveBeenCalledTimes(1);
+      // The organization keeps the answer as itself.
+      expect(
+        (completeSelfServiceSetup.mock.calls.at(-1) as unknown as [Record<string, unknown>])[0],
+      ).toMatchObject({ organizationName: "Anna Berg", useCase: "everyday" });
+      expect(container.textContent).toContain("Choose how to power your chats");
+      expect(providerRow(container, "Opengeni credits")).not.toBeNull();
+      expect(providerRow(container, "Use your own provider account")).not.toBeNull();
+      await clickButton(container, "Skip for now");
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(createOrganizationApiKey).not.toHaveBeenCalled();
+    } finally {
       await act(async () => root.unmount());
       container.remove();
     }

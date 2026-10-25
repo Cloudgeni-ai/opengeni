@@ -562,11 +562,12 @@ export const CompleteSelfServiceOrganizationSetupRequest = /* @__PURE__ */ defin
     organizationName: primitives.string.trim().min(1).max(120),
     operationId: primitives.uuid,
     /**
-     * The signup answer to "How do you want to use Opengeni?": add AI agents to
-     * a product (`embed`) or run agents in the cloud (`cloud`). Stored once per
-     * person and organization; the first answer wins.
+     * The signup answer to "How do you want to use Opengeni?": get help with
+     * everyday things (`everyday`), add AI agents to a product (`embed`) or run
+     * agents in the cloud (`cloud`). Stored once per person and organization;
+     * the first answer wins.
      */
-    useCase: z.enum(["embed", "cloud"]).optional(),
+    useCase: z.enum(["everyday", "embed", "cloud"]).optional(),
   }),
 );
 export type CompleteSelfServiceOrganizationSetupRequest = z.infer<
