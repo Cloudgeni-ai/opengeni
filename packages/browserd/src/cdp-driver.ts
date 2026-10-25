@@ -3204,6 +3204,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               node.backendDOMNodeId === owner.backendNodeId,
           );
           if (!ownerNode || typeof ownerNode.nodeId !== "string") continue;
+          await this.rebuildAccessibility(oopif.sessionId);
           const nodes = await this.collectAccessibilityFrames(oopif.sessionId, frames);
           const ids = new Set(nodes.map((node) => node.nodeId));
           const origin = frameOrigin(frames[0]?.url);
@@ -3721,6 +3722,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async refreshAccessibility(state: TargetState): Promise<CdpAccessibilitySnapshot> {
     for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
       const before = flattenFrameTree(await this.frameTree(state.sessionId));
+      await this.rebuildAccessibility(state.sessionId);
       const nodes = await this.collectAccessibilityFrames(state.sessionId, before);
       if (state.oopifs.size > 0)
         nodes.push(...(await this.oopifAccessibility(state, before, nodes)));
@@ -3739,6 +3741,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return accessibility;
     }
     throw new Error("browser frame tree did not settle for a bounded accessibility observation");
+  }
+
+  /**
+   * Chromium updates its accessibility tree incrementally and can miss a
+   * change: content assigned to a shadow-root slot after that slot was laid
+   * out stays out of the tree (or is reported as not rendered) while it is
+   * on screen, so a custom context menu can be visible yet absent. Restarting
+   * the domain makes the next read build the tree from the current DOM and
+   * layout. Measured, that adds about a millisecond to a small page and 7 to
+   * 40 percent to the read of a large one (+16 ms at 1,200 nodes, +80 ms at
+   * 18,000). DOM-backed node ids are DOM node ids, so refs survive the
+   * rebuild (see normalizeCdpAccessibilityTree for the others).
+   */
+  private async rebuildAccessibility(sessionId: string): Promise<void> {
+    if (this.engine === "lightpanda") return;
+    const connection = await this.ensureConnection();
+    await connection.send("Accessibility.disable", {}, { sessionId });
+    await connection.send("Accessibility.enable", {}, { sessionId });
   }
 
   private async collectAccessibilityFrames(
@@ -5142,7 +5162,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // name is the requested text, that is the element the caller named.
     const unique =
       uniqueEntries(matches) ??
-      (needle !== undefined && !(locator.kind === "role" && locator.exact)
+      (needle !== undefined && !locator.exact
         ? uniqueEntries(matches.filter((entry) => sameAccessibleName(entry.name, needle)))
         : null);
     if (!unique) {
@@ -5191,13 +5211,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       targetId: state.targetId,
       documentGeneration: state.documentGeneration,
     }).entriesByRef.get(previous.ref);
-    if (!current || current.backendDOMNodeId !== previous.backendDOMNodeId) {
-      throw new InteractionDefiniteDriverError(
-        "locator_not_found",
-        "browser element reference is stale or unavailable",
-      );
-    }
-    return current;
+    // Chromium's incremental tree can report a visible node as not rendered.
+    // Without this proof, the rebuilt full tree decides whether the ref holds.
+    return current && current.backendDOMNodeId === previous.backendDOMNodeId ? current : null;
   }
 
   private async uniqueDomMatch(state: TargetState, selector: string): Promise<number> {
@@ -7489,7 +7505,9 @@ function accessibilityLocatorMatches(
     (entry) =>
       entry.backendDOMNodeId !== null &&
       entry.role === "text" &&
-      (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase()),
+      (locator.exact
+        ? sameAccessibleName(entry.name, locator.text)
+        : (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase())),
   );
 }
 

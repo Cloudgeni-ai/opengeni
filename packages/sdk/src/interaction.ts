@@ -871,8 +871,8 @@ export type BrowserLocator =
       name?: string | undefined;
       exact?: boolean | undefined;
     }
-  | { kind: "label"; text: string }
-  | { kind: "text"; text: string }
+  | { kind: "label"; text: string; exact?: boolean | undefined }
+  | { kind: "text"; text: string; exact?: boolean | undefined }
   | { kind: "placeholder"; text: string }
   | { kind: "test_id"; value: string }
   | { kind: "css"; selector: string };
