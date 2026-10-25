@@ -502,9 +502,20 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     let checked = false;
     f.api.mainBusy = async (purpose, reservations) => {
       expect(purpose).toBe("observe");
-      expect(reservations).toEqual([{ branch: `${f.cfg.branchPrefix}${root.batchId}`, headSha: root.tipSha }]);
+      expect(reservations).toEqual([
+        { branch: `${f.cfg.branchPrefix}${root.batchId}`, headSha: root.tipSha },
+      ]);
       checked = true;
-      f.api.lastHeadroom = { allowed: true, reason: "foreign run plus invisible reservation", budget: 52, occupied: 1, reservedMain: 0, candidateSlots: 18, occupiedBatchSlots: 2, publicationBlocked: true };
+      f.api.lastHeadroom = {
+        allowed: true,
+        reason: "foreign run plus invisible reservation",
+        budget: 52,
+        occupied: 1,
+        reservedMain: 0,
+        candidateSlots: 18,
+        occupiedBatchSlots: 2,
+        publicationBlocked: true,
+      };
       return false;
     };
     f.api.pulls.push({ ...f.makePull(f.newer), number: 2 });
