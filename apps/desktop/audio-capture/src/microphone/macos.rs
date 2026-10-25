@@ -2,6 +2,7 @@
 //! says which of them is running input right now.
 
 use std::ffi::{c_int, c_void};
+use std::sync::OnceLock;
 
 use cidre::core_audio as ca;
 
@@ -25,21 +26,36 @@ fn process_path(pid: i32) -> Option<String> {
     String::from_utf8(buffer).ok()
 }
 
+type Responsible = unsafe extern "C" fn(c_int) -> c_int;
+
+/// libSystem and the private call, loaded once and kept for the process.
+fn responsible_function() -> Option<Responsible> {
+    static FUNCTION: OnceLock<Option<(libloading::Library, Responsible)>> = OnceLock::new();
+    FUNCTION
+        .get_or_init(|| {
+            // SAFETY: libSystem is always present; the symbol takes and
+            // returns a pid. The library is kept beside the pointer, so the
+            // pointer stays valid.
+            unsafe {
+                let library = libloading::Library::new("/usr/lib/libSystem.B.dylib").ok()?;
+                let function = *library
+                    .get::<Responsible>(b"responsibility_get_pid_responsible_for_pid\0")
+                    .ok()?;
+                Some((library, function))
+            }
+        })
+        .as_ref()
+        .map(|(_, function)| *function)
+}
+
 /// The process macOS holds responsible for this one (the app above a
 /// WebKit or helper process), when it differs. The call is private but
 /// stable, and looked up at run time so a missing one only loses the owner.
 fn responsible_pid(pid: i32) -> Option<i32> {
-    type Responsible = unsafe extern "C" fn(c_int) -> c_int;
-    // SAFETY: the symbol takes and returns a pid; the library stays loaded
-    // while it runs.
-    unsafe {
-        let library = libloading::Library::new("/usr/lib/libSystem.B.dylib").ok()?;
-        let function = library
-            .get::<Responsible>(b"responsibility_get_pid_responsible_for_pid\0")
-            .ok()?;
-        let owner = function(pid);
-        (owner > 0 && owner != pid).then_some(owner)
-    }
+    let function = responsible_function()?;
+    // SAFETY: see responsible_function.
+    let owner = unsafe { function(pid) };
+    (owner > 0 && owner != pid).then_some(owner)
 }
 
 pub fn users() -> Result<Vec<MicrophoneUser>, CaptureError> {

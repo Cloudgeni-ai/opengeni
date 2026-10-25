@@ -33,6 +33,7 @@ use crate::output::json_string;
 
 const POLL: Duration = Duration::from_secs(1);
 /// Enough to reach the app above a browser's or WebView's helper processes.
+#[cfg(not(target_os = "macos"))]
 pub const MAX_OWNERS: usize = 4;
 
 /// One process using a microphone.
@@ -90,7 +91,10 @@ pub fn render(users: &[MicrophoneUser]) -> String {
             )
         })
         .collect();
-    format!("{{\"event\":\"microphone\",\"users\":[{}]}}", list.join(","))
+    format!(
+        "{{\"event\":\"microphone\",\"users\":[{}]}}",
+        list.join(",")
+    )
 }
 
 fn line(text: &str) -> bool {

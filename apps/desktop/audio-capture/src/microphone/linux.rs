@@ -111,7 +111,9 @@ unsafe fn text(pointer: *const c_char) -> Option<String> {
         return None;
     }
     // SAFETY: libpulse strings are NUL-terminated and live for the callback.
-    let value = unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned();
+    let value = unsafe { CStr::from_ptr(pointer) }
+        .to_string_lossy()
+        .into_owned();
     (!value.is_empty()).then_some(value)
 }
 
@@ -257,7 +259,9 @@ impl Client {
                 gets,
             };
             if context_connect(context, std::ptr::null(), 0, std::ptr::null()) < 0 {
-                return Err(unavailable("No sound server (PulseAudio or PipeWire) is running."));
+                return Err(unavailable(
+                    "No sound server (PulseAudio or PipeWire) is running.",
+                ));
             }
             loop {
                 match (client.get_state)(context) {
