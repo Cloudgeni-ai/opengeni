@@ -43,6 +43,7 @@ import {
   type BrowserTargetState as BrowserTargetStateValue,
   type BrowserObservation as BrowserObservationValue,
   type BrowserTarget as BrowserTargetValue,
+  type BrowserActionNote as BrowserActionNoteValue,
   type BrowserActionResolvedTarget as BrowserActionResolvedTargetValue,
   type InteractionSemanticNodeValue,
   INTERACTION_MAX_RESOLVED_TARGET_TEXT,
@@ -204,6 +205,17 @@ const STREAMING_MIME_TYPES = new Set(["text/event-stream", "multipart/x-mixed-re
  * stops loading. Chromium itself waits for the operating system's connect
  * timeout, which outlives every caller's deadline. */
 const NAVIGATION_COMMIT_TIMEOUT_MS = BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS;
+/** The least time a navigation's commit may take after Chromium answered it,
+ * even when the server used up most of NAVIGATION_COMMIT_TIMEOUT_MS. */
+const NAVIGATION_COMMIT_GRACE_MS = 2_000;
+const NAVIGATION_COMMIT_POLL_MS = 25;
+/** Chromium's load error for an HTTP error status whose response had no body. */
+const HTTP_ERROR_STATUS_LOAD_ERROR = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
+/** Recent main-frame loaders remembered per tab, to recognize a navigation's
+ * commit even after a later document (a client redirect) replaced it. */
+const COMMITTED_LOADER_HISTORY = 16;
+/** Captures of a tab that keeps committing new documents before giving up. */
+const SCREENSHOT_DOCUMENT_ATTEMPTS = 3;
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
@@ -441,6 +453,22 @@ type TargetState = {
   frame: MainFrame;
   documentGeneration: string;
   frameGeneration: string;
+  /** Main-frame documents (loader ids) this attachment saw commit, oldest
+   * first and bounded. A navigation is complete only once its own loader
+   * appears here: Chromium answers Page.navigate before the renderer commits. */
+  committedLoaders: string[];
+  /** Main-frame document requests the browser cancelled (bounded): a
+   * navigation whose loader is here will not commit. */
+  abandonedLoaders: string[];
+  /** Counts main-frame commits, cross- and same-document alike, so a history
+   * traversal can wait for the entry it asked for to commit. */
+  mainFrameCommits: number;
+  /** The document an input action resolved its element in. The action's first
+   * input event goes out only while that document is still the current one. */
+  inputFence: string | null;
+  /** When set, the current action's locator waits end here instead of
+   * LOCATOR_WAIT_MS after they start: a re-find keeps the action's deadline. */
+  locatorDeadline?: number | null;
   accessibility: CdpAccessibilitySnapshot | null;
   /** When Chromium's accessibility tree for this tab was last rebuilt, how
    * many nodes its last read had, and whether the next read is the first of a
@@ -693,6 +721,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   get networkNotice(): string | null {
     return this.runner.networkNotice ?? null;
   }
+  /** The load error of the page start() opened and kept on the browser's
+   * error page (keepTabOnLoadError), such as net::ERR_CONNECTION_REFUSED. */
+  startLoadError: string | null = null;
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;
   private readonly runner: BrowserCommandRunner;
@@ -939,7 +970,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.selectedTargetId = target.targetId;
         this.ownedTabsChanged();
         if (deferNavigation)
-          await this.navigate(await this.ensureTargetState(target), url, options);
+          this.startLoadError = await this.navigate(
+            await this.ensureTargetState(target),
+            url,
+            options,
+          );
         this.windowParking?.arm();
         return await this.observe(target.targetId);
       } catch (error) {
@@ -987,7 +1022,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.selectedTargetId = target.targetId;
     if (deferNavigation) {
-      await this.navigate(await this.ensureTargetState(target), url, options);
+      this.startLoadError = await this.navigate(await this.ensureTargetState(target), url, options);
     }
     this.windowParking?.arm();
     return await this.observe(target.targetId);
@@ -1720,98 +1755,117 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       async (state) =>
         await this.untilDialog(state, async () => {
           const deadline = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
-          await this.screenshotRead(
-            "Page.getFrameTree",
-            deadline,
-            async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
-          );
-          const metrics = await this.screenshotRead(
-            "Page.getLayoutMetrics",
-            deadline,
-            async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-          );
-          const capture: Record<string, unknown> = {
-            format: normalized.format,
-            fromSurface: true,
-            captureBeyondViewport: normalized.fullPage,
-            ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
-          };
-          let cssWidth = metrics.viewport.width;
-          let cssHeight = metrics.viewport.height;
-          let scrollX = metrics.viewport.x;
-          let scrollY = metrics.viewport.y;
-          if (normalized.fullPage) {
-            cssWidth = metrics.content.width;
-            cssHeight = metrics.content.height;
-            scrollX = 0;
-            scrollY = 0;
-            assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
-            capture.clip = {
-              x: 0,
-              y: 0,
-              width: cssWidth,
-              height: cssHeight,
-              scale: 1,
-            };
-          }
-          const captureOnce = async () => {
-            const response = await this.screenshotRead(
-              "Page.captureScreenshot",
+          for (let attempt = 0; attempt < SCREENSHOT_DOCUMENT_ATTEMPTS; attempt += 1) {
+            await this.screenshotRead(
+              "Page.getFrameTree",
               deadline,
-              async (timeoutMs) =>
-                await this.sendTarget<{ data?: unknown }>(
-                  state,
-                  "Page.captureScreenshot",
-                  capture,
-                  {
-                    timeoutMs,
-                  },
-                ),
+              async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
             );
-            const data = decodeBoundedBase64Image(response.data);
-            return { data, dimensions: imageDimensions(data, normalized.format) };
-          };
-          let { data, dimensions } = await captureOnce();
-          // Chromium applies a new device-metrics override asynchronously, so a
-          // capture right after a viewport change can still return the previous
-          // surface. A viewport capture of an emulated device has an exact size;
-          // wait briefly for the compositor instead of publishing the stale frame.
-          const expected = normalized.fullPage ? undefined : state.emulatedViewport;
-          if (expected) {
-            const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
-            const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
-            const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
-            let pause = 16;
-            while (
-              (Math.abs(dimensions.width - expectedWidth) > 1 ||
-                Math.abs(dimensions.height - expectedHeight) > 1) &&
-              Date.now() + pause < settleDeadline
-            ) {
-              await delay(pause);
-              pause = Math.min(pause * 2, 200);
-              const refreshed = await this.screenshotRead(
-                "Page.getLayoutMetrics",
-                deadline,
-                async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-              );
-              cssWidth = refreshed.viewport.width;
-              cssHeight = refreshed.viewport.height;
-              scrollX = refreshed.viewport.x;
-              scrollY = refreshed.viewport.y;
-              ({ data, dimensions } = await captureOnce());
+            const metrics = await this.screenshotRead(
+              "Page.getLayoutMetrics",
+              deadline,
+              async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+            );
+            const capture: Record<string, unknown> = {
+              format: normalized.format,
+              fromSurface: true,
+              captureBeyondViewport: normalized.fullPage,
+              ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
+            };
+            let cssWidth = metrics.viewport.width;
+            let cssHeight = metrics.viewport.height;
+            let scrollX = metrics.viewport.x;
+            let scrollY = metrics.viewport.y;
+            if (normalized.fullPage) {
+              cssWidth = metrics.content.width;
+              cssHeight = metrics.content.height;
+              scrollX = 0;
+              scrollY = 0;
+              assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
+              capture.clip = {
+                x: 0,
+                y: 0,
+                width: cssWidth,
+                height: cssHeight,
+                scale: 1,
+              };
             }
+            const captureOnce = async () => {
+              const response = await this.screenshotRead(
+                "Page.captureScreenshot",
+                deadline,
+                async (timeoutMs) =>
+                  await this.sendTarget<{ data?: unknown }>(
+                    state,
+                    "Page.captureScreenshot",
+                    capture,
+                    {
+                      timeoutMs,
+                    },
+                  ),
+              );
+              const data = decodeBoundedBase64Image(response.data);
+              return { data, dimensions: imageDimensions(data, normalized.format) };
+            };
+            let { data, dimensions } = await captureOnce();
+            // Chromium applies a new device-metrics override asynchronously, so a
+            // capture right after a viewport change can still return the previous
+            // surface. A viewport capture of an emulated device has an exact size;
+            // wait briefly for the compositor instead of publishing the stale frame.
+            const expected = normalized.fullPage ? undefined : state.emulatedViewport;
+            if (expected) {
+              const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
+              const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
+              const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
+              let pause = 16;
+              while (
+                (Math.abs(dimensions.width - expectedWidth) > 1 ||
+                  Math.abs(dimensions.height - expectedHeight) > 1) &&
+                Date.now() + pause < settleDeadline
+              ) {
+                await delay(pause);
+                pause = Math.min(pause * 2, 200);
+                const refreshed = await this.screenshotRead(
+                  "Page.getLayoutMetrics",
+                  deadline,
+                  async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+                );
+                cssWidth = refreshed.viewport.width;
+                cssHeight = refreshed.viewport.height;
+                scrollX = refreshed.viewport.x;
+                scrollY = refreshed.viewport.y;
+                ({ data, dimensions } = await captureOnce());
+              }
+            }
+            // The image is labeled with the document it shows. A commit while it
+            // was captured leaves the label unproven, so capture the new page.
+            const shown = state.documentGeneration;
+            await this.screenshotRead(
+              "Page.getFrameTree",
+              deadline,
+              async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
+            );
+            if (state.documentGeneration !== shown) {
+              if (attempt + 1 < SCREENSHOT_DOCUMENT_ATTEMPTS) continue;
+              throw new InteractionControllerError(
+                "resource_unavailable",
+                "browser page kept changing to new documents while its screenshot was captured",
+                true,
+              );
+            }
+            return this.imageFrame({
+              state,
+              sequence: 0,
+              format: normalized.format,
+              data,
+              width: dimensions.width,
+              height: dimensions.height,
+              deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
+              scrollX,
+              scrollY,
+            });
           }
-          return this.imageFrame({
-            state,
-            sequence: 0,
-            format: normalized.format,
-            data,
-            width: dimensions.width,
-            height: dimensions.height,
-            deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
-            scrollX,
-            scrollY,
-          });
+          throw new Error("unreachable screenshot attempt");
         }),
     );
   }
@@ -2036,6 +2090,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       await this.bringToFrontForAction(state);
       let completedActions = 0;
+      // Navigations complete only once their page committed, so a batch that
+      // has so far only navigated and waited knows exactly where the tab is.
+      let onlyCommittedNavigation = true;
+      let committedNavigations = 0;
       const initialEffectCount = state.actionEffectCount;
       const requestsBeforeActions = {
         open: new Set(state.inflightRequests),
@@ -2065,13 +2123,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 await this.refreshFrame(state);
                 this.assertExpectedGenerations(command, state);
               }
-              await this.dispatchAction(state, action, command.operationId);
+              await this.dispatchAction(state, action, command.operationId, {
+                // Only an action whose locators already follow the page to a
+                // new document (a later action of a batch without
+                // fenceEachAction) may look again there. A single or first
+                // action is fenced to the document the caller checked, so a
+                // change before its input stays a refusal.
+                refindAfterDocumentChange: state.locatorFollowsNavigation === true,
+              });
             });
           }
           state.nodeRoute = null;
+          state.inputFence = null;
           state.actionTrace = undefined;
           state.locatorFollowsNavigation = false;
           completedActions += 1;
+          if (action.type === "navigate" || action.type === "history") committedNavigations += 1;
+          else if (action.type !== "wait") onlyCommittedNavigation = false;
           if (state.dialog) {
             if (completedActions < actions.length)
               throw await this.dialogPause(
@@ -2085,6 +2153,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           }
         } catch (error) {
           state.nodeRoute = null;
+          state.inputFence = null;
           state.actionTrace = undefined;
           state.locatorFollowsNavigation = false;
           if (error instanceof DialogBlockedError || error instanceof DialogOpenedSignal) {
@@ -2112,6 +2181,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               command,
               secretValues,
               error,
+              null,
+            );
+          if (
+            error instanceof InteractionDefiniteDriverError &&
+            action.type === "wait" &&
+            onlyCommittedNavigation &&
+            committedNavigations > 0
+          )
+            throw await this.withFailureObservation(
+              state,
+              info.targetId,
+              command,
+              secretValues,
+              new InteractionDefiniteDriverError(
+                error.code,
+                `browser action #${actionIndex} (wait) failed after the preceding navigation committed (${error.code}: ${error.message}); the tab shows the committed page`,
+                error.retryable,
+              ),
               null,
             );
           throw await this.withFailureObservation(
@@ -2994,6 +3081,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         info.targetId,
         frame.id,
       ),
+      committedLoaders: [frame.loaderId],
+      abandonedLoaders: [],
+      mainFrameCommits: 0,
+      inputFence: null,
       accessibility: null,
       accessibilityRebuiltAt: 0,
       accessibilityNodeCount: null,
@@ -3064,6 +3155,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         },
         sessionId,
       ),
+      // A same-document navigation (a history entry made by pushState, a
+      // fragment) commits without a new loader or frameNavigated event.
+      connection.on(
+        "Page.navigatedWithinDocument",
+        (event) => {
+          if (event.params.frameId === state.frame.id) state.mainFrameCommits += 1;
+        },
+        sessionId,
+      ),
       ...(this.engine === "lightpanda"
         ? [
             connection.on(
@@ -3129,6 +3229,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           const requestId = stringField(event.params, "requestId");
           if (requestId) {
             state.inflightRequests.delete(requestId);
+            // A document request's id is its navigation's loader id. One the
+            // browser cancelled (a newer navigation took over) never commits.
+            if (
+              event.params.type === "Document" &&
+              (event.params.canceled === true || event.params.errorText === "net::ERR_ABORTED")
+            ) {
+              state.abandonedLoaders.push(requestId);
+              if (state.abandonedLoaders.length > COMMITTED_LOADER_HISTORY)
+                state.abandonedLoaders.shift();
+            }
             if (event.params.canceled !== true && event.params.errorText !== "net::ERR_ABORTED") {
               this.recordFailedRequest(state, requestId, {
                 message:
@@ -3872,6 +3982,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       });
     for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
       const before = flattenFrameTree(await this.frameTree(state.sessionId));
+      // The snapshot carries the current document's generation, so it must be
+      // read from that document: a commit since the frame was last read makes
+      // the new page current first, and the read starts over.
+      const main = before[0];
+      if (main && (main.loaderId !== state.frame.loaderId || main.id !== state.frame.id)) {
+        this.assertCurrentTargetState(state);
+        this.adoptMainFrame(state, main);
+        continue;
+      }
       if (rebuilding) await this.rebuildAccessibility(state.sessionId);
       state.accessibilityRebuildDue = false;
       const nodes = await this.collectAccessibilityFrames(state.sessionId, before);
@@ -3965,23 +4084,41 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async refreshFrame(state: TargetState, timeoutMs?: number): Promise<void> {
     const frame = await this.mainFrame(state.sessionId, timeoutMs);
     this.assertCurrentTargetState(state);
-    if (frame.loaderId !== state.frame.loaderId || frame.id !== state.frame.id) {
+    this.adoptMainFrame(state, frame);
+  }
+
+  /**
+   * Make `frame` the target's current main-frame document. Every generation a
+   * receipt reports (its URL, outline refs, fences and screenshot labels)
+   * derives from this one state, so a new document replaces all of them at
+   * once and drops the old document's accessibility snapshot.
+   */
+  private adoptMainFrame(state: TargetState, frame: MainFrame): void {
+    if (frame.loaderId === state.frame.loaderId && frame.id === state.frame.id) {
+      // A new URL in the same document is a same-document commit (pushState,
+      // a fragment), seen here before its event when the frame is read first.
+      if (frame.url !== state.frame.url) state.mainFrameCommits += 1;
       state.frame = frame;
-      state.documentGeneration = documentGeneration(
-        this.controllerGeneration,
-        state.authorityGeneration,
-        state.targetId,
-        frame.loaderId,
-      );
-      state.frameGeneration = frameGeneration(
-        this.controllerGeneration,
-        state.authorityGeneration,
-        state.targetId,
-        frame.id,
-      );
-      state.accessibility = null;
-    } else {
-      state.frame = frame;
+      return;
+    }
+    state.frame = frame;
+    state.mainFrameCommits += 1;
+    state.documentGeneration = documentGeneration(
+      this.controllerGeneration,
+      state.authorityGeneration,
+      state.targetId,
+      frame.loaderId,
+    );
+    state.frameGeneration = frameGeneration(
+      this.controllerGeneration,
+      state.authorityGeneration,
+      state.targetId,
+      frame.id,
+    );
+    state.accessibility = null;
+    if (!state.committedLoaders.includes(frame.loaderId)) {
+      state.committedLoaders.push(frame.loaderId);
+      if (state.committedLoaders.length > COMMITTED_LOADER_HISTORY) state.committedLoaders.shift();
     }
   }
 
@@ -4309,8 +4446,54 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     action: BrowserAction,
     operationId: string,
+    options: { refindAfterDocumentChange?: boolean } = {},
+  ): Promise<void> {
+    const startedAt = Date.now();
+    try {
+      await this.dispatchActionOnce(state, action, operationId);
+      return;
+    } catch (error) {
+      // The page moved to a new document after the action found its element,
+      // just before its first input event (which would have landed on the new
+      // page at the old element's position). Only an action whose locators
+      // follow the page by design (a later action of a batch without
+      // fenceEachAction) looks for an element named by role, text or another
+      // locator once more there, within its own locator deadline. A single or
+      // first action is fenced to the document its caller checked, and a ref
+      // names an element of the page the caller saw: both stay refusals.
+      const locators = actionLocators(action);
+      if (
+        options.refindAfterDocumentChange !== true ||
+        !(error instanceof DocumentMovedBeforeInputError) ||
+        locators.length === 0 ||
+        locators.some((locator) => locator.kind === "ref")
+      )
+        throw error;
+      state.locatorDeadline = startedAt + LOCATOR_WAIT_MS;
+    }
+    try {
+      await this.refreshFrame(state);
+      await this.dispatchActionOnce(state, action, operationId);
+    } catch (error) {
+      if (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found") {
+        throw new InteractionDefiniteDriverError(
+          "document_stale",
+          `browser document changed before the action sent input, and its element was not found on the new page (${error.message}); no input was sent`,
+        );
+      }
+      throw error;
+    } finally {
+      state.locatorDeadline = null;
+    }
+  }
+
+  private async dispatchActionOnce(
+    state: TargetState,
+    action: BrowserAction,
+    operationId: string,
   ): Promise<void> {
     state.nodeRoute = null;
+    state.inputFence = null;
     switch (action.type) {
       case "navigate":
         await this.navigate(state, action.url);
@@ -5136,7 +5319,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     options: { input?: boolean } = {},
   ): Promise<CdpAccessibilityEntry> {
     const input = options.input ?? true;
-    const deadline = Date.now() + LOCATOR_WAIT_MS;
+    const deadline = state.locatorDeadline ?? Date.now() + LOCATOR_WAIT_MS;
     const fence = state.locatorFollowsNavigation
       ? null
       : { document: state.documentGeneration, frame: state.frameGeneration };
@@ -5149,6 +5332,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       let found: CdpAccessibilityEntry | null = null;
       const purpose: AccessibilityRead = finalAttempt ? "final" : read;
       read = "read";
+      // The document this attempt reads. A match counts only if that document
+      // is still the current one once the element is found.
+      const document = state.documentGeneration;
       try {
         found = await this.resolveLocator(state, locator, purpose);
       } catch (error) {
@@ -5176,9 +5362,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "browser document changed while the action waited for its element",
         );
       }
+      if (found && state.documentGeneration !== document) {
+        // A followed navigation committed while this attempt read the page
+        // it left: look for the element again in the new document.
+        found = null;
+      }
       if (found) {
         if (!input || Date.now() >= deadline || !(await this.nodeDisabled(state, found))) {
           entry = found;
+          if (state.inputFence !== null && state.inputFence !== document) {
+            // An action with two elements (a drag) needs both in one document.
+            throw new InteractionDefiniteDriverError(
+              "document_stale",
+              "browser document changed while the action waited for its element",
+            );
+          }
+          state.inputFence = document;
           break;
         }
       }
@@ -6588,16 +6787,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     url: string,
     options: BrowserTabNavigationOptions = {},
-  ): Promise<void> {
+  ): Promise<string | null> {
     this.connection?.assertNavigable?.(url);
-    let result: { errorText?: unknown };
+    const startedAt = Date.now();
+    const loaderBefore = state.frame.loaderId;
+    let result: { errorText?: unknown; loaderId?: unknown; isDownload?: unknown };
     try {
-      result = await this.sendActionTarget<{ errorText?: unknown }>(
-        state,
-        "Page.navigate",
-        { url },
-        { timeoutMs: this.navigationCommitTimeoutMs },
-      );
+      result = await this.sendActionTarget<{
+        errorText?: unknown;
+        loaderId?: unknown;
+        isDownload?: unknown;
+      }>(state, "Page.navigate", { url }, { timeoutMs: this.navigationCommitTimeoutMs });
     } catch (error) {
       if (!(error instanceof CdpCommandTimeoutError)) throw error;
       // The server never answered. Stop the pending navigation so the tab
@@ -6612,21 +6812,124 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       failure.cause = error;
       throw failure;
     }
-    if (
-      typeof result.errorText === "string" &&
-      result.errorText &&
-      !(options.keepTabOnLoadError === true && isPageLoadError(result.errorText))
-    ) {
+    let errorText =
+      typeof result.errorText === "string" && result.errorText ? result.errorText : null;
+    if (errorText !== null && !isPageLoadError(errorText)) {
       throw new InteractionDefiniteDriverError(
         "resource_unavailable",
-        isPageLoadError(result.errorText)
-          ? `browser could not navigate to the requested URL (${result.errorText})`
-          : "browser could not navigate to the requested URL",
+        "browser could not navigate to the requested URL",
+        true,
+      );
+    }
+    // Chromium answers once the response is ready to commit, while the tab
+    // still shows the previous document. Until the new document commits, a
+    // readiness check or a locator would read the page being left. A failed
+    // load commits the browser's error page under the same loader, except an
+    // aborted one (a download, an empty response), which commits nothing. A
+    // response the browser turned into a download never commits either: the
+    // tab keeps its page, and the navigation is over once Chromium says so.
+    const loaderId =
+      typeof result.loaderId === "string" && result.loaderId ? result.loaderId : null;
+    if (
+      loaderId !== null &&
+      this.engine !== "lightpanda" &&
+      errorText !== "net::ERR_ABORTED" &&
+      result.isDownload !== true
+    ) {
+      const committed = () => state.committedLoaders.includes(loaderId);
+      const outcome = await this.waitForCommit(
+        state,
+        committed,
+        () => state.abandonedLoaders.includes(loaderId),
+        errorText === null
+          ? Math.max(
+              startedAt + this.navigationCommitTimeoutMs,
+              Date.now() + NAVIGATION_COMMIT_GRACE_MS,
+            )
+          : Date.now() + NAVIGATION_COMMIT_GRACE_MS,
+      );
+      if (outcome === "committed") {
+        // The server answered with an HTTP error status and an empty body, so
+        // the browser shows its own page naming that status. That is the
+        // site's answer, as a status page with a body would be, not a failure.
+        if (errorText === HTTP_ERROR_STATUS_LOAD_ERROR) errorText = null;
+      } else if (errorText === null) {
+        await this.failUncommittedNavigation(state, loaderBefore, outcome, committed);
+      }
+    }
+    // A failed load is reported whichever page the tab shows.
+    if (errorText !== null && options.keepTabOnLoadError !== true) {
+      throw new InteractionDefiniteDriverError(
+        "resource_unavailable",
+        `browser could not navigate to the requested URL (${errorText})`,
         true,
       );
     }
     await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
     await this.refreshFrame(state);
+    // The caller asked to keep the tab on the browser's error page.
+    return errorText;
+  }
+
+  /**
+   * Wait until `committed` holds for the main frame, reading the frame tree as
+   * the authority so a commit event still in flight cannot be missed. Ends
+   * early when `abandoned` reports that the browser gave the navigation up.
+   */
+  private async waitForCommit(
+    state: TargetState,
+    committed: () => boolean,
+    abandoned: () => boolean,
+    deadline: number,
+  ): Promise<"committed" | "abandoned" | "timeout"> {
+    for (;;) {
+      if (committed()) return "committed";
+      await this.refreshFrame(state);
+      if (committed()) return "committed";
+      if (state.dialog) {
+        // A beforeunload prompt holds the navigation until it is answered.
+        throw new DialogOpenedSignal("browser navigation opened a JavaScript dialog");
+      }
+      if (abandoned()) return "abandoned";
+      if (Date.now() >= deadline) return "timeout";
+      await delay(NAVIGATION_COMMIT_POLL_MS);
+    }
+  }
+
+  /**
+   * Fail a navigation whose page did not commit. One still pending is stopped
+   * first, so it cannot replace the page later; the failure observation then
+   * shows the page the tab kept.
+   */
+  private async failUncommittedNavigation(
+    state: TargetState,
+    loaderBefore: string,
+    outcome: "abandoned" | "timeout",
+    committed: () => boolean,
+  ): Promise<void> {
+    if (outcome === "timeout") {
+      await this.sendActionTarget(
+        state,
+        "Page.stopLoading",
+        {},
+        { potentialEffect: false, timeoutMs: TARGET_CLOSE_SETTLE_TIMEOUT_MS },
+      ).catch(() => undefined);
+    }
+    await this.refreshFrame(state);
+    if (committed()) return;
+    const kept =
+      state.frame.loaderId === loaderBefore ? "; the tab still shows its previous page" : "";
+    throw outcome === "timeout"
+      ? new InteractionDefiniteDriverError(
+          "timeout",
+          `browser navigation did not commit a new page in time and was stopped${kept}`,
+          true,
+        )
+      : new InteractionDefiniteDriverError(
+          "resource_unavailable",
+          `browser navigation was cancelled before its page committed${kept}`,
+          true,
+        );
   }
 
   private async navigateHistory(state: TargetState, direction: "back" | "forward"): Promise<void> {
@@ -6655,7 +6958,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         `browser target has no ${direction} history entry`,
       );
     }
+    const commitsBefore = state.mainFrameCommits;
+    const loaderBefore = state.frame.loaderId;
+    const startedAt = Date.now();
     await this.sendActionTarget(state, "Page.navigateToHistoryEntry", { entryId: entry.id });
+    // The entry commits after Chromium answered: a new document, a page the
+    // back/forward cache restores, or a same-document entry (pushState).
+    const committed = () => state.mainFrameCommits !== commitsBefore;
+    const outcome = await this.waitForCommit(
+      state,
+      committed,
+      () => false,
+      Math.max(startedAt + this.navigationCommitTimeoutMs, Date.now() + NAVIGATION_COMMIT_GRACE_MS),
+    );
+    if (outcome !== "committed")
+      await this.failUncommittedNavigation(state, loaderBefore, outcome, committed);
     await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
     await this.refreshFrame(state);
   }
@@ -6669,6 +6986,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let pollMs = 0;
     let lookedFinal = false;
     let locatorPolls = 0;
+    let loaded = false;
     while (Date.now() < deadline) {
       const pollStartedAt = Date.now();
       if (action.condition === "load") {
@@ -6689,11 +7007,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         const loading = [...state.inflightRequests].some(
           (requestId) => state.requests.get(requestId)?.stream !== true,
         );
-        if (
-          (await this.documentReady(state)) &&
-          !loading &&
-          Date.now() - state.lastNetworkActivityAt >= NETWORK_IDLE_MS
-        ) {
+        loaded = await this.documentReady(state);
+        if (loaded && !loading && Date.now() - state.lastNetworkActivityAt >= NETWORK_IDLE_MS) {
           return;
         }
       } else if (action.locator) {
@@ -6729,18 +7044,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (action.condition === "visible" ? visible : !visible) return;
     }
     // Some live pages never go quiet: a long poll or a request the page keeps
-    // open is indistinguishable from a slow fetch until it ends. Network idle
-    // waits for the page to settle, so a document that finished loading has
-    // settled as far as anything will within the wait; failing here would
-    // make a completed navigation look uncertain.
-    if (action.condition === "network_idle" && (await this.documentReady(state))) return;
+    // open is indistinguishable from a slow fetch until it ends. A loaded page
+    // is ready to use, so the wait ends here and the batch carries on, and the
+    // receipt says the network never went idle rather than claim it did.
+    if (action.condition === "network_idle" && loaded) {
+      state.actionTrace?.trace.record({
+        actionIndex: state.actionTrace.actionIndex,
+        kind: "network_busy",
+        message: `page loaded; its network was still busy after ${formatSeconds(timeoutMs)} (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there`,
+      } satisfies BrowserActionNoteValue);
+      return;
+    }
     throw new InteractionDefiniteDriverError("timeout", "browser wait condition timed out", true);
   }
 
   private async waitForDocumentReady(state: TargetState, timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (await this.documentReady(state)) return;
+      try {
+        if (await this.documentReady(state)) return;
+      } catch (error) {
+        // A document that has just committed may not have its JavaScript
+        // context yet; read it again shortly.
+        if (!missingExecutionContext(error)) throw error;
+      }
       await delay(25);
     }
     throw new InteractionDefiniteDriverError("timeout", "browser navigation timed out", true);
@@ -7047,6 +7374,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<T> {
     const connection = await this.ensureConnection();
     this.assertCurrentTargetState(state);
+    if (state.inputFence !== null && method.startsWith("Input.")) {
+      const fence = state.inputFence;
+      // Checked once, before the action's first input event: input that the
+      // page answers by navigating (a mousedown handler, say) must still be
+      // allowed to finish, as must the release of a pressed button.
+      state.inputFence = null;
+      // Input lands on whatever document the tab shows, so read the frame tree
+      // itself: a commit whose event is still in flight counts too.
+      await this.refreshFrame(state);
+      if (fence !== state.documentGeneration) {
+        throw new DocumentMovedBeforeInputError(
+          "browser document changed after the action found its element; no input was sent",
+        );
+      }
+    }
     let unsubscribe: () => void = () => undefined;
     const dialog = new Promise<{ kind: "dialog" }>((resolve) => {
       unsubscribe = connection.on(
@@ -7352,6 +7694,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // frame id itself changes.
     if (frame.id !== state.frame.id) return;
     state.navigationPending = false;
+    state.mainFrameCommits += 1;
     if (frame.loaderId !== state.frame.loaderId) {
       // The previous document and its frames are gone. Chromium does not
       // always report their unfinished requests (a WebUI start page's
@@ -7363,20 +7706,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.requests.delete(requestId);
       }
     }
-    state.frame = { id: frame.id, loaderId: frame.loaderId, url: frame.url };
-    state.documentGeneration = documentGeneration(
-      this.controllerGeneration,
-      state.authorityGeneration,
-      state.targetId,
-      frame.loaderId,
-    );
-    state.frameGeneration = frameGeneration(
-      this.controllerGeneration,
-      state.authorityGeneration,
-      state.targetId,
-      frame.id,
-    );
-    state.accessibility = null;
+    const replaced = frame.loaderId !== state.frame.loaderId;
+    this.adoptMainFrame(state, { id: frame.id, loaderId: frame.loaderId, url: frame.url });
+    // Any main-frame commit can change the page's content, so its snapshot
+    // is read again even when the loader id stayed the same.
+    if (!replaced) state.accessibility = null;
   }
 
   private recordFailedRequest(
@@ -8951,6 +9285,12 @@ function missingExecutionContext(error: unknown): boolean {
   );
 }
 
+/** A wait length as people say it: "30 s", or "1.5 s" below ten seconds. */
+function formatSeconds(ms: number): string {
+  const seconds = ms / 1_000;
+  return `${seconds < 10 ? Math.round(seconds * 10) / 10 : Math.round(seconds)} s`;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -9235,6 +9575,25 @@ function isNavigationTimeout(error: unknown): boolean {
     (error instanceof CdpCommandTimeoutError ||
       (error instanceof InteractionDefiniteDriverError && error.code === "timeout"))
   );
+}
+
+/** The page committed a new document after an action found its element and
+ * before its first input event: nothing was sent to either document. */
+class DocumentMovedBeforeInputError extends InteractionDefiniteDriverError {
+  constructor(message: string) {
+    super("document_stale", message);
+    this.name = "DocumentMovedBeforeInputError";
+  }
+}
+
+/** The locators an action resolves before it sends input. */
+function actionLocators(action: BrowserAction): BrowserLocator[] {
+  const locators: Array<BrowserLocator | undefined> = [];
+  if (action.type === "wait") return [];
+  if ("locator" in action) locators.push(action.locator);
+  if ("from" in action) locators.push(action.from);
+  if ("to" in action) locators.push(action.to);
+  return locators.filter((locator): locator is BrowserLocator => locator !== undefined);
 }
 
 /** The server never answered and the tab stopped loading: unlike a slow

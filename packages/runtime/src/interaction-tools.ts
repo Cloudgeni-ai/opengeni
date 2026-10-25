@@ -41,6 +41,7 @@ import {
   BrowserIdentityListResponse,
   BrowserIdentityMutationResponse,
   BrowserObservation,
+  BrowserActionNote,
   BrowserActionResolvedTarget,
   BrowserDialog,
   InteractionDiagnosticSummary,
@@ -99,6 +100,7 @@ import {
   OpenGeniApiError,
   OpenGeniClient,
   interactionControlFailureFromError,
+  type BrowserFrame,
   type InteractionControlFailure,
   type InteractionTransport,
 } from "@opengeni/sdk";
@@ -253,6 +255,7 @@ const CompactBrowserActionReceipt = z
     state: InteractionOperationState,
     error: InteractionError.optional(),
     targets: z.array(BrowserActionResolvedTarget).optional(),
+    notes: z.array(BrowserActionNote).optional(),
     observation: CompactBrowserObservation.optional(),
   })
   .strict();
@@ -1836,6 +1839,10 @@ export function createInteractionAttemptToolDefinitions(
           opened.session.id,
           openedTargetId,
         );
+        if (!screenshotShowsObservedDocument(opened.observation, frame))
+          return new InteractionExecutionResult(opened, [
+            { type: "text" as const, text: BROWSER_OPEN_SCREENSHOT_NEWER_DOCUMENT },
+          ]);
         return new InteractionExecutionResult(opened, [
           browserToolImageContent(frame.data, frame.mediaType),
         ]);
@@ -2150,6 +2157,10 @@ export function createInteractionAttemptToolDefinitions(
             browserSessionId,
             targetId,
           );
+          if (!screenshotShowsObservedDocument(receipt.observation, frame))
+            return new InteractionExecutionResult(projected, [
+              { type: "text" as const, text: BROWSER_ACT_SCREENSHOT_NEWER_DOCUMENT },
+            ]);
           return new InteractionExecutionResult(projected, [
             browserToolImageContent(frame.data, frame.mediaType),
           ]);
@@ -5058,6 +5069,7 @@ function compactActionReceipt(
     state: receipt.state,
     ...(receipt.error ? { error: receipt.error } : {}),
     ...(receipt.targets && receipt.targets.length > 0 ? { targets: receipt.targets } : {}),
+    ...(receipt.notes && receipt.notes.length > 0 ? { notes: receipt.notes } : {}),
     ...(receipt.observation
       ? {
           observation: projectBrowserObservation(
@@ -5200,6 +5212,7 @@ function agentActionText(receipt: z.infer<typeof BrowserAgentActionReceipt>): st
       state: receipt.state,
       error: receipt.error,
       ...(receipt.targets ? { targets: receipt.targets } : {}),
+      ...(receipt.notes ? { notes: receipt.notes } : {}),
     });
     return receipt.observation ? `${text}\n${fullObservationText(receipt.observation)}` : text;
   }
@@ -5371,6 +5384,33 @@ function screenshotFailureReason(error: unknown): string {
 
 const BROWSER_DIALOG_NO_SCREENSHOT =
   "No screenshot: a JavaScript dialog is open in this tab. Handle it first with browser_act action {type:'handle_dialog'}.";
+
+/**
+ * Whether a screenshot shows the document a result's page outline describes.
+ * The outline and the image are read one after the other, so a page that
+ * commits a new document in between would pair one page's elements with
+ * another page's picture. Without an outline there is nothing to contradict.
+ */
+function screenshotShowsObservedDocument(
+  observation:
+    | { target: { targetGeneration: string; documentGeneration: string | null } }
+    | null
+    | undefined,
+  frame: BrowserFrame,
+): boolean {
+  if (!observation) return true;
+  return (
+    observation.target.targetGeneration === frame.targetGeneration &&
+    (observation.target.documentGeneration === null ||
+      observation.target.documentGeneration === frame.documentGeneration)
+  );
+}
+
+const BROWSER_ACT_SCREENSHOT_NEWER_DOCUMENT =
+  "The action ran, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.";
+
+const BROWSER_OPEN_SCREENSHOT_NEWER_DOCUMENT =
+  "The browser opened, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.";
 
 function browserToolImageContent(
   data: Uint8Array,

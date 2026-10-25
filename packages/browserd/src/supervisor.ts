@@ -306,6 +306,8 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
   readonly networkNotice?: string | null;
+  /** The load error of the page start() kept on the browser's error page. */
+  readonly startLoadError?: string | null;
   start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
@@ -1355,7 +1357,18 @@ export class BrowserSupervisor {
       this.sessions.set(options.browserSessionId, runtime);
       const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
       runtime.creationObservation = null;
-      const notice = runtime.driver.networkNotice;
+      // The browser opened even if its first page did not load; say why in
+      // plain words rather than leave the caller to infer it from the
+      // browser's error page.
+      const loadError = runtime.driver.startLoadError;
+      const notice = [
+        loadError
+          ? `initialUrl did not load (${loadError}); the tab shows the browser's error page.`
+          : null,
+        runtime.driver.networkNotice,
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join(" ");
       return {
         ...binding(runtime),
         observation,
@@ -2471,7 +2484,9 @@ export class BrowserSupervisor {
           runtime.lastTargets = await driver.listTargets();
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
         } else {
-          const observation = await driver.start(options.initialUrl);
+          // The browser opens even when its first page fails to load: the tab
+          // shows the browser's error page, which names the failure.
+          const observation = await driver.start(options.initialUrl, { keepTabOnLoadError: true });
           runtime.creationObservation = observation;
           runtime.lastTargets = [observation.target];
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);

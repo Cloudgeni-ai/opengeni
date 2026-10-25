@@ -3338,6 +3338,31 @@ export type BrowserActionResolvedTarget = z.infer<typeof BrowserActionResolvedTa
  * and callers that do not send it receive receipts without the field. */
 export const BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER = "receiptTargets";
 
+/** Something an action did that its completed state alone does not say. A
+ * `network_busy` note is a network_idle wait on a page that loaded but whose
+ * network never went quiet (it keeps polling or holds requests open): the wait
+ * ended at its timeout and the action still completed. `message` says so in
+ * plain words. */
+export const BrowserActionNote = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      actionIndex: z
+        .number()
+        .int()
+        .min(0)
+        .max(INTERACTION_MAX_ACTIONS_PER_BATCH - 1),
+      kind: z.enum(["network_busy"]),
+      message: primitives.nonEmptyString.max(1_024),
+    })
+    .strict(),
+);
+export type BrowserActionNote = z.infer<typeof BrowserActionNote>;
+
+/** Query parameter by which a caller asks a browser controller to include
+ * `notes` in an action receipt. Controllers that predate the field ignore it,
+ * and callers that do not send it receive receipts without the field. */
+export const BROWSER_ACTION_RECEIPT_NOTES_PARAMETER = "receiptNotes";
+
 export const BrowserActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3358,6 +3383,10 @@ export const BrowserActionReceipt = /* @__PURE__ */ defineSchema(() =>
         .array(BrowserActionResolvedTarget)
         .max(INTERACTION_MAX_RESOLVED_ACTION_TARGETS)
         .optional(),
+      /** Per-action notes, in dispatch order (see BrowserActionNote). Present
+       * only when the controller supports it and the caller asked for it;
+       * never persisted in the controller's operation journal. */
+      notes: z.array(BrowserActionNote).max(INTERACTION_MAX_ACTIONS_PER_BATCH).optional(),
     })
     .strict()
     .superRefine((receipt, context) => {

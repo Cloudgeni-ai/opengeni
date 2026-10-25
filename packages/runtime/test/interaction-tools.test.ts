@@ -208,6 +208,51 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test("browser_act passes on a wait that ended on a page whose network stayed busy", async () => {
+    const target = browserTarget();
+    const note = {
+      actionIndex: 1,
+      kind: "network_busy" as const,
+      message:
+        "page loaded; its network was still busy after 30 s (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there",
+    };
+    let dispatched: unknown = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, request) => {
+          dispatched = request.action;
+          return {
+            ...browserReceipt(request.operationId, browserObservation(target)),
+            notes: [note],
+          };
+        },
+      }),
+    });
+    const caller = { kind: "model" as const, subjectId: "model:test" };
+    const result = await definitions[0]!.execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: { type: "navigate", url: "https://example.test/", waitUntil: "network_idle" },
+      },
+      { operationId: randomUUID(), caller },
+    );
+    expect(dispatched).toEqual({
+      type: "batch",
+      actions: [
+        { type: "navigate", url: "https://example.test/" },
+        { type: "wait", condition: "network_idle" },
+      ],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ state: "completed", notes: [note] });
+    expect((result.content[0] as { text: string }).text).toContain(`\nNote: ${note.message}.\n`);
+  });
+
   test("browser_act tells the model where upload workspace File IDs come from", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,
@@ -1211,6 +1256,7 @@ describe("interaction attempt tools", () => {
     const image = new Uint8Array([4, 5, 6]);
     const order: string[] = [];
     let captureFails = false;
+    let capturedDocument: string | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         getBrowserSession: async () => session,
@@ -1232,7 +1278,7 @@ describe("interaction attempt tools", () => {
             controllerGeneration: target.controllerGeneration,
             targetId: target.id,
             targetGeneration: target.targetGeneration,
-            documentGeneration: target.documentGeneration!,
+            documentGeneration: capturedDocument ?? target.documentGeneration!,
             sequence: 1,
             mediaType: "image/jpeg",
             width: 1,
@@ -1288,6 +1334,21 @@ describe("interaction attempt tools", () => {
     expect((failed.content[1] as { text: string }).text).toBe(
       "The browser opened, but its screenshot could not be captured: synthetic capture failure",
     );
+
+    // A tab that committed another document after its outline was read would
+    // pair one page's outline with another page's picture: leave it out.
+    captureFails = false;
+    capturedDocument = "document-after-outline";
+    const moved = await definitions[0]!.execute(
+      { browserSessionId, includeScreenshot: true },
+      context(),
+    );
+    expect(moved.isError).toBeFalsy();
+    expect(moved.content).toHaveLength(2);
+    expect(moved.content[1]).toEqual({
+      type: "text",
+      text: "The browser opened, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.",
+    });
   });
 
   test.each([true, false])(
@@ -2951,6 +3012,7 @@ describe("interaction attempt tools", () => {
     const image = new Uint8Array([1, 2, 3]);
     const order: string[] = [];
     let captureFails = false;
+    let capturedDocument: string | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         actInBrowser: async (_workspaceId, _browserSessionId, value) => {
@@ -2966,7 +3028,7 @@ describe("interaction attempt tools", () => {
             controllerGeneration: target.controllerGeneration,
             targetId: target.id,
             targetGeneration: target.targetGeneration,
-            documentGeneration: target.documentGeneration!,
+            documentGeneration: capturedDocument ?? target.documentGeneration!,
             sequence: 1,
             mediaType: "image/jpeg",
             width: 1,
@@ -3026,6 +3088,22 @@ describe("interaction attempt tools", () => {
     expect((failed.content[1] as { text: string }).text).toBe(
       "The action ran, but its screenshot could not be captured: synthetic capture failure",
     );
+
+    // A tab that committed another document after the receipt's outline was
+    // read would pair one page's outline with another page's picture.
+    captureFails = false;
+    capturedDocument = "document-after-outline";
+    const moved = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, action, includeScreenshot: true },
+      { ...context, operationId: randomUUID() },
+    );
+    expect(moved.isError).toBeFalsy();
+    expect(moved.structuredContent).toMatchObject({ targetId: target.id, state: "completed" });
+    expect(moved.content).toHaveLength(2);
+    expect(moved.content[1]).toEqual({
+      type: "text",
+      text: "The action ran, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.",
+    });
   });
 
   test("an open JavaScript dialog replaces a requested screenshot with what to do next", async () => {
