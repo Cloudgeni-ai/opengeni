@@ -7,7 +7,7 @@ export function baseJobClasses(
 ): NonNullable<BaseCiEvidence["classes"]> {
   const unknown = { source: "unknown", units: "unknown" } as const;
   const ids = new Set<number>();
-  const jobs: { name: string; status: string; conclusion: string }[] = [];
+  const jobs: { name: string; status: string; conclusion: string | null }[] = [];
   for (const row of rows) {
     if (!row || typeof row !== "object") return unknown;
     const job = row as Record<string, unknown>;
@@ -18,7 +18,7 @@ export function baseJobClasses(
       job.run_id !== runId ||
       typeof job.name !== "string" ||
       typeof job.status !== "string" ||
-      typeof job.conclusion !== "string"
+      (job.conclusion !== null && typeof job.conclusion !== "string")
     )
       return unknown;
     ids.add(Number(job.id));
@@ -28,7 +28,7 @@ export function baseJobClasses(
     if (
       !selected.length ||
       selected.some(
-        (j) => j.status !== "completed" || !["success", "failure"].includes(j.conclusion),
+        (j) => j.status !== "completed" || !["success", "failure"].includes(j.conclusion ?? ""),
       )
     )
       return "unknown";

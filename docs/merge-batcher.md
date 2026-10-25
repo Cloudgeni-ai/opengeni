@@ -409,7 +409,12 @@ retry, splitting or parking. A complete verified Batch receipt identifies its
 failed classes: `source` maps only to main's `Source and type contracts`, and
 `unit-*` maps to the complete main `Unit tests (shard N/M)` set. A red or unknown
 relevant class holds; an unrelated browser/image/release failure does not hold
-when every relevant class is conclusively green. Unknown/running/error evidence,
+when every relevant class is conclusively green. A still-running or approval-waiting
+exact-base workflow may supply completed relevant job classes; unrelated image,
+browser or release work need not finish first. This is `classes` evidence, not a
+full-green workflow receipt. The reader traverses complete attempt-scoped job pages,
+checks totals and duplicate/run/attempt identities, and rereads the latest run/attempt
+before accepting those classes. Pending relevant jobs, unknown/error evidence,
 missing failure classes, duplicate jobs and incomplete shard sets do not release
 the hold. A verified full-green base also clears it. This is class relevance,
 not a same-assertion fingerprint proof, requeue operation or green-test waiver.
