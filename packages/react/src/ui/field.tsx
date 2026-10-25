@@ -6,12 +6,14 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
-  type ComponentProps,
+  type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
 import { CheckIcon, CircleAlertIcon, MinusIcon } from "lucide-react";
 
 import { cn } from "../lib/cn";
+import { useMergedRefs } from "../lib/refs";
+import { useOpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
    Field - one labelled control in a vertical form (brief 7.15).
@@ -95,6 +97,7 @@ export function Field({
   children: ReactNode;
 }) {
   const generatedId = useId();
+  const t = useOpenGeniText();
   const controlId = id ?? `${generatedId}-control`;
   const labelId = `${generatedId}-label`;
   const hintId = `${generatedId}-hint`;
@@ -107,7 +110,7 @@ export function Field({
     <>
       {label}
       {optional ? (
-        <span className="ml-1.5 text-xs font-normal text-fg-subtle">Optional</span>
+        <span className="ml-1.5 text-xs font-normal text-fg-subtle">{t("field.optional")}</span>
       ) : null}
     </>
   );
@@ -171,9 +174,9 @@ export function FieldStack({ className, children }: { className?: string; childr
 const controlBase =
   "block w-full min-w-0 rounded-md! border border-border bg-surface text-sm text-fg transition-colors duration-[120ms] outline-offset-2 placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-brand disabled:cursor-not-allowed disabled:border-border disabled:bg-surface-2 disabled:text-fg-muted read-only:bg-surface-2 read-only:hover:border-border aria-invalid:border-danger aria-invalid:hover:border-danger pointer-coarse:text-base";
 
-export const TextInput = forwardRef<
+export const TextInput = /* @__PURE__ */ forwardRef<
   HTMLInputElement,
-  ComponentProps<"input"> & {
+  ComponentPropsWithoutRef<"input"> & {
     /** JetBrains Mono, for names, IDs and code. */
     mono?: boolean | undefined;
     /** Resource names are not a person's identity or a saved credential. */
@@ -204,9 +207,9 @@ export const TextInput = forwardRef<
   );
 });
 
-export const TextArea = forwardRef<
+export const TextArea = /* @__PURE__ */ forwardRef<
   HTMLTextAreaElement,
-  ComponentProps<"textarea"> & {
+  ComponentPropsWithoutRef<"textarea"> & {
     mono?: boolean | undefined;
   }
 >(function TextArea({ className, mono = false, rows = 3, style, ...props }, ref) {
@@ -236,19 +239,18 @@ export const TextArea = forwardRef<
  * `indeterminate` shows a dash for a group checkbox whose items are mixed;
  * clicking it reports `checked: true` (select all).
  */
-export function Checkbox({
-  onCheckedChange,
-  className,
-  indeterminate = false,
-  ...props
-}: Omit<ComponentProps<"input">, "type" | "onChange" | "className"> & {
-  onCheckedChange?: ((checked: boolean) => void) | undefined;
-  className?: string | undefined;
-  indeterminate?: boolean | undefined;
-}) {
-  const ref = useRef<HTMLInputElement>(null);
+export const Checkbox = /* @__PURE__ */ forwardRef<
+  HTMLInputElement,
+  Omit<ComponentPropsWithoutRef<"input">, "type" | "onChange" | "className"> & {
+    onCheckedChange?: ((checked: boolean) => void) | undefined;
+    className?: string | undefined;
+    indeterminate?: boolean | undefined;
+  }
+>(function Checkbox({ onCheckedChange, className, indeterminate = false, ...props }, forwardedRef) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const ref = useMergedRefs(inputRef, forwardedRef);
   useLayoutEffect(() => {
-    if (ref.current) ref.current.indeterminate = indeterminate;
+    if (inputRef.current) inputRef.current.indeterminate = indeterminate;
   }, [indeterminate]);
   return (
     <span className={cn("relative grid size-4 shrink-0 place-items-center", className)}>
@@ -274,7 +276,7 @@ export function Checkbox({
       )}
     </span>
   );
-}
+});
 
 /**
  * A single yes/no choice inside a form with a Save button. For on/off that

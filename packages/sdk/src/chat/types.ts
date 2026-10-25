@@ -50,10 +50,23 @@ export type OpenGeniOptions = {
    * permissions before their first request; without it, Opengeni adds a user
    * on their first request. Both default to workspace read, session
    * create/read/control (including sending messages), file upload/read, and
-   * per-session MCP attachment; no admin permissions. Never updates an
-   * existing membership: use `client.updateExternalWorkspaceMember` for that.
+   * per-session MCP attachment; per-user workspaces also let people connect
+   * their own accounts (see `identities`). No admin permissions. Never
+   * updates an existing membership: use `client.updateExternalWorkspaceMember`
+   * for that.
    */
   memberPermissions?: WorkspaceIdResolverOptions["memberPermissions"];
+  /**
+   * Whether each of your users is their own Opengeni user (`per_user`: your
+   * `resolve` returns a distinct `user` per person) or many of your users
+   * share one (`shared`). It decides whether people may connect their own
+   * accounts, such as Gmail, from the chat (`connections:personal`): a
+   * personal connection belongs to the Opengeni user, so with a shared
+   * identity everyone behind it could use it. Unset: per-user workspaces get
+   * it and tenant workspaces do not; `per_user`: both do (the SDK then adds
+   * tenant users itself); `shared`: neither. `memberPermissions` overrides it.
+   */
+  identities?: WorkspaceIdResolverOptions["identities"];
 };
 
 /**

@@ -77,7 +77,8 @@ async function claimWithCutover(
   const dispositionRead = spyOn(db, "readCodexCutoverDisposition");
   const cutoverRead = spyOn(db, "readSubscriptionProviderCutoverState").mockResolvedValue(cutover);
   let overlayCodexApps: unknown;
-  const overlay = spyOn(core, "settingsWithModelProviderCredentials").mockResolvedValue(settings);
+  // Stop at the overlay, after all independent post-claim reads have joined.
+  const overlay = spyOn(core, "settingsWithModelProviderCredentials").mockRejectedValue(stop);
   const coreApps = spyOn(db, "resolveSubscriptionCoreCodexAppsDesignation").mockResolvedValue({
     connectionId: "core-apps-connection",
     status: "active",
@@ -91,6 +92,7 @@ async function claimWithCutover(
     cutoverRead,
     coreApps,
     overlay,
+    spyOn(db, "getSessionEvent").mockResolvedValue(null),
     spyOn(core, "resolveCatalogSettings").mockResolvedValue({ settings } as Awaited<
       ReturnType<typeof core.resolveCatalogSettings>
     >),
@@ -131,9 +133,11 @@ async function claimWithCutover(
         return settings;
       },
     ),
-    spyOn(db, "installOrReadTurnExecutionPolicyForAttempt").mockImplementation(async () => {
-      throw stop;
-    }),
+    spyOn(db, "installOrReadTurnExecutionPolicyForAttempt").mockResolvedValue({
+      accepted: true,
+      installed: false,
+      policy,
+    } as Awaited<ReturnType<typeof db.installOrReadTurnExecutionPolicyForAttempt>>),
   );
   await expect(
     claimTurnAttempt({

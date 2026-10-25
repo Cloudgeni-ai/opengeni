@@ -94,6 +94,10 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "POST" && path.startsWith("/v1/webhooks/events/")) {
     return true;
   }
+  // The GitHub App's webhooks: GitHub's signature with the App's webhook secret.
+  if (c.req.method === "POST" && path === "/v1/webhooks/github") {
+    return true;
+  }
   if (c.req.method === "POST" && path === "/v1/webhooks/pr-review/github") {
     return true;
   }
@@ -119,6 +123,7 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     path === "/v1/integrations/google-drive/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
     path === "/v1/integrations/slack/callback" ||
+    path === "/v1/integrations/teams/messages" ||
     path === "/v1/integrations/slack/events" ||
     path === "/v1/integrations/slack/commands" ||
     path === "/v1/integrations/slack/interactions" ||

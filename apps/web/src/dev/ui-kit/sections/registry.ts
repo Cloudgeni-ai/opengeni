@@ -104,6 +104,7 @@ export const SECTION_KEYS = [
   "destructive-confirm",
   "secret-values",
   "secret-ask-card",
+  "secret-approval",
   "cadence-picker",
   // People
   "access-list",
@@ -124,6 +125,7 @@ export const SECTION_KEYS = [
   "page-models-cache",
   "page-schedules",
   "page-schedule-form",
+  "page-meetings",
   "page-knowledge",
   "page-org-people",
 ] as const;
@@ -594,7 +596,7 @@ export const SECTIONS: readonly SectionMeta[] = [
       "New variable set, Add variable, Create API key, Invite people, New schedule, Edit schedule, Connect account",
     recommended: "b",
     whyRecommended:
-      "Every create and edit flow is a full page (/schedules/new) with a back link and a sticky Cancel + primary footer. Nothing slides in from the side.",
+      "Every create and edit flow is a full page (/automations/new) with a back link and a sticky Cancel + primary footer. Nothing slides in from the side.",
     decision:
       "Decided 27 Sep 2026: B everywhere. Changed from A (dialog or sheet by size). A small centered dialog stays only for one-field prompts such as Rename or Replace value.",
     alternatives: [
@@ -683,6 +685,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Ask for a secret in chat and save it to a vault; show references as chips.",
     usedOn: "Chat questions, inbox, messages, tool rows and approvals",
     load: () => import("./secret-ask-card"),
+  },
+  {
+    key: "secret-approval",
+    group: "Forms",
+    title: "Secret approval",
+    purpose: "Mark secrets an agent may use only after the person allows each use.",
+    usedOn: "Item page, chat questions, inbox and phone",
+    load: () => import("./secret-approval"),
   },
   {
     key: "cadence-picker",
@@ -898,6 +908,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Create or edit a schedule: what to do, when, a name and advanced options.",
     usedOn: "Schedules",
     load: () => import("./page-schedule-form"),
+  },
+  {
+    key: "page-meetings",
+    group: "Pages",
+    title: "Meetings",
+    purpose: "Record a meeting, then read its transcript and name who spoke.",
+    usedOn: "Main rail",
+    load: () => import("./page-meetings"),
   },
   {
     key: "page-knowledge",

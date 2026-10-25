@@ -234,6 +234,39 @@ deployment's own OpenAI/Azure credentials. The endpoint is part of each model's
 definition version, so an accepted turn never silently moves to another
 resource.
 
+**Microsoft Entra ID sign-in (Azure OpenAI only).** Azure resources that turn
+key authentication off (`disableLocalAuth`) accept only Entra ID bearer tokens,
+so the Azure connection has an `authMethod`:
+
+- `api_key` (the default, unchanged): the encrypted key, sent as `api-key`.
+- `entra_client_secret`: the organization's own app registration. Admins enter
+  the directory (tenant) ID, application (client) ID and a client secret; the
+  secret is stored in the same encrypted credential column as a key and is
+  never returned.
+- `entra_deployment_identity`: the deployment's own workload identity (the
+  standard `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_FEDERATED_TOKEN_FILE`
+  or `AZURE_CLIENT_SECRET` variables, as set by AKS workload identity). It is
+  off unless the operator sets `OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED=true`;
+  only then does the console offer it and the API accept it, and the runtime
+  refuses it again at use time if the operator later turns it off. On a shared
+  deployment this lends one identity to every organization that selects it, so
+  operators enable it only where that is intended. Startup fails if it is
+  enabled without an identity.
+
+Tokens come from the Entra v2 token endpoint with scope
+`https://cognitiveservices.azure.com/.default` (client credentials with a
+secret, or a client assertion from the federated token file, which is re-read
+on every request). `@opengeni/network/azure-entra` caches one token per exact
+credential per process and renews it five minutes before expiry (or at half
+the lifetime of a shorter token), so long turns, compaction and title
+generation keep working. Every request (HTTP and the Responses WebSocket
+upgrade) carries `Authorization: Bearer …` and no `api-key`. A token Azure
+refuses is discarded so the next request signs in again; a credential Entra
+refuses fails as `OrganizationAzureOpenAIUnavailableError`. Saving a connection
+signs in once first and returns a safe 422 if Entra refuses it; the identity
+needs the `Cognitive Services OpenAI User` role on the resource. Ownership,
+reach and administration are the same as for a key connection.
+
 Canonical: `packages/contracts/src/direct-model-provider.ts`,
 `packages/core/src/domain/direct-model-provider.ts` for the setup check,
 `withDirectModelProviders` in `packages/config/src/index.ts`,
@@ -2215,10 +2248,21 @@ text is Anthropic's summary of the update, not the words the model wrote, and it
 can claim things the model never said. It therefore stays a reasoning item,
 streamed as reasoning and shown as a thought: it is never an assistant message,
 never `agent.message.completed` or `turn.completed.reply`, and never counts as
-visible text for `wait_for_input` or final-answer checks. When a person's turn
-has only such a summary before `wait_for_input`, the wait is refused so the
-model writes its reply as a `text` block; if it still writes none, nothing is
-recorded as the reply. A `text` block is always recorded verbatim. Replay sends
+visible text for `wait_for_input` or final-answer checks. The model writes a
+note longer than a sentence or two before a tool call this way, so an answer
+written just before `wait_for_input` would reach the person only as that
+summary. `wait_for_input` therefore takes a `reply` argument, shown verbatim as
+the agent's message (see [run lifecycle](./run-lifecycle.md)), and the prompt
+asks for it whenever the turn answers the person. When a person's turn asks to
+wait without a `reply` and the response holds a progress update, or the turn
+has no visible text, the wait is refused (at most twice per attempt) so the
+model passes its answer in `reply`; if it still passes none, nothing is
+recorded as the reply. A `text` block is always recorded verbatim. Progress
+updates are marked `providerData.anthropic.progressUpdate` on the reasoning
+item. `display: "updates"` stays on: under `"omitted"` the notes would be
+empty and under `"summarized"` they would be summaries mixed into reasoning,
+so no display mode returns them verbatim, and because a summary is only ever a
+thought it cannot replace a reply. Replay sends
 each signed block back unchanged in its original position, so history bytes
 match what Claude returned; history stored while updates were briefly recorded
 as assistant messages replays the same signed block. Other APIs see a newly

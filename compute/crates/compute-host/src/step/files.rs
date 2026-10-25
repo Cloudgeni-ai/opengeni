@@ -123,6 +123,9 @@ pub(super) struct Taken {
     /// The runtime of the VMM that wrote it, which after an upgrade can be
     /// older than the engine's own.
     pub(super) runtime: String,
+    /// The VMM process that wrote it, as the engine names it, if it does:
+    /// whose base the image becomes.
+    pub(super) process: Option<String>,
 }
 
 /// Makes the sandbox's images consistent after a host restart and reports

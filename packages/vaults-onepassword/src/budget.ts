@@ -15,6 +15,10 @@ export const ONEPASSWORD_REQUEST_COST = {
   itemsGetAll: 1,
   itemsGet: 1,
   filesRead: 1,
+  // Not measured separately; charged like an item update, which they are.
+  filesAttach: 4,
+  filesDelete: 4,
+  filesReplaceDocument: 4,
   itemsCreate: 2,
   itemsPut: 4,
   itemsArchive: 3,

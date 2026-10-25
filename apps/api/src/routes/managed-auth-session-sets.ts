@@ -71,6 +71,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { SIGNUP_ATTRIBUTION_AUTH_FIELD } from "../auth/signup-funnel-metrics";
 import { ApiHttpError } from "../http/api-error";
+import { trustedBrowserOrigins } from "../http/browser-mutation-origin";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import { ManagedAuthEmailThrottleError } from "../auth/managed-auth-rate-limits";
 import { z } from "zod";
@@ -584,7 +585,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
     try {
       requireManagedAuthMutationAdmission({
         request: context.req.raw,
-        allowedOrigins: allowedOrigins(deps),
+        allowedOrigins: trustedBrowserOrigins(deps.settings),
         authority,
         signingSecret: requireSigningSecret(deps),
         expectedGeneration: snapshot.projection.generation,
@@ -959,7 +960,7 @@ async function requireMutation(
   try {
     requireManagedAuthMutationAdmission({
       request: context.req.raw,
-      allowedOrigins: allowedOrigins(deps),
+      allowedOrigins: trustedBrowserOrigins(deps.settings),
       authority,
       signingSecret: requireSigningSecret(deps),
       expectedGeneration,
@@ -1032,23 +1033,6 @@ function loginTransactionClientScope(context: Context, deps: ApiRouteDeps): stri
     purpose: "managed-auth-login-transaction-rate-limit",
     client: trustedRequestSourceRateLimitKey(context, deps.settings),
   });
-}
-
-function allowedOrigins(deps: ApiRouteDeps): string[] {
-  const origins = new Set<string>();
-  for (const candidate of [
-    deps.settings.publicBaseUrl,
-    deps.settings.webBaseUrl,
-    ...deps.settings.betterAuthTrustedOrigins.split(","),
-  ]) {
-    if (!candidate?.trim()) continue;
-    try {
-      origins.add(new URL(candidate.trim()).origin);
-    } catch {
-      continue;
-    }
-  }
-  return [...origins];
 }
 
 function setAuthorityCookie(context: Context, deps: ApiRouteDeps, authority: string): void {

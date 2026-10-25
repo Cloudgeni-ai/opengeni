@@ -1,3 +1,4 @@
+import { integrationAvailable, requireIntegrationAvailable } from "./teams-rollout";
 import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
 import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
@@ -45,7 +46,7 @@ import {
   type FetchLike,
 } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { connectSetupPermission, requireConnectOwnerAuthority } from "./connect-authority";
 import {
   microsoftAdminConsentUrl,
   microsoftAuthorizationNotGranted,
@@ -155,6 +156,7 @@ export async function startApiIntegrationProviderOAuth(
     payload: ApiIntegrationOAuthStartRequest;
   },
 ): Promise<OAuthStartResponse> {
+  requireIntegrationAvailable(deps.settings, input.workspaceId, input.payload.definitionId);
   const definition = requiredDefinition(input.payload.definitionId);
   await withOrganizationIntegrationAcquisition(deps.db, input, [definition.id], async () => {});
   const providerDomain = integrationDefinitionProviderDomain(definition);
@@ -306,7 +308,7 @@ export async function completeApiIntegrationProviderOAuth(
           ...connectOperation,
           expectedRevision: stored.attempt.revision,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, callbackPermission(state!), origin),
         },
         integrationKeyForConnectProvider(state.definitionId),
         Boolean(input.code && !input.error),
@@ -331,7 +333,7 @@ export async function completeApiIntegrationProviderOAuth(
       await finishConnectOperation(deps.db, state, {
         ...connectOperation,
         authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+          requireConnectOwnerAuthority(tx, state!, callbackPermission(state!), origin),
         commit: async (_tx, current) =>
           denial
             ? {
@@ -359,7 +361,8 @@ export async function completeApiIntegrationProviderOAuth(
     if (!input.code) throw new ProviderOAuthCallbackError("missing_code");
 
     const definition = integrationDefinitionById(state.definitionId);
-    if (!definition) throw new ProviderOAuthCallbackError("state_invalid");
+    if (!definition || !integrationAvailable(deps.settings, state.workspaceId, definition.id))
+      throw new ProviderOAuthCallbackError("state_invalid");
     await withOrganizationIntegrationAcquisition(deps.db, state, [definition.id], async () => {});
     if (
       state.definitionFingerprint !== providerDefinitionFingerprint(definition) ||
@@ -464,7 +467,8 @@ export async function completeApiIntegrationProviderOAuth(
       verifiedAt: new Date().toISOString(),
     });
     const persistenceInput: import("@opengeni/db").PersistProviderOAuthConnectionInput = {
-      authorize: (tx: import("@opengeni/db").Database) => requireConnectOwnerAuthority(tx, state!),
+      authorize: (tx: import("@opengeni/db").Database) =>
+        requireConnectOwnerAuthority(tx, state!, callbackPermission(state!)),
       accountId: state.accountId,
       workspaceId: state.workspaceId,
       subjectId: ownerSubjectId,
@@ -497,7 +501,7 @@ export async function completeApiIntegrationProviderOAuth(
         {
           ...connectOperation,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, callbackPermission(state!), origin),
           commit: async (tx, current) => {
             const connection = await persist(tx);
             if (!connection) throw new ProviderOAuthCallbackError("connection_conflict");
@@ -888,10 +892,26 @@ async function requireProviderOAuthGrant(
   deps: ApiRouteDeps,
   state: Pick<
     ProviderOAuthState,
-    "accountId" | "workspaceId" | "subjectId" | "personalOwnerVerified" | "externalContinuation"
+    | "accountId"
+    | "workspaceId"
+    | "subjectId"
+    | "personalOwnerVerified"
+    | "externalContinuation"
+    | "definitionId"
+    | "ownership"
   >,
 ): Promise<void> {
-  await deps.db.transaction((tx) => requireConnectOwnerAuthority(tx, state));
+  await deps.db.transaction((tx) =>
+    requireConnectOwnerAuthority(tx, state, callbackPermission(state)),
+  );
+}
+
+/**
+ * The callback rechecks the permission its Connect step needed: signing in
+ * your own personal account to a reviewed definition is personal setup.
+ */
+function callbackPermission(state: Pick<ProviderOAuthState, "definitionId" | "ownership">) {
+  return connectSetupPermission({ providerId: state.definitionId, ownership: state.ownership });
 }
 
 /**

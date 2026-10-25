@@ -86,6 +86,9 @@ pub struct SavedFiles {
     /// The learned order in which the guest touches memory after a wake,
     /// when one exists.
     pub profile: Option<PathBuf>,
+    /// The stored image the disk was made from, if it was: a store may
+    /// name the image's chunks where the disk still holds the same bytes.
+    pub image: Option<ImageId>,
 }
 
 /// Names one stored copy of a sandbox.
@@ -309,6 +312,16 @@ pub trait Store: Send + Sync + 'static {
     ) -> impl Future<Output = Result<bool, EngineError>> + Send {
         let _ = (image, path);
         ready(Ok(false))
+    }
+
+    /// Stores the sandbox image file at `path` (ADR 19) and returns the
+    /// id creates name it by; `None` from a store that keeps no images.
+    fn put_image(
+        &self,
+        path: &Path,
+    ) -> impl Future<Output = Result<Option<ImageId>, EngineError>> + Send {
+        let _ = path;
+        ready(Ok(None))
     }
 }
 
@@ -717,6 +730,10 @@ impl Store for Directory {
         .await
     }
 
+    async fn put_image(&self, path: &Path) -> Result<Option<ImageId>, EngineError> {
+        self.put_rootfs(path).await.map(Some)
+    }
+
     async fn forget_memory(&self, id: Id, _: Stamp) -> Result<Owned<Option<Receipt>>, EngineError> {
         let stored = self.dir(id);
         blocking("forget", move || {
@@ -778,6 +795,7 @@ mod tests {
             disk: JailedFile::new(disk.clone()),
             memory: None,
             profile: None,
+            image: None,
         };
         let store = Directory::new(dir.path().join("store"));
         let id: Id = "00000000000000000000000000000004".parse().unwrap();
@@ -809,6 +827,7 @@ mod tests {
                 runtime: None,
             }),
             profile: None,
+            image: None,
         };
         for (path, bytes) in [
             (files.disk.path(), &b"disk"[..]),
@@ -856,6 +875,7 @@ mod tests {
                 runtime: Some("Firecracker v1.0.0 on a test processor".into()),
             }),
             profile: None,
+            image: None,
         };
         fs::write(files.disk.path(), b"GOOD").unwrap();
         fs::write(&files.memory.as_ref().unwrap().state, b"state").unwrap();

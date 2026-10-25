@@ -109,6 +109,7 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         completedAt: item.completedAt,
         durationMs: item.durationMs,
         outcome: item.outcome,
+        ...(item.detail ? { detail: item.detail } : {}),
       };
     case "session-status":
       return {
@@ -223,6 +224,7 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         occurredAt: item.occurredAt,
         outcome: item.outcome,
         failureText: item.failureText,
+        ...(item.failureDetail ? { failureDetail: item.failureDetail } : {}),
       };
     case "turn-steps":
       return {
@@ -250,6 +252,7 @@ function serializeGroup(group: TimelineGroup): Record<string, unknown> {
         itemKinds: countBy(group.items.map((item) => item.kind)),
         ...(group.outcome ? { outcome: group.outcome } : {}),
         ...(group.failureText ? { failureText: group.failureText } : {}),
+        ...(group.failureDetail ? { failureDetail: group.failureDetail } : {}),
         items: group.items.map(serializeItem),
       };
     case "turn":
@@ -258,6 +261,7 @@ function serializeGroup(group: TimelineGroup): Record<string, unknown> {
         id: group.id,
         outcome: group.outcome,
         ...(group.failureText ? { failureText: group.failureText } : {}),
+        ...(group.failureDetail ? { failureDetail: group.failureDetail } : {}),
         ...(group.contextCompactionCount
           ? { contextCompactionCount: group.contextCompactionCount }
           : {}),

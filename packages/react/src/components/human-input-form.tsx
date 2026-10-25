@@ -24,6 +24,7 @@ import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
 import {
   answersFromDrafts,
+  choiceOffersOther,
   defaultHumanInputFormMessages,
   emptyDraft,
   initialDrafts,
@@ -38,7 +39,7 @@ import {
   type HumanInputDraftScope,
 } from "../human-input-draft-store";
 import { SecretQuestionField, type SecretFieldHandle } from "./secret-question-field";
-import { linkifyText } from "./linkified-text";
+import { InlineMarkdown } from "./markdown";
 import { useOpenGeniText } from "../messages/runtime";
 
 export {
@@ -133,20 +134,33 @@ function HumanInputRequestForm({
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
   const decision = decisionButtons ? binaryDecision(request.questions) : null;
   const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
+  // Agent-written question text renders as inline Markdown; host-provided
+  // titles and messages render as given.
+  const questionTitle =
+    title === undefined && singleQuestion ? (singleQuestion.label ?? singleQuestion.prompt) : null;
+  const questionDescription =
+    description === undefined && singleQuestion
+      ? singleQuestion.label
+        ? singleQuestion.prompt
+        : (singleQuestion.helpText ?? null)
+      : null;
   const resolvedTitle =
-    title === undefined
-      ? singleQuestion
-        ? (singleQuestion.label ?? singleQuestion.prompt)
-        : messages.title
-      : title;
-  const resolvedDescription =
-    description === undefined
-      ? singleQuestion
-        ? singleQuestion.label
-          ? singleQuestion.prompt
-          : (singleQuestion.helpText ?? null)
-        : messages.description || null
-      : description;
+    questionTitle !== null ? (
+      <InlineMarkdown>{questionTitle}</InlineMarkdown>
+    ) : title === undefined ? (
+      messages.title
+    ) : (
+      title
+    );
+  const resolvedDescription = questionDescription ? (
+    <InlineMarkdown>{questionDescription}</InlineMarkdown>
+  ) : description === undefined ? (
+    singleQuestion ? null : (
+      messages.description || null
+    )
+  ) : (
+    description
+  );
   const resolvedSubmitLabel = submitLabel ?? messages.submit;
   const resolvedSkipLabel = skipLabel ?? messages.skip;
   const formId = useId();
@@ -518,7 +532,11 @@ function HumanInputRequestForm({
         </span>
         <div className="min-w-0 flex-1">
           <h2 id={titleId} className="truncate text-og-sm font-semibold text-og-fg">
-            {resolvedTitle}
+            {questionTitle !== null ? (
+              <InlineMarkdown singleLine>{questionTitle}</InlineMarkdown>
+            ) : (
+              resolvedTitle
+            )}
           </h2>
           {metaBits.length > 0 ? (
             <p className="mt-0.5 truncate text-og-xs text-og-fg-subtle">
@@ -572,7 +590,7 @@ function HumanInputRequestForm({
                 id={titleId}
                 className="min-w-0 text-og-md font-semibold text-og-fg [overflow-wrap:anywhere]"
               >
-                {linkifyText(resolvedTitle)}
+                {resolvedTitle}
                 {singleQuestion?.required && !request.allowSkip && !decision ? (
                   <span aria-hidden className="ml-1 text-og-status-failed">
                     *
@@ -592,7 +610,7 @@ function HumanInputRequestForm({
             </div>
             {resolvedDescription ? (
               <div className="mt-0.5 text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
-                {linkifyText(resolvedDescription)}
+                {resolvedDescription}
               </div>
             ) : null}
             {request.expiresAt ? (
@@ -631,14 +649,16 @@ function HumanInputRequestForm({
           decision.decline.description ? (
             <div className="shrink-0 space-y-1 px-4 pt-3 text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
               {decision.question.label && decision.question.helpText ? (
-                <p>{linkifyText(decision.question.helpText)}</p>
+                <p>
+                  <InlineMarkdown>{decision.question.helpText}</InlineMarkdown>
+                </p>
               ) : null}
               {[decision.accept, decision.decline].map((option) =>
                 option.description ? (
                   <p key={option.id}>
                     <span className="font-medium text-og-fg">{option.label}</span>
                     {" · "}
-                    {linkifyText(option.description)}
+                    <InlineMarkdown>{option.description}</InlineMarkdown>
                   </p>
                 ) : null,
               )}
@@ -945,7 +965,7 @@ function QuestionControls({
                 <span className="mr-1.5 tabular-nums text-og-fg-muted">{questionNumber}.</span>
               )}
               {questionNumber === null ? null : " "}
-              {linkifyText(visibleLabel)}
+              <InlineMarkdown>{visibleLabel}</InlineMarkdown>
               {question.required && !allowSkip ? (
                 <span aria-hidden className="ml-1 text-og-status-failed">
                   *
@@ -959,12 +979,12 @@ function QuestionControls({
           </div>
           {question.label ? (
             <p id={promptId} className="text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
-              {linkifyText(question.prompt)}
+              <InlineMarkdown>{question.prompt}</InlineMarkdown>
             </p>
           ) : null}
           {question.helpText ? (
             <p id={helpId} className="text-og-xs text-og-fg-subtle [overflow-wrap:anywhere]">
-              {linkifyText(question.helpText)}
+              <InlineMarkdown>{question.helpText}</InlineMarkdown>
             </p>
           ) : null}
           {hint ? (
@@ -980,7 +1000,7 @@ function QuestionControls({
           ) : null}
           {question.helpText && question.label ? (
             <p id={helpId} className="mb-1.5 text-og-xs text-og-fg-subtle [overflow-wrap:anywhere]">
-              {linkifyText(question.helpText)}
+              <InlineMarkdown>{question.helpText}</InlineMarkdown>
             </p>
           ) : null}
           {hint ? (
@@ -1077,14 +1097,14 @@ function QuestionControls({
                   <span className="block text-og-sm font-medium">{option.label}</span>
                   {option.description ? (
                     <span className="mt-0.5 block text-og-xs text-og-fg-muted">
-                      {linkifyText(option.description)}
+                      <InlineMarkdown>{option.description}</InlineMarkdown>
                     </span>
                   ) : null}
                 </span>
               </label>
             );
           })}
-          {!question.skillReview ? (
+          {choiceOffersOther(question) ? (
             <div
               className={cn(
                 "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",

@@ -26,13 +26,19 @@
 //! ([`Chunked::sweep`]); an archive publishes its pointer within the
 //! window that keeps a sweep from deleting what it reused (see
 //! [`compute_storage::fresh`]).
+//!
+//! An archive reuses what the sandbox's earlier copy holds at the same
+//! offsets, and for a disk made from a stored image, what the image holds:
+//! a first archive stores only what the sandbox changed. It asks the store
+//! whether it still holds a chunk it reuses unless a copy this host
+//! confirmed recently names it (see [`confirmed`]).
 
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::SystemTime;
 
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
@@ -55,6 +61,8 @@ use crate::store::{
 };
 use crate::threads::Threads;
 use crate::working_set::{self, WakeProfile};
+use confirmed::{Confirmed, ImageChunks};
+use files::{Earlier, Reusable};
 
 /// Chunk uploads in flight per file.
 const UPLOADS_PER_FILE: usize = 32;
@@ -119,9 +127,10 @@ fn parse_head(operation: &'static str, bytes: &[u8]) -> Result<Head, EngineError
 #[derive(Clone, Debug)]
 pub struct Chunked {
     chunks: ChunkStore,
-    /// The chunk hashes of the base image disks are fetched over, computed
-    /// once per version of that file.
-    seed: Arc<Mutex<Option<Arc<Seed>>>>,
+    /// The chunk hashes of the images disks are fetched over.
+    seeds: Arc<Seeds>,
+    /// The stored copies this host knows the store holds whole.
+    confirmed: Arc<Confirmed>,
     /// Permits for chunk transfers, shared by every sandbox.
     transfers: Arc<Semaphore>,
     /// Permits for compressing chunks, shared by every sandbox: each holds
@@ -188,6 +197,83 @@ impl Seed {
     }
 }
 
+/// The chunk hashes of each local file disks are fetched over (the host's
+/// base image and each sandbox image it keeps), computed at most once per
+/// version of the file however many fetches ask at once. One file's
+/// hashing never holds up fetches over another, and the hashes of a file
+/// that is gone (an image retired) are dropped by the next fetch.
+#[derive(Debug, Default)]
+struct Seeds {
+    by_path: std::sync::Mutex<HashMap<PathBuf, SeedSlot>>,
+}
+
+/// Where the hashes of one file are kept, once taken.
+type SeedSlot = Arc<Mutex<Option<Arc<Seed>>>>;
+
+impl Seeds {
+    /// The hashes of `path` as it is now, from `compute` (which blocks) if
+    /// none were taken of this version of it. `None` if it cannot be read.
+    async fn get(
+        &self,
+        path: &Path,
+        compute: impl FnOnce(&Path) -> io::Result<Seed> + Send + 'static,
+    ) -> Option<Arc<Seed>> {
+        let slot = {
+            let mut by_path = self.by_path.lock().unwrap_or_else(PoisonError::into_inner);
+            // A slot no fetch holds, for a file that is gone, keeps nothing
+            // anyone can use again. There are only as many as the host has
+            // had images since the last fetch.
+            by_path
+                .retain(|held, slot| held == path || Arc::strong_count(slot) > 1 || held.exists());
+            Arc::clone(by_path.entry(path.to_owned()).or_default())
+        };
+        let mut cached = slot.lock().await;
+        let current = match Identity::of(path) {
+            Ok(current) => current,
+            Err(error) => {
+                // Gone (an image retired): nothing more to keep for it.
+                drop(cached);
+                self.forget(path, &slot);
+                tracing::debug!(path = %path.display(), %error, "no seed to fetch over");
+                return None;
+            }
+        };
+        if let Some(seed) = cached.as_ref()
+            && seed.identity == current
+        {
+            return Some(Arc::clone(seed));
+        }
+        *cached = None;
+        let owned = path.to_owned();
+        match tokio::task::spawn_blocking(move || compute(&owned)).await {
+            Ok(Ok(seed)) => {
+                let seed = Arc::new(seed);
+                *cached = Some(Arc::clone(&seed));
+                Some(seed)
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(path = %path.display(), %error, "base image unreadable; downloading whole disks");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(%error, "hashing the base image failed");
+                None
+            }
+        }
+    }
+
+    /// Drops the slot for `path` if it is still `slot`.
+    fn forget(&self, path: &Path, slot: &SeedSlot) {
+        let mut by_path = self.by_path.lock().unwrap_or_else(PoisonError::into_inner);
+        if by_path
+            .get(path)
+            .is_some_and(|held| Arc::ptr_eq(held, slot))
+        {
+            by_path.remove(path);
+        }
+    }
+}
+
 impl Chunked {
     /// Keeps sandboxes in `chunks`. Everything under its prefix shares
     /// chunks, so the prefix is also the boundary of who may see whose bytes.
@@ -195,7 +281,8 @@ impl Chunked {
     pub fn new(chunks: ChunkStore) -> Self {
         Self {
             chunks,
-            seed: Arc::default(),
+            seeds: Arc::default(),
+            confirmed: Arc::default(),
             transfers: Arc::new(Semaphore::new(TRANSFERS_PER_HOST)),
             compress: Arc::new(Semaphore::new(Threads::for_host().compress)),
             lanes: Arc::default(),
@@ -315,34 +402,10 @@ impl Chunked {
         parse_head(operation, &bytes).map(Some)
     }
 
-    /// The chunk hashes of `path` as it is now, computed at most once per
-    /// version of the file however many fetches ask at once. `None` if it
-    /// cannot be read: fetching then downloads everything.
+    /// The chunk hashes of `path` as it is now. `None` if it cannot be
+    /// read: fetching then downloads everything.
     async fn seed(&self, path: &Path) -> Option<Arc<Seed>> {
-        let mut cached = self.seed.lock().await;
-        let current = Identity::of(path).ok()?;
-        if let Some(seed) = cached.as_ref()
-            && seed.path == path
-            && seed.identity == current
-        {
-            return Some(Arc::clone(seed));
-        }
-        let owned = path.to_owned();
-        match tokio::task::spawn_blocking(move || Seed::compute(&owned)).await {
-            Ok(Ok(seed)) => {
-                let seed = Arc::new(seed);
-                *cached = Some(Arc::clone(&seed));
-                Some(seed)
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(path = %path.display(), %error, "base image unreadable; downloading whole disks");
-                None
-            }
-            Err(error) => {
-                tracing::warn!(%error, "hashing the base image failed");
-                None
-            }
-        }
+        self.seeds.get(path, Seed::compute).await
     }
 
     /// The whole chunks of an earlier copy of a file, by offset, so bytes that
@@ -353,24 +416,138 @@ impl Chunked {
             return HashMap::new();
         };
         match self.chunks.get_manifest(digest).await {
-            Ok(manifest) => manifest
-                .extents
-                .into_iter()
-                .filter_map(|extent| match extent.source {
-                    ExtentSource::Chunk {
-                        reference,
-                        offset: 0,
-                    } if u64::from(reference.plain_len) == extent.length => {
-                        Some((extent.offset, reference))
-                    }
-                    _ => None,
-                })
-                .collect(),
+            Ok(manifest) => whole_chunks(manifest),
             Err(error) => {
                 tracing::debug!(%error, "earlier copy unreadable; archiving everything");
                 HashMap::new()
             }
         }
+    }
+
+    /// What an archive of `id` from `files`, begun at `now`, may reuse.
+    /// Read after the archive began, so a sweep's fence covers it.
+    async fn before(&self, id: Id, files: &SavedFiles, now: SystemTime) -> Before {
+        const OP: &str = "archive";
+        let earlier = match self.chunks.get_pointer(&id.to_string()).await {
+            Ok(Some(bytes)) if !bytes.is_empty() => match parse_head(OP, &bytes) {
+                Ok(head) => Some((receipt_of(&bytes), head)),
+                Err(error) => {
+                    tracing::debug!(%id, %error, "earlier copy unreadable; archiving everything");
+                    None
+                }
+            },
+            Ok(_) => None,
+            Err(error) => {
+                tracing::debug!(%id, %error, "earlier copy unreadable; archiving everything");
+                None
+            }
+        };
+        let confirmed = earlier
+            .as_ref()
+            .and_then(|(receipt, _)| self.confirmed.sandbox(id, receipt, now));
+        let image = match files.image {
+            Some(image) => self.image_chunks(image, now).await,
+            None => None,
+        };
+        let earlier = earlier.map(|(_, head)| head);
+        let memory = earlier.as_ref().and_then(|head| head.memory.as_ref());
+        let (disk, state, memory) = tokio::join!(
+            self.earlier(earlier.as_ref().map(|head| head.disk.as_str())),
+            self.earlier(memory.map(|memory| memory.state.as_str())),
+            self.earlier(memory.map(|memory| memory.memory.as_str())),
+        );
+        let own = confirmed.is_some();
+        Before {
+            confirmed,
+            disk: reusable(disk, own, image.as_ref().map(|image| &image.chunks)),
+            state: reusable(state, own, None),
+            memory: reusable(memory, own, None),
+            image,
+        }
+    }
+
+    /// The chunks of the stored image `image`, if the store holds every one
+    /// of them, checked at most once a day however many archives ask. The
+    /// pointer is read on every call, after the archive asking began, so a
+    /// sweep's fence covers what it names.
+    async fn image_chunks(&self, image: ImageId, now: SystemTime) -> Option<Arc<ImageChunks>> {
+        const OP: &str = "archive";
+        let pointer = match self
+            .chunks
+            .get_pointer(&rootfs::rootfs_pointer(image))
+            .await
+        {
+            Ok(Some(pointer)) if !pointer.is_empty() => pointer,
+            Ok(_) => return None,
+            Err(error) => {
+                tracing::debug!(%image, %error, "image unreadable; archiving without it");
+                return None;
+            }
+        };
+        let receipt = receipt_of(&pointer);
+        let slot = self.confirmed.image_slot(image, now);
+        let mut held = slot.lock().await;
+        if let Some(chunks) = held
+            .as_ref()
+            .filter(|chunks| chunks.receipt == receipt && confirmed::fresh(chunks.at, now))
+        {
+            return Some(Arc::clone(chunks));
+        }
+        *held = None;
+        let manifest = match parse_head(OP, &pointer) {
+            Ok(stored) => self.chunks.get_manifest(&stored.disk).await.ok(),
+            Err(_) => None,
+        };
+        let Some(manifest) = manifest else {
+            tracing::warn!(%image, "image manifest unreadable; archiving without it");
+            return None;
+        };
+        let chunks = whole_chunks(manifest);
+        match self.holds_all(OP, chunks.values().cloned()).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(%image, "the store lost part of an image; archiving without it");
+                return None;
+            }
+            Err(error) => {
+                tracing::debug!(%image, %error, "image not checked; archiving without it");
+                return None;
+            }
+        }
+        let chunks = Arc::new(ImageChunks {
+            receipt,
+            chunks,
+            at: now,
+        });
+        *held = Some(Arc::clone(&chunks));
+        Some(chunks)
+    }
+
+    /// Whether the store holds every one of `references`, intact.
+    async fn holds_all(
+        &self,
+        op: &'static str,
+        references: impl IntoIterator<Item = ChunkRef>,
+    ) -> Result<bool, EngineError> {
+        let checks: Vec<Result<bool, EngineError>> = stream::iter(references)
+            .map(|reference| async move {
+                let _permit = self
+                    .transfers
+                    .acquire()
+                    .await
+                    .map_err(|error| EngineError::caused_by(ErrorKind::Transient, op, error))?;
+                match self.chunks.has_chunk(&reference).await {
+                    Ok(present) => Ok(present),
+                    Err(StorageError::Invalid(_)) => Ok(false),
+                    Err(error) => Err(storage_error(op, error)),
+                }
+            })
+            .buffer_unordered(VERIFY_CHECKS)
+            .collect()
+            .await;
+        checks
+            .into_iter()
+            .try_fold(true, |all, present| Ok(all && present?))
     }
 
     /// Brings the working-set pack `index` names into `memory` in
@@ -589,19 +766,14 @@ impl Store for Chunked {
             Ok(publication) => publication,
             Err(settled) => return Ok(settled),
         };
-        let earlier = match self.head(OP, id).await {
-            Ok(head) => head,
-            Err(error) => {
-                tracing::debug!(%id, %error, "earlier copy unreadable; archiving everything");
-                None
-            }
-        };
-        let memory_before = earlier.as_ref().and_then(|head| head.memory.as_ref());
-        let (disk_before, state_before, memory_before) = tokio::join!(
-            self.earlier(earlier.as_ref().map(|head| head.disk.as_str())),
-            self.earlier(memory_before.map(|memory| memory.state.as_str())),
-            self.earlier(memory_before.map(|memory| memory.memory.as_str())),
-        );
+        let now = self.chunks.now();
+        let Before {
+            confirmed: earlier_confirmed,
+            image,
+            disk: disk_before,
+            state: state_before,
+            memory: memory_before,
+        } = self.before(id, files, now).await;
         let disk = self.put_file(
             files.disk.path(),
             files.disk.open(),
@@ -672,70 +844,32 @@ impl Store for Chunked {
             .publish(publication, bytes)
             .await
             .map_err(|error| storage_error(OP, error))?;
+        // Everything the new copy names was stored by now, or asked about
+        // now, or confirmed when the copies it was reused from were.
+        let confirmed = [earlier_confirmed, image.map(|image| image.at)]
+            .into_iter()
+            .flatten()
+            .fold(now, SystemTime::min);
+        self.confirmed
+            .confirm_sandbox(id, receipt.clone(), confirmed);
         Ok(Archive::Stored(receipt))
     }
 
     async fn verify(&self, id: Id, receipt: &Receipt) -> Result<bool, EngineError> {
-        const OP: &str = "verify";
-        let Some(bytes) = self
-            .chunks
-            .get_pointer(&id.to_string())
-            .await
-            .map_err(|error| storage_error(OP, error))?
-        else {
-            return Ok(false);
-        };
-        if blake3::hash(&bytes).to_hex().as_str() != receipt.0 {
-            return Ok(false);
-        }
-        let Ok(head) = parse_head(OP, &bytes) else {
-            return Ok(false);
-        };
-        let mut digests = vec![head.disk];
-        if let Some(memory) = head.memory {
-            digests.extend([memory.state, memory.memory]);
-        }
-        let mut referenced = HashMap::new();
-        for digest in digests {
-            // Fetching checks each manifest against its digest.
-            match self.chunks.get_manifest(&digest).await {
-                Ok(manifest) => {
-                    for extent in manifest.extents {
-                        if let ExtentSource::Chunk { reference, .. } = extent.source {
-                            referenced.insert(reference.key(), reference);
-                        }
-                    }
-                }
-                Err(
-                    StorageError::Object(object_store::Error::NotFound { .. })
-                    | StorageError::Integrity
-                    | StorageError::Invalid(_)
-                    | StorageError::Json(_),
-                ) => return Ok(false),
-                Err(error) => return Err(storage_error(OP, error)),
+        let now = self.chunks.now();
+        let holds = self.holds(id, receipt).await;
+        match holds {
+            Ok(true) => self.confirmed.confirm_sandbox(id, receipt.clone(), now),
+            // Something the copy needs is gone or damaged, and may be part of
+            // an image: the next archive asks about everything it reuses, and
+            // so stores it again.
+            Ok(false) => {
+                self.confirmed.drop_sandbox(id);
+                self.confirmed.drop_images();
             }
+            Err(_) => {}
         }
-        // The local copy may be deleted on this answer: every chunk the copy
-        // needs must be there, not only the manifests naming them.
-        let checks: Vec<Result<bool, EngineError>> = stream::iter(referenced.into_values())
-            .map(|reference| async move {
-                let _permit = self
-                    .transfers
-                    .acquire()
-                    .await
-                    .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?;
-                match self.chunks.has_chunk(&reference).await {
-                    Ok(present) => Ok(present),
-                    Err(StorageError::Invalid(_)) => Ok(false),
-                    Err(error) => Err(storage_error(OP, error)),
-                }
-            })
-            .buffer_unordered(VERIFY_CHECKS)
-            .collect()
-            .await;
-        checks
-            .into_iter()
-            .try_fold(true, |all, present| Ok(all && present?))
+        holds
     }
 
     async fn fetch(&self, id: Id, into: &FetchInto) -> Result<FetchedMemory, EngineError> {
@@ -782,7 +916,10 @@ impl Store for Chunked {
 
     async fn delete(&self, id: Id, own: OwnerEpoch) -> Result<Owned<()>, EngineError> {
         match self.chunks.delete_pointer(&id.to_string(), own).await {
-            Ok(()) => Ok(Owned::Done(())),
+            Ok(()) => {
+                self.confirmed.drop_sandbox(id);
+                Ok(Owned::Done(()))
+            }
             Err(StorageError::Fenced { by }) => Ok(Owned::Fenced { by }),
             Err(error) => Err(storage_error("delete", error)),
         }
@@ -816,6 +953,10 @@ impl Store for Chunked {
 
     async fn fetch_image(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
         self.get_rootfs(image, path).await
+    }
+
+    async fn put_image(&self, path: &Path) -> Result<Option<ImageId>, EngineError> {
+        self.put_rootfs(path).await.map(Some)
     }
 
     /// Points the sandbox at its disk alone, without the memory image or
@@ -864,7 +1005,14 @@ impl Store for Chunked {
                 .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
             let receipt = receipt_of(&bytes);
             match self.chunks.publish(change, bytes).await {
-                Ok(()) => return Ok(Owned::Done(Some(receipt))),
+                Ok(()) => {
+                    // The copy names part of what the one it replaces named.
+                    let now = self.chunks.now();
+                    if let Some(at) = self.confirmed.sandbox(id, &receipt_of(&stored), now) {
+                        self.confirmed.confirm_sandbox(id, receipt.clone(), at);
+                    }
+                    return Ok(Owned::Done(Some(receipt)));
+                }
                 Err(StorageError::Superseded) => {}
                 Err(error) => return Err(storage_error(OP, error)),
             }
@@ -875,6 +1023,116 @@ impl Store for Chunked {
     fn chunks(&self) -> Option<(&ChunkStore, &Arc<Lanes>)> {
         Some((&self.chunks, &self.lanes))
     }
+}
+
+impl Chunked {
+    /// Whether the store holds exactly the copy `receipt` names of `id`,
+    /// every chunk of it intact (see [`Store::verify`]).
+    async fn holds(&self, id: Id, receipt: &Receipt) -> Result<bool, EngineError> {
+        const OP: &str = "verify";
+        let Some(bytes) = self
+            .chunks
+            .get_pointer(&id.to_string())
+            .await
+            .map_err(|error| storage_error(OP, error))?
+        else {
+            return Ok(false);
+        };
+        if blake3::hash(&bytes).to_hex().as_str() != receipt.0 {
+            return Ok(false);
+        }
+        let Ok(head) = parse_head(OP, &bytes) else {
+            return Ok(false);
+        };
+        let mut digests = vec![head.disk];
+        if let Some(memory) = head.memory {
+            digests.extend([memory.state, memory.memory]);
+        }
+        let mut referenced = HashMap::new();
+        for digest in digests {
+            // Fetching checks each manifest against its digest.
+            match self.chunks.get_manifest(&digest).await {
+                Ok(manifest) => {
+                    for extent in manifest.extents {
+                        if let ExtentSource::Chunk { reference, .. } = extent.source {
+                            referenced.insert(reference.key(), reference);
+                        }
+                    }
+                }
+                Err(
+                    StorageError::Object(object_store::Error::NotFound { .. })
+                    | StorageError::Integrity
+                    | StorageError::Invalid(_)
+                    | StorageError::Json(_),
+                ) => return Ok(false),
+                Err(error) => return Err(storage_error(OP, error)),
+            }
+        }
+        // The local copy may be deleted on this answer: every chunk the copy
+        // needs must be there, not only the manifests naming them.
+        self.holds_all(OP, referenced.into_values()).await
+    }
+}
+
+/// The whole chunks of a stored file, by offset.
+fn whole_chunks(manifest: DiskManifest) -> HashMap<u64, ChunkRef> {
+    manifest
+        .extents
+        .into_iter()
+        .filter_map(|extent| match extent.source {
+            ExtentSource::Chunk {
+                reference,
+                offset: 0,
+            } if u64::from(reference.plain_len) == extent.length => {
+                Some((extent.offset, reference))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// What an archive may reuse (see [`Chunked::before`]).
+struct Before {
+    /// Since when everything the sandbox's earlier copy names is known to
+    /// be stored, if this host stored or verified it recently.
+    confirmed: Option<SystemTime>,
+    /// The confirmed chunks of the image its disk was made from.
+    image: Option<Arc<ImageChunks>>,
+    disk: Earlier,
+    state: Earlier,
+    memory: Earlier,
+}
+
+/// What an archive may reuse of a file, by offset: what its own earlier
+/// copy `own` holds there, confirmed to be stored if `own_confirmed`, and
+/// what the confirmed `image` holds there if it differs. A chunk of the
+/// earlier copy that the image holds at the same offset is confirmed with
+/// the image.
+fn reusable(
+    own: HashMap<u64, ChunkRef>,
+    own_confirmed: bool,
+    image: Option<&HashMap<u64, ChunkRef>>,
+) -> Earlier {
+    let mut earlier: Earlier = HashMap::with_capacity(own.len().max(image.map_or(0, HashMap::len)));
+    for (&offset, reference) in image.into_iter().flatten() {
+        earlier.entry(offset).or_default().push(Reusable {
+            reference: reference.clone(),
+            confirmed: true,
+        });
+    }
+    for (offset, reference) in own {
+        let held = earlier.entry(offset).or_default();
+        if held.iter().any(|reusable| reusable.reference == reference) {
+            continue;
+        }
+        // After the image's, so a range that matches both names the
+        // confirmed one.
+        held.push(Reusable {
+            reference,
+            confirmed: own_confirmed,
+        });
+    }
+    earlier
 }
 
 /// The chunk at each chunk-sized position of a memory manifest (`None` for
@@ -943,6 +1201,7 @@ fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
     EngineError::caused_by(kind, operation, error)
 }
 
+mod confirmed;
 mod files;
 mod rootfs;
 pub(crate) use rootfs::file_id;

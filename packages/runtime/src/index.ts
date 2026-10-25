@@ -83,6 +83,7 @@ export {
 import {
   createLocalMcpBridgeFromAdapters,
   IntegrationInvocationError,
+  isLocalMcpBridgeServer,
   type LocalMcpBridgeAdapter,
 } from "@opengeni/capabilities";
 import {
@@ -123,6 +124,7 @@ import {
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   RequestHumanInteractionToolInput,
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
@@ -177,6 +179,7 @@ import {
   integrationToolFamily,
   type ToolFamily,
   isSecretReferenceError,
+  SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
@@ -225,6 +228,12 @@ import {
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
 import {
+  GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
+  googleCalendarRestResultOutcome,
+  isOfficialGoogleCalendarMcpConfig,
+  type GoogleCalendarRestMcpBridgeContext,
+} from "./google-calendar-rest-mcp";
+import {
   SLACK_REST_MCP_BRIDGE_ADAPTER,
   type SlackApiRateLimiter,
   type SlackRestMcpBridgeContext,
@@ -238,6 +247,7 @@ import {
   type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 import {
+  modelToolTextBudgetBytes,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
   type SpillOversizedModelToolResult,
@@ -245,10 +255,12 @@ import {
 export {
   modelToolResultFits,
   modelToolResultOverflowError,
+  modelToolTextBudgetBytes,
   projectAttemptToolResultForCaller,
   spilledModelToolResult,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
+  type ProjectModelToolResult,
   type SpillOversizedModelToolResult,
 } from "./tool-result-spill";
 export {
@@ -273,6 +285,16 @@ export {
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "./gmail-rest-mcp";
+export {
+  GOOGLE_CALENDAR_REST_API_BASE,
+  GOOGLE_CALENDAR_REST_MCP_TOOLS,
+  GoogleCalendarRestMcpServer,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+  googleCalendarRestToolIsMutation,
+  googleCalendarToolSupportsScopes,
+  isOfficialGoogleCalendarMcpConfig,
+  type GoogleCalendarRestMcpServerOptions,
+} from "./google-calendar-rest-mcp";
 export {
   SLACK_REST_API_BASE,
   SLACK_REST_MCP_TOOLS,
@@ -448,8 +470,19 @@ export {
   managedCodemodeClientDigest,
   type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
-import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
-export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
+import {
+  InputWaitYield,
+  waitForInputReply,
+  type InputWaitRequest,
+  type InputWaitYieldStream,
+} from "./input-wait-yield";
+export {
+  InputWaitYield,
+  modelResponseHasProgressUpdate,
+  modelResponseHasVisibleText,
+  waitForInputReply,
+  type InputWaitRequest,
+} from "./input-wait-yield";
 import { withModelStepHandover } from "./model-step-handover";
 export { ModelStepHandover } from "./model-step-handover";
 export {
@@ -898,6 +931,7 @@ export type {
 ensureReadableStreamFrom();
 
 type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
+  GoogleCalendarRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
   DriveMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
@@ -905,6 +939,7 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   BuiltInMcpBridgeContext
 >[] = Object.freeze([
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
   SLACK_REST_MCP_BRIDGE_ADAPTER,
   DRIVE_MCP_BRIDGE_ADAPTER,
 ]);
@@ -2574,8 +2609,10 @@ function gitBindingDiscoveryApplies(
 }
 
 /**
- * Resource facts for modular module selection. Every input is a session- or
- * turn-level fact, so the composed prefix changes only when they change.
+ * Resource facts for modular module selection. Every output is a session-level
+ * fact, so the composed prefix changes only when they change. Per-turn file
+ * attachments deliberately select nothing here: a turn with a file must share
+ * the cached instructions of a turn without one.
  */
 export function agentPromptResourcesFor(
   settings: Settings,
@@ -2583,7 +2620,6 @@ export function agentPromptResourcesFor(
   options: Pick<
     BuildAgentOptions,
     | "activeSandboxBackend"
-    | "fileResourceDownloads"
     | "gitCredentialBindings"
     | "gitTokenSeed"
     | "gitTokenSeeds"
@@ -2606,10 +2642,6 @@ export function agentPromptResourcesFor(
       (Boolean(options.gitTokenSeed) ||
         gitTokenSeeds.length > 0 ||
         (options.gitCredentialBindings?.length ?? 0) > 0),
-    attachments:
-      (managedSandbox || connectedMachine) &&
-      (resources.some((resource) => resource.kind === "file") ||
-        (options.fileResourceDownloads?.length ?? 0) > 0),
     ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
     ...(options.rig ? { rig: options.rig } : {}),
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
@@ -2880,6 +2912,20 @@ const HUMAN_INPUT_TOOL_DESCRIPTION =
 
 const HUMAN_INPUT_SECRET_DESCRIPTION =
   'For a password, API key, token or one-time setup key, ask with a question of kind "secret" and a secret spec (item, field, saveTo); never use a text question or chat for secrets. The answer is saved to a vault and you receive a reference such as {{secret:GitHub/password}} plus the plain username, never the value; use the reference right away.';
+
+/**
+ * Secret approval cards are Opengeni's own: when a secret use is blocked, the
+ * person is already asked in the chat and by notification. An agent cannot
+ * ask with one. Returns a model-facing reason, or null.
+ */
+export function secretApprovalQuestionRejection(input: RequestHumanInputToolInput): string | null {
+  if (
+    !input.questions.some((question) => question.id.startsWith(SECRET_USE_APPROVAL_QUESTION_PREFIX))
+  ) {
+    return null;
+  }
+  return "Nothing was asked. Opengeni already asked the person, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.";
+}
 
 /**
  * Secret-question rules the schema cannot express (AC-1): the capability is
@@ -3197,6 +3243,10 @@ export function buildOpenGeniAgent(
                   "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
                 );
               }
+              const approvalRejection = secretApprovalQuestionRejection(parsed.data);
+              if (approvalRejection) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(approvalRejection);
+              }
               const secretRejection = await secretQuestionRejection(parsed.data, {
                 enabled: toolFamilies.secrets,
                 hasActingHuman: options.secrets?.hasActingHuman ?? false,
@@ -3349,6 +3399,7 @@ export function buildOpenGeniAgent(
       options.approvedToolCallId,
     );
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
+    installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     return agent;
   }
@@ -3372,6 +3423,8 @@ export function buildOpenGeniAgent(
           }
         : undefined,
     ),
+    instructionManifest: (manifest: Manifest) =>
+      manifestWithoutFileResourceEntries(manifest, resources),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(options.authorizeAttemptExecution
@@ -3484,6 +3537,7 @@ export function buildOpenGeniAgent(
     options.approvedToolCallId,
   );
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
+  installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   return agent;
 }
@@ -3654,6 +3708,42 @@ function installModelMcpCallIdentity(agent: ApprovalCapableAgent): void {
 function modelMcpSourceCallId(modelName: string): string | undefined {
   const identity = modelMcpCallIdentity.getStore();
   return identity?.modelName === modelName ? identity.callId : undefined;
+}
+
+/** First-party tools that move this chat to another machine. */
+const ROUTE_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set(["sandbox_swap", "sandbox_attach"]);
+
+/**
+ * Run the tools that move this chat to another machine in model order. A
+ * model that writes `sandbox_swap` and then `computer_open` (or any other
+ * call) in one response means the later call for the machine it swapped to,
+ * but calls of one response otherwise start together: the later call would
+ * read the chat's route before the swap committed and act on, or be refused
+ * by, the machine the chat was leaving. Earlier calls of the response finish
+ * on the old machine first; later ones start after the move. Reinstalled on
+ * every clone like the other MCP projections. A `tool_invoke` of a swap is
+ * rewritten to the swap's own call before the runner orders the response, so
+ * it is ordered the same way. A swap inside a Code Mode program is one step of
+ * that program's single call and is not ordered against the response's other
+ * calls.
+ */
+export function installRouteMoveOrdering(agent: ApprovalCapableAgent): void {
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) =>
+      tool.type === "function" &&
+      ROUTE_MOVING_TOOL_FAMILIES.has(toolCallFamily(agent.mcpServers ?? [], [], tool.name) ?? "")
+        ? { ...tool, exclusiveExecution: true }
+        : tool,
+    );
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installRouteMoveOrdering(cloned);
+      return cloned;
+    };
+  }
 }
 
 const TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS = 2_000;
@@ -3843,6 +3933,15 @@ function installMcpApprovalPolicy(
         identity?.recommendsApproval === true;
       const legacyApproval = !policy.connectorBacked && recommendsApproval;
       if (!policy.connectorBacked && !legacyApproval && !connectorActionPolicy) {
+        return tool;
+      }
+      // Opengeni's own servers have no workspace connector policy: only a tool
+      // they ask approval for goes through the ledger, as on the gateway path.
+      if (
+        !policy.connectorBacked &&
+        !legacyApproval &&
+        attemptToolSource(policy.serverId) !== "mcp"
+      ) {
         return tool;
       }
       const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
@@ -4791,9 +4890,10 @@ export type PrepareToolsOptions = {
   /**
    * Consulted before `wait_for_input` registers a wait. A returned message is
    * given to the model as a tool error instead of waiting, for example when the
-   * wait would end a person's turn without any visible reply.
+   * wait would end a person's turn without any visible reply. It receives the
+   * call's verbatim `reply` argument, if any.
    */
-  inputWaitReplyGuard?: () => Promise<string | null>;
+  inputWaitReplyGuard?: (request: InputWaitRequest) => Promise<string | null>;
   /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
   mcpAccountLabels?: ReadonlyMap<string, McpAccountRouteLabel>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
@@ -4901,6 +5001,12 @@ export type PrepareToolsOptions = {
    * return the compact receipt. Codemode callers skip the 1 MiB cap entirely.
    */
   spillOversizedModelToolResult?: SpillOversizedModelToolResult;
+  /**
+   * The current model's tool-output truncation policy in tokens, read for each
+   * call so a mid-attempt model change is honoured. Local bridge projections
+   * size their model-visible copy to it. Defaults to the settings value.
+   */
+  modelToolOutputTruncationTokens?: () => number;
   /**
    * Private exact-byte connector attachment bridge. Source URLs are passed only
    * through this host callback and never included in the returned MCP result.
@@ -5755,6 +5861,7 @@ export async function prepareAgentTools(
             registry,
             resolvedMcpConnectionIds,
             options,
+            settings.modelToolOutputTruncationTokens,
           ),
         execution,
       );
@@ -6051,6 +6158,7 @@ async function prepareAttemptToolEnvironment(
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   options: PrepareToolsOptions,
+  defaultModelToolOutputTruncationTokens: number,
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
@@ -6068,16 +6176,31 @@ async function prepareAttemptToolEnvironment(
     options.sessionAttachedRemoteMcpTargets,
     options.runMcpCredentials,
   );
+  const serversByRegistryId = new Map(
+    prepared.servers.map(({ server }) => [server.registryId, server]),
+  );
+  const modelToolOutputBudget = () => ({
+    maxTextBytes: modelToolTextBudgetBytes(
+      options.modelToolOutputTruncationTokens?.() ?? defaultModelToolOutputTruncationTokens,
+    ),
+  });
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
-      ...prepared.definitions.map((definition) => ({
-        ...definition,
-        execute: wrapAttemptToolExecute(
-          async (argumentsValue, context) => await definition.execute(argumentsValue, context),
-          options.spillOversizedModelToolResult,
-          definition.identity,
-        ),
-      })),
+      ...prepared.definitions.map((definition) => {
+        const server = serversByRegistryId.get(definition.identity.serverId);
+        const toolName = definition.identity.toolName;
+        return {
+          ...definition,
+          execute: wrapAttemptToolExecute(
+            async (argumentsValue, context) => await definition.execute(argumentsValue, context),
+            options.spillOversizedModelToolResult,
+            definition.identity,
+            server?.hasModelToolResultProjection()
+              ? (result) => server.projectModelToolResult(toolName, result, modelToolOutputBudget())
+              : undefined,
+          ),
+        };
+      }),
       ...wrapAttemptToolDefinitions(
         options.attemptToolDefinitions ?? [],
         options.spillOversizedModelToolResult,
@@ -6236,7 +6359,9 @@ function installAttemptConnectorActionGatewayLifecycle(
           ? { resultOutcome: binding.resultOutcome }
           : config && isOfficialGmailMcpConfig(config.url ?? "", config.connectionRef)
             ? { resultOutcome: gmailRestResultOutcome }
-            : {}),
+            : config && isOfficialGoogleCalendarMcpConfig(config.url ?? "", config.connectionRef)
+              ? { resultOutcome: googleCalendarRestResultOutcome }
+              : {}),
         ...(connectorActionPolicy ? { connectorActionPolicy } : {}),
       }),
     };
@@ -8879,6 +9004,29 @@ export class PrefixedMcpServer implements MCPServer {
       : {};
   }
 
+  /** True when the wrapped local bridge supplies its own model-visible result copy. */
+  hasModelToolResultProjection(): boolean {
+    if (this.inner instanceof PrefixedMcpServer) return this.inner.hasModelToolResultProjection();
+    return (
+      isLocalMcpBridgeServer(this.inner) && typeof this.inner.projectModelToolResult === "function"
+    );
+  }
+
+  /** The wrapped local bridge's model-visible copy of one exact result (unprefixed tool name). */
+  projectModelToolResult(
+    toolName: string,
+    result: AttemptToolResultValue,
+    budget: { readonly maxTextBytes: number },
+  ): AttemptToolResultValue {
+    if (this.inner instanceof PrefixedMcpServer) {
+      return this.inner.projectModelToolResult(toolName, result, budget);
+    }
+    if (isLocalMcpBridgeServer(this.inner) && this.inner.projectModelToolResult) {
+      return this.inner.projectModelToolResult(toolName, result, budget);
+    }
+    return result;
+  }
+
   catalogEffectAuthority(toolName: string): unknown {
     return this.effectAuthority ? this.effectAuthority(toolName) : this.approvalAuthority;
   }
@@ -9085,8 +9233,11 @@ export class PrefixedMcpServer implements MCPServer {
       meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : undefined;
     // A wait that would end a person's turn without a visible reply is refused
     // before admission, so the model answers first and nothing remote changes.
+    // Its optional `reply` is the verbatim answer, recorded once it is accepted.
+    const waitRequest =
+      unprefixed === "wait_for_input" ? { reply: waitForInputReply(args) } : undefined;
     if (unprefixed === "wait_for_input") {
-      const refusal = await this.inputWaitYield?.replyRefusal();
+      const refusal = await this.inputWaitYield?.replyRefusal(waitRequest);
       if (refusal) {
         return boundedMcpToolResult({
           isError: true,
@@ -9097,7 +9248,7 @@ export class PrefixedMcpServer implements MCPServer {
     // Admission must precede the physical remote call, not merely observe its
     // result: model dispatch and terminal settlement drain this reservation.
     const completeWait =
-      unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait() : undefined;
+      unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait(waitRequest) : undefined;
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
       const physicalCall = async (callArgs: Record<string, unknown>) => {
@@ -10664,6 +10815,7 @@ export async function runOwnedSandboxSetup(
     codemodeTokenSeedOverride?: string;
     codemodeClientDownloadOverride?: ManagedCodemodeClientDownload;
     commandRunner?: SandboxLifecycleCommandRunner;
+    measureSetup?: SandboxLifecycleHookContext["measureSetup"];
     /** Durable host coordinator for immutable rig setup on one exact managed
      * sandbox. Turn-private hooks always run after this callback returns. */
     coordinateSharedRigSetup?: (input: {
@@ -10711,6 +10863,7 @@ export async function runOwnedSandboxSetup(
   ];
   const ownedHookContext: SandboxLifecycleHookContext = {
     environment,
+    ...(opts.measureSetup ? { measureSetup: opts.measureSetup } : {}),
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
     ...(runAs ? { runAs } : {}),
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
@@ -11221,6 +11374,33 @@ export function buildManifest(
   });
 }
 
+/**
+ * The manifest the SDK renders into the system instructions (remote mount
+ * policy and filesystem layout): the runtime manifest without file resource
+ * entries. Files are attached per turn, so listing them there would change the
+ * cached instruction prefix on every turn with a file. The session still
+ * materializes the full manifest, and the turn's attachment notice at the end
+ * of the input tells the model where each file is and how to treat it. Entries
+ * under the default file root are dropped too, because a resumed sandbox's
+ * manifest state can still hold files attached on earlier turns.
+ */
+export function manifestWithoutFileResourceEntries(
+  manifest: Manifest,
+  resources: readonly ResourceRef[],
+): Manifest {
+  const filePaths = new Set(
+    resources.flatMap((resource) =>
+      resource.kind === "file" ? [resourceMountPath(resource)] : [],
+    ),
+  );
+  const fileRoot = `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/`;
+  const entries = Object.entries(manifest.entries).filter(
+    ([path]) => !filePaths.has(path) && !path.startsWith(fileRoot),
+  );
+  if (entries.length === Object.keys(manifest.entries).length) return manifest;
+  return new Manifest({ ...manifest, entries: Object.fromEntries(entries) });
+}
+
 export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {
   workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
 } {
@@ -11524,6 +11704,11 @@ export type SandboxLifecycleCommandRunner = (
 
 export type SandboxLifecycleHookContext = {
   environment: Record<string, string>;
+  /** Host-only startup observation; never projected into model context. */
+  measureSetup?: (
+    phase: "client_readiness" | "credential_seed" | "credential_hooks" | "artifact_runtime",
+    work: () => Promise<void>,
+  ) => Promise<void>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
   runAs?: string;
   // TOKEN-BROKER (B1): back-compat GitHub alias for gitTokenSeeds.github.
@@ -11651,10 +11836,23 @@ async function runApplicableBeforeAgentStartHooks(
   hooks: SandboxLifecycleHook[],
   context: SandboxLifecycleHookContext,
 ): Promise<void> {
-  const runHook = (hook: SandboxLifecycleHook): Promise<void> =>
-    withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
-      hook.run(session, context),
-    );
+  const runHook = (hook: SandboxLifecycleHook): Promise<void> => {
+    const run = () =>
+      withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
+        hook.run(session, context),
+      );
+    const phase =
+      hook.id === "codemode-client"
+        ? "client_readiness"
+        : hook.id === "codemode-token"
+          ? "credential_seed"
+          : hook.id === "azure-cli-login"
+            ? "credential_hooks"
+            : hook.id === "artifact-runtime-doctor"
+              ? "artifact_runtime"
+              : null;
+    return phase && context.measureSetup ? context.measureSetup(phase, run) : run();
+  };
   if (!hooks.some((hook) => hook.independent)) {
     for (const hook of hooks) await runHook(hook);
     return;

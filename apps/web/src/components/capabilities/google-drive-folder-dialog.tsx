@@ -248,7 +248,7 @@ function GoogleDriveFolderDialogBody({
       onClose();
       toast.success("Google Drive folders saved", {
         description: syncEnabled
-          ? `${selectedSources.length} location${selectedSources.length === 1 ? "" : "s"} enabled. Manage cadence and pause state in Schedules.`
+          ? `${selectedSources.length} location${selectedSources.length === 1 ? "" : "s"} enabled. Manage cadence and pause state in Automations.`
           : `${selectedSources.length} location${selectedSources.length === 1 ? "" : "s"} selected. Synchronization remains disabled.`,
       });
     } catch (error) {
@@ -458,7 +458,7 @@ function GoogleDriveFolderDialogBody({
           <span>
             <span className="block font-medium text-fg">Enable synchronization</span>
             Selection alone never starts ingestion. Once enabled, cadence and user pause are managed
-            from Schedules.
+            from Automations.
           </span>
         </label>
         <label className="grid gap-1 text-xs text-fg-muted">

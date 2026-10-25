@@ -109,13 +109,89 @@ Full access; SDK
 `listOrganizationMcpConnections`, `updateOrganizationMcpConnection`,
 `deleteOrganizationMcpConnection`). Migration `0601` is rolling.
 
+### App actions in chat
+
+In a chat a person started themselves, the agent can do what that person could
+do in the app's pages and settings: invite people, share the chat, check their
+plan, credits and usage, change workspace and organization settings, and the
+rest of the organization MCP server's catalog. It runs as that person, with
+exactly their access, and each change waits for them to confirm it in the chat.
+
+- The session's agent has `admin_actions_search`, `admin_action_describe` and
+  `admin_action_call`. They are ordinary, selectable session tools, selected by
+  default, and listed only in a top-level session a person started (never in a
+  child or service session). Their descriptions never change with the
+  session's access. A host that embeds Opengeni turns them off by leaving them
+  out of its tool selection.
+- Each call resolves, live, as whom it runs. With full access (below): the
+  person who gave it, as before. Otherwise: the person who sent this turn's
+  message. Scheduled, goal, inbox and other turns nobody sent run nothing, and
+  neither do API-key and service turns, or child and service sessions.
+- When the API accepts a person's message it freezes, with that turn, what the
+  message may do (`session_turn_app_action_grants`): who sent it, whether they
+  can confirm changes from where they sent it, and the most it may do, which
+  is the request's own workspace and organization grant at that moment. Every
+  call is capped by that and by the chat's workspace, and each route still
+  checks the person's live access. A turn without one runs nothing.
+- Only someone signed in to the app itself (the managed sign-in session, or
+  the local single-user session) can confirm changes. Every other accepted
+  person sign-in is delegated: an embed's host-issued token, an external user,
+  or another integration's person token. There someone else vouches for who
+  the person is, so the route only reads, capped by that token.
+  `OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES=true` gives all delegated
+  sign-ins the same card (not only embeds), so a deployment sets it only when
+  every issuer of such tokens maps each user to the right member; the cap
+  stays.
+- Reads (`GET`, `HEAD` and the catalog's read-only `POST`s) run at once: they
+  show only what the person already sees in the app. That includes things the
+  person can open there anyway, such as exports and the events of other chats
+  shared with them, now in this chat's transcript and sent to its model.
+- A change shows the person the ordinary in-chat approval card with a plain
+  question that names the target ("Invite anna@example.com to your
+  organization as an admin?"), one line of the key values, Allow and Cancel,
+  and the raw call behind Details. It runs only if they allow it. The worker
+  asks; the API enforces it: it runs a change only when this attempt is
+  executing exactly those arguments, approved by that same person. An Allow
+  from anyone else in the chat doesn't count, and neither does one sent
+  through an API key, a chat integration (such as a Slack button) or an embed
+  that has not opted in: the approval records who decided and whether they
+  were signed in to the app itself, fixed with the decision like the rest of
+  it, and only such a decision confirms. The
+  card's one-line summary hides secret-looking values (fields named as
+  passwords, codes, tokens, keys or other secrets; DSNs; the sign-in part,
+  query and random-looking path segments of any URL, and the whole path for
+  webhook hosts such as Slack, Discord and Zapier, also inside free text;
+  connection-string passwords; bearer credentials; bare tokens of a
+  well-known shape such as API keys, GitHub, Slack and AWS tokens and JWTs).
+  Without full access the action
+  is capped to the chat's workspace, so steps that widen an agent's access
+  (agent sign-ins, connected agents, full access, personal keys) stay refused.
+- Calls that create, show, copy or rotate a key, password, token or other
+  secret (API and personal keys, webhook and event-source secrets, enrollment
+  tokens, device sign-in codes, vaults, credential providers) never run this
+  way, and neither does a call whose body carries one (credential headers for
+  a chat's MCP servers, a connection's credential bundle): one click would
+  put a lasting secret into the conversation and the model provider's logs.
+  The same action without a secret in the body (creating a chat without MCP
+  headers) runs normally. The person does the rest in the app, or gives the
+  session full access. Secret fields are marked where the contracts define
+  them (`secretValue(...)` from `@opengeni/contracts`), with secret-sounding
+  field names as a backstop; the catalog generator records them as
+  `secretFields` on each entry, and a test fails when the catalog drifts or
+  when an open map of strings in an action schema is neither marked nor
+  listed as plain with its reason.
+- An owner or admin can turn this off for the organization: Organization
+  settings > Security & data > Agents, "Actions in chat" (on by default;
+  `chatActionsAllowed` on `/v1/organizations/:id/agent-admin-access`). Calls
+  then refuse with that reason; the tool list stays the same.
+
 ### Full access for agent sessions
 
-Any member can let a session they started reach the same organization
-actions as themselves, without connecting an outside client. The API calls it
-admin access; the app calls it full access. The agent can do exactly what
-that person can do in the app: a member's workspaces and their settings, or
-everything an owner or admin manages.
+Any member can let a session they started run the same actions without asking
+first, without connecting an outside client. The API calls it admin access;
+the app calls it full access. The agent can do exactly what that person can do
+in the app: a member's workspaces and their settings, or everything an owner
+or admin manages.
 
 - The organization allows it first: Organization settings > Security & data >
   Agents, "Full access for agent sessions" (off by default;
@@ -132,20 +208,19 @@ everything an owner or admin manages.
   The granter or any owner or admin can turn it off from the shield beside
   the title or the same menu (`DELETE`; `GET` returns the state and what the
   viewer may do).
-- While it is on, the session's agent sees `admin_actions_search`,
-  `admin_action_describe` and `admin_action_call`. They are never part of a
-  tool selection or default: the session's Opengeni MCP server lists them only
-  while access is in effect, and every call checks again, so turning it off,
-  the organization turning it off, or the granter leaving the session's
-  workspace (or losing the owner or admin role that gave them access to it)
-  applies to the very next call.
+- While it is on, the app-action tools are listed whatever the session's tool
+  selection, changes run without a confirmation, in any workspace the granter
+  can use, and every call checks again, so turning it off, the organization
+  turning it off, or the granter leaving the session's workspace (or losing
+  the owner or admin role that gave them access to it) applies to the very
+  next call.
 - They cover exactly the organization MCP server's catalog and run each
   action in process as the granter, capped by the granter's own live access
   (a member's 403s stay 403s), under the same rules (`browserOnly` actions and browser-bound provider OAuth
   stay with the person). Nothing of the agent's own workspace scope carries
   into the action.
 
-Migration `0692` is rolling.
+Migrations `0692` and `0971` are rolling.
 
 The public OAuth authorization server is deliberately narrow: public dynamic
 client registration, authorization-code grant with mandatory PKCE S256, exact
@@ -531,7 +606,7 @@ First-party Opengeni MCP session monitoring tools (`sessions:read`):
 - `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and conversation-first history with explicit `results`, `tools`, and `debug` views. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
 - `session_wait` - one blocking call (session-scoped grants only) for a short in-turn wait. It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. When the returned events include a direct child's complete final answer and the call is the exact live parent attempt's own model call (the worker marks it `_meta.opengeniCaller: "model"`; a Codemode call does not count), the read is recorded on the turn and the own-pending counts exclude that child's idle terminal result for it. The attempt's successful completion supersedes a still-pending such result (`consumed_by_parent_read`), and one committed after that completion arrives already consumed; a failed or interrupted attempt suppresses nothing. Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence.
 - `command_read` / `command_wait` - one provider-neutral, command-specific output/status path. Read immediately or wait briefly, then resume from the output cursor. A terminal read marks completion observed and suppresses its still-pending notification; a running read leaves future completion eligible. Retained output remains readable after settlement subject to explicit retention limits. Timeout never cancels the command; use `wait_for_input` for a long or uncertain wait. The separate native shell tool `command_input(session_id, chars)` sends nonempty stdin in its owning context where supported; it is not a first-party MCP endpoint and reports unsupported capabilities explicitly.
-- `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A human/API turn that neither calls `wait_for_input` again nor consumes the awaited machine input leaves the wait armed; only a newer finished turn that a person did not start or that consumed immediate machine input, or the deadline, retires it. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
+- `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. Its optional `reply` is the agent's complete message for the person: the worker shows it verbatim as the turn's answer once the wait is accepted (see [run lifecycle](run-lifecycle.md)). The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A human/API turn that neither calls `wait_for_input` again nor consumes the awaited machine input leaves the wait armed; only a newer finished turn that a person did not start or that consumed immediate machine input, or the deadline, retires it. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
 
 Exact-attempt advisory work-claim mutations (`sessions:control`) use
 `work_claim_upsert` and `work_claim_release`. They are CAS/idempotency-fenced,

@@ -1,5 +1,5 @@
 /**
- * The row and page actions a schedule shares between the list and its own
+ * The row and page actions an automation shares between the list and its own
  * page: Run now, Pause (with Undo), Resume, the list switch's quiet pause and
  * resume, and Delete (a centered confirm).
  * Every action goes through the same API calls the old page used; failures
@@ -16,15 +16,22 @@ import {
 import { useAppContext } from "@opengeni/react/app/app-context";
 import type { ScheduledTask } from "@opengeni/react/app/types";
 
-import { isKnowledgeSync, nextRunOf, runTimeLabel, scheduleErrorText } from "./schedule-model";
+import {
+  hasEventTriggers,
+  isFinishedOnce,
+  isKnowledgeSync,
+  nextRunOf,
+  runTimeLabel,
+  scheduleErrorText,
+} from "./schedule-model";
 
 export type ScheduleAction = "pause" | "resume" | "trigger" | "delete";
 
 const ACTION_ERROR: Record<ScheduleAction, string> = {
-  pause: "Couldn't pause the schedule",
-  resume: "Couldn't resume the schedule",
+  pause: "Couldn't pause the automation",
+  resume: "Couldn't resume the automation",
   trigger: "Couldn't start a run",
-  delete: "Couldn't delete the schedule",
+  delete: "Couldn't delete the automation",
 };
 
 export interface ScheduleActions {
@@ -104,8 +111,14 @@ export function useScheduleActions({
       if (!done) return false;
       const now = new Date();
       const next = nextRunOf({ ...task, status: "active" }, now);
-      toast.success(`Resumed ${task.name}`, {
-        description: next ? `Next run ${runTimeLabel(next, now)}.` : undefined,
+      // A finished run-once automation is on again: it waits for its next event.
+      const listening = hasEventTriggers(task);
+      toast.success(`${isFinishedOnce(task) ? "Turned on" : "Resumed"} ${task.name}`, {
+        description: next
+          ? `Next run ${runTimeLabel(next, now)}.`
+          : listening
+            ? "It runs when a matching event arrives."
+            : undefined,
       });
       await onChanged(task);
       return true;
@@ -156,7 +169,7 @@ export function useScheduleActions({
       onOpenChange={(open) => {
         if (!open) setConfirmDelete(null);
       }}
-      title={confirmDelete ? `Delete ${confirmDelete.name}?` : "Delete schedule?"}
+      title={confirmDelete ? `Delete ${confirmDelete.name}?` : "Delete automation?"}
       consequences={
         knowledge
           ? [
@@ -166,12 +179,14 @@ export function useScheduleActions({
           : [
               next
                 ? `It stops running. The next run was ${runTimeLabel(next, now)}.`
-                : "It won't run again.",
+                : confirmDelete && hasEventTriggers(confirmDelete) && !isFinishedOnce(confirmDelete)
+                  ? "It stops listening for events and won't run again."
+                  : "It won't run again.",
               "Chats from earlier runs stay in your chats.",
               "This can't be undone. Pause it instead to keep it for later.",
             ]
       }
-      confirmLabel="Delete schedule"
+      confirmLabel="Delete automation"
       pendingLabel="Deleting…"
       onConfirm={async () => {
         const task = confirmDelete;

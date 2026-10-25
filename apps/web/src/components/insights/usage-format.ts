@@ -114,7 +114,7 @@ const SOURCE_NAMES: Readonly<Record<string, string>> = {
   web: "Web app",
   api: "API & SDK",
   slack: "Slack",
-  schedule: "Schedules",
+  schedule: "Automations",
   agent: "Agents",
   other: "Other",
 };

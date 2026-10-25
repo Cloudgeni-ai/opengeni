@@ -7,7 +7,11 @@ import {
 } from "../http/variable-sets-removed";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
-import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
+import {
+  assertGoalResumeAllowed,
+  GoalResumeBlockedError,
+  turnAppActionGrant,
+} from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listWorkspaceBackgroundCommandsForSubject } from "@opengeni/db";
@@ -16,16 +20,24 @@ import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
-import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
+import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
+import { enqueueCapabilitySetupContinuation } from "@opengeni/db";
+import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
+import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
+import { capabilitySetupReadiness } from "../capability-setup-readiness";
+import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import {
   requireWorkspace,
   sessionScheduleTargets,
+  type SessionScheduleTargets,
   currentSiteViewerRlsContext,
   nestedPostgresSqlState,
 } from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
   isVerifiedDelegatedHumanAuthorization,
+  scheduledTaskViewerSubjectForGrant,
   withSiteSessionOrigin,
 } from "@opengeni/core";
 import {
@@ -40,7 +52,11 @@ import {
 import type { CreditDebitAttribution, SessionForkPointRefusal } from "@opengeni/db";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
-import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
+import {
+  resolveSiteSessionOrigin,
+  siteViewConversationContext,
+  withOptionalSiteCommandOrigin,
+} from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
 import { SandboxRecoveryConflictError } from "@opengeni/db";
@@ -416,10 +432,43 @@ type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSes
 /** One immediate stop attempt; a sleeping compute sandbox wakes within it. */
 const BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS = 5_000;
 /** Readers without schedule authority see no schedule relationship at all. */
-const NO_SESSION_SCHEDULE_TARGETS = {
+const NO_SESSION_SCHEDULE_TARGETS: SessionScheduleTargets = {
   scheduled: new Set<string>(),
   upcoming: new Set<string>(),
-} as const;
+  waitingForEvents: new Set<string>(),
+  waits: null,
+};
+
+/**
+ * The automations posting into these sessions, for a reader allowed to run
+ * schedules and control chats; wait details cover what that person can see.
+ */
+async function sessionScheduleTargetsForGrant(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<SessionScheduleTargets> {
+  if (
+    !hasPermission(grant.permissions, "scheduled_tasks:run") ||
+    !hasPermission(grant.permissions, "sessions:control")
+  ) {
+    return NO_SESSION_SCHEDULE_TARGETS;
+  }
+  return await sessionScheduleTargets(db, workspaceId, sessionIds, {
+    viewer: async () => await scheduledTaskViewerSubjectForGrant(db, grant),
+  });
+}
+
+/** What the session list and header show about the automations posting into a chat. */
+function sessionAutomationFacts(targets: SessionScheduleTargets, sessionId: string) {
+  return {
+    hasSchedules: targets.scheduled.has(sessionId),
+    hasUpcomingSchedules: targets.upcoming.has(sessionId),
+    waitingForEvents: targets.waitingForEvents.has(sessionId),
+    ...(targets.waits ? { automationWait: targets.waits.get(sessionId) ?? null } : {}),
+  };
+}
 const VIEWER_LIFECYCLE_PERMISSIONS = ["stream:view", "terminal:attach", "files:write"] as const;
 
 /**
@@ -793,6 +842,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         // additionally restricts that execution to the parent's real owner.
         if (grant.principalKind !== "agent_attempt")
           (payload as Record<string, unknown>).visibility = "private";
+        // Started beside the Site in the console's Site view (its id and
+        // version without a frame marker: not Site code, which the bridge
+        // always marks), by someone who may publish it: the first message
+        // says which Site "the Site" is. Later messages carry the console's
+        // own context. Server-authored; the caller's context was refused above.
+        if (
+          siteOrigin.siteId &&
+          c.req.header(SITE_FRAME_HEADER) === undefined &&
+          hasPermission(grant.permissions, "artifacts:publish", grant.permissionMode) &&
+          typeof (payload as { initialMessage?: unknown }).initialMessage === "string"
+        ) {
+          const context = await siteViewConversationContext(db, grant, siteOrigin);
+          if (context) (payload as Record<string, unknown>).modelContext = context;
+        }
       }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
@@ -1080,20 +1143,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       sessionIds: [...page.pinned, ...page.sessions].map((session) => session.id),
     });
-    const scheduleTargets =
-      hasPermission(grant.permissions, "scheduled_tasks:run") &&
-      hasPermission(grant.permissions, "sessions:control")
-        ? await sessionScheduleTargets(
-            db,
-            workspaceId,
-            [...page.pinned, ...page.sessions].map((session) => session.id),
-          )
-        : NO_SESSION_SCHEDULE_TARGETS;
+    const scheduleTargets = await sessionScheduleTargetsForGrant(
+      db,
+      grant,
+      workspaceId,
+      [...page.pinned, ...page.sessions].map((session) => session.id),
+    );
     if ("projection" in page) {
       const decorateEntry = (session: (typeof page.sessions)[number]) => ({
         ...session,
-        hasSchedules: scheduleTargets.scheduled.has(session.id),
-        hasUpcomingSchedules: scheduleTargets.upcoming.has(session.id),
+        ...sessionAutomationFacts(scheduleTargets, session.id),
         ...(commandActivity.has(session.id)
           ? { backgroundCommandActivity: commandActivity.get(session.id)! }
           : {}),
@@ -1115,8 +1174,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const activity = commandActivity.get(session.id);
       const decorated = {
         ...session,
-        hasSchedules: scheduleTargets.scheduled.has(session.id),
-        hasUpcomingSchedules: scheduleTargets.upcoming.has(session.id),
+        ...sessionAutomationFacts(scheduleTargets, session.id),
         ...(activity ? { backgroundCommandActivity: activity } : {}),
       };
       return sessionResponse(decorated, policy);
@@ -1360,10 +1418,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             workspaceId,
             sessionIds: [sessionId],
           }),
-          hasPermission(grant.permissions, "scheduled_tasks:run") &&
-          hasPermission(grant.permissions, "sessions:control")
-            ? sessionScheduleTargets(db, workspaceId, [sessionId])
-            : Promise.resolve(NO_SESSION_SCHEDULE_TARGETS),
+          sessionScheduleTargetsForGrant(db, grant, workspaceId, [sessionId]),
           loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
         ]),
       () => sessionUsageLimitForRead(db, session, { subjectId: grant.subjectId }),
@@ -1373,8 +1428,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         {
           ...session,
           ...(usageLimit ? { usageLimit } : {}),
-          hasSchedules: scheduleTargets.scheduled.has(sessionId),
-          hasUpcomingSchedules: scheduleTargets.upcoming.has(sessionId),
+          ...sessionAutomationFacts(scheduleTargets, sessionId),
           ...(activity.get(sessionId)
             ? { backgroundCommandActivity: activity.get(sessionId) }
             : {}),
@@ -2455,18 +2509,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     };
     collect(lineage.children);
-    const targets =
-      hasPermission(grant.permissions, "scheduled_tasks:run") &&
-      hasPermission(grant.permissions, "sessions:control")
-        ? await sessionScheduleTargets(db, workspaceId, sessionIds)
-        : NO_SESSION_SCHEDULE_TARGETS;
+    const targets = await sessionScheduleTargetsForGrant(db, grant, workspaceId, sessionIds);
     const decorateNodes = (nodes: LineageNode[]): LineageNode[] =>
       nodes.map((node) => ({
         ...node,
         session: {
           ...node.session,
-          hasSchedules: targets.scheduled.has(node.session.id),
-          hasUpcomingSchedules: targets.upcoming.has(node.session.id),
+          ...sessionAutomationFacts(targets, node.session.id),
         },
         children: decorateNodes(node.children),
       }));
@@ -2481,12 +2530,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...lineage,
       sessionHasSchedules: targets.scheduled.has(c.req.param("sessionId")),
       sessionHasUpcomingSchedules: targets.upcoming.has(c.req.param("sessionId")),
+      sessionWaitingForEvents: targets.waitingForEvents.has(c.req.param("sessionId")),
+      ...(targets.waits
+        ? { sessionAutomationWait: targets.waits.get(c.req.param("sessionId")) ?? null }
+        : {}),
       ancestors: lineage.ancestors.map((session) =>
         sessionResponse(
           {
             ...session,
-            hasSchedules: targets.scheduled.has(session.id),
-            hasUpcomingSchedules: targets.upcoming.has(session.id),
+            ...sessionAutomationFacts(targets, session.id),
           },
           policy,
         ),
@@ -2855,6 +2907,103 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw error;
     }
   });
+
+  // The person finished setup from a capability card the agent posted. Wake
+  // the agent once per card so it continues the request that needed it,
+  // unless the person already wrote since the card or the capability is not
+  // usable in this chat yet. Every skip is a normal 200 outcome.
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const sessionId = c.req.param("sessionId");
+      // Stands in for the person's own "done": only that person, present in a
+      // client, may send it; never an agent.
+      if (isAgentActingAsPerson(c)) {
+        throw new ApiHttpError(403, {
+          code: "forbidden",
+          message: "Only the person who finished setup can continue the request.",
+          retryable: false,
+        });
+      }
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      if (grant.principalKind === "agent_attempt") {
+        throw new ApiHttpError(403, {
+          code: "forbidden",
+          message: "Only the person who finished setup can continue the request.",
+          retryable: false,
+        });
+      }
+      const payload = await parseRequestJson(c, ContinueAfterCapabilitySetupRequest);
+      const session = await getSessionForSubject(
+        db,
+        workspaceId,
+        sessionId,
+        grant.subjectId,
+        relatedSessionAccessFor(c),
+      );
+      if (!session) throw new HTTPException(404, { message: "session not found" });
+      // A reviewed integration's card stands for the person's own connected
+      // instances of it, which the workspace catalog does not list.
+      const integration = integrationDefinitionIdFromCapabilityId(payload.capabilityId) !== null;
+      const [item, withPolicy] = await Promise.all([
+        integration
+          ? integrationDefinitionSetupItem(
+              db,
+              settings,
+              workspaceId,
+              grant.subjectId,
+              payload.capabilityId,
+            )
+          : buildCapabilityCatalog({
+              db,
+              workspaceId,
+              settings,
+              subjectId: grant.subjectId,
+              accountId: grant.accountId,
+            }).then((catalog) => catalog.items.find((entry) => entry.id === payload.capabilityId)),
+        withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
+      ]);
+      const readiness = capabilitySetupReadiness(payload.capabilityId, item, withPolicy);
+      if (!item || (readiness !== "ready" && readiness !== "assumed_ready")) {
+        return c.json({
+          outcome: "not_needed",
+          reason: readiness === "not_applicable" ? "not_applicable" : "not_ready",
+        } satisfies ContinueAfterCapabilitySetupResponse);
+      }
+      const result = await enqueueCapabilitySetupContinuation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        capabilityId: item.id,
+        capabilityName: item.name,
+        toolsVerified: readiness === "ready",
+        requesterSubjectId: grant.subjectId,
+      });
+      if (result.outcome === "not_needed") {
+        return c.json({
+          outcome: "not_needed",
+          reason: result.reason,
+        } satisfies ContinueAfterCapabilitySetupResponse);
+      }
+      if (result.events.length > 0) {
+        await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
+      }
+      if (result.shouldWake && result.workflowWakeRevision !== null) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: result.temporalWorkflowId ?? workflowIdForSession(sessionId),
+          wakeRevision: result.workflowWakeRevision,
+        });
+      }
+      return c.json({
+        outcome: result.outcome,
+        updateId: result.update.id,
+      } satisfies ContinueAfterCapabilitySetupResponse);
+    },
+  );
 
   // Replace the session's agent configuration (capabilities, identity,
   // instructions alias, renderer). Shares the tool-policy version CAS and
@@ -4035,6 +4184,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           text: payload.text,
           annotations: payload.annotations,
           modelContext: payload.modelContext ?? null,
+          timeZone: payload.timeZone ?? null,
           resources: payload.resources,
           model: payload.model ?? null,
           reasoningEffort: payload.reasoningEffort ?? null,
@@ -4126,6 +4276,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             text: event.payload.text,
             annotations: event.payload.annotations,
             modelContext: event.payload.modelContext ?? null,
+            timeZone: event.payload.timeZone ?? null,
             resources: event.payload.resources ?? [],
             model: event.payload.model ?? null,
             reasoningEffort: event.payload.reasoningEffort ?? null,
@@ -4178,6 +4329,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           subjectId: grant.subjectId,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
+          // The same rule that decides whether a message may confirm app-action
+          // changes: the app's own sign-in, or an embed the deployment opted in.
+          // A key, chat integration or other token with this identity can't.
+          decidedBySignedInPerson:
+            turnAppActionGrant({
+              grant,
+              authorization,
+              delegatedSignInChangesEnabled:
+                settings.delegatedSignInAppActionChangesEnabled === true,
+            })?.changes === "confirm",
           payload,
           mcpCredentialUpdates,
           clientEventId: event.clientEventId ?? null,
@@ -4238,6 +4399,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             authorization.canonicalManagedHumanSession ||
             authorization.canonicalLocalHumanSession ||
             isVerifiedDelegatedHumanAuthorization(authorization),
+          // An agent or personal key acting as the person is not the person
+          // for a secret approval card.
+          personSignedIn:
+            authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
           mcpCredentialUpdates,
@@ -5586,6 +5751,8 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
+  // Stands in for the person's own next message, so it needs the same access.
+  if (suffix === "/capability-continuations" && verb === "POST") return "session.append";
   if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/skills" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/admin-access") {

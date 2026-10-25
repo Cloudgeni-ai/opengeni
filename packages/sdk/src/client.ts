@@ -5,6 +5,10 @@ import {
 } from "./session-sequence";
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
 import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
+import {
+  currentMessageTimeZone,
+  normalizeMessageTimeZone,
+} from "@opengeni/contracts/message-time-zone";
 import type { WorkspaceBackgroundCommandListResponse } from "./types";
 import type {
   InsightsSiteUsageQuery,
@@ -36,17 +40,23 @@ import type {
 } from "./artifact-catalog";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
+  AutomationTemplateResponse,
+  CreateAutomationTemplateRequest,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
   EventDelivery,
   EventSource,
   EventTypeDescriptor,
+  ListAutomationTemplatesResponse,
   ListEventDeliveriesResponse,
   ListInboundEventsResponse,
+  ReadyEventSource,
   RotateEventSourceSecretResponse,
   SendTestEventRequest,
   SendTestEventResponse,
+  UpdateAutomationTemplateRequest,
   UpdateEventSourceRequest,
+  WorkspaceAutomationTemplate,
 } from "@opengeni/contracts";
 import type {
   SiteDataCollectionDefinitionRequest,
@@ -85,6 +95,7 @@ import type {
   SiteLimitProfile,
   SitePlatformUsage,
   SitePublication,
+  SitePublicationLink,
   SitePublishWarningFix,
   SiteTakedownRequest,
   UpsertSitePublicationRequest,
@@ -118,10 +129,13 @@ import type {
 import type {
   DuplicateWorkspaceArtifactRequest,
   SiteOpenedResponse,
+  SiteSidebarStateResponse,
+  UpdateSiteSidebarStateRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
@@ -251,6 +265,7 @@ import {
   type ComputerClipboard,
   type ComputerFrame,
   type ComputerObservation,
+  type ComputerScreenshotOptions,
   type ComputerSession,
   type ComputerSessionAttachment,
   type ComputerSessionAttachmentRequest,
@@ -718,6 +733,8 @@ import type {
   ApplySessionGoalRevisionRequest,
   UpdateSessionRequest,
   UpdateSessionToolPolicyRequest,
+  ContinueAfterCapabilitySetupRequest,
+  ContinueAfterCapabilitySetupResponse,
   UpdateSessionAgentRequest,
   UpdateSessionSkillsRequest,
   UpdateRigRequest,
@@ -985,6 +1002,15 @@ export type OpenGeniClientOptions = {
   /** Positive deadline for interactive session commands. Defaults to 15 seconds. */
   sessionCommandTimeoutMs?: number;
   /**
+   * Whether a person's messages carry this device's IANA time zone when the
+   * caller does not set `timeZone` itself, so the agent sees their local time.
+   * `"auto"` (the default) does this only in a browser or React Native app,
+   * where the device clock belongs to the person typing; servers never
+   * attach their own zone. `false` never fills it in. An explicit, valid
+   * `timeZone` on a message is always sent.
+   */
+  messageTimeZone?: "auto" | false | undefined;
+  /**
    * How this client treats an API that advertises a different
    * `x-opengeni-api-contract` revision.
    *
@@ -1013,6 +1039,65 @@ function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "com
   if (options.apiContract) return options.apiContract;
   const browser = typeof window !== "undefined" && typeof document !== "undefined";
   return browser && !options.apiKey ? "strict" : "compatible";
+}
+
+/** A browser page or React Native app, where the device clock is the person's own. */
+function runsOnPersonsDevice(): boolean {
+  if (typeof window !== "undefined" && typeof document !== "undefined") return true;
+  const nav = (globalThis as { navigator?: { product?: unknown } }).navigator;
+  return nav?.product === "ReactNative";
+}
+
+/**
+ * One person's message body with its `timeZone` settled: a valid explicit zone,
+ * else (when enabled) the device's zone, else none. `automatic` marks a zone the
+ * caller did not choose, which may be dropped for a server that predates it.
+ */
+function withMessageTimeZone<T extends { timeZone?: string | undefined }>(
+  body: T,
+  mode: OpenGeniClientOptions["messageTimeZone"],
+): { body: T; automatic: boolean } {
+  const { timeZone: requested, ...rest } = body;
+  // A zone the caller chose is used as is, or dropped when it is unusable;
+  // it is never swapped for the device's zone.
+  if (requested !== undefined && requested !== null) {
+    const explicit = normalizeMessageTimeZone(requested);
+    return {
+      body: (explicit ? { ...rest, timeZone: explicit } : rest) as T,
+      automatic: false,
+    };
+  }
+  const device = mode !== false && runsOnPersonsDevice() ? currentMessageTimeZone() : undefined;
+  return device
+    ? { body: { ...rest, timeZone: device } as T, automatic: true }
+    : { body: rest as T, automatic: false };
+}
+
+function withoutMessageTimeZone<T extends { timeZone?: string | undefined }>(body: T): T {
+  const { timeZone: _timeZone, ...rest } = body;
+  return rest as T;
+}
+
+/**
+ * Whether a request was refused only because the server (or an embedding
+ * host's session relay or Site frame guard) predates message time zones:
+ * older servers reject unknown fields on the strict message and steer bodies
+ * with these messages, older relays refuse unknown create fields by name, and
+ * older Site hosts refuse a frame field they do not list.
+ */
+function rejectsMessageTimeZoneField(error: unknown): boolean {
+  if (!(error instanceof OpenGeniApiError)) return false;
+  const text = `${error.message}\n${error.body}`;
+  if (error.status === 422) return /invalid (session event|steer request)/.test(text);
+  if (error.status === 403) {
+    const field = error.details?.field;
+    return (
+      error.details?.code === "site_frame_field_forbidden" &&
+      typeof field === "string" &&
+      /(^|\.)timeZone$/.test(field)
+    );
+  }
+  return error.status === 400 && /timeZone\W+cannot be set/.test(text);
 }
 
 /** Per-request cancellation for operations whose caller owns an AbortSignal. */
@@ -1345,6 +1430,7 @@ export class OpenGeniClient {
     return body;
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async createTranscriptionRecording(
     workspaceId: string,
     input: CreateTranscriptionRecordingInput,
@@ -1360,6 +1446,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async getTranscriptionRecording(
     workspaceId: string,
     recordingId: string,
@@ -1376,6 +1463,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async listTranscriptionRecordings(
     workspaceId: string,
     options: { signal?: AbortSignal | undefined } = {},
@@ -1395,6 +1483,7 @@ export class OpenGeniClient {
     return body;
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async uploadTranscriptionRecordingChunk(
     workspaceId: string,
     recordingId: string,
@@ -1444,6 +1533,7 @@ export class OpenGeniClient {
     return body;
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async finalizeTranscriptionRecording(
     workspaceId: string,
     recordingId: string,
@@ -1464,6 +1554,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async processNextTranscriptionRecordingSegment(
     workspaceId: string,
     recordingId: string,
@@ -1480,6 +1571,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async discardTranscriptionRecording(
     workspaceId: string,
     recordingId: string,
@@ -1501,19 +1593,32 @@ export class OpenGeniClient {
     request: CreateSessionRequest,
   ): Promise<CreateSessionResponse> {
     const limited = request.usageLimitMicros !== undefined && request.usageLimitMicros !== null;
+    // Only an initial message a person sends carries their time zone.
+    const { body: zoned, automatic } =
+      request.initialMessage && request.startMode !== "realtime"
+        ? withMessageTimeZone(request, this.options.messageTimeZone)
+        : { body: withoutMessageTimeZone(request), automatic: false };
     // A limited create spells out the default start mode. Servers that
     // predate usage limits accept only `realtime` there, so they reject the
     // whole request before creating or starting anything, rather than
     // dropping the unknown limit and starting uncapped work.
     const body: CreateSessionRequest =
-      limited && request.startMode === undefined ? { ...request, startMode: "standard" } : request;
-    let created: CreateSessionResponse;
-    try {
-      created = await this.requestJson<CreateSessionResponse>(
+      limited && zoned.startMode === undefined ? { ...zoned, startMode: "standard" } : zoned;
+    const post = async (payload: CreateSessionRequest) =>
+      await this.requestJson<CreateSessionResponse>(
         "POST",
         `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
-        body,
+        payload,
       );
+    let created: CreateSessionResponse;
+    try {
+      try {
+        created = await post(body);
+      } catch (error) {
+        // A relay that predates message time zones refuses the unknown field.
+        if (!automatic || !rejectsMessageTimeZoneField(error)) throw error;
+        created = await post(withoutMessageTimeZone(body));
+      }
     } catch (error) {
       if (
         limited &&
@@ -1824,6 +1929,26 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/tool-policy`,
+      request,
+    );
+  }
+
+  /**
+   * Tell the chat that the person finished setup from the capability card the
+   * agent posted (connect, add credentials, enable) so the agent continues the
+   * request that needed it. Call it after setup is verified, never on failure
+   * or cancel. Safe to repeat: the server wakes the agent at most once per
+   * card, and not at all once the person has written since the card or while
+   * the capability is not yet usable in this chat (`not_needed` with a reason).
+   */
+  async continueAfterCapabilitySetup(
+    workspaceId: string,
+    sessionId: string,
+    request: ContinueAfterCapabilitySetupRequest,
+  ): Promise<ContinueAfterCapabilitySetupResponse> {
+    return await this.requestJson<ContinueAfterCapabilitySetupResponse>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/capability-continuations`,
       request,
     );
   }
@@ -2148,13 +2273,30 @@ export class OpenGeniClient {
   }
 
   /**
-   * Record that this person opened a Site, which orders its sidebar row like
-   * session activity. Personal; needs `artifacts:read`.
+   * Record that this person opened a Site, which lists it in their sidebar.
+   * Opening is not activity, so it does not move the row. Personal; needs
+   * `artifacts:read`.
    */
   async recordSiteOpened(workspaceId: string, siteId: string): Promise<SiteOpenedResponse> {
     return this.requestJson(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/opened`,
+    );
+  }
+  /**
+   * Pin or archive a Site row in this person's own sidebar. Personal like a
+   * session pin; archive never unpublishes the Site. Opening the Site again
+   * restores an archived row. Needs `artifacts:read`.
+   */
+  async updateSiteSidebarState(
+    workspaceId: string,
+    siteId: string,
+    request: UpdateSiteSidebarStateRequest,
+  ): Promise<SiteSidebarStateResponse> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/sidebar`,
+      request,
     );
   }
 
@@ -3098,11 +3240,23 @@ export class OpenGeniClient {
     sessionId: string,
     event: ClientSessionEventInput,
   ): Promise<SessionEvent> {
-    return await this.requestSessionCommand<SessionEvent>(
-      "POST",
-      `${sessionPath(workspaceId, sessionId)}/events`,
-      event,
+    const path = `${sessionPath(workspaceId, sessionId)}/events`;
+    if (event.type !== "user.message") {
+      return await this.requestSessionCommand<SessionEvent>("POST", path, event);
+    }
+    const { body: payload, automatic } = withMessageTimeZone(
+      event.payload,
+      this.options.messageTimeZone,
     );
+    try {
+      return await this.requestSessionCommand<SessionEvent>("POST", path, { ...event, payload });
+    } catch (error) {
+      if (!automatic || !rejectsMessageTimeZoneField(error)) throw error;
+      return await this.requestSessionCommand<SessionEvent>("POST", path, {
+        ...event,
+        payload: withoutMessageTimeZone(payload),
+      });
+    }
   }
 
   async sendMessage(
@@ -3347,7 +3501,7 @@ export class OpenGeniClient {
     return await this.requestSessionCommand<SubmitComposerDraftResponse>(
       "POST",
       `${sessionPath(workspaceId, sessionId)}/composer-draft/submit`,
-      request,
+      withMessageTimeZone(request, this.options.messageTimeZone).body,
     );
   }
 
@@ -3628,11 +3782,18 @@ export class OpenGeniClient {
   ): Promise<SteerMessageResult> {
     const input = typeof message === "string" ? { text: message } : message;
     assertNoMessageTools(input);
-    return await this.requestSessionCommand<SteerMessageResult>(
-      "POST",
-      `${sessionPath(workspaceId, sessionId)}/steer`,
-      input,
-    );
+    const path = `${sessionPath(workspaceId, sessionId)}/steer`;
+    const { body, automatic } = withMessageTimeZone(input, this.options.messageTimeZone);
+    try {
+      return await this.requestSessionCommand<SteerMessageResult>("POST", path, body);
+    } catch (error) {
+      if (!automatic || !rejectsMessageTimeZoneField(error)) throw error;
+      return await this.requestSessionCommand<SteerMessageResult>(
+        "POST",
+        path,
+        withoutMessageTimeZone(body),
+      );
+    }
   }
 
   // --- Goals -------------------------------------------------------------------
@@ -4737,9 +4898,9 @@ export class OpenGeniClient {
 
   /** Stops a recording and saves it as an MP4 plus an action log in the
    * browser's source session workspace; the MP4 is also a retained artifact.
-   * While the recording is still moving off a slow browser host, the request
-   * is repeated with the same operationId until the save completes or
-   * `options.signal` aborts. */
+   * While the recording is still moving off a slow browser host, or its
+   * video is being made, the request is repeated with the same operationId
+   * until the save completes or `options.signal` aborts. */
   async saveBrowserRecording(
     workspaceId: string,
     browserSessionId: string,
@@ -5292,10 +5453,38 @@ export class OpenGeniClient {
     computerSessionId: string,
     targetId: string,
     options: OpenGeniRequestOptions = {},
+    captureOptions: ComputerScreenshotOptions = {},
   ): Promise<ComputerFrame> {
+    const query = new URLSearchParams();
+    if (captureOptions.region !== undefined) {
+      const { x, y, width, height } = captureOptions.region;
+      if (
+        ![x, y, width, height].every((value) => typeof value === "number" && Number.isFinite(value))
+      ) {
+        throw new TypeError("computer screenshot region must be four finite numbers");
+      }
+      if (x < 0 || y < 0 || width <= 0 || height <= 0) {
+        throw new RangeError(
+          "computer screenshot region needs a non-negative x and y and a positive width and height",
+        );
+      }
+      query.set("region", [x, y, width, height].join(","));
+      if (captureOptions.regionFrame !== undefined) {
+        const frame = captureOptions.regionFrame;
+        if (
+          ![frame.width, frame.height].every((value) => Number.isSafeInteger(value) && value > 0)
+        ) {
+          throw new RangeError(
+            "computer screenshot regionFrame must be a positive whole width and height",
+          );
+        }
+        query.set("regionFrame", [frame.width, frame.height].join(","));
+      }
+    }
+    const suffix = query.size > 0 ? `?${query}` : "";
     const response = await this.requestResponse(
       "GET",
-      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot`,
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot${suffix}`,
       {},
       options,
     );
@@ -7480,6 +7669,21 @@ export class OpenGeniClient {
     return response.sources;
   }
 
+  /**
+   * Sources the caller can use without setting them up, listed by key until
+   * used: MCP servers they are signed in to that offer events, their Gmail
+   * accounts and This workspace. Create one with `createEventSource` and the
+   * request `readyEventSourceRequest(key)` gives; adding it again returns the
+   * same source. A trigger may also name one by its key.
+   */
+  async listReadyEventSources(workspaceId: string): Promise<ReadyEventSource[]> {
+    const response = await this.requestJson<{ sources: ReadyEventSource[] }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/event-sources/ready`,
+    );
+    return response.sources;
+  }
+
   async createEventSource(
     workspaceId: string,
     request: CreateEventSourceRequest,
@@ -7592,6 +7796,51 @@ export class OpenGeniClient {
       eventTypes: EventTypeDescriptor[];
     }>("GET", `/v1/workspaces/${workspaceId}/event-sources/${sourceId}/event-types`);
     return response.eventTypes;
+  }
+
+  // --- Automation templates ---------------------------------------------------
+  // Templates saved in a workspace, for anyone in it to start an automation
+  // from. Using one fills the automation form; nothing is created until the
+  // automation is saved. Whoever saved one, or an admin, can change it.
+
+  async listAutomationTemplates(workspaceId: string): Promise<WorkspaceAutomationTemplate[]> {
+    const response = await this.requestJson<ListAutomationTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/automation-templates`,
+    );
+    return response.templates;
+  }
+
+  async createAutomationTemplate(
+    workspaceId: string,
+    request: CreateAutomationTemplateRequest,
+  ): Promise<WorkspaceAutomationTemplate> {
+    const response = await this.requestJson<AutomationTemplateResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/automation-templates`,
+      request,
+    );
+    return response.template;
+  }
+
+  async updateAutomationTemplate(
+    workspaceId: string,
+    templateId: string,
+    request: UpdateAutomationTemplateRequest,
+  ): Promise<WorkspaceAutomationTemplate> {
+    const response = await this.requestJson<AutomationTemplateResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/automation-templates/${templateId}`,
+      request,
+    );
+    return response.template;
+  }
+
+  async deleteAutomationTemplate(workspaceId: string, templateId: string): Promise<void> {
+    await this.requestJson<unknown>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/automation-templates/${templateId}`,
+    );
   }
 
   // --- Vaults ---------------------------------------------------------------
@@ -8741,6 +8990,24 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * The Site and its current version without its history: a cheap check for
+   * whether a new version is live. Read `getWorkspaceArtifact` for history.
+   */
+  async getWorkspaceArtifactCurrent(
+    workspaceId: string,
+    artifactId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactCurrentResponse> {
+    return await this.requestJson<WorkspaceArtifactCurrentResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/current`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
   /** Display-only HTML delivery: do not download the retained source bundle to render a Site. */
   async getWorkspaceArtifactHtml(
     workspaceId: string,
@@ -9225,8 +9492,9 @@ export class OpenGeniClient {
 
   /**
    * A Site's web publication: hostname, access, embedded agent, limits,
-   * status and moderation. 404 when the Site was never published; 503
-   * `sites_publishing_disabled` when the deployment has no Sites domain.
+   * status and moderation. 404 `site_not_published` when the Site was never
+   * published; 404 `sites_publishing_disabled` when the deployment has no
+   * Sites domain.
    */
   async getSitePublication(
     workspaceId: string,
@@ -9236,6 +9504,27 @@ export class OpenGeniClient {
     return await this.requestJson<SitePublication>(
       "GET",
       sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Where a Site is published: its primary public URL, hostname and status.
+   * Anyone who can open the Site reads it; the publication's settings need
+   * `getSitePublication`. 404 `site_not_published` when the Site was never
+   * published; 404 `sites_publishing_disabled` when the deployment has no
+   * Sites domain.
+   */
+  async getSitePublicationLink(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublicationLink> {
+    return await this.requestJson<SitePublicationLink>(
+      "GET",
+      `${sitePublicationPath(workspaceId, siteId)}/link`,
       undefined,
       undefined,
       options,

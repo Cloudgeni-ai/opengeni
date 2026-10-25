@@ -35,6 +35,8 @@ import {
   workingCopyManifest,
 } from "../src/working-copy-adoption";
 import { UnsettledCleanupError } from "../src/cleanup-error";
+import type { BrowserRelaunchedTabs } from "../src/stopped-browser-tabs";
+import { tabUrlHash } from "../src/stopped-browser-tabs";
 
 describe("BrowserSupervisor", () => {
   test("propagates failed process cleanup during controller shutdown", async () => {
@@ -419,6 +421,7 @@ describe("BrowserSupervisor", () => {
       let firstDriverLost = false;
       let factoryCalls = 0;
       let dispatches = 0;
+      const noted: Array<{ instance: number; relaunched: BrowserRelaunchedTabs }> = [];
       await withSupervisor(
         async ({ supervisor }) => {
           const session = reference(11);
@@ -439,6 +442,18 @@ describe("BrowserSupervisor", () => {
           expect(recovered).toHaveLength(1);
           expect(recovered[0]!.id).not.toBe(created.observation.target.id);
           expect(recovered[0]!.url).toBe("https://recovery.test/");
+          // The relaunched browser can say what became of the lost tab.
+          expect(noted).toEqual([
+            {
+              instance: 2,
+              relaunched: {
+                reason: "browser_lost",
+                tabs: [
+                  { targetId: created.observation.target.id, replacementId: recovered[0]!.id },
+                ],
+              },
+            },
+          ]);
 
           expect(await supervisor.action(command(created.observation, operationId))).toEqual(
             receipt,
@@ -454,6 +469,7 @@ describe("BrowserSupervisor", () => {
           },
           driverHooks: {
             available: (instance) => instance > 1 || !firstDriverLost,
+            noteRelaunchedTabs: (instance, relaunched) => noted.push({ instance, relaunched }),
             async dispatch(instance) {
               dispatches += 1;
               if (instance === 1) {
@@ -1632,6 +1648,7 @@ async function withSupervisor(
       isTerminal?: (instance: number) => boolean;
       close?: (instance: number) => void;
       requiresExplicitProfileRestore?: boolean;
+      noteRelaunchedTabs?: (instance: number, relaunched: BrowserRelaunchedTabs) => void;
     };
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
     now?: () => number;
@@ -1679,6 +1696,9 @@ function fakeDriver(
     isTerminal?: (instance: number) => boolean;
     close?: (instance: number) => void;
     requiresExplicitProfileRestore?: boolean;
+    noteRelaunchedTabs?: (instance: number, relaunched: BrowserRelaunchedTabs) => void;
+    /** The page a tab shows when started without a URL. */
+    tabUrl?: string;
   } = {},
   instance = 1,
 ): BrowserSupervisorDriver {
@@ -1690,7 +1710,7 @@ function fakeDriver(
     documentGeneration: `document-${instance}`,
     kind: "page",
     title: "Fixture",
-    url: "about:blank",
+    url: hooks.tabUrl ?? "about:blank",
     selected: true,
     attached: true,
     createdAt: "2026-08-09T12:00:00.000Z",
@@ -1721,10 +1741,16 @@ function fakeDriver(
   };
   return {
     ...(hooks.requiresExplicitProfileRestore ? { requiresExplicitProfileRestore: true } : {}),
+    ...(hooks.noteRelaunchedTabs
+      ? {
+          noteRelaunchedTabs: (relaunched: BrowserRelaunchedTabs) =>
+            hooks.noteRelaunchedTabs!(instance, relaunched),
+        }
+      : {}),
     async start(url) {
       requireOpen();
       hooks.start?.(instance);
-      target.url = url ?? "about:blank";
+      target.url = url ?? hooks.tabUrl ?? "about:blank";
       return observation();
     },
     async target(targetId) {
@@ -2701,6 +2727,64 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  test("a failed relaunch closes the browser it started, so the next recovery relaunches", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let closes = 0,
+        detaches = 0,
+        starts = 0,
+        relaunchedRunning = false;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        // The recorded browser is gone, so recovery relaunches the profile.
+        inspectOwnedProcess: async () => "exited",
+        // The profile counts as in use while a relaunched browser runs.
+        assertProfileUnused: async () => {
+          if (relaunchedRunning) throw new Error("synthetic profile in use");
+        },
+        createDriver: async (context) => {
+          const driver = fakeDriver(context);
+          return {
+            ...driver,
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            async start(url?: string) {
+              relaunchedRunning = true;
+              starts++;
+              if (starts === 1) throw new Error("synthetic start failure after launch");
+              return await driver.start(url);
+            },
+            async close() {
+              closes++;
+              relaunchedRunning = false;
+              await driver.close();
+            },
+            async detach() {
+              detaches++;
+            },
+          };
+        },
+      });
+      try {
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow();
+        // The browser this recovery launched was stopped, not left running.
+        expect({ closes, detaches, relaunchedRunning }).toEqual({
+          closes: 1,
+          detaches: 0,
+          relaunchedRunning: false,
+        });
+        const result = await supervisor.createSession({
+          ...options,
+          recoverExistingWorkingDirectory: true,
+        });
+        expect(result.browserSessionId).toBe(options.browserSessionId);
+        expect(starts).toBe(2);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
   test("a failed reattach whose transport did not detach keeps the browser refused", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
       let drivers = 0;
@@ -3184,6 +3268,191 @@ describe("same-working-directory controller restart", () => {
         expect(contexts[1]!.allowOwnedProcessLaunch).toBe(true);
       } finally {
         await supervisor.close();
+      }
+    });
+  });
+
+  const RELAUNCH_FIXTURE_URL = "https://page.example.test/";
+  /** A supervisor whose drivers each have their own tab IDs and report what a
+   * relaunch tells them about the tabs of the browser before. */
+  const relaunchFixture = async (rootDirectory: string, clock: () => number) => {
+    const state = {
+      processState: "live" as "live" | "exited",
+      drivers: 0,
+      noted: [] as Array<{ instance: number; relaunched: BrowserRelaunchedTabs }>,
+    };
+    const open = () =>
+      BrowserSupervisor.open({
+        rootDirectory,
+        idleReleaseMs: 60_000,
+        now: clock,
+        inspectOwnedProcess: async () => state.processState,
+        assertProfileUnused: async () => undefined,
+        stopEndedProcess: async () => {
+          state.processState = "exited";
+        },
+        createDriver: async (context) => {
+          state.drivers += 1;
+          return {
+            ...fakeDriver(
+              context,
+              {
+                noteRelaunchedTabs: (instance, relaunched) =>
+                  state.noted.push({ instance, relaunched }),
+                tabUrl: RELAUNCH_FIXTURE_URL,
+              },
+              state.drivers,
+            ),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            close: async () => {
+              state.processState = "exited";
+            },
+            detach: async () => undefined,
+          };
+        },
+      });
+    return { state, open };
+  };
+
+  test("a browser relaunched after its idle release learns which tab replaced each old one", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let clock = 1_000_000;
+      const { state, open } = await relaunchFixture(rootDirectory, () => clock);
+      const supervisor = await open();
+      try {
+        const created = await supervisor.createSession({
+          ...options,
+          recoverExistingWorkingDirectory: true,
+        });
+        const oldTab = created.observation.target.id;
+        clock += 61_000;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+        const record = join(
+          rootDirectory,
+          "sessions",
+          options.browserSessionId,
+          "stopped-browser-tabs.json",
+        );
+        expect(JSON.parse(await readFile(record, "utf8"))).toMatchObject({
+          version: 2,
+          reason: "idle_release",
+          idleReleaseMinutes: 1,
+          tabs: [{ targetId: oldTab, urlHash: tabUrlHash(RELAUNCH_FIXTURE_URL), selected: true }],
+        });
+        expect(state.noted).toEqual([]);
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const [replacement] = await supervisor.listTargets(options);
+        expect(replacement!.id).not.toBe(oldTab);
+        expect(state.noted).toEqual([
+          {
+            instance: 2,
+            relaunched: {
+              reason: "idle_release",
+              idleReleaseMinutes: 1,
+              tabs: [{ targetId: oldTab, replacementId: replacement!.id }],
+            },
+          },
+        ]);
+        // Used once: the record describes only that relaunch.
+        await expect(readFile(record)).rejects.toThrow();
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("every launch takes the stopped-tabs record, and only a relaunch applies it", async () => {
+    const writeRecord = async (sessionDirectory: string) => {
+      await mkdir(sessionDirectory, { recursive: true });
+      await writeFile(
+        join(sessionDirectory, "stopped-browser-tabs.json"),
+        JSON.stringify({
+          version: 2,
+          reason: "idle_release",
+          stoppedAt: "2026-01-02T03:04:05.000Z",
+          tabs: [{ targetId: "old", urlHash: tabUrlHash(RELAUNCH_FIXTURE_URL), selected: true }],
+        }),
+      );
+    };
+    // A fresh launch relaunches no profile: the record is removed unapplied,
+    // so no later launch can misuse it.
+    const directory = await mkdtemp("/tmp/ogw-");
+    try {
+      const options = { ...reference(96), headed: false };
+      const sessionDirectory = join(directory, "sessions", options.browserSessionId);
+      await writeRecord(sessionDirectory);
+      const { state, open } = await relaunchFixture(directory, () => 1_000_000);
+      const supervisor = await open();
+      try {
+        await supervisor.createSession(options);
+        await expect(
+          readFile(join(sessionDirectory, "stopped-browser-tabs.json")),
+        ).rejects.toThrow();
+        expect(state.noted).toEqual([]);
+      } finally {
+        await supervisor.close();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+    // A recovered launch that reattaches the live browser takes it too.
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      await writeRecord(sessionDirectory);
+      const { state, open } = await relaunchFixture(rootDirectory, () => 1_000_000);
+      const supervisor = await open();
+      try {
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        expect(state.processState).toBe("live");
+        await expect(
+          readFile(join(sessionDirectory, "stopped-browser-tabs.json")),
+        ).rejects.toThrow();
+        expect(state.noted).toEqual([]);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("a browser relaunched after a controller restart says so, and a reattached one keeps its tabs", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let clock = 1_000_000;
+      const { state, open } = await relaunchFixture(rootDirectory, () => clock);
+      const first = await open();
+      await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+      // Handed off live at shutdown, then reattached by the successor: the
+      // same browser with the same tabs, so there is nothing to explain.
+      await first.close();
+      const second = await open();
+      let oldTab: string;
+      try {
+        await second.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        expect(state.processState).toBe("live");
+        expect(state.noted).toEqual([]);
+        oldTab = (await second.listTargets(options))[0]!.id;
+      } finally {
+        await second.close();
+      }
+      // Handed off again; this time the browser is gone before its session
+      // returns, so a new one reopens its tabs.
+      const third = await open();
+      try {
+        clock += 61_000;
+        expect(await third.releaseDetachedBrowsers()).toEqual([options.browserSessionId]);
+        expect(state.processState).toBe("exited");
+        await third.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const [replacement] = await third.listTargets(options);
+        expect(state.noted).toEqual([
+          {
+            instance: 3,
+            relaunched: {
+              reason: "controller_restart",
+              tabs: [{ targetId: oldTab, replacementId: replacement!.id }],
+            },
+          },
+        ]);
+      } finally {
+        await third.close();
       }
     });
   });

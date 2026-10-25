@@ -510,7 +510,8 @@ beforeAll(async () => {
     // Current event readers also project 0810's nullable usage source key and
     // 0889's nullable tool name.
     await staging`alter table session_events add column usage_source_key text, add column tool_name text, add column tool_call_id text`;
-    // ...and the claim adapter reads 0917's nullable continue-waiting-work columns.
+    // Current update readers project 0917's nullable continuation receipt.
+    // Stage only its columns; keep its authority routines and migration withheld.
     await staging`alter table session_system_updates add column continued_by_subject_id text, add column continued_at timestamptz`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -670,6 +671,14 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       ].map((routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`),
       "target-schema runtime capability create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb) is missing or ambiguous",
     );
+    // 0948 carries an agent's personal machine move into a replacement attempt.
+    heldBack.push(
+      "owner-internal target-schema helper carry_session_attempt_machine_authorization(uuid, uuid, uuid) is missing or ambiguous",
+    );
+    // 0976 adds the shared unbilled allowance counter.
+    heldBack.push(
+      "owner-internal target-schema helper count_unbilled_allowance_usage(uuid, uuid, text, bigint, text) is missing or ambiguous",
+    );
     // 0854 adds the private-file lookup.
     heldBack.push(
       "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
@@ -741,13 +750,59 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_runtime_usage",
       // 0842 adds private Site/chat grants to both posture inventories.
       "site_session_access",
+      // Per-person Site sidebar pins and archive state.
+      "site_sidebar_states",
       "site_sql_databases",
       "site_sql_migrations",
       "site_sql_queries",
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
-    ];
+      // 0929 adds event-trigger state. Its non-RLS ingress routing table is
+      // runtime-privileged since 0947 but never protected; see below.
+      "inbound_events",
+      "event_deliveries",
+      "event_sources",
+      "event_triggers",
+      "scheduled_task_event_inbox",
+      "scheduled_task_event_occurrences",
+      "scheduled_task_event_settings",
+      // 0930 recording tables are also withheld.
+      "recordings",
+      "recording_tracks",
+      "recording_chunks",
+      "recording_transcript_versions",
+      "recording_transcript_segments",
+      "recording_people",
+      "recording_speaker_assignments",
+      "recording_segment_edits",
+      "recording_events",
+      // 0932 MCP event subscriptions are also withheld.
+      "mcp_event_subscriptions",
+      // 0934 adds the Teams conversation tables to both posture inventories.
+      "teams_bot_inbox",
+      "teams_bot_installations",
+      "teams_bot_links",
+      "teams_bot_outbox",
+      "teams_bot_proofs",
+      "teams_bot_routes",
+      // 0935 adds the event source feed cursors.
+      "event_source_feeds",
+      // 0940 voice recognition and 0942 live transcript tables are also withheld.
+      "recording_voiceprints",
+      "recording_speaker_voices",
+      "recording_voice_rejections",
+      "recording_live_segments",
+      // 0952 secret approval rules and requests are also withheld.
+      "secret_approval_rules",
+      "secret_use_approvals",
+      // 0954 meeting notes are also withheld.
+      "recording_notes",
+      // 0959 automation templates are also withheld.
+      "automation_templates",
+      // 0971 per-turn app action grants are also withheld.
+      "session_turn_app_action_grants",
+    ].sort();
     // 0823 machine-consent tables are protected but not runtime-privileged.
     const protectedTables = [
       ...runtimeTables,
@@ -755,7 +810,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "session_turn_machine_consents",
     ].sort();
     heldBack.push(
-      `runtime privilege tables are missing: ${runtimeTables.join(", ")}`,
+      `runtime privilege tables are missing: ${[...runtimeTables, "event_ingress_routes"].sort().join(", ")}`,
       `protected tables are missing: ${protectedTables.join(", ")}`,
     );
     const expected = [

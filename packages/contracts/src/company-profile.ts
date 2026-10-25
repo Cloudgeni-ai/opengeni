@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import {
@@ -18,9 +19,7 @@ export const COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES = 28_672;
 export const COMPANY_PROFILE_PROMPT_MAX_UTF8_BYTES = 32_768;
 
 export const CompanyProfileStableKey = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
-    .min(1)
+  primitives.nonEmptyString
     .max(COMPANY_PROFILE_STABLE_KEY_MAX_CHARS)
     .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
 );
@@ -31,15 +30,13 @@ export function normalizeCompanyProfileStableKey(value: string): string {
 }
 
 export const CompanyProfileStableKeyInput = /* @__PURE__ */ defineSchema(() =>
-  z.string().transform(normalizeCompanyProfileStableKey).pipe(CompanyProfileStableKey),
+  primitives.string.transform(normalizeCompanyProfileStableKey).pipe(CompanyProfileStableKey),
 );
 
 export const CompanyProfileEntry = /* @__PURE__ */ defineSchema(() =>
   z.object({
     key: CompanyProfileStableKeyInput,
-    content: z
-      .string()
-      .min(1)
+    content: primitives.nonEmptyString
       .max(COMPANY_PROFILE_ENTRY_MAX_CHARS)
       .refine((value) => value.trim().length > 0, "company-profile entries must not be blank"),
   }),
@@ -47,9 +44,7 @@ export const CompanyProfileEntry = /* @__PURE__ */ defineSchema(() =>
 export type CompanyProfileEntry = z.infer<typeof CompanyProfileEntry>;
 
 function boundedScalar() {
-  return z
-    .string()
-    .min(1)
+  return primitives.nonEmptyString
     .max(COMPANY_PROFILE_SCALAR_MAX_CHARS)
     .refine((value) => value.trim().length > 0, "company-profile scalar content must not be blank")
     .nullable();
@@ -176,68 +171,65 @@ export type CompanyProfileActivationType = z.infer<typeof CompanyProfileActivati
 
 export const CompanyProfileRevisionIdentity = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    revision: z.number().int().positive(),
-    contentHash: z.string().regex(/^[0-9a-f]{64}$/),
+    id: primitives.uuid,
+    revision: primitives.positiveInteger,
+    contentHash: primitives.string.regex(/^[0-9a-f]{64}$/),
   }),
 );
 export type CompanyProfileRevisionIdentity = z.infer<typeof CompanyProfileRevisionIdentity>;
 
 export const CompanyProfileRevision = /* @__PURE__ */ defineSchema(() =>
   CompanyProfileRevisionIdentity.extend({
-    operationId: z.string().uuid(),
-    accountId: z.string().uuid(),
+    operationId: primitives.uuid,
+    accountId: primitives.uuid,
     intent: CompanyProfileRevisionIntent,
     profile: CompanyProfileContent,
     provenance: z.object({
       source: CompanyProfileProvenanceSource,
-      sourceId: z.string().min(1).max(COMPANY_PROFILE_SOURCE_ID_MAX_CHARS).nullable(),
+      sourceId: primitives.nonEmptyString.max(COMPANY_PROFILE_SOURCE_ID_MAX_CHARS).nullable(),
     }),
-    supersedesRevisionId: z.string().uuid().nullable(),
+    supersedesRevisionId: primitives.nullableUuid,
     createdBySubjectId: z.string().min(1).max(1_024),
-    createdAt: z.string().datetime(),
+    createdAt: primitives.dateTime,
   }),
 );
 export type CompanyProfileRevision = z.infer<typeof CompanyProfileRevision>;
 
 export const CompanyProfileHead = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    accountId: z.string().uuid(),
-    revisionId: z.string().uuid(),
-    revision: z.number().int().positive(),
-    contentHash: z.string().regex(/^[0-9a-f]{64}$/),
-    activationVersion: z.number().int().positive(),
-    activatedAt: z.string().datetime(),
+    accountId: primitives.uuid,
+    revisionId: primitives.uuid,
+    revision: primitives.positiveInteger,
+    contentHash: primitives.string.regex(/^[0-9a-f]{64}$/),
+    activationVersion: primitives.positiveInteger,
+    activatedAt: primitives.dateTime,
   }),
 );
 export type CompanyProfileHead = z.infer<typeof CompanyProfileHead>;
 
 export const CompanyProfileActivationEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    operationId: z.string().uuid(),
-    accountId: z.string().uuid(),
+    id: primitives.uuid,
+    operationId: primitives.uuid,
+    accountId: primitives.uuid,
     type: CompanyProfileActivationType,
-    activationVersion: z.number().int().positive(),
+    activationVersion: primitives.positiveInteger,
     oldRevision: CompanyProfileRevisionIdentity.nullable(),
     newRevision: CompanyProfileRevisionIdentity.nullable(),
     actorSubjectId: z.string().min(1).max(1_024),
-    reason: z.string().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
-    createdAt: z.string().datetime(),
+    reason: primitives.nonEmptyString.max(COMPANY_PROFILE_REASON_MAX_CHARS),
+    createdAt: primitives.dateTime,
   }),
 );
 export type CompanyProfileActivationEvent = z.infer<typeof CompanyProfileActivationEvent>;
 
 export const CompanyProfileSnapshotEntry = /* @__PURE__ */ defineSchema(() =>
   CompanyProfileRevisionIdentity.extend({
-    activationVersion: z.number().int().positive(),
-    activatedAt: z.string().datetime(),
+    activationVersion: primitives.positiveInteger,
+    activatedAt: primitives.dateTime,
     provenance: z.object({
       source: CompanyProfileProvenanceSource,
-      sourceIdHash: z
-        .string()
-        .regex(/^[0-9a-f]{64}$/)
-        .nullable(),
+      sourceIdHash: primitives.string.regex(/^[0-9a-f]{64}$/).nullable(),
     }),
   }),
 );
@@ -245,16 +237,16 @@ export type CompanyProfileSnapshotEntry = z.infer<typeof CompanyProfileSnapshotE
 
 export const CompanyProfileSnapshot = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    sessionId: z.string().uuid(),
-    turnId: z.string().uuid(),
-    attemptId: z.string().uuid(),
-    executionGeneration: z.number().int().positive(),
+    id: primitives.uuid,
+    accountId: primitives.uuid,
+    workspaceId: primitives.uuid,
+    sessionId: primitives.uuid,
+    turnId: primitives.uuid,
+    attemptId: primitives.uuid,
+    executionGeneration: primitives.positiveInteger,
     profile: CompanyProfileSnapshotEntry.nullable(),
-    snapshotHash: z.string().regex(/^[0-9a-f]{64}$/),
-    createdAt: z.string().datetime(),
+    snapshotHash: primitives.string.regex(/^[0-9a-f]{64}$/),
+    createdAt: primitives.dateTime,
   }),
 );
 export type CompanyProfileSnapshot = z.infer<typeof CompanyProfileSnapshot>;
@@ -287,21 +279,21 @@ export type CompanyProfileListResponse = z.infer<typeof CompanyProfileListRespon
 
 export const UpdateCompanyProfileRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    operationId: z.string().uuid().optional(),
+    operationId: primitives.optionalUuid,
     profile: CompanyProfileContent,
-    expectedCurrentRevisionId: z.string().uuid().nullable(),
-    expectedActivationVersion: z.number().int().nonnegative(),
-    reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
+    expectedCurrentRevisionId: primitives.nullableUuid,
+    expectedActivationVersion: primitives.nonnegativeInteger,
+    reason: primitives.string.trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
   }),
 );
 export type UpdateCompanyProfileRequest = z.infer<typeof UpdateCompanyProfileRequest>;
 
 export const ActivateCompanyProfileRevisionRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    operationId: z.string().uuid().optional(),
-    expectedCurrentRevisionId: z.string().uuid().nullable(),
-    expectedActivationVersion: z.number().int().nonnegative(),
-    reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
+    operationId: primitives.optionalUuid,
+    expectedCurrentRevisionId: primitives.nullableUuid,
+    expectedActivationVersion: primitives.nonnegativeInteger,
+    reason: primitives.string.trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
   }),
 );
 export type ActivateCompanyProfileRevisionRequest = z.infer<
@@ -310,11 +302,11 @@ export type ActivateCompanyProfileRevisionRequest = z.infer<
 
 export const RollbackCompanyProfileRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    operationId: z.string().uuid().optional(),
-    targetRevisionId: z.string().uuid(),
-    expectedCurrentRevisionId: z.string().uuid(),
-    expectedActivationVersion: z.number().int().positive(),
-    reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
+    operationId: primitives.optionalUuid,
+    targetRevisionId: primitives.uuid,
+    expectedCurrentRevisionId: primitives.uuid,
+    expectedActivationVersion: primitives.positiveInteger,
+    reason: primitives.string.trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
   }),
 );
 export type RollbackCompanyProfileRequest = z.infer<typeof RollbackCompanyProfileRequest>;
@@ -338,11 +330,11 @@ export type CompanyProfileAgentPolicyMode = z.infer<typeof CompanyProfileAgentPo
 
 export const CompanyProfileAgentPolicy = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    organizationId: z.string().uuid(),
+    organizationId: primitives.uuid,
     mode: CompanyProfileAgentPolicyMode,
-    version: z.number().int().nonnegative(),
-    updatedAt: z.string().datetime({ offset: true }),
-    changed: z.boolean().optional(),
+    version: primitives.nonnegativeInteger,
+    updatedAt: primitives.string.datetime({ offset: true }),
+    changed: primitives.optionalBoolean,
   }),
 );
 export type CompanyProfileAgentPolicy = z.infer<typeof CompanyProfileAgentPolicy>;
@@ -351,8 +343,8 @@ export const UpdateCompanyProfileAgentPolicyRequest = /* @__PURE__ */ defineSche
   z
     .object({
       mode: CompanyProfileAgentPolicyMode,
-      expectedVersion: z.number().int().nonnegative(),
-      operationId: z.string().uuid(),
+      expectedVersion: primitives.nonnegativeInteger,
+      operationId: primitives.uuid,
     })
     .strict(),
 );
@@ -363,13 +355,13 @@ export type UpdateCompanyProfileAgentPolicyRequest = z.infer<
 export const CompanyProfileAgentAttempt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      sessionId: z.string().uuid(),
-      turnId: z.string().uuid(),
-      attemptId: z.string().uuid(),
-      executionGeneration: z.number().int().positive(),
-      agentSubjectId: z.string().trim().min(1).max(1_024),
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      sessionId: primitives.uuid,
+      turnId: primitives.uuid,
+      attemptId: primitives.uuid,
+      executionGeneration: primitives.positiveInteger,
+      agentSubjectId: primitives.string.trim().min(1).max(1_024),
     })
     .strict(),
 );
@@ -378,9 +370,9 @@ export type CompanyProfileAgentAttempt = z.infer<typeof CompanyProfileAgentAttem
 export const CompanyProfileAgentProposalRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       profile: CompanyProfileContent,
-      reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
+      reason: primitives.string.trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
     })
     .strict(),
 );
@@ -401,13 +393,13 @@ export type CompanyProfileAgentHumanInputPrompt = z.infer<
 export const CompanyProfileAgentReviewRequiredReceipt = /* @__PURE__ */ defineSchema(() =>
   z.object({
     status: z.literal("confirmation_required"),
-    operationId: z.string().uuid(),
-    proposalReceiptId: z.string().uuid(),
+    operationId: primitives.uuid,
+    proposalReceiptId: primitives.uuid,
     revision: CompanyProfileRevision,
     policyMode: z.literal("suggest"),
     humanInput: CompanyProfileAgentHumanInputPrompt,
     confirmWith: z.literal("company_profile_confirm"),
-    replayed: z.boolean(),
+    replayed: primitives.boolean,
   }),
 );
 export type CompanyProfileAgentReviewRequiredReceipt = z.infer<
@@ -417,12 +409,12 @@ export type CompanyProfileAgentReviewRequiredReceipt = z.infer<
 export const CompanyProfileAgentAutomaticActivationReceipt = /* @__PURE__ */ defineSchema(() =>
   z.object({
     status: z.literal("activated"),
-    operationId: z.string().uuid(),
-    proposalReceiptId: z.string().uuid(),
-    automaticActivationReceiptId: z.string().uuid(),
+    operationId: primitives.uuid,
+    proposalReceiptId: primitives.uuid,
+    automaticActivationReceiptId: primitives.uuid,
     policyMode: z.literal("automatic"),
     mutation: CompanyProfileMutationResponse,
-    replayed: z.boolean(),
+    replayed: primitives.boolean,
   }),
 );
 export type CompanyProfileAgentAutomaticActivationReceipt = z.infer<
@@ -440,9 +432,9 @@ export type CompanyProfileAgentProposalReceipt = z.infer<typeof CompanyProfileAg
 export const CompanyProfileAgentConfirmRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      proposalReceiptId: z.string().uuid(),
-      humanInputRequestId: z.string().uuid(),
+      operationId: primitives.uuid,
+      proposalReceiptId: primitives.uuid,
+      humanInputRequestId: primitives.uuid,
     })
     .strict(),
 );
@@ -451,12 +443,12 @@ export type CompanyProfileAgentConfirmRequest = z.infer<typeof CompanyProfileAge
 export const CompanyProfileAgentConfirmationReceipt = /* @__PURE__ */ defineSchema(() =>
   z.object({
     status: z.literal("activated"),
-    operationId: z.string().uuid(),
-    confirmationReceiptId: z.string().uuid(),
-    proposalReceiptId: z.string().uuid(),
-    humanInputRequestId: z.string().uuid(),
+    operationId: primitives.uuid,
+    confirmationReceiptId: primitives.uuid,
+    proposalReceiptId: primitives.uuid,
+    humanInputRequestId: primitives.uuid,
     mutation: CompanyProfileMutationResponse,
-    replayed: z.boolean(),
+    replayed: primitives.boolean,
   }),
 );
 export type CompanyProfileAgentConfirmationReceipt = z.infer<
@@ -465,7 +457,7 @@ export type CompanyProfileAgentConfirmationReceipt = z.infer<
 
 export const CompanyProfileDiffRequest = /* @__PURE__ */ defineSchema(() =>
   z
-    .object({ fromRevisionId: z.string().uuid(), toRevisionId: z.string().uuid() })
+    .object({ fromRevisionId: primitives.uuid, toRevisionId: primitives.uuid })
     .refine((value) => value.fromRevisionId !== value.toRevisionId, {
       path: ["toRevisionId"],
       message: "diff revisions must be different",
@@ -478,7 +470,7 @@ export const CompanyProfileDiffResponse = /* @__PURE__ */ defineSchema(() =>
     from: CompanyProfileRevision,
     to: CompanyProfileRevision,
     format: z.literal("unified_json"),
-    diff: z.string(),
+    diff: primitives.string,
   }),
 );
 export type CompanyProfileDiffResponse = z.infer<typeof CompanyProfileDiffResponse>;
@@ -486,7 +478,7 @@ export type CompanyProfileDiffResponse = z.infer<typeof CompanyProfileDiffRespon
 export const CompanyProfileConflictResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     code: z.literal("COMPANY_PROFILE_CONFLICT"),
-    message: z.string(),
+    message: primitives.string,
     currentHead: CompanyProfileHead.nullable(),
   }),
 );
@@ -494,7 +486,7 @@ export const CompanyProfileConflictResponse = /* @__PURE__ */ defineSchema(() =>
 export const CompanyProfileOperationReuseResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     code: z.literal("COMPANY_PROFILE_OPERATION_REUSED"),
-    message: z.string(),
+    message: primitives.string,
   }),
 );
 
@@ -513,7 +505,7 @@ export type CompanyProfileLearningSubjectKind = z.infer<typeof CompanyProfileLea
 const CompanyProfileScalarLearningSubject = /* @__PURE__ */ defineSchema(() =>
   z.object({
     kind: z.enum(["company_identity", "company_mission"]),
-    content: z.string().trim().min(1).max(COMPANY_PROFILE_SCALAR_MAX_CHARS),
+    content: primitives.string.trim().min(1).max(COMPANY_PROFILE_SCALAR_MAX_CHARS),
     stableKey: z.null(),
   }),
 );
@@ -521,7 +513,7 @@ const CompanyProfileScalarLearningSubject = /* @__PURE__ */ defineSchema(() =>
 const CompanyProfileRepeatableLearningSubject = /* @__PURE__ */ defineSchema(() =>
   z.object({
     kind: z.enum(["company_product", "company_customer", "company_goal", "company_constraint"]),
-    content: z.string().trim().min(1).max(COMPANY_PROFILE_ENTRY_MAX_CHARS),
+    content: primitives.string.trim().min(1).max(COMPANY_PROFILE_ENTRY_MAX_CHARS),
     stableKey: CompanyProfileStableKeyInput,
   }),
 );
@@ -529,9 +521,9 @@ const CompanyProfileRepeatableLearningSubject = /* @__PURE__ */ defineSchema(() 
 /** Authority-native seam invoked only by the canonical durable-learning router adapter. */
 export const CompanyProfileLearningWrite = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    operationId: z.string().uuid(),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
+    operationId: primitives.uuid,
+    accountId: primitives.uuid,
+    workspaceId: primitives.uuid,
     actorSubjectId: z.string().min(1).max(1_024),
     actorKind: z.enum(["human", "agent", "service"]),
     authority: z.enum(["active", "proposal"]),
@@ -539,7 +531,7 @@ export const CompanyProfileLearningWrite = /* @__PURE__ */ defineSchema(() =>
       CompanyProfileScalarLearningSubject,
       CompanyProfileRepeatableLearningSubject,
     ]),
-    sourceId: z.string().min(1).max(COMPANY_PROFILE_SOURCE_ID_MAX_CHARS),
+    sourceId: primitives.nonEmptyString.max(COMPANY_PROFILE_SOURCE_ID_MAX_CHARS),
   }),
 );
 export type CompanyProfileLearningWrite = z.infer<typeof CompanyProfileLearningWrite>;

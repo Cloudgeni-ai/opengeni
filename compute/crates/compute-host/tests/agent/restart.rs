@@ -2,6 +2,7 @@
 //! fenced, teardowns ordered.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -1089,5 +1090,151 @@ async fn a_repeated_create_succeeds_only_with_the_same_settings() {
         ),
         "a repeated remove: {reply:?}"
     );
+    lab.assert_clean();
+}
+
+/// Fake guest memory spanning several pages, every one of them `fill`
+/// but for the last few bytes, which are `tail`: changing only the tail
+/// changes only the last page, so a diff merged over the wrong base loses
+/// the others.
+fn pages(fill: char, tail: char) -> String {
+    let mut value: String = std::iter::repeat_n(fill, 3 * 4096 + 100).collect();
+    value.extend(std::iter::repeat_n(tail, 8));
+    value
+}
+
+/// Full and diff snapshots taken so far.
+fn snapshots(lab: &Lab) -> (usize, usize) {
+    let [full, diff] = &lab.world.snapshots;
+    (full.load(Ordering::Relaxed), diff.load(Ordering::Relaxed))
+}
+
+/// Asks for sandbox `id` to be saved and its VM ended, and waits for it.
+async fn saved(lab: &Lab, id: Id) {
+    assert_eq!(lab.sleep_to(id, LevelName::Saved).await, Reply::Done);
+    lab.wait_level(id, LevelName::Saved).await;
+}
+
+async fn restarted(lab: Lab) -> Lab {
+    let (root, world) = lab.stop().await;
+    Lab::start(root, world, Delays::default(), HostPolicy::default()).await
+}
+
+/// The record of what sandbox `id`'s live VM memory is based on.
+fn base_record(lab: &Lab, id: Id) -> PathBuf {
+    lab.sandbox_dir(id).join("memory-base.json")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_beside_a_vm_keeps_its_saves_to_what_changed() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(3);
+    lab.create(sandbox, NEVER).await;
+    let (first, second) = (pages('a', 'x'), pages('a', 'y'));
+    lab.run(sandbox, &[&format!("set {first}")]).await;
+    let lab = restarted(lab).await;
+    assert_eq!(lab.world.adopted.load(Ordering::Relaxed), 1);
+    saved(&lab, sandbox).await;
+    assert_eq!(
+        snapshots(&lab),
+        (0, 1),
+        "a VM booted before the restart is saved as a diff over zeros"
+    );
+    assert_eq!(
+        lab.run(sandbox, &["get", &format!("set {second}")]).await,
+        [first.as_str(), "ok"]
+    );
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    let lab = restarted(lab).await;
+    assert_eq!(lab.world.adopted.load(Ordering::Relaxed), 2);
+    saved(&lab, sandbox).await;
+    assert_eq!(
+        snapshots(&lab),
+        (0, 2),
+        "a VM restored before the restart is saved as a diff over its image"
+    );
+    assert_eq!(lab.run(sandbox, &["get"]).await, [second.as_str()]);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 2);
+    lab.assert_clean();
+}
+
+/// A snapshot resets the VMM's record of which pages changed. From the
+/// moment it is taken until its image is published, a restarted agent has
+/// no base to save a diff over, so the record of the base is gone by then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_base_record_is_withdrawn_before_each_snapshot() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(3);
+    lab.create(sandbox, NEVER).await;
+    let (first, second) = (pages('a', 'x'), pages('a', 'y'));
+    lab.run(sandbox, &[&format!("set {first}")]).await;
+    saved(&lab, sandbox).await;
+    lab.run(sandbox, &[&format!("set {second}")]).await;
+    assert!(
+        base_record(&lab, sandbox).exists(),
+        "a restored VM's base is recorded"
+    );
+    lab.world
+        .stall_after_snapshots
+        .store(true, Ordering::SeqCst);
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    let stalled = Instant::now() + Duration::from_secs(10);
+    while snapshots(&lab) != (0, 2) {
+        assert!(
+            Instant::now() < stalled,
+            "no snapshot: {:?}",
+            snapshots(&lab)
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(
+        !base_record(&lab, sandbox).exists(),
+        "the base record outlived the snapshot that reset the changed pages"
+    );
+    lab.world
+        .stall_after_snapshots
+        .store(false, Ordering::SeqCst);
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    assert_eq!(lab.run(sandbox, &["get"]).await, [second.as_str()]);
+    assert!(
+        base_record(&lab, sandbox).exists(),
+        "a restored VM's base is recorded"
+    );
+    lab.assert_clean();
+}
+
+/// After a restart, a VM whose base is not recorded, or recorded for a
+/// process that is not the one running, as when its VM was started again
+/// after the record was written, is saved whole: these VMs were restored
+/// from an image, so a diff over zeros would lose every page they did not
+/// change since.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_without_its_own_base_record_is_saved_whole_after_a_restart() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let (unrecorded, foreign) = (id(3), id(4));
+    let (first, second) = (pages('a', 'x'), pages('a', 'y'));
+    for sandbox in [unrecorded, foreign] {
+        lab.create(sandbox, NEVER).await;
+        lab.run(sandbox, &[&format!("set {first}")]).await;
+        saved(&lab, sandbox).await;
+        lab.run(sandbox, &[&format!("set {second}")]).await;
+    }
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 2);
+    std::fs::remove_file(base_record(&lab, unrecorded)).unwrap();
+    let path = base_record(&lab, foreign);
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["process"] = "another process".into();
+    record["image"] = serde_json::Value::Null;
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let lab = restarted(lab).await;
+    assert_eq!(lab.world.adopted.load(Ordering::Relaxed), 2);
+    for sandbox in [unrecorded, foreign] {
+        saved(&lab, sandbox).await;
+    }
+    assert_eq!(snapshots(&lab), (2, 2), "each next save holds every page");
+    for sandbox in [unrecorded, foreign] {
+        assert_eq!(lab.run(sandbox, &["get"]).await, [second.as_str()]);
+    }
     lab.assert_clean();
 }

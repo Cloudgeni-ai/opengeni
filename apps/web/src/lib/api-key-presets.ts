@@ -80,7 +80,7 @@ export const WORKSPACE_KEY_PERMISSION_GROUPS: ReadonlyArray<{
     ],
   },
   {
-    label: "Schedules",
+    label: "Automations",
     permissions: ["scheduled_tasks:run", "scheduled_tasks:manage"],
   },
   {
@@ -91,6 +91,7 @@ export const WORKSPACE_KEY_PERMISSION_GROUPS: ReadonlyArray<{
     label: "Connections and code",
     permissions: [
       "connections:read",
+      "connections:personal",
       "connections:write",
       "capabilities:manage",
       "github:use",
@@ -129,8 +130,8 @@ const PERMISSION_LABELS: Record<string, string> = {
   "documents:manage": "Manage knowledge",
   "artifacts:read": "Read artifacts",
   "artifacts:publish": "Publish artifacts",
-  "scheduled_tasks:run": "Run schedules",
-  "scheduled_tasks:manage": "Manage schedules",
+  "scheduled_tasks:run": "Run automations",
+  "scheduled_tasks:manage": "Manage automations",
   // Legacy names on existing keys, shown as what they now grant.
   "variable-sets:list": "List secrets",
   "variable-sets:read": "List secrets",
@@ -146,6 +147,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   "secrets:write": "Change secrets",
   "connections:read": "See connections",
   "connections:write": "Manage connections",
+  "connections:personal": "Connect their own accounts",
   "capabilities:manage": "Manage capabilities",
   "github:use": "Use GitHub",
   "github:manage": "Manage GitHub",
@@ -220,7 +222,7 @@ export function apiKeyPresets(): ApiKeyPreset[] {
       id: "full_automation",
       label: "Full workspace automation",
       description:
-        "Everything automation needs, including schedules, secrets and files. Can't manage people, keys or read secret values.",
+        "Everything automation needs, including automations, secrets and files. Can't manage people, keys or read secret values.",
       permissions: workspaceKeyPermissions().filter(
         (permission) => !FULL_AUTOMATION_EXCLUDED.has(permission),
       ),

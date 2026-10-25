@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { RetainedArtifactReferenceSchema } from "./retained-output";
@@ -38,11 +39,11 @@ export const INTERACTION_MAX_CLIPBOARD_BYTES = 1024 * 1024;
 export const WorkspaceInteractionRevisionEvent = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      workspaceId: z.string().uuid(),
-      sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      workspaceId: primitives.uuid,
+      sequence: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
+      revision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       type: z.literal("workspace.interaction.changed"),
-      occurredAt: z.string().datetime({ offset: true }),
+      occurredAt: primitives.string.datetime({ offset: true }),
     })
     .strict()
     .refine((event) => event.sequence === event.revision, {
@@ -124,26 +125,26 @@ const canonicalWebOrigin = /* @__PURE__ */ defineSchema(() =>
       { message: "origin must be a canonical HTTP(S) origin" },
     ),
 );
-const sha256Hex = /* @__PURE__ */ defineSchema(() => z.string().regex(/^[0-9a-f]{64}$/u));
+const sha256Hex = /* @__PURE__ */ defineSchema(() => primitives.string.regex(/^[0-9a-f]{64}$/u));
 
 export const InteractionPlacement = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
     z
       .object({
         kind: z.literal("sandbox_group"),
-        sandboxGroupId: z.string().uuid(),
+        sandboxGroupId: primitives.uuid,
       })
       .strict(),
     z
       .object({
         kind: z.literal("connected_machine"),
-        sandboxId: z.string().uuid(),
+        sandboxId: primitives.uuid,
       })
       .strict(),
     z
       .object({
         kind: z.literal("attached_device"),
-        deviceId: z.string().uuid(),
+        deviceId: primitives.uuid,
       })
       .strict(),
     z
@@ -171,12 +172,12 @@ export type InteractionControllerBinding = z.infer<typeof InteractionControllerB
 export const InteractionAssociation = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      sessionId: z.string().uuid(),
-      turnId: z.string().uuid().nullable(),
-      attemptId: z.string().uuid().nullable(),
+      sessionId: primitives.uuid,
+      turnId: primitives.nullableUuid,
+      attemptId: primitives.nullableUuid,
       relationship: z.enum(["created", "using", "observing", "related"]),
       actorSubjectId: z.string().min(1).max(1_024),
-      lastUsedAt: z.string().datetime({ offset: true }),
+      lastUsedAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -187,9 +188,9 @@ export const InteractionActor = /* @__PURE__ */ defineSchema(() =>
     .object({
       kind: z.enum(["agent", "human", "system"]),
       subjectId: z.string().min(1).max(1_024),
-      sessionId: z.string().uuid().optional(),
-      turnId: z.string().uuid().optional(),
-      attemptId: z.string().uuid().optional(),
+      sessionId: primitives.optionalUuid,
+      turnId: primitives.optionalUuid,
+      attemptId: primitives.optionalUuid,
       executionGeneration: z.number().int().positive().optional(),
     })
     .strict()
@@ -226,21 +227,21 @@ export type InteractionLifecycle = z.infer<typeof InteractionLifecycle>;
 export const BrowserSessionCapabilities = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      semanticObservation: z.boolean(),
-      screenshots: z.boolean(),
-      liveFrames: z.boolean(),
-      humanInput: z.boolean(),
-      tabs: z.boolean(),
-      downloads: z.boolean(),
-      uploads: z.boolean(),
-      clipboard: z.boolean(),
-      permissions: z.boolean(),
-      diagnostics: z.boolean(),
-      rawCdp: z.boolean(),
-      linkedComputer: z.boolean(),
-      privateCheckpoint: z.boolean(),
-      identityPublication: z.boolean(),
-      parallelTargets: z.boolean(),
+      semanticObservation: primitives.boolean,
+      screenshots: primitives.boolean,
+      liveFrames: primitives.boolean,
+      humanInput: primitives.boolean,
+      tabs: primitives.boolean,
+      downloads: primitives.boolean,
+      uploads: primitives.boolean,
+      clipboard: primitives.boolean,
+      permissions: primitives.boolean,
+      diagnostics: primitives.boolean,
+      rawCdp: primitives.boolean,
+      linkedComputer: primitives.boolean,
+      privateCheckpoint: primitives.boolean,
+      identityPublication: primitives.boolean,
+      parallelTargets: primitives.boolean,
     })
     .strict(),
 );
@@ -256,26 +257,26 @@ export type BrowserStorageMode = z.infer<typeof BrowserStorageMode>;
 export const BrowserSession = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      name: z.string().trim().min(1).max(200),
+      id: primitives.uuid,
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      name: primitives.string.trim().min(1).max(200),
       lifecycle: InteractionLifecycle,
       placement: InteractionPlacement,
       controller: InteractionControllerBinding.nullable(),
       driverId: boundedOpaqueId,
       engine: z.enum(["chromium", "chrome", "firefox", "webkit", "lightpanda", "external"]),
       engineVersion: z.string().min(1).max(256).nullable(),
-      headless: z.boolean(),
-      identityId: z.string().uuid().nullable(),
-      baseRevisionId: z.string().uuid().nullable(),
-      networkRouteId: z.string().uuid().nullable(),
-      linkedComputerSessionId: z.string().uuid().nullable(),
+      headless: primitives.boolean,
+      identityId: primitives.nullableUuid,
+      baseRevisionId: primitives.nullableUuid,
+      networkRouteId: primitives.nullableUuid,
+      linkedComputerSessionId: primitives.nullableUuid,
       capabilities: BrowserSessionCapabilities,
       associations: z.array(InteractionAssociation).max(1_000),
       createdBySubjectId: z.string().min(1).max(1_024),
-      createdAt: z.string().datetime({ offset: true }),
-      lastUsedAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
+      lastUsedAt: primitives.string.datetime({ offset: true }),
       failureCode: boundedOpaqueId.nullable(),
     })
     .strict(),
@@ -288,11 +289,10 @@ export type BrowserSession = z.infer<typeof BrowserSession>;
 export const BrowserClipboard = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
-      revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      text: z
-        .string()
+      revision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
+      text: primitives.string
         .max(INTERACTION_MAX_CLIPBOARD_BYTES)
         .refine(
           (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
@@ -300,7 +300,7 @@ export const BrowserClipboard = /* @__PURE__ */ defineSchema(() =>
         ),
       source: z.enum(["empty", "write", "clear", "copy", "paste"]),
       sourceTargetId: boundedOpaqueId.nullable(),
-      updatedAt: z.string().datetime({ offset: true }).nullable(),
+      updatedAt: primitives.string.datetime({ offset: true }).nullable(),
     })
     .strict()
     .superRefine((clipboard, context) => {
@@ -332,15 +332,15 @@ export type BrowserClipboard = z.infer<typeof BrowserClipboard>;
 export const AttachedBrowserDeviceCapabilities = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      tabInventory: z.boolean(),
-      debuggerAttachment: z.boolean(),
-      semanticObservation: z.boolean(),
-      screenshots: z.boolean(),
-      liveFrames: z.boolean(),
-      humanInput: z.boolean(),
-      diagnostics: z.boolean(),
-      rawCdp: z.boolean(),
-      linkedComputer: z.boolean(),
+      tabInventory: primitives.boolean,
+      debuggerAttachment: primitives.boolean,
+      semanticObservation: primitives.boolean,
+      screenshots: primitives.boolean,
+      liveFrames: primitives.boolean,
+      humanInput: primitives.boolean,
+      diagnostics: primitives.boolean,
+      rawCdp: primitives.boolean,
+      linkedComputer: primitives.boolean,
     })
     .strict(),
 );
@@ -349,16 +349,16 @@ export type AttachedBrowserDeviceCapabilities = z.infer<typeof AttachedBrowserDe
 export const AttachedBrowserDeviceAnnouncement = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      name: z.string().trim().min(1).max(200),
-      profileLabel: z.string().trim().min(1).max(200).nullable(),
-      browserName: z.string().trim().min(1).max(100),
-      browserVersion: z.string().trim().min(1).max(256),
-      extensionVersion: z.string().trim().min(1).max(256),
+      id: primitives.uuid,
+      name: primitives.string.trim().min(1).max(200),
+      profileLabel: primitives.string.trim().min(1).max(200).nullable(),
+      browserName: primitives.string.trim().min(1).max(100),
+      browserVersion: primitives.string.trim().min(1).max(256),
+      extensionVersion: primitives.string.trim().min(1).max(256),
       platform: z.enum(["linux", "macos", "windows"]),
       architecture: z.enum(["x64", "arm64"]),
       connectionGeneration: opaqueGeneration,
-      inventoryRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      inventoryRevision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       tabCount: z.number().int().nonnegative().max(100_000),
       capabilities: AttachedBrowserDeviceCapabilities,
     })
@@ -381,12 +381,12 @@ export type AttachedBrowserConnectionEndReason = z.infer<typeof AttachedBrowserC
 export const AttachedBrowserConnectionEnd = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      deviceId: z.string().uuid(),
+      deviceId: primitives.uuid,
       connectionGeneration: opaqueGeneration,
       reason: AttachedBrowserConnectionEndReason,
       detail: z.string().min(1).max(512).nullable(),
-      endedAt: z.string().datetime(),
-      connectedMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      endedAt: primitives.dateTime,
+      connectedMs: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
     })
     .strict(),
 );
@@ -396,7 +396,7 @@ export const AttachedBrowserInventorySnapshot = /* @__PURE__ */ defineSchema(() 
   z
     .object({
       bridgeGeneration: attachedBridgeGeneration,
-      revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      revision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       devices: z.array(AttachedBrowserDeviceAnnouncement).max(10_000),
       /** The bridge's recent ended connections; absent from older agents. */
       connectionEnds: z.array(AttachedBrowserConnectionEnd).max(64).optional(),
@@ -421,26 +421,26 @@ export type AttachedBrowserInventorySnapshot = z.infer<typeof AttachedBrowserInv
 export const AttachedBrowserDevice = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      enrollmentId: z.string().uuid(),
-      name: z.string().trim().min(1).max(200),
-      profileLabel: z.string().trim().min(1).max(200).nullable(),
-      browserName: z.string().trim().min(1).max(100),
-      browserVersion: z.string().trim().min(1).max(256),
-      extensionVersion: z.string().trim().min(1).max(256),
+      id: primitives.uuid,
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      enrollmentId: primitives.uuid,
+      name: primitives.string.trim().min(1).max(200),
+      profileLabel: primitives.string.trim().min(1).max(200).nullable(),
+      browserName: primitives.string.trim().min(1).max(100),
+      browserVersion: primitives.string.trim().min(1).max(256),
+      extensionVersion: primitives.string.trim().min(1).max(256),
       platform: z.enum(["linux", "macos", "windows"]),
       architecture: z.enum(["x64", "arm64"]),
       state: z.enum(["connected", "disconnected"]),
       connectionGeneration: opaqueGeneration,
-      inventoryRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      inventoryRevision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       tabCount: z.number().int().nonnegative().max(100_000),
       capabilities: AttachedBrowserDeviceCapabilities,
-      lastSeenAt: z.string().datetime({ offset: true }),
-      disconnectedAt: z.string().datetime({ offset: true }).nullable(),
-      createdAt: z.string().datetime({ offset: true }),
-      updatedAt: z.string().datetime({ offset: true }),
+      lastSeenAt: primitives.string.datetime({ offset: true }),
+      disconnectedAt: primitives.string.datetime({ offset: true }).nullable(),
+      createdAt: primitives.string.datetime({ offset: true }),
+      updatedAt: primitives.string.datetime({ offset: true }),
     })
     .strict()
     .superRefine((device, context) => {
@@ -463,14 +463,14 @@ export type AttachedBrowserDevice = z.infer<typeof AttachedBrowserDevice>;
 export const AttachedBrowserBridge = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      enrollmentId: z.string().uuid(),
+      enrollmentId: primitives.uuid,
       sandboxId: z.string().uuid().nullable().default(null),
       machineName: z.string().nullable().default(null),
       state: z.enum(["online", "offline"]),
       bridgeGeneration: attachedBridgeGeneration,
-      inventoryRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      inventoryRevision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       connectedProfileCount: z.number().int().nonnegative().max(10_000),
-      lastSeenAt: z.string().datetime({ offset: true }),
+      lastSeenAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -479,7 +479,7 @@ export type AttachedBrowserBridge = z.infer<typeof AttachedBrowserBridge>;
 export const AttachedBrowserDeviceListResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      revision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       bridges: z.array(AttachedBrowserBridge).max(10_000),
       devices: z.array(AttachedBrowserDevice).max(10_000),
     })
@@ -491,17 +491,17 @@ export const AttachedBrowserTab = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       id: boundedOpaqueId,
-      windowId: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      windowId: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       index: z.number().int().nonnegative().max(100_000),
       title: z.string().max(8_192),
       url: boundedUrl.nullable(),
-      active: z.boolean(),
-      pinned: z.boolean(),
-      incognito: z.boolean(),
-      audible: z.boolean(),
-      discarded: z.boolean(),
-      controllable: z.boolean(),
-      unavailableReason: z.string().trim().min(1).max(2_048).nullable(),
+      active: primitives.boolean,
+      pinned: primitives.boolean,
+      incognito: primitives.boolean,
+      audible: primitives.boolean,
+      discarded: primitives.boolean,
+      controllable: primitives.boolean,
+      unavailableReason: primitives.string.trim().min(1).max(2_048).nullable(),
     })
     .strict()
     .superRefine((tab, context) => {
@@ -519,9 +519,9 @@ export type AttachedBrowserTab = z.infer<typeof AttachedBrowserTab>;
 export const AttachedBrowserTabListResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      deviceId: z.string().uuid(),
+      deviceId: primitives.uuid,
       connectionGeneration: opaqueGeneration,
-      inventoryRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      inventoryRevision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       tabs: z.array(AttachedBrowserTab).max(100_000),
     })
     .strict(),
@@ -550,7 +550,7 @@ export const BrowserRevisionMaterialization = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       portability: BrowserRevisionPortability,
-      reason: z.string().trim().min(1).max(2_048).nullable(),
+      reason: primitives.string.trim().min(1).max(2_048).nullable(),
       platform: z.enum(["linux", "macos", "windows"]).nullable(),
       architecture: z.enum(["x64", "arm64"]).nullable(),
       engine: z.enum(["chromium", "chrome", "firefox", "webkit", "lightpanda", "external"]),
@@ -600,11 +600,11 @@ export type BrowserRevisionMaterialization = z.infer<typeof BrowserRevisionMater
 export const BrowserRevisionComponent = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
+      id: primitives.uuid,
       kind: BrowserRevisionComponentKind,
       format: boundedOpaqueId,
       artifactDigest: sha256Hex,
-      sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      sizeBytes: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
       materialization: BrowserRevisionMaterialization,
     })
     .strict(),
@@ -614,17 +614,17 @@ export type BrowserRevisionComponent = z.infer<typeof BrowserRevisionComponent>;
 export const BrowserRevision = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      identityId: z.string().uuid(),
-      parentRevisionId: z.string().uuid().nullable(),
-      ordinal: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      sourceBrowserSessionId: z.string().uuid(),
+      id: primitives.uuid,
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      identityId: primitives.uuid,
+      parentRevisionId: primitives.nullableUuid,
+      ordinal: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
+      sourceBrowserSessionId: primitives.uuid,
       manifestDigest: sha256Hex,
       components: z.array(BrowserRevisionComponent).min(1).max(16),
       createdBySubjectId: z.string().min(1).max(1_024),
-      createdAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -633,18 +633,18 @@ export type BrowserRevision = z.infer<typeof BrowserRevision>;
 export const BrowserIdentity = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      name: z.string().trim().min(1).max(200),
+      id: primitives.uuid,
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      name: primitives.string.trim().min(1).max(200),
       status: BrowserIdentityStatus,
-      version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      defaultRevisionId: z.string().uuid().nullable(),
-      headGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      revisionCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      version: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
+      defaultRevisionId: primitives.nullableUuid,
+      headGeneration: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
+      revisionCount: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       createdBySubjectId: z.string().min(1).max(1_024),
-      createdAt: z.string().datetime({ offset: true }),
-      updatedAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
+      updatedAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -656,9 +656,9 @@ export type BrowserIdentity = z.infer<typeof BrowserIdentity>;
 export const InteractionCredentialAuthorityRef = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      connectionId: z.string().uuid(),
+      connectionId: primitives.uuid,
       connectionSubjectId: z.string().min(1).max(1_024).nullable(),
-      providerDomain: z.string().trim().min(1).max(512),
+      providerDomain: primitives.string.trim().min(1).max(512),
     })
     .strict(),
 );
@@ -676,7 +676,7 @@ export const NetworkRouteConfiguration = /* @__PURE__ */ defineSchema(() =>
       .object({
         kind: z.literal("proxy"),
         protocol: z.enum(["http", "https", "socks5"]),
-        host: z.string().trim().min(1).max(253),
+        host: primitives.string.trim().min(1).max(253),
         port: z.number().int().min(1).max(65_535),
         credential: InteractionCredentialAuthorityRef.nullable(),
       })
@@ -687,7 +687,7 @@ export const NetworkRouteConfiguration = /* @__PURE__ */ defineSchema(() =>
         providerId: boundedOpaqueId,
         routeId: boundedOpaqueId,
         egressClass: z.enum(["datacenter", "residential", "isp"]),
-        region: z.string().trim().min(1).max(128).nullable(),
+        region: primitives.string.trim().min(1).max(128).nullable(),
         credential: InteractionCredentialAuthorityRef.nullable(),
       })
       .strict(),
@@ -706,10 +706,10 @@ export const NetworkRouteConsistency = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       dns: z.enum(["placement", "proxy", "provider"]),
-      expectedPublicIp: z.string().trim().min(1).max(128).nullable(),
-      expectedRegion: z.string().trim().min(1).max(128).nullable(),
-      locale: z.string().trim().min(1).max(64).nullable(),
-      timezone: z.string().trim().min(1).max(128).nullable(),
+      expectedPublicIp: primitives.string.trim().min(1).max(128).nullable(),
+      expectedRegion: primitives.string.trim().min(1).max(128).nullable(),
+      locale: primitives.string.trim().min(1).max(64).nullable(),
+      timezone: primitives.string.trim().min(1).max(128).nullable(),
       geolocation: z
         .object({
           latitude: z.number().finite().min(-90).max(90),
@@ -815,17 +815,17 @@ export function networkRoutePlacementCompatibilityIssue(
 export const NetworkRoute = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      name: z.string().trim().min(1).max(200),
+      id: primitives.uuid,
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      name: primitives.string.trim().min(1).max(200),
       status: NetworkRouteStatus,
       configuration: NetworkRouteConfiguration,
       consistency: NetworkRouteConsistency,
-      version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      version: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
       createdBySubjectId: z.string().min(1).max(1_024),
-      createdAt: z.string().datetime({ offset: true }),
-      updatedAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
+      updatedAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -834,7 +834,7 @@ export type NetworkRoute = z.infer<typeof NetworkRoute>;
 export const NetworkRouteListResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      revision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       routes: z.array(NetworkRoute).max(10_000),
     })
     .strict(),
@@ -844,8 +844,8 @@ export type NetworkRouteListResponse = z.infer<typeof NetworkRouteListResponse>;
 export const CreateNetworkRouteRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      name: z.string().trim().min(1).max(200),
+      operationId: primitives.uuid,
+      name: primitives.string.trim().min(1).max(200),
       configuration: NetworkRouteConfiguration,
       consistency: NetworkRouteConsistency,
     })
@@ -856,9 +856,9 @@ export type CreateNetworkRouteRequest = z.infer<typeof CreateNetworkRouteRequest
 export const UpdateNetworkRouteRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      name: z.string().trim().min(1).max(200).optional(),
+      operationId: primitives.uuid,
+      expectedVersion: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
+      name: primitives.string.trim().min(1).max(200).optional(),
       status: NetworkRouteStatus.optional(),
       configuration: NetworkRouteConfiguration.optional(),
       consistency: NetworkRouteConsistency.optional(),
@@ -879,8 +879,8 @@ export const NetworkRouteMutationResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       route: NetworkRoute,
-      operationId: z.string().uuid(),
-      replayed: z.boolean(),
+      operationId: primitives.uuid,
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -892,7 +892,7 @@ export const SiteAuthAuthority = /* @__PURE__ */ defineSchema(() =>
       .object({
         id: boundedOpaqueId,
         kind: z.literal("external_provider"),
-        label: z.string().trim().min(1).max(200),
+        label: primitives.string.trim().min(1).max(200),
         adapterId: boundedOpaqueId,
         /** Opaque provider-owned auth-connection reference. It is meaningful
          * only to the named adapter and never treated as credential material. */
@@ -909,7 +909,7 @@ export const SiteAuthMethod = /* @__PURE__ */ defineSchema(() =>
     .object({
       id: boundedOpaqueId,
       kind: z.enum(["password", "sso", "magic_link", "passkey", "external"]),
-      label: z.string().trim().min(1).max(200),
+      label: primitives.string.trim().min(1).max(200),
       authorityIds: z.array(boundedOpaqueId).min(1).max(32),
     })
     .strict(),
@@ -921,7 +921,7 @@ export const SiteAuthHealthPolicy = /* @__PURE__ */ defineSchema(() =>
     .object({
       mode: z.enum(["on_use", "maintained"]),
       intervalSeconds: z.number().int().min(60).max(31_536_000).nullable(),
-      automaticRepair: z.boolean(),
+      automaticRepair: primitives.boolean,
     })
     .strict()
     .superRefine((policy, context) => {
@@ -945,9 +945,9 @@ export const SiteAuthMaintenance = /* @__PURE__ */ defineSchema(() =>
     .object({
       action: z.enum(["health_check", "repair"]),
       /** Hidden until the durable session start has been confirmed. */
-      sessionId: z.string().uuid().nullable(),
-      dueAt: z.string().datetime({ offset: true }),
-      startedAt: z.string().datetime({ offset: true }).nullable(),
+      sessionId: primitives.nullableUuid,
+      dueAt: primitives.string.datetime({ offset: true }),
+      startedAt: primitives.string.datetime({ offset: true }).nullable(),
     })
     .strict(),
 );
@@ -961,16 +961,16 @@ export const SITE_AUTH_MAINTENANCE_CONNECTION_CONTEXT_KEY = "opengeniSiteAuthCon
 const SiteAuthConnectionConfiguration = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      name: z.string().trim().min(1).max(200),
-      accountLabel: z.string().trim().min(1).max(200),
+      name: primitives.string.trim().min(1).max(200),
+      accountLabel: primitives.string.trim().min(1).max(200),
       origins: z.array(canonicalWebOrigin).min(1).max(64),
       loginUrl: boundedHttpUrl.nullable(),
       verificationUrlPrefixes: z.array(boundedHttpUrl).max(32),
       authorities: z.array(SiteAuthAuthority).min(1).max(32),
       methods: z.array(SiteAuthMethod).min(1).max(32),
-      preferredIdentityId: z.string().uuid().nullable(),
+      preferredIdentityId: primitives.nullableUuid,
       preferredPlacement: InteractionPlacement.nullable(),
-      preferredNetworkRouteId: z.string().uuid().nullable(),
+      preferredNetworkRouteId: primitives.nullableUuid,
       healthPolicy: SiteAuthHealthPolicy,
     })
     .strict(),
@@ -1048,21 +1048,21 @@ function validateSiteAuthConfiguration(
 
 export const SiteAuthConnection = /* @__PURE__ */ defineSchema(() =>
   SiteAuthConnectionConfiguration.extend({
-    id: z.string().uuid(),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
+    id: primitives.uuid,
+    accountId: primitives.uuid,
+    workspaceId: primitives.uuid,
     status: z.enum(["active", "archived"]),
     verificationState: SiteAuthVerificationState,
-    lastVerifiedAt: z.string().datetime({ offset: true }).nullable(),
+    lastVerifiedAt: primitives.string.datetime({ offset: true }).nullable(),
     lastVerifiedUrl: boundedUrl.nullable(),
-    lastCheckedAt: z.string().datetime({ offset: true }).nullable(),
-    nextCheckAt: z.string().datetime({ offset: true }).nullable(),
+    lastCheckedAt: primitives.string.datetime({ offset: true }).nullable(),
+    nextCheckAt: primitives.string.datetime({ offset: true }).nullable(),
     maintenance: SiteAuthMaintenance.nullable(),
     repairCode: boundedOpaqueId.nullable(),
-    version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    version: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
     createdBySubjectId: z.string().min(1).max(1_024),
-    createdAt: z.string().datetime({ offset: true }),
-    updatedAt: z.string().datetime({ offset: true }),
+    createdAt: primitives.string.datetime({ offset: true }),
+    updatedAt: primitives.string.datetime({ offset: true }),
   }).superRefine(validateSiteAuthConfiguration),
 );
 export type SiteAuthConnection = z.infer<typeof SiteAuthConnection>;
@@ -1070,7 +1070,7 @@ export type SiteAuthConnection = z.infer<typeof SiteAuthConnection>;
 export const SiteAuthConnectionListResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      revision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       connections: z.array(SiteAuthConnection).max(10_000),
     })
     .strict(),
@@ -1079,7 +1079,7 @@ export type SiteAuthConnectionListResponse = z.infer<typeof SiteAuthConnectionLi
 
 export const CreateSiteAuthConnectionRequest = /* @__PURE__ */ defineSchema(() =>
   SiteAuthConnectionConfiguration.extend({
-    operationId: z.string().uuid(),
+    operationId: primitives.uuid,
   }).superRefine(validateSiteAuthConfiguration),
 );
 export type CreateSiteAuthConnectionRequest = z.infer<typeof CreateSiteAuthConnectionRequest>;
@@ -1087,8 +1087,8 @@ export type CreateSiteAuthConnectionRequest = z.infer<typeof CreateSiteAuthConne
 export const UpdateSiteAuthConnectionRequest = /* @__PURE__ */ defineSchema(() =>
   SiteAuthConnectionConfiguration.partial()
     .extend({
-      operationId: z.string().uuid(),
-      expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      operationId: primitives.uuid,
+      expectedVersion: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
       status: z.enum(["active", "archived"]).optional(),
     })
     .strict()
@@ -1106,8 +1106,8 @@ export const SiteAuthConnectionMutationResponse = /* @__PURE__ */ defineSchema((
   z
     .object({
       connection: SiteAuthConnection,
-      operationId: z.string().uuid(),
-      replayed: z.boolean(),
+      operationId: primitives.uuid,
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -1130,7 +1130,7 @@ export const AuthRunChoice = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       id: boundedOpaqueId,
-      label: z.string().trim().min(1).max(200),
+      label: primitives.string.trim().min(1).max(200),
       methodId: boundedOpaqueId,
     })
     .strict(),
@@ -1141,8 +1141,8 @@ export const AuthRunExternalAction = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       kind: z.enum(["push", "security_key", "passkey", "device", "human", "other"]),
-      label: z.string().trim().min(1).max(500),
-      expiresAt: z.string().datetime({ offset: true }).nullable(),
+      label: primitives.string.trim().min(1).max(500),
+      expiresAt: primitives.string.datetime({ offset: true }).nullable(),
     })
     .strict(),
 );
@@ -1151,11 +1151,11 @@ export type AuthRunExternalAction = z.infer<typeof AuthRunExternalAction>;
 export const AuthRun = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      siteAuthConnectionId: z.string().uuid(),
-      browserSessionId: z.string().uuid(),
+      id: primitives.uuid,
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      siteAuthConnectionId: primitives.uuid,
+      browserSessionId: primitives.uuid,
       targetId: boundedOpaqueId,
       controllerGeneration: opaqueGeneration,
       targetGeneration: opaqueGeneration,
@@ -1166,15 +1166,15 @@ export const AuthRun = /* @__PURE__ */ defineSchema(() =>
       state: AuthRunState,
       choices: z.array(AuthRunChoice).max(64),
       externalAction: AuthRunExternalAction.nullable(),
-      interventionId: z.string().uuid().nullable(),
+      interventionId: primitives.nullableUuid,
       verifiedUrl: boundedUrl.nullable(),
       failureCode: boundedOpaqueId.nullable(),
-      version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      operationId: z.string().uuid(),
+      version: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
+      operationId: primitives.uuid,
       createdBySubjectId: z.string().min(1).max(1_024),
-      createdAt: z.string().datetime({ offset: true }),
-      updatedAt: z.string().datetime({ offset: true }),
-      settledAt: z.string().datetime({ offset: true }).nullable(),
+      createdAt: primitives.string.datetime({ offset: true }),
+      updatedAt: primitives.string.datetime({ offset: true }),
+      settledAt: primitives.string.datetime({ offset: true }).nullable(),
     })
     .strict()
     .superRefine((run, context) => {
@@ -1228,8 +1228,8 @@ export const AuthRunMutationResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       run: AuthRun,
-      operationId: z.string().uuid(),
-      replayed: z.boolean(),
+      operationId: primitives.uuid,
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -1238,8 +1238,8 @@ export type AuthRunMutationResponse = z.infer<typeof AuthRunMutationResponse>;
 export const StartAuthRunRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      siteAuthConnectionId: z.string().uuid(),
+      operationId: primitives.uuid,
+      siteAuthConnectionId: primitives.uuid,
       targetId: boundedOpaqueId,
       expectedTargetGeneration: opaqueGeneration,
       expectedDocumentGeneration: opaqueGeneration.nullable(),
@@ -1254,7 +1254,7 @@ export type StartAuthRunRequest = z.infer<typeof StartAuthRunRequest>;
 export const ReportAuthRunPayload = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      expectedVersion: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
       methodId: boundedOpaqueId.optional(),
       authorityId: boundedOpaqueId.optional(),
       state: z.enum([
@@ -1297,7 +1297,7 @@ export type ReportAuthRunPayload = z.infer<typeof ReportAuthRunPayload>;
 
 export const ReportAuthRunRequest = /* @__PURE__ */ defineSchema(() =>
   ReportAuthRunPayload.safeExtend({
-    operationId: z.string().uuid(),
+    operationId: primitives.uuid,
   }),
 );
 export type ReportAuthRunRequest = z.infer<typeof ReportAuthRunRequest>;
@@ -1307,8 +1307,8 @@ export type ReportAuthRunRequest = z.infer<typeof ReportAuthRunRequest>;
 export const ExternalAuthRunRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      operationId: primitives.uuid,
+      expectedVersion: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
       action: z.enum(["start", "poll"]),
     })
     .strict(),
@@ -1320,8 +1320,8 @@ export const ExternalAuthRunResponse = /* @__PURE__ */ defineSchema(() =>
     .object({
       run: AuthRun,
       status: z.enum(["working", "needs_human", "ready_to_verify", "failed"]),
-      operationId: z.string().uuid(),
-      replayed: z.boolean(),
+      operationId: primitives.uuid,
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -1331,8 +1331,8 @@ export type ExternalAuthRunResponse = z.infer<typeof ExternalAuthRunResponse>;
 export const ExternalAuthInteractiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      operationId: primitives.uuid,
+      expectedVersion: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
     })
     .strict(),
 );
@@ -1341,9 +1341,9 @@ export type ExternalAuthInteractiveRequest = z.infer<typeof ExternalAuthInteract
 export const ExternalAuthInteractiveResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      authRunId: z.string().uuid(),
+      authRunId: primitives.uuid,
       url: boundedHttpUrl,
-      expiresAt: z.string().datetime({ offset: true }).nullable(),
+      expiresAt: primitives.string.datetime({ offset: true }).nullable(),
     })
     .strict(),
 );
@@ -1354,10 +1354,10 @@ export type ExternalAuthInteractiveResponse = z.infer<typeof ExternalAuthInterac
 export const BrowserExternalAuthCommand = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
-      operationId: z.string().uuid(),
-      authRunId: z.string().uuid(),
+      operationId: primitives.uuid,
+      authRunId: primitives.uuid,
       adapterId: boundedOpaqueId,
       connectionId: boundedOpaqueId,
       action: z.enum(["start", "poll", "interactive"]),
@@ -1373,7 +1373,7 @@ export const BrowserExternalAuthResult = /* @__PURE__ */ defineSchema(() =>
       externalAction: AuthRunExternalAction.nullable(),
       interactiveUrl: boundedHttpUrl.nullable(),
       failureCode: boundedOpaqueId.nullable(),
-      profileLoaded: z.boolean(),
+      profileLoaded: primitives.boolean,
     })
     .strict()
     .superRefine((result, context) => {
@@ -1412,8 +1412,8 @@ export type BrowserExternalAuthResult = z.infer<typeof BrowserExternalAuthResult
 export const VerifyAuthRunRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      operationId: primitives.uuid,
+      expectedVersion: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
     })
     .strict(),
 );
@@ -1427,30 +1427,30 @@ export type InteractionInterventionStatus = z.infer<typeof InteractionInterventi
 export const InteractionIntervention = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
+      id: primitives.uuid,
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
       resourceKind: z.enum(["browser_session", "computer_session"]),
-      resourceId: z.string().uuid(),
+      resourceId: primitives.uuid,
       targetId: boundedOpaqueId,
       controllerGeneration: opaqueGeneration,
       targetGeneration: opaqueGeneration,
       documentGeneration: opaqueGeneration.nullable(),
       kind: z.enum(["manual_login", "mfa", "external_action", "confirmation", "other"]),
-      reason: z.string().trim().min(1).max(2_048),
+      reason: primitives.string.trim().min(1).max(2_048),
       status: InteractionInterventionStatus,
-      authRunId: z.string().uuid().nullable(),
-      originatingSessionId: z.string().uuid(),
-      originatingTurnId: z.string().uuid().nullable(),
-      originatingAttemptId: z.string().uuid().nullable(),
-      originatingToolOperationId: z.string().uuid().nullable(),
+      authRunId: primitives.nullableUuid,
+      originatingSessionId: primitives.uuid,
+      originatingTurnId: primitives.nullableUuid,
+      originatingAttemptId: primitives.nullableUuid,
+      originatingToolOperationId: primitives.nullableUuid,
       responseActorSubjectId: z.string().min(1).max(1_024).nullable(),
-      version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      operationId: z.string().uuid(),
-      expiresAt: z.string().datetime({ offset: true }),
-      createdAt: z.string().datetime({ offset: true }),
-      updatedAt: z.string().datetime({ offset: true }),
-      settledAt: z.string().datetime({ offset: true }).nullable(),
+      version: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
+      operationId: primitives.uuid,
+      expiresAt: primitives.string.datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
+      updatedAt: primitives.string.datetime({ offset: true }),
+      settledAt: primitives.string.datetime({ offset: true }).nullable(),
     })
     .strict(),
 );
@@ -1466,16 +1466,16 @@ export type InteractionInterventionListResponse = z.infer<
 export const CreateInteractionInterventionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       resourceKind: z.enum(["browser_session", "computer_session"]),
-      resourceId: z.string().uuid(),
+      resourceId: primitives.uuid,
       targetId: boundedOpaqueId,
       expectedControllerGeneration: opaqueGeneration,
       expectedTargetGeneration: opaqueGeneration,
       expectedDocumentGeneration: opaqueGeneration.nullable(),
       kind: z.enum(["manual_login", "mfa", "external_action", "confirmation", "other"]),
-      reason: z.string().trim().min(1).max(2_048),
-      authRunId: z.string().uuid().optional(),
+      reason: primitives.string.trim().min(1).max(2_048),
+      authRunId: primitives.optionalUuid,
       expiresInSeconds: z.number().int().min(30).max(86_400).default(900),
     })
     .strict(),
@@ -1487,8 +1487,8 @@ export type CreateInteractionInterventionRequest = z.infer<
 export const ResolveInteractionInterventionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      operationId: primitives.uuid,
+      expectedVersion: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
       outcome: z.enum(["completed", "dismissed"]),
     })
     .strict(),
@@ -1501,8 +1501,8 @@ export const InteractionInterventionMutationResponse = /* @__PURE__ */ defineSch
   z
     .object({
       intervention: InteractionIntervention,
-      operationId: z.string().uuid(),
-      replayed: z.boolean(),
+      operationId: primitives.uuid,
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -1515,19 +1515,19 @@ export const INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME = "interaction__interacti
 
 export const RequestHumanInteractionToolInput = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("operation", [
-    z.object({ operation: z.literal("wait"), interventionId: z.string().uuid() }).strict(),
+    z.object({ operation: z.literal("wait"), interventionId: primitives.uuid }).strict(),
     z
       .object({
         operation: z.literal("request"),
         resourceKind: z.enum(["browser_session", "computer_session"]),
-        resourceId: z.string().uuid(),
+        resourceId: primitives.uuid,
         targetId: boundedOpaqueId,
         expectedControllerGeneration: opaqueGeneration,
         expectedTargetGeneration: opaqueGeneration,
         expectedDocumentGeneration: opaqueGeneration.nullable(),
         kind: z.enum(["manual_login", "mfa", "external_action", "confirmation", "other"]),
-        reason: z.string().trim().min(1).max(2_048),
-        authRunId: z.string().uuid().optional(),
+        reason: primitives.string.trim().min(1).max(2_048),
+        authRunId: primitives.optionalUuid,
         expiresInSeconds: z.number().int().min(30).max(86_400).default(900),
       })
       .strict(),
@@ -1549,7 +1549,7 @@ export type RequestHumanInteractionToolOutput = z.infer<typeof RequestHumanInter
 export const BrowserIdentityListResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      revision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       identities: z.array(BrowserIdentity).max(10_000),
     })
     .strict(),
@@ -1569,8 +1569,8 @@ export type BrowserRevisionListResponse = z.infer<typeof BrowserRevisionListResp
 export const CreateBrowserIdentityRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      name: z.string().trim().min(1).max(200),
+      operationId: primitives.uuid,
+      name: primitives.string.trim().min(1).max(200),
     })
     .strict(),
 );
@@ -1579,11 +1579,11 @@ export type CreateBrowserIdentityRequest = z.infer<typeof CreateBrowserIdentityR
 export const UpdateBrowserIdentityRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      name: z.string().trim().min(1).max(200).optional(),
+      operationId: primitives.uuid,
+      expectedVersion: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
+      name: primitives.string.trim().min(1).max(200).optional(),
       status: BrowserIdentityStatus.optional(),
-      defaultRevisionId: z.string().uuid().optional(),
+      defaultRevisionId: primitives.optionalUuid,
     })
     .strict()
     .refine(
@@ -1600,8 +1600,8 @@ export const BrowserIdentityMutationResponse = /* @__PURE__ */ defineSchema(() =
   z
     .object({
       identity: BrowserIdentity,
-      operationId: z.string().uuid(),
-      replayed: z.boolean(),
+      operationId: primitives.uuid,
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -1612,10 +1612,10 @@ export type BrowserIdentityMutationResponse = z.infer<typeof BrowserIdentityMuta
 export const PublishBrowserRevisionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      identityId: z.string().uuid(),
-      expectedHeadGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      advanceDefault: z.boolean().default(true),
+      operationId: primitives.uuid,
+      identityId: primitives.uuid,
+      expectedHeadGeneration: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
+      advanceDefault: primitives.boolean.default(true),
     })
     .strict(),
 );
@@ -1627,7 +1627,7 @@ export const PublishBrowserRevisionResponse = /* @__PURE__ */ defineSchema(() =>
       identity: BrowserIdentity,
       revision: BrowserRevision,
       outcome: z.enum(["saved_as_default", "saved_not_default"]),
-      replayed: z.boolean(),
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -1637,16 +1637,16 @@ export const BrowserTarget = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       id: boundedOpaqueId,
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetGeneration: opaqueGeneration,
       documentGeneration: opaqueGeneration.nullable(),
       kind: z.enum(["page", "popup", "background_page", "worker"]),
       title: z.string().max(4_096),
       url: boundedUrl,
-      selected: z.boolean(),
-      attached: z.boolean(),
-      createdAt: z.string().datetime({ offset: true }),
+      selected: primitives.boolean,
+      attached: primitives.boolean,
+      createdAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -1663,8 +1663,8 @@ export type BrowserDownloadStatus = z.infer<typeof BrowserDownloadStatus>;
 export const BrowserDownload = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      browserSessionId: z.string().uuid(),
+      id: primitives.uuid,
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetId: boundedOpaqueId.nullable(),
       filename: z
@@ -1673,12 +1673,12 @@ export const BrowserDownload = /* @__PURE__ */ defineSchema(() =>
         .max(4_096)
         .regex(/^[^\u0000-\u001f\u007f]+$/u),
       status: BrowserDownloadStatus,
-      receivedBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      totalBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+      receivedBytes: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
+      totalBytes: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER).nullable(),
       sha256: sha256Hex.nullable(),
-      version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      startedAt: z.string().datetime({ offset: true }),
-      settledAt: z.string().datetime({ offset: true }).nullable(),
+      version: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
+      startedAt: primitives.string.datetime({ offset: true }),
+      settledAt: primitives.string.datetime({ offset: true }).nullable(),
       failureCode: boundedOpaqueId.nullable(),
     })
     .strict()
@@ -1723,7 +1723,7 @@ export type BrowserDownload = z.infer<typeof BrowserDownload>;
 export const BrowserDownloadListResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       downloads: z.array(BrowserDownload).max(10_000),
     })
@@ -1757,9 +1757,9 @@ const workspaceRelativeFilePath = /* @__PURE__ */ defineSchema(() =>
 export const BrowserDownloadSaveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       destinationPath: workspaceRelativeFilePath,
-      overwrite: z.boolean().default(false),
+      overwrite: primitives.boolean.default(false),
     })
     .strict(),
 );
@@ -1770,9 +1770,9 @@ export const BrowserDownloadSaveResponse = /* @__PURE__ */ defineSchema(() =>
     .object({
       download: BrowserDownload,
       destinationPath: workspaceRelativeFilePath,
-      fileId: z.string().uuid(),
-      operationId: z.string().uuid(),
-      replayed: z.boolean(),
+      fileId: primitives.uuid,
+      operationId: primitives.uuid,
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -1784,13 +1784,13 @@ export type BrowserDownloadSaveResponse = z.infer<typeof BrowserDownloadSaveResp
 export const BrowserDownloadExportRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      downloadId: z.string().uuid(),
+      operationId: primitives.uuid,
+      downloadId: primitives.uuid,
       upload: z
         .object({
           url: boundedHttpUrl,
           requiredHeaders: z.record(z.string().min(1).max(256), z.string().max(8_192)),
-          expiresAt: z.string().datetime({ offset: true }),
+          expiresAt: primitives.string.datetime({ offset: true }),
         })
         .strict(),
     })
@@ -1801,11 +1801,11 @@ export type BrowserDownloadExportRequest = z.infer<typeof BrowserDownloadExportR
 export const BrowserDownloadExportReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      downloadId: z.string().uuid(),
-      sizeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      operationId: primitives.uuid,
+      downloadId: primitives.uuid,
+      sizeBytes: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       sha256: sha256Hex,
-      replayed: z.boolean(),
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -1815,18 +1815,18 @@ export type BrowserDownloadExportReceipt = z.infer<typeof BrowserDownloadExportR
 export const BrowserRecordingSummary = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      recordingId: z.string().uuid(),
+      recordingId: primitives.uuid,
       state: z.enum(["recording", "stopped"]),
-      startedAt: z.string().datetime({ offset: true }),
-      stoppedAt: z.string().datetime({ offset: true }).nullable(),
+      startedAt: primitives.string.datetime({ offset: true }),
+      stoppedAt: primitives.string.datetime({ offset: true }).nullable(),
       stopReason: z.enum(["requested", "duration_limit", "size_limit", "session_ended"]).nullable(),
-      durationMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      frameCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      frameBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      actionCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      durationMs: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
+      frameCount: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
+      frameBytes: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
+      actionCount: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
       bundle: z
         .object({
-          sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+          sizeBytes: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
           sha256: sha256Hex,
         })
         .strict()
@@ -1847,12 +1847,12 @@ export type BrowserRecordingStartRequest = z.infer<typeof BrowserRecordingStartR
 export const BrowserRecordingExportRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      recordingId: z.string().uuid(),
+      recordingId: primitives.uuid,
       upload: z
         .object({
           url: boundedHttpUrl,
           requiredHeaders: z.record(z.string().min(1).max(256), z.string().max(8_192)),
-          expiresAt: z.string().datetime({ offset: true }),
+          expiresAt: primitives.string.datetime({ offset: true }),
         })
         .strict(),
     })
@@ -1863,8 +1863,8 @@ export type BrowserRecordingExportRequest = z.infer<typeof BrowserRecordingExpor
 export const BrowserRecordingExportReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      recordingId: z.string().uuid(),
-      sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      recordingId: primitives.uuid,
+      sizeBytes: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
       sha256: sha256Hex,
     })
     .strict(),
@@ -1911,7 +1911,7 @@ export type BrowserRecordingUploadStatus = z.infer<typeof BrowserRecordingUpload
 export const BrowserRecordingSaveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       /** Where the MP4 goes; the action log is saved beside it as .actions.json. */
       destinationPath: workspaceRelativeFilePath.optional(),
     })
@@ -1926,12 +1926,12 @@ export const BrowserRecordingSaveResponse = /* @__PURE__ */ defineSchema(() =>
       video: z
         .object({
           path: workspaceRelativeFilePath,
-          artifactId: z.string().uuid(),
-          sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-          durationMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+          artifactId: primitives.uuid,
+          sizeBytes: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
+          durationMs: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
           width: z.number().int().positive().max(100_000),
           height: z.number().int().positive().max(100_000),
-          frameCount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+          frameCount: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
         })
         .strict(),
       actionLogPath: workspaceRelativeFilePath,
@@ -1940,12 +1940,13 @@ export const BrowserRecordingSaveResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type BrowserRecordingSaveResponse = z.infer<typeof BrowserRecordingSaveResponse>;
 
-/** A save that is still moving the recording off its browser host (HTTP 202).
+/** A save still in progress (HTTP 202): `uploading` while the recording
+ * moves off its browser host, `encoding` while the worker makes its video.
  * Repeat the same request, with the same operationId, after `retryAfterMs`. */
 export const BrowserRecordingSaveProgress = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      state: z.literal("uploading"),
+      state: z.enum(["uploading", "encoding"]),
       recording: BrowserRecordingSummary,
       retryAfterMs: z.number().int().positive().max(60_000),
     })
@@ -2021,7 +2022,7 @@ export const InteractionSemanticSnapshot = /* @__PURE__ */ defineSchema(() =>
     .object({
       kind: z.literal("snapshot"),
       roots: z.array(InteractionSemanticNode),
-      nodeCount: z.number().int().nonnegative().max(INTERACTION_MAX_SEMANTIC_NODES),
+      nodeCount: primitives.nonnegativeInteger.max(INTERACTION_MAX_SEMANTIC_NODES),
       /** Present when the platform stopped reading the tree early: every
        * listed node is real, but nodes after the cut are missing. */
       incomplete: z
@@ -2054,10 +2055,10 @@ export const InteractionSemanticDiff = /* @__PURE__ */ defineSchema(() =>
 export const InteractionDiagnosticSummary = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      consoleErrorCount: z.number().int().nonnegative(),
-      failedRequestCount: z.number().int().nonnegative(),
-      downloadCount: z.number().int().nonnegative(),
-      pageErrorCount: z.number().int().nonnegative(),
+      consoleErrorCount: primitives.nonnegativeInteger,
+      failedRequestCount: primitives.nonnegativeInteger,
+      downloadCount: primitives.nonnegativeInteger,
+      pageErrorCount: primitives.nonnegativeInteger,
     })
     .strict(),
 );
@@ -2068,7 +2069,7 @@ export const BrowserDialog = /* @__PURE__ */ defineSchema(() =>
       type: z.enum(["alert", "confirm", "prompt", "beforeunload"]),
       message: z.string().max(8_192),
       defaultPrompt: z.string().max(32_768),
-      openedAt: z.string().datetime({ offset: true }),
+      openedAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -2079,19 +2080,19 @@ export const BrowserObservation = /* @__PURE__ */ defineSchema(() =>
     .object({
       protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
       observationId: boundedOpaqueId,
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       target: BrowserTarget,
       frameId: opaqueGeneration.nullable(),
       semantic: z.union([InteractionSemanticSnapshot, InteractionSemanticDiff]).nullable(),
       screenshot: RetainedArtifactReferenceSchema.nullable(),
       viewport: z
         .object({
-          width: z.number().int().positive(),
-          height: z.number().int().positive(),
+          width: primitives.positiveInteger,
+          height: primitives.positiveInteger,
           visualWidth: z.number().positive(),
           visualHeight: z.number().positive(),
           deviceScaleFactor: z.number().positive(),
-          maxTouchPoints: z.number().int().nonnegative(),
+          maxTouchPoints: primitives.nonnegativeInteger,
         })
         .strict()
         .nullable()
@@ -2100,7 +2101,7 @@ export const BrowserObservation = /* @__PURE__ */ defineSchema(() =>
       changedRegions: z.array(InteractionRect).max(INTERACTION_MAX_CHANGED_NODES),
       diagnostics: InteractionDiagnosticSummary,
       dialog: BrowserDialog.nullable(),
-      observedAt: z.string().datetime({ offset: true }),
+      observedAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -2114,7 +2115,7 @@ export type BrowserDiagnosticKind = z.infer<typeof BrowserDiagnosticKind>;
 export const BrowserDiagnosticEntry = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      sequence: z.number().int().positive(),
+      sequence: primitives.positiveInteger,
       kind: BrowserDiagnosticKind,
       level: z.enum(["debug", "info", "warning", "error"]).nullable(),
       message: z.string().max(8_192),
@@ -2122,7 +2123,7 @@ export const BrowserDiagnosticEntry = /* @__PURE__ */ defineSchema(() =>
       method: z.string().min(1).max(32).nullable(),
       status: z.number().int().min(100).max(999).nullable(),
       filename: z.string().max(4_096).nullable(),
-      occurredAt: z.string().datetime({ offset: true }),
+      occurredAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -2131,13 +2132,13 @@ export type BrowserDiagnosticEntry = z.infer<typeof BrowserDiagnosticEntry>;
 export const BrowserDiagnosticBatch = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetId: boundedOpaqueId,
       targetGeneration: opaqueGeneration,
       entries: z.array(BrowserDiagnosticEntry).max(INTERACTION_MAX_DIAGNOSTIC_ENTRIES),
-      cursor: z.number().int().nonnegative(),
-      truncated: z.boolean(),
+      cursor: primitives.nonnegativeInteger,
+      truncated: primitives.boolean,
     })
     .strict(),
 );
@@ -2151,11 +2152,25 @@ export const BrowserLocator = /* @__PURE__ */ defineSchema(() =>
         kind: z.literal("role"),
         role: z.string().min(1).max(256),
         name: z.string().max(8_192).optional(),
-        exact: z.boolean().optional(),
+        exact: primitives.optionalBoolean,
       })
       .strict(),
-    z.object({ kind: z.literal("label"), text: z.string().min(1).max(8_192) }).strict(),
-    z.object({ kind: z.literal("text"), text: z.string().min(1).max(8_192) }).strict(),
+    // exact: the whole accessible name, ignoring case and spacing, as for
+    // role. A label is always matched on its whole name.
+    z
+      .object({
+        kind: z.literal("label"),
+        text: z.string().min(1).max(8_192),
+        exact: primitives.optionalBoolean,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("text"),
+        text: z.string().min(1).max(8_192),
+        exact: primitives.optionalBoolean,
+      })
+      .strict(),
     z
       .object({
         kind: z.literal("placeholder"),
@@ -2173,7 +2188,7 @@ export type BrowserLocator = z.infer<typeof BrowserLocator>;
 export const BrowserTargetState = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetId: boundedOpaqueId,
       targetGeneration: opaqueGeneration,
@@ -2254,14 +2269,14 @@ export type BrowserDomReadRequest = z.infer<typeof BrowserDomReadRequest>;
 export const BrowserDomReadResponse = /* @__PURE__ */ defineSchema(() =>
   BrowserTargetState.extend({
     kind: z.enum(["element", "count"]),
-    count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    count: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
     text: z.string().max(32_768).nullable().optional(),
     value: z.string().max(32_768).nullable().optional(),
     attributes: z
       .partialRecord(BrowserDomSafeAttribute, z.string().max(32_768).nullable())
       .optional(),
     redacted: z.enum(["password", "payment", "private", "policy"]).nullable().optional(),
-    truncated: z.boolean(),
+    truncated: primitives.boolean,
   }).strict(),
 );
 export type BrowserDomReadResponse = z.infer<typeof BrowserDomReadResponse>;
@@ -2277,21 +2292,21 @@ export const ComputerLocator = /* @__PURE__ */ defineSchema(() =>
         kind: z.literal("role"),
         role: z.string().min(1).max(256),
         name: z.string().max(8_192).optional(),
-        exact: z.boolean().optional(),
+        exact: primitives.optionalBoolean,
       })
       .strict(),
     z
       .object({
         kind: z.literal("label"),
         text: z.string().min(1).max(8_192),
-        exact: z.boolean().optional(),
+        exact: primitives.optionalBoolean,
       })
       .strict(),
     z
       .object({
         kind: z.literal("text"),
         text: z.string().min(1).max(8_192),
-        exact: z.boolean().optional(),
+        exact: primitives.optionalBoolean,
       })
       .strict(),
     z
@@ -2337,7 +2352,7 @@ const browserActionVariants = [
       type: z.literal("viewport"),
       width: z.number().int().min(240).max(4_096),
       height: z.number().int().min(240).max(4_096),
-      mobile: z.boolean(),
+      mobile: primitives.boolean,
       deviceScaleFactor: z.number().min(0.5).max(4).optional(),
     })
     .strict(),
@@ -2386,7 +2401,7 @@ const browserActionVariants = [
     .object({
       type: z.literal("check"),
       locator: BrowserLocator,
-      checked: z.boolean(),
+      checked: primitives.boolean,
     })
     .strict(),
   z
@@ -2467,15 +2482,14 @@ const browserActionVariants = [
     .object({
       type: z.literal("upload"),
       locator: BrowserLocator,
-      workspaceFileIds: z.array(z.string().uuid()).min(1).max(100),
+      workspaceFileIds: z.array(primitives.uuid).min(1).max(100),
     })
     .strict(),
   z
     .object({
       type: z.literal("clipboard"),
       operation: z.enum(["write", "clear", "copy", "paste"]),
-      text: z
-        .string()
+      text: primitives.string
         .max(INTERACTION_MAX_CLIPBOARD_BYTES)
         .refine(
           (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
@@ -2657,7 +2671,7 @@ export const InteractionError = /* @__PURE__ */ defineSchema(() =>
         "driver_failed",
       ]),
       message: z.string().min(1).max(8_192),
-      retryable: z.boolean(),
+      retryable: primitives.boolean,
       details: z.record(z.string().max(256), z.json()).optional(),
     })
     .strict(),
@@ -2683,8 +2697,8 @@ export const BrowserActionCommand = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-      operationId: z.string().uuid(),
-      browserSessionId: z.string().uuid(),
+      operationId: primitives.uuid,
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetId: boundedOpaqueId,
       expectedTargetGeneration: opaqueGeneration,
@@ -2712,7 +2726,7 @@ export type BrowserActionCommand = z.infer<typeof BrowserActionCommand>;
 export const BrowserWorkspaceFileAuthority = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      fileId: z.string().uuid(),
+      fileId: primitives.uuid,
       safeFilename: z
         .string()
         .min(1)
@@ -2726,7 +2740,7 @@ export const BrowserWorkspaceFileAuthority = /* @__PURE__ */ defineSchema(() =>
       download: z
         .object({
           url: boundedHttpUrl,
-          expiresAt: z.string().datetime({ offset: true }),
+          expiresAt: primitives.string.datetime({ offset: true }),
         })
         .strict(),
     })
@@ -2737,7 +2751,7 @@ export type BrowserWorkspaceFileAuthority = z.infer<typeof BrowserWorkspaceFileA
 export const BrowserWorkspaceFileStageRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       files: z.array(BrowserWorkspaceFileAuthority).min(1).max(100),
     })
     .strict()
@@ -2760,9 +2774,9 @@ export type BrowserWorkspaceFileStageRequest = z.infer<typeof BrowserWorkspaceFi
 export const BrowserWorkspaceFileStageResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      fileIds: z.array(z.string().uuid()).min(1).max(100),
-      replayed: z.boolean(),
+      operationId: primitives.uuid,
+      fileIds: z.array(primitives.uuid).min(1).max(100),
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -2781,16 +2795,16 @@ export type InteractionLifecycleOperationKind = z.infer<typeof InteractionLifecy
 export const InteractionLifecycleOperationReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       resourceKind: z.enum(["browser_session", "computer_session"]),
-      resourceId: z.string().uuid(),
+      resourceId: primitives.uuid,
       kind: InteractionLifecycleOperationKind,
       state: InteractionOperationState,
-      replayed: z.boolean(),
+      replayed: primitives.boolean,
       error: InteractionError.nullable(),
-      createdAt: z.string().datetime({ offset: true }),
-      dispatchedAt: z.string().datetime({ offset: true }).nullable(),
-      settledAt: z.string().datetime({ offset: true }).nullable(),
+      createdAt: primitives.string.datetime({ offset: true }),
+      dispatchedAt: primitives.string.datetime({ offset: true }).nullable(),
+      settledAt: primitives.string.datetime({ offset: true }).nullable(),
     })
     .strict()
     .superRefine((receipt, context) => {
@@ -2824,20 +2838,20 @@ export type InteractionLifecycleOperationReceipt = z.infer<
 export const CreateBrowserSessionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      sessionId: z.string().uuid(),
-      name: z.string().trim().min(1).max(200).optional(),
+      operationId: primitives.uuid,
+      sessionId: primitives.uuid,
+      name: primitives.string.trim().min(1).max(200).optional(),
       initialUrl: boundedUrl.optional(),
-      headless: z.boolean().default(true),
+      headless: primitives.boolean.default(true),
       storageMode: BrowserStorageMode.default("private_profile"),
       /** Managed engine choice. Attached Chrome continues to derive its engine
        * from the selected device rather than accepting an impersonated value. */
       engine: z.enum(["chromium", "lightpanda"]).default("chromium"),
       placement: InteractionPlacement.optional(),
-      identityId: z.string().uuid().optional(),
-      baseRevisionId: z.string().uuid().optional(),
-      networkRouteId: z.string().uuid().optional(),
-      linkedComputerSessionId: z.string().uuid().optional(),
+      identityId: primitives.optionalUuid,
+      baseRevisionId: primitives.optionalUuid,
+      networkRouteId: primitives.optionalUuid,
+      linkedComputerSessionId: primitives.optionalUuid,
     })
     .strict()
     .superRefine((value, context) => {
@@ -2955,7 +2969,7 @@ export type CreateBrowserSessionRequest = z.infer<typeof CreateBrowserSessionReq
 export const BrowserSessionListResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      revision: z.number().int().nonnegative(),
+      revision: primitives.nonnegativeInteger,
       sessions: z.array(BrowserSession).max(10_000),
     })
     .strict(),
@@ -2989,7 +3003,7 @@ export type BrowserSessionMutationResponse = z.infer<typeof BrowserSessionMutati
 export const BrowserSessionLifecycleRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
     })
     .strict(),
 );
@@ -3018,8 +3032,8 @@ export type BrowserWorkingCopyRefusal = z.infer<typeof BrowserWorkingCopyRefusal
 export const BrowserWorkingCopyAdoption = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      browserSessionId: z.string().uuid(),
+      operationId: primitives.uuid,
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       manifestDigest: sha256Hex,
       phase: z.enum([
@@ -3036,8 +3050,8 @@ export const BrowserWorkingCopyAdoption = /* @__PURE__ */ defineSchema(() =>
       ]),
       failureCode: z.string().min(1).max(64).nullable(),
       retainedDirectories: z.array(z.string().min(1).max(256)).max(64),
-      createdAt: z.string().datetime({ offset: true }),
-      updatedAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
+      updatedAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -3051,9 +3065,9 @@ export type BrowserWorkingCopyAdoption = z.infer<typeof BrowserWorkingCopyAdopti
 export const BrowserWorkingCopyInspection = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
-      adoptable: z.boolean(),
+      adoptable: primitives.boolean,
       refusal: BrowserWorkingCopyRefusal.nullable(),
       /** Plain explanation of the state and the next action. */
       explanation: z.string().min(1).max(2_048),
@@ -3061,27 +3075,27 @@ export const BrowserWorkingCopyInspection = /* @__PURE__ */ defineSchema(() =>
       manifest: z
         .object({
           digest: sha256Hex,
-          entries: z.number().int().nonnegative(),
-          bytes: z.number().int().nonnegative(),
+          entries: primitives.nonnegativeInteger,
+          bytes: primitives.nonnegativeInteger,
           /** Controller-owned derived entries left out of the copy (journal
            * shared-memory indexes and the per-launch launcher folder). */
           excluded: z.array(z.string().min(1).max(256)).max(16),
         })
         .strict()
         .nullable(),
-      platformSupported: z.boolean(),
-      profileIdentityMatches: z.boolean(),
+      platformSupported: primitives.boolean,
+      profileIdentityMatches: primitives.boolean,
       profileInUse: z.boolean().nullable(),
       receipt: z
         .object({
-          operationId: z.string().uuid(),
+          operationId: primitives.uuid,
           intent: z.enum(["launch", "suspend", "retire", "adopt"]),
           state: z.string().min(1).max(64),
-          directoryLaunchAllowed: z.boolean(),
-          authorityMatches: z.boolean(),
-          launchedFromCheckpoint: z.boolean(),
+          directoryLaunchAllowed: primitives.boolean,
+          authorityMatches: primitives.boolean,
+          launchedFromCheckpoint: primitives.boolean,
           adoption: z
-            .object({ operationId: z.string().uuid(), manifestDigest: sha256Hex })
+            .object({ operationId: primitives.uuid, manifestDigest: sha256Hex })
             .strict()
             .nullable(),
         })
@@ -3092,7 +3106,7 @@ export const BrowserWorkingCopyInspection = /* @__PURE__ */ defineSchema(() =>
           /** How recent the copy's contents are is not machine-proven. */
           status: z.literal("unknown"),
           /** When the browser's latest saved checkpoint was taken, if any. */
-          latestCheckpointAt: z.string().datetime({ offset: true }).nullable(),
+          latestCheckpointAt: primitives.string.datetime({ offset: true }).nullable(),
         })
         .strict(),
       activeAdoption: BrowserWorkingCopyAdoption.nullable(),
@@ -3104,7 +3118,7 @@ export type BrowserWorkingCopyInspection = z.infer<typeof BrowserWorkingCopyInsp
 export const BrowserWorkingCopyAdoptionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       /** The manifest digest from an inspection of the exact bytes to adopt. */
       manifestDigest: sha256Hex,
     })
@@ -3116,7 +3130,7 @@ export const BrowserWorkingCopyAdoptionResponse = /* @__PURE__ */ defineSchema((
   z
     .object({
       /** True while the controller is still running this adoption. */
-      inFlight: z.boolean(),
+      inFlight: primitives.boolean,
       /** Null when the controller has no record of the operation, which
        * proves it changed nothing there. */
       adoption: BrowserWorkingCopyAdoption.nullable(),
@@ -3138,7 +3152,7 @@ export type BrowserOpenTargetRequest = z.infer<typeof BrowserOpenTargetRequest>;
 export const BrowserTargetListResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targets: z.array(BrowserTarget).max(10_000),
     })
@@ -3185,7 +3199,7 @@ const DirectComputerRfbAttachment = /* @__PURE__ */ defineSchema(() =>
       url: boundedUrl,
       protocols: z.array(z.string().min(1).max(2_048)).min(2).max(3),
       /** Absent on an older API means pixel viewing only. */
-      inputAllowed: z.boolean().default(false),
+      inputAllowed: primitives.boolean.default(false),
     })
     .strict(),
 );
@@ -3199,7 +3213,7 @@ function relayInteractionFrameStreamAttachment<const Kind extends 3 | 4>(kind: K
       channel: z
         .object({
           channelId: boundedOpaqueId,
-          workspaceId: z.string().uuid(),
+          workspaceId: primitives.uuid,
           agentId: boundedOpaqueId,
           kind: z.literal(kind),
           port: z.number().int().min(1).max(65_535),
@@ -3234,13 +3248,13 @@ export type InteractionFrameStreamAttachment = z.infer<typeof InteractionFrameSt
 export const BrowserSessionAttachment = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetId: boundedOpaqueId,
       stream: BrowserFrameStreamAttachment,
       fencedInputBatches: z.literal(true).optional(),
       focusedInputObservations: z.literal(true).optional(),
-      expiresAt: z.string().datetime({ offset: true }),
+      expiresAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -3263,7 +3277,7 @@ export type BrowserSessionAttachmentRequest = z.infer<typeof BrowserSessionAttac
 export const BrowserActionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       targetId: boundedOpaqueId,
       // Omitted fences mean "the target's current state at dispatch": the API
       // reads them from the live controller in the same request.
@@ -3280,7 +3294,7 @@ export type BrowserActionRequest = z.infer<typeof BrowserActionRequest>;
 export const BrowserSessionHeartbeatResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       alive: z.literal(true),
     })
@@ -3290,7 +3304,7 @@ export type BrowserSessionHeartbeatResponse = z.infer<typeof BrowserSessionHeart
 
 const resolvedTargetRole = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(64));
 const resolvedTargetText = /* @__PURE__ */ defineSchema(() =>
-  z.string().min(1).max(INTERACTION_MAX_RESOLVED_TARGET_TEXT),
+  primitives.nonEmptyString.max(INTERACTION_MAX_RESOLVED_TARGET_TEXT),
 );
 
 /** The element one locator of an action resolved to, captured before input.
@@ -3328,13 +3342,13 @@ export const BrowserActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-      operationId: z.string().uuid(),
-      browserSessionId: z.string().uuid(),
+      operationId: primitives.uuid,
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetId: boundedOpaqueId,
       state: InteractionOperationState,
-      dispatchedAt: z.string().datetime({ offset: true }).nullable(),
-      settledAt: z.string().datetime({ offset: true }).nullable(),
+      dispatchedAt: primitives.string.datetime({ offset: true }).nullable(),
+      settledAt: primitives.string.datetime({ offset: true }).nullable(),
       observation: BrowserObservation.nullable(),
       error: InteractionError.nullable(),
       /** Elements resolved by locators, in dispatch order. Present only when the
@@ -3375,23 +3389,23 @@ export type BrowserActionReceipt = z.infer<typeof BrowserActionReceipt>;
 export const ComputerSessionCapabilities = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      semanticObservation: z.boolean(),
-      appDiscovery: z.boolean(),
-      appLaunch: z.boolean(),
-      windowCapture: z.boolean(),
-      screenCapture: z.boolean(),
-      semanticActions: z.boolean(),
-      pointerInput: z.boolean(),
+      semanticObservation: primitives.boolean,
+      appDiscovery: primitives.boolean,
+      appLaunch: primitives.boolean,
+      windowCapture: primitives.boolean,
+      screenCapture: primitives.boolean,
+      semanticActions: primitives.boolean,
+      pointerInput: primitives.boolean,
       /** A causal count-2 click requires its exact confirmed first operation. */
-      pointerClickContinuation: z.boolean().optional(),
-      keyboardInput: z.boolean(),
-      clipboard: z.boolean(),
-      backgroundActions: z.boolean(),
+      pointerClickContinuation: primitives.optionalBoolean,
+      keyboardInput: primitives.boolean,
+      clipboard: primitives.boolean,
+      backgroundActions: primitives.boolean,
       /** Raw window input stays in the background. Absent means foreground-only. */
-      backgroundInput: z.boolean().optional(),
+      backgroundInput: primitives.optionalBoolean,
       /** Accepts a ComputerActionBatch as one operation. */
-      actionBatches: z.boolean().optional(),
-      parallelApps: z.boolean(),
+      actionBatches: primitives.optionalBoolean,
+      parallelApps: primitives.boolean,
     })
     .strict(),
 );
@@ -3403,18 +3417,17 @@ export type ComputerSessionCapabilities = z.infer<typeof ComputerSessionCapabili
 export const ComputerClipboard = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      computerSessionId: z.string().uuid(),
+      computerSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
-      text: z
-        .string()
+      text: primitives.string
         .max(INTERACTION_MAX_CLIPBOARD_BYTES)
         .refine(
           (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
           { message: "computer clipboard text exceeds its UTF-8 byte envelope" },
         )
         .nullable(),
-      truncated: z.boolean(),
-      observedAt: z.string().datetime({ offset: true }),
+      truncated: primitives.boolean,
+      observedAt: primitives.string.datetime({ offset: true }),
     })
     .strict()
     .superRefine((clipboard, context) => {
@@ -3432,10 +3445,10 @@ export type ComputerClipboard = z.infer<typeof ComputerClipboard>;
 export const ComputerSession = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      name: z.string().trim().min(1).max(200),
+      id: primitives.uuid,
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      name: primitives.string.trim().min(1).max(200),
       lifecycle: InteractionLifecycle,
       placement: InteractionPlacement,
       controller: InteractionControllerBinding.nullable(),
@@ -3446,8 +3459,8 @@ export const ComputerSession = /* @__PURE__ */ defineSchema(() =>
       capabilities: ComputerSessionCapabilities.nullable(),
       associations: z.array(InteractionAssociation).max(1_000),
       createdBySubjectId: z.string().min(1).max(1_024),
-      createdAt: z.string().datetime({ offset: true }),
-      lastUsedAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
+      lastUsedAt: primitives.string.datetime({ offset: true }),
       failureCode: boundedOpaqueId.nullable(),
     })
     .strict()
@@ -3480,7 +3493,7 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       id: boundedOpaqueId,
-      computerSessionId: z.string().uuid(),
+      computerSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetGeneration: opaqueGeneration,
       kind: z.enum(["app", "window", "screen"]),
@@ -3488,12 +3501,15 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
       processId: z.number().int().positive().nullable(),
       title: z.string().max(4_096),
       bounds: InteractionRect.nullable(),
-      focused: z.boolean(),
+      focused: primitives.boolean,
       /** Present on a window the platform cannot capture or read while it is
        * off screen (macOS: on another Space, such as a full-screen app). A
        * minimized window or a hidden app's window is not marked: reading it
        * brings it back on screen behind the person's front window. */
       offScreen: z.literal(true).optional(),
+      /** Present on the target this computer was last observed or acted on
+       * in, which a call that omits targetId works in. */
+      current: z.literal(true).optional(),
     })
     .strict(),
 );
@@ -3504,14 +3520,14 @@ export const ComputerObservation = /* @__PURE__ */ defineSchema(() =>
     .object({
       protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
       observationId: boundedOpaqueId,
-      computerSessionId: z.string().uuid(),
+      computerSessionId: primitives.uuid,
       target: ComputerTarget,
       frameId: opaqueGeneration.nullable(),
       semantic: z.union([InteractionSemanticSnapshot, InteractionSemanticDiff]).nullable(),
       screenshot: RetainedArtifactReferenceSchema.nullable(),
       focusedRef: boundedOpaqueId.nullable(),
       changedRegions: z.array(InteractionRect).max(INTERACTION_MAX_CHANGED_NODES),
-      observedAt: z.string().datetime({ offset: true }),
+      observedAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -3537,7 +3553,9 @@ const ComputerSemanticAction = /* @__PURE__ */ defineSchema(() =>
         "show_menu",
         "scroll_into_view",
       ]),
-      value: z.union([z.string().max(1_000_000), z.number().finite(), z.boolean()]).optional(),
+      value: z
+        .union([z.string().max(1_000_000), z.number().finite(), primitives.boolean])
+        .optional(),
     })
     .strict()
     .superRefine((action, context) => {
@@ -3577,7 +3595,7 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
         deltaY: z.number().finite().optional(),
         button: z.enum(["left", "right", "middle"]).optional(),
         clickCount: z.union([z.literal(1), z.literal(2)]).optional(),
-        continuationOfOperationId: z.string().uuid().optional(),
+        continuationOfOperationId: primitives.optionalUuid,
       })
       .strict()
       .superRefine((action, context) => {
@@ -3630,8 +3648,7 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
       .object({
         type: z.literal("clipboard"),
         operation: z.enum(["write", "clear", "copy", "paste"]),
-        text: z
-          .string()
+        text: primitives.string
           .max(INTERACTION_MAX_CLIPBOARD_BYTES)
           .refine(
             (value) =>
@@ -3691,8 +3708,8 @@ export const ComputerActionCommand = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-      operationId: z.string().uuid(),
-      computerSessionId: z.string().uuid(),
+      operationId: primitives.uuid,
+      computerSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetId: boundedOpaqueId,
       expectedTargetGeneration: opaqueGeneration,
@@ -3743,19 +3760,54 @@ export const ComputerActionCommand = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerActionCommand = z.infer<typeof ComputerActionCommand>;
 
+/** An action whose locator named a pressable control by role and name, when
+ * nothing of that role had the name and the one control of a role pressed
+ * alike (a button for a link, or a link for a button) with that exact name
+ * was used instead. */
+export const ComputerActionRoleStandIn = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      actionIndex: z
+        .number()
+        .int()
+        .min(0)
+        .max(INTERACTION_MAX_ACTIONS_PER_BATCH - 1),
+      /** The role the locator named. */
+      requestedRole: resolvedTargetRole,
+      /** The role of the element used. */
+      role: resolvedTargetRole,
+      name: resolvedTargetText,
+    })
+    .strict(),
+);
+export type ComputerActionRoleStandIn = z.infer<typeof ComputerActionRoleStandIn>;
+
+/** Query parameter by which a caller asks a computer controller to include
+ * `roleStandIns` in an action receipt. Controllers that predate the field
+ * ignore it, and callers that do not send it receive receipts without it. */
+export const COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER = "receiptRoleStandIns";
+
 export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-      operationId: z.string().uuid(),
-      computerSessionId: z.string().uuid(),
+      operationId: primitives.uuid,
+      computerSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetId: boundedOpaqueId,
       state: InteractionOperationState,
-      dispatchedAt: z.string().datetime({ offset: true }).nullable(),
-      settledAt: z.string().datetime({ offset: true }).nullable(),
+      dispatchedAt: primitives.string.datetime({ offset: true }).nullable(),
+      settledAt: primitives.string.datetime({ offset: true }).nullable(),
       observation: ComputerObservation.nullable(),
       error: InteractionError.nullable(),
+      /** Actions that acted on an element of another role than the one named,
+       * in dispatch order. Present only when the controller supports it and the
+       * caller asked for it; never persisted in the controller's operation
+       * journal, so an idempotent replay omits it. */
+      roleStandIns: z
+        .array(ComputerActionRoleStandIn)
+        .max(INTERACTION_MAX_ACTIONS_PER_BATCH)
+        .optional(),
     })
     .strict()
     .superRefine((receipt, context) => {
@@ -3790,9 +3842,9 @@ export type ComputerActionReceipt = z.infer<typeof ComputerActionReceipt>;
 export const CreateComputerSessionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      sessionId: z.string().uuid(),
-      name: z.string().trim().min(1).max(200).optional(),
+      operationId: primitives.uuid,
+      sessionId: primitives.uuid,
+      name: primitives.string.trim().min(1).max(200).optional(),
       placement: InteractionPlacement.optional(),
     })
     .strict(),
@@ -3802,7 +3854,7 @@ export type CreateComputerSessionRequest = z.infer<typeof CreateComputerSessionR
 export const ComputerSessionListResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      revision: z.number().int().nonnegative(),
+      revision: primitives.nonnegativeInteger,
       sessions: z.array(ComputerSession).max(10_000),
     })
     .strict(),
@@ -3822,7 +3874,7 @@ export type ComputerSessionMutationResponse = z.infer<typeof ComputerSessionMuta
 export const ComputerSessionLifecycleRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
     })
     .strict(),
 );
@@ -3831,7 +3883,7 @@ export type ComputerSessionLifecycleRequest = z.infer<typeof ComputerSessionLife
 export const ComputerTargetListResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      computerSessionId: z.string().uuid(),
+      computerSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targets: z.array(ComputerTarget).max(10_000),
     })
@@ -3845,14 +3897,14 @@ export type ComputerFrameStreamOptions = z.infer<typeof ComputerFrameStreamOptio
 export const ComputerSessionAttachment = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      computerSessionId: z.string().uuid(),
+      computerSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetId: boundedOpaqueId,
       // Viewer posture only. Canonical actions still require live source authority.
       // Older API responses omit it; their existing action authorization remains.
-      inputAllowed: z.boolean().optional(),
+      inputAllowed: primitives.optionalBoolean,
       stream: ComputerFrameStreamAttachment,
-      expiresAt: z.string().datetime({ offset: true }),
+      expiresAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -3863,9 +3915,9 @@ export type ComputerSessionAttachment = z.infer<typeof ComputerSessionAttachment
 export const ComputerSessionInputPosture = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      computerSessionId: z.string().uuid(),
+      computerSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
-      inputAllowed: z.boolean(),
+      inputAllowed: primitives.boolean,
     })
     .strict(),
 );
@@ -3887,7 +3939,7 @@ export type ComputerSessionAttachmentRequest = z.infer<typeof ComputerSessionAtt
 export const ComputerActionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       targetId: boundedOpaqueId,
       expectedTargetGeneration: opaqueGeneration,
       expectedObservationId: boundedOpaqueId.nullable(),
@@ -3930,7 +3982,7 @@ export type ComputerActionRequest = z.infer<typeof ComputerActionRequest>;
 export const ComputerSessionHeartbeatResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      computerSessionId: z.string().uuid(),
+      computerSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       alive: z.literal(true),
     })
@@ -3943,12 +3995,9 @@ export type ComputerSessionHeartbeatResponse = z.infer<typeof ComputerSessionHea
 export const ComputerNativeCallRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
-      tool: z
-        .string()
-        .regex(/^[a-z_]+$/)
-        .max(80),
-      arguments: z.record(z.string(), z.unknown()),
+      operationId: primitives.uuid,
+      tool: primitives.string.regex(/^[a-z_]+$/).max(80),
+      arguments: z.record(primitives.string, z.unknown()),
     })
     .strict(),
 );
@@ -3956,7 +4005,7 @@ export type ComputerNativeCallRequest = z.infer<typeof ComputerNativeCallRequest
 export const ComputerNativeCommand = /* @__PURE__ */ defineSchema(() =>
   ComputerNativeCallRequest.extend({
     protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-    computerSessionId: z.string().uuid(),
+    computerSessionId: primitives.uuid,
     controllerGeneration: opaqueGeneration,
     targetId: z.null(),
     actor: InteractionActor,
@@ -3969,15 +4018,15 @@ export const ComputerNativeResult = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       target: z.null(),
-      computerSessionId: z.string().uuid(),
+      computerSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
-      tool: z.string(),
+      tool: primitives.string,
       // Original MCP content, including partial/refusal evidence and images.
       result: z
         .object({
-          content: z.array(z.record(z.string(), z.unknown())),
+          content: z.array(z.record(primitives.string, z.unknown())),
           structuredContent: z.unknown().optional(),
-          isError: z.boolean().optional(),
+          isError: primitives.optionalBoolean,
         })
         .passthrough(),
       outcome: z.enum(["completed", "failed", "outcome_unknown"]),
@@ -3990,13 +4039,13 @@ export const ComputerNativeReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-      operationId: z.string().uuid(),
-      computerSessionId: z.string().uuid(),
+      operationId: primitives.uuid,
+      computerSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       targetId: z.null(),
       state: InteractionOperationState,
-      dispatchedAt: z.string().datetime({ offset: true }).nullable(),
-      settledAt: z.string().datetime({ offset: true }).nullable(),
+      dispatchedAt: primitives.string.datetime({ offset: true }).nullable(),
+      settledAt: primitives.string.datetime({ offset: true }).nullable(),
       observation: ComputerNativeResult.nullable(),
       error: InteractionError.nullable(),
     })
@@ -4317,7 +4366,7 @@ export type BrowserPasskeyCredentialMaterial = z.infer<typeof BrowserPasskeyCred
 /** A vault passkey item loaded into the session's authenticators. */
 export const BrowserPasskeyCredential = /* @__PURE__ */ defineSchema(() =>
   BrowserPasskeyCredentialMaterial.extend({
-    itemId: z.string().uuid(),
+    itemId: primitives.uuid,
   }).strict(),
 );
 export type BrowserPasskeyCredential = z.infer<typeof BrowserPasskeyCredential>;
@@ -4327,8 +4376,8 @@ export const BrowserPasskeyEvent = /* @__PURE__ */ defineSchema(() =>
     z
       .object({
         type: z.literal("registered"),
-        eventId: z.string().uuid(),
-        occurredAt: z.string().datetime({ offset: true }),
+        eventId: primitives.uuid,
+        occurredAt: primitives.string.datetime({ offset: true }),
         targetId: boundedOpaqueId,
         /** Top-level origin of the page that registered it, when known. */
         origin: z.string().max(2_048).nullable(),
@@ -4338,13 +4387,13 @@ export const BrowserPasskeyEvent = /* @__PURE__ */ defineSchema(() =>
     z
       .object({
         type: z.literal("asserted"),
-        eventId: z.string().uuid(),
-        occurredAt: z.string().datetime({ offset: true }),
+        eventId: primitives.uuid,
+        occurredAt: primitives.string.datetime({ offset: true }),
         targetId: boundedOpaqueId,
         rpId: z.string().min(1).max(253),
         credentialId: passkeyBinary,
         /** Vault item the credential was loaded from; null for one registered in this session and not yet synced. */
-        itemId: z.string().uuid().nullable(),
+        itemId: primitives.nullableUuid,
         signCount: z.number().int().nonnegative().max(0xffff_ffff),
       })
       .strict(),
@@ -4361,13 +4410,13 @@ export const BrowserPasskeySyncRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       credentials: z
         .array(BrowserPasskeyCredential)
         .max(BROWSER_MAX_PASSKEY_CREDENTIALS)
         .nullable(),
-      acknowledgeEventIds: z.array(z.string().uuid()).max(BROWSER_MAX_PASSKEY_EVENTS),
+      acknowledgeEventIds: z.array(primitives.uuid).max(BROWSER_MAX_PASSKEY_EVENTS),
     })
     .strict(),
 );
@@ -4376,10 +4425,10 @@ export type BrowserPasskeySyncRequest = z.infer<typeof BrowserPasskeySyncRequest
 export const BrowserPasskeySyncResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      browserSessionId: z.string().uuid(),
+      browserSessionId: primitives.uuid,
       controllerGeneration: opaqueGeneration,
       /** Page targets that currently host a virtual authenticator. */
-      authenticators: z.number().int().nonnegative(),
+      authenticators: primitives.nonnegativeInteger,
       events: z.array(BrowserPasskeyEvent).max(BROWSER_MAX_PASSKEY_EVENTS),
     })
     .strict(),

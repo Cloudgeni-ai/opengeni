@@ -58,6 +58,7 @@
       [
         "../../packages/react-native/app.plugin.js",
         {
+          "recording": true,
           "call": {
             "title": "Call Opengeni",
             "description": "Start a voice call with your agent.",

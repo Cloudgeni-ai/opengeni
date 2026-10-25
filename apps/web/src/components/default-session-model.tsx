@@ -229,10 +229,10 @@ export function DefaultSessionModelPreferenceRow(props: {
   const selectedModel = catalog.models.find((model) => model.id === draft.model) ?? null;
   const payer = selectedModel && props.describePayer ? props.describePayer(selectedModel) : null;
   const starts = organizationScope
-    ? "New chats and schedules in every workspace start with this model."
+    ? "New chats and automations in every workspace start with this model."
     : payer
-      ? `New chats and schedules start with this model, ${payer}.`
-      : "New chats and schedules start with this model.";
+      ? `New chats and automations start with this model, ${payer}.`
+      : "New chats and automations start with this model.";
   // A workspace's own catalog says what can run there; the organization's
   // default is checked in each workspace instead.
   const cantRun =

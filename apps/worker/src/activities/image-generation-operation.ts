@@ -88,6 +88,14 @@ export type ExecuteImageGenerationOperationInput = {
   prompt: string;
   referenceDigests?: readonly Readonly<{ mediaType: string; sha256: string }>[];
   /**
+   * Opengeni-credit customer price frozen at admission. A priced operation is
+   * admitted against the workspace's credits before dispatch and debited in
+   * the same transaction that makes its image ready.
+   */
+  pricedCostMicros?: number;
+  /** The turn's canonical chat model; its plan and trial grants may pay. */
+  creditUsageModelId?: string;
+  /**
    * Provider-specific proof that a thrown error occurred before the paid
    * provider boundary was crossed. Such a failure may return the operation to
    * `prepared`; every other generation error remains outcome-ambiguous after
@@ -126,6 +134,10 @@ export async function executeImageGenerationOperation(
     modelId: input.modelId,
     requestDigest: identity.requestDigest,
     expectedArtifactId: identity.artifactId,
+    ...(input.pricedCostMicros ? { pricedCostMicros: input.pricedCostMicros } : {}),
+    ...(input.pricedCostMicros && input.creditUsageModelId
+      ? { creditUsageModelId: input.creditUsageModelId }
+      : {}),
   });
 
   if (prepared.operation.status !== "prepared") {
@@ -200,6 +212,7 @@ export async function executeImageGenerationOperation(
       providerId: input.providerId,
       providerBindingHash: input.providerBindingHash,
       output,
+      operation: { operationId: identity.operationId, operationKey: identity.operationKey },
     });
     await ports.complete(input.db, {
       accountId: input.accountId,
@@ -331,6 +344,7 @@ async function recoverCompletedImage(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     artifact,
+    operation: { operationId: identity.operationId, operationKey: identity.operationKey },
   });
   if (!recovered) return null;
   await verifyReadyGeneratedImageArtifact(input.objectStorage, recovered);

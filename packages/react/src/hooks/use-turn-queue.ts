@@ -60,6 +60,14 @@ export type AcceptedQueueSteer = {
   state: "sending" | "queued";
 };
 
+/** Outcome of withdrawing one waiting prompt back into an empty composer. */
+export type QueueRecallResult =
+  | { status: "recalled"; draft: ComposerDraft }
+  /** The prompt left the queue first (the agent took it); nothing changed. */
+  | { status: "already_sent" }
+  /** Anything else (offline, draft changed, a mutation in flight); the queue shows why. */
+  | { status: "failed" };
+
 export type UseTurnQueueOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
@@ -87,6 +95,14 @@ export type UseTurnQueueResult = {
     turnId: string,
     options: { expectedDraftRevision: number; replaceDraft: boolean },
   ) => Promise<ComposerDraft | null>;
+  /**
+   * Withdraw a waiting prompt into an empty durable composer draft. Losing the
+   * race to the agent is a quiet `already_sent`, not a queue error.
+   */
+  recallTurn?: (
+    turnId: string,
+    options: { expectedDraftRevision: number },
+  ) => Promise<QueueRecallResult>;
   /** Advance the same durable waiting prompt; no duplicate prompt is created. */
   steerTurn: (turnId: string) => Promise<boolean>;
   removeTurn: (turnId: string) => Promise<boolean>;
@@ -349,6 +365,7 @@ export function useTurnQueue(
         turn: SessionTurn,
         clientEventId: string,
       ) => Promise<SessionQueueMutationResponse>,
+      failure: { quietWhenGone?: boolean } = {},
     ): Promise<SessionQueueMutationResponse | null> => {
       const ownedTargetKey = targetKey;
       if (!sessionId || targetKeyRef.current !== ownedTargetKey || pendingRef.current[turnId]) {
@@ -377,8 +394,20 @@ export function useTurnQueue(
         return result;
       } catch (cause) {
         if (targetKeyRef.current === ownedTargetKey) {
-          setMutationError(asError(cause));
-          await load();
+          if (failure.quietWhenGone) {
+            // Reconcile first: a prompt that already left the queue is the
+            // caller's quiet outcome, never a flash of queue error.
+            await load();
+            const stillWaiting = snapshotRef.current?.items.some(
+              (candidate) => candidate.id === turnId,
+            );
+            if (stillWaiting !== false && targetKeyRef.current === ownedTargetKey) {
+              setMutationError(asError(cause));
+            }
+          } else {
+            setMutationError(asError(cause));
+            await load();
+          }
         }
         return null;
       } finally {
@@ -423,6 +452,36 @@ export function useTurnQueue(
       return result?.draft ?? null;
     },
     [client, mutate, sessionId, workspaceId],
+  );
+
+  const recallTurn = useCallback(
+    async (
+      turnId: string,
+      recall: { expectedDraftRevision: number },
+    ): Promise<QueueRecallResult> => {
+      const ownedTargetKey = targetKey;
+      const known = snapshotRef.current?.items.some((candidate) => candidate.id === turnId);
+      if (known === false) return { status: "already_sent" };
+      const result = await mutate(
+        turnId,
+        "edit",
+        (_current, turn, clientEventId) =>
+          client.editQueueItem(workspaceId, sessionId!, turnId, {
+            clientEventId,
+            expectedTurnVersion: turn.version,
+            expectedDraftRevision: recall.expectedDraftRevision,
+            replaceDraft: false,
+          }),
+        { quietWhenGone: true },
+      );
+      if (targetKeyRef.current !== ownedTargetKey) return { status: "failed" };
+      if (result?.draft) return { status: "recalled", draft: result.draft };
+      const stillWaiting = snapshotRef.current?.items.some((candidate) => candidate.id === turnId);
+      return result === null && stillWaiting === false
+        ? { status: "already_sent" }
+        : { status: "failed" };
+    },
+    [client, mutate, sessionId, targetKey, workspaceId],
   );
 
   const steerTurn = useCallback(
@@ -526,6 +585,7 @@ export function useTurnQueue(
     refresh: load,
     moveTurn,
     editTurn,
+    recallTurn,
     steerTurn,
     removeTurn,
     pendingByTurn: visiblePendingByTurn,

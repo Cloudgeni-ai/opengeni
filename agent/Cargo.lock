@@ -1971,7 +1971,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opengeni-agent"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -1997,6 +1997,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -2017,7 +2018,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-files-ffi"
-version = "0.1.126"
+version = "0.1.140"
 
 [[package]]
 name = "opengeni-agent-harness"
@@ -2042,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-linux-ffi"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "libc",
  "tokio",
@@ -2050,7 +2051,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-macos-ffi"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "accessibility-sys",
  "block2",
@@ -2069,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-pipewire-ffi"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "libc",
  "thiserror 2.0.20",
@@ -2077,7 +2078,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-platform"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2105,7 +2106,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-proto"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "prost",
  "prost-build",
@@ -2114,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-stream"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2131,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-update"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "blake3",
  "hex",
@@ -2151,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-windows-ffi"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "thiserror 2.0.20",
  "windows-sys 0.61.2",
@@ -2159,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-computer-native"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "arboard",
  "async-lock",
@@ -2191,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-relay"
-version = "0.1.126"
+version = "0.1.140"
 dependencies = [
  "async-trait",
  "axum",
@@ -3076,6 +3077,16 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signal-hook"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
 
 [[package]]
 name = "signal-hook-registry"

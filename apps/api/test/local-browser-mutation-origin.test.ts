@@ -1,10 +1,18 @@
 import { Hono } from "hono";
 import { describe, expect, test } from "bun:test";
 
-import { requireSameOriginBrowserMutation } from "../src/http/browser-mutation-origin";
+import {
+  requireSameOriginBrowserMutation,
+  trustedBrowserOrigins,
+} from "../src/http/browser-mutation-origin";
 
 function app(
-  settings: { productAccessMode: string; publicBaseUrl: string | null } = {
+  settings: {
+    productAccessMode: string;
+    publicBaseUrl: string | null;
+    webBaseUrl?: string;
+    betterAuthTrustedOrigins?: string;
+  } = {
     productAccessMode: "local",
     publicBaseUrl: null,
   },
@@ -84,5 +92,38 @@ describe("managed browser mutation origin", () => {
         })
       ).status,
     ).toBe(503);
+  });
+
+  test("accepts a trusted second hostname of the same deployment", async () => {
+    const twoHosts = {
+      ...managed,
+      betterAuthTrustedOrigins: " https://app.example.test , https://agents.example.org ",
+    };
+    expect((await request("https://agents.example.org", "same-origin", url, twoHosts)).status).toBe(
+      200,
+    );
+    expect((await request("https://app.example.test", "same-origin", url, twoHosts)).status).toBe(
+      200,
+    );
+    expect((await request("https://agents.example.org", "same-site", url, twoHosts)).status).toBe(
+      403,
+    );
+    expect((await request("https://attacker.test", "same-origin", url, twoHosts)).status).toBe(403);
+  });
+});
+
+describe("trusted browser origins", () => {
+  test("normalizes configured URLs to origins and skips invalid entries", () => {
+    expect(
+      trustedBrowserOrigins({
+        publicBaseUrl: "https://app.example.test/base/",
+        webBaseUrl: "https://web.example.test:8443/",
+        betterAuthTrustedOrigins: "https://app.example.test,not a url,,https://agents.example.org",
+      }),
+    ).toEqual([
+      "https://app.example.test",
+      "https://web.example.test:8443",
+      "https://agents.example.org",
+    ]);
   });
 });

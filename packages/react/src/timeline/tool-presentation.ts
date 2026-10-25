@@ -886,6 +886,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   askForHelp: "help",
   // Notes, knowledge and instructions
   checkNotes: "brain",
+  checkMeetings: "record",
   saveNote: "brain",
   archiveNote: "brain",
   proposeUpdate: "brain",
@@ -964,6 +965,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   replyToPost: "share",
   // Scheduled tasks
   checkSchedules: "calendar",
+  checkEvents: "calendar",
   createSchedule: "calendar",
   updateSchedule: "calendar",
   runSchedule: "calendar",

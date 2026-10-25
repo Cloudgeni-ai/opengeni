@@ -6,10 +6,13 @@ import {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   SiteOpenedResponse,
+  SiteSidebarStateResponse,
+  UpdateSiteSidebarStateRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
   WorkspaceArtifactContentResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListQuery,
   WorkspaceArtifactListResponse,
@@ -34,8 +37,10 @@ import {
   duplicateWorkspaceArtifact,
   getWorkspaceArtifact,
   getWorkspaceArtifactContentRef,
+  getWorkspaceArtifactCurrent,
   listWorkspaceArtifacts,
   recordSiteOpened,
+  setSiteSidebarState,
   nestedPostgresSqlState,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
@@ -60,6 +65,7 @@ import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
   redactWorkspaceArtifactListProvenance,
+  redactWorkspaceArtifactProvenance,
 } from "../workspace-artifact-provenance";
 
 import {
@@ -235,8 +241,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     }
   });
 
-  // Opening a Site counts as this person's activity on its sidebar row. It is
-  // personal, needs only read access, and a Site page cannot record it.
+  // Opening a Site lists it in this person's sidebar; it is not activity and
+  // never moves the row. It is personal, needs only read access, and a Site
+  // page cannot record it.
   app.post(`${base}/:artifactId/opened`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
@@ -254,6 +261,36 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
             subjectId: viewer.subjectId,
             viewer,
             siteId,
+          }),
+        ),
+      );
+    } catch (error) {
+      return workspaceArtifactErrorResponse(context, error);
+    }
+  });
+
+  // Pin or archive a Site row in this person's own sidebar. Personal like a
+  // session pin, so it needs only read access; archive hides the row for them
+  // and never changes the Site's publication or audience.
+  app.put(`${base}/:artifactId/sidebar`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    if (currentSiteSessionOrigin())
+      throw new HTTPException(403, { message: "A Site page cannot change the sidebar" });
+    const siteId = artifactId(context);
+    const change = await body(context, UpdateSiteSidebarStateRequest);
+    const viewer = await siteViewerForGrant(deps.db, grant);
+    if (!viewer.subjectId)
+      throw new HTTPException(403, { message: "A signed-in person is required" });
+    try {
+      return context.json(
+        SiteSidebarStateResponse.parse(
+          await setSiteSidebarState(deps.db, {
+            workspaceId,
+            subjectId: viewer.subjectId,
+            viewer,
+            siteId,
+            ...change,
           }),
         ),
       );
@@ -371,6 +408,29 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
             canReadProvenanceSession(deps, grant, sessionId),
           ),
         ),
+      );
+    } catch (error) {
+      return workspaceArtifactErrorResponse(context, error);
+    }
+  });
+
+  // The Site and its current version without its history, for a view that
+  // checks every few seconds whether a new version is live. Provenance is
+  // left out, as in lists, so the check needs no session reads.
+  app.get(`${base}/:artifactId/current`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    try {
+      const artifact = await getWorkspaceArtifactCurrent(
+        deps.db,
+        workspaceId,
+        await siteViewerForGrant(deps.db, grant),
+        artifactId(context),
+      );
+      return context.json(
+        WorkspaceArtifactCurrentResponse.parse({
+          artifact: redactWorkspaceArtifactProvenance(artifact),
+        }),
       );
     } catch (error) {
       return workspaceArtifactErrorResponse(context, error);

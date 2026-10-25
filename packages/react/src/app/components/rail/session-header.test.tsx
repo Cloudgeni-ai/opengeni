@@ -147,7 +147,7 @@ test("reuses the compact Schedule button without requiring creation metadata", a
       onToggleInspector={() => undefined}
       onRename={async () => null}
       onPin={async () => null}
-      onOpenSchedule={
+      onOpenAutomations={
         linked
           ? () => {
               opened++;
@@ -158,15 +158,15 @@ test("reuses the compact Schedule button without requiring creation metadata", a
   );
   try {
     await act(async () => root.render(render(true)));
-    const button = container.querySelector<HTMLButtonElement>(
-      'button[title="Open schedules for this session"]',
-    );
-    expect(button?.textContent?.trim()).toBe("Schedule");
+    const button = container.querySelector<HTMLButtonElement>("button[data-automation-wait]");
+    expect(button?.getAttribute("data-automation-wait")).toBe("schedule");
+    expect(button?.title).toBe("On a schedule. Open this chat's automations.");
+    expect(button?.textContent?.trim()).toBe("On a schedule");
     await act(async () => button?.click());
     expect(opened).toBe(1);
     await act(async () => root.render(render(false)));
-    expect(container.querySelector('button[title="Open schedules for this session"]')).toBeNull();
-    // A paused or finished schedule still links to its settings, marked inactive.
+    expect(container.querySelector("button[data-automation-wait]")).toBeNull();
+    // A paused or finished automation still links to its settings, marked inactive.
     await act(async () =>
       root.render(
         <SessionHeader
@@ -180,19 +180,122 @@ test("reuses the compact Schedule button without requiring creation metadata", a
           onToggleInspector={() => undefined}
           onRename={async () => null}
           onPin={async () => null}
-          onOpenSchedule={() => {
+          onOpenAutomations={() => {
             opened++;
           }}
         />,
       ),
     );
     const inactive = container.querySelector<HTMLButtonElement>(
-      'button[title="No upcoming runs. Open schedules for this session"]',
+      'button[data-automation-wait="none"]',
     );
-    expect(inactive?.textContent?.trim()).toBe("Schedule");
-    expect(inactive?.querySelector("svg")?.getAttribute("class")).toContain("lucide-calendar-off");
+    expect(inactive?.title).toBe("Nothing upcoming. Open this chat's automations.");
+    expect(inactive?.textContent?.trim()).toBe("Automation");
+    expect(inactive?.querySelector("svg")?.getAttribute("class")).toContain("lucide-zap-off");
     await act(async () => inactive?.click());
     expect(opened).toBe(2);
+    // An automation an event can still wake says so.
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{ ...session, hasSchedules: true, waitingForEvents: true }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          onOpenAutomations={() => undefined}
+        />,
+      ),
+    );
+    const listening = container.querySelector<HTMLButtonElement>(
+      'button[data-automation-wait="event"]',
+    );
+    expect(listening?.title).toBe("Waiting for an event. Open this chat's automations.");
+    expect(listening?.textContent?.trim()).toBe("Waiting on an event");
+    expect(listening?.querySelector("svg")?.getAttribute("class")).toContain("lucide-zap");
+    // With the details, the pill names the source and its tooltip the event.
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{
+            ...session,
+            hasSchedules: true,
+            waitingForEvents: true,
+            automationWait: {
+              nextRunAt: null,
+              event: {
+                source: { kind: "github", name: "GitHub" },
+                eventTypes: ["check_suite.completed"],
+              },
+              automations: 1,
+            },
+          }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          onOpenAutomations={() => undefined}
+        />,
+      ),
+    );
+    const detailed = container.querySelector<HTMLButtonElement>(
+      'button[data-automation-wait="event"]',
+    );
+    expect(detailed?.title).toBe(
+      "Waiting for check_suite.completed from GitHub. Open this chat's automations.",
+    );
+    expect(detailed?.textContent?.trim()).toBe("Waiting on GitHub");
+    // Two automations on two apps: the pill names both, not only the first.
+    const checks = {
+      source: { kind: "github" as const, name: "GitHub" },
+      eventTypes: ["check_suite.completed"],
+    };
+    const mail = {
+      source: { kind: "gmail" as const, name: "Gmail" },
+      eventTypes: ["message.received"],
+    };
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{
+            ...session,
+            hasSchedules: true,
+            waitingForEvents: true,
+            automationWait: {
+              nextRunAt: null,
+              event: checks,
+              events: [checks, mail],
+              automations: 2,
+            },
+          }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          onOpenAutomations={() => undefined}
+        />,
+      ),
+    );
+    const both = container.querySelector<HTMLButtonElement>('button[data-automation-wait="event"]');
+    expect(both?.title).toBe(
+      "Waiting for check_suite.completed from GitHub or message.received from Gmail. Open this chat's automations.",
+    );
+    expect(both?.textContent?.trim()).toBe("Waiting on GitHub and Gmail");
   } finally {
     await act(async () => root.unmount());
     container.remove();

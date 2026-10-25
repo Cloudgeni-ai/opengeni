@@ -252,14 +252,42 @@ describe("SessionRowHoverDetails", () => {
     expect(text).not.toContain("Maja Berg");
   });
 
-  test("schedule and Site origins appear when relevant", () => {
+  test("automation and Site origins appear when relevant", () => {
     expect(render(entry({ scheduledTaskId: "task-1" })).textContent).toContain(
-      "Started by a schedule",
+      "Started by an automation",
     );
     expect(render(entry({ hasSchedules: true })).textContent).toContain("On a schedule");
     expect(render(entry({ hasSchedules: true, hasUpcomingSchedules: true })).textContent).toContain(
       "On a schedule",
     );
+    // An event can arrive at any moment, so it outranks the next scheduled run
+    // and the automation that started the chat.
+    expect(
+      render(
+        entry({
+          scheduledTaskId: "task-1",
+          hasSchedules: true,
+          hasUpcomingSchedules: true,
+          waitingForEvents: true,
+        }),
+      ).textContent,
+    ).toContain("Waiting for an event");
+    // With the details, it says which event, from where, and the next run.
+    expect(
+      render(
+        entry({
+          waitingForEvents: true,
+          automationWait: {
+            nextRunAt: null,
+            event: {
+              source: { kind: "github", name: "GitHub" },
+              eventTypes: ["pull_request.opened"],
+            },
+            automations: 1,
+          },
+        }),
+      ).textContent,
+    ).toContain("Waiting for pull_request.opened from GitHub");
     // A paused schedule, or a one-time schedule whose time passed, is not upcoming.
     expect(
       render(entry({ hasSchedules: true, hasUpcomingSchedules: false })).textContent,

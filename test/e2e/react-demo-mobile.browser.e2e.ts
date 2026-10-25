@@ -99,8 +99,8 @@ describe("public React demo mobile product acceptance", () => {
         await page.getByRole("heading", { name: "Fleet", exact: true }).waitFor();
         expect(new URL(page.url()).hash).toBe("#fleet");
 
-        await navigation.getByRole("button", { name: "Schedules", exact: true }).click();
-        await page.getByRole("heading", { name: "Scheduled tasks" }).waitFor();
+        await navigation.getByRole("button", { name: "Automations", exact: true }).click();
+        await page.getByRole("heading", { name: "Automations" }).waitFor();
         expect(new URL(page.url()).hash).toBe("#schedules");
 
         await navigation.getByRole("button", { name: "Workspace", exact: true }).click();
@@ -108,12 +108,12 @@ describe("public React demo mobile product acceptance", () => {
         expect(
           await page.getByRole("tab", { name: "Files", exact: true }).getAttribute("aria-selected"),
         ).toBe("true");
-        await page.getByRole("button", { name: "Close workspace" }).click();
+        await page.getByRole("button", { name: "Hide workspace" }).click();
         await visibleWorkspaceDialog(page).waitFor({ state: "hidden" });
       } else {
         expect(await page.getByRole("navigation", { name: "Demo views" }).count()).toBe(0);
         expect(await page.getByRole("heading", { name: "Fleet", exact: true }).count()).toBe(1);
-        expect(await page.getByRole("heading", { name: "Scheduled tasks" }).count()).toBe(1);
+        expect(await page.getByRole("heading", { name: "Automations" }).count()).toBe(1);
         expect(await page.locator("[data-workspace-surface]").count()).toBeGreaterThan(0);
       }
 
@@ -180,7 +180,8 @@ describe("public React demo mobile product acceptance", () => {
     const workspace = visibleWorkspaceDialog(page);
     await workspace.waitFor();
     expect(await page.evaluate(() => document.activeElement?.getAttribute("role"))).toBe("tab");
-    await page.keyboard.press("ArrowRight");
+    // The workspace panel tabs are a vertical tablist.
+    await page.keyboard.press("ArrowDown");
     expect(
       await page.getByRole("tab", { name: "Terminal", exact: true }).getAttribute("aria-selected"),
     ).toBe("true");
@@ -225,8 +226,8 @@ describe("public React demo mobile product acceptance", () => {
     expect(await page.evaluate(() => navigator.onLine)).toBe(false);
     await navigation.getByRole("button", { name: "Fleet", exact: true }).click();
     await page.getByRole("heading", { name: "Fleet", exact: true }).waitFor();
-    await navigation.getByRole("button", { name: "Schedules", exact: true }).click();
-    await page.getByRole("heading", { name: "Scheduled tasks" }).waitFor();
+    await navigation.getByRole("button", { name: "Automations", exact: true }).click();
+    await page.getByRole("heading", { name: "Automations" }).waitFor();
     await navigation.getByRole("button", { name: "Session", exact: true }).click();
     await page.getByRole("heading", { name: "Staging operations" }).waitFor();
     await textbox.fill("Keep the loaded scripted demo usable offline.");

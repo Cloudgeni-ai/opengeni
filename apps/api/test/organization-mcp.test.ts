@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
@@ -17,11 +18,20 @@ import {
   registeredApiRoutes,
   type ActionCatalogEntry,
 } from "../../../scripts/public-api/action-catalog";
-import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
+import * as primitives from "../../../packages/contracts/src/primitives";
+import { secretValue, secretValues } from "@opengeni/contracts";
+import {
+  ACTION_PLAIN_STRING_MAPS,
+  ACTION_SECRET_FIELD_EXCEPTIONS,
+  actionFieldPaths as allFieldPaths,
+  actionSecretFields,
+  schemaSecretFields,
+  unclassifiedStringMaps,
+} from "../../../scripts/public-api/action-secrets";
+import { ACTION_CATALOG, READ_ONLY_POST_ACTIONS } from "@opengeni/contracts/app-actions";
 import {
   buildOrganizationMcpServer,
   organizationMcpIcons,
-  READ_ONLY_POST_ACTIONS,
   type OrganizationMcpCaller,
   searchActions,
 } from "../src/organization-mcp";
@@ -144,6 +154,81 @@ describe("organization MCP action catalog", () => {
     ])
       expect(listed.has(key)).toBe(true);
     expect(listed.has("POST /v1/identity/login-bindings/:bindingId/recovery")).toBe(false);
+    expect(listed.has("POST /v1/integrations/teams/messages")).toBe(false);
+  });
+
+  test("marks every action that carries a secret, from its schemas, unless an exception says why not", () => {
+    // The catalog's marks are exactly what the schemas say: a new action with
+    // a secret field is marked when the catalog is regenerated, and this fails
+    // until it is (or until an exception in action-secrets.ts gives a reason).
+    for (const entry of ACTION_CATALOG) {
+      expect([entry.id, entry.secretFields ?? []]).toEqual([entry.id, actionSecretFields(entry)]);
+    }
+    // The rule itself, on a schema no route uses.
+    const sample = z.object({
+      apiKey: z.string(),
+      credentialVersion: z.number(),
+      hasWebhookSecret: z.boolean(),
+      credential: z.object({ connectionId: z.string() }),
+      bundle: z.object({ credentials: z.record(z.string(), z.string()) }),
+      nested: z.array(z.object({ clientSecret: z.string().optional() })),
+      references: z.object({ otp: z.string() }),
+      previewToken: z.string(),
+      code: z.string(),
+      status: z.object({ errorCode: z.string(), code: z.string() }),
+      kind: z.enum(["token", "secret"]),
+    });
+    expect(schemaSecretFields(sample, "request")).toEqual([
+      "request.apiKey",
+      "request.bundle.credentials",
+      "request.code",
+      "request.nested[].clientSecret",
+    ]);
+    expect(schemaSecretFields(sample, "response")).toEqual([
+      "response.apiKey",
+      "response.bundle.credentials",
+      "response.nested[].clientSecret",
+    ]);
+    // A field marked secret in its contract counts whatever it is called; an
+    // unmarked bundle with a plain name doesn't.
+    const marked = z.object({
+      headers: secretValue(z.record(z.string(), z.string())).optional(),
+      values: z.record(z.string(), z.string()),
+      items: z.array(z.object({ blob: secretValue(z.string()) })),
+    });
+    expect(schemaSecretFields(marked, "request")).toEqual([
+      "request.headers",
+      "request.items[].blob",
+    ]);
+    // Marks belong to one field's schema, never a shared primitive.
+    for (const [name, value] of Object.entries(primitives))
+      if (value instanceof z.ZodType)
+        expect([name, secretValues.has(value)]).toEqual([name, false]);
+    // Every open map of strings (the shape of a header or credential bundle)
+    // is either marked secret or listed as plain with its reason.
+    for (const entry of ACTION_CATALOG)
+      for (const [side, names] of [
+        ["request", entry.request],
+        ["response", entry.response],
+      ] as const)
+        for (const name of names)
+          expect([entry.id, name, unclassifiedStringMaps(name, side)]).toEqual([
+            entry.id,
+            name,
+            [],
+          ]);
+    // Every exception still matches something, so none outlives its reason.
+    const everyPath = ACTION_CATALOG.flatMap((entry) =>
+      [
+        ...entry.request.map((name) => ["request", name] as const),
+        ...entry.response.map((name) => ["response", name] as const),
+      ].flatMap(([side, name]) => allFieldPaths(name, side)),
+    );
+    for (const exception of [...ACTION_SECRET_FIELD_EXCEPTIONS, ...ACTION_PLAIN_STRING_MAPS])
+      expect([exception.reason, everyPath.some((path) => exception.path.test(path))]).toEqual([
+        exception.reason,
+        true,
+      ]);
   });
 
   test("marks exactly the actions no agent can do as the person", () => {
@@ -170,6 +255,11 @@ describe("organization MCP action catalog", () => {
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId",
         "GET /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
+        // Teams setup and account linking require the person's verified browser.
+        "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "POST /v1/workspaces/:workspaceId/integrations/teams/link",
+        "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
         // a task's usage limit bounds agent spending; agents never change it.
         "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
       ].sort(),
@@ -361,6 +451,31 @@ describe("organization MCP server", () => {
     expect(described.pathParameters).toEqual(["workspaceId"]);
     expect(described.input[0]!.in).toBe("body");
     expect(described.input[0]!.schema).toMatchObject({ type: "object" });
+  });
+
+  test("vault actions describe their bodies and queries", async () => {
+    const { call } = await connect(person(full));
+    const describeAction = async (id: string) =>
+      (await call("opengeni_action_describe", { id })).value as {
+        input: Array<{ name: string; in: string; schema: Record<string, any> | null }>;
+      };
+    const update = await describeAction("PATCH /v1/workspaces/:workspaceId/vaults/:vaultId");
+    expect(update.input[0]).toMatchObject({ name: "UpdateVaultRequest", in: "body" });
+    expect(update.input[0]!.schema!.required).toContain("expectedGeneration");
+    const remove = await describeAction("DELETE /v1/workspaces/:workspaceId/vaults/:vaultId");
+    expect(remove.input[0]).toMatchObject({ name: "DeleteVaultRequest", in: "body" });
+    expect(remove.input[0]!.schema!.required).toEqual(["confirmName"]);
+    const link = await describeAction("POST /v1/workspaces/:workspaceId/vaults/link");
+    expect(link.input[0]).toMatchObject({ name: "LinkProviderVaultRequest", in: "body" });
+    expect(link.input[0]!.schema).toMatchObject({ type: "object" });
+    const items = await describeAction("GET /v1/workspaces/:workspaceId/vaults/:vaultId/items");
+    expect(items.input[0]).toMatchObject({ name: "ListVaultItemsQuery", in: "query" });
+    expect(Object.keys(items.input[0]!.schema!.properties)).toContain("includeArchived");
+    const approval = await describeAction(
+      "PUT /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
+    );
+    expect(approval.input[0]).toMatchObject({ name: "SetVaultItemApprovalRequest", in: "body" });
+    expect(approval.input[0]!.schema).toMatchObject({ type: "object" });
   });
 
   test("publication fixes describe both required bodies and invoke the route contract", async () => {

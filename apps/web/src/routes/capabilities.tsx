@@ -114,6 +114,8 @@ import { useOneDriveIntegration } from "@/components/capabilities/use-onedrive-i
 import { useOutlookCalendarIntegration } from "@/components/capabilities/use-outlook-calendar-integration";
 import { useOutlookContactsIntegration } from "@/components/capabilities/use-outlook-contacts-integration";
 import { useOutlookMailIntegration } from "@/components/capabilities/use-outlook-mail-integration";
+import { useTeamsBotIntegration } from "@/components/capabilities/use-teams-bot-integration";
+import { useMicrosoftTeamsIntegration } from "@/components/capabilities/use-microsoft-teams-integration";
 import {
   canManageSlackReactionSummon,
   useSlackIntegration,
@@ -123,6 +125,7 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { cn } from "@opengeni/react/app/lib/utils";
+import { PrReviewAutomationCard } from "@/components/capabilities/pr-review-automation-card";
 import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
@@ -272,6 +275,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const context = useAppContext();
 
   const client = context.client;
+  // Where event triggers run, pull-request review is an automation.
+  const eventTriggersEnabled = context.clientConfig.eventTriggers?.enabled === true;
   const onRuntimeChanged = useCallback(
     () => void context.refreshWorkspaceMcpServers(workspaceId),
     [context, workspaceId],
@@ -544,6 +549,15 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // curated definition here is oauth2-only, so a single shared effect (below)
   // handles the OAuth return for all of them.
   useApiIntegrationOAuthCallback({ workspaceId, refresh, onRuntimeChanged });
+  const teamsBot = useTeamsBotIntegration({ workspaceId, refreshRevision: catalogData.revision });
+  const microsoftTeams = useMicrosoftTeamsIntegration({
+    workspaceId,
+    definitions: apiIntegrationDefinitions,
+    instances: apiIntegrationInstances,
+    refresh,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
+  });
   const outlookMail = useOutlookMailIntegration({
     workspaceId,
     definitions: apiIntegrationDefinitions,
@@ -591,6 +605,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     ...(atlassian.hasHistoricalConnection
       ? [{ ...atlassian, model: connectionAccessModel(atlassian.model, connectionsAccessDenied) }]
       : []),
+    ...(teamsBot.visible ? [teamsBot] : []),
+    microsoftTeams,
     outlookMail,
     outlookCalendar,
     outlookContacts,
@@ -1292,7 +1308,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       params.get("reason") === "google_drive_native_retired"
     ) {
       setCallbackNotice(
-        "The previous Google Drive integration is retired. Connect Google Drive MCP and use a normal schedule for recurring work. Your imported documents and history are kept.",
+        "The previous Google Drive integration is retired. Connect Google Drive MCP and use an automation for recurring work. Your imported documents and history are kept.",
       );
       clearReturnParams();
     }
@@ -2219,10 +2235,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       }}
                     />
                     {activeTab === "plugins" ? (
-                      <div className="mt-6">
+                      <div className="mt-6 grid gap-4">
+                        {eventTriggersEnabled ? (
+                          <PrReviewAutomationCard workspaceId={workspaceId} />
+                        ) : null}
                         <PrReviewSetupCard
                           client={client}
                           workspaceId={workspaceId}
+                          retiring={eventTriggersEnabled}
                           canManage={
                             canManageApiIntegrationInstances &&
                             hasWorkspacePermission(

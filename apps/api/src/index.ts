@@ -32,6 +32,8 @@ import {
   createObservability,
   installCpuSamplingSignal,
   logStartupDependencyRetry,
+  traceClientCalls,
+  traceFetch,
   type Observability,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
@@ -56,6 +58,7 @@ import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
+import { startTeamsBotPump } from "./integrations/teams-bot";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
@@ -64,7 +67,11 @@ import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
-import { startEventIntakePrunePump, startEventTriggerDispatchPump } from "./event-trigger-dispatch";
+import {
+  startEventIntakePrunePump,
+  startEventTriggerDispatchPump,
+  startEventSubscriptionPump,
+} from "./event-trigger-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -76,6 +83,10 @@ import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
 import { OfficeWorkbookWebSocketTransport } from "./office-workbooks";
 import { officeWorkbookRelayFor } from "./routes/office-workbooks";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
+import {
+  API_SERVER_IDLE_TIMEOUT_SECONDS,
+  apiRequestBindingsForIdleTimeout,
+} from "./http/request-idle-timeout";
 import { startApiMetricsListener } from "./http/metrics-listener";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
@@ -344,6 +355,21 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
+    startBrowserRecordingVideo: async (input) => {
+      try {
+        await temporal.workflow.start("browserRecordingVideoWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `recording-browser-video:${input.recordingId}`,
+          // A rerun after a finished one finds the recording made and stops,
+          // and one after its deletion makes it again from the bundle.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
     scheduleTransientObjectDeletion: async ({ workspaceId, objectKeys, deleteAfter }) => {
       const keys = [...new Set(objectKeys)].sort();
       if (keys.length === 0) return;
@@ -507,7 +533,11 @@ export async function startApi(
   }
   // Compute sandboxes reach their agent over this process's bus and database.
   installComputeAgentPlane({ db: dbClient.db, bus, settings });
-  const objectStorage = createObjectStorage(settings);
+  // Calls made while serving a request become child spans of its request span.
+  const createdObjectStorage = createObjectStorage(settings);
+  const objectStorage = createdObjectStorage
+    ? traceClientCalls(createdObjectStorage, "object_storage")
+    : null;
   let editableArtifactComposition: StandaloneEditableArtifactApplication | undefined;
   if (objectStorage && isArtifactRuntimeConfigured()) {
     try {
@@ -525,8 +555,8 @@ export async function startApi(
     settings,
     db: dbClient.db,
     bus,
-    workflowClient: workflowClient.client,
-    documentIndexer: workflowClient.documentIndexer,
+    workflowClient: traceClientCalls(workflowClient.client, "temporal"),
+    documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
     objectStorage,
     ...(editableArtifactComposition
       ? {
@@ -590,7 +620,7 @@ export async function startApi(
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
-    idleTimeout: 255,
+    idleTimeout: API_SERVER_IDLE_TIMEOUT_SECONDS,
     fetch: (request, bunServer) => {
       const upgrade = dispatchApiWebSocketUpgrade(
         request,
@@ -599,10 +629,10 @@ export async function startApi(
         localBrowserBoundary,
       );
       if (upgrade.handled) return upgrade.response;
-      return app.fetch(
-        request,
-        apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
-      );
+      return app.fetch(request, {
+        ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
+        ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
+      });
     },
     websocket: {
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -619,6 +649,7 @@ export async function startApi(
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
+  const stopTeamsBotPump = startTeamsBotPump(routeDeps);
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopWorkspaceWebhookDispatchPump = startWorkspaceWebhookDispatchPump({
     db: dbClient.db,
@@ -653,6 +684,12 @@ export async function startApi(
     observability,
   });
   const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
+  const stopEventSubscriptionPump = startEventSubscriptionPump({
+    db: dbClient.db,
+    settings,
+    bus,
+    observability,
+  });
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
@@ -726,6 +763,7 @@ export async function startApi(
       const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
       metricsServer?.stop(true);
       stopSlackInteractionPump?.();
+      stopTeamsBotPump();
       await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
@@ -733,6 +771,7 @@ export async function startApi(
       await stopScheduledTaskLifecyclePump();
       await stopEventTriggerDispatchPump();
       await stopEventIntakePrunePump();
+      await stopEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();
       // Write queued presence before the database pool closes.
@@ -753,6 +792,9 @@ export async function startApi(
 if (import.meta.main) {
   const fatalBoundary = installApiFatalProcessBoundary();
   try {
+    // Standalone process only: an embedding host owns its own global fetch.
+    // Outbound HTTP made while serving a request becomes a child span of it.
+    globalThis.fetch = traceFetch(globalThis.fetch);
     const settings = getSettings();
     const observability = createObservability(settings, { component: "api" });
     fatalBoundary.attachObservability(observability);

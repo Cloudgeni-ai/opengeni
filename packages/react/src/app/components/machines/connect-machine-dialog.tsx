@@ -41,6 +41,8 @@ import {
 import { isMachineComputeSelectable } from "../../lib/machine-selectability";
 import { computerConnectUrl } from "@opengeni/sdk/app-links";
 import { desktopDownloadsFor, desktopDownloadUrl } from "../../lib/desktop-download";
+import { useDesktopThisComputer, type DesktopThisComputer } from "../desktop/this-computer";
+import { ComputerUseRow } from "../desktop/computer-use";
 
 /** Who can use the machine: the person connecting it, or the whole workspace. */
 export type ConnectMachineScope = "user" | "workspace";
@@ -275,6 +277,7 @@ function ConnectMachineBody({
   const [scope, setScope] = useState<ConnectMachineScope>(defaultScope);
   const [allowScreenControl, setAllowScreenControl] = useState(defaultAllowScreenControl);
   const [advanced, setAdvanced] = useState(defaultAllowScreenControl);
+  const desktop = useDesktopThisComputer();
   const connected = useNewlyConnectedMachine(
     machines,
     machinesLoading,
@@ -292,6 +295,65 @@ function ConnectMachineBody({
 
   if (connected) {
     return <ConnectedStep machine={connected} useInChat={useInChat} onClose={onClose} />;
+  }
+  const serverSetup = advanced ? (
+    <ConnectSetup
+      workspaceId={workspaceId}
+      origin={origin}
+      personalWorkspace={personalWorkspace}
+      scope={scope}
+      onScopeChange={setScope}
+      allowScreenControl={allowScreenControl}
+      onAllowScreenControlChange={setAllowScreenControl}
+    />
+  ) : null;
+  // Inside the desktop app this computer is already here: no download or
+  // hand-off to the app, just its own state and one action. Other computers
+  // and servers connect with a command, as on the web.
+  if (desktop && desktop.computer.status?.state !== "unavailable") {
+    return (
+      <>
+        <DialogHeader>
+          <DialogTitle>Connect a machine</DialogTitle>
+          <DialogDescription>
+            {advanced
+              ? "Run the command below on the computer or server you want to connect."
+              : "Use this computer, or connect another computer or server."}
+          </DialogDescription>
+        </DialogHeader>
+        {!advanced ? <ThisComputerChoice desktop={desktop} onClose={onClose} /> : null}
+        <Disclosure
+          title="Connect another computer or server"
+          summary="Run a command on it, or pair it with a code."
+          open={advanced}
+          onOpenChange={setAdvanced}
+        >
+          {serverSetup}
+        </Disclosure>
+      </>
+    );
+  }
+  if (desktop) {
+    // This kind of computer can't be used here: other machines are what's left.
+    return (
+      <>
+        <DialogHeader>
+          <DialogTitle>Connect a machine</DialogTitle>
+          <DialogDescription>
+            Run the command below on the computer or server you want to connect.
+          </DialogDescription>
+        </DialogHeader>
+        <ConnectSetup
+          workspaceId={workspaceId}
+          origin={origin}
+          personalWorkspace={personalWorkspace}
+          scope={scope}
+          onScopeChange={setScope}
+          allowScreenControl={allowScreenControl}
+          onAllowScreenControlChange={setAllowScreenControl}
+        />
+      </>
+    );
   }
   return (
     <>
@@ -312,19 +374,33 @@ function ConnectMachineBody({
         open={advanced}
         onOpenChange={setAdvanced}
       >
-        {advanced ? (
-          <ConnectSetup
-            workspaceId={workspaceId}
-            origin={origin}
-            personalWorkspace={personalWorkspace}
-            scope={scope}
-            onScopeChange={setScope}
-            allowScreenControl={allowScreenControl}
-            onAllowScreenControlChange={setAllowScreenControl}
-          />
-        ) : null}
+        {serverSetup}
       </Disclosure>
     </>
+  );
+}
+
+/**
+ * This computer, inside the desktop app: the same computer-use switch as on
+ * Machines. Allowing permissions continues in the app's own steps.
+ */
+function ThisComputerChoice({
+  desktop,
+  onClose,
+}: {
+  desktop: DesktopThisComputer;
+  onClose: () => void;
+}) {
+  return (
+    <div className="min-w-0 rounded-[10px] border border-border px-3">
+      <ComputerUseRow
+        desktop={desktop}
+        onAllowPermissions={() => {
+          onClose();
+          desktop.allowPermissions();
+        }}
+      />
+    </div>
   );
 }
 

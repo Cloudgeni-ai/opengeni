@@ -125,15 +125,21 @@ describe("what a vault can do", () => {
   test("writes wait while the provider refuses, is locked or is down", () => {
     const bitwarden = (overrides: Partial<VaultSummary>) =>
       vault({ source: "bitwarden", providerOperations: PROTON, ...overrides });
+    const service = (overrides: Partial<VaultSummary>) =>
+      vault({ source: "external", providerOperations: PROTON, ...overrides });
     for (const [paused, reason] of [
       [bitwarden({ syncStatus: "auth_expired" }), "Changes wait until Bitwarden is reconnected."],
       [
         bitwarden({ syncStatus: "error", syncErrorCode: "provider_locked" }),
-        "Changes wait until Bitwarden is unlocked on the bridge.",
+        "Changes wait until Bitwarden is unlocked.",
       ],
       [
         bitwarden({ freshness: { state: "unavailable" } as VaultSummary["freshness"] }),
-        "Changes wait until Bitwarden is reachable again.",
+        "Changes wait until Bitwarden responds again.",
+      ],
+      [
+        service({ freshness: { state: "unavailable" } as VaultSummary["freshness"] }),
+        "Changes wait until your vault service is reachable again.",
       ],
     ] as const) {
       expect(creatableTypes(vaultOperations(paused))).toEqual([]);
@@ -205,7 +211,8 @@ describe("a linked vault's health", () => {
   test("stale is quiet; offline is for machines you run, unavailable for vendors", () => {
     expect(needsAttention({ kind: "stale", checkedAt: null })).toBe(false);
     expect(needsAttention({ kind: "locked" })).toBe(true);
-    expect(healthLabel({ kind: "unavailable" }, "bitwarden")).toBe("Offline");
+    expect(healthLabel({ kind: "unavailable" }, "external")).toBe("Offline");
+    expect(healthLabel({ kind: "unavailable" }, "bitwarden")).toBe("Unavailable");
     expect(healthLabel({ kind: "unavailable" }, "keeper")).toBe("Unavailable");
     expect(healthLabel({ kind: "auth_expired" }, "onepassword")).toBe("Token expired");
     expect(healthLabel({ kind: "auth_expired" }, "keeper")).toBe("Needs reconnect");
@@ -316,25 +323,23 @@ describe("renewing a connection's access", () => {
     expect(keeper.title).toBe("Saved the new device");
     expect(keeper.description).toContain("Finish connecting");
     expect(keeper.description).toContain("you don't need a new token");
-    const bridge = renewalNotice("bitwarden", { discoveryPending: true });
-    expect(bridge.title).toBe("Saved the bridge settings");
-    expect(bridge.description).toContain("you don't need to enter it again");
+    const bitwarden = renewalNotice("bitwarden", { discoveryPending: true });
+    expect(bitwarden.title).toBe("Saved the new API key");
+    expect(bitwarden.description).toContain("you don't need to enter it again");
   });
 });
 
 describe("a locked provider", () => {
-  test("names where it is locked, not always Bitwarden", () => {
-    expect(lockedText("bitwarden", "connect")).toBe(
-      "Bitwarden is locked on the bridge. Unlock it there, then connect again.",
-    );
+  test("names where it is locked in that provider's words", () => {
     expect(lockedText("protonpass", "connect")).toBe(
       "Proton Pass says this session is locked. Unlock Proton Pass, then connect again.",
     );
     expect(lockedText("external", "retry")).toBe(
       "Your service says its vault is locked. Unlock it there, then try again.",
     );
-    for (const provider of ["protonpass", "external", "keeper"] as const) {
-      expect(lockedText(provider, "connect")).not.toContain("Bitwarden");
+    expect(lockedText("keeper", "retry")).toBe("Keeper is locked. Unlock it, then try again.");
+    for (const provider of ["protonpass", "external", "keeper", "bitwarden"] as const) {
+      expect(lockedText(provider, "connect")).not.toContain("bridge");
     }
   });
 });

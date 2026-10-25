@@ -9,7 +9,11 @@ import {
 } from "@opengeni/db";
 import { OpenAIResponsesModel, tool, type Model } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
-import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
+import {
+  createProductionAgentRuntime,
+  waitForInputReply,
+  type OpenGeniRuntime,
+} from "@opengeni/runtime";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
@@ -17,8 +21,10 @@ import { testSettings } from "@opengeni/testing/settings";
 import OpenAI from "openai";
 import { createActivityTestHarness } from "../src/activities";
 import {
+  INPUT_WAIT_PROGRESS_UPDATE_REFUSAL,
   INPUT_WAIT_REPLY_REFUSAL,
   latestDurableTurnMessageText,
+  WAIT_REPLY_MESSAGE_ID,
 } from "../src/activities/agent-turn/input-wait-reply";
 import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";
 
@@ -162,15 +168,16 @@ function claudeStream(id: string, blocks: ClaudeBlock[]): Response {
 
 /**
  * Claude Opus 5.5 behind the real Messages transport, answering each request
- * with the next scripted response (`msg_1`, `msg_2`, ...).
+ * with the next scripted response (`msg_1`, `msg_2`, ... unless `ids` names
+ * them).
  */
-function scriptedClaude(responses: ClaudeBlock[][]) {
+function scriptedClaude(responses: ClaudeBlock[][], ids: string[] = []) {
   let calls = 0;
   const model = new AnthropicMessagesModel(claudeProvider, "claude-opus-5-5", (async () => {
     const blocks = responses[calls];
     calls += 1;
     if (!blocks) throw new Error("a yielded wait must not reach another inference");
-    return claudeStream(`msg_${calls}`, blocks);
+    return claudeStream(ids[calls - 1] ?? `msg_${calls}`, blocks);
   }) as typeof fetch);
   return { model, calls: () => calls };
 }
@@ -186,11 +193,11 @@ const progressSummary: ClaudeBlock = {
   thinking: FABRICATED,
   signature: "sig_progress",
 };
-const waitCall = (id: string): ClaudeBlock => ({
+const waitCall = (id: string, input: Record<string, unknown> = {}): ClaudeBlock => ({
   type: "tool_use",
   id,
   name: "wait_for_input",
-  input: {},
+  input,
 });
 
 describe("assistant message events from a real agent turn", () => {
@@ -303,13 +310,23 @@ describe("assistant message events from a real agent turn", () => {
           agent.tools.push(
             tool({
               name: "wait_for_input",
-              parameters: { type: "object", properties: {}, additionalProperties: false },
+              parameters: {
+                type: "object",
+                properties: {
+                  reply: { type: "string" },
+                  reason: { type: "string" },
+                  timeoutSeconds: { type: "integer" },
+                },
+                additionalProperties: false,
+              },
               strict: false,
-              execute: async () => {
-                // Same admission order as the first-party MCP wrapper.
-                const refusal = await agentOptions?.inputWaitYield?.replyRefusal();
+              execute: async (args) => {
+                // Same admission order and reply argument as the first-party
+                // MCP wrapper.
+                const request = { reply: waitForInputReply(args) };
+                const refusal = await agentOptions?.inputWaitYield?.replyRefusal(request);
                 if (refusal) return { isError: true, error: refusal };
-                agentOptions?.inputWaitYield?.beginWait()(true);
+                agentOptions?.inputWaitYield?.beginWait(request)(true);
                 return { status: "waiting_for_input" };
               },
             }),
@@ -549,7 +566,7 @@ describe("assistant message events from a real agent turn", () => {
       const events = await runTurn(claude.model, "chat", { waitForInputTool: true });
       expect(claude.calls()).toBe(2);
       const outputs = events.filter((event) => event.type === "agent.toolCall.output");
-      expect(JSON.stringify(outputs[0]?.payload)).toContain(INPUT_WAIT_REPLY_REFUSAL);
+      expect(JSON.stringify(outputs[0]?.payload)).toContain(INPUT_WAIT_PROGRESS_UPDATE_REFUSAL);
       expect(completedMessages(events)).toEqual([
         { text: reply, messageId: "msg_2:1", phase: "commentary" },
       ]);
@@ -570,7 +587,7 @@ describe("assistant message events from a real agent turn", () => {
       expect(turnCompleted(events)).toEqual({ output: "" });
     }, 60_000);
 
-    test("long text: the model's full answer is the reply, never the summary beside it", async () => {
+    test("long text beside a summary: the wait asks for the reply argument, never records the summary", async () => {
       const answer = [
         "Those messages were not written by me.",
         "",
@@ -584,10 +601,16 @@ describe("assistant message events from a real agent turn", () => {
         "Want me to add that rule as a separate change?",
       ].join("\n");
       const claude = scriptedClaude([
-        [emptyReasoning, { type: "text", text: answer }, progressSummary, waitCall("toolu_wait")],
+        [emptyReasoning, { type: "text", text: answer }, progressSummary, waitCall("toolu_wait_1")],
+        [emptyReasoning, waitCall("toolu_wait_2", { reply: answer })],
       ]);
       const events = await runTurn(claude.model, "chat", { waitForInputTool: true });
-      expect(claude.calls()).toBe(1);
+      // Part of what the model wrote for the person came back only as a
+      // summary, so the first wait is refused until it passes its reply.
+      expect(claude.calls()).toBe(2);
+      const outputs = events.filter((event) => event.type === "agent.toolCall.output");
+      expect(JSON.stringify(outputs[0]?.payload)).toContain(INPUT_WAIT_PROGRESS_UPDATE_REFUSAL);
+      // The reply repeats the text already shown, so it is not shown twice.
       expect(completedMessages(events)).toEqual([
         { text: answer, messageId: "msg_1:1", phase: "commentary" },
       ]);
@@ -606,6 +629,183 @@ describe("assistant message events from a real agent turn", () => {
         { text: status, messageId: "msg_1:1", phase: "commentary" },
       ]);
       expect(turnCompleted(events)).toEqual({ output: "", reply: status });
+    }, 60_000);
+  });
+
+  // Session df030716, October 23 at 13:13 UTC: asked "Where is it? You didn't
+  // actually show it to me.", Claude Opus 5.5 (high) wrote its whole answer,
+  // with three inline artifact images and a table, before calling
+  // wait_for_input. Claude returned that answer as a progress-update thinking
+  // block (content index 1) whose only readable text was Anthropic's
+  // one-paragraph summary: 915 output tokens, 801 of them thinking. A worker
+  // without #5673 streamed the summary as the agent's message and recorded it
+  // as the reply, so the person saw the summary and no images.
+  describe("a reply written before wait_for_input is shown verbatim (df030716, 13:13 UTC)", () => {
+    const TURN_MESSAGE_ID = "msg_011CgKEATPvLMvyNDMvWEjyi";
+    // One reply message per accepting attempt: wait_for_input:reply:<attempt id>.
+    const REPLY_MESSAGE_ID = expect.stringMatching(new RegExp(`^${WAIT_REPLY_MESSAGE_ID}:`));
+    const SUMMARY =
+      "I confirmed the images weren't actually posted before (known bug #5673, fixed upstream but not in this release), so here are the actual before/A/B comparison pictures across devices and themes, along with a space-usage table. I'd lean toward option B for freeing up the most chat space, especially on phone — let me know which layout (A or B) you want so the worker can finish it, get it reviewed, and merge.\n\n";
+    const REPLY = [
+      "You're right, the images weren't in my last reply. Here they are.",
+      "",
+      "**Which layout do you want for the space above the message box?**",
+      "",
+      "- **A (docked):** the wait message, goal, running status and activity become one slim row in its own strip above the message box.",
+      "- **B (overlay):** the same slim row floats as see-through pills over the chat.",
+      "",
+      "![Before, A and B side by side, dark](artifact:cf247ccc-42a0-4a55-9ac8-7ab85c31cd54)",
+      "",
+      "![Before, A and B side by side, light](artifact:f79ba924-cfd6-4bd6-a738-2ea7a428e21f)",
+      "",
+      "![Phone: before, A and B, dark](artifact:a3dba521-b585-4f43-9cf6-46cbac6c25a9)",
+      "",
+      "| Extra chat space | A | B |",
+      "|---|---|---|",
+      "| Laptop | +86 px | +125 px |",
+      "| Phone | +134 px | +177 px |",
+      "",
+      'I\'d pick B. Reply "A" or "B", plus any changes you want.',
+    ].join("\n");
+    const WAIT = {
+      reason:
+        "Waiting for your pick of A or B, and for the Site sidebar and live Site editing workers.",
+      timeoutSeconds: 6900,
+    };
+    const update: ClaudeBlock = { type: "thinking", thinking: SUMMARY, signature: "sig_update" };
+    const completedMessages = (events: Awaited<ReturnType<typeof runTurn>>) =>
+      events
+        .filter((event) => event.type === "agent.message.completed")
+        .map((event) => event.payload);
+    const turnCompleted = (events: Awaited<ReturnType<typeof runTurn>>) =>
+      events.find((event) => event.type === "turn.completed")?.payload;
+    const shownText = (events: Awaited<ReturnType<typeof runTurn>>) =>
+      JSON.stringify(events.filter((event) => event.type.startsWith("agent.message.")));
+
+    test("the exact turn: the summary stays reasoning and the wait asks for the verbatim reply", async () => {
+      const claude = scriptedClaude(
+        [
+          // The production response: thinking, thinking (the update), tool_use.
+          [emptyReasoning, update, waitCall("toolu_01BmVpQSRzQAzEiBTn5vY3ah", WAIT)],
+          [emptyReasoning, waitCall("toolu_wait_reply", { ...WAIT, reply: REPLY })],
+        ],
+        [TURN_MESSAGE_ID, "msg_retry"],
+      );
+      const events = await runTurn(claude.model, "chat", { waitForInputTool: true });
+      expect(claude.calls()).toBe(2);
+      const outputs = events.filter((event) => event.type === "agent.toolCall.output");
+      expect(JSON.stringify(outputs[0]?.payload)).toContain(INPUT_WAIT_PROGRESS_UPDATE_REFUSAL);
+      // The summary is only a thought; it is never streamed or stored as a message.
+      expect(shownText(events)).not.toContain("I confirmed the images");
+      expect(
+        events
+          .filter((event) => event.type === "agent.reasoning.delta")
+          .map((event) => (event.payload as { text?: string }).text)
+          .join(""),
+      ).toContain("I confirmed the images");
+      // The person sees the reply exactly as written, images and table included.
+      expect(completedMessages(events)).toEqual([
+        { text: REPLY, messageId: REPLY_MESSAGE_ID, phase: "final_answer" },
+      ]);
+      expect(turnCompleted(events)).toEqual({ output: "", reply: REPLY });
+      const types = events.map((event) => event.type);
+      expect(types.lastIndexOf("agent.message.completed")).toBeLessThan(
+        types.indexOf("turn.completed"),
+      );
+    }, 60_000);
+
+    test("the reply passed on the first call is accepted at once, even beside a summary", async () => {
+      const claude = scriptedClaude(
+        [[emptyReasoning, update, waitCall("toolu_wait", { ...WAIT, reply: REPLY })]],
+        [TURN_MESSAGE_ID],
+      );
+      const events = await runTurn(claude.model, "chat", { waitForInputTool: true });
+      expect(claude.calls()).toBe(1);
+      expect(shownText(events)).not.toContain("I confirmed the images");
+      expect(completedMessages(events)).toEqual([
+        { text: REPLY, messageId: REPLY_MESSAGE_ID, phase: "final_answer" },
+      ]);
+      expect(turnCompleted(events)).toEqual({ output: "", reply: REPLY });
+      // Published as soon as the wait is accepted, before its tool result,
+      // so an approval pause or a retried activity cannot lose it.
+      const replyAt = events.findIndex(
+        (event) =>
+          event.type === "agent.message.completed" &&
+          String((event.payload as { messageId?: unknown }).messageId).startsWith(
+            `${WAIT_REPLY_MESSAGE_ID}:`,
+          ),
+      );
+      const waitOutputAt = events.findIndex((event) => event.type === "agent.toolCall.output");
+      expect(replyAt).toBeGreaterThan(-1);
+      expect(replyAt).toBeLessThan(waitOutputAt);
+    }, 60_000);
+
+    test("a short text beside the summary is kept, and the reply is the answer", async () => {
+      const intro = "Here are the pictures.";
+      const claude = scriptedClaude([
+        [emptyReasoning, { type: "text", text: intro }, update, waitCall("toolu_wait_1", WAIT)],
+        [emptyReasoning, waitCall("toolu_wait_2", { ...WAIT, reply: REPLY })],
+      ]);
+      const events = await runTurn(claude.model, "chat", { waitForInputTool: true });
+      expect(claude.calls()).toBe(2);
+      const outputs = events.filter((event) => event.type === "agent.toolCall.output");
+      expect(JSON.stringify(outputs[0]?.payload)).toContain(INPUT_WAIT_PROGRESS_UPDATE_REFUSAL);
+      expect(completedMessages(events)).toEqual([
+        { text: intro, messageId: "msg_1:1", phase: "commentary" },
+        { text: REPLY, messageId: REPLY_MESSAGE_ID, phase: "final_answer" },
+      ]);
+      expect(turnCompleted(events)).toEqual({ output: "", reply: REPLY });
+    }, 60_000);
+
+    test("any model's reply argument is shown verbatim", async () => {
+      const events = await runTurn(
+        new ScriptedModel([
+          { output: [functionCall("wait_for_input", { ...WAIT, reply: REPLY }, "call_wait")] },
+          { error: new Error("a yielded wait must not reach another inference") },
+        ] as never),
+        "chat",
+        { waitForInputTool: true },
+      );
+      expect(completedMessages(events)).toEqual([
+        { text: REPLY, messageId: REPLY_MESSAGE_ID, phase: "final_answer" },
+      ]);
+      expect(turnCompleted(events)).toEqual({ output: "", reply: REPLY });
+    }, 60_000);
+
+    test("a reply that repeats the text before the call is not shown twice", async () => {
+      const status = "Both reviews are done; waiting for CI.";
+      const events = await runTurn(
+        new ScriptedModel([
+          {
+            output: [
+              { ...assistantMessage(status, "msg_status"), phase: "commentary" },
+              functionCall("wait_for_input", { ...WAIT, reply: status }, "call_wait"),
+            ] as never,
+          },
+          { error: new Error("a yielded wait must not reach another inference") },
+        ]),
+        "chat",
+        { waitForInputTool: true },
+      );
+      expect(completedMessages(events)).toEqual([
+        { text: status, messageId: "msg_status", phase: "commentary" },
+      ]);
+      expect(turnCompleted(events)).toEqual({ output: "", reply: status });
+    }, 60_000);
+
+    test("an agent-started turn shows its reply but records no person's reply", async () => {
+      const events = await runTurn(
+        new ScriptedModel([
+          { output: [functionCall("wait_for_input", { ...WAIT, reply: REPLY }, "call_wait")] },
+          { error: new Error("a yielded wait must not reach another inference") },
+        ] as never),
+        "chat",
+        { waitForInputTool: true, createdBy: "agent" },
+      );
+      expect(completedMessages(events)).toEqual([
+        { text: REPLY, messageId: REPLY_MESSAGE_ID, phase: "final_answer" },
+      ]);
+      expect(turnCompleted(events)).toEqual({ output: "" });
     }, 60_000);
   });
 });

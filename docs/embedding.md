@@ -74,6 +74,35 @@ Stop, tool approvals, attachments, human-input forms, live voice, optimistic del
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
 
+**Automations in the host.** `AutomationsPanel` from
+`@opengeni/react/automations` lists, creates and edits automations inside the
+host's own dialog or page, so people can have the agent pick a chat up again
+on a schedule or when something happens without leaving the product. Scoped to
+a chat, new automations continue that chat with its settings; without a chat,
+each run starts a new chat with the workspace's defaults and the owner's
+access. Event triggers show when the deployment runs them.
+
+```tsx
+import { AutomationsPanel } from "@opengeni/react/automations";
+
+<AutomationsPanel
+  client={client}
+  workspaceId={workspaceId}
+  sessionId={chatId}
+  // The host's own MCP server, offered before the person has a source for it.
+  eventServers={[{ serverId: "acme-mcp", name: "Acme" }]}
+  // Subscription arguments new triggers start with, such as the open project.
+  argumentDefaults={{ projectId }}
+  onOpenSession={(id) => openChat(id)}
+/>;
+```
+
+Its words come from the `automations.*` keys of the message catalog, so
+`OpenGeniMessagesProvider` translates it. `AutomationForm`,
+`AutomationWhenField` and the pure helpers behind them (`automationCreateRequest`,
+`automationWhenSentence` and the rest) are exported for hosts that build their
+own layout.
+
 `NewConversation` exposes the same new-chat flow that `OpenGeniChat` uses.
 For a persistent shell, `useNewConversation`/`NewConversationView` and
 `useSessionConversation`/`SessionConversationView` separate ownership from
@@ -231,6 +260,74 @@ person installs the product's app and returns to **Open app and connect**. Syste
 permissions and sign-in/consent are not bypassed. Without host configuration the
 default offer explains that computer setup is unavailable. It never substitutes
 an Opengeni download, setup token, shell command, or model-supplied setup URL.
+
+### Capability connection offers
+
+When the agent asks the person to connect a catalog OAuth integration (its
+`capability_authorization_request` card), `SessionConversation` and
+`OpenGeniChat` render the same connect card as the Opengeni web app, with no
+host code: the person picks who can use the connection, signs in through a
+popup, the card adds the integration to the chat, and the agent continues on
+its own. The popup's sign-in returns to the host page; the card follows the
+attempt's state through the API, so the page needs no return handler, and the
+person closes the popup.
+
+The card appears only when the person's own grant can finish every step: chat
+control (`sessions:control`) plus one of these:
+
+- `connections:personal`: connect their own account (personal ownership only)
+  and, if the integration is not on yet, turn it on for personal accounts. This
+  works only for a reviewed catalog integration that signs each person in with
+  OAuth and that the organization's integration policy allows. It never covers
+  custom MCP servers, shared or workspace connections, other people's
+  connections, or removing or reconfiguring an integration, and an
+  organization can reserve turning integrations on for admins.
+- `connections:write` with `connections:read` and `capabilities:manage` (or an
+  integration that is already on): any account, shared or personal.
+- `connections:read` alone, when the integration is already on and bound to a
+  shared workspace account.
+
+Otherwise the card says the integration can't be connected from here.
+
+Turning an integration on is a workspace change: once someone turns it on for
+personal accounts, the other members of that workspace see it as an optional
+integration that each of them must connect with their own account before
+their chats can use it. Nobody gets access to anyone else's account.
+
+Who gets `connections:personal` by default depends on whether each product
+user is their own Opengeni user, set with `identities` on the facade or on
+`createWorkspaceIdResolver`, because a personal connection belongs to the
+Opengeni user:
+
+| Setup | Default |
+| --- | --- |
+| One workspace per user (`resolve` returns `{ user }`, or `chats: "isolated"`) | On |
+| `identities: "per_user"` (each `user` is one real person) | On, also in tenant workspaces: the SDK adds each signed-in tenant user with the defaults plus `connections:personal` |
+| Tenant workspaces with `identities` unset | Off (users are left to the API's first-use grant) |
+| `identities: "shared"` (one `user` stands for many people, for example a team) | Off everywhere, so one person's Gmail is never usable by everyone behind that identity |
+
+`memberPermissions` overrides these defaults either way. The SDK never changes
+an existing member's permissions; use `updateExternalWorkspaceMember` for
+people added earlier. If the organization key's custom policy covers neither
+`connections:personal` nor `connections:write`, defaulted onboarding falls back
+to the conversation defaults instead of failing. A proxy with a
+`createSession` hook owns each chat's tools, so it reports
+`chatConnections: false` in client config and the stock conversation leaves
+these cards to the host. `timelineProps.renderAuthNeeded` still takes
+precedence, and host-managed connections (`authoritySource: "host"`) keep their
+own row.
+
+The agent's cards for the deployment's reviewed Microsoft integrations
+(Outlook Mail, Calendar and Contacts, OneDrive and Teams) render the same way,
+with `SessionIntegrationCapabilityCard`. Each person connects their own
+Microsoft account, which installs the integration's reviewed tools for that
+account alone, so these cards need `sessions:control` plus
+`connections:personal` (or `connections:write`), not `connections:read` or
+`capabilities:manage`. The per-user defaults above already include both, so
+the host does not pre-install anything; a shared identity without
+`connections:personal` sees the card as unavailable. The session proxy
+forwards the Connect, integration, tool-policy and continuation routes the
+card uses as the signed-in end user.
 
 ### Embedded defaults
 
@@ -1515,6 +1612,12 @@ approvals. Hooks outside that baseline export exact structural refinements:
 `FileAttachmentClientLike`. A host proxy therefore implements only the methods
 used by the mounted hooks; it does not stub workspace administration, billing,
 sandbox environment, connected-machine, or unrelated workbench APIs.
+
+Meeting recording embeds the same way: `@opengeni/sdk/recordings` gives a
+headless, local-first recorder and uploader, and `@opengeni/react/recordings`
+gives capture, list, transcript and speaker hooks over an explicit
+`recordings` client when the host proxies the API. See
+[`recordings.md`](recordings.md#embedding).
 
 Generated-image timeline rows carry a compact permanent artifact receipt. A
 host using the styled `MessageTimeline` can pass `loadRetainedArtifact`; the

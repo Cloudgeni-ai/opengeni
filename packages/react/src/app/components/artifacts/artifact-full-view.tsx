@@ -1,11 +1,67 @@
 import { ArrowLeftIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
-import type { ReactNode } from "react";
+import {
+  forwardRef,
+  type ComponentPropsWithoutRef,
+  type ComponentRef,
+  type ReactNode,
+} from "react";
 
+import { cn } from "../../../lib/cn";
 import { Button } from "../../../ui/button";
 import { containedPortal } from "../../../ui/portal-container";
 
 const DialogContainedPortal = containedPortal(Dialog.Portal);
+
+/**
+ * The whole-window layer an artifact expands into: a Radix dialog with the
+ * desktop app's window-control clearance, so Escape closes the innermost layer
+ * and focus returns to where it came from.
+ */
+export const ArtifactFullWindowDialog = /* @__PURE__ */ forwardRef<
+  ComponentRef<typeof Dialog.Content>,
+  {
+    onClose: () => void;
+    children: ReactNode;
+  } & Omit<ComponentPropsWithoutRef<typeof Dialog.Content>, "children" | "className">
+>(function ArtifactFullWindowDialog({ onClose, children, ...content }, ref) {
+  return (
+    <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
+      <DialogContainedPortal>
+        <Dialog.Content
+          ref={ref}
+          data-artifact-fullscreen
+          aria-describedby={undefined}
+          {...content}
+          className="fixed inset-0 z-50 flex h-dvh w-dvw flex-col overflow-hidden bg-surface text-left text-fg outline-hidden"
+        >
+          {children}
+        </Dialog.Content>
+      </DialogContainedPortal>
+    </Dialog.Root>
+  );
+});
+
+/** The single bar across the top of a full-window artifact; it also drags the desktop window. */
+export function ArtifactFullWindowBar({
+  className,
+  children,
+}: {
+  className?: string | undefined;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      data-window-drag
+      className={cn(
+        "flex min-h-12 shrink-0 items-center border-b border-border/80 bg-surface/95",
+        className,
+      )}
+    >
+      {children}
+    </div>
+  );
+}
 
 /**
  * An artifact shown by itself across the whole window, with one bar: back to
@@ -26,38 +82,26 @@ export function ArtifactFullView({
   children: ReactNode;
 }) {
   return (
-    <Dialog.Root open onOpenChange={(open) => !open && onBack()}>
-      <DialogContainedPortal>
-        <Dialog.Content
-          data-artifact-fullscreen
-          aria-describedby={undefined}
-          onOpenAutoFocus={(event) => event.preventDefault()}
-          className="fixed inset-0 z-50 flex h-dvh w-dvw flex-col overflow-hidden bg-surface text-left text-fg outline-hidden"
-        >
-          <div
-            data-window-drag
-            className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4"
+    <ArtifactFullWindowDialog onClose={onBack} onOpenAutoFocus={(event) => event.preventDefault()}>
+      <ArtifactFullWindowBar className="justify-between gap-3 px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-8 shrink-0 px-2 pointer-coarse:h-11"
+            onClick={onBack}
           >
-            <div className="flex min-w-0 items-center gap-2.5">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-8 shrink-0 px-2 pointer-coarse:h-11"
-                onClick={onBack}
-              >
-                <ArrowLeftIcon aria-hidden="true" />
-                Back
-              </Button>
-              <Dialog.Title className="truncate text-xs font-semibold">{title}</Dialog.Title>
-            </div>
-            {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}
-          </div>
-          <div className="flex min-h-0 flex-1 flex-col overflow-auto bg-surface-2 p-4 max-sm:p-2">
-            <div className="m-auto w-full max-w-6xl min-w-0">{children}</div>
-          </div>
-        </Dialog.Content>
-      </DialogContainedPortal>
-    </Dialog.Root>
+            <ArrowLeftIcon aria-hidden="true" />
+            Back
+          </Button>
+          <Dialog.Title className="truncate text-xs font-semibold">{title}</Dialog.Title>
+        </div>
+        {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}
+      </ArtifactFullWindowBar>
+      <div className="flex min-h-0 flex-1 flex-col overflow-auto bg-surface-2 p-4 max-sm:p-2">
+        <div className="m-auto w-full max-w-6xl min-w-0">{children}</div>
+      </div>
+    </ArtifactFullWindowDialog>
   );
 }

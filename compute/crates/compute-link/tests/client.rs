@@ -523,14 +523,15 @@ async fn message(subscriber: &mut async_nats::Subscriber) -> async_nats::Message
         .expect("the subscription ended")
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "compute-link-client-{}-{name}-{}",
-        std::process::id(),
-        now_ms()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("link.json")
+/// Where a test's hub keeps its session, in a directory removed when the
+/// returned guard goes, at the end of the test even when it fails.
+fn scratch(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("compute-link-client-{name}-"))
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("link.json");
+    (dir, path)
 }
 
 async fn saved(path: &Path, check: impl Fn(Option<&Saved>) -> bool) -> Option<Saved> {
@@ -564,7 +565,7 @@ async fn an_agent_is_connected_only_once_its_session_opens_and_then_round_trips(
     let mut gateway = Gateway::start().await;
     let hub = hub();
     let wakes = Arc::new(Wakes::default());
-    let path = scratch("round-trip");
+    let (_scratch, path) = scratch("round-trip");
     hub.attach(
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
@@ -768,10 +769,11 @@ async fn a_message_for_a_sleeping_agent_waits_wakes_it_and_reaches_it_once_it_is
     let mut gateway = Gateway::start().await;
     let hub = hub();
     let wakes = Arc::new(Wakes::default());
+    let (_scratch, path) = scratch("sleep");
     hub.attach(
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
-        scratch("sleep"),
+        path,
         Arc::new(()),
         wakes.clone(),
     );
@@ -892,7 +894,7 @@ async fn a_message_for_a_sleeping_agent_waits_wakes_it_and_reaches_it_once_it_is
 async fn a_lost_link_ends_the_agents_connection_and_its_session_opens_again() {
     let mut gateway = Gateway::start().await;
     let hub = hub();
-    let path = scratch("link");
+    let (_scratch, path) = scratch("link");
     hub.attach(
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
@@ -984,7 +986,7 @@ async fn a_lost_link_ends_the_agents_connection_and_its_session_opens_again() {
 #[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
 async fn a_restarted_host_opens_the_kept_session_so_messages_wait_for_the_agent() {
     let mut gateway = Gateway::start().await;
-    let path = scratch("restart");
+    let (_scratch, path) = scratch("restart");
     let first = hub();
     first.attach(
         SANDBOX.into(),
@@ -1100,10 +1102,11 @@ async fn a_restarted_host_opens_the_kept_session_so_messages_wait_for_the_agent(
 async fn a_gateway_that_refuses_a_ticket_shuts_the_agent_out() {
     let mut gateway = Gateway::start().await;
     let hub = hub();
+    let (_scratch, path) = scratch("refused");
     hub.attach(
         SANDBOX.into(),
         link(&gateway, "ticket-bad"),
-        scratch("refused"),
+        path,
         Arc::new(()),
         Arc::new(Wakes::default()),
     );
@@ -1140,10 +1143,11 @@ async fn a_gateway_that_refuses_a_ticket_shuts_the_agent_out() {
 async fn a_connection_that_is_not_an_agent_is_refused() {
     let mut gateway = Gateway::start().await;
     let hub = hub();
+    let (_scratch, path) = scratch("not-agent");
     hub.attach(
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
-        scratch("not-agent"),
+        path,
         Arc::new(()),
         Arc::new(Wakes::default()),
     );
@@ -1182,10 +1186,11 @@ async fn a_connection_that_is_not_an_agent_is_refused() {
 async fn an_agents_control_and_bulk_connections_share_its_session() {
     let mut gateway = Gateway::start().await;
     let hub = hub();
+    let (_scratch, path) = scratch("two-connections");
     hub.attach(
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
-        scratch("two-connections"),
+        path,
         Arc::new(()),
         Arc::new(Wakes::default()),
     );
@@ -1276,10 +1281,11 @@ async fn a_gateway_that_stops_reading_loses_its_link_by_the_silence_deadline() {
         backoff_max: Duration::from_millis(200),
         connect_timeout: Duration::from_secs(2),
     });
+    let (_scratch, path) = scratch("stalled");
     hub.attach(
         SANDBOX.into(),
         link(&gateway, "t1"),
-        scratch("stalled"),
+        path,
         Arc::new(()),
         Arc::new(Wakes::default()),
     );

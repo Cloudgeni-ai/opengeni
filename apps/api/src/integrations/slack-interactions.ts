@@ -141,6 +141,7 @@ import {
   createSessionForRequest,
   getActorNewSessionModelChoice,
   hasPermission,
+  recordSlackEvent,
   requireAccessContext,
   requireAccessGrant,
   requireSessionAuthorizationListScope,
@@ -550,6 +551,22 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       throw new HTTPException(403, {
         message: "Slack installation unavailable",
       });
+    // The workspace's Slack event source, when it has one, records channel
+    // activity for automations. Conversations below never depend on it.
+    try {
+      await recordSlackEvent({
+        db: deps.db,
+        settings: deps.settings,
+        workspaceId: installation.workspaceId,
+        teamId,
+        body: signed.rawBytes,
+      });
+    } catch (error) {
+      console.error("[slack-interactions] recording the Slack event failed", {
+        workspaceId: installation.workspaceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     const event = record(payload.event);
     const appHomeEvent = slackAppHomeOpenedEvent(payload);
     if (appHomeEvent) {
@@ -3858,12 +3875,15 @@ async function continueSlackSession(
     await showSlackStartMessageStopped(deps, grant, interaction, entry);
     return;
   }
-  const pending = await listSessionHumanInputRequests(
-    deps.db,
-    interaction.workspaceId,
-    interaction.sessionId,
-    { status: "pending", limit: 20 },
-  );
+  // Opengeni's own secret-use approval cards are answered only in the
+  // Opengeni card, by the signed-in person, and never block the thread: a
+  // reply while one is pending is an ordinary answer or message.
+  const pending = (
+    await listSessionHumanInputRequests(deps.db, interaction.workspaceId, interaction.sessionId, {
+      status: "pending",
+      limit: 20,
+    })
+  ).filter((request) => !isSecretUseApprovalCard(request));
   // A secret is answered only in the Opengeni card, which saves it to a vault.
   // While one is pending, a thread reply is neither an answer nor a message:
   // it may be the pasted secret itself (AC-5).
@@ -5130,17 +5150,22 @@ async function slackHumanInputCard(
   const operationId = deterministicUuid(
     slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:human-input`),
   );
-  const secretUrl = hasSecretQuestion(request.questions)
-    ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
-    : null;
-  const text = hasSecretQuestion(request.questions)
-    ? `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\n${
-        secretUrl ? `<${secretUrl}|Answer in Opengeni>` : "Answer in Opengeni"
-      }; secrets are saved to a vault and never posted in Slack${request.allowSkip ? ". You can also choose Skip" : ""}.`
-    : `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread${request.allowSkip ? " or choose Skip" : ""}.`;
+  const secretQuestion = hasSecretQuestion(request.questions);
+  const approvalQuestion = isSecretUseApprovalCard(request);
+  const secretUrl =
+    secretQuestion || approvalQuestion
+      ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
+      : null;
+  const answerInOpengeni = secretUrl ? `<${secretUrl}|Answer in Opengeni>` : "Answer in Opengeni";
+  const text = secretQuestion
+    ? `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\n${answerInOpengeni}; secrets are saved to a vault and never posted in Slack${request.allowSkip ? ". You can also choose Skip" : ""}.`
+    : approvalQuestion
+      ? `${mention}Opengeni needs your approval:\n${formatQuestions(request.questions)}\n${answerInOpengeni}; only you can allow a secret's use, signed in to Opengeni.`
+      : `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread${request.allowSkip ? " or choose Skip" : ""}.`;
   if (!requesterAuthorized || !interaction.initiatingSlackUserId) return { text, operationId };
   const question = request.questions.length === 1 ? request.questions[0] : null;
   const canUseButtons =
+    !approvalQuestion &&
     question?.kind === "single_select" &&
     question.options.length > 0 &&
     question.options.length <= 5;
@@ -5958,7 +5983,7 @@ async function readSignedSlackRequest(c: Context, deps: ApiRouteDeps) {
   ) {
     throw new HTTPException(401, { message: "invalid Slack signature" });
   }
-  return { rawBody };
+  return { rawBody, rawBytes };
 }
 
 function normalizedFormInteraction(
@@ -6080,6 +6105,11 @@ function hasSecretQuestion(questions: readonly HumanInputQuestion[]): boolean {
   return questions.some((question) => question.kind === "secret");
 }
 
+/** Opengeni's own approval card for a blocked secret use. */
+function isSecretUseApprovalCard(request: { origin?: string | undefined }): boolean {
+  return request.origin === "secret_use_approval";
+}
+
 export function slackSecretAnswerRefusalText(sessionUrl: string | null): string {
   return `This question asks for a secret, so it can only be answered in Opengeni, where it is saved to a vault: ${
     sessionUrl ? `<${sessionUrl}|answer in Opengeni>` : "open the task in Opengeni"
@@ -6166,7 +6196,7 @@ async function slackInfoCommandResponse(
   const canControl = hasPermission(grant.permissions, "sessions:control");
   const canCreate = hasPermission(grant.permissions, "sessions:create");
   const canSchedule = hasPermission(grant.permissions, "scheduled_tasks:manage");
-  const schedules = canSchedule ? slackSchedulesUrl(deps, installation.workspaceId) : null;
+  const schedules = canSchedule ? slackAutomationsUrl(deps, installation.workspaceId) : null;
   // Asking Opengeni in a task's thread to repeat it needs the scheduling tool in
   // new Slack tasks here, `scheduled_tasks:manage` for the tool, and
   // `sessions:control` for the thread reply itself.
@@ -6199,7 +6229,7 @@ async function slackInfoCommandResponse(
       ? [
           `• *Repeat a task on a schedule:* ${[
             ...(agentSchedules ? ["ask Opengeni in its thread"] : []),
-            ...(schedules ? [`open <${schedules}|Schedules>`] : []),
+            ...(schedules ? [`open <${schedules}|Automations>`] : []),
           ].join(", or ")}.`,
         ]
       : []),
@@ -6310,18 +6340,18 @@ function makeRecurringText(
   workspaceId: string,
   sessionId: string,
 ): string | null {
-  // Unchanged deep-link contract: the schedules editor plus the exact source
+  // Unchanged deep-link contract: the Automations page plus the exact source
   // session UUID, and nothing copied out of Slack. A deployment without an
   // absolute web base URL simply omits the action instead of failing a card.
-  const base = slackSchedulesUrl(deps, workspaceId);
+  const base = slackAutomationsUrl(deps, workspaceId);
   if (!base) return null;
   const url = new URL(base);
   url.searchParams.set("sourceSessionId", sessionId);
   return `<${url.toString()}|Make recurring>`;
 }
 
-function slackSchedulesUrl(deps: ApiRouteDeps, workspaceId: string): string | null {
-  return safeSlackActionUrl(deps, `/workspaces/${encodeURIComponent(workspaceId)}/schedules`);
+function slackAutomationsUrl(deps: ApiRouteDeps, workspaceId: string): string | null {
+  return safeSlackActionUrl(deps, `/workspaces/${encodeURIComponent(workspaceId)}/automations`);
 }
 
 function linkUrl(

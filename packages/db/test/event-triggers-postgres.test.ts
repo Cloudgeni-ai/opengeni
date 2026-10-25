@@ -9,6 +9,7 @@ import {
 } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
+  bindGitHubInstallationRepositories,
   claimEventTriggerDispatch,
   createDb,
   createEventSource,
@@ -16,14 +17,18 @@ import {
   createScheduledTaskRun,
   deleteEventSource,
   eventOccurrenceProducerKey,
+  findAppEventSource,
   getEventOccurrenceForRun,
+  getEventRunOccurrence,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTask,
   getScheduledTaskEvents,
   getScheduledTaskRunEventOccurrences,
+  githubInstallationRouteKey,
   listDueEventTriggerTasks,
   listEventDeliveries,
   listEventSources,
+  listGitHubEventRoutes,
   listInboundEvents,
   markEventOccurrenceStarted,
   markScheduledTaskRunFailedIfQueued,
@@ -85,14 +90,14 @@ async function workspace() {
 type Space = Awaited<ReturnType<typeof workspace>>;
 
 /** An automation; `owner` makes it a person's (runs then need that person's authority). */
-async function task(space: Space, options: { owner?: string } = {}) {
+async function task(space: Space, options: { owner?: string; schedule?: unknown } = {}) {
   return createScheduledTask(client.db, {
     accountId: space.accountId,
     workspaceId: space.workspaceId,
     ...(options.owner ? { ownerSubjectId: options.owner } : {}),
     name: "When something happens",
     status: "active",
-    schedule: { type: "manual" },
+    schedule: options.schedule ?? { type: "manual" },
     temporalScheduleId: `schedule-${crypto.randomUUID()}`,
     runMode: "new_session_per_run",
     overlapPolicy: "buffer_one",
@@ -275,6 +280,68 @@ describe("event sources", () => {
     expect(second).toEqual({ source: first.source, created: false });
   });
 
+  test("the route table keeps no provider identity", async () => {
+    const space = await workspace();
+    const routeSecret = new Uint8Array(32).fill(7);
+    const installationId = 424_242;
+    await bindGitHubInstallationRepositories(client.db, {
+      ...space,
+      installationId,
+      linkedBySubjectId: space.subjectId,
+      repositoryIds: [1],
+      eventRouteSecret: routeSecret,
+    });
+    const app = {
+      accountId: space.accountId,
+      workspaceId: space.workspaceId,
+      createdBySubjectId: space.subjectId,
+      name: "App",
+      visibility: "workspace" as const,
+    };
+    const { source: github } = await createEventSource(client.db, {
+      ...app,
+      kind: "github",
+      ownerSubjectId: null,
+      externalKey: "github",
+      routeSecret,
+    });
+    const { source: slack } = await createEventSource(client.db, {
+      ...app,
+      kind: "slack",
+      ownerSubjectId: null,
+      externalKey: "team:T0001",
+    });
+    const { source: gmail } = await createEventSource(client.db, {
+      ...app,
+      kind: "gmail",
+      ownerSubjectId: space.subjectId,
+      externalKey: "email:someone@example.com",
+    });
+    const routes = await shared!.admin<{ source_id: string; external_key: string | null }[]>`
+      SELECT source_id, external_key FROM event_ingress_routes
+      WHERE source_id IN (${github.id}, ${slack.id}, ${gmail.id})`;
+    // GitHub keeps one keyed route per installation; Slack and Gmail need none.
+    expect([...routes]).toEqual([
+      {
+        source_id: github.id,
+        external_key: githubInstallationRouteKey(routeSecret, installationId),
+      },
+    ]);
+    expect(routes[0]!.external_key).not.toContain(String(installationId));
+    expect(await listGitHubEventRoutes(client.db, routeSecret, installationId)).toEqual([
+      { accountId: space.accountId, workspaceId: space.workspaceId, sourceId: github.id },
+    ]);
+    expect(
+      await listGitHubEventRoutes(client.db, new Uint8Array(32).fill(8), installationId),
+    ).toEqual([]);
+    expect(await findAppEventSource(client.db, space.workspaceId, "slack", "team:T0001")).toEqual(
+      expect.objectContaining({ id: slack.id }),
+    );
+    expect(
+      await findAppEventSource(client.db, space.workspaceId, "slack", "team:T0002"),
+    ).toBeNull();
+  });
+
   test("people see shared sources, app sources and their own private ones", async () => {
     const space = await workspace();
     const mine = await webhookSource(space, "private");
@@ -432,6 +499,12 @@ describe("dispatch", () => {
       eventRun.id,
     ]);
     expect(carried.get(eventRun.id)?.events.map((summary) => summary.type)).toEqual(["a", "b"]);
+    expect(await getEventRunOccurrence(client.db, space.workspaceId, eventRun.id)).toMatchObject({
+      taskId: automation.id,
+      occurrence: { eventCount: 2, events: [{ type: "a" }, { type: "b" }] },
+    });
+    const clockRun = await run(automation, "scheduled", `scheduled-${crypto.randomUUID()}`);
+    expect(await getEventRunOccurrence(client.db, space.workspaceId, clockRun.id)).toBeNull();
   });
 
   test("a failed start is retried later", async () => {
@@ -585,6 +658,60 @@ describe("dispatch", () => {
     expect(dispatch.start).toEqual([]);
     expect(await inboxStatuses(space, automation.id)).toEqual(["skipped"]);
     expect((await settings(space, automation.id))?.completed_at).toBeTruthy();
+  });
+
+  test("repeating triggers outlive the schedule's last run; a finished once-automation does not", async () => {
+    const space = await workspace();
+    const source = await webhookSource(space);
+    // A one-time date long past: the schedule itself has no run left.
+    const spent = {
+      type: "once",
+      runAt: new Date(Date.now() - 2 * 86_400_000).toISOString(),
+      timeZone: "UTC",
+    };
+    const reviewedEvents = async (taskId: string) => {
+      let seen: unknown = "unreviewed";
+      await reviewScheduledTaskBlockers(client.db, space.workspaceId, taskId, (facts) => {
+        seen = facts.task.events;
+        return { kind: "none", reviewedRunId: null };
+      });
+      return seen;
+    };
+
+    const plain = await task(space, { schedule: spent });
+    expect(await reviewedEvents(plain.id)).toBeNull();
+    expect(await retireExhaustedScheduledTask(client.db, space.workspaceId, plain.id)).toBe(true);
+
+    const listening = await task(space, { schedule: spent });
+    await setScheduledTaskEvents(client.db, {
+      ...space,
+      taskId: listening.id,
+      triggers: [{ sourceId: source.id, ...everything }],
+    });
+    expect(await reviewedEvents(listening.id)).toEqual({ once: false, completed: false });
+    expect(await retireExhaustedScheduledTask(client.db, space.workspaceId, listening.id)).toBe(
+      false,
+    );
+    expect((await deliver(space, source.id, [event("a")])).matchedTaskIds).toEqual([listening.id]);
+    // Without its triggers, the spent schedule retires it as before.
+    await setScheduledTaskEvents(client.db, { ...space, taskId: listening.id, triggers: [] });
+    expect(await retireExhaustedScheduledTask(client.db, space.workspaceId, listening.id)).toBe(
+      true,
+    );
+
+    const waiting = await task(space);
+    await setScheduledTaskEvents(client.db, {
+      ...space,
+      taskId: waiting.id,
+      triggers: [{ sourceId: source.id, ...everything }],
+      once: true,
+    });
+    expect(await reviewedEvents(waiting.id)).toEqual({ once: true, completed: false });
+    await deliver(space, source.id, [event("b")]);
+    expect(
+      (await claimEventTriggerDispatch(client.db, space.workspaceId, waiting.id)).start,
+    ).toHaveLength(1);
+    expect(await reviewedEvents(waiting.id)).toEqual({ once: true, completed: true });
   });
 
   test("events waiting for a paused automation are skipped", async () => {

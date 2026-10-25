@@ -6,6 +6,9 @@ import { execFileSync } from "node:child_process";
 import {
   cli,
   prepare,
+  prepareAppOnly,
+  appOnlyCheckName,
+  appOnlyNamespaceName,
   verify,
   writable,
   validatePlan,
@@ -83,6 +86,230 @@ function staged(plan: Plan, phase: "guard" | "namespace" | "applied") {
 }
 
 describe("offline batcher administration contract", () => {
+  test("v4 recovery identifies only the exact legacy and ordered partial upgrade inventories", () => {
+    const legacy = prepare(fixture(), 5425399, 174101112);
+    const next = prepareAppOnly(fixture(), 5425399, 174101112);
+    const { current, receipts } = staged(legacy, "applied");
+    const retained = JSON.stringify(receipts);
+    expect(() => verify(next, current, "legacy-applied", receipts)).not.toThrow();
+    expect(() => verify(legacy, current, "legacy-applied", receipts)).toThrow(
+      "explicit version 4 plan",
+    );
+    expect(() => verify(next, current, "applied", receipts)).toThrow();
+    current.rulesets[0] = { ...next.admission, id: next.admissionId };
+    expect(() => verify(next, current, "upgrade-admission", receipts)).not.toThrow();
+    expect(() => verify(next, current, "legacy-applied", receipts)).toThrow();
+    expect(() => verify(next, current, "applied", receipts)).toThrow();
+    current.rulesets[0] = { ...next.restore, id: next.admissionId };
+    expect(() => verify(next, current, "legacy-namespace", receipts)).not.toThrow();
+    expect(() => verify(next, current, "namespace", receipts)).toThrow();
+    current.rulesets[0] = { ...next.admission, id: next.admissionId };
+    current.rulesets[current.rulesets.length - 1] = {
+      ...next.namespace,
+      id: receipts.namespace.id,
+    };
+    expect(() => verify(next, current, "applied", receipts)).not.toThrow();
+    expect(JSON.stringify(receipts)).toBe(retained);
+    current.rulesets[0] = { ...legacy.admission, id: legacy.admissionId };
+    for (const phase of [
+      "legacy-applied",
+      "upgrade-admission",
+      "legacy-namespace",
+      "applied",
+    ] as const)
+      expect(() => verify(next, current, phase, receipts)).toThrow();
+    expect(mergeMode("legacy-applied")).toBe("hold");
+    expect(mergeMode("upgrade-admission")).toBe("hold");
+  });
+
+  test("App-only v4 binds the guiding check and both bypass lists to the App", () => {
+    const before = fixture();
+    const plan = prepareAppOnly(before, 5425399, 174101112);
+    const onlyApp = [{ actor_id: 5425399, actor_type: "Integration", bypass_mode: "always" }];
+    expect(plan.schemaVersion).toBe(4);
+    expect(plan.namespace.name).toBe(appOnlyNamespaceName);
+    expect(plan.admission.bypass_actors).toEqual(onlyApp);
+    expect(plan.namespace.bypass_actors).toEqual(onlyApp);
+    expect(plan.admission.rules).toContainEqual({
+      type: "required_status_checks",
+      parameters: {
+        required_status_checks: [{ context: appOnlyCheckName, integration_id: 5425399 }],
+        strict_required_status_checks_policy: false,
+        do_not_enforce_on_create: false,
+      },
+    });
+    expect(plan.restore).toEqual(writable(before.rulesets[0]!));
+    expect(plan.restore.bypass_actors).toEqual([
+      { actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" },
+    ]);
+    expect(
+      (plan.restore.rules as { type: string }[]).some((r) => r.type === "required_status_checks"),
+    ).toBe(false);
+    for (const phase of ["guard", "namespace", "applied"] as const) {
+      const { current, receipts } = staged(plan, phase);
+      expect(() => verify(plan, current, phase, receipts)).not.toThrow();
+    }
+    expect(() => verify(plan, before, "restored", {})).not.toThrow();
+  });
+
+  test("v4 guidance preserves exact legacy plans and both reverse paths", () => {
+    const before = fixture();
+    const oldName = "Merges go through the batcher: add the queue-ready label";
+    const legacy = prepare(before, 5425399, 174101112);
+    const old = prepareAppOnly(before, 5425399, 174101112, "legacy");
+    const next = prepareAppOnly(before, 5425399, 174101112);
+    expect(legacy.namespace.name).toBe(oldName);
+    expect(old.namespace.name).toBe(oldName);
+    expect(next.namespace.name).toBe(
+      "Merges go through the batcher: use gh pr merge --auto or add the queue-ready label",
+    );
+    expect({ ...next, namespace: { ...next.namespace, name: oldName } }).toEqual(old);
+    for (const plan of [old, next]) {
+      const retained = JSON.stringify(plan);
+      expect(() => validatePlan(plan)).not.toThrow();
+      expect(plan.restore).toEqual(legacy.restore);
+      const { current, receipts } = staged(plan, "applied");
+      expect(() => verify(plan, current, "applied", receipts)).not.toThrow();
+      current.rulesets[0] = { ...plan.restore, id: plan.admissionId };
+      expect(() => verify(plan, current, "namespace", receipts)).not.toThrow();
+      current.rulesets = current.rulesets.filter((r) => r.id !== receipts.namespace!.id);
+      expect(() => verify(plan, current, "guard", receipts)).not.toThrow();
+      current.rulesets = current.rulesets.filter((r) => r.id !== receipts.guard!.id);
+      expect(() => verify(plan, current, "restored", receipts)).not.toThrow();
+      expect(JSON.stringify(plan)).toBe(retained);
+    }
+    for (const plan of [old, next]) {
+      const { current, receipts } = staged(plan, "applied");
+      const namespace = current.rulesets.find((r) => r.id === receipts.namespace!.id)!;
+      namespace.name = plan === old ? appOnlyNamespaceName : oldName;
+      expect(() => verify(plan, current, "applied", receipts)).toThrow("readback drift");
+      const wrongReceipt = structuredClone(receipts);
+      wrongReceipt.namespace!.name = namespace.name;
+      expect(() => verify(plan, current, "applied", wrongReceipt)).toThrow();
+    }
+  });
+
+  test("v4 labels reject arbitrary names, collisions and unrelated policy changes", () => {
+    const plan = prepareAppOnly(fixture(), 5425399, 174101112);
+    for (const name of [
+      appOnlyNamespaceName + " ",
+      "arbitrary",
+      "",
+      "Opengeni batcher dedicated writer",
+    ]) {
+      const changed = structuredClone(plan);
+      changed.namespace.name = name;
+      expect(() => validatePlan(changed)).toThrow();
+    }
+    for (const name of [
+      plan.namespace.name,
+      prepare(fixture(), 5425399, 174101112).namespace.name,
+    ]) {
+      const before = fixture();
+      before.rulesets.push({ ...plan.namespace, id: 999, name });
+      expect(() => prepareAppOnly(before, 5425399, 174101112)).toThrow("reconcile prior execution");
+    }
+    const renamed = structuredClone(plan);
+    renamed.namespace.bypass_actors = [
+      { actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" },
+    ];
+    expect(() => validatePlan(renamed)).toThrow();
+    const scoped = structuredClone(plan);
+    scoped.namespace.conditions = { ref_name: { include: ["~ALL"], exclude: [] } };
+    expect(() => validatePlan(scoped)).toThrow();
+  });
+
+  test("fresh native-auto Manual snapshots retain true without relaxing repository equality", () => {
+    const before = fixture();
+    Object.assign(before.repository, { allow_auto_merge: true });
+    const plan = prepareAppOnly(before, 5425399, 174101112);
+    expect(plan.before.repository).toMatchObject({ allow_auto_merge: true });
+    expect(() => verify(plan, before, "restored")).not.toThrow();
+    const changed = structuredClone(before);
+    Object.assign(changed.repository, { allow_auto_merge: false });
+    expect(() => verify(plan, changed, "restored")).toThrow("Repository configuration");
+    expect(plan.restore).toEqual(writable(before.rulesets[0]!));
+  });
+
+  test("App-only plans reject admin bypass and unbound guiding checks; legacy plans remain exact", () => {
+    const legacy = prepare(fixture(), 5425399, 174101112);
+    const saved = JSON.stringify(legacy);
+    expect(() => validatePlan(legacy)).not.toThrow();
+    const plan = prepareAppOnly(fixture(), 5425399, 174101112);
+    for (const key of ["namespace", "admission"] as const) {
+      const changed = structuredClone(plan);
+      (changed[key].bypass_actors as unknown[]).push({
+        actor_id: null,
+        actor_type: "OrganizationAdmin",
+        bypass_mode: "always",
+      });
+      expect(() => validatePlan(changed)).toThrow();
+    }
+    const changed = structuredClone(plan);
+    const rules = changed.admission.rules as {
+      type: string;
+      parameters?: { required_status_checks: { integration_id?: number }[] };
+    }[];
+    delete rules.find((r) => r.type === "required_status_checks")!.parameters!
+      .required_status_checks[0]!.integration_id;
+    expect(() => validatePlan(changed)).toThrow();
+    expect(JSON.stringify(legacy)).toBe(saved);
+  });
+
+  test("App-only provider readback includes the explicit create default without accepting changed semantics", () => {
+    const plan = prepareAppOnly(fixture(), 5425399, 174101112);
+    const { current, receipts } = staged(plan, "applied");
+    const rule = (
+      current.rulesets[0]!.rules as { type: string; parameters: Record<string, unknown> }[]
+    ).find((r) => r.type === "required_status_checks")!;
+    rule.parameters.do_not_enforce_on_create = false;
+    expect(() => verify(plan, current, "applied", receipts)).not.toThrow();
+    for (const value of [true, null, "false", 0]) {
+      rule.parameters.do_not_enforce_on_create = value;
+      expect(() => verify(plan, current, "applied", receipts)).toThrow();
+    }
+  });
+
+  test("OrganizationAdmin null readback matches sentinel 1 without rewriting saved policy", () => {
+    const plan = prepare(fixture(), 5425399, 174101112);
+    const saved = JSON.stringify(plan);
+    for (const phase of ["namespace", "applied"] as const) {
+      const { current, receipts } = structuredClone(staged(plan, phase));
+      for (const rule of [...current.rulesets, receipts.namespace]) {
+        for (const actor of rule.bypass_actors as Record<string, unknown>[])
+          if (actor.actor_type === "OrganizationAdmin") actor.actor_id = null;
+      }
+      expect(() => verify(plan, current, phase, receipts)).not.toThrow();
+    }
+    expect(JSON.stringify(plan)).toBe(saved);
+  });
+  test("OrganizationAdmin normalization rejects other actor, ID, mode and shape drift", () => {
+    const plan = prepare(fixture(), 5425399, 174101112);
+    for (const change of [
+      { actor_id: 2 },
+      { actor_id: "1" },
+      { actor_id: null, actor_type: "RepositoryRole" },
+      { actor_id: null, actor_type: "Integration" },
+      { actor_id: null, bypass_mode: "pull_request" },
+      { actor_id: null, bypass_mode: "exempt" },
+      { actor_id: null, extra: true },
+    ]) {
+      const { current, receipts } = structuredClone(staged(plan, "namespace"));
+      const actors = receipts.namespace.bypass_actors as Record<string, unknown>[];
+      Object.assign(actors.find((a) => a.actor_type === "OrganizationAdmin")!, change);
+      expect(() => verify(plan, current, "namespace", receipts)).toThrow();
+    }
+    for (const mutation of ["missing", "duplicate", "integration-id"] as const) {
+      const { current, receipts } = structuredClone(staged(plan, "namespace"));
+      const actors = receipts.namespace.bypass_actors as Record<string, unknown>[];
+      const actor = actors.find((a) => a.actor_type === "OrganizationAdmin")!;
+      if (mutation === "missing") delete actor.actor_id;
+      if (mutation === "duplicate") actors.push({ ...actor, actor_id: null });
+      if (mutation === "integration-id")
+        actors.find((a) => a.actor_type === "Integration")!.actor_id = null;
+      expect(() => verify(plan, current, "namespace", receipts)).toThrow();
+    }
+  });
   test("observed GitHub omitted update default verifies plan, apply and exact reverse phases", () => {
     for (const omittedPlan of [false, true]) {
       const plan = prepare(fixture(), 5425399, 174101112);
@@ -183,12 +410,13 @@ describe("offline batcher administration contract", () => {
       ).not.toThrow();
     }
   });
-  test("App has exact runtime permissions without administration or events", () => {
+  test("App has exact runtime permissions with read-only administration and no events", () => {
     expect(manifest.name).toBe("Opengeni merge batcher");
     expect(manifest.name.length).toBeLessThanOrEqual(34);
     expect(manifest.public).toBe(false);
     expect(manifest.default_events).toEqual([]);
     expect(manifest.default_permissions).toEqual({
+      administration: "read",
       contents: "write",
       workflows: "write",
       actions: "write",

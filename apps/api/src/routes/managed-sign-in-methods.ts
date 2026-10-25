@@ -29,6 +29,7 @@ import {
   verifyManagedAuthPassword,
 } from "../auth/managed-auth";
 import { ApiHttpError } from "../http/api-error";
+import { trustedBrowserOrigins } from "../http/browser-mutation-origin";
 import { runManagedSignInConnect } from "../auth/managed-auth-attempt-context";
 import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifications";
 import { managedAuthSelectedProofHeaders } from "../auth/managed-auth-session-adapter";
@@ -71,10 +72,11 @@ async function identity(context: Context, deps: ApiRouteDeps) {
 }
 
 export async function admitManagedSignInMutation(context: Context, deps: ApiRouteDeps) {
-  const origin = deps.settings.publicBaseUrl ? new URL(deps.settings.publicBaseUrl).origin : null;
+  const origins = deps.settings.publicBaseUrl ? trustedBrowserOrigins(deps.settings) : [];
+  const origin = context.req.header("origin");
   if (
     !origin ||
-    context.req.header("origin") !== origin ||
+    !origins.includes(origin) ||
     context.req.header("sec-fetch-site") !== "same-origin" ||
     context.req.header("content-type")?.split(";", 1)[0] !== "application/json"
   ) {
@@ -96,7 +98,7 @@ export async function admitManagedSignInMutation(context: Context, deps: ApiRout
     try {
       requireManagedAuthMutationAdmission({
         request: context.req.raw,
-        allowedOrigins: [origin],
+        allowedOrigins: origins,
         authority,
         signingSecret: deps.settings.betterAuthSecret!,
         expectedGeneration: snapshot.projection.generation,

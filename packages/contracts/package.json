@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.2.1",
+  "version": "5.3.1",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +18,14 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./event-triggers": {
+      "types": "./src/event-triggers.ts",
+      "default": "./src/event-triggers.ts"
+    },
+    "./automation-templates": {
+      "types": "./src/automation-templates.ts",
+      "default": "./src/automation-templates.ts"
+    },
     "./prepared-mcp-setup": {
       "types": "./src/prepared-mcp-setup.ts",
       "default": "./src/prepared-mcp-setup.ts"
@@ -25,6 +33,10 @@
     "./connection-account-label": {
       "types": "./src/connection-account-label.ts",
       "default": "./src/connection-account-label.ts"
+    },
+    "./personal-integration-setup": {
+      "types": "./src/personal-integration-setup.ts",
+      "default": "./src/personal-integration-setup.ts"
     },
     "./modal-native-proof-v2": {
       "types": "./src/modal-native-proof-v2.ts",
@@ -170,6 +182,10 @@
       "types": "./src/session-history.ts",
       "default": "./src/session-history.ts"
     },
+    "./message-time-zone": {
+      "types": "./src/message-time-zone.ts",
+      "default": "./src/message-time-zone.ts"
+    },
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"
@@ -198,9 +214,17 @@
       "types": "./src/model-display.ts",
       "default": "./src/model-display.ts"
     },
+    "./secret-use-approval-question": {
+      "types": "./src/secret-use-approval-question.ts",
+      "default": "./src/secret-use-approval-question.ts"
+    },
     "./tool-review-presentation": {
       "types": "./src/tool-review-presentation.ts",
       "default": "./src/tool-review-presentation.ts"
+    },
+    "./app-actions": {
+      "types": "./src/app-actions.ts",
+      "default": "./src/app-actions.ts"
     },
     "./workspace-integration-wire": {
       "types": "./src/workspace-integration-wire.ts",

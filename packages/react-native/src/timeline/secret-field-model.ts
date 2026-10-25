@@ -30,6 +30,19 @@ export type SecretInputMode =
   | "setup-key"
   | "off";
 
+/**
+ * Generate is offered when the agent allows it, never for a card, an identity
+ * or an SSH private key (whose key pairs come from secret_save).
+ */
+export function secretCanGenerate(spec: HumanInputSecretSpec | null | undefined): boolean {
+  return (
+    Boolean(spec?.allowGenerate) &&
+    spec?.itemType !== "card" &&
+    spec?.itemType !== "identity" &&
+    spec?.itemType !== "ssh_key"
+  );
+}
+
 export function secretInputMode(spec: HumanInputSecretSpec | null | undefined): SecretInputMode {
   const autocomplete = spec?.autocomplete;
   if (autocomplete === "one-time-code") return "one-time-code";
@@ -37,6 +50,9 @@ export function secretInputMode(spec: HumanInputSecretSpec | null | undefined): 
   if (autocomplete === "current-password") return "current-password";
   if (autocomplete === "off") return spec?.fieldKind === "totp" ? "setup-key" : "off";
   if (spec?.fieldKind === "totp") return "setup-key";
+  // Card numbers, ID numbers and private keys are no website password.
+  if (spec?.itemType === "card" || spec?.itemType === "identity" || spec?.itemType === "ssh_key")
+    return "off";
   if (spec?.allowGenerate) return "new-password";
   if (spec?.itemType === "api_key" || spec?.itemType === "note") return "off";
   return "current-password";

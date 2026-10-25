@@ -29,6 +29,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
+import { parsePathParam } from "../http/path-identifier";
 
 function nativeConfirmation(authorization: AccessGrantAuthorization) {
   if (
@@ -106,7 +107,7 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
   });
   app.on(["GET", "POST"], [base + "/:linkId", base + "/:linkId/:operation"], async (c) => {
     const workspaceId = c.req.param("workspaceId")!;
-    const linkId = z.string().uuid().parse(c.req.param("linkId"));
+    const linkId = parsePathParam(c, "linkId", z.string().uuid());
     const operation = c.req.param("operation");
     if (
       !(

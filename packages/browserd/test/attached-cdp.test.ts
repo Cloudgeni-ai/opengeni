@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
+import {
+  InteractionControllerError,
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
 import {
   CdpCommandTimeoutError,
@@ -73,6 +77,45 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
 }
 
 describe("AttachedChromeCdpConnection", () => {
+  test("a tab close whose profile connection ended is an unknown outcome, not a failure", async () => {
+    const closing = (failure: Error) =>
+      new AttachedChromeCdpConnection(
+        {
+          async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+            if (payload.type === "tabs.close") throw failure;
+            return {} as T;
+          },
+          close() {},
+        },
+        { browserName: "Chrome", browserVersion: "151.0.0.0" },
+      );
+    for (const failure of [
+      // The profile's connection ended with the command pending (Chrome
+      // closed the profile, or the extension stopped).
+      new AttachedBrowserBridgeError("resource_unavailable", "attached browser unavailable", true),
+      new AttachedBrowserBridgeError("transport_failed", "attached browser bridge closed", true),
+      new AttachedBrowserBridgeError("timeout", "attached browser command timed out", true),
+    ]) {
+      const connection = closing(failure);
+      const error = await connection
+        .send("Target.closeTarget", { targetId: "7" })
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(InteractionOutcomeUnknownDriverError);
+      expect(error).toMatchObject({ code: "outcome_unknown", retryable: false });
+      connection.close();
+    }
+    // Chrome says the tab is already gone.
+    const gone = closing(
+      new AttachedBrowserBridgeError("driver_rejected", "No tab with id: 7.", false),
+    );
+    const error = await gone
+      .send("Target.closeTarget", { targetId: "7" })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(InteractionDefiniteDriverError);
+    expect(error).toMatchObject({ code: "target_not_found" });
+    gone.close();
+  });
+
   test("reports a tab's download browser-wide with the file Chrome saved", async () => {
     const commands: Array<Record<string, unknown>> = [];
     let polls = 0;
@@ -718,16 +761,15 @@ describe("attached Chrome event stream recovery", () => {
     });
     try {
       await connection.send("Target.attachToTarget", { targetId: "7" });
+      const polls = () => bridge.commands.filter((command) => command.type === "debugger.poll");
+      const before = polls().length;
       bridge.pollFailure = new AttachedBrowserBridgeError(
         "fenced",
         "attached browser connection changed",
         true,
       );
       bridge.failingPolls = Number.POSITIVE_INFINITY;
-      await eventually(
-        () => bridge.commands.filter((command) => command.type === "debugger.poll").length > 2,
-        "the fenced poll",
-      );
+      await eventually(() => polls().length > before, "the fenced poll");
       await new Promise((resolve) => setTimeout(resolve, 20));
       const failure = await connection.send("Target.getTargets").catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(InteractionControllerError);

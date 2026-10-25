@@ -13,12 +13,28 @@ import {
   type VaultProviderCapabilities,
   type VaultProviderContext,
   VaultProviderError,
+  type VaultItemType,
   type VaultProviderOperations,
   parseTotpInput,
 } from "./contract";
-import { FILE_FIELD_PREFIX, type MappedField, type MappedItem, mapItem } from "./mapping";
+import {
+  FILE_FIELD_PREFIX,
+  IDENTITY_KEYS,
+  IDENTITY_STANDARD_KEYS,
+  type MappedField,
+  type MappedItem,
+  identityFieldName,
+  mapItem,
+} from "./mapping";
 import { nameKey, safeSecretName, totpUri } from "./naming";
-import { restrictToOperations } from "./operations";
+import {
+  VAULT_TYPE_MARKER_FIELD,
+  encodeItemTypeMarker,
+  parseCardExpiry,
+  restrictToOperations,
+  sshPublicKeyFromPrivateKey,
+} from "@opengeni/vaults";
+import { standardVaultFieldName } from "@opengeni/contracts";
 import {
   FullItemList,
   ITEM_HAS_FILES,
@@ -38,7 +54,7 @@ export const PROTON_PASS_MAX_ITEM_VIEWS_PER_LIST = 500;
 
 /** Operations pass-cli 2.4.2 supports without secrets on argv (see README). */
 export const PROTON_PASS_OPERATIONS: VaultProviderOperations = {
-  createItemTypes: ["login", "note", "api_key"],
+  createItemTypes: ["login", "note", "api_key", "card", "identity", "ssh_key"],
   updateItem: false,
   removeField: false,
   archiveItem: true,
@@ -153,7 +169,12 @@ function totpValue(field: ProviderWriteField, label: string): string {
 }
 
 type CreatePlan = {
-  kind: "login" | "note" | "custom";
+  /** The `item create` subcommand. */
+  kind: CreateKind;
+  /**
+   * The `--from-template -` JSON; for an SSH key, the title and the private
+   * key, which goes in alone on stdin (`ssh-key import` reads a key file).
+   */
   template: Record<string, unknown>;
   /** The same content as an Item, for metadata when the follow-up read fails. */
   synthetic: Item["content"]["content"];
@@ -164,6 +185,15 @@ type CreatePlan = {
 /** Builds the `--from-template -` JSON for a create; values travel only on stdin. */
 export function planCreate(item: ProviderWriteItem): CreatePlan {
   const title = item.name;
+  const category = item.category ?? null;
+  if (category && (item.type === "login" || item.type === "card" || item.type === "identity")) {
+    refuse(
+      `Proton Pass ${TYPE_LABEL[item.type]} items cannot carry a category ("${category}"); save it without one`,
+    );
+  }
+  if (category && item.type === "ssh_key") {
+    refuse(`Proton Pass SSH keys cannot carry a category ("${category}"); save it without one`);
+  }
   if (item.type === "login") {
     let username: string | null = null;
     let email: string | null = null;
@@ -212,6 +242,12 @@ export function planCreate(item: ProviderWriteItem): CreatePlan {
       refuse("A Proton Pass note holds text only");
     }
     const note = field ? fieldValue(field) : "";
+    if (category) {
+      // Proton notes have no categories: a custom item carries the note and
+      // the `opengeni.type` marker, and reads back as this note.
+      const marker = markerField({ type: "note", category });
+      return customPlan(title, note, [{ section_name: "Fields", fields: [marker] }]);
+    }
     return {
       kind: "note",
       template: { title, note },
@@ -221,37 +257,24 @@ export function planCreate(item: ProviderWriteItem): CreatePlan {
     };
   }
   if (item.type === "api_key") {
-    const fields = item.fields.map((field) => {
+    if (category === "wifi") {
+      const wifi = wifiPlan(title, item.fields);
+      if (wifi) return wifi;
+    }
+    const fields = item.fields.map((field): TemplateField => {
       if (field.kind === "file") refuse("Proton Pass files cannot be written from here");
       const fieldType =
         field.kind === "totp" ? "totp" : field.kind === "concealed" ? "hidden" : "text";
       const value = field.kind === "totp" ? totpValue(field, title) : fieldValue(field);
       return { field_name: field.name, field_type: fieldType, value };
     });
+    if (category) fields.push(markerField({ type: "api_key", category }));
     const sections = fields.length ? [{ section_name: "Fields", fields }] : [];
-    return {
-      kind: "custom",
-      template: { title, note: null, sections },
-      synthetic: {
-        Custom: {
-          sections: sections.map((section) => ({
-            section_name: section.section_name,
-            section_fields: section.fields.map((field) => ({
-              name: field.field_name,
-              content:
-                field.field_type === "totp"
-                  ? { Totp: field.value }
-                  : field.field_type === "hidden"
-                    ? { Hidden: field.value }
-                    : { Text: field.value },
-            })),
-          })),
-        },
-      },
-      note: "",
-      extraSections: [],
-    };
+    return customPlan(title, null, sections);
   }
+  if (item.type === "card") return cardPlan(title, item.fields);
+  if (item.type === "identity") return identityPlan(title, item.fields);
+  if (item.type === "ssh_key") return sshKeyPlan(title, item.fields);
   return refuse(
     item.type === "passkey"
       ? "Passkeys live only in workspace-hosted vaults"
@@ -259,11 +282,218 @@ export function planCreate(item: ProviderWriteItem): CreatePlan {
   );
 }
 
+type CreateKind = "login" | "note" | "custom" | "credit-card" | "identity" | "wifi" | "ssh-key";
+type TemplateField = { field_name: string; field_type: "text" | "hidden" | "totp"; value: string };
+
+const TYPE_LABEL = { login: "login", card: "card", identity: "identity" } as const;
+
+function markerField(marker: { type: VaultItemType; category: string }): TemplateField {
+  return {
+    field_name: VAULT_TYPE_MARKER_FIELD,
+    field_type: "text",
+    value: encodeItemTypeMarker(marker),
+  };
+}
+
+function customPlan(
+  title: string,
+  note: string | null,
+  sections: Array<{ section_name: string; fields: TemplateField[] }>,
+): CreatePlan {
+  return {
+    kind: "custom",
+    template: { title, note, sections },
+    synthetic: {
+      Custom: {
+        sections: sections.map((section) => ({
+          section_name: section.section_name,
+          section_fields: section.fields.map((field) => ({
+            name: field.field_name,
+            content:
+              field.field_type === "totp"
+                ? { Totp: field.value }
+                : field.field_type === "hidden"
+                  ? { Hidden: field.value }
+                  : { Text: field.value },
+          })),
+        })),
+      },
+    },
+    note: note ?? "",
+    extraSections: [],
+  };
+}
+
+function textOnly(field: ProviderWriteField, what: string): string {
+  if (field.kind !== "text" && field.kind !== "concealed") {
+    refuse(`The ${what} of a Proton Pass item holds text only`);
+  }
+  return fieldValue(field);
+}
+
+/** A native Wi-Fi item when the fields fit one (ssid, password, note); else null. */
+function wifiPlan(title: string, fields: readonly ProviderWriteField[]): CreatePlan | null {
+  const slots = new Map<string, string>();
+  for (const field of fields) {
+    const key = nameKey(field.name);
+    if (!["ssid", "password", "note"].includes(key) || slots.has(key)) return null;
+    if (field.kind !== "text" && field.kind !== "concealed") return null;
+    slots.set(key, fieldValue(field));
+  }
+  const ssid = slots.get("ssid") ?? "";
+  const password = slots.get("password") ?? "";
+  const note = slots.get("note") ?? "";
+  return {
+    kind: "wifi",
+    template: { title, ssid, password, security: null, note },
+    synthetic: { Wifi: { ssid, password, sections: [] } },
+    note,
+    extraSections: [],
+  };
+}
+
+function cardPlan(title: string, fields: readonly ProviderWriteField[]): CreatePlan {
+  const card: Record<string, string> = {};
+  let month: string | null = null;
+  let year: string | null = null;
+  const set = (key: string, field: ProviderWriteField) => {
+    if (card[key] !== undefined) refuse(`A Proton Pass card holds one "${field.name}"`);
+    card[key] = textOnly(field, field.name);
+  };
+  for (const field of fields) {
+    const standard = standardVaultFieldName("card", field.name);
+    const key = nameKey(field.name);
+    if (standard === "cardholder name") set("cardholder_name", field);
+    else if (standard === "number") set("number", field);
+    else if (standard === "security code") set("cvv", field);
+    else if (standard === "expiry month") month = textOnly(field, field.name).trim();
+    else if (standard === "expiry year") year = textOnly(field, field.name).trim();
+    else if (key === "expiration date") set("expiration_date", field);
+    else if (key === "pin") set("pin", field);
+    else if (key === "note") set("note", field);
+    else if (standard === "brand") {
+      // pass-cli 2.4.2 drops a card type given on create; Proton detects it.
+      if (textOnly(field, field.name).trim()) {
+        refuse("Proton Pass sets a card's brand itself from its number; leave brand empty");
+      }
+    } else {
+      refuse(
+        `Proton Pass cards hold a cardholder name, number, security code, expiry, PIN and note; "${field.name}" has no place in one`,
+      );
+    }
+  }
+  if (month !== null || year !== null) {
+    const expiry = parseCardExpiry(`${month ?? ""}/${year ?? ""}`);
+    if (!expiry || card.expiration_date !== undefined) {
+      refuse("A Proton Pass card expiry needs both a month (1-12) and a year");
+    }
+    card.expiration_date = `${expiry.year}-${expiry.month.padStart(2, "0")}`;
+  }
+  return {
+    kind: "credit-card",
+    template: { title, card_type: null, ...card },
+    synthetic: {
+      CreditCard: {
+        cardholder_name: card.cardholder_name ?? "",
+        number: card.number ?? "",
+        verification_number: card.cvv ?? "",
+        expiration_date: card.expiration_date ?? "",
+        pin: card.pin ?? "",
+      },
+    },
+    note: card.note ?? "",
+    extraSections: [],
+  };
+}
+
+function identityPlan(title: string, fields: readonly ProviderWriteField[]): CreatePlan {
+  const identity: Record<string, string> = {};
+  let note = "";
+  for (const field of fields) {
+    const standard = standardVaultFieldName("identity", field.name);
+    const key =
+      (standard ? IDENTITY_STANDARD_KEYS[standard] : undefined) ??
+      nameKey(field.name).replace(/\s+/g, "_");
+    if (key === "note") {
+      note = textOnly(field, field.name);
+      continue;
+    }
+    if (!IDENTITY_KEYS.has(key)) {
+      refuse(
+        `Proton Pass identities have no "${field.name}" field; they hold ${[...IDENTITY_KEYS].map(identityFieldName).join(", ")} and a note`,
+      );
+    }
+    if (identity[key] !== undefined) refuse(`A Proton Pass identity holds one "${field.name}"`);
+    identity[key] = textOnly(field, field.name);
+  }
+  return {
+    kind: "identity",
+    template: { title, note, ...identity },
+    synthetic: { Identity: { ...identity } },
+    note,
+    extraSections: [],
+  };
+}
+
+function sshKeyPlan(title: string, fields: readonly ProviderWriteField[]): CreatePlan {
+  let privateKey: string | null = null;
+  for (const field of fields) {
+    const standard = standardVaultFieldName("ssh_key", field.name);
+    // Proton derives the public key from the private key, and Opengeni the
+    // fingerprint from the public key (core already checked they match).
+    if (standard === "public key" || standard === "fingerprint") continue;
+    if (standard !== "private key") {
+      refuse(
+        `Proton Pass SSH keys created from here hold only the key pair; "${field.name}" has no place in one`,
+      );
+    }
+    privateKey = textOnly(field, field.name);
+  }
+  if (!privateKey?.trim()) refuse('A Proton Pass SSH key needs its "private key"');
+  const derived = sshPublicKeyFromPrivateKey(privateKey);
+  return {
+    kind: "ssh-key",
+    template: { title, private_key: privateKey },
+    synthetic: {
+      SshKey: { private_key: privateKey, public_key: derived?.publicKey ?? "", sections: [] },
+    },
+    note: "",
+    extraSections: [],
+  };
+}
+
+/** The `item create` argv for a plan, after `--share-id`. */
+function createArgs(plan: CreatePlan, shareId: string): { args: string[]; stdin: string } {
+  if (plan.kind === "ssh-key") {
+    // `ssh-key import` reads a key file; /dev/stdin keeps the key off disk and argv.
+    return {
+      args: [
+        "item",
+        "create",
+        "ssh-key",
+        "import",
+        `--share-id=${shareId}`,
+        `--title=${String(plan.template.title)}`,
+        "--from-private-key=/dev/stdin",
+      ],
+      stdin: String(plan.template.private_key),
+    };
+  }
+  return {
+    args: ["item", "create", plan.kind, `--share-id=${shareId}`, "--from-template", "-"],
+    stdin: JSON.stringify(plan.template),
+  };
+}
+
 const CREATE_CONTEXT = {
   login: /Error creating login item/,
   note: /Error creating note item/,
   custom: /Error creating custom item/,
-} as const;
+  "credit-card": /Error creating credit card item/,
+  identity: /Error creating identity item/,
+  wifi: /Error creating WiFi item/,
+  "ssh-key": /Error creating SSH key item|Error reading private key file|Failed to parse/,
+} as const satisfies Record<CreateKind, RegExp>;
 
 export function createProtonPassVaultProvider(
   options: ProtonPassVaultProviderOptions,
@@ -597,16 +827,10 @@ export function createProtonPassVaultProvider(
         );
       }
       const plan = planCreate(item);
+      const create = createArgs(plan, externalVaultId);
       const stdout = await cli(ctx, "write", {
-        args: [
-          "item",
-          "create",
-          plan.kind,
-          `--share-id=${externalVaultId}`,
-          "--from-template",
-          "-",
-        ],
-        stdin: JSON.stringify(plan.template),
+        args: create.args,
+        stdin: create.stdin,
         subject: `create ${plan.kind} item`,
         mutationContext: CREATE_CONTEXT[plan.kind],
         maxStdoutBytes: 64 * 1024,

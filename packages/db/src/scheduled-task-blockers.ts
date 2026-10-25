@@ -45,6 +45,12 @@ export type ScheduledTaskBlockerFacts = {
     updatedAt: Date;
     /** The stored schedule spec, unvalidated: its cadence decides when to tell the owner. */
     schedule: unknown;
+    /**
+     * The automation's event run policy, or null without event triggers.
+     * Repeating triggers keep running after the schedule's last run; a
+     * run-once automation has none left once it completed.
+     */
+    events: { once: boolean; completed: boolean } | null;
   };
   review: ScheduledTaskBlockerReview | null;
   /** Newest first: scheduled and event (not manual) agent-turn runs only. */
@@ -125,13 +131,20 @@ export async function reviewScheduledTaskBlockers(
         reusable_session_id: string | null;
         updated_at: Date | string;
         schedule: unknown;
+        events_once: boolean | null;
+        events_completed: boolean | null;
       }>(
         exec,
-        sql`select id, account_id, workspace_id, name, status, deleted_at, run_mode,
-              reusable_session_id, updated_at, schedule
-            from scheduled_tasks
-            where workspace_id = ${workspaceId} and id = ${taskId}
-            for update`,
+        sql`select task.id, task.account_id, task.workspace_id, task.name, task.status,
+              task.deleted_at, task.run_mode, task.reusable_session_id, task.updated_at,
+              task.schedule, settings.once as events_once,
+              settings.completed_at is not null as events_completed
+            from scheduled_tasks task
+            left join scheduled_task_event_settings settings
+              on settings.workspace_id = task.workspace_id and settings.task_id = task.id
+                and settings.account_id = task.account_id
+            where task.workspace_id = ${workspaceId} and task.id = ${taskId}
+            for update of task`,
       );
       if (!task) return { paused: false, noticePending: false };
       const [reviewRow] = await rawRows<{
@@ -198,6 +211,10 @@ export async function reviewScheduledTaskBlockers(
             typeof task.schedule === "string"
               ? (JSON.parse(task.schedule) as unknown)
               : (task.schedule ?? null),
+          events:
+            task.events_once === null
+              ? null
+              : { once: task.events_once, completed: task.events_completed === true },
         },
         review,
         runs: runs.map((run) => ({

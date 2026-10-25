@@ -351,6 +351,7 @@ describe("GitHub repository binding candidates (Postgres)", () => {
         authorityExpiresAt: new Date(authorityCheckedAt.getTime() + 10 * 60_000),
         authorityNonce: `core-github-bindings-${crypto.randomUUID()}`,
         repositoryIds,
+        eventRouteSecret: null,
       });
     await bind(own, 501, "acme", [456, 457]);
     await bind(own, 502, "globex", [900]);

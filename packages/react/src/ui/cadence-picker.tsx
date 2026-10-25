@@ -10,6 +10,11 @@
       - "sentence" (default): [Every weekday] at [08:00] [Oslo time]
       - "presets": labelled preset chips and fields, with a summary line
       - "text": type "every weekday at 8" and see the rule it becomes
+
+   Words come from the host's message catalog (`cadence.*`): components read
+   `useOpenGeniText()`, and the pure functions take it as `text` in their
+   options, English when omitted. Typed text (`parseCadence`, the "text"
+   variant) reads English.
    -------------------------------------------------------------------------- */
 
 import {
@@ -38,6 +43,12 @@ import { InlineDisabledReason, SelectMenuPanel, type SelectOption } from "./sele
 import { MENU_CHECK_CLASS, MENU_SURFACE_CLASS } from "./menu-styles";
 import { cn } from "../lib/cn";
 import { containedPortal } from "./portal-container";
+import {
+  createOpenGeniText,
+  useOpenGeniText,
+  type OpenGeniMessageKey,
+  type OpenGeniText,
+} from "../messages/runtime";
 
 const SelectContainedPortal = containedPortal(SelectPrimitive.Portal);
 const PopoverContainedPortal = containedPortal(PopoverPrimitive.Portal);
@@ -111,16 +122,53 @@ export type CadenceScheduleSpec =
 export const WEEKDAYS: readonly Weekday[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const WORKDAYS: readonly Weekday[] = ["mon", "tue", "wed", "thu", "fri"];
 
-const WEEKDAY_NAMES: Record<Weekday, { short: string; long: string; plural: string }> = {
-  mon: { short: "Mon", long: "Monday", plural: "Mondays" },
-  tue: { short: "Tue", long: "Tuesday", plural: "Tuesdays" },
-  wed: { short: "Wed", long: "Wednesday", plural: "Wednesdays" },
-  thu: { short: "Thu", long: "Thursday", plural: "Thursdays" },
-  fri: { short: "Fri", long: "Friday", plural: "Fridays" },
-  sat: { short: "Sat", long: "Saturday", plural: "Saturdays" },
-  sun: { short: "Sun", long: "Sunday", plural: "Sundays" },
-};
+/** The built-in English words, for callers that pass no `text`. */
+const ENGLISH = createOpenGeniText();
 
+type DayForm = "short" | "long" | "plural";
+
+const WEEKDAY_KEYS = {
+  mon: {
+    short: "cadence.day.mon.short",
+    long: "cadence.day.mon.long",
+    plural: "cadence.day.mon.plural",
+  },
+  tue: {
+    short: "cadence.day.tue.short",
+    long: "cadence.day.tue.long",
+    plural: "cadence.day.tue.plural",
+  },
+  wed: {
+    short: "cadence.day.wed.short",
+    long: "cadence.day.wed.long",
+    plural: "cadence.day.wed.plural",
+  },
+  thu: {
+    short: "cadence.day.thu.short",
+    long: "cadence.day.thu.long",
+    plural: "cadence.day.thu.plural",
+  },
+  fri: {
+    short: "cadence.day.fri.short",
+    long: "cadence.day.fri.long",
+    plural: "cadence.day.fri.plural",
+  },
+  sat: {
+    short: "cadence.day.sat.short",
+    long: "cadence.day.sat.long",
+    plural: "cadence.day.sat.plural",
+  },
+  sun: {
+    short: "cadence.day.sun.short",
+    long: "cadence.day.sun.long",
+    plural: "cadence.day.sun.plural",
+  },
+} as const satisfies Record<Weekday, Record<DayForm, OpenGeniMessageKey>>;
+
+/** "Mon", "Monday" or "Mondays", in the host's words. */
+function weekdayName(t: OpenGeniText, day: Weekday, form: DayForm): string {
+  return t(WEEKDAY_KEYS[day][form]);
+}
 const API_WEEKDAYS: Record<Weekday, ApiWeekday> = {
   mon: "MONDAY",
   tue: "TUESDAY",
@@ -131,22 +179,41 @@ const API_WEEKDAYS: Record<Weekday, ApiWeekday> = {
   sun: "SUNDAY",
 };
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const MONTH_NAMES = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
-];
+const MONTH_KEYS = [
+  { short: "cadence.month.jan.short", long: "cadence.month.jan.long" },
+  { short: "cadence.month.feb.short", long: "cadence.month.feb.long" },
+  { short: "cadence.month.mar.short", long: "cadence.month.mar.long" },
+  { short: "cadence.month.apr.short", long: "cadence.month.apr.long" },
+  { short: "cadence.month.may.short", long: "cadence.month.may.long" },
+  { short: "cadence.month.jun.short", long: "cadence.month.jun.long" },
+  { short: "cadence.month.jul.short", long: "cadence.month.jul.long" },
+  { short: "cadence.month.aug.short", long: "cadence.month.aug.long" },
+  { short: "cadence.month.sep.short", long: "cadence.month.sep.long" },
+  { short: "cadence.month.oct.short", long: "cadence.month.oct.long" },
+  { short: "cadence.month.nov.short", long: "cadence.month.nov.long" },
+  { short: "cadence.month.dec.short", long: "cadence.month.dec.long" },
+] as const satisfies ReadonlyArray<Record<"short" | "long", OpenGeniMessageKey>>;
 
+/** "Sep" or "September" for month 9, in the host's words. */
+function monthName(t: OpenGeniText, month: number, form: "short" | "long"): string {
+  return t(MONTH_KEYS[month - 1]![form]);
+}
+
+/** English month names, which typed cadences use. */
+const TYPED_MONTHS = [
+  "january",
+  "february",
+  "march",
+  "april",
+  "may",
+  "june",
+  "july",
+  "august",
+  "september",
+  "october",
+  "november",
+  "december",
+];
 const UNIT_SECONDS: Record<IntervalUnit, number> = { minutes: 60, hours: 3_600, days: 86_400 };
 const UNIT_LIMITS: Record<IntervalUnit, number> = { minutes: 1_440, hours: 168, days: 365 };
 const DAY_MS = 86_400_000;
@@ -260,10 +327,13 @@ export function parseLocalDate(value: string): LocalDate | null {
 }
 
 /** Human labels for an IANA zone: "Oslo time" and "Oslo". */
-export function timeZoneLabels(timeZone: string): { label: string; shortLabel: string } {
+export function timeZoneLabels(
+  timeZone: string,
+  text: OpenGeniText = ENGLISH,
+): { label: string; shortLabel: string } {
   if (timeZone === "UTC" || timeZone === "Etc/UTC") return { label: "UTC", shortLabel: "UTC" };
   const city = (timeZone.split("/").pop() ?? timeZone).replaceAll("_", " ");
-  return { label: `${city} time`, shortLabel: city };
+  return { label: text("cadence.zoneTime", { city }), shortLabel: city };
 }
 
 /* ---------------------------------------------------------------- times */
@@ -326,26 +396,45 @@ export function stepTime(value: string, minutes: number): string {
 export interface RunFormatOptions {
   timeZone: string;
   now: Date;
+  /** The host's words, from `useOpenGeniText()`. English when omitted. */
+  text?: OpenGeniText | undefined;
 }
 
-function dateLabel(date: LocalDate, today: LocalDate): string {
-  const weekday = WEEKDAY_NAMES[weekdayOf(date)].short;
-  const base = `${weekday} ${date.day} ${MONTHS[date.month - 1]}`;
-  return date.year === today.year ? base : `${base} ${date.year}`;
+function dateLabel(t: OpenGeniText, date: LocalDate, today: LocalDate): string {
+  const words = {
+    weekday: weekdayName(t, weekdayOf(date), "short"),
+    day: date.day,
+    month: monthName(t, date.month, "short"),
+  };
+  return date.year === today.year
+    ? t("cadence.date", words)
+    : t("cadence.dateWithYear", { ...words, year: date.year });
 }
 
-function relativeDateLabel(date: LocalDate, today: LocalDate): string {
+function relativeDateLabel(t: OpenGeniText, date: LocalDate, today: LocalDate): string {
   const delta = dayNumber(date) - dayNumber(today);
-  if (delta === 0) return "Today";
-  if (delta === 1) return "Tomorrow";
-  return dateLabel(date, today);
+  if (delta === 0) return t("cadence.today");
+  if (delta === 1) return t("cadence.tomorrow");
+  return dateLabel(t, date, today);
+}
+
+/** "a, b and c" in the host's words. */
+function joinList(t: OpenGeniText, items: readonly string[]): string {
+  if (items.length <= 1) return items.join("");
+  return t("cadence.and", { head: items.slice(0, -1).join(", "), last: items.at(-1) });
 }
 
 /** "Today, 14:00", "Tomorrow, 08:00", "Mon 28 Sep, 08:00" or "Mon 4 Jan 2027, 08:00". */
-export function formatRunTime(date: Date, { timeZone, now }: RunFormatOptions): string {
+export function formatRunTime(
+  date: Date,
+  { timeZone, now, text = ENGLISH }: RunFormatOptions,
+): string {
   const parts = zonedParts(date, timeZone);
   const today = localDateOf(now, timeZone);
-  return `${relativeDateLabel(parts, today)}, ${pad(parts.hour)}:${pad(parts.minute)}`;
+  return text("cadence.runTime", {
+    date: relativeDateLabel(text, parts, today),
+    time: `${pad(parts.hour)}:${pad(parts.minute)}`,
+  });
 }
 
 /**
@@ -356,6 +445,7 @@ export function formatRunTime(date: Date, { timeZone, now }: RunFormatOptions): 
 export function describeNextRuns(runs: readonly Date[], options: RunFormatOptions): string {
   const [first, ...rest] = runs;
   if (!first) return "";
+  const t = options.text ?? ENGLISH;
   const today = localDateOf(options.now, options.timeZone);
   const firstParts = zonedParts(first, options.timeZone);
   const labels = rest.map((run, index) => {
@@ -364,14 +454,13 @@ export function describeNextRuns(runs: readonly Date[], options: RunFormatOption
     const time = `${pad(parts.hour)}:${pad(parts.minute)}`;
     if (dayNumber(parts) === dayNumber(previous)) return time;
     if (parts.hour === firstParts.hour && parts.minute === firstParts.minute) {
-      return relativeDateLabel(parts, today);
+      return relativeDateLabel(t, parts, today);
     }
-    return `${relativeDateLabel(parts, today)}, ${time}`;
+    return t("cadence.runTime", { date: relativeDateLabel(t, parts, today), time });
   });
   const head = formatRunTime(first, options);
   if (labels.length === 0) return head;
-  if (labels.length === 1) return `${head}, then ${labels[0]}`;
-  return `${head}, then ${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
+  return t("cadence.then", { first: head, rest: joinList(t, labels) });
 }
 
 /* ---------------------------------------------------------------- describe */
@@ -384,6 +473,8 @@ export interface CadenceDescribeOptions {
   timeZoneShortLabel?: string | undefined;
   /** Used to decide whether a one-time date needs its year. */
   now?: Date | undefined;
+  /** The host's words, from `useOpenGeniText()`. English when omitted. */
+  text?: OpenGeniText | undefined;
 }
 
 export interface CadenceDescription {
@@ -393,11 +484,10 @@ export interface CadenceDescription {
   short: string;
 }
 
-function listDays(days: readonly Weekday[], form: "long" | "short" | "plural"): string {
-  const names = sortDays(days).map((day) => WEEKDAY_NAMES[day][form]);
-  if (names.length <= 1) return names.join("");
+function listDays(t: OpenGeniText, days: readonly Weekday[], form: DayForm): string {
+  const names = sortDays(days).map((day) => weekdayName(t, day, form));
   if (form === "short" && names.length > 2) return names.join(", ");
-  return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  return joinList(t, names);
 }
 
 function sortDays(days: readonly Weekday[]): Weekday[] {
@@ -410,9 +500,16 @@ function sameDays(a: readonly Weekday[], b: readonly Weekday[]): boolean {
   return left.length === right.length && left.every((day, index) => day === right[index]);
 }
 
-function unitLabel(every: number, unit: IntervalUnit): string {
-  const singular = unit.slice(0, -1);
-  return every === 1 ? singular : `${every} ${unit}`;
+/** "minute" or "30 minutes": what follows "every". */
+function unitLabel(t: OpenGeniText, every: number, unit: IntervalUnit): string {
+  switch (unit) {
+    case "minutes":
+      return t("cadence.every.minutes", { count: every });
+    case "hours":
+      return t("cadence.every.hours", { count: every });
+    case "days":
+      return t("cadence.every.days", { count: every });
+  }
 }
 
 /** The rule in words, as a sentence and as a short row label. */
@@ -420,24 +517,28 @@ export function describeCadence(
   rule: CadenceRule,
   options: CadenceDescribeOptions,
 ): CadenceDescription {
-  const labels = timeZoneLabels(options.timeZone);
+  const t = options.text ?? ENGLISH;
+  const labels = timeZoneLabels(options.timeZone, t);
   const zone = options.timeZoneLabel ?? labels.label;
   const zoneShort = options.timeZoneShortLabel ?? labels.shortLabel;
-  const at = (time: string) => `at ${time} ${zone}`;
-  const atShort = (time: string) => `at ${time} · ${zoneShort}`;
+  const at = (time: string) => t("cadence.at", { time, zone }).trim();
+  const atShort = (time: string) => t("cadence.atShort", { time, zone: zoneShort });
 
   switch (rule.frequency) {
     case "hourly":
-      return { sentence: "Runs every hour", short: "Every hour" };
+      return {
+        sentence: t("cadence.describe.hourly"),
+        short: t("cadence.describe.hourlyShort"),
+      };
     case "daily":
       return {
-        sentence: `Runs every day ${at(rule.time)}`,
-        short: `Every day ${atShort(rule.time)}`,
+        sentence: t("cadence.describe.daily", { at: at(rule.time) }),
+        short: t("cadence.describe.dailyShort", { at: atShort(rule.time) }),
       };
     case "weekdays":
       return {
-        sentence: `Runs every weekday ${at(rule.time)}`,
-        short: `Every weekday ${atShort(rule.time)}`,
+        sentence: t("cadence.describe.weekdays", { at: at(rule.time) }),
+        short: t("cadence.describe.weekdaysShort", { at: atShort(rule.time) }),
       };
     case "weekly": {
       if (sameDays(rule.days, WORKDAYS)) {
@@ -447,36 +548,50 @@ export function describeCadence(
         return describeCadence({ frequency: "daily", time: rule.time }, options);
       }
       if (rule.days.length === 0) {
-        return { sentence: "Runs every week on the days you pick", short: "Every week" };
+        return {
+          sentence: t("cadence.describe.weeklyNoDays"),
+          short: t("cadence.describe.weeklyNoDaysShort"),
+        };
       }
       return {
-        sentence: `Runs every ${listDays(rule.days, "long")} ${at(rule.time)}`,
-        short: `Every week on ${listDays(rule.days, "short")} ${atShort(rule.time)}`,
+        sentence: t("cadence.describe.weekly", {
+          days: listDays(t, rule.days, "long"),
+          at: at(rule.time),
+        }),
+        short: t("cadence.describe.weeklyShort", {
+          days: listDays(t, rule.days, "short"),
+          at: atShort(rule.time),
+        }),
       };
     }
     case "monthly":
       return {
-        sentence: `Runs every month on day ${rule.dayOfMonth} ${at(rule.time)}`,
-        short: `Every month on day ${rule.dayOfMonth} ${atShort(rule.time)}`,
+        sentence: t("cadence.describe.monthly", { day: rule.dayOfMonth, at: at(rule.time) }),
+        short: t("cadence.describe.monthlyShort", { day: rule.dayOfMonth, at: atShort(rule.time) }),
       };
     case "interval": {
-      const every = unitLabel(rule.every, rule.unit);
+      const every = unitLabel(t, rule.every, rule.unit);
       if (rule.unit === "days" && rule.time) {
         return {
-          sentence: `Runs every ${every} ${at(rule.time)}`,
-          short: `Every ${every} ${atShort(rule.time)}`,
+          sentence: t("cadence.describe.intervalAt", { every, at: at(rule.time) }),
+          short: t("cadence.describe.intervalAtShort", { every, at: atShort(rule.time) }),
         };
       }
-      return { sentence: `Runs every ${every}`, short: `Every ${every}` };
+      return {
+        sentence: t("cadence.describe.interval", { every }),
+        short: t("cadence.describe.intervalShort", { every }),
+      };
     }
     case "once": {
       const once = onceParts(rule, options.timeZone);
-      if (!once) return { sentence: "Runs once", short: "Once" };
+      if (!once) {
+        return { sentence: t("cadence.describe.once"), short: t("cadence.describe.onceShort") };
+      }
       const today = options.now ? localDateOf(options.now, options.timeZone) : once.date;
-      const day = dateLabel(once.date, today);
+      const date = dateLabel(t, once.date, today);
       return {
-        sentence: `Runs once on ${day} ${at(once.time)}`,
-        short: `Once on ${day}, ${once.time} · ${zoneShort}`,
+        sentence: t("cadence.describe.onceOn", { date, at: at(once.time) }),
+        short: t("cadence.describe.onceOnShort", { date, time: once.time, zone: zoneShort }),
       };
     }
   }
@@ -516,11 +631,11 @@ export interface CadenceIssue {
 /** What's wrong with a rule, in words, or null when it can run. */
 export function validateCadence(
   rule: CadenceRule,
-  { timeZone, now }: RunFormatOptions,
+  { timeZone, now, text = ENGLISH }: RunFormatOptions,
 ): CadenceIssue | null {
   const timeIssue = (time: string | undefined): CadenceIssue | null =>
     time !== undefined && !parseTime(time)
-      ? { field: "time", message: "Enter a time like 08:00." }
+      ? { field: "time", message: text("cadence.issue.time") }
       : null;
 
   switch (rule.frequency) {
@@ -530,32 +645,35 @@ export function validateCadence(
     case "weekdays":
       return timeIssue(rule.time);
     case "weekly":
-      if (rule.days.length === 0) return { field: "days", message: "Pick at least one day." };
+      if (rule.days.length === 0) return { field: "days", message: text("cadence.issue.days") };
       return timeIssue(rule.time);
     case "monthly":
       if (!Number.isInteger(rule.dayOfMonth) || rule.dayOfMonth < 1 || rule.dayOfMonth > 31) {
-        return { field: "dayOfMonth", message: "Pick a day from 1 to 31." };
+        return { field: "dayOfMonth", message: text("cadence.issue.dayOfMonth") };
       }
       return timeIssue(rule.time);
     case "interval": {
       const limit = UNIT_LIMITS[rule.unit];
       if (!Number.isInteger(rule.every) || rule.every < 1 || rule.every > limit) {
-        return { field: "every", message: `Enter a whole number from 1 to ${limit}.` };
+        return { field: "every", message: text("cadence.issue.every", { limit }) };
       }
       return rule.unit === "days" ? timeIssue(rule.time) : null;
     }
     case "once": {
       if (!("at" in rule)) {
-        if (!parseLocalDate(rule.date)) return { field: "date", message: "Pick a date." };
+        if (!parseLocalDate(rule.date))
+          return { field: "date", message: text("cadence.issue.date") };
         const issue = timeIssue(rule.time);
         if (issue) return issue;
       }
       const [run] = onceRun(rule, timeZone);
-      if (!run) return { field: "date", message: "Pick a date." };
+      if (!run) return { field: "date", message: text("cadence.issue.date") };
       if (run.getTime() <= now.getTime()) {
         return {
           field: "date",
-          message: `${formatRunTime(run, { timeZone, now })} has already passed. Pick a later time.`,
+          message: text("cadence.issue.passed", {
+            time: formatRunTime(run, { timeZone, now, text }),
+          }),
         };
       }
       return null;
@@ -898,7 +1016,7 @@ export function parseCadence(
   else {
     const iso = /\b(\d{4}-\d{2}-\d{2})\b/.exec(text);
     if (iso) onceDate = parseLocalDate(iso[1]!);
-    const monthPattern = MONTH_NAMES.map((name) => name.toLowerCase().slice(0, 3)).join("|");
+    const monthPattern = TYPED_MONTHS.map((name) => name.slice(0, 3)).join("|");
     const dayMonth = new RegExp(
       `\\b(\\d{1,2})(?:st|nd|rd|th)? (?:of )?(${monthPattern})[a-z]*\\b`,
     ).exec(text);
@@ -911,7 +1029,7 @@ export function parseCadence(
         ? { day: Number(monthDay[2]), month: monthDay[1]! }
         : null;
     if (!onceDate && found) {
-      const month = MONTH_NAMES.findIndex((name) => name.toLowerCase().startsWith(found.month)) + 1;
+      const month = TYPED_MONTHS.findIndex((name) => name.startsWith(found.month)) + 1;
       let year = today.year;
       if (month < today.month || (month === today.month && found.day < today.day)) year += 1;
       onceDate = found.day <= daysInMonth(year, month) ? { year, month, day: found.day } : null;
@@ -1011,59 +1129,82 @@ const ALL_FREQUENCIES: readonly CadenceFrequency[] = [
   "once",
 ];
 
-const FREQUENCY_OPTIONS: Record<
-  CadenceFrequency,
-  { label: string; trigger: string; preset: string; description: string }
-> = {
-  hourly: {
-    label: "Every hour",
-    trigger: "Every hour",
-    preset: "Hourly",
-    description: "On the hour, around the clock",
-  },
-  daily: {
-    label: "Every day",
-    trigger: "Every day",
-    preset: "Daily",
-    description: "Including weekends",
-  },
-  weekdays: {
-    label: "Every weekday",
-    trigger: "Every weekday",
-    preset: "Weekdays",
-    description: "Monday to Friday",
-  },
-  weekly: {
-    label: "Every week",
-    trigger: "Every week",
-    preset: "Weekly",
-    description: "On the days you pick",
-  },
-  monthly: {
-    label: "Every month",
-    trigger: "Every month",
-    preset: "Monthly",
-    description: "On one day of the month",
-  },
-  interval: {
-    label: "Custom interval",
-    trigger: "Every",
-    preset: "Custom",
-    description: "Every few minutes, hours or days",
-  },
-  once: {
-    label: "One time",
-    trigger: "One time",
-    preset: "Once",
-    description: "On a date you pick",
-  },
-};
+interface FrequencyWords {
+  /** In the menu: "Every day". */
+  label: string;
+  /** On the closed menu: "Every day", or "Every" before an interval's number. */
+  trigger: string;
+  /** On a preset chip: "Daily". */
+  preset: string;
+  /** Under the menu label: "Including weekends". */
+  description: string;
+}
 
-const UNIT_OPTIONS: Array<{ value: IntervalUnit; label: string }> = [
-  { value: "minutes", label: "minutes" },
-  { value: "hours", label: "hours" },
-  { value: "days", label: "days" },
-];
+function frequencyWords(t: OpenGeniText, frequency: CadenceFrequency): FrequencyWords {
+  switch (frequency) {
+    case "hourly":
+      return {
+        label: t("cadence.frequency.hourly"),
+        trigger: t("cadence.frequency.hourly"),
+        preset: t("cadence.frequency.hourlyPreset"),
+        description: t("cadence.frequency.hourlyDescription"),
+      };
+    case "daily":
+      return {
+        label: t("cadence.frequency.daily"),
+        trigger: t("cadence.frequency.daily"),
+        preset: t("cadence.frequency.dailyPreset"),
+        description: t("cadence.frequency.dailyDescription"),
+      };
+    case "weekdays":
+      return {
+        label: t("cadence.frequency.weekdays"),
+        trigger: t("cadence.frequency.weekdays"),
+        preset: t("cadence.frequency.weekdaysPreset"),
+        description: t("cadence.frequency.weekdaysDescription"),
+      };
+    case "weekly":
+      return {
+        label: t("cadence.frequency.weekly"),
+        trigger: t("cadence.frequency.weekly"),
+        preset: t("cadence.frequency.weeklyPreset"),
+        description: t("cadence.frequency.weeklyDescription"),
+      };
+    case "monthly":
+      return {
+        label: t("cadence.frequency.monthly"),
+        trigger: t("cadence.frequency.monthly"),
+        preset: t("cadence.frequency.monthlyPreset"),
+        description: t("cadence.frequency.monthlyDescription"),
+      };
+    case "interval":
+      return {
+        label: t("cadence.frequency.interval"),
+        trigger: t("cadence.frequency.intervalTrigger"),
+        preset: t("cadence.frequency.intervalPreset"),
+        description: t("cadence.frequency.intervalDescription"),
+      };
+    case "once":
+      return {
+        label: t("cadence.frequency.once"),
+        trigger: t("cadence.frequency.once"),
+        preset: t("cadence.frequency.oncePreset"),
+        description: t("cadence.frequency.onceDescription"),
+      };
+  }
+}
+
+function unitOptions(
+  t: OpenGeniText,
+  every: number,
+): Array<{ value: IntervalUnit; label: string }> {
+  const one = every === 1;
+  return [
+    { value: "minutes", label: one ? t("cadence.unit.minute") : t("cadence.unit.minutes") },
+    { value: "hours", label: one ? t("cadence.unit.hour") : t("cadence.unit.hours") },
+    { value: "days", label: one ? t("cadence.unit.day") : t("cadence.unit.days") },
+  ];
+}
 
 function ruleTime(rule: CadenceRule): string | undefined {
   if (rule.frequency === "hourly") return undefined;
@@ -1241,7 +1382,7 @@ function ValueSelect<V extends string>({
 export function TimeField({
   value,
   onChange,
-  label = "Time",
+  label: labelProp,
   disabled,
   id,
   className,
@@ -1253,6 +1394,8 @@ export function TimeField({
   id?: string | undefined;
   className?: string | undefined;
 }) {
+  const t = useOpenGeniText();
+  const label = labelProp ?? t("cadence.picker.time");
   const [draft, setDraft] = useState(value);
   const [focused, setFocused] = useState(false);
   useEffect(() => {
@@ -1373,10 +1516,11 @@ function DayToggleGroup({
   invalid?: boolean | undefined;
   describedBy?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   return (
     <div
       role="group"
-      aria-label="Days"
+      aria-label={t("cadence.picker.days")}
       aria-invalid={invalid || undefined}
       aria-describedby={describedBy}
       className={cn(
@@ -1392,7 +1536,7 @@ function DayToggleGroup({
             key={day}
             type="button"
             aria-pressed={on}
-            aria-label={WEEKDAY_NAMES[day].long}
+            aria-label={weekdayName(t, day, "long")}
             disabled={disabled}
             onClick={() =>
               onChange(on ? days.filter((each) => each !== day) : sortDays([...days, day]))
@@ -1404,7 +1548,7 @@ function DayToggleGroup({
                 : "text-fg-muted hover:bg-surface-2 hover:text-fg disabled:text-fg-subtle disabled:hover:bg-transparent",
             )}
           >
-            {WEEKDAY_NAMES[day].short.slice(0, 2)}
+            {weekdayName(t, day, "short").slice(0, 2)}
           </button>
         );
       })}
@@ -1414,7 +1558,8 @@ function DayToggleGroup({
 
 /* ---------------------------------------------------------------- time zones */
 
-let allZonesCache: CadenceTimeZoneOption[] | null = null;
+// Every zone the browser knows, labelled in each text's words.
+const allZonesCache = new WeakMap<OpenGeniText, CadenceTimeZoneOption[]>();
 const NO_TIME_ZONES: readonly CadenceTimeZoneOption[] = [];
 
 function offsetLabelFor(timeZone: string, at: Date): string {
@@ -1429,27 +1574,30 @@ function offsetLabelFor(timeZone: string, at: Date): string {
   }
 }
 
-function allTimeZones(at: Date): CadenceTimeZoneOption[] {
-  if (allZonesCache) return allZonesCache;
+function allTimeZones(at: Date, t: OpenGeniText): CadenceTimeZoneOption[] {
+  const cached = allZonesCache.get(t);
+  if (cached) return cached;
   const ids =
     typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
-  allZonesCache = ids.map((id) => ({
+  const zones = ids.map((id) => ({
     id,
-    ...timeZoneLabels(id),
+    ...timeZoneLabels(id, t),
     offsetLabel: offsetLabelFor(id, at),
   }));
-  return allZonesCache;
+  allZonesCache.set(t, zones);
+  return zones;
 }
 
 function zoneOption(
   timeZone: string,
   suggested: readonly CadenceTimeZoneOption[],
   at: Date,
+  t: OpenGeniText,
 ): CadenceTimeZoneOption {
   return (
     suggested.find((zone) => zone.id === timeZone) ?? {
       id: timeZone,
-      ...timeZoneLabels(timeZone),
+      ...timeZoneLabels(timeZone, t),
       offsetLabel: offsetLabelFor(timeZone, at),
     }
   );
@@ -1479,6 +1627,7 @@ export function TimeZoneSearch({
   preview?: boolean | undefined;
   className?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   const [clock] = useState(() => now ?? new Date());
   const [query, setQuery] = useState(initialQuery);
   const listId = useId();
@@ -1488,7 +1637,7 @@ export function TimeZoneSearch({
     if (!needle) return [...timeZones];
     const seen = new Set<string>();
     const results: CadenceTimeZoneOption[] = [];
-    for (const zone of [...timeZones, ...allTimeZones(clock)]) {
+    for (const zone of [...timeZones, ...allTimeZones(clock, t)]) {
       if (seen.has(zone.id)) continue;
       const haystack = `${zone.label} ${zone.id} ${zone.offsetLabel ?? ""}`.toLowerCase();
       if (haystack.includes(needle)) {
@@ -1498,7 +1647,7 @@ export function TimeZoneSearch({
       if (results.length >= 50) break;
     }
     return results;
-  }, [clock, query, timeZones]);
+  }, [clock, query, t, timeZones]);
   const [active, setActive] = useState(() =>
     Math.max(
       0,
@@ -1516,9 +1665,9 @@ export function TimeZoneSearch({
         meta: zone.offsetLabel || undefined,
         // Search results name the region so "New Salem time" is findable and clear.
         description: searching && zone.id.includes("/") ? regionOf(zone.id) : undefined,
-        group: searching ? undefined : "Suggested",
+        group: searching ? undefined : t("cadence.picker.suggested"),
       })),
-    [options, searching],
+    [options, searching, t],
   );
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -1548,9 +1697,9 @@ export function TimeZoneSearch({
       onSelect={onSelect}
       listboxId={listId}
       idPrefix={optionPrefix}
-      aria-label="Time zones"
+      aria-label={t("cadence.picker.timeZones")}
       preview={preview}
-      emptyMessage={<>No time zones match &ldquo;{query.trim()}&rdquo;.</>}
+      emptyMessage={t("cadence.picker.noZonesMatch", { query: query.trim() })}
       className={className}
       header={
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3.5">
@@ -1563,14 +1712,14 @@ export function TimeZoneSearch({
             aria-activedescendant={
               options[activeIndex] ? `${optionPrefix}-${activeIndex}` : undefined
             }
-            aria-label="Search time zones"
+            aria-label={t("cadence.picker.searchZones")}
             // oxlint-disable-next-line jsx-a11y/no-autofocus -- focus moves into the opened picker
             autoFocus={autoFocus && !preview}
             autoComplete="off"
             spellCheck={false}
             readOnly={preview}
             value={query}
-            placeholder="Search city or zone"
+            placeholder={t("cadence.picker.searchZonesPlaceholder")}
             onChange={(event) => {
               setQuery(event.target.value);
               setActive(0);
@@ -1607,15 +1756,16 @@ export function TimeZonePicker({
   /** "field" is a bordered control; "ghost" sits inside another field. */
   variant?: "field" | "ghost" | undefined;
 }) {
+  const t = useOpenGeniText();
   const [open, setOpen] = useState(false);
   const [clock] = useState(() => now ?? new Date());
-  const current = zoneOption(value, timeZones, clock);
+  const current = zoneOption(value, timeZones, clock, t);
   return (
     <PopoverPrimitive.Root open={open} onOpenChange={setOpen}>
       <PopoverPrimitive.Trigger
         type="button"
         disabled={disabled}
-        aria-label={`Time zone: ${current.label}`}
+        aria-label={t("cadence.picker.timeZoneLabel", { zone: current.label })}
         className={cn(
           fieldBase,
           "group/zone justify-between",
@@ -1679,6 +1829,7 @@ function CalendarGrid({
   min: LocalDate;
   onSelect: (date: LocalDate) => void;
 }) {
+  const t = useOpenGeniText();
   const [focus, setFocus] = useState<LocalDate>(value ?? min);
   const [view, setView] = useState({ year: focus.year, month: focus.month });
   const gridRef = useRef<HTMLDivElement>(null);
@@ -1742,12 +1893,15 @@ function CalendarGrid({
     <div className="w-[17.5rem] p-3">
       <div className="mb-2 flex items-center justify-between">
         <p aria-live="polite" className="text-sm font-semibold text-fg">
-          {MONTH_NAMES[view.month - 1]} {view.year}
+          {t("cadence.picker.monthYear", {
+            month: monthName(t, view.month, "long"),
+            year: view.year,
+          })}
         </p>
         <div className="flex items-center gap-1">
           <button
             type="button"
-            aria-label="Previous month"
+            aria-label={t("cadence.picker.previousMonth")}
             disabled={!canGoBack}
             onClick={() => shiftMonth(-1)}
             className="grid size-8 place-items-center rounded-[10px] text-fg-muted transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg disabled:cursor-not-allowed disabled:text-fg-subtle disabled:hover:bg-transparent pointer-coarse:size-11"
@@ -1756,7 +1910,7 @@ function CalendarGrid({
           </button>
           <button
             type="button"
-            aria-label="Next month"
+            aria-label={t("cadence.picker.nextMonth")}
             onClick={() => shiftMonth(1)}
             className="grid size-8 place-items-center rounded-[10px] text-fg-muted transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg pointer-coarse:size-11"
           >
@@ -1767,7 +1921,10 @@ function CalendarGrid({
       <div
         ref={gridRef}
         role="grid"
-        aria-label={`${MONTH_NAMES[view.month - 1]} ${view.year}`}
+        aria-label={t("cadence.picker.monthYear", {
+          month: monthName(t, view.month, "long"),
+          year: view.year,
+        })}
         onKeyDown={onKeyDown}
       >
         <div role="row" className="grid grid-cols-7">
@@ -1775,10 +1932,10 @@ function CalendarGrid({
             <span
               key={day}
               role="columnheader"
-              aria-label={WEEKDAY_NAMES[day].long}
+              aria-label={weekdayName(t, day, "long")}
               className="grid h-8 place-items-center text-xs font-medium text-fg-subtle"
             >
-              {WEEKDAY_NAMES[day].short.slice(0, 2)}
+              {weekdayName(t, day, "short").slice(0, 2)}
             </span>
           ))}
         </div>
@@ -1803,7 +1960,15 @@ function CalendarGrid({
                     data-date={iso}
                     tabIndex={focused ? 0 : -1}
                     disabled={past}
-                    aria-label={`${WEEKDAY_NAMES[weekdayOf(date)].long} ${date.day} ${MONTH_NAMES[date.month - 1]} ${date.year}${isToday ? ", today" : ""}`}
+                    aria-label={t(
+                      isToday ? "cadence.picker.monthDayToday" : "cadence.picker.monthDay",
+                      {
+                        weekday: weekdayName(t, weekdayOf(date), "long"),
+                        day: date.day,
+                        month: monthName(t, date.month, "long"),
+                        year: date.year,
+                      },
+                    )}
                     onClick={() => onSelect(date)}
                     className={cn(
                       "relative mx-auto grid size-9 place-items-center rounded-[10px] text-sm tabular-nums transition-colors duration-[120ms]",
@@ -1851,16 +2016,17 @@ function DateField({
   describedBy?: string | undefined;
   className?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   const [open, setOpen] = useState(false);
   const date = parseLocalDate(value);
   const today = localDateOf(now, timeZone);
-  const label = date ? dateLabel(date, today) : "Pick a date";
+  const label = date ? dateLabel(t, date, today) : t("cadence.picker.pickDate");
   return (
     <PopoverPrimitive.Root open={open} onOpenChange={setOpen}>
       <PopoverPrimitive.Trigger
         type="button"
         disabled={disabled}
-        aria-label={`Date: ${label}`}
+        aria-label={t("cadence.picker.dateLabel", { date: label })}
         aria-invalid={invalid || undefined}
         aria-describedby={describedBy}
         className={cn(fieldBase, "justify-between", className)}
@@ -1915,14 +2081,16 @@ export function CadencePreview({
   id?: string | undefined;
   className?: string | undefined;
 }) {
-  const zone = zoneOption(value.timeZone, timeZones, now);
-  const options = { timeZone: value.timeZone, now };
+  const t = useOpenGeniText();
+  const zone = zoneOption(value.timeZone, timeZones, now, t);
+  const options = { timeZone: value.timeZone, now, text: t };
   const problem = issue ?? validateCadence(value.rule, options)?.message ?? null;
   const description = describeCadence(value.rule, {
     timeZone: value.timeZone,
     timeZoneLabel: zone.label,
     timeZoneShortLabel: zone.shortLabel,
     now,
+    text: t,
   });
   const runs = problem ? [] : nextRuns(value.rule, { ...options, count });
   const viewerZone =
@@ -1933,8 +2101,11 @@ export function CadencePreview({
     viewerZone && runs[0]
       ? (() => {
           const local = zonedParts(runs[0], viewerZone);
-          const viewerLabel = zoneOption(viewerZone, timeZones, now).label;
-          return `That's ${pad(local.hour)}:${pad(local.minute)} ${viewerLabel} for you.`;
+          const viewerLabel = zoneOption(viewerZone, timeZones, now, t).label;
+          return t("cadence.picker.viewerTime", {
+            time: `${pad(local.hour)}:${pad(local.minute)}`,
+            zone: viewerLabel,
+          });
         })()
       : null;
 
@@ -1972,11 +2143,11 @@ export function CadencePreview({
         <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">
           {runs.length > 0 ? (
             <>
-              <span className="text-fg-subtle">Next: </span>
+              <span className="text-fg-subtle">{t("cadence.picker.next")}</span>
               {describeNextRuns(runs, options)}
             </>
           ) : (
-            "No upcoming runs."
+            t("cadence.picker.noUpcomingRuns")
           )}
         </p>
         {viewerLine ? (
@@ -2003,17 +2174,17 @@ interface PartProps {
 
 function FrequencySelect({ value, update, now, disabled, frequencies }: PartProps) {
   const rule = value.rule;
+  const t = useOpenGeniText();
   return (
     <ValueSelect<CadenceFrequency>
-      label="How often"
+      label={t("cadence.picker.howOften")}
       value={rule.frequency}
-      triggerLabel={FREQUENCY_OPTIONS[rule.frequency].trigger}
+      triggerLabel={frequencyWords(t, rule.frequency).trigger}
       disabled={disabled}
-      options={frequencies.map((frequency) => ({
-        value: frequency,
-        label: FREQUENCY_OPTIONS[frequency].label,
-        description: FREQUENCY_OPTIONS[frequency].description,
-      }))}
+      options={frequencies.map((frequency) => {
+        const words = frequencyWords(t, frequency);
+        return { value: frequency, label: words.label, description: words.description };
+      })}
       onValueChange={(frequency) =>
         update(switchFrequency(rule, frequency, { timeZone: value.timeZone, now }))
       }
@@ -2048,6 +2219,7 @@ function RuleDetails({
   const rule = normalizeCadenceRule(value.rule, value.timeZone);
   const invalid = (field: CadenceField) => issue?.field === field;
   const described = (field: CadenceField) => (issue?.field === field ? issueId : undefined);
+  const t = useOpenGeniText();
   const word = (text: string) =>
     layout === "inline" ? <span className={connector}>{text}</span> : null;
   const inline = layout === "inline";
@@ -2056,7 +2228,7 @@ function RuleDetails({
     case "weekly":
       return (
         <Phrase inline={inline}>
-          {word("on")}
+          {word(t("cadence.picker.wordOn"))}
           <DayToggleGroup
             days={rule.days}
             disabled={disabled}
@@ -2069,9 +2241,9 @@ function RuleDetails({
     case "monthly":
       return (
         <Phrase inline={inline}>
-          {word("on day")}
+          {word(t("cadence.picker.wordOnDay"))}
           <ValueSelect
-            label="Day of the month"
+            label={t("cadence.picker.dayOfMonth")}
             value={String(rule.dayOfMonth)}
             options={DAY_OF_MONTH_OPTIONS}
             disabled={disabled}
@@ -2087,7 +2259,7 @@ function RuleDetails({
       return (
         <Phrase inline={inline}>
           <NumberField
-            label="Every how many"
+            label={t("cadence.picker.everyHowMany")}
             value={rule.every}
             max={UNIT_LIMITS[rule.unit]}
             disabled={disabled}
@@ -2096,12 +2268,9 @@ function RuleDetails({
             onChange={(every) => update({ ...rule, every })}
           />
           <ValueSelect<IntervalUnit>
-            label="Unit"
+            label={t("cadence.picker.unit")}
             value={rule.unit}
-            options={UNIT_OPTIONS.map((option) => ({
-              ...option,
-              label: rule.every === 1 ? option.label.slice(0, -1) : option.label,
-            }))}
+            options={unitOptions(t, rule.every)}
             disabled={disabled}
             onValueChange={(unit) =>
               update(
@@ -2123,7 +2292,7 @@ function RuleDetails({
       if ("at" in rule) return null;
       return (
         <Phrase inline={inline}>
-          {word("on")}
+          {word(t("cadence.picker.wordOn"))}
           <DateField
             value={rule.date}
             timeZone={value.timeZone}
@@ -2140,11 +2309,11 @@ function RuleDetails({
   }
 }
 
-function monthDayHint(rule: CadenceRule): string | null {
+function monthDayHint(t: OpenGeniText, rule: CadenceRule): string | null {
   if (rule.frequency !== "monthly" || rule.dayOfMonth <= 28) return null;
   return rule.dayOfMonth === 29
-    ? "Skips February in most years."
-    : `Skips months with fewer than ${rule.dayOfMonth} days.`;
+    ? t("cadence.picker.skipsFebruary")
+    : t("cadence.picker.skipsShortMonths", { day: rule.dayOfMonth });
 }
 
 function SentenceVariant(props: PartProps) {
@@ -2152,14 +2321,17 @@ function SentenceVariant(props: PartProps) {
   const rule = value.rule;
   const time = ruleTime(normalizeCadenceRule(rule, value.timeZone));
   const showTime = usesTime(rule) && time !== undefined;
+  const t = useOpenGeniText();
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2">
       <FrequencySelect {...props} />
-      {rule.frequency === "hourly" ? <span className={connector}>on the hour</span> : null}
+      {rule.frequency === "hourly" ? (
+        <span className={connector}>{t("cadence.picker.onTheHour")}</span>
+      ) : null}
       <RuleDetails {...props} layout="inline" />
       {showTime ? (
         <span className="inline-flex min-w-0 items-center gap-2">
-          <span className={connector}>at</span>
+          <span className={connector}>{t("cadence.picker.wordAt")}</span>
           <TimeField
             value={time}
             disabled={disabled}
@@ -2191,6 +2363,7 @@ function PresetChips({
   disabled?: boolean | undefined;
   labelledBy: string;
 }) {
+  const t = useOpenGeniText();
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const delta =
@@ -2230,7 +2403,7 @@ function PresetChips({
                 : "border-border bg-surface text-fg-muted hover:border-border-strong hover:text-fg disabled:bg-surface-2 disabled:text-fg-subtle disabled:hover:border-border",
             )}
           >
-            {FREQUENCY_OPTIONS[frequency].preset}
+            {frequencyWords(t, frequency).preset}
           </button>
         );
       })}
@@ -2271,18 +2444,19 @@ function PresetsVariant(props: PartProps) {
   const time = ruleTime(rule);
   const repeatsId = useId();
   const timeId = useId();
+  const t = useOpenGeniText();
   const detailLabel: Partial<Record<CadenceFrequency, string>> = {
-    weekly: "Days",
-    monthly: "Day of the month",
-    interval: "Every",
-    once: "Date",
+    weekly: t("cadence.picker.days"),
+    monthly: t("cadence.picker.dayOfMonth"),
+    interval: t("cadence.picker.every"),
+    once: t("cadence.picker.date"),
   };
   const detail = detailLabel[rule.frequency];
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex min-w-0 flex-col gap-2">
         <span id={repeatsId} className="text-xs leading-4.5 font-medium text-fg">
-          Repeats
+          {t("cadence.picker.repeats")}
         </span>
         <PresetChips
           value={rule.frequency}
@@ -2301,7 +2475,7 @@ function PresetsVariant(props: PartProps) {
       ) : null}
       {usesTime(rule) && time !== undefined ? (
         <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-4">
-          <PresetField label="Time" htmlFor={timeId}>
+          <PresetField label={t("cadence.picker.time")} htmlFor={timeId}>
             <TimeField
               id={timeId}
               value={time}
@@ -2309,7 +2483,7 @@ function PresetsVariant(props: PartProps) {
               onChange={(next) => update(withTime(rule, next))}
             />
           </PresetField>
-          <PresetField label="Time zone">
+          <PresetField label={t("cadence.picker.timeZone")}>
             <TimeZonePicker
               value={value.timeZone}
               onChange={updateZone}
@@ -2428,9 +2602,10 @@ export function CadencePicker({
   const now = nowProp ?? firstRender;
   const issueId = useId();
   const reasonId = useId();
+  const t = useOpenGeniText();
   const [parseIssue, setParseIssue] = useState<string | null>(null);
-  const issue = validateCadence(value.rule, { timeZone: value.timeZone, now });
-  const hint = monthDayHint(value.rule);
+  const issue = validateCadence(value.rule, { timeZone: value.timeZone, now, text: t });
+  const hint = monthDayHint(t, value.rule);
 
   const parts: PartProps = {
     value,

@@ -40,6 +40,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { parsePathParam } from "../http/path-identifier";
 import { codexRouteDisposition } from "./codex-core";
 import { requireSubscriptionCoreRoute } from "./subscription-pool-core";
 
@@ -95,13 +96,17 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       c: Context,
       mutate: boolean,
     ): Promise<{ connection: ModelConnectionTarget; core: boolean }> {
-      const kind = Kind.parse(c.req.param("kind"));
+      const kind = parsePathParam(c, "kind", Kind);
       if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled)
         throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
-      const scopeId = z.string().uuid().parse(c.req.param("scopeId"));
-      let connectionId = c.req.param("connectionId")!;
-      if (kind === "codex" || kind === "supergrok" || kind === "claude_subscription")
-        connectionId = z.string().uuid().parse(connectionId);
+      const scopeId = parsePathParam(c, "scopeId", z.string().uuid());
+      let connectionId = parsePathParam(
+        c,
+        "connectionId",
+        kind === "codex" || kind === "supergrok" || kind === "claude_subscription"
+          ? z.string().uuid()
+          : z.union([z.literal("current"), z.string().uuid()]),
+      );
       if (scope === "organizations") {
         if (mutate) requireSameOriginBrowserMutation(c, deps);
         const human = await requireOrganizationCodexHuman(c, deps, scopeId);

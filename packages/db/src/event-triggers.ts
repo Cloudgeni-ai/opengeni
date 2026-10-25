@@ -8,6 +8,7 @@ import {
   type EventSourceKind,
   type EventSourceStatus,
   type EventSourceVisibility,
+  type EventStatusReasonCode,
   type EventTrigger,
   type InboundEvent,
   type ParsedEventTriggerInput,
@@ -15,6 +16,7 @@ import {
   type ScheduledTaskRunEventOccurrence,
   type WebhookEventAdapter,
 } from "@opengeni/contracts";
+import { createHmac } from "node:crypto";
 import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
@@ -30,6 +32,50 @@ type SourceRow = typeof schema.eventSources.$inferSelect;
 type DeliveryRow = typeof schema.eventDeliveries.$inferSelect;
 type EventRow = typeof schema.inboundEvents.$inferSelect;
 type TriggerRow = typeof schema.eventTriggers.$inferSelect;
+
+/**
+ * Why a source or trigger is not active: the English sentence people and
+ * agents read, a code (`EVENT_STATUS_REASON_CODES`) clients word in their own
+ * language, and what the app or server said, when it said something.
+ */
+export type EventStatusReason = {
+  text: string;
+  code: EventStatusReasonCode;
+  detail?: string | null;
+};
+
+const STATUS_REASON_MAX_CHARS = 500;
+
+function storedStatusReason(status: string, reason: EventStatusReason | null | undefined) {
+  if (status === "active" || !reason) {
+    return {
+      statusReason: status === "active" ? null : "Blocked",
+      statusReasonCode: null,
+      statusReasonDetail: null,
+    };
+  }
+  const detail = reason.detail?.trim().slice(0, STATUS_REASON_MAX_CHARS) || null;
+  return {
+    statusReason: reason.text.trim().slice(0, STATUS_REASON_MAX_CHARS) || "Blocked",
+    statusReasonCode: reason.code,
+    statusReasonDetail: detail,
+  };
+}
+
+/** The stored reason as clients read it: none while active. */
+function statusReasonFields(row: {
+  status: string;
+  statusReason: string | null;
+  statusReasonCode: string | null;
+  statusReasonDetail: string | null;
+}) {
+  const active = row.status === "active";
+  return {
+    statusReason: active ? null : row.statusReason,
+    statusReasonCode: active ? null : row.statusReasonCode,
+    statusReasonDetail: active || !row.statusReasonCode ? null : row.statusReasonDetail,
+  };
+}
 
 /** The Temporal workflow id, and so the run producer key, of an occurrence's run. */
 export function eventOccurrenceProducerKey(occurrenceId: string): string {
@@ -47,6 +93,8 @@ export type EventSourceRecord = {
   visibility: EventSourceVisibility;
   status: EventSourceStatus;
   statusReason: string | null;
+  statusReasonCode: string | null;
+  statusReasonDetail: string | null;
   secretEncrypted: string | null;
   externalKey: string | null;
   mcpServerId: string | null;
@@ -70,7 +118,7 @@ function mapSource(row: SourceRow, routeId: string | null): EventSourceRecord {
     ownerSubjectId: row.ownerSubjectId,
     visibility: row.visibility as EventSourceVisibility,
     status: row.status as EventSourceStatus,
-    statusReason: row.statusReason,
+    ...statusReasonFields(row),
     secretEncrypted: row.secretEncrypted,
     externalKey: row.externalKey,
     mcpServerId: row.mcpServerId,
@@ -122,15 +170,22 @@ export type CreateEventSourceInput = {
   visibility: EventSourceVisibility;
   adapter?: WebhookEventAdapter | null;
   secretEncrypted?: string | null;
+  /** Defaults to active; a pasted webhook waiting for its secret starts blocked. */
+  status?: EventSourceStatus;
+  statusReason?: EventStatusReason | null;
   externalKey?: string | null;
   mcpServerId?: string | null;
   connectionId?: string | null;
+  /** A GitHub source's routes are keyed with this (see githubInstallationRouteKey). */
+  routeSecret?: Uint8Array | null;
 };
 
 /**
- * Create a source. Webhook sources are always new and get a routed URL. App
- * and MCP sources are one per installation, mailbox or connection: creating
- * one that exists returns it unchanged (`created: false`).
+ * Create a source. Webhook sources are always new and get a routed URL. App,
+ * MCP and "This workspace" sources are one per installation, mailbox,
+ * connection or person: creating one that exists returns it unchanged
+ * (`created: false`), except that a GitHub source's routes are recomputed
+ * either way, which repairs lost ones.
  */
 export async function createEventSource(
   db: Database,
@@ -147,6 +202,9 @@ export async function createEventSource(
         ownerSubjectId: input.ownerSubjectId,
         visibility: input.visibility,
         secretEncrypted: input.secretEncrypted ?? null,
+        ...(input.status
+          ? { status: input.status, ...storedStatusReason(input.status, input.statusReason) }
+          : {}),
         externalKey: input.externalKey ?? null,
         mcpServerId: input.mcpServerId ?? null,
         connectionId: input.connectionId ?? null,
@@ -175,30 +233,155 @@ export async function createEventSource(
                       ? eq(schema.eventSources.connectionId, input.connectionId)
                       : isNull(schema.eventSources.connectionId),
                   )
-                : eq(schema.eventSources.externalKey, input.externalKey ?? ""),
+                : input.kind === "workspace"
+                  ? eq(schema.eventSources.ownerSubjectId, input.ownerSubjectId ?? "")
+                  : eq(schema.eventSources.externalKey, input.externalKey ?? ""),
             ),
           )
           .limit(1);
         if (!existing) throw new Error("event source create conflicted without an existing source");
+        if (input.kind === "github") {
+          await syncGitHubEventRoutes(tx, input.workspaceId, input.routeSecret ?? null);
+        }
         return { source: mapSource(existing, null), created: false };
       }
+      // A generic webhook's URL names its own route, and a GitHub source is
+      // routed by its workspace's installations. Slack callbacks arrive
+      // already resolved to their workspace, Gmail and "This workspace" are
+      // read rather than delivered, and an MCP subscription adds its webhook
+      // route when it subscribes, so those get none here.
       let routeId: string | null = null;
-      if (input.kind !== "mcp") {
+      if (input.kind === "github") {
+        await syncGitHubEventRoutes(tx, inserted.workspaceId, input.routeSecret ?? null);
+      } else if (input.kind === "webhook") {
         const [route] = await tx
           .insert(schema.eventIngressRoutes)
           .values({
             accountId: inserted.accountId,
             workspaceId: inserted.workspaceId,
             sourceId: inserted.id,
-            kind: input.kind,
-            externalKey: input.kind === "webhook" ? null : (input.externalKey ?? null),
+            kind: "webhook",
           })
           .returning({ routeId: schema.eventIngressRoutes.routeId });
-        routeId = input.kind === "webhook" ? (route?.routeId ?? null) : null;
+        routeId = route?.routeId ?? null;
+      }
+      if (eventSourceKindHasFeed(input.kind)) {
+        await tx.insert(schema.eventSourceFeeds).values({
+          sourceId: inserted.id,
+          accountId: inserted.accountId,
+          workspaceId: inserted.workspaceId,
+        });
       }
       return { source: mapSource(inserted, routeId), created: true };
     }),
   );
+}
+
+/**
+ * Sources whose events Opengeni reads from the app's change history instead
+ * of receiving them: each has a feed (migration 0935) the feed pump reads.
+ * "This workspace" reads Opengeni's own recording events the same way.
+ */
+export function eventSourceKindHasFeed(kind: EventSourceKind): boolean {
+  return kind === "gmail" || kind === "workspace";
+}
+
+/** Have the feed pump read these sources' feeds now. */
+export async function wakeEventSourceFeeds(
+  scoped: Database,
+  workspaceId: string,
+  sourceIds: readonly string[],
+): Promise<void> {
+  if (sourceIds.length === 0) return;
+  await scoped
+    .update(schema.eventSourceFeeds)
+    .set({ nextActionAt: sql`now()`, updatedAt: sql`now()` })
+    .where(
+      and(
+        eq(schema.eventSourceFeeds.workspaceId, workspaceId),
+        inArray(schema.eventSourceFeeds.sourceId, [...sourceIds]),
+        sql`${schema.eventSourceFeeds.nextActionAt} > now()`,
+      ),
+    );
+}
+
+/**
+ * The route key of one GitHub App installation's deliveries.
+ * event_ingress_routes has no tenant RLS (intake finds the workspace through
+ * it), so it never holds a provider identity: the key is an HMAC-SHA-256 of
+ * the installation under the deployment's route secret. Equality lookups work
+ * the same; the table alone tells nobody which installation a workspace uses.
+ */
+export function githubInstallationRouteKey(
+  routeSecret: Uint8Array,
+  installationId: number,
+): string {
+  return createHmac("sha256", routeSecret)
+    .update(`github installation ${installationId}`)
+    .digest("hex");
+}
+
+/**
+ * A workspace's GitHub source receives the deliveries of every GitHub App
+ * installation bound to the workspace. Its routes are recomputed from the
+ * bindings whenever a binding or the source changes, inside the writer's
+ * workspace scope. Intake still checks each delivery's repository against the
+ * workspace's current binding, so a route is only ever a candidate. Without a
+ * route secret (a deployment with no encryption key) nothing can be routed,
+ * so the source keeps no routes.
+ */
+export async function syncGitHubEventRoutes(
+  scoped: Database,
+  workspaceId: string,
+  routeSecret: Uint8Array | null,
+): Promise<void> {
+  const sources = await scoped
+    .select({ id: schema.eventSources.id, accountId: schema.eventSources.accountId })
+    .from(schema.eventSources)
+    .where(
+      and(eq(schema.eventSources.workspaceId, workspaceId), eq(schema.eventSources.kind, "github")),
+    );
+  if (sources.length === 0) return;
+  const installations = routeSecret
+    ? await scoped
+        .select({ installationId: schema.githubInstallations.installationId })
+        .from(schema.githubInstallations)
+        .where(eq(schema.githubInstallations.workspaceId, workspaceId))
+    : [];
+  const wanted = new Set(
+    installations.map((row) => githubInstallationRouteKey(routeSecret!, row.installationId)),
+  );
+  for (const source of sources) {
+    const routes = await scoped
+      .select({
+        routeId: schema.eventIngressRoutes.routeId,
+        externalKey: schema.eventIngressRoutes.externalKey,
+      })
+      .from(schema.eventIngressRoutes)
+      .where(eq(schema.eventIngressRoutes.sourceId, source.id));
+    const stale = routes.filter((route) => !wanted.has(route.externalKey ?? ""));
+    if (stale.length > 0) {
+      await scoped.delete(schema.eventIngressRoutes).where(
+        inArray(
+          schema.eventIngressRoutes.routeId,
+          stale.map((route) => route.routeId),
+        ),
+      );
+    }
+    const present = new Set(routes.map((route) => route.externalKey));
+    const missing = [...wanted].filter((key) => !present.has(key));
+    if (missing.length > 0) {
+      await scoped.insert(schema.eventIngressRoutes).values(
+        missing.map((externalKey) => ({
+          accountId: source.accountId,
+          workspaceId,
+          sourceId: source.id,
+          kind: "github",
+          externalKey,
+        })),
+      );
+    }
+  }
 }
 
 /** Sources a person can see: shared ones, workspace app sources and their own. */
@@ -250,6 +433,29 @@ export async function getEventSource(
   });
 }
 
+/** A workspace's app source for one app identity (a Slack team), if it has one. */
+export async function findAppEventSource(
+  db: Database,
+  workspaceId: string,
+  kind: "slack",
+  externalKey: string,
+): Promise<EventSourceRecord | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scoped) => {
+    const [row] = await scoped
+      .select()
+      .from(schema.eventSources)
+      .where(
+        and(
+          eq(schema.eventSources.workspaceId, workspaceId),
+          eq(schema.eventSources.kind, kind),
+          eq(schema.eventSources.externalKey, externalKey),
+        ),
+      )
+      .limit(1);
+    return row ? mapSource(row, null) : null;
+  });
+}
+
 export async function updateEventSource(
   db: Database,
   workspaceId: string,
@@ -258,7 +464,7 @@ export async function updateEventSource(
     name?: string;
     visibility?: EventSourceVisibility;
     status?: EventSourceStatus;
-    statusReason?: string | null;
+    statusReason?: EventStatusReason | null;
     secretEncrypted?: string;
   },
 ): Promise<EventSourceRecord | null> {
@@ -269,10 +475,7 @@ export async function updateEventSource(
         ...(patch.name !== undefined ? { name: patch.name } : {}),
         ...(patch.visibility !== undefined ? { visibility: patch.visibility } : {}),
         ...(patch.status !== undefined
-          ? {
-              status: patch.status,
-              statusReason: patch.status === "active" ? null : (patch.statusReason ?? null),
-            }
+          ? { status: patch.status, ...storedStatusReason(patch.status, patch.statusReason) }
           : {}),
         ...(patch.secretEncrypted !== undefined ? { secretEncrypted: patch.secretEncrypted } : {}),
         updatedAt: sql`now()`,
@@ -282,6 +485,10 @@ export async function updateEventSource(
       )
       .returning();
     if (!row) return null;
+    // Turning a source off or on, or sharing it, changes whether its feed is wanted.
+    if (patch.status !== undefined || patch.visibility !== undefined) {
+      await wakeEventSourceFeeds(scoped, workspaceId, [row.id]);
+    }
     const routes = await routesBySource(scoped, [row.id]);
     return mapSource(row, routes.get(row.id) ?? null);
   });
@@ -345,11 +552,11 @@ export async function resolveEventIngressRoute(
   return row ? { ...row, kind: row.kind as EventSourceKind } : null;
 }
 
-/** Every workspace source an app identity (an installation, a team, a mailbox) delivers to. */
-export async function listEventIngressRoutesForApp(
+/** Every workspace GitHub source one GitHub App installation delivers to. */
+export async function listGitHubEventRoutes(
   db: Database,
-  kind: Exclude<EventSourceKind, "webhook" | "mcp">,
-  externalKey: string,
+  routeSecret: Uint8Array,
+  installationId: number,
 ): Promise<Array<{ accountId: string; workspaceId: string; sourceId: string }>> {
   return await db
     .select({
@@ -360,8 +567,11 @@ export async function listEventIngressRoutesForApp(
     .from(schema.eventIngressRoutes)
     .where(
       and(
-        eq(schema.eventIngressRoutes.kind, kind),
-        eq(schema.eventIngressRoutes.externalKey, externalKey),
+        eq(schema.eventIngressRoutes.kind, "github"),
+        eq(
+          schema.eventIngressRoutes.externalKey,
+          githubInstallationRouteKey(routeSecret, installationId),
+        ),
       ),
     )
     .limit(100);
@@ -399,6 +609,8 @@ export type RecordEventDeliveryInput = {
   accountId: string;
   workspaceId: string;
   sourceId: string;
+  /** The MCP subscription stream the delivery arrived on; empty for other sources. */
+  streamKey?: string;
   status: EventDeliveryStatus;
   reason: string | null;
   /** The sender's delivery identity, or a digest of the body. */
@@ -427,14 +639,27 @@ export type RecordEventDeliveryResult = {
 
 export const EVENT_DISPATCH_SETTLE_MS = 3_000;
 
-function mapDelivery(row: DeliveryRow, eventIds: string[]): EventDelivery {
+/** The events one delivery became: their ids, and their types each once, in order. */
+type DeliveryEvents = { ids: string[]; types: string[] };
+
+const NO_DELIVERY_EVENTS: DeliveryEvents = { ids: [], types: [] };
+
+function deliveryEventsOf(events: ReadonlyArray<{ id: string; type: string }>): DeliveryEvents {
+  return {
+    ids: events.map((event) => event.id),
+    types: [...new Set(events.map((event) => event.type))],
+  };
+}
+
+function mapDelivery(row: DeliveryRow, events: DeliveryEvents): EventDelivery {
   return {
     id: row.id,
     sourceId: row.sourceId,
     receivedAt: row.receivedAt.toISOString(),
     status: row.status as EventDeliveryStatus,
     reason: row.reason,
-    eventIds,
+    eventIds: events.ids,
+    eventTypes: events.types,
     bodyBytes: row.bodyBytes,
     bodyRetained: row.body !== null,
     duplicateCount: row.duplicateCount,
@@ -454,88 +679,101 @@ export async function recordEventDelivery(
   db: Database,
   input: RecordEventDeliveryInput,
 ): Promise<RecordEventDeliveryResult> {
-  const settleMs = Math.max(0, Math.floor(input.settleMs ?? EVENT_DISPATCH_SETTLE_MS));
   return await withWorkspaceRls(db, input.workspaceId, async (scoped) =>
-    scoped.transaction(async (tx) => {
-      const [stored] = await rawRows<DeliveryRowRaw & { duplicate: boolean }>(
-        tx,
-        sql`insert into event_deliveries (
-            account_id, workspace_id, source_id, status, reason, dedupe_key, body, body_bytes,
-            body_sha256, headers, replay_of_delivery_id
-          ) values (
-            ${input.accountId}, ${input.workspaceId}, ${input.sourceId}, ${input.status},
-            ${input.reason}, ${input.dedupeKey}, ${input.body ? Buffer.from(input.body) : null},
-            ${input.bodyBytes}, ${input.bodySha256}, ${JSON.stringify(input.headers)}::jsonb,
-            ${input.replayOfDeliveryId ?? null}
-          )
-          on conflict (source_id, dedupe_key) where replay_of_delivery_id is null
-          do update set duplicate_count = event_deliveries.duplicate_count + 1,
-            last_duplicate_at = now()
-          returning *, (xmax <> 0) as duplicate`,
-      );
-      if (!stored) throw new Error("event delivery was not stored");
-      const deliveryRow = deliveryRowFromRaw(stored);
-      if (stored.duplicate) {
-        const eventIds = await deliveryEventIds(tx, input.workspaceId, [deliveryRow.id]);
-        return {
-          delivery: mapDelivery(deliveryRow, eventIds.get(deliveryRow.id) ?? []),
-          duplicate: true,
-          eventIds: [],
-          matchedTaskIds: [],
-        };
-      }
-      const inserted: Array<{ id: string; event: StoredEventInput }> = [];
-      for (const event of input.events) {
-        const [row] = await tx
-          .insert(schema.inboundEvents)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sourceId: input.sourceId,
-            deliveryId: deliveryRow.id,
-            externalId: event.externalId,
-            streamKey: event.streamKey,
-            type: event.type,
-            occurredAt: event.occurredAt,
-            subject: event.subject,
-            summary: event.summary,
-            url: event.url,
-            actorKind: event.actor.kind,
-            actorName: event.actor.name,
-            data: event.data,
-            dataTruncated: event.dataTruncated,
-            gapBefore: event.gapBefore,
-          })
-          .onConflictDoNothing()
-          .returning({ id: schema.inboundEvents.id });
-        if (row) inserted.push({ id: row.id, event });
-      }
-      const matched = await queueMatchingEvents(tx, input, inserted, settleMs);
-      const [updated] = await tx
-        .update(schema.eventDeliveries)
-        .set({ eventCount: inserted.length })
-        .where(eq(schema.eventDeliveries.id, deliveryRow.id))
-        .returning();
-      await tx
-        .update(schema.eventSources)
-        .set({ lastDeliveryAt: sql`now()` })
-        .where(
-          and(
-            eq(schema.eventSources.workspaceId, input.workspaceId),
-            eq(schema.eventSources.id, input.sourceId),
-          ),
-        );
-      return {
-        delivery: mapDelivery(
-          updated ?? deliveryRow,
-          inserted.map((entry) => entry.id),
-        ),
-        duplicate: false,
-        eventIds: inserted.map((entry) => entry.id),
-        matchedTaskIds: matched,
-      };
-    }),
+    scoped.transaction((tx) => recordEventDeliveryInTransaction(tx, input)),
   );
+}
+
+/**
+ * `recordEventDelivery` inside a caller's workspace-scoped transaction, so a
+ * caller can commit its own state (an MCP subscription's cursor) atomically
+ * with the delivery.
+ */
+export async function recordEventDeliveryInTransaction(
+  tx: Database,
+  input: RecordEventDeliveryInput,
+): Promise<RecordEventDeliveryResult> {
+  const settleMs = Math.max(0, Math.floor(input.settleMs ?? EVENT_DISPATCH_SETTLE_MS));
+  const [stored] = await rawRows<DeliveryRowRaw & { duplicate: boolean }>(
+    tx,
+    sql`insert into event_deliveries (
+        account_id, workspace_id, source_id, stream_key, status, reason, dedupe_key, body,
+        body_bytes, body_sha256, headers, replay_of_delivery_id
+      ) values (
+        ${input.accountId}, ${input.workspaceId}, ${input.sourceId}, ${input.streamKey ?? ""},
+        ${input.status}, ${input.reason}, ${input.dedupeKey},
+        ${input.body ? Buffer.from(input.body) : null}, ${input.bodyBytes}, ${input.bodySha256},
+        ${JSON.stringify(input.headers)}::jsonb, ${input.replayOfDeliveryId ?? null}
+      )
+      on conflict (source_id, dedupe_key) where replay_of_delivery_id is null
+      do update set duplicate_count = event_deliveries.duplicate_count + 1,
+        last_duplicate_at = now()
+      returning *, (xmax <> 0) as duplicate`,
+  );
+  if (!stored) throw new Error("event delivery was not stored");
+  const deliveryRow = deliveryRowFromRaw(stored);
+  if (stored.duplicate) {
+    const events = await deliveryEvents(tx, input.workspaceId, [deliveryRow.id]);
+    return {
+      delivery: mapDelivery(deliveryRow, events.get(deliveryRow.id) ?? NO_DELIVERY_EVENTS),
+      duplicate: true,
+      eventIds: [],
+      matchedTaskIds: [],
+    };
+  }
+  const inserted: Array<{ id: string; event: StoredEventInput }> = [];
+  for (const event of input.events) {
+    const [row] = await tx
+      .insert(schema.inboundEvents)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sourceId: input.sourceId,
+        deliveryId: deliveryRow.id,
+        externalId: event.externalId,
+        streamKey: event.streamKey,
+        type: event.type,
+        occurredAt: event.occurredAt,
+        subject: event.subject,
+        summary: event.summary,
+        url: event.url,
+        actorKind: event.actor.kind,
+        actorName: event.actor.name,
+        data: event.data,
+        dataTruncated: event.dataTruncated,
+        gapBefore: event.gapBefore,
+        // The write time, not the transaction's: events of one delivery
+        // then list in the order the source sent them.
+        receivedAt: sql`clock_timestamp()`,
+      })
+      .onConflictDoNothing()
+      .returning({ id: schema.inboundEvents.id });
+    if (row) inserted.push({ id: row.id, event });
+  }
+  const matched = await queueMatchingEvents(tx, input, inserted, settleMs);
+  const [updated] = await tx
+    .update(schema.eventDeliveries)
+    .set({ eventCount: inserted.length })
+    .where(eq(schema.eventDeliveries.id, deliveryRow.id))
+    .returning();
+  await tx
+    .update(schema.eventSources)
+    .set({ lastDeliveryAt: sql`now()` })
+    .where(
+      and(
+        eq(schema.eventSources.workspaceId, input.workspaceId),
+        eq(schema.eventSources.id, input.sourceId),
+      ),
+    );
+  return {
+    delivery: mapDelivery(
+      updated ?? deliveryRow,
+      deliveryEventsOf(inserted.map((entry) => ({ id: entry.id, type: entry.event.type }))),
+    ),
+    duplicate: false,
+    eventIds: inserted.map((entry) => entry.id),
+    matchedTaskIds: matched,
+  };
 }
 
 type DeliveryRowRaw = {
@@ -543,6 +781,7 @@ type DeliveryRowRaw = {
   account_id: string;
   workspace_id: string;
   source_id: string;
+  stream_key: string;
   received_at: Date | string;
   status: string;
   reason: string | null;
@@ -567,6 +806,7 @@ function deliveryRowFromRaw(raw: DeliveryRowRaw): DeliveryRow {
     accountId: raw.account_id,
     workspaceId: raw.workspace_id,
     sourceId: raw.source_id,
+    streamKey: raw.stream_key,
     receivedAt: asDate(raw.received_at),
     status: raw.status,
     reason: raw.reason,
@@ -582,15 +822,19 @@ function deliveryRowFromRaw(raw: DeliveryRowRaw): DeliveryRow {
   };
 }
 
-async function deliveryEventIds(
+async function deliveryEvents(
   db: Database,
   workspaceId: string,
   deliveryIds: string[],
-): Promise<Map<string, string[]>> {
-  const result = new Map<string, string[]>();
+): Promise<Map<string, DeliveryEvents>> {
+  const result = new Map<string, DeliveryEvents>();
   if (deliveryIds.length === 0) return result;
   const rows = await db
-    .select({ id: schema.inboundEvents.id, deliveryId: schema.inboundEvents.deliveryId })
+    .select({
+      id: schema.inboundEvents.id,
+      type: schema.inboundEvents.type,
+      deliveryId: schema.inboundEvents.deliveryId,
+    })
     .from(schema.inboundEvents)
     .where(
       and(
@@ -599,17 +843,20 @@ async function deliveryEventIds(
       ),
     )
     .orderBy(schema.inboundEvents.occurredAt, schema.inboundEvents.id);
+  const byDelivery = new Map<string, Array<{ id: string; type: string }>>();
   for (const row of rows) {
     if (!row.deliveryId) continue;
-    result.set(row.deliveryId, [...(result.get(row.deliveryId) ?? []), row.id]);
+    byDelivery.set(row.deliveryId, [...(byDelivery.get(row.deliveryId) ?? []), row]);
   }
+  for (const [deliveryId, events] of byDelivery) result.set(deliveryId, deliveryEventsOf(events));
   return result;
 }
 
 /**
  * Evaluate the source's active triggers on runnable automations and queue
  * each matching event once per automation. A trigger only sees a private
- * source when its automation belongs to the source's owner.
+ * source when its automation belongs to the source's owner, and an event only
+ * fires the triggers of the stream it arrived on (an MCP subscription).
  */
 async function queueMatchingEvents(
   tx: Database,
@@ -624,10 +871,11 @@ async function queueMatchingEvents(
     event_types: string[];
     conditions: unknown;
     include_own_events: boolean;
+    stream_key: string;
   }>(
     tx,
     sql`select trigger.id, trigger.task_id, trigger.event_types, trigger.conditions,
-        trigger.include_own_events
+        trigger.include_own_events, trigger.stream_key
       from event_triggers trigger
       join scheduled_tasks task
         on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
@@ -648,6 +896,7 @@ async function queueMatchingEvents(
     if (!conditions.success) continue;
     for (const { id, event } of events) {
       if (
+        trigger.stream_key !== event.streamKey ||
         !input.match(event, {
           eventTypes: trigger.event_types,
           conditions: conditions.data,
@@ -695,6 +944,8 @@ export type EventDeliveryForReplay = {
   delivery: EventDelivery;
   body: Uint8Array | null;
   headers: Record<string, string>;
+  /** The MCP subscription stream it arrived on; empty for other sources. */
+  streamKey: string;
 };
 
 export async function getEventDeliveryForReplay(
@@ -716,11 +967,12 @@ export async function getEventDeliveryForReplay(
       )
       .limit(1);
     if (!row) return null;
-    const eventIds = await deliveryEventIds(scoped, workspaceId, [row.id]);
+    const events = await deliveryEvents(scoped, workspaceId, [row.id]);
     return {
-      delivery: mapDelivery(row, eventIds.get(row.id) ?? []),
+      delivery: mapDelivery(row, events.get(row.id) ?? NO_DELIVERY_EVENTS),
       body: row.body,
       headers: row.headers,
+      streamKey: row.streamKey,
     };
   });
 }
@@ -778,14 +1030,14 @@ export async function listEventDeliveries(
       .orderBy(desc(schema.eventDeliveries.receivedAt), desc(schema.eventDeliveries.id))
       .limit(limit + 1);
     const page = rows.slice(0, limit);
-    const eventIds = await deliveryEventIds(
+    const events = await deliveryEvents(
       scoped,
       workspaceId,
       page.map((row) => row.id),
     );
     const last = page.at(-1);
     return {
-      deliveries: page.map((row) => mapDelivery(row, eventIds.get(row.id) ?? [])),
+      deliveries: page.map((row) => mapDelivery(row, events.get(row.id) ?? NO_DELIVERY_EVENTS)),
       nextCursor: rows.length > limit && last ? encodeEventCursor(last.receivedAt, last.id) : null,
     };
   });
@@ -922,7 +1174,7 @@ function mapTrigger(row: TriggerRow, sourceKind: EventSourceKind): EventTrigger 
     includeOwnEvents: row.includeOwnEvents,
     arguments: row.arguments ?? null,
     status: row.status as EventTrigger["status"],
-    statusReason: row.statusReason,
+    ...statusReasonFields(row),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -980,7 +1232,8 @@ export async function getScheduledTaskEvents(
  * Replace an automation's event triggers and set its event run policy. A
  * trigger keeps its id while its position stays, so runs keep pointing at it.
  * No triggers removes the policy too; the automation is a plain schedule
- * again. `once` re-arms whenever it is set.
+ * again. `once` re-arms whenever it is set. MCP triggers carry the stream key
+ * of their subscription, which is created here when missing.
  */
 export async function setScheduledTaskEvents(
   db: Database,
@@ -988,7 +1241,7 @@ export async function setScheduledTaskEvents(
     accountId: string;
     workspaceId: string;
     taskId: string;
-    triggers: ParsedEventTriggerInput[];
+    triggers: Array<ParsedEventTriggerInput & { streamKey?: string }>;
     maxRunsPerHour?: number | undefined;
     once?: boolean | undefined;
   },
@@ -998,6 +1251,18 @@ export async function setScheduledTaskEvents(
       await tx.execute(
         sql`select id from scheduled_tasks where workspace_id = ${input.workspaceId} and id = ${input.taskId} for update`,
       );
+      const previous = await tx
+        .select({
+          sourceId: schema.eventTriggers.sourceId,
+          streamKey: schema.eventTriggers.streamKey,
+        })
+        .from(schema.eventTriggers)
+        .where(
+          and(
+            eq(schema.eventTriggers.workspaceId, input.workspaceId),
+            eq(schema.eventTriggers.taskId, input.taskId),
+          ),
+        );
       if (input.triggers.length === 0) {
         await tx
           .delete(schema.eventTriggers)
@@ -1019,6 +1284,7 @@ export async function setScheduledTaskEvents(
           sql`update scheduled_task_event_inbox set status = 'skipped'
             where workspace_id = ${input.workspaceId} and task_id = ${input.taskId} and status = 'pending'`,
         );
+        await syncEventSubscriptions(tx, input.workspaceId, input.taskId, previous);
         return;
       }
       await tx
@@ -1059,8 +1325,11 @@ export async function setScheduledTaskEvents(
           conditions: trigger.conditions,
           includeOwnEvents: trigger.includeOwnEvents,
           arguments: trigger.arguments ?? null,
+          streamKey: trigger.streamKey ?? "",
           status: "active",
           statusReason: null,
+          statusReasonCode: null,
+          statusReasonDetail: null,
         };
         const current = byPosition.get(position);
         if (current) {
@@ -1087,10 +1356,83 @@ export async function setScheduledTaskEvents(
           ),
         );
       }
+      await syncEventSubscriptions(tx, input.workspaceId, input.taskId, previous);
     }),
   );
   return (
     (await getScheduledTaskEvents(db, input.workspaceId, [input.taskId])).get(input.taskId) ?? null
+  );
+}
+
+/**
+ * Create the MCP subscriptions an automation's triggers want and wake every
+ * subscription and source feed it uses or used, so the pumps start, keep or
+ * end each one now instead of at its next poll or refresh. The pumps decide
+ * from the committed triggers and automation whether a subscription or feed
+ * is still wanted, so this may run before a status change in the same
+ * transaction.
+ */
+export async function syncEventSubscriptions(
+  tx: Database,
+  workspaceId: string,
+  taskId: string,
+  previous: ReadonlyArray<{ sourceId: string; streamKey: string }> = [],
+): Promise<void> {
+  await tx.execute(
+    sql`insert into mcp_event_subscriptions (
+        account_id, workspace_id, source_id, stream_key, event_name, arguments
+      )
+      select distinct on (trigger.source_id, trigger.stream_key)
+        trigger.account_id, trigger.workspace_id, trigger.source_id, trigger.stream_key,
+        trigger.event_types[1], coalesce(trigger.arguments, '{}'::jsonb)
+      from event_triggers trigger
+      join scheduled_tasks task
+        on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
+      join event_sources source
+        on source.id = trigger.source_id and source.workspace_id = trigger.workspace_id
+      where trigger.workspace_id = ${workspaceId} and trigger.task_id = ${taskId}
+        and trigger.stream_key <> '' and trigger.status <> 'disabled'
+        and source.kind = 'mcp' and task.deleted_at is null
+      order by trigger.source_id, trigger.stream_key
+      on conflict (source_id, stream_key) do nothing`,
+  );
+  const earlier = previous.filter((entry) => entry.streamKey !== "");
+  await tx.execute(
+    sql`update mcp_event_subscriptions subscription
+      set next_action_at = now(), updated_at = now()
+      where subscription.workspace_id = ${workspaceId} and subscription.next_action_at > now()
+        and (
+          (subscription.source_id, subscription.stream_key) in (
+            select trigger.source_id, trigger.stream_key from event_triggers trigger
+            where trigger.workspace_id = ${workspaceId} and trigger.task_id = ${taskId}
+              and trigger.stream_key <> '')
+          ${
+            earlier.length > 0
+              ? sql`or (subscription.source_id, subscription.stream_key) in (${sql.join(
+                  earlier.map((entry) => sql`(${entry.sourceId}::uuid, ${entry.streamKey})`),
+                  sql`, `,
+                )})`
+              : sql``
+          }
+        )`,
+  );
+  await tx.execute(
+    sql`update event_source_feeds feed
+      set next_action_at = now(), updated_at = now()
+      where feed.workspace_id = ${workspaceId} and feed.next_action_at > now()
+        and (
+          feed.source_id in (
+            select trigger.source_id from event_triggers trigger
+            where trigger.workspace_id = ${workspaceId} and trigger.task_id = ${taskId})
+          ${
+            previous.length > 0
+              ? sql`or feed.source_id in (${sql.join(
+                  previous.map((entry) => sql`${entry.sourceId}::uuid`),
+                  sql`, `,
+                )})`
+              : sql``
+          }
+        )`,
   );
 }
 
@@ -1100,38 +1442,100 @@ export async function rearmScheduledTaskEvents(
   workspaceId: string,
   taskId: string,
 ): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, (scoped) =>
-    scoped.execute(
+  await withWorkspaceRls(db, workspaceId, async (scoped) => {
+    await scoped.execute(
       sql`update scheduled_task_event_settings
         set armed_at = now(), completed_at = null, throttle_notified = false, updated_at = now()
         where workspace_id = ${workspaceId} and task_id = ${taskId}`,
-    ),
+    );
+    await syncEventSubscriptions(scoped, workspaceId, taskId);
+  });
+}
+
+/**
+ * Have the pumps look at an automation's MCP streams and source feeds now,
+ * after it was paused, resumed or deleted, so a stream nothing wants is ended
+ * at once and a feed starts reading as soon as an automation listens again.
+ */
+export async function wakeScheduledTaskEventSubscriptions(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, (scoped) =>
+    syncEventSubscriptions(scoped, workspaceId, taskId),
   );
 }
 
-/** Mark a trigger blocked (or active again) with a plain-language reason. */
-export async function setEventTriggerStatus(
+/** An automation whose trigger changed state because its source or stream did. */
+export type EventTriggerNotice = {
+  taskId: string;
+  taskName: string;
+  /** The chat the owner opens from the notice; null when the automation never ran. */
+  sessionId: string | null;
+};
+
+/**
+ * Block (or unblock) every trigger listening on one stream of a source (the
+ * empty stream key is every trigger of a source without streams), with a
+ * plain-language reason. Returns the automations whose triggers changed state
+ * now, so the owner is told once per episode.
+ */
+export async function setEventStreamTriggerStatus(
   db: Database,
   workspaceId: string,
-  triggerId: string,
-  status: EventTrigger["status"],
-  statusReason: string | null,
-): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, (scoped) =>
-    scoped
-      .update(schema.eventTriggers)
-      .set({
-        status,
-        statusReason: status === "active" ? null : statusReason,
-        updatedAt: sql`now()`,
-      })
-      .where(
-        and(
-          eq(schema.eventTriggers.workspaceId, workspaceId),
-          eq(schema.eventTriggers.id, triggerId),
-        ),
-      ),
-  );
+  stream: { sourceId: string; streamKey: string },
+  status: "active" | "blocked",
+  reason: EventStatusReason | null,
+): Promise<EventTriggerNotice[]> {
+  const stored = storedStatusReason(status, reason);
+  return await withWorkspaceRls(db, workspaceId, async (scoped) => {
+    const changed = await rawRows<{ task_id: string; was: string }>(
+      scoped,
+      sql`with previous as (
+          select id, status from event_triggers
+          where workspace_id = ${workspaceId} and source_id = ${stream.sourceId}
+            and stream_key = ${stream.streamKey} and status <> 'disabled'
+          for update
+        )
+        update event_triggers trigger
+        set status = ${status}, status_reason = ${stored.statusReason},
+          status_reason_code = ${stored.statusReasonCode},
+          status_reason_detail = ${stored.statusReasonDetail}, updated_at = now()
+        from previous
+        where trigger.id = previous.id
+          and (trigger.status <> ${status}
+            or trigger.status_reason is distinct from ${stored.statusReason}
+            or trigger.status_reason_code is distinct from ${stored.statusReasonCode}
+            or trigger.status_reason_detail is distinct from ${stored.statusReasonDetail})
+        returning trigger.task_id, previous.status as was`,
+    );
+    const transitioned = [
+      ...new Set(changed.filter((row) => row.was !== status).map((row) => row.task_id)),
+    ];
+    if (transitioned.length === 0) return [];
+    const tasks = await rawRows<{ id: string; name: string; session_id: string | null }>(
+      scoped,
+      sql`select task.id, task.name,
+          coalesce(task.reusable_session_id, (
+            select run.session_id from scheduled_task_runs run
+            where run.workspace_id = task.workspace_id and run.task_id = task.id
+              and run.session_id is not null
+            order by run.created_at desc limit 1)) as session_id
+        from scheduled_tasks task
+        where task.workspace_id = ${workspaceId} and task.deleted_at is null
+          and task.id in (${sql.join(
+            transitioned.map((taskId) => sql`${taskId}::uuid`),
+            sql`, `,
+          )})
+        order by task.id`,
+    );
+    return tasks.map((task) => ({
+      taskId: task.id,
+      taskName: task.name,
+      sessionId: task.session_id,
+    }));
+  });
 }
 
 /** Identity-only inventory of automations whose inbox is due; every read after it is workspace-scoped. */
@@ -1573,6 +1977,36 @@ export async function getScheduledTaskRunEventOccurrences(
     });
   }
   return result;
+}
+
+/** One event run's automation and the events it carried; null for any other run. */
+export async function getEventRunOccurrence(
+  db: Database,
+  workspaceId: string,
+  runId: string,
+): Promise<{ taskId: string; occurrence: ScheduledTaskRunEventOccurrence } | null> {
+  const [row] = await withWorkspaceRls(db, workspaceId, (scoped) =>
+    rawRows<{ task_id: string; trigger_ids: string[]; event_count: number; events: unknown }>(
+      scoped,
+      sql`select run.task_id, occurrence.trigger_ids, occurrence.event_count, occurrence.events
+        from scheduled_task_runs run
+        join scheduled_task_event_occurrences occurrence
+          on occurrence.workspace_id = run.workspace_id and occurrence.task_id = run.task_id
+          and run.producer_key = 'scheduled-task-event:' || occurrence.id::text
+        where run.workspace_id = ${workspaceId} and run.trigger_type = 'event'
+          and run.id = ${runId}::uuid`,
+    ),
+  );
+  if (!row) return null;
+  const summaries = storedSummaries.safeParse(row.events);
+  return {
+    taskId: row.task_id,
+    occurrence: {
+      triggerIds: row.trigger_ids,
+      eventCount: row.event_count,
+      events: summaries.success ? summaries.data : [],
+    },
+  };
 }
 
 /** Retention: one bounded pass; returns how many rows changed so callers can repeat. */

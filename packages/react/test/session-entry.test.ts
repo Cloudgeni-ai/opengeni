@@ -63,6 +63,8 @@ describe("session-only entry", () => {
       "@opengeni/sdk/model-picker-order",
       // The new-conversation controller imports only the voice model type.
       "@opengeni/sdk/realtime",
+      // Unsent answers drop Other on a secret approval card: an id-only leaf.
+      "@opengeni/sdk/secret-use-approval",
       // The timeline's task usage-limit stop: a zod-free refusal leaf.
       "@opengeni/sdk/session-usage-limits",
       "react",
@@ -181,7 +183,18 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/timeline/agent-work-human-input.ts"))).toBe(
       true,
     );
-    expect(reactSources.length).toBe(57);
+    // Up-arrow recall of the person's latest waiting prompt.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-queued-prompt-recall.ts"))).toBe(
+      true,
+    );
+    // The draft store asks the pure human-input rules which questions offer Other.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-model.ts"))).toBe(true);
+    // Pure startup-step titles: an unclassified turn failure is named by the
+    // step it failed at ("Sandbox didn't start") instead of its recorded text.
+    expect(
+      reactSources.some((id) => id.endsWith("/src/timeline/platform-activity-presentation.ts")),
+    ).toBe(true);
+    expect(reactSources.length).toBe(60);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

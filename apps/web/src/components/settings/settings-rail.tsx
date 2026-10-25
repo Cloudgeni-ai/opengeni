@@ -16,6 +16,7 @@ import {
   KeyRoundIcon,
   LaptopIcon,
   LockKeyholeIcon,
+  MonitorIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
@@ -30,6 +31,7 @@ import {
 } from "./organization-settings-pages";
 import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
+import { thisComputerSettingsAvailable } from "@/lib/this-computer-page";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import {
@@ -141,7 +143,19 @@ export const RUNTIME_PAGES = [
     label: "Machines",
     icon: LaptopIcon,
   },
+  {
+    to: "/workspaces/$workspaceId/computer-use" as const,
+    label: "Computer use",
+    icon: MonitorIcon,
+    /** Only inside the desktop app, about the computer it runs on. */
+    desktopOnly: true,
+  },
 ] as const;
+
+/** The runtime pages the rail lists: Computer use only inside a desktop app that has it. */
+export function runtimePages(insideDesktopApp: boolean) {
+  return RUNTIME_PAGES.filter((page) => !("desktopOnly" in page) || insideDesktopApp);
+}
 
 /** The name of a workspace settings page or dashboard. */
 export function workspacePageLabel(location: WorkspaceManagementLocation): string {
@@ -381,7 +395,7 @@ export function useSettingsRail(input: {
           ],
         },
         {
-          items: RUNTIME_PAGES.map((page) => ({
+          items: runtimePages(thisComputerSettingsAvailable()).map((page) => ({
             id: `workspace:${page.to}`,
             label: page.label,
             icon: page.icon,

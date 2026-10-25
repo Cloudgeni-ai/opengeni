@@ -411,7 +411,7 @@ export function SchedulesApp({
   );
 
   const copyLink = useCallback((item: ScheduleItem) => {
-    const url = `https://app.opengeni.ai/workspaces/design-preview/schedules?schedule=${item.id}`;
+    const url = `https://app.opengeni.ai/workspaces/design-preview/automations?taskId=${item.id}`;
     void navigator.clipboard?.writeText(url).catch(() => undefined);
     toast("Link copied", { description: "Anyone with access to Design preview can open it." });
   }, []);

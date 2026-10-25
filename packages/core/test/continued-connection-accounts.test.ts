@@ -118,14 +118,29 @@ async function world() {
     ).turn;
   const resolver: NonNullable<
     ClaimSessionWorkForAttemptInput["resolveContinuedConnectionAccounts"]
-  > = async (tx, { sessionId, intent }) =>
-    await resolveContinuedConnectionAccounts({
+  > = async (tx, { sessionId, intent, session: claimedSession }) => {
+    const resolved = await resolveContinuedConnectionAccounts({
       db: tx,
       settings,
       ...scope,
       sessionId,
       intent,
+      claimedSession,
     });
+    // Compare the optimized locked-session path with the original fresh
+    // projection under the same transaction, including reconnect/revocation,
+    // principal changes, removed connectors and ambiguous account choices.
+    expect(resolved).toEqual(
+      await resolveContinuedConnectionAccounts({
+        db: tx,
+        settings,
+        ...scope,
+        sessionId,
+        intent,
+      }),
+    );
+    return resolved;
+  };
   const claim = async (resolve: boolean) => {
     const attemptId = crypto.randomUUID();
     const claimed = await claimSessionWorkForAttempt(db, scope.workspaceId, {

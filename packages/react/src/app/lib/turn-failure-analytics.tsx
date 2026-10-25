@@ -68,7 +68,7 @@ export function turnFailureClass(
     failure.quotaScope,
   );
   if (known) return known.kind;
-  if (code.startsWith("sandbox_")) return "sandbox";
+  if (code.startsWith("sandbox_") || (!code && failure.sandboxStartFailed)) return "sandbox";
   if (code.startsWith("mcp_")) return "mcp";
   if (code.startsWith("context_") || code.includes("compaction")) return "context_limit";
   if (code === "upstream_connectivity_unavailable") return "connectivity";

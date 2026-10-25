@@ -64,6 +64,7 @@ import {
   type KnowledgeContext,
   dbSql,
   deleteScheduledTask,
+  wakeScheduledTaskEventSubscriptions,
   getConnectionMetadata,
   getEnrollment,
   getLiveEnrollmentConnection,
@@ -136,6 +137,7 @@ import {
 import { prepareExternalLinkTaskAdmission } from "../application/external-link-work-admission";
 import {
   rearmScheduledTaskEventsOnResume,
+  scheduledTaskFinishedOnce,
   validateScheduledTaskEvents,
   validateScheduleForExistingEvents,
   writeScheduledTaskEvents,
@@ -263,12 +265,12 @@ export async function scheduledConnectionTools(
       ...settings.mcpServers.map(({ id }) => id),
       ...target.mcpServers.map(({ id }) => id),
     ],
-    defaultMcpServerIds: await workspaceSessionToolPolicyDefaultServerIds(
-      db,
-      workspaceId,
-      settings,
-      subjectId,
-    ),
+    // Explicit and inherited selections ignore workspace defaults. Their current
+    // registry is already supplied above; account authority is resolved by callers.
+    defaultMcpServerIds:
+      target.toolPolicy.mode === "workspace_default"
+        ? await workspaceSessionToolPolicyDefaultServerIds(db, workspaceId, settings, subjectId)
+        : [],
   }).toolRefs;
 }
 
@@ -369,6 +371,8 @@ export async function createValidatedScheduledTask(input: {
   authorizationSurface?: SessionAuthorizationSurface | undefined;
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
+  /** Reads event sources (MCP servers and Gmail) while checking triggers; for tests. */
+  eventSourceFetch?: typeof fetch | undefined;
 }): Promise<ScheduledTask> {
   // Variable Sets were replaced by vaults (RM-1).
   if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
@@ -653,11 +657,14 @@ export async function createValidatedScheduledTask(input: {
     ? await validateScheduledTaskEvents({
         settings: input.settings,
         db: input.db,
+        accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         ownerSubjectId,
+        actorSubjectId: input.grant.subjectId,
         schedule: input.payload.schedule,
         action,
         events: requestedEvents,
+        ...(input.eventSourceFetch ? { fetch: input.eventSourceFetch } : {}),
       })
     : null;
   const visibility = await resolveScheduledTaskVisibility({
@@ -1428,12 +1435,13 @@ export async function validatedScheduledTaskUpdate(
 
 /**
  * Validate an edit's event triggers with the rest of it and write them in the
- * transaction that commits it. Resuming an automation re-arms its events.
+ * transaction that commits it. Resuming an automation re-arms its events, and
+ * so does turning on a run-once automation that already ran.
  */
 async function withScheduledTaskEventsUpdate(
   input: Pick<
     Parameters<typeof validatedScheduledTaskUpdateWithoutAudience>[0],
-    "settings" | "db" | "existing" | "payload"
+    "settings" | "db" | "grant" | "existing" | "payload" | "eventSourceFetch"
   >,
   update: UpdateScheduledTaskInput,
 ): Promise<UpdateScheduledTaskInput> {
@@ -1443,11 +1451,15 @@ async function withScheduledTaskEventsUpdate(
     ? await validateScheduledTaskEvents({
         settings: input.settings,
         db: input.db,
+        accountId: existing.accountId,
         workspaceId: existing.workspaceId,
         ownerSubjectId: existing.ownerSubjectId,
+        actorSubjectId: input.grant.subjectId,
+        taskId: existing.id,
         schedule,
         action: update.action ?? existing.action,
         events: input.payload.events,
+        ...(input.eventSourceFetch ? { fetch: input.eventSourceFetch } : {}),
       })
     : null;
   if (!events && update.schedule) {
@@ -1458,8 +1470,11 @@ async function withScheduledTaskEventsUpdate(
       schedule,
     });
   }
-  const resumes = update.status === "active" && existing.status !== "active";
-  if (!events && !resumes) return update;
+  const resumes =
+    update.status === "active" &&
+    (existing.status !== "active" || (await scheduledTaskFinishedOnce(input.db, existing)));
+  const statusChanges = update.status !== undefined && update.status !== existing.status;
+  if (!events && !statusChanges && !resumes) return update;
   const prior = update.beforeUpdateCommit;
   return {
     ...update,
@@ -1467,6 +1482,10 @@ async function withScheduledTaskEventsUpdate(
       await prior?.(tx);
       if (events) await writeScheduledTaskEvents(tx, existing, events);
       if (resumes) await rearmScheduledTaskEventsOnResume(tx, existing);
+      // A paused automation ends its MCP subscriptions; resuming starts them again.
+      else if (statusChanges) {
+        await wakeScheduledTaskEventSubscriptions(tx, existing.workspaceId, existing.id);
+      }
     },
   };
 }
@@ -1513,6 +1532,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   authorizationSurface?: SessionAuthorizationSurface | undefined;
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
+  /** See createValidatedScheduledTask. */
+  eventSourceFetch?: typeof fetch | undefined;
 }): Promise<UpdateScheduledTaskInput> {
   const requestedPrompt =
     input.payload.prompt ??
@@ -2368,6 +2389,7 @@ export async function deleteScheduledTaskLifecycle(input: {
             });
           })()
         : await deleteScheduledTask(tx, input.workspaceId, task.id);
+      if (wasLive) await wakeScheduledTaskEventSubscriptions(tx, input.workspaceId, task.id);
       return { task, deletion };
     },
   );

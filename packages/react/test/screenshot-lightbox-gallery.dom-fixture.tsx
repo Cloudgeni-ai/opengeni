@@ -7,6 +7,62 @@ const { LightboxProvider, useLightboxGalleryItem, useLightboxOptional } =
   await import("../src/timeline/screenshot-lightbox");
 type LightboxGalleryEntry = import("../src/timeline/screenshot-lightbox").LightboxGalleryEntry;
 type LightboxGalleryImage = import("../src/timeline/screenshot-lightbox").LightboxGalleryImage;
+
+/**
+ * Gives the zoom surface a 1000 x 800 CSS-pixel layout box (its size) at the
+ * window's origin (its position); returns the restore function.
+ */
+function measureZoomSurface(width = 1000, height = 800): () => void {
+  const proto = HTMLElement.prototype;
+  const rect = proto.getBoundingClientRect;
+  const isSurface = (element: HTMLElement) => element.hasAttribute("data-zoom-pan-surface");
+  const own = {
+    clientWidth: Object.getOwnPropertyDescriptor(proto, "clientWidth"),
+    clientHeight: Object.getOwnPropertyDescriptor(proto, "clientHeight"),
+  };
+  const inherited = (name: "clientWidth" | "clientHeight") => {
+    for (let level = Object.getPrototypeOf(proto); level; level = Object.getPrototypeOf(level)) {
+      const descriptor = Object.getOwnPropertyDescriptor(level, name);
+      if (descriptor) return descriptor;
+    }
+    return undefined;
+  };
+  proto.getBoundingClientRect = function (this: HTMLElement) {
+    if (!isSurface(this)) return rect.call(this);
+    return {
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      width,
+      height,
+      right: width,
+      bottom: height,
+      toJSON: () => ({}),
+    } as DOMRect;
+  };
+  for (const [name, size] of [
+    ["clientWidth", width],
+    ["clientHeight", height],
+  ] as const) {
+    const original = own[name] ?? inherited(name);
+    Object.defineProperty(proto, name, {
+      configurable: true,
+      get(this: HTMLElement) {
+        return isSurface(this) ? size : ((original?.get?.call(this) as number | undefined) ?? 0);
+      },
+    });
+  }
+  return () => {
+    proto.getBoundingClientRect = rect;
+    for (const name of ["clientWidth", "clientHeight"] as const) {
+      const descriptor = own[name];
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else Reflect.deleteProperty(proto, name);
+    }
+  };
+}
+
 describe("LightboxProvider gallery", () => {
   test("pages through registered chat images in document order, wrapping around", async () => {
     const loads: string[] = [];
@@ -234,5 +290,74 @@ describe("LightboxProvider gallery", () => {
     expect(document.querySelector('button[aria-label="Next image"]')).toBeNull();
     expect(document.body.textContent).toContain("Esc or click outside to close");
     await rendered.unmount();
+  });
+
+  test("chat images zoom in place: Cmd/Ctrl + plus zooms the image, not the window", async () => {
+    let controller: ReturnType<typeof useLightboxOptional> = null;
+    function Probe() {
+      controller = useLightboxOptional();
+      return <button type="button" data-open="only" />;
+    }
+    // The image area measures 1000 x 800 CSS pixels.
+    const restore = measureZoomSurface();
+    const rendered = await renderComponent(
+      <LightboxProvider>
+        <Probe />
+      </LightboxProvider>,
+    );
+    try {
+      await act(async () => {
+        controller?.open(
+          "blob:only",
+          undefined,
+          document.querySelector<HTMLElement>("[data-open]"),
+        );
+      });
+      const image = document.querySelector<HTMLImageElement>("figure img")!;
+      Object.defineProperty(image, "naturalWidth", { configurable: true, value: 2000 });
+      Object.defineProperty(image, "naturalHeight", { configurable: true, value: 1500 });
+      await act(async () => {
+        image.dispatchEvent(new Event("load"));
+      });
+      const percent = () => document.querySelector("[data-zoom-percent]")?.textContent;
+      expect(percent()).toBe("48%");
+      const zoomIn = new KeyboardEvent("keydown", {
+        key: "=",
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => {
+        document.body.dispatchEvent(zoomIn);
+      });
+      expect(zoomIn.defaultPrevented).toBe(true);
+      expect(percent()).toBe("50%");
+      await act(async () => {
+        document.querySelector<HTMLButtonElement>('button[aria-label="Zoom in"]')?.click();
+      });
+      expect(percent()).toBe("75%");
+      await act(async () => {
+        document.body.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "0", ctrlKey: true, bubbles: true }),
+        );
+      });
+      expect(percent()).toBe("48%");
+
+      await act(async () => {
+        document.querySelector<HTMLButtonElement>('button[aria-label="Close"]')?.click();
+      });
+      // Closed (its exit animation may still be running): the window zooms again.
+      const outside = new KeyboardEvent("keydown", {
+        key: "=",
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      document.body.dispatchEvent(outside);
+      expect(outside.defaultPrevented).toBe(false);
+    } finally {
+      restore();
+      await rendered.unmount();
+    }
   });
 });

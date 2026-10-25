@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
+import { ACTION_CATALOG } from "@opengeni/contracts/app-actions";
 import { actionDescription, DESCRIBED_ACTION_PATH } from "../src/mcp/action-descriptions";
 import { describeAction, searchActions } from "../src/organization-mcp";
 

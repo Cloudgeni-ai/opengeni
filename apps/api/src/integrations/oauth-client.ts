@@ -75,11 +75,12 @@ import {
   PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { connectSetupPermission, requireConnectOwnerAuthority } from "./connect-authority";
 import {
   DEFAULT_OAUTH_PROFILE,
   OFFICIAL_GMAIL_MCP_URL,
   OFFICIAL_DRIVE_MCP_URL,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
   DEPLOYMENT_MANAGED_CLIENTS,
   builtInOAuthProfileByKey,
   assertAuthorizationServerNotReserved,
@@ -171,7 +172,7 @@ type OAuthClientDeps = {
 
 export type OAuthStartContext = {
   /** Server-selected dedicated adapter identity; never copied from request metadata. */
-  integrationKey?: "gmail" | "google-drive" | "slack-personal";
+  integrationKey?: "gmail" | "google-drive" | "google-calendar" | "slack-personal";
   connectAttemptId?: string;
   externalContinuation?: ExternalActorContinuation;
   accountId: string;
@@ -207,7 +208,7 @@ type OAuthClientRegistration = {
 };
 
 type OAuthStatePayload = {
-  integrationKey?: "gmail" | "google-drive" | "slack-personal";
+  integrationKey?: "gmail" | "google-drive" | "google-calendar" | "slack-personal";
   connectAttemptId?: string;
   externalContinuation?: ExternalActorContinuation;
   returnUrl?: string;
@@ -732,13 +733,23 @@ export function isHostedSlackMcpTarget(providerDomain: string, mcpUrl: string): 
 }
 
 function assertGoogleMcpSetupEnabled(settings: Settings, profile: OAuthProviderProfile): void {
-  if (profile.key === "official-gmail" || profile.key === "official-drive") {
+  if (
+    profile.key === "official-gmail" ||
+    profile.key === "official-drive" ||
+    profile.key === "official-google-calendar"
+  ) {
     assertGoogleConnectorSetupEnabled(settings);
   }
   if (profile.key === "official-drive" && !settings.googleDriveMcpEnabled) {
     throw new HTTPException(503, {
       message:
         "Google Drive MCP is unavailable until this deployment has completed Google's preview and OAuth setup.",
+    });
+  }
+  if (profile.key === "official-google-calendar" && !settings.googleCalendarEnabled) {
+    throw new HTTPException(503, {
+      message:
+        "Google Calendar is unavailable until this deployment adds the Calendar scopes to its Google OAuth app.",
     });
   }
 }
@@ -836,6 +847,8 @@ async function completeMcpOAuthCallbackWithinDeadline(
   let state: OAuthStatePayload | null = null;
   let integrationKey: string | null = "custom:mcp";
   let connectOperation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
+  // A personal sign-in started with `connections:personal` finishes with it too.
+  let ownerPermission: ReturnType<typeof connectSetupPermission> = "connections:write";
   if (!input.state) {
     const error = new OAuthCallbackStageError(
       "state_verify",
@@ -870,14 +883,23 @@ async function completeMcpOAuthCallbackWithinDeadline(
         state.providerDomain === "drivemcp.googleapis.com" &&
         builtInOAuthProfileFor(state)?.key === "official-drive" &&
         personalOwnerStateAccepted(state);
+      const calendarAttemptMatches =
+        stored.attempt.providerId === "google-calendar" &&
+        state.integrationKey === "google-calendar" &&
+        state.mcpUrl === OFFICIAL_GOOGLE_CALENDAR_MCP_URL &&
+        state.providerDomain === "calendarmcp.googleapis.com" &&
+        builtInOAuthProfileFor(state)?.key === "official-google-calendar" &&
+        personalOwnerStateAccepted(state);
       if (
         (!["mcp-oauth", "slack-personal"].includes(stored.attempt.providerId) &&
           !gmailAttemptMatches &&
-          !driveAttemptMatches) ||
+          !driveAttemptMatches &&
+          !calendarAttemptMatches) ||
         stored.attempt.ownership !== state.ownership ||
         stored.returnUrl !== state.returnUrl
       )
         throw new HTTPException(403, { message: "OAuth attempt mismatch" });
+      ownerPermission = connectSetupPermission(stored.attempt);
       connectOperation = {
         attemptId: state.connectAttemptId,
         operationId: `oauth:${state.nonce}`,
@@ -891,7 +913,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           ...connectOperation,
           expectedRevision: stored.attempt.revision,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
         },
         integrationKey,
         Boolean(input.code),
@@ -916,7 +938,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         await finishConnectOperation(db, state, {
           ...connectOperation,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
           commit: async (_tx, current) => ({
             ...current,
             revision: current.revision + 1,
@@ -1148,7 +1170,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           {
             ...connectOperation!,
             authorize: (tx, _attempt, origin) =>
-              requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+              requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
             commit: async (tx, current) => {
               const connection = await persist(tx);
               if (!connection)
@@ -1210,7 +1232,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           finishConnectOperation(tx, state!, {
             ...connectOperation!,
             authorize: (locked, _attempt, origin) =>
-              requireConnectOwnerAuthority(locked, state!, "connections:write", origin),
+              requireConnectOwnerAuthority(locked, state!, ownerPermission, origin),
             commit: async (_locked, current) => ({
               ...current,
               revision: current.revision + 1,
@@ -1938,6 +1960,11 @@ export function googleDriveOAuthClientConfigured(settings: Settings): boolean {
   return settings.googleDriveMcpEnabled && gmailOAuthClientConfigured(settings);
 }
 
+/** Calendar shares the Google client once the deployment has added the Calendar scopes to it. */
+export function googleCalendarOAuthClientConfigured(settings: Settings): boolean {
+  return settings.googleCalendarEnabled && gmailOAuthClientConfigured(settings);
+}
+
 function isConfidentialOAuthClient(client: {
   clientId: string;
   clientSecret?: string | undefined;
@@ -2152,6 +2179,7 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     payload.integrationKey !== undefined &&
     payload.integrationKey !== "gmail" &&
     payload.integrationKey !== "google-drive" &&
+    payload.integrationKey !== "google-calendar" &&
     payload.integrationKey !== "slack-personal"
   ) {
     throw new HTTPException(400, { message: "invalid OAuth integration identity" });
@@ -2217,7 +2245,13 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     // Absent on a legacy state, which therefore cannot land a personal owner.
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
     ...(payload.integrationKey
-      ? { integrationKey: payload.integrationKey as "gmail" | "google-drive" | "slack-personal" }
+      ? {
+          integrationKey: payload.integrationKey as
+            | "gmail"
+            | "google-drive"
+            | "google-calendar"
+            | "slack-personal",
+        }
       : {}),
     providerDomain: requiredString(payload.providerDomain, "state.providerDomain"),
     mcpUrl: stringValue(payload.mcpUrl) ?? resource,
@@ -2288,6 +2322,18 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
       builtInOAuthProfileFor(parsed)?.key !== "official-drive")
   ) {
     throw new HTTPException(400, { message: "invalid Google Drive OAuth integration identity" });
+  }
+  if (
+    parsed.integrationKey === "google-calendar" &&
+    (parsed.mcpUrl !== OFFICIAL_GOOGLE_CALENDAR_MCP_URL ||
+      parsed.resource !== OFFICIAL_GOOGLE_CALENDAR_MCP_URL ||
+      parsed.providerDomain !== "calendarmcp.googleapis.com" ||
+      parsed.ownership !== "personal" ||
+      builtInOAuthProfileFor(parsed)?.key !== "official-google-calendar")
+  ) {
+    throw new HTTPException(400, {
+      message: "invalid Google Calendar OAuth integration identity",
+    });
   }
   if (Boolean(connectionId) !== Boolean(connectionVersion)) {
     throw new HTTPException(400, { message: "invalid OAuth reconnect state" });

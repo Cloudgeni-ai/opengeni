@@ -33,6 +33,7 @@ import {
   BrowserRecordingSaveResponse,
   BrowserRecordingStartRequest,
   BrowserRecordingSummary,
+  type RecordingVisibility,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
   BrowserDomReadResponse,
@@ -130,6 +131,10 @@ import {
   getAuthRun,
   getExternalAuthPreparation,
   getSession,
+  getSessionAuthorityProjection,
+  browserRecordingBundleObjectKey,
+  findBrowserRecording,
+  getBrowserRecordingVideo,
   InteractionResourceConflictError,
   InteractionResourceNotFoundError,
   InteractionResourceStateError,
@@ -251,8 +256,10 @@ import {
 import { resolveBrowserActionFences, type BrowserActionFences } from "../browser-action-fences";
 import { InteractionRouteStages, reportInteractionRouteStages } from "../interaction-route-stages";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
+  interactionActionDeadlineApiError,
   interactionControlApiError,
   legacyInteractionCapacityError,
   legacyInteractionCapacityFailure,
@@ -269,9 +276,10 @@ import {
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
-import { BrowserRecordingVideoError, encodeBrowserRecording } from "../browser-recording-video";
 import {
   BROWSER_RECORDING_SAVE_RETRY_AFTER_MS,
+  browserRecordingFailureStatus,
+  browserRecordingOwner,
   stageBrowserRecordingBundle,
 } from "../browser-recording-save";
 import {
@@ -1274,10 +1282,12 @@ export function registerBrowserSessionRoutes(
 
   /** Stops a recording and saves it in the source session's workspace as an
    * MP4 plus its action log, then publishes the MP4 so it plays in the chat.
-   * The browser host only uploads its frame bundle; the video is encoded here,
-   * so no browser host needs a video encoder. A bundle still uploading over a
-   * slow link answers 202 with `retryAfterMs`; repeating the request with the
-   * same operationId joins that upload instead of starting another. */
+   * The browser host only uploads its frame bundle. That makes it a
+   * recording, and the worker encodes its video, so no browser host and no
+   * API request needs a video encoder. While the bundle is still uploading
+   * over a slow link, or its video is being made, this answers 202 with
+   * `retryAfterMs`; repeating the request with the same operationId joins
+   * that work instead of starting it again. */
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId/save",
     async (context) => {
@@ -1291,17 +1301,13 @@ export function registerBrowserSessionRoutes(
       if (!objectStorage) {
         throw new HTTPException(503, { message: "object storage is not configured" });
       }
-      const recordingPrefix = `workspaces/${workspaceId}/browser-recordings/${recordingId}`;
-      // One bundle object per recording: every save attempt uploads to it, so
-      // a retry joins the upload already running instead of starting over.
-      const bundleKey = `${recordingPrefix}/bundle`;
-      const prefix = `${recordingPrefix}/${request.operationId}`;
-      const outputNames = ["video.mp4", "actions.json"] as const;
-      const temporaryKeys = outputNames.map((name) => `${prefix}/${name}`);
-      // Staged objects are deleted on a durable deadline even if no request
-      // finishes; without that, the save waits for the whole upload instead.
+      const startVideo = deps.workflowClient.startBrowserRecordingVideo;
+      if (!startVideo) {
+        throw new HTTPException(503, { message: "browser recording videos are not available" });
+      }
+      // A bundle no save comes back for is deleted on a durable deadline;
+      // without that, the save waits for the whole upload instead.
       const scheduleDeletion = deps.workflowClient.scheduleTransientObjectDeletion;
-      let keepBundle = scheduleDeletion !== undefined;
       try {
         const staged = await withActiveBrowserController(
           context,
@@ -1310,71 +1316,144 @@ export function registerBrowserSessionRoutes(
           browserSessionId,
           "session.control",
           "browser.control",
-          async ({ sessionClient, record }) => ({
-            sourceSessionId: record.sourceSessionId,
-            ...(await stageBrowserRecordingBundle({
-              sessionClient,
-              objectStorage,
+          async ({ sessionClient, record }) => {
+            const sourceSessionId = record.sourceSessionId;
+            const authorization = await authorizeSourceSession(
+              deps,
+              grant,
+              sourceSessionId,
+              "session.control",
+            );
+            const owner = browserRecordingOwner({
+              authorization,
+              grantSubjectId: grant.subjectId,
+              chat: await getSessionAuthorityProjection(deps.db, workspaceId, sourceSessionId),
+            });
+            const existing = await findBrowserRecording(deps.db, {
+              workspaceId,
+              subjectId: owner.subjectId,
               recordingId,
-              bundleKey,
-              stagedKeys: temporaryKeys,
-              audience: signedUrlAudienceForPlacement(record.session.placement),
-              uploadTtlSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
-              scheduleDeletion:
-                scheduleDeletion &&
-                (async (objectKeys, deleteAfter) =>
-                  await scheduleDeletion({ workspaceId, objectKeys, deleteAfter })),
-            })),
-          }),
+            });
+            if (existing) {
+              return {
+                sourceSessionId,
+                owner,
+                existing,
+                recording: await sessionClient.stopRecording(recordingId),
+                bundle: null,
+              };
+            }
+            return {
+              sourceSessionId,
+              owner,
+              existing: null,
+              ...(await stageBrowserRecordingBundle({
+                sessionClient,
+                objectStorage,
+                recordingId,
+                bundleKey: ({ sha256 }) =>
+                  browserRecordingBundleObjectKey({ workspaceId, recordingId, sha256 }),
+                audience: signedUrlAudienceForPlacement(record.session.placement),
+                uploadTtlSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+                scheduleDeletion:
+                  scheduleDeletion &&
+                  (async (objectKeys, deleteAfter) =>
+                    await scheduleDeletion({ workspaceId, objectKeys, deleteAfter })),
+              })),
+            };
+          },
         );
-        const { recording, sourceSessionId } = staged;
-        if (!staged.bundle) {
-          return context.json(
+        const { recording, sourceSessionId, existing } = staged;
+        const progress = (state: "uploading" | "encoding") =>
+          context.json(
             BrowserRecordingSaveProgress.parse({
-              state: "uploading",
+              state,
               recording,
               retryAfterMs: BROWSER_RECORDING_SAVE_RETRY_AFTER_MS,
             }),
             202,
           );
+        const makeVideo = async (
+          ownerSubjectId: string,
+          visibility: RecordingVisibility,
+          bundle: { sizeBytes: number; sha256: string },
+        ) => {
+          // Starting it again while it runs, or after it finished, does nothing.
+          await startVideo({
+            accountId: grant.accountId,
+            workspaceId,
+            recordingId,
+            ownerSubjectId,
+            visibility,
+            startedAt: recording.startedAt,
+            durationMilliseconds: recording.durationMs,
+            bundle: { byteLength: bundle.sizeBytes, sha256: bundle.sha256 },
+          });
+        };
+        if (!existing) {
+          if (!staged.bundle) return progress("uploading");
+          await makeVideo(staged.owner.subjectId, staged.owner.visibility, staged.bundle);
+          return progress("encoding");
+        }
+        if (existing.recording.state === "processing") {
+          // Should its workflow have been lost, this starts it again.
+          if (recording.bundle) {
+            await makeVideo(
+              existing.recording.ownerSubjectId,
+              existing.recording.visibility,
+              recording.bundle,
+            );
+          }
+          return progress("encoding");
+        }
+        if (existing.recording.state === "failed") {
+          throw new HTTPException(browserRecordingFailureStatus(existing.recording.errorCode), {
+            message: existing.errorMessage ?? "the recording could not be encoded",
+          });
+        }
+        const actor = {
+          workspaceId,
+          subjectId: existing.recording.ownerSubjectId,
+          recordingId,
+        };
+        const video =
+          existing.recording.state === "ready"
+            ? await getBrowserRecordingVideo(deps.db, actor)
+            : null;
+        if (!video) return progress("encoding");
+        const actionLog = await objectStorage.getObjectBytes(video.actionLogObjectKey);
+        if (!actionLog) {
+          throw new HTTPException(503, {
+            message: "browser recording action log is not available",
+          });
         }
         await authorizeSourceSession(deps, grant, sourceSessionId, "session.control");
         const sourceSession = await requireSourceSession(deps, workspaceId, sourceSessionId);
-        const encoded = await encodeBrowserRecording({
-          bundle: staged.bundle,
-          ffmpegPath: deps.settings.voiceInputFfmpegPath,
-          signal: context.req.raw.signal,
-        });
         const videoPath =
           request.destinationPath ?? defaultBrowserRecordingPath(recording.startedAt);
         const actionLogPath = `${videoPath.replace(/\.[^./]*$/u, "")}.actions.json`;
         const outputs = [
-          { path: videoPath, bytes: encoded.video, contentType: "video/mp4", name: "video.mp4" },
           {
-            path: actionLogPath,
-            bytes: encoded.actionLog,
-            contentType: "application/json",
-            name: "actions.json",
+            name: "video.mp4",
+            path: videoPath,
+            key: video.objectKey,
+            sizeBytes: video.bytes,
+            sha256: video.sha256,
           },
-        ].map((output) => ({
-          ...output,
-          key: `${prefix}/${output.name}`,
-          sha256: createHash("sha256").update(output.bytes).digest("hex"),
-        }));
+          {
+            name: "actions.json",
+            path: actionLogPath,
+            key: video.actionLogObjectKey,
+            sizeBytes: actionLog.bytes.byteLength,
+            sha256: createHash("sha256").update(actionLog.bytes).digest("hex"),
+          },
+        ];
         await requireLimit(deps, {
           accountId: grant.accountId,
           workspaceId,
           action: "file:upload",
-          quantity: outputs.reduce((total, output) => total + output.bytes.byteLength, 0),
+          quantity: outputs.reduce((total, output) => total + output.sizeBytes, 0),
         });
-        for (const output of outputs) {
-          await objectStorage.putObject({
-            key: output.key,
-            contentType: output.contentType,
-            body: output.bytes,
-            sha256: output.sha256,
-          });
-        }
         await withChannelA(
           channelServices,
           {
@@ -1401,7 +1480,7 @@ export function registerBrowserSessionRoutes(
                 overwrite: false,
                 mayReplaceExisting: false,
                 createParents: true,
-                sizeBytes: output.bytes.byteLength,
+                sizeBytes: output.sizeBytes,
                 sha256: output.sha256,
                 source: { url: get.url, expiresAt: get.expiresAt.toISOString() },
               });
@@ -1419,39 +1498,24 @@ export function registerBrowserSessionRoutes(
           path: videoPath,
           signal: context.req.raw.signal,
         });
-        // Saved: the bundle has no further use. Until then it stays for a
-        // retry, and its scheduled deletion removes it if none comes.
-        keepBundle = false;
         return context.json(
           BrowserRecordingSaveResponse.parse({
             recording,
             video: {
               path: videoPath,
               artifactId: published.artifact.artifactId,
-              sizeBytes: encoded.video.byteLength,
-              durationMs: encoded.durationMs,
-              width: encoded.width,
-              height: encoded.height,
-              frameCount: encoded.frameCount,
+              sizeBytes: video.bytes,
+              durationMs: video.durationMilliseconds,
+              width: video.width,
+              height: video.height,
+              frameCount: video.frameCount,
             },
             actionLogPath,
           }),
           201,
         );
       } catch (error) {
-        if (error instanceof BrowserRecordingVideoError) {
-          throw new HTTPException(error.code === "encode_failed" ? 502 : 422, {
-            message: error.message,
-            cause: error,
-          });
-        }
         throw browserRouteError(error);
-      } finally {
-        await Promise.allSettled(
-          [...temporaryKeys, ...(keepBundle ? [] : [bundleKey])].map((key) =>
-            objectStorage.deleteObject(key),
-          ),
-        );
       }
     },
   );
@@ -1596,131 +1660,143 @@ export function registerBrowserSessionRoutes(
       // live controller in this request (a recovery retry of the callback must
       // replay the same command digest, so it reuses the first read).
       let resolvedFences: BrowserActionFences | null = null;
-      const result = await withActiveBrowserController(
+      // The response waits for the whole batch, which may outlast the
+      // server's idle timeout.
+      const result = await withoutRequestIdleTimeout(
         context,
-        grant,
-        workspaceId,
-        browserSessionId,
-        "session.control",
-        "browser.action",
-        async ({ sessionClient, binding, record, sourceAuthorization }) => {
-          stages.mark("placement");
-          const passkeySync = (refresh: boolean) =>
-            syncBrowserPasskeys({
-              port: interactionSecrets,
-              grant,
-              browserSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              client: sessionClient,
-              refresh,
-              log: (event, fields) => console.warn(event, { browserSessionId, ...fields }),
-            });
-          // Before the action this browser takes over the principal's passkeys.
-          // It is independent of the fence read, so both run together; the
-          // action is dispatched only after the takeover settles.
-          const passkeyTakeover = passkeySync(true);
-          resolvedFences ??= await resolveBrowserActionFences(request, () =>
-            sessionClient.targetState(request.targetId),
-          );
-          stages.mark("fences");
-          const commandFields = {
-            protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
-            operationId: request.operationId,
-            browserSessionId,
-            controllerGeneration: binding.controllerGeneration,
-            targetId: request.targetId,
-            ...resolvedFences,
-            actor: interactionActorForGrant(grant),
-            observationMode: request.observationMode,
-            action: request.action,
-          };
-          // Validate the public command before resolving any reference.
-          BrowserActionCommand.parse(commandFields);
-          if (workspaceFileIds.length > 0) {
-            let alreadyAdmitted = false;
-            try {
-              await sessionClient.receipt(request.operationId);
-              alreadyAdmitted = true;
-            } catch (error) {
-              if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
-                throw error;
-              }
-            }
-            if (!alreadyAdmitted) {
-              if (!deps.objectStorage) {
-                throw new HTTPException(503, {
-                  message: "object storage is not configured",
-                });
-              }
-              const files = await getFilesForSubject(deps.db, {
-                accountId: grant.accountId,
-                workspaceId,
-                subjectId: browserFileAuthoritySubjectId(grant, sourceAuthorization),
-                fileIds: workspaceFileIds,
-              });
-              const ordered = requireAuthorizedBrowserUploadFiles(workspaceFileIds, files);
-              const authorities = await Promise.all(
-                ordered.map(async (file) => {
-                  const signed = await deps.objectStorage!.createGetUrl({
-                    key: file.objectKey,
-                    expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
-                    audience: signedUrlAudienceForPlacement(record.session.placement),
-                  });
-                  return {
-                    fileId: file.id,
-                    safeFilename: browserUploadFilename(file.safeFilename),
-                    sizeBytes: file.sizeBytes,
-                    sha256: browserUploadSha256(file.sha256),
-                    download: {
-                      url: signed.url,
-                      expiresAt: signed.expiresAt.toISOString(),
-                    },
-                  };
-                }),
-              );
-              await sessionClient.stageWorkspaceFiles({
-                operationId: request.operationId,
-                files: authorities,
-              });
-            }
-          }
-          await passkeyTakeover;
-          stages.mark("passkey_pre");
-          // Resolved last, right before dispatch, so TOTP codes are fresh (Q-33).
-          const secretValues = await resolveInteractionSecretValues({
-            port: interactionSecrets,
+        async () =>
+          await withActiveBrowserController(
+            context,
             grant,
-            texts: browserActionSecretTexts(request.action),
-            use: {
-              surface: "browser",
-              toolName: "browser_act",
-              operationId: request.operationId,
+            workspaceId,
+            browserSessionId,
+            "session.control",
+            "browser.action",
+            async ({ sessionClient, binding, record, sourceAuthorization }) => {
+              stages.mark("placement");
+              const passkeySync = (refresh: boolean) =>
+                syncBrowserPasskeys({
+                  port: interactionSecrets,
+                  grant,
+                  browserSessionId,
+                  controllerGeneration: binding.controllerGeneration,
+                  client: sessionClient,
+                  refresh,
+                  log: (event, fields) => console.warn(event, { browserSessionId, ...fields }),
+                });
+              // Before the action this browser takes over the principal's passkeys.
+              // It is independent of the fence read, so both run together; the
+              // action is dispatched only after the takeover settles.
+              const passkeyTakeover = passkeySync(true);
+              resolvedFences ??= await resolveBrowserActionFences(request, () =>
+                sessionClient.targetState(request.targetId),
+              );
+              stages.mark("fences");
+              const commandFields = {
+                protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+                operationId: request.operationId,
+                browserSessionId,
+                controllerGeneration: binding.controllerGeneration,
+                targetId: request.targetId,
+                ...resolvedFences,
+                actor: interactionActorForGrant(grant),
+                observationMode: request.observationMode,
+                action: request.action,
+              };
+              // Validate the public command before resolving any reference.
+              BrowserActionCommand.parse(commandFields);
+              if (workspaceFileIds.length > 0) {
+                let alreadyAdmitted = false;
+                try {
+                  await sessionClient.receipt(request.operationId);
+                  alreadyAdmitted = true;
+                } catch (error) {
+                  if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
+                    throw error;
+                  }
+                }
+                if (!alreadyAdmitted) {
+                  if (!deps.objectStorage) {
+                    throw new HTTPException(503, {
+                      message: "object storage is not configured",
+                    });
+                  }
+                  const files = await getFilesForSubject(deps.db, {
+                    accountId: grant.accountId,
+                    workspaceId,
+                    subjectId: browserFileAuthoritySubjectId(grant, sourceAuthorization),
+                    fileIds: workspaceFileIds,
+                  });
+                  const ordered = requireAuthorizedBrowserUploadFiles(workspaceFileIds, files);
+                  const authorities = await Promise.all(
+                    ordered.map(async (file) => {
+                      const signed = await deps.objectStorage!.createGetUrl({
+                        key: file.objectKey,
+                        expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+                        audience: signedUrlAudienceForPlacement(record.session.placement),
+                      });
+                      return {
+                        fileId: file.id,
+                        safeFilename: browserUploadFilename(file.safeFilename),
+                        sizeBytes: file.sizeBytes,
+                        sha256: browserUploadSha256(file.sha256),
+                        download: {
+                          url: signed.url,
+                          expiresAt: signed.expiresAt.toISOString(),
+                        },
+                      };
+                    }),
+                  );
+                  await sessionClient.stageWorkspaceFiles({
+                    operationId: request.operationId,
+                    files: authorities,
+                  });
+                }
+              }
+              await passkeyTakeover;
+              stages.mark("passkey_pre");
+              // Resolved last, right before dispatch, so TOTP codes are fresh (Q-33).
+              const secretValues = await resolveInteractionSecretValues({
+                port: interactionSecrets,
+                grant,
+                texts: browserActionSecretTexts(request.action),
+                use: {
+                  surface: "browser",
+                  toolName: "browser_act",
+                  operationId: request.operationId,
+                  // The page's host, shown to a person asked to approve the use.
+                  lookupDestination: async () => {
+                    const targets = await sessionClient.listTargets();
+                    const url = targets.find((target) => target.id === request.targetId)?.url;
+                    return url ? new URL(url).host || null : null;
+                  },
+                },
+                beforeResolve: requirePlacementAcceptsSecretValues(
+                  deps.db,
+                  grant,
+                  workspaceId,
+                  record.session.placement,
+                ),
+              });
+              stages.mark("secrets");
+              try {
+                return await sessionClient.action(
+                  BrowserActionCommand.parse({
+                    ...commandFields,
+                    ...(secretValues === undefined ? {} : { secretValues }),
+                  }),
+                );
+              } finally {
+                stages.mark("dispatch");
+                // Write back what the action did (new registrations, sign counts)
+                // without holding the response: unacknowledged events stay in
+                // browserd, and the session's next sync waits for this one.
+                void passkeySync(false);
+              }
             },
-            beforeResolve: requirePlacementAcceptsSecretValues(
-              deps.db,
-              grant,
-              workspaceId,
-              record.session.placement,
-            ),
-          });
-          stages.mark("secrets");
-          try {
-            return await sessionClient.action(
-              BrowserActionCommand.parse({
-                ...commandFields,
-                ...(secretValues === undefined ? {} : { secretValues }),
-              }),
-            );
-          } finally {
-            stages.mark("dispatch");
-            // Write back what the action did (new registrations, sign counts)
-            // without holding the response: unacknowledged events stay in
-            // browserd, and the session's next sync waits for this one.
-            void passkeySync(false);
-          }
-        },
-        true,
-        stages,
+            true,
+            stages,
+          ),
       );
       observeBrowserActionResult(deps.observability, startedAtMs, request, result);
       reportInteractionRouteStages(context, deps.observability, stages);
@@ -6885,7 +6961,9 @@ type PreservedWorkingCopyCallback<T> = (input: {
   authority: PlacementBrowserWorkingCopyAuthority;
 }) => Promise<T>;
 
-function browserRouteError(error: unknown): HTTPException {
+export function browserRouteError(error: unknown): HTTPException {
+  const actionDeadline = interactionActionDeadlineApiError(error);
+  if (actionDeadline) return actionDeadline;
   const tabDiagnosis = browserTabDiagnosisError(error);
   if (tabDiagnosis instanceof ApiHttpError) return tabDiagnosis;
   const connectedMachineError = interactionControlApiError(error, "browser");
@@ -6919,6 +6997,19 @@ function browserRouteError(error: unknown): HTTPException {
   }
   const legacyCapacity = legacyInteractionCapacityError(error, "browser");
   if (legacyCapacity) return legacyCapacity;
+  // A controller that cannot tell whether its change happened (a tab close
+  // whose browser connection ended first) keeps that uncertainty, so callers
+  // inspect the session instead of treating the 409 as a refusal to retry.
+  if (error instanceof BrowserControlRequestError && error.error.code === "outcome_unknown") {
+    const failure = new ApiHttpError(409, {
+      code: "conflict",
+      message: error.error.message,
+      retryable: false,
+      outcomeUnknown: true,
+    });
+    failure.cause = error;
+    return failure;
+  }
   if (error instanceof BrowserControlRequestError) {
     return new HTTPException(error.status as ContentfulStatusCode, {
       message: error.error.message,

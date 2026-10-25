@@ -6,9 +6,10 @@ import {
   useLayoutEffect,
   useMemo,
   useState,
-  type ComponentProps,
   type ReactElement,
   type ReactNode,
+  forwardRef,
+  type ComponentPropsWithoutRef,
 } from "react";
 import { ArrowRightIcon, ChevronRightIcon, CircleAlertIcon } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -121,7 +122,10 @@ const SettingRowDepthContext = createContext(0);
 /** Control left: a switch-wide leading column (36px, or the control's width), then the text. */
 const LEFT_COLUMNS = "grid-cols-[minmax(2.25rem,auto)_minmax(0,1fr)] gap-x-3";
 
-export interface SettingRowProps extends Omit<ComponentProps<"div">, "title" | "children"> {
+export interface SettingRowProps extends Omit<
+  ComponentPropsWithoutRef<"div">,
+  "title" | "children"
+> {
   /** 14/500, sentence case. Wraps; never truncates. */
   label: ReactNode;
   /** 12/18 muted, one or two sentences. */
@@ -145,203 +149,217 @@ export interface SettingRowProps extends Omit<ComponentProps<"div">, "title" | "
   children?: ReactNode | undefined;
 }
 
-export function SettingRow({
-  label,
-  description,
-  control,
-  controlWidth = "compact",
-  variant = "control-right",
-  hint,
-  error,
-  children,
-  className,
-  ...props
-}: SettingRowProps) {
-  const depth = useContext(SettingRowDepthContext);
-  const baseId = useId();
-  const controlId = `${baseId}-control`;
-  const labelId = `${baseId}-label`;
-  const descriptionId = `${baseId}-description`;
-  const hintId = `${baseId}-hint`;
-  const errorId = `${baseId}-error`;
-  const hasDescription = description !== undefined && description !== null;
-  const hasHint = hint !== undefined && hint !== null && hint !== false;
-  const hasError = error !== undefined && error !== null && error !== false;
-  // How many controls took `controlId`; the label points at the control only then.
-  const [labelTargets, setLabelTargets] = useState(0);
-  const claimLabel = useCallback(() => {
-    setLabelTargets((count) => count + 1);
-    return () => setLabelTargets((count) => count - 1);
-  }, []);
+export const SettingRow = /* @__PURE__ */ forwardRef<HTMLDivElement, SettingRowProps>(
+  function SettingRow(
+    {
+      label,
+      description,
+      control,
+      controlWidth = "compact",
+      variant = "control-right",
+      hint,
+      error,
+      children,
+      className,
+      ...props
+    },
+    ref,
+  ) {
+    const depth = useContext(SettingRowDepthContext);
+    const baseId = useId();
+    const controlId = `${baseId}-control`;
+    const labelId = `${baseId}-label`;
+    const descriptionId = `${baseId}-description`;
+    const hintId = `${baseId}-hint`;
+    const errorId = `${baseId}-error`;
+    const hasDescription = description !== undefined && description !== null;
+    const hasHint = hint !== undefined && hint !== null && hint !== false;
+    const hasError = error !== undefined && error !== null && error !== false;
+    // How many controls took `controlId`; the label points at the control only then.
+    const [labelTargets, setLabelTargets] = useState(0);
+    const claimLabel = useCallback(() => {
+      setLabelTargets((count) => count + 1);
+      return () => setLabelTargets((count) => count - 1);
+    }, []);
 
-  const field = useMemo<SettingRowField>(
-    () => ({
-      controlId,
-      labelId,
-      describedBy: joinIds(hasDescription && descriptionId, hasHint && hintId, hasError && errorId),
-      invalid: hasError,
-      claimLabel,
-    }),
-    [
-      claimLabel,
-      controlId,
-      descriptionId,
-      errorId,
-      hasDescription,
-      hasError,
-      hasHint,
-      hintId,
-      labelId,
-    ],
-  );
+    const field = useMemo<SettingRowField>(
+      () => ({
+        controlId,
+        labelId,
+        describedBy: joinIds(
+          hasDescription && descriptionId,
+          hasHint && hintId,
+          hasError && errorId,
+        ),
+        invalid: hasError,
+        claimLabel,
+      }),
+      [
+        claimLabel,
+        controlId,
+        descriptionId,
+        errorId,
+        hasDescription,
+        hasError,
+        hasHint,
+        hintId,
+        labelId,
+      ],
+    );
 
-  const nested = depth > 0;
-  const compact = controlWidth === "compact";
-  const hasControl = control !== undefined && control !== null && control !== false;
-  // Where the control goes for this variant and width.
-  const placement: "right" | "left" | "below" | "responsive" = !hasControl
-    ? "right"
-    : variant === "stacked"
-      ? "below"
-      : variant === "control-left"
-        ? compact
-          ? "left"
-          : "below"
-        : compact
-          ? "right"
-          : "responsive";
-  // Control left keeps one text column: rows without a leading switch leave its
-  // column empty, so every label on the list starts at the same edge.
-  const gutter = variant === "control-left" && placement !== "left" && !nested;
+    const nested = depth > 0;
+    const compact = controlWidth === "compact";
+    const hasControl = control !== undefined && control !== null && control !== false;
+    // Where the control goes for this variant and width.
+    const placement: "right" | "left" | "below" | "responsive" = !hasControl
+      ? "right"
+      : variant === "stacked"
+        ? "below"
+        : variant === "control-left"
+          ? compact
+            ? "left"
+            : "below"
+          : compact
+            ? "right"
+            : "responsive";
+    // Control left keeps one text column: rows without a leading switch leave its
+    // column empty, so every label on the list starts at the same edge.
+    const gutter = variant === "control-left" && placement !== "left" && !nested;
 
-  // With the control under the text (stacked), the hint and error follow the control.
-  const trailingNotes = placement === "below";
-  const notes =
-    hasHint || hasError ? (
-      <div className={cn("flex min-w-0 flex-col gap-1.5", trailingNotes ? "-mt-1.5" : "mt-1.5")}>
-        {hasHint ? (
-          <div id={hintId} className="text-xs leading-4.5 text-fg-muted">
-            {hint}
-          </div>
-        ) : null}
-        {hasError ? (
-          <p id={errorId} className="flex items-start gap-1.5 text-xs leading-4.5 text-danger">
-            <CircleAlertIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-            <span className="min-w-0">{error}</span>
+    // With the control under the text (stacked), the hint and error follow the control.
+    const trailingNotes = placement === "below";
+    const notes =
+      hasHint || hasError ? (
+        <div className={cn("flex min-w-0 flex-col gap-1.5", trailingNotes ? "-mt-1.5" : "mt-1.5")}>
+          {hasHint ? (
+            <div id={hintId} className="text-xs leading-4.5 text-fg-muted">
+              {hint}
+            </div>
+          ) : null}
+          {hasError ? (
+            <p id={errorId} className="flex items-start gap-1.5 text-xs leading-4.5 text-danger">
+              <CircleAlertIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+              <span className="min-w-0">{error}</span>
+            </p>
+          ) : null}
+        </div>
+      ) : null;
+
+    const text = (
+      <div className="min-w-0">
+        <div className="text-sm font-medium text-pretty text-fg">
+          <label id={labelId} htmlFor={hasControl && labelTargets > 0 ? controlId : undefined}>
+            {label}
+          </label>
+        </div>
+        {hasDescription ? (
+          <p id={descriptionId} className="mt-0.5 text-xs leading-4.5 text-pretty text-fg-muted">
+            {description}
           </p>
         ) : null}
+        {trailingNotes ? null : notes}
+      </div>
+    );
+
+    const controlSlot = hasControl ? (
+      <div
+        data-slot="setting-row-control"
+        className={cn(
+          "flex min-w-0 items-center",
+          placement === "right" && "justify-end",
+          placement === "left" && "h-5 justify-start",
+          // Below 640px, wrapped controls fill the row: selects and segmented options stretch.
+          (placement === "below" || placement === "responsive") &&
+            controlWidth === "select" &&
+            "w-full *:w-full @[640px]/setting-row:w-60",
+          placement === "below" &&
+            controlWidth === "auto" &&
+            "w-full *:w-full [&_[data-slot=segmented-control-item]]:flex-1 @[640px]/setting-row:w-auto @[640px]/setting-row:*:w-auto @[640px]/setting-row:[&_[data-slot=segmented-control-item]]:flex-none",
+          placement === "responsive" &&
+            controlWidth === "auto" &&
+            "w-full *:w-full [&_[data-slot=segmented-control-item]]:flex-1 @[640px]/setting-row:w-auto @[640px]/setting-row:*:w-auto @[640px]/setting-row:justify-end @[640px]/setting-row:[&_[data-slot=segmented-control-item]]:flex-none",
+        )}
+      >
+        {control}
       </div>
     ) : null;
 
-  const text = (
-    <div className="min-w-0">
-      <div className="text-sm font-medium text-pretty text-fg">
-        <label id={labelId} htmlFor={hasControl && labelTargets > 0 ? controlId : undefined}>
-          {label}
-        </label>
-      </div>
-      {hasDescription ? (
-        <p id={descriptionId} className="mt-0.5 text-xs leading-4.5 text-pretty text-fg-muted">
-          {description}
-        </p>
-      ) : null}
-      {trailingNotes ? null : notes}
-    </div>
-  );
-
-  const controlSlot = hasControl ? (
-    <div
-      data-slot="setting-row-control"
-      className={cn(
-        "flex min-w-0 items-center",
-        placement === "right" && "justify-end",
-        placement === "left" && "h-5 justify-start",
-        // Below 640px, wrapped controls fill the row: selects and segmented options stretch.
-        (placement === "below" || placement === "responsive") &&
-          controlWidth === "select" &&
-          "w-full *:w-full @[640px]/setting-row:w-60",
-        placement === "below" &&
-          controlWidth === "auto" &&
-          "w-full *:w-full [&_[data-slot=segmented-control-item]]:flex-1 @[640px]/setting-row:w-auto @[640px]/setting-row:*:w-auto @[640px]/setting-row:[&_[data-slot=segmented-control-item]]:flex-none",
-        placement === "responsive" &&
-          controlWidth === "auto" &&
-          "w-full *:w-full [&_[data-slot=segmented-control-item]]:flex-1 @[640px]/setting-row:w-auto @[640px]/setting-row:*:w-auto @[640px]/setting-row:justify-end @[640px]/setting-row:[&_[data-slot=segmented-control-item]]:flex-none",
-      )}
-    >
-      {control}
-    </div>
-  ) : null;
-
-  return (
-    <SettingRowFieldContext.Provider value={field}>
-      <div
-        data-slot="setting-row"
-        data-variant={variant}
-        data-nested={nested || undefined}
-        className={cn("@container/setting-row min-w-0", className)}
-        {...props}
-      >
+    return (
+      <SettingRowFieldContext.Provider value={field}>
         <div
-          className={cn(
-            "grid min-w-0 gap-x-6 gap-y-3",
-            nested ? "min-h-11 py-2" : "min-h-14 py-3",
-            gutter
-              ? `${LEFT_COLUMNS} content-center *:col-start-2`
-              : [
-                  placement === "right" && "grid-cols-[minmax(0,1fr)_auto] items-center",
-                  placement === "left" && `${LEFT_COLUMNS} items-start`,
-                  placement === "below" && "grid-cols-1 content-center",
-                ],
-            placement === "responsive" &&
-              "grid-cols-1 content-center @[640px]/setting-row:grid-cols-[minmax(0,1fr)_auto] @[640px]/setting-row:items-center",
-          )}
+          data-slot="setting-row"
+          data-variant={variant}
+          data-nested={nested || undefined}
+          className={cn("@container/setting-row min-w-0", className)}
+          ref={ref}
+          {...props}
         >
-          {placement === "left" ? (
-            <>
-              {controlSlot}
-              {text}
-            </>
-          ) : (
-            <>
-              {text}
-              {controlSlot}
-              {trailingNotes ? notes : null}
-            </>
-          )}
+          <div
+            className={cn(
+              "grid min-w-0 gap-x-6 gap-y-3",
+              nested ? "min-h-11 py-2" : "min-h-14 py-3",
+              gutter
+                ? `${LEFT_COLUMNS} content-center *:col-start-2`
+                : [
+                    placement === "right" && "grid-cols-[minmax(0,1fr)_auto] items-center",
+                    placement === "left" && `${LEFT_COLUMNS} items-start`,
+                    placement === "below" && "grid-cols-1 content-center",
+                  ],
+              placement === "responsive" &&
+                "grid-cols-1 content-center @[640px]/setting-row:grid-cols-[minmax(0,1fr)_auto] @[640px]/setting-row:items-center",
+            )}
+          >
+            {placement === "left" ? (
+              <>
+                {controlSlot}
+                {text}
+              </>
+            ) : (
+              <>
+                {text}
+                {controlSlot}
+                {trailingNotes ? notes : null}
+              </>
+            )}
+          </div>
+          {children ? (
+            <SettingRowDepthContext.Provider value={depth + 1}>
+              <div
+                data-slot="setting-row-children"
+                // One group with the parent: indented, no hairlines inside it and
+                // no guide line; the next hairline follows the whole group.
+                className={cn(
+                  "-mt-1 mb-2 flex min-w-0 flex-col",
+                  variant === "control-left"
+                    ? // Line up with the parent's label, past the switch column.
+                      "pl-12"
+                    : "pl-5",
+                )}
+              >
+                {children}
+              </div>
+            </SettingRowDepthContext.Provider>
+          ) : null}
         </div>
-        {children ? (
-          <SettingRowDepthContext.Provider value={depth + 1}>
-            <div
-              data-slot="setting-row-children"
-              // One group with the parent: indented, no hairlines inside it and
-              // no guide line; the next hairline follows the whole group.
-              className={cn(
-                "-mt-1 mb-2 flex min-w-0 flex-col",
-                variant === "control-left"
-                  ? // Line up with the parent's label, past the switch column.
-                    "pl-12"
-                  : "pl-5",
-              )}
-            >
-              {children}
-            </div>
-          </SettingRowDepthContext.Provider>
-        ) : null}
-      </div>
-    </SettingRowFieldContext.Provider>
-  );
-}
+      </SettingRowFieldContext.Provider>
+    );
+  },
+);
 
 /** Rows of one section, split by hairlines. The Section variant decides whether they sit in a card. */
-export function SettingRowGroup({ className, ...props }: ComponentProps<"div">) {
+export const SettingRowGroup = /* @__PURE__ */ forwardRef<
+  HTMLDivElement,
+  ComponentPropsWithoutRef<"div">
+>(function SettingRowGroup({ className, ...props }, ref) {
   return (
     <div
       data-slot="setting-row-group"
       className={cn("flex min-w-0 flex-col divide-y divide-border", className)}
+      ref={ref}
       {...props}
     />
   );
-}
+});
 
 /**
  * A setting that lives on its own page ("Allowed models", "Models it can
@@ -350,27 +368,33 @@ export function SettingRowGroup({ className, ...props }: ComponentProps<"div">) 
  * hover of a list row. Use it instead of an "Edit" or "Change" button that
  * only opens a page.
  */
-export function SettingNavRow({
-  label,
-  description,
-  value,
-  onOpen,
-  href,
-  disabled = false,
-  disabledReason,
-  className,
-  ...props
-}: Omit<ComponentProps<"div">, "children"> & {
-  label: ReactNode;
-  description?: ReactNode | undefined;
-  /** The current value, short: "All models", "3 models". */
-  value?: ReactNode | undefined;
-  onOpen?: (() => void) | undefined;
-  href?: string | undefined;
-  disabled?: boolean | undefined;
-  /** Why the page can't be opened, and who can fix it. Replaces the description. */
-  disabledReason?: ReactNode | undefined;
-}) {
+export const SettingNavRow = /* @__PURE__ */ forwardRef<
+  HTMLDivElement,
+  Omit<ComponentPropsWithoutRef<"div">, "children"> & {
+    label: ReactNode;
+    description?: ReactNode | undefined;
+    /** The current value, short: "All models", "3 models". */
+    value?: ReactNode | undefined;
+    onOpen?: (() => void) | undefined;
+    href?: string | undefined;
+    disabled?: boolean | undefined;
+    /** Why the page can't be opened, and who can fix it. Replaces the description. */
+    disabledReason?: ReactNode | undefined;
+  }
+>(function SettingNavRow(
+  {
+    label,
+    description,
+    value,
+    onOpen,
+    href,
+    disabled = false,
+    disabledReason,
+    className,
+    ...props
+  },
+  ref,
+) {
   const baseId = useId();
   const labelId = `${baseId}-label`;
   const descriptionId = `${baseId}-description`;
@@ -412,7 +436,7 @@ export function SettingNavRow({
   const labelledBy = joinIds(labelId, hasValue && valueId);
   const describedBy = secondary ? descriptionId : undefined;
   return (
-    <div data-slot="setting-nav-row" className={cn("min-w-0", className)} {...props}>
+    <div data-slot="setting-nav-row" className={cn("min-w-0", className)} ref={ref} {...props}>
       {disabled ? (
         <div className={rowClass} aria-disabled="true">
           {inner}
@@ -440,7 +464,7 @@ export function SettingNavRow({
       )}
     </div>
   );
-}
+});
 
 /**
  * A quiet destructive action at the end of a settings list ("Turn off

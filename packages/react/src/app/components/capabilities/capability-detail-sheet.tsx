@@ -1318,7 +1318,7 @@ export function ConnectionStatus({
         {attention
           ? `${personal ? "Personal" : "Workspace"} connection needs to be reconnected.`
           : personal
-            ? `Personal connection to ${health.connection.providerDomain}. Your messages and personal schedules can use this account.`
+            ? `Personal connection to ${health.connection.providerDomain}. Your messages and personal automations can use this account.`
             : `Workspace connection to ${health.connection.providerDomain}. Shared with agents and automations here.`}
       </p>
     </div>

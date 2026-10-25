@@ -213,7 +213,7 @@ export type SessionRepliesMute = {
 /** The session menu's mute action, naming the schedule when it covers one. */
 export function repliesMuteLabel(mute: Pick<SessionRepliesMute, "muted" | "scope">): string {
   if (mute.scope === "schedule") {
-    return mute.muted ? "Unmute this schedule's replies" : "Mute this schedule's replies";
+    return mute.muted ? "Unmute this automation's replies" : "Mute this automation's replies";
   }
   return mute.muted ? "Unmute replies" : "Mute replies";
 }
@@ -262,7 +262,7 @@ export function useSessionRepliesMute(session: {
         const nextScope = value.scope ?? "session";
         setScope(nextScope);
         void storeFor(client).refresh();
-        const subject = nextScope === "schedule" ? "Replies from this schedule" : "Replies";
+        const subject = nextScope === "schedule" ? "Replies from this automation" : "Replies";
         toast.success(
           value.repliesMuted
             ? `${subject} muted. Notifications and questions still reach you.`
@@ -270,7 +270,7 @@ export function useSessionRepliesMute(session: {
         );
       })
       .catch((error: unknown) => {
-        const what = scope === "schedule" ? "this schedule's replies" : "replies";
+        const what = scope === "schedule" ? "this automation's replies" : "replies";
         toast.error(next ? `Couldn't mute ${what}.` : `Couldn't unmute ${what}.`, {
           description: error instanceof Error ? error.message : String(error),
         });

@@ -10,6 +10,7 @@ import {
 import type { SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
+import type { ComposerQueuedRecall } from "../hooks/use-queued-prompt-recall";
 import type { SlashCommandContext } from "../hooks/use-slash-commands";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import {
@@ -114,6 +115,8 @@ export type ChatComposerProps = {
   runControl?: ComposerRunControl | undefined;
   /** A response is in progress (drives the Stop control). */
   running?: boolean | undefined;
+  /** Up in an empty composer pulls the latest waiting prompt back (`useQueuedPromptRecall`). */
+  queuedRecall?: ComposerQueuedRecall | undefined;
 };
 
 /**
@@ -156,6 +159,7 @@ export function ChatComposer({
   surfaceClassName,
   runControl,
   running,
+  queuedRecall,
 }: ChatComposerProps) {
   const controller = useChatComposerController({
     delivery: composer,
@@ -174,6 +178,7 @@ export function ChatComposer({
     messages,
     runControl,
     running,
+    queuedRecall,
   });
   const hasControls = Boolean(
     attachments || models || controlsLeading || controlsStart || transcription,

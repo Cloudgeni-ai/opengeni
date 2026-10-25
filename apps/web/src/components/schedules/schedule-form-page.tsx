@@ -1,22 +1,36 @@
 import { workspaceDefaultMachine } from "@opengeni/react/app/lib/workspace-default-machine";
 import { Link } from "@tanstack/react-router";
 /**
- * New schedule, Edit schedule and Duplicate: one full page with a back link
- * and a sticky footer. What (a composer-style field with chips) -> When (the
- * cadence sentence and its next runs) -> an optional Name -> one closed
- * Advanced section. Knowledge source syncs keep a small editor of their own.
+ * New automation, Edit automation and Duplicate: one full page with a back
+ * link and a sticky footer. What (a composer-style field with chips) -> When
+ * (the cadence sentence and its next runs, and the events that start a run)
+ * -> an optional Name -> one closed Settings section. Knowledge source syncs
+ * keep a small editor of their own.
  */
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
+import { t } from "@opengeni/react/app/lib/console-text";
+import {
+  AutomationWhenField,
+  automationTemplateOfSaved,
+  automationTemplatesFor,
+  emptyEventTriggersDraft,
+  eventTriggersDraftFrom,
+  hasEventTriggerIssues,
+  useEventSourceStandIns,
+  validateEventTriggers,
+  withTemplateSources,
+  type AutomationTemplate,
+  type EventTriggersIssues,
+} from "@opengeni/react/automations";
 
 import { ConnectionAccountPicker } from "@opengeni/react/app/components/capabilities/connection-account-picker";
 import { selectedConnectionAccounts } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
 import { useConnectionAccounts } from "@opengeni/react/app/components/capabilities/use-connection-accounts";
 import { AgentLearningDraftEditor } from "@opengeni/react/app/components/knowledge/agent-learning-settings";
 import { Button } from "@opengeni/react/ui/button";
-import { CadencePicker } from "@opengeni/react/ui/cadence-picker";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { useVaults } from "@opengeni/react";
 import {
@@ -66,10 +80,13 @@ import {
   SCHEDULE_FREQUENCIES,
   cadenceIssue,
   cadenceOfSchedule,
+  cadenceRepeats,
   createRequestFromDraft,
   defaultCadence,
   deriveScheduleName,
+  draftForEventSource,
   draftFromTemplate,
+  hasEventTriggers,
   isKnowledgeSync,
   mergeSchedulePinnedAccounts,
   nextRunOf,
@@ -86,6 +103,13 @@ import {
 } from "./schedule-model";
 import { useScheduleAccess, useScheduleNavigation } from "./schedule-parts";
 import { KnowledgeSyncFormPage } from "./knowledge-sync-form-page";
+import {
+  useEventSourceLogo,
+  useEventSources,
+  useEventTriggersEnabled,
+  useReadyEventSources,
+} from "./use-event-sources";
+import { SAVED_TEMPLATE_ID } from "./use-automation-templates";
 
 export type ScheduleFormMode =
   | {
@@ -93,6 +117,8 @@ export type ScheduleFormMode =
       template?: string;
       from?: string;
       sourceSessionId?: string;
+      /** Start with a trigger on this event source. */
+      eventSourceId?: string;
     }
   | { kind: "edit"; scheduleId: string };
 
@@ -101,6 +127,13 @@ type Source =
   | { status: "loading" }
   | { status: "error"; error: Error }
   | { status: "ready"; task: ScheduledTask };
+
+/** A template saved in the workspace that `?template=` names. */
+type SavedTemplate =
+  | { status: "none" }
+  | { status: "loading" }
+  | { status: "error"; error: Error }
+  | { status: "ready"; template: AutomationTemplate | undefined };
 
 export function ScheduleFormPage({
   workspaceId,
@@ -116,6 +149,42 @@ export function ScheduleFormPage({
   );
   const [attempt, setAttempt] = useState(0);
   const go = useScheduleNavigation(workspaceId);
+  const eventTriggers = useEventTriggersEnabled();
+  const savedTemplateId =
+    mode.kind === "create" && mode.template && SAVED_TEMPLATE_ID.test(mode.template)
+      ? mode.template
+      : undefined;
+  const [saved, setSaved] = useState<SavedTemplate>(() =>
+    savedTemplateId ? { status: "loading" } : { status: "none" },
+  );
+
+  useEffect(() => {
+    if (!savedTemplateId) {
+      setSaved({ status: "none" });
+      return;
+    }
+    let live = true;
+    setSaved({ status: "loading" });
+    client.listAutomationTemplates(workspaceId).then(
+      (list) => {
+        if (!live) return;
+        const found = list.find((entry) => entry.id === savedTemplateId);
+        // One that is gone opens a blank form, like an unknown built-in id.
+        setSaved({ status: "ready", template: found && automationTemplateOfSaved(found) });
+      },
+      (error: unknown) => {
+        if (live) {
+          setSaved({
+            status: "error",
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        }
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [attempt, client, savedTemplateId, workspaceId]);
 
   useEffect(() => {
     if (!sourceId) {
@@ -144,14 +213,46 @@ export function ScheduleFormPage({
 
   const back =
     mode.kind === "edit"
-      ? { label: "Schedule", onClick: () => go.detail(mode.scheduleId) }
-      : { label: "Schedules", onClick: go.list };
+      ? { label: "Automation", onClick: () => go.detail(mode.scheduleId) }
+      : { label: "Automations", onClick: go.list };
 
+  if (saved.status === "loading" || saved.status === "error") {
+    return (
+      <FormPage
+        title="New automation"
+        submitLabel="Create automation"
+        back={back}
+        onCancel={back.onClick}
+        loading={saved.status === "loading"}
+        loadingFields={4}
+        submitDisabled
+      >
+        {saved.status === "error" ? (
+          <ErrorMessage
+            title="Couldn't load the template"
+            {...apiErrorDetails(saved.error)}
+            action={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setAttempt((value) => value + 1)}
+              >
+                Try again
+              </Button>
+            }
+          >
+            {apiErrorAdvice(saved.error)}
+          </ErrorMessage>
+        ) : null}
+      </FormPage>
+    );
+  }
   if (source.status === "loading" || source.status === "error") {
     return (
       <FormPage
-        title={mode.kind === "edit" ? "Edit schedule" : "New schedule"}
-        submitLabel={mode.kind === "edit" ? "Save changes" : "Create schedule"}
+        title={mode.kind === "edit" ? "Edit automation" : "New automation"}
+        submitLabel={mode.kind === "edit" ? "Save changes" : "Create automation"}
         back={back}
         onCancel={back.onClick}
         loading={source.status === "loading"}
@@ -160,10 +261,12 @@ export function ScheduleFormPage({
       >
         {source.status === "error" ? (
           isPermissionDenied(source.error) ? (
-            <Notice title="You can't open this schedule.">Ask a workspace admin for access.</Notice>
+            <Notice title="You can't open this automation.">
+              Ask a workspace admin for access.
+            </Notice>
           ) : (
             <ErrorMessage
-              title="Couldn't load the schedule"
+              title="Couldn't load the automation"
               {...apiErrorDetails(source.error)}
               action={
                 <Button
@@ -177,7 +280,7 @@ export function ScheduleFormPage({
               }
             >
               {apiErrorFacts(source.error).status === 404
-                ? "It may have been deleted. Go back to Schedules to see the rest."
+                ? "It may have been deleted. Go back to Automations to see the rest."
                 : apiErrorAdvice(source.error)}
             </ErrorMessage>
           )
@@ -187,6 +290,16 @@ export function ScheduleFormPage({
   }
 
   const task = source.status === "ready" ? source.task : null;
+  const chosen =
+    mode.kind !== "create"
+      ? undefined
+      : saved.status === "ready"
+        ? saved.template
+        : templateById(mode.template, eventTriggers);
+  // A template on events opens blank where events don't run.
+  const template = chosen
+    ? automationTemplatesFor([chosen], { eventTriggers, workspaceEvents: true })[0]
+    : undefined;
   if (mode.kind === "edit" && task && isKnowledgeSync(task)) {
     return (
       <KnowledgeSyncFormPage
@@ -199,10 +312,11 @@ export function ScheduleFormPage({
   }
   return (
     <AgentScheduleForm
-      key={`${mode.kind}-${task?.id ?? "new"}-${mode.kind === "create" ? (mode.template ?? mode.sourceSessionId ?? "") : ""}`}
+      key={`${mode.kind}-${task?.id ?? "new"}-${mode.kind === "create" ? (mode.template ?? mode.sourceSessionId ?? mode.eventSourceId ?? "") : ""}`}
       workspaceId={workspaceId}
       mode={mode}
       task={task}
+      template={template}
       back={
         mode.kind === "edit" && task
           ? { label: task.name, onClick: back.onClick }
@@ -261,7 +375,7 @@ type IfStillRunning = "queue" | "skip";
 
 const IF_STILL_RUNNING_HINT: Record<IfStillRunning, string> = {
   queue: "The new run waits, then starts when the previous one finishes.",
-  skip: "The new run is skipped. The next one on the schedule runs as normal.",
+  skip: "The new run is skipped. The next one runs as normal.",
 };
 
 interface FormErrors {
@@ -269,18 +383,25 @@ interface FormErrors {
   name?: string;
   target?: string;
   machine?: string;
+  /** The schedule and the events disagree, such as run once on a repeating schedule. */
+  when?: string;
+  /** The event-runs-per-hour setting. */
+  maxRunsPerHour?: string;
 }
 
 function AgentScheduleForm({
   workspaceId,
   mode,
   task,
+  template,
   back,
 }: {
   workspaceId: string;
   mode: ScheduleFormMode;
   /** The schedule being edited, or duplicated from. */
   task: ScheduledTask | null;
+  /** The template a new automation starts from. */
+  template: AutomationTemplate | undefined;
   back: { label: string; onClick: () => void };
 }) {
   const context = useAppContext();
@@ -288,6 +409,21 @@ function AgentScheduleForm({
   const access = useScheduleAccess(workspaceId);
   const go = useScheduleNavigation(workspaceId);
   const editing = mode.kind === "edit";
+  const eventTriggers = useEventTriggersEnabled();
+  const eventSources = useEventSources(workspaceId, eventTriggers);
+  const readySources = useReadyEventSources(workspaceId, eventTriggers);
+  // Sources that need no setting up (an MCP server that offers events, the
+  // viewer's Gmail, this workspace's own events) are offered before the
+  // viewer has added them.
+  const standIns = useEventSourceStandIns({
+    client,
+    workspaceId,
+    sources: eventSources.sources,
+    readySources,
+    workspaceEvents: eventTriggers,
+  });
+  const formSources = standIns.sources;
+  const sourceLogo = useEventSourceLogo();
   const canAsk = useCanCreateScheduleWithAgent(workspaceId);
   const ask = useCreateWithOpenGeni(workspaceId);
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
@@ -351,31 +487,36 @@ function AgentScheduleForm({
       const fromTask: ScheduleDraft = {
         ...formStateFromScheduledTask(task, formDefaults),
         cadence: cadenceOfSchedule(task.schedule),
+        events: eventTriggersDraftFrom(task.events),
         rigId: task.rigId,
         visibility: task.visibility,
         ...(task.vaultPolicy?.mode === "selected" ? { vaultPolicy: task.vaultPolicy } : {}),
       };
       if (editing) return fromTask;
-      // Duplicate: a new schedule you own. Someone else's connected accounts
+      // Duplicate: a new automation you own. Someone else's connected accounts
       // don't come with it, and the Knowledge source stays with the original.
+      // One that only events start stays that way.
       const own = ownsSchedule(task, access.viewerSubjectId);
       return {
         ...fromTask,
         name: `${task.name} (copy)`.slice(0, NAME_MAX_LENGTH),
         knowledgeSource: undefined,
         pinnedAccounts: own ? fromTask.pinnedAccounts : [],
-        cadence: fromTask.cadence ?? defaultCadence(),
+        cadence: fromTask.cadence ?? (hasEventTriggers(task) ? null : defaultCadence()),
       };
     }
     if (mode.kind === "create" && mode.sourceSessionId) {
       return {
         ...recurringSessionTaskFormState(mode.sourceSessionId, canAttachOpenGeniTool, formDefaults),
         cadence: { timeZone: viewerTimeZone(), rule: { frequency: "hourly" } },
+        events: emptyEventTriggersDraft(),
         rigId: null,
         visibility: "workspace",
       };
     }
-    const template = mode.kind === "create" ? templateById(mode.template) : undefined;
+    if (mode.kind === "create" && mode.eventSourceId && eventTriggers) {
+      return draftForEventSource(mode.eventSourceId, defaults);
+    }
     if (template) return draftFromTemplate(template, defaults);
     return newScheduleDraft(defaults);
   });
@@ -401,6 +542,11 @@ function AgentScheduleForm({
   const inheritsChatSettings =
     draft.runMode === "existing_session" || Boolean(materializedSessionId);
   const [errors, setErrors] = useState<FormErrors>({});
+  const [eventIssues, setEventIssues] = useState<EventTriggersIssues | undefined>(undefined);
+  // The runs-per-hour box keeps what was typed, even while it isn't a number yet.
+  const [runsPerHourText, setRunsPerHourText] = useState(() =>
+    String(initial.events.maxRunsPerHour),
+  );
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [accessChange, setAccessChange] = useState<{
     environment: boolean;
@@ -434,8 +580,29 @@ function AgentScheduleForm({
       ...(patch.machineSandboxId !== undefined || patch.executionTarget !== undefined
         ? { machine: undefined }
         : {}),
+      ...(patch.cadence !== undefined || patch.events !== undefined ? { when: undefined } : {}),
+      ...(patch.events !== undefined ? { maxRunsPerHour: undefined } : {}),
     }));
+    if (patch.events !== undefined) setEventIssues(undefined);
   };
+
+  // A GitHub event names a repository, but a run can only open the
+  // repositories its message carries.
+  const needsRepositories =
+    eventTriggers &&
+    !inheritsChatSettings &&
+    !draft.resources.some((resource) => resource.kind === "repository") &&
+    draft.events.triggers.some(
+      (trigger) => formSources?.find((source) => source.id === trigger.sourceId)?.kind === "github",
+    );
+  // A template's trigger names a kind of source: it takes the viewer's own
+  // once their sources load.
+  useEffect(() => {
+    setDraft((current) => {
+      const events = withTemplateSources(current.events, formSources);
+      return events === current.events ? current : { ...current, events };
+    });
+  }, [formSources]);
 
   // Keep following the workspace default as the catalog resolves it.
   const followedDefault = draft.modelFollowsDefault ? modelCatalog.defaultSelection : null;
@@ -575,6 +742,20 @@ function AgentScheduleForm({
         current.visibility === "private" ? current : { ...current, visibility: "private" },
       );
   }, [privateReason]);
+  // A new automation that listens to something only its owner sees (their
+  // meetings, mailbox or MCP connection) starts out Only me; they can still
+  // share it.
+  const listensPrivately = draft.events.triggers.some(
+    (trigger) =>
+      formSources?.find((source) => source.id === trigger.sourceId)?.visibility === "private",
+  );
+  useEffect(() => {
+    if (!creating || !listensPrivately || canCreatePrivate !== true || audienceChosenRef.current)
+      return;
+    setDraft((current) =>
+      current.visibility === "private" ? current : { ...current, visibility: "private" },
+    );
+  }, [canCreatePrivate, creating, listensPrivately]);
   const showAudience =
     !personal &&
     (canCreatePrivate === true || draft.visibility === "private" || privateReason !== null);
@@ -785,7 +966,7 @@ function AgentScheduleForm({
       }`,
       description:
         machine.scope === "user"
-          ? "Runs on your own computer. Only you can see this schedule and its chats."
+          ? "Runs on your own computer. Only you can see this automation and its chats."
           : "Runs on this computer, in its code folder.",
       leading: <LaptopIcon className="size-4 text-fg-subtle" />,
       disabled: !isMachineComputeSelectable(machine.state),
@@ -839,14 +1020,15 @@ function AgentScheduleForm({
       : [ifStillRunning === "skip" ? "Skip if still running" : "Queue if still running"]),
     ...(inheritsChatSettings ? [] : [whereLabel]),
     ...(secretsSummary ? [`Secrets: ${secretsSummary}`] : []),
-
+    ...(draft.events.triggers.length > 0 && Number.isFinite(draft.events.maxRunsPerHour)
+      ? [`Up to ${draft.events.maxRunsPerHour} event runs an hour`]
+      : []),
     ...(eachRun === "existing_session"
       ? []
       : [learningCustom ? "Custom agent learning" : "Workspace learning defaults"]),
   ].join(" · ");
 
   const derivedName = deriveScheduleName(draft.prompt);
-  const whenLabelId = useId();
 
   const validate = (): FormErrors => {
     const next: FormErrors = {};
@@ -866,7 +1048,11 @@ function AgentScheduleForm({
       machineOnly &&
       computeChanged
     ) {
-      next.machine = "This Opengeni server needs a connected machine for schedules.";
+      next.machine = "This Opengeni server needs a connected machine for automations.";
+    }
+    if (draft.events.once && draft.events.triggers.length > 0 && cadenceRepeats(draft.cadence)) {
+      next.when =
+        "A run-once automation can't also repeat on a schedule. Remove the schedule or make it one time.";
     }
     return next;
   };
@@ -874,11 +1060,27 @@ function AgentScheduleForm({
   const onSubmit = async () => {
     const next = validate();
     const cadenceProblem = cadenceIssue(draft.cadence, new Date());
+    const triggerIssues =
+      draft.events.triggers.length > 0
+        ? validateEventTriggers(t, draft.events, formSources ?? [])
+        : undefined;
+    if (triggerIssues?.maxRunsPerHour) next.maxRunsPerHour = triggerIssues.maxRunsPerHour;
     setErrors(next);
-    if (next.target || next.machine) setAdvancedOpen(true);
-    if (Object.values(next).some(Boolean) || cadenceProblem) return false;
+    setEventIssues(triggerIssues);
+    if (next.target || next.machine || next.maxRunsPerHour) setAdvancedOpen(true);
+    if (
+      Object.values(next).some(Boolean) ||
+      cadenceProblem ||
+      (triggerIssues && hasEventTriggerIssues(triggerIssues))
+    )
+      return false;
     const submitted: ScheduleDraft = {
       ...draft,
+      // A trigger on this workspace's events adds the viewer's source for them.
+      events: await withFriendlyError(
+        "Couldn't add the event source.",
+        standIns.realEvents(draft.events),
+      ),
       // Pins only for connectors a person changed; everything else stays live.
       pinnedAccounts: !pinnable
         ? []
@@ -934,7 +1136,7 @@ function AgentScheduleForm({
       return true;
     }
     const created = await withFriendlyError(
-      "Couldn't create the schedule.",
+      "Couldn't create the automation.",
       client.createScheduledTask(
         workspaceId,
         createRequestFromDraft(submitted, {
@@ -944,8 +1146,12 @@ function AgentScheduleForm({
       ),
     );
     const first = nextRunOf(created, new Date());
-    toast.success("Schedule created", {
-      description: first ? `First run ${runTimeLabel(first, new Date())}.` : undefined,
+    toast.success("Automation created", {
+      description: first
+        ? `First run ${runTimeLabel(first, new Date())}.`
+        : hasEventTriggers(created)
+          ? "It runs when a matching event arrives."
+          : undefined,
       action:
         access.canRun && created.status === "active"
           ? {
@@ -966,7 +1172,7 @@ function AgentScheduleForm({
     return true;
   };
 
-  // A fresh New schedule offers the chat route; a duplicate or a "Make
+  // A fresh New automation offers the chat route; a duplicate or a "Make
   // recurring" launch already has its instructions.
   const offerAgent = mode.kind === "create" && !mode.from && !sourceSessionId && canAsk;
 
@@ -985,17 +1191,17 @@ function AgentScheduleForm({
       (connectionAccounts.loading || Boolean(connectionAccounts.error) || requiresAccountChoice));
   const blockedReason = noAccess
     ? editing && task && !ownsSchedule(task, access.viewerSubjectId)
-      ? "Only the schedule's owner can change it. Duplicate it to make your own."
-      : "You need permission to manage schedules in this workspace."
+      ? "Only the automation's owner can change it. Duplicate it to make your own."
+      : "You need permission to manage automations in this workspace."
     : selectedComputeUnavailable && computeChanged
       ? "Machine unavailable. Choose another machine or update the workspace default."
       : cantRunHere && computeChanged
-        ? "Connect a machine first. This Opengeni server can't run schedules without one."
+        ? "Connect a machine first. This Opengeni server can't run automations without one."
         : pinningAccounts && requiresAccountChoice
           ? (accountChoiceMessage ?? "Pick an account for each tool.")
           : (draft.runMode !== "existing_session" && learningLoading) ||
               (pinningAccounts && connectionAccounts.loading)
-            ? "Loading this schedule's settings…"
+            ? "Loading this automation's settings…"
             : pinningAccounts && connectionAccounts.error
               ? connectionAccounts.accessDenied
                 ? "You can't see this workspace's connected accounts. Ask a workspace admin."
@@ -1034,7 +1240,7 @@ function AgentScheduleForm({
   return (
     <>
       <FormPage
-        title={editing ? "Edit schedule" : "New schedule"}
+        title={editing ? "Edit automation" : "New automation"}
         description={
           editing ? (
             task?.name
@@ -1044,7 +1250,7 @@ function AgentScheduleForm({
             </>
           ) : undefined
         }
-        submitLabel={editing ? "Save changes" : "Create schedule"}
+        submitLabel={editing ? "Save changes" : "Create automation"}
         pendingLabel={editing ? "Saving…" : "Creating…"}
         submitAnalyticsAction={editing ? null : "create_schedule"}
         onSubmit={onSubmit}
@@ -1060,8 +1266,8 @@ function AgentScheduleForm({
               tone="waiting"
               title={
                 editing
-                  ? "This schedule can't run here yet"
-                  : "Schedules need a connected machine here"
+                  ? "This automation can't run here yet"
+                  : "Automations need a connected machine here"
               }
               actionLayout="responsive"
               action={
@@ -1091,8 +1297,8 @@ function AgentScheduleForm({
                 {
                   value: "reusable_session",
                   label: savedReusableSessionId
-                    ? "Use this schedule's chat"
-                    : "Create a chat for this schedule",
+                    ? "Use this automation's chat"
+                    : "Create a chat for this automation",
                   description: "Keep the results together in one conversation.",
                 },
                 {
@@ -1111,10 +1317,10 @@ function AgentScheduleForm({
                     to="/workspaces/$workspaceId/sessions/$sessionId"
                     params={{ workspaceId, sessionId: materializedSessionId }}
                   >
-                    Open this schedule's chat
+                    Open this automation's chat
                   </Link>
                 ) : (
-                  "Open this schedule's chat"
+                  "Open this automation's chat"
                 )}{" "}
                 to change its model, tools or machine.
               </p>
@@ -1202,8 +1408,8 @@ function AgentScheduleForm({
               label="Who can see it"
               hint={
                 draft.visibility === "private"
-                  ? `${privateReason ? `${privateReason.slice(0, -1)}, so only` : "Only"} you can see this schedule and its chats. Admins can see that it exists, what it costs, and pause it.`
-                  : "Everyone in this workspace can see this schedule and its chats."
+                  ? `${privateReason ? `${privateReason.slice(0, -1)}, so only` : "Only"} you can see this automation and its chats. Admins can see that it exists, what it costs, and pause it.`
+                  : "Everyone in this workspace can see this automation and its chats."
               }
             >
               <FieldSegmented<"workspace" | "private">
@@ -1234,7 +1440,13 @@ function AgentScheduleForm({
           <Field
             label="Message"
             error={errors.prompt}
-            hint="Sent to the agent each time the schedule runs."
+            hint={
+              needsRepositories
+                ? "Sent to the agent on each run, with the events that started it. A run can only open the repositories added here, so add the ones it works on."
+                : draft.events.triggers.length > 0
+                  ? "Sent to the agent on each run, with the events that started it."
+                  : "Sent to the agent each time it runs."
+            }
           >
             <ComposerField
               workspaceId={workspaceId}
@@ -1254,8 +1466,8 @@ function AgentScheduleForm({
               summary="Model, tools, accounts and machine"
             >
               <p className="text-sm text-fg-muted">
-                Scheduled messages use the chat’s current model, tools, accounts and machine.
-                Changes apply to the chat and its scheduled runs.
+                Each run uses the chat’s current model, tools, accounts and machine. Changes apply
+                to the chat and its automated runs.
               </p>
               {targetSessionId ? (
                 <Link
@@ -1270,37 +1482,22 @@ function AgentScheduleForm({
               )}
             </Disclosure>
           ) : null}
-          <div className="min-w-0">
-            <p id={whenLabelId} className="mb-2 text-sm leading-5 font-medium text-fg">
-              When
-            </p>
-            {draft.cadence ? (
-              <CadencePicker
-                aria-labelledby={whenLabelId}
-                value={draft.cadence}
-                onChange={(cadence) => update({ cadence })}
-                frequencies={SCHEDULE_FREQUENCIES}
-                now={now}
-                viewerTimeZone={viewerTimeZone()}
-                timeZones={suggestedZones(draft.cadence.timeZone)}
-              />
-            ) : (
-              <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-                <p className="m-0 text-sm leading-5 text-fg-muted">
-                  Runs only when someone presses Run now.
-                </p>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => update({ cadence: defaultCadence() })}
-                >
-                  Add a schedule
-                </Button>
-              </div>
-            )}
-          </div>
-          <Field label="Name" optional error={errors.name} hint="Shown in the schedules list.">
+          <AutomationWhenField
+            cadence={draft.cadence}
+            onCadenceChange={(cadence) => update({ cadence })}
+            events={draft.events}
+            onEventsChange={(events) => update({ events })}
+            eventTriggers={eventTriggers}
+            sources={formSources}
+            loadEventTypes={standIns.loadEventTypes}
+            eventIssues={eventIssues}
+            error={errors.when}
+            sourceLogo={sourceLogo}
+            onAddSource={(choice) => go.newSource(choice)}
+            frequencies={SCHEDULE_FREQUENCIES}
+            now={now}
+          />
+          <Field label="Name" optional error={errors.name} hint="Shown in the automations list.">
             <TextInput
               value={draft.name}
               onChange={(event) => update({ name: event.target.value })}
@@ -1401,6 +1598,33 @@ function AgentScheduleForm({
                   />
                 </Field>
               ) : null}
+              {draft.events.triggers.length > 0 ? (
+                <Field
+                  label="Event runs per hour"
+                  error={errors.maxRunsPerHour}
+                  hint="At most this many runs start from events in an hour. Events past that wait and arrive together in the next run, and you're told once."
+                >
+                  <TextInput
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={runsPerHourText}
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      setRunsPerHourText(text);
+                      update({
+                        events: {
+                          ...draft.events,
+                          maxRunsPerHour: /^\d+$/u.test(text.trim())
+                            ? Number(text.trim())
+                            : Number.NaN,
+                        },
+                      });
+                    }}
+                    className="w-24"
+                    suppressAutofill
+                  />
+                </Field>
+              ) : null}
               {!inheritsChatSettings ? (
                 <Field
                   label="Where it runs"
@@ -1477,11 +1701,11 @@ function AgentScheduleForm({
               ) : null}
               {eachRun === "existing_session" ? null : learningLoading ? (
                 <p role="status" className="m-0 text-sm text-fg-muted">
-                  Loading this schedule's agent learning settings…
+                  Loading this automation's agent learning settings…
                 </p>
               ) : learningError && isPermissionDenied(learningError) ? (
                 <p className="m-0 text-sm text-fg-muted">
-                  You can't see this schedule's agent learning settings. You can still save other
+                  You can't see this automation's agent learning settings. You can still save other
                   changes.
                 </p>
               ) : learningError ? (
@@ -1536,17 +1760,4 @@ async function withFriendlyError<T>(lead: string, request: Promise<T>): Promise<
     if (isApiError(error)) throw error;
     throw new Error(`${lead} ${userErrorText(error)}`, { cause: error });
   }
-}
-
-/** The viewer's zone and the schedule's zone first; search covers the rest. */
-function suggestedZones(current: string) {
-  const zones = [...new Set([viewerTimeZone(), current, "UTC"])];
-  return zones.map((id) => {
-    const city = id === "UTC" ? "UTC" : (id.split("/").pop() ?? id).replaceAll("_", " ");
-    return {
-      id,
-      label: id === "UTC" ? "UTC" : `${city} time`,
-      shortLabel: city,
-    };
-  });
 }

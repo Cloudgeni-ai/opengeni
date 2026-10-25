@@ -9,15 +9,16 @@ import {
 import {
   ChatComposer,
   MessageTimeline,
+  SessionChrome,
   useComposer,
   buildTimeline,
   createOpenGeniText,
 } from "@opengeni/react";
-import type { TimelineItem } from "@opengeni/react";
+import type { TimelineItem, UseTurnQueueResult } from "@opengeni/react";
 import type { Session, SessionEvent } from "@opengeni/sdk";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "../../../packages/react/test/fake-client";
 import { useSessionStartupTimeline } from "../../../packages/react/src/lib/session-startup-timeline";
-import { SessionWaitStatus } from "@opengeni/react/app/components/session/session-wait-status";
+import { sessionInputWait } from "@opengeni/react/app/lib/session-rail";
 import { Button } from "@opengeni/react/ui/button";
 import "../src/styles.css";
 
@@ -26,6 +27,11 @@ const params = new URLSearchParams(location.search);
 const initial = params.get("state") ?? "accepted";
 const acceptedAt = new Date(Date.now() - Number(params.get("age") ?? 0) * 1000).toISOString();
 const client = fakeClient({});
+const emptyQueue = {
+  queue: [],
+  pendingInputs: [],
+  mutationFor: () => null,
+} as unknown as UseTurnQueueResult;
 function event(
   type: string,
   payload: Record<string, unknown> = {},
@@ -138,8 +144,13 @@ function Preview() {
         turnSummary={{ rolling: true }}
         items={timeline}
       />
-      <SessionWaitStatus session={session} />
       <div className="mx-auto w-full max-w-3xl px-4 pb-6">
+        <SessionChrome
+          className="mb-1"
+          queue={emptyQueue}
+          sessionStatus={session.status}
+          wait={sessionInputWait(session)}
+        />
         <ChatComposer composer={composer} placeholder="Send a follow-up…" />
       </div>
     </main>

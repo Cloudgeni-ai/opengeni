@@ -18,6 +18,7 @@
 //     reads OPENGENI_SANDBOX_BRIDGE_{HOST,PORT,SUBNET,API_ORIGIN}
 
 import { execFileSync } from "node:child_process";
+import { networkInterfaces } from "node:os";
 import { createServer, request as upstreamRequest, type Server } from "node:http";
 import { createServer as createNetServer, isIPv4 } from "node:net";
 import { localSandboxApiRouteAllowed } from "@opengeni/config";
@@ -83,12 +84,24 @@ export function dockerBridgeRouteCandidates(ipamConfig: unknown): DockerBridgeRo
 }
 
 /**
- * Whether this process can listen on an address, which holds exactly when the
- * address belongs to this host. Linux Docker Engine assigns the gateway to the
+ * Whether an address belongs to this host and this process can listen on it.
+ * Linux Docker Engine assigns the gateway to the
  * host's bridge interface (even before a container brings it up); Docker
  * Desktop and rootless Docker keep it in a VM or network namespace.
  */
-export async function canListenOn(address: string): Promise<boolean> {
+export async function canListenOn(
+  address: string,
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): Promise<boolean> {
+  if (!isIPv4(address)) return false;
+  // A successful bind is not proof of interface ownership: Linux hosts with
+  // ip_nonlocal_bind enabled also accept addresses in other network namespaces.
+  if (
+    !Object.values(interfaces).some((entries) =>
+      entries?.some((entry) => entry.address === address),
+    )
+  )
+    return false;
   const server = createNetServer();
   try {
     await new Promise<void>((resolve, reject) => {

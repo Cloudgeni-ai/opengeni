@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { ToolGatewayIdentity } from "./tool-catalog";
@@ -13,11 +14,10 @@ export const WORKSPACE_ARTIFACT_LIST_DEFAULT = 50;
 export const WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS = 512;
 
 const encoder = new TextEncoder();
-const sha256 = /* @__PURE__ */ defineSchema(() => z.string().regex(/^[0-9a-f]{64}$/));
+const sha256 = /* @__PURE__ */ defineSchema(() => primitives.string.regex(/^[0-9a-f]{64}$/));
 
 export const WorkspaceArtifactSlug = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
+  primitives.string
     .trim()
     .min(1)
     .max(96)
@@ -50,7 +50,7 @@ export const WorkspaceArtifactSourceFile = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       path: WorkspaceArtifactSourcePath,
-      content: z.string(),
+      content: primitives.string,
     })
     .strict(),
 );
@@ -118,28 +118,25 @@ export type WorkspaceArtifactRequestedTools = z.infer<typeof WorkspaceArtifactRe
 
 export const WorkspaceArtifactVersion = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    artifactId: z.string().uuid(),
-    revision: z.number().int().positive(),
+    id: primitives.uuid,
+    accountId: primitives.uuid,
+    workspaceId: primitives.uuid,
+    artifactId: primitives.uuid,
+    revision: primitives.positiveInteger,
     contentType: z.literal("text/html"),
     contentSha256: sha256.nullable(),
-    sizeBytes: z.number().int().positive().max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+    sizeBytes: primitives.positiveInteger.max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
     sourceSha256: sha256.nullable(),
-    sourceSizeBytes: z
-      .number()
-      .int()
-      .positive()
+    sourceSizeBytes: primitives.positiveInteger
       .max(WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES)
       .nullable(),
     requestedTools: WorkspaceArtifactRequestedTools,
-    sourceSessionId: z.string().uuid().nullable(),
-    sourceTurnId: z.string().uuid().nullable(),
-    sourceAttemptId: z.string().uuid().nullable(),
+    sourceSessionId: primitives.nullableUuid,
+    sourceTurnId: primitives.nullableUuid,
+    sourceAttemptId: primitives.nullableUuid,
     sourceExecutionGeneration: z.number().int().positive().nullable(),
     createdBySubjectId: z.string().min(1).max(1024),
-    createdAt: z.string().datetime({ offset: true }),
+    createdAt: primitives.string.datetime({ offset: true }),
   }),
 );
 export type WorkspaceArtifactVersion = z.infer<typeof WorkspaceArtifactVersion>;
@@ -155,12 +152,12 @@ export type WorkspaceArtifactVisibility = z.infer<typeof WorkspaceArtifactVisibi
 
 export const WorkspaceArtifact = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
+    id: primitives.uuid,
+    accountId: primitives.uuid,
+    workspaceId: primitives.uuid,
     slug: WorkspaceArtifactSlug,
-    title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS),
-    description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable(),
+    title: primitives.string.trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS),
+    description: primitives.string.max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable(),
     status: WorkspaceArtifactStatus,
     /** Absent from older servers, where every Site is visible to the workspace. */
     visibility: WorkspaceArtifactVisibility.default("workspace"),
@@ -168,8 +165,8 @@ export const WorkspaceArtifact = /* @__PURE__ */ defineSchema(() =>
     ownerSubjectId: z.string().min(1).max(1024).nullable().default(null),
     currentVersion: WorkspaceArtifactVersion.nullable(),
     createdBySubjectId: z.string().min(1).max(1024),
-    createdAt: z.string().datetime({ offset: true }),
-    updatedAt: z.string().datetime({ offset: true }),
+    createdAt: primitives.string.datetime({ offset: true }),
+    updatedAt: primitives.string.datetime({ offset: true }),
   }),
 );
 export type WorkspaceArtifact = z.infer<typeof WorkspaceArtifact>;
@@ -181,20 +178,20 @@ export type WorkspaceArtifactEventType = z.infer<typeof WorkspaceArtifactEventTy
 
 export const WorkspaceArtifactEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    artifactId: z.string().uuid(),
+    id: primitives.uuid,
+    accountId: primitives.uuid,
+    workspaceId: primitives.uuid,
+    artifactId: primitives.uuid,
     type: WorkspaceArtifactEventType,
-    fromVersionId: z.string().uuid().nullable(),
-    toVersionId: z.string().uuid(),
-    sourceSessionId: z.string().uuid().nullable(),
-    sourceTurnId: z.string().uuid().nullable(),
-    sourceAttemptId: z.string().uuid().nullable(),
+    fromVersionId: primitives.nullableUuid,
+    toVersionId: primitives.uuid,
+    sourceSessionId: primitives.nullableUuid,
+    sourceTurnId: primitives.nullableUuid,
+    sourceAttemptId: primitives.nullableUuid,
     sourceExecutionGeneration: z.number().int().positive().nullable(),
     actorSubjectId: z.string().min(1).max(1024),
     reason: z.string().min(1).max(4096),
-    createdAt: z.string().datetime({ offset: true }),
+    createdAt: primitives.string.datetime({ offset: true }),
   }),
 );
 export type WorkspaceArtifactEvent = z.infer<typeof WorkspaceArtifactEvent>;
@@ -202,10 +199,38 @@ export type WorkspaceArtifactEvent = z.infer<typeof WorkspaceArtifactEvent>;
 /** When this person last opened the Site; it orders the Site's sidebar row. */
 export const SiteOpenedResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    openedAt: z.string().datetime({ offset: true }),
+    openedAt: primitives.string.datetime({ offset: true }),
   }),
 );
 export type SiteOpenedResponse = z.infer<typeof SiteOpenedResponse>;
+
+/**
+ * Pin or archive a Site row in this person's own sidebar. Archive only hides
+ * the row for them; the Site stays published for everyone.
+ */
+export const UpdateSiteSidebarStateRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      pinned: z.boolean().optional(),
+      archived: z.boolean().optional(),
+    })
+    .strict()
+    .refine((value) => value.pinned !== undefined || value.archived !== undefined, {
+      message: "Set pinned or archived",
+    }),
+);
+export type UpdateSiteSidebarStateRequest = z.infer<typeof UpdateSiteSidebarStateRequest>;
+
+export const SiteSidebarStateResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    siteId: z.string().uuid(),
+    pinned: z.boolean(),
+    pinnedAt: z.string().datetime({ offset: true }).nullable(),
+    archived: z.boolean(),
+    archivedAt: z.string().datetime({ offset: true }).nullable(),
+  }),
+);
+export type SiteSidebarStateResponse = z.infer<typeof SiteSidebarStateResponse>;
 
 export const WorkspaceArtifactListQuery = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -215,10 +240,10 @@ export const WorkspaceArtifactListQuery = /* @__PURE__ */ defineSchema(() =>
       .positive()
       .max(WORKSPACE_ARTIFACT_LIST_MAX)
       .default(WORKSPACE_ARTIFACT_LIST_DEFAULT),
-    cursor: z.string().min(1).max(WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS).optional(),
+    cursor: primitives.nonEmptyString.max(WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS).optional(),
     status: WorkspaceArtifactStatus.optional(),
     /** Sites created or published by this session, including older versions. */
-    sourceSessionId: z.string().uuid().optional(),
+    sourceSessionId: primitives.optionalUuid,
   }),
 );
 export type WorkspaceArtifactListQuery = z.infer<typeof WorkspaceArtifactListQuery>;
@@ -226,8 +251,8 @@ export type WorkspaceArtifactListQuery = z.infer<typeof WorkspaceArtifactListQue
 export const WorkspaceArtifactListResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     artifacts: z.array(WorkspaceArtifact).max(WORKSPACE_ARTIFACT_LIST_MAX),
-    nextCursor: z.string().max(WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS).nullable(),
-    truncated: z.boolean(),
+    nextCursor: primitives.string.max(WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS).nullable(),
+    truncated: primitives.boolean,
   }),
 );
 export type WorkspaceArtifactListResponse = z.infer<typeof WorkspaceArtifactListResponse>;
@@ -237,16 +262,25 @@ export const WorkspaceArtifactDetailResponse = /* @__PURE__ */ defineSchema(() =
     artifact: WorkspaceArtifact,
     versions: z.array(WorkspaceArtifactVersion).max(WORKSPACE_ARTIFACT_LIST_MAX),
     events: z.array(WorkspaceArtifactEvent).max(WORKSPACE_ARTIFACT_LIST_MAX),
-    versionsTruncated: z.boolean(),
-    eventsTruncated: z.boolean(),
+    versionsTruncated: primitives.boolean,
+    eventsTruncated: primitives.boolean,
   }),
 );
 export type WorkspaceArtifactDetailResponse = z.infer<typeof WorkspaceArtifactDetailResponse>;
 
+/**
+ * A Site and its current version without its history or who made it: what an
+ * open Site view checks to see whether a new version is live.
+ */
+export const WorkspaceArtifactCurrentResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    artifact: WorkspaceArtifact,
+  }),
+);
+export type WorkspaceArtifactCurrentResponse = z.infer<typeof WorkspaceArtifactCurrentResponse>;
+
 export const WorkspaceArtifactHtml = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
-    .min(1)
+  primitives.nonEmptyString
     .max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES)
     .superRefine((value, ctx) => {
       if (encoder.encode(value).byteLength > WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES) {
@@ -262,15 +296,18 @@ export const CreateWorkspaceArtifactRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       slug: WorkspaceArtifactSlug.optional(),
-      title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS),
-      description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable().optional(),
+      title: primitives.string.trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS),
+      description: primitives.string
+        .max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS)
+        .nullable()
+        .optional(),
       html: WorkspaceArtifactHtml.optional(),
-      uploadId: z.string().uuid().optional(),
+      uploadId: primitives.optionalUuid,
       source: WorkspaceArtifactSourceBundle.optional(),
       requestedTools: WorkspaceArtifactRequestedTools.optional(),
       /** Who can see the new Site. Omitted: the whole workspace. */
       visibility: WorkspaceArtifactVisibility.optional(),
-      idempotencyKey: z.string().trim().min(1).max(200),
+      idempotencyKey: primitives.string.trim().min(1).max(200),
     })
     .refine((value) => (value.html !== undefined) !== (value.uploadId !== undefined), {
       message: "Provide either html or uploadId",
@@ -284,14 +321,17 @@ export type CreateWorkspaceArtifactRequest = z.infer<typeof CreateWorkspaceArtif
 export const PublishWorkspaceArtifactVersionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS).optional(),
-      description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable().optional(),
+      title: primitives.string.trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS).optional(),
+      description: primitives.string
+        .max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS)
+        .nullable()
+        .optional(),
       html: WorkspaceArtifactHtml.optional(),
-      uploadId: z.string().uuid().optional(),
+      uploadId: primitives.optionalUuid,
       source: WorkspaceArtifactSourceBundle.optional(),
       requestedTools: WorkspaceArtifactRequestedTools.optional(),
-      expectedCurrentVersionId: z.string().uuid(),
-      idempotencyKey: z.string().trim().min(1).max(200),
+      expectedCurrentVersionId: primitives.uuid,
+      idempotencyKey: primitives.string.trim().min(1).max(200),
     })
     .refine((value) => (value.html !== undefined) !== (value.uploadId !== undefined), {
       message: "Provide either html or uploadId",
@@ -306,10 +346,10 @@ export type PublishWorkspaceArtifactVersionRequest = z.infer<
 
 export const RollbackWorkspaceArtifactRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    versionId: z.string().uuid(),
-    expectedCurrentVersionId: z.string().uuid(),
-    reason: z.string().trim().min(1).max(4096),
-    idempotencyKey: z.string().trim().min(1).max(200),
+    versionId: primitives.uuid,
+    expectedCurrentVersionId: primitives.uuid,
+    reason: primitives.string.trim().min(1).max(4096),
+    idempotencyKey: primitives.string.trim().min(1).max(200),
   }),
 );
 export type RollbackWorkspaceArtifactRequest = z.infer<typeof RollbackWorkspaceArtifactRequest>;
@@ -321,8 +361,8 @@ export type RollbackWorkspaceArtifactRequest = z.infer<typeof RollbackWorkspaceA
 export const DuplicateWorkspaceArtifactRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /** Omitted: the original's title followed by "(copy)". */
-    title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS).optional(),
-    idempotencyKey: z.string().trim().min(1).max(200),
+    title: primitives.string.trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS).optional(),
+    idempotencyKey: primitives.string.trim().min(1).max(200),
   }),
 );
 export type DuplicateWorkspaceArtifactRequest = z.infer<typeof DuplicateWorkspaceArtifactRequest>;
@@ -330,9 +370,9 @@ export type DuplicateWorkspaceArtifactRequest = z.infer<typeof DuplicateWorkspac
 export const SetWorkspaceArtifactStatusRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     status: WorkspaceArtifactStatus,
-    expectedCurrentVersionId: z.string().uuid(),
-    reason: z.string().trim().min(1).max(4096),
-    idempotencyKey: z.string().trim().min(1).max(200),
+    expectedCurrentVersionId: primitives.uuid,
+    reason: primitives.string.trim().min(1).max(4096),
+    idempotencyKey: primitives.string.trim().min(1).max(200),
   }),
 );
 export type SetWorkspaceArtifactStatusRequest = z.infer<typeof SetWorkspaceArtifactStatusRequest>;
@@ -363,15 +403,15 @@ export const WorkspaceArtifactMutationResponse = /* @__PURE__ */ defineSchema(()
     artifact: WorkspaceArtifact,
     version: WorkspaceArtifactVersion,
     event: WorkspaceArtifactEvent,
-    replayed: z.boolean(),
+    replayed: primitives.boolean,
   }),
 );
 export type WorkspaceArtifactMutationResponse = z.infer<typeof WorkspaceArtifactMutationResponse>;
 
 export const WorkspaceArtifactContentResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    artifactId: z.string().uuid(),
-    versionId: z.string().uuid(),
+    artifactId: primitives.uuid,
+    versionId: primitives.uuid,
     contentType: z.literal("text/html"),
     contentSha256: sha256.nullable(),
     html: WorkspaceArtifactHtml,

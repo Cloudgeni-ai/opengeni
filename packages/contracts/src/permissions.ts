@@ -33,6 +33,12 @@ export const Permission = /* @__PURE__ */ defineSchema(() =>
     "usage_allowances:manage",
     "connections:read",
     "connections:write",
+    /**
+     * Connect, use and remove one's own accounts, turn on a reviewed OAuth
+     * integration for personal accounts, and add it to one's own chats.
+     * `connections:write` includes it.
+     */
+    "connections:personal",
     "capabilities:manage",
     /** @deprecated alias of secrets:write */
     "environments:manage",

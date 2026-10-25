@@ -7,7 +7,7 @@
 //                                 capability-off, rate-limited, auth-expired,
 //                                 many-vaults, conflict, empty-task, narrowed,
 //                                 inherited, and for the other password managers:
-//                                 provider-locked (Bitwarden), provider-offline
+//                                 provider-locked (your service), provider-offline
 //                                 (Bitwarden, your service), provider-expired and
 //                                 incomplete and syncing (Proton Pass),
 //                                 provider-rate-limited and stale and never-synced
@@ -27,6 +27,7 @@ import {
   totpRemainingMs,
   parseTotpInput,
   generatePassword,
+  VAULT_DEFAULT_PRIMARY_FIELD,
 } from "@opengeni/contracts";
 import type { VaultItemSummary, VaultSummary } from "@opengeni/react";
 import type { VaultProviderConnectionSummary } from "@opengeni/sdk";
@@ -128,7 +129,7 @@ function stateFor(workspaceId: string): MockState {
         if (each.provider === "keeper")
           each.label = "Acme Corporation Keeper Secrets Manager application for production agents";
         if (each.provider === "bitwarden")
-          each.label = "Ola's laptop bridge next to the unlocked Bitwarden desktop vault";
+          each.label = "Ola's Bitwarden account for the payments team's shared agent collections";
         for (const folder of state.providerVaults[each.id] ?? []) {
           if (each.provider === "keeper" && folder.name === "Staging")
             folder.name =
@@ -170,11 +171,11 @@ function providerHealth(vault: VaultSummary): Partial<VaultSummary> {
   });
   switch (vault.source) {
     case "bitwarden":
-      if (active.has("provider-locked")) return unavailable("provider_locked", vault.lastSyncedAt);
-      if (active.has("provider-offline"))
-        return unavailable("provider_unavailable", vault.lastSyncedAt);
-      return {};
+      return active.has("provider-offline")
+        ? unavailable("provider_unavailable", vault.lastSyncedAt)
+        : {};
     case "external":
+      if (active.has("provider-locked")) return unavailable("provider_locked", vault.lastSyncedAt);
       return active.has("provider-offline")
         ? unavailable("provider_unavailable", vault.lastSyncedAt)
         : {};
@@ -328,7 +329,11 @@ function routes(state: MockState): Route[] {
       .filter((input) => !input.remove)
       .map((input, position) => {
         const kind = input.kind ?? (input.name === "username" ? "text" : "concealed");
-        const value = input.generate ? generatePassword(input.generate) : (input.value ?? "");
+        const value = input.generate
+          ? generatePassword(input.generate)
+          : input.generateKey
+            ? "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-generated\n-----END OPENSSH PRIVATE KEY-----"
+            : (input.value ?? "");
         return {
           id: mockId(`${itemName}/${input.name}`),
           name: input.name,
@@ -526,13 +531,7 @@ function routes(state: MockState): Route[] {
           (field) =>
             field.name ===
             (body.primaryFieldName ??
-              (body.type === "login"
-                ? "password"
-                : body.type === "api_key"
-                  ? "value"
-                  : body.type === "note"
-                    ? "note"
-                    : "file")),
+              VAULT_DEFAULT_PRIMARY_FIELD[body.type as keyof typeof VAULT_DEFAULT_PRIMARY_FIELD]),
         );
         const totp = fields.find((field) => field.kind === "totp");
         const now = new Date().toISOString();
@@ -540,6 +539,7 @@ function routes(state: MockState): Route[] {
           id: mockId(`item-${body.name}`),
           vaultId: vault.id,
           type: body.type,
+          category: body.category ?? null,
           name: body.name,
           websites: body.websites ?? [],
           username: fields.find((field) => field.name === "username")?.value ?? null,
@@ -1172,14 +1172,26 @@ function tokenFailure(token: string): Response | null {
 }
 
 /**
- * Fake credentials for the other password managers. In the token or signing
- * secret: "invalid", "expired", "used" (a spent Keeper one-time token),
- * "locked" (Bitwarden), "rate"; in the address: "offline".
+ * Fake credentials for the other password managers. In the token, signing
+ * secret or API key secret: "invalid", "expired", "used" (a spent Keeper
+ * one-time token), "locked" (your service), "rate"; "wrong" in a Bitwarden
+ * master password; in the address: "offline".
  */
 function credentialFailure(credentials: Record<string, string | undefined>): Response | null {
-  const secret = credentials.token ?? credentials.oneTimeToken ?? credentials.signingSecret ?? "";
-  if ((credentials.endpoint ?? "").includes("offline"))
-    return fail(503, "provider_unavailable", "Bridge unreachable.");
+  const secret =
+    credentials.token ??
+    credentials.oneTimeToken ??
+    credentials.signingSecret ??
+    credentials.clientSecret ??
+    "";
+  if ((credentials.endpoint ?? credentials.serverUrl ?? "").includes("offline"))
+    return fail(503, "provider_unavailable", "Bitwarden server could not be reached.");
+  if ((credentials.masterPassword ?? "").includes("wrong"))
+    return fail(
+      400,
+      "provider_auth_invalid",
+      "The master password does not open this Bitwarden account",
+    );
   if (secret.includes("used"))
     return fail(400, "provider_auth_invalid", "One-time token already used.");
   if (secret.includes("locked")) return fail(423, "provider_locked", "Vault locked.");

@@ -351,8 +351,12 @@ Vault secrets reach a machine only per command. When an `exec_command` or
 `/bin/sh -c` on POSIX hosts or `powershell -NoProfile -NonInteractive -Command`
 on Windows (an explicit supported `shell` argument is honoured), splices each
 reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
-`ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
-`/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
+`ExecRequest.env`. This also applies when the POSIX host's default login shell
+is zsh: a secret-bearing `run_on` exec explicitly selects `/bin/sh`, rather than
+letting the host choose a shell. The tool gateway preserves references and
+escapes until this delivery boundary, including for Codemode calls; it never
+substitutes values into `run_on` command text. `{{secretfile:…}}` files are written
+under the 0700 `/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
 end; terminal one-offs clean it on return, while yielded `run_on` commands retain
 it as described below. That best-effort cleanup
 first waits for any write still in flight from an exec that timed out during
@@ -499,6 +503,20 @@ agent report for the same generation replaces either inference. Native-host
 diagnostics are written to stderr because stdout carries Chrome frames.
 Oversized tab titles are truncated and oversized tab URLs make only that tab
 uncontrollable; neither ends the profile's connection.
+
+Chrome closes a profile together with its last window, which stops the
+extension and ends the profile's connection (`browser_closed_port`) even when
+Chrome itself keeps running, as it does on macOS. The extension therefore never
+closes a profile's only tab without first opening a new tab page in its place
+(a new unfocused window when that tab is in a popup or app window), and when
+Chrome has no window open it creates a requested tab in a new unfocused window.
+A tab close whose connection ends before the extension answers is reported as
+`outcome_unknown` (HTTP 409), because the tab may already be closed; a tab
+Chrome reports as gone is `target_not_found`, and the agent then forgets only
+that tab, not its current browser. A close the browser acknowledged whose
+connection ends before the remaining tabs are listed is also `outcome_unknown`.
+A profile whose last window the person closed stays disconnected until a
+window opens in it again.
 
 An accepted full inventory snapshot observes every connected profile once through
 `attached_browser_inventories.observed_at`. Unchanged profiles need neither a
@@ -1564,6 +1582,11 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   workspace access and confirms locally before connecting. The link carries only
   the origin, workspace/chat destination and subject, never an enrollment token.
   Mobile browsers direct the person to the computer they want to connect;
+- inside the desktop app, the same dialog is **Connect a machine**: for the
+  computer the app runs on it shows the **Computer use** switch (off, turning
+  on, on, waiting on a macOS permission, or a problem with one fix), and never
+  offers a download or **Open app and connect** for it. **Connect another computer or server** holds the
+  command and code flows below;
 - **Connect a server instead** explicitly reveals the advanced terminal flow.
   Only then is a token minted. The person chooses **Who can use it?** (**Only me** by
   default, or **This workspace**) and screen control (off by default); both are

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildRecordingSegments,
+  recordingSpeakerLabels,
   createElevenLabsRecordingTranscriptionProvider,
   createRecordingTranscriptionProviderRegistry,
   estimateRecordingTranscriptionCostMicros,
@@ -38,7 +39,7 @@ describe("parseElevenLabsTranscript", () => {
         { text: "ja", type: "word", start: "bad", end: 1.6 },
       ],
     });
-    expect(result.languages).toEqual(["nor"]);
+    expect(result.languages).toEqual(["no"]);
     expect(result.audioMilliseconds).toBe(4250);
     expect(result.diarized).toBe(true);
     expect(result.words).toEqual([
@@ -127,6 +128,39 @@ describe("buildRecordingSegments", () => {
     expect(segments[0]!.words).toEqual([
       { text: "Hello", startMs: 0, endMs: 300 },
       { text: "there.", startMs: 350, endMs: 700 },
+    ]);
+  });
+
+  test("speaker ids map to the labels the segments carry", () => {
+    const tracks = [
+      { trackNumber: 1, fixedLabel: "track-1", words: [word("Hello", 0, 300, null)] },
+      {
+        trackNumber: 2,
+        fixedLabel: null,
+        words: [
+          word(" ", 900, 950, "S4"),
+          word("Hi", 1000, 1200, "S2"),
+          word("Bye", 1300, 1500, "S4"),
+          word("Ok", 1600, 1700, "S2"),
+        ],
+      },
+    ];
+    expect(recordingSpeakerLabels(tracks)).toEqual(
+      new Map([
+        [
+          2,
+          new Map([
+            ["S2", "speaker_0"],
+            ["S4", "speaker_1"],
+          ]),
+        ],
+      ]),
+    );
+    expect(buildRecordingSegments(tracks).map((segment) => segment.speakerLabel)).toEqual([
+      "track-1",
+      "speaker_0",
+      "speaker_1",
+      "speaker_0",
     ]);
   });
 
@@ -266,6 +300,47 @@ describe("ElevenLabs provider", () => {
       provider.transcribe({ audio, model: "scribe_v2", diarize: false }, { apiKey: "k" }),
     ).rejects.toMatchObject({ code: "network", retryable: true });
   });
+
+  test("grants a live session with a single-use token, never the key", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const provider = createElevenLabsRecordingTranscriptionProvider({
+      now: () => new Date("2026-10-24T10:00:00Z"),
+      fetch: (async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return Response.json({ token: "sutkn_abc" });
+      }) as unknown as typeof fetch,
+    });
+    const grant = await provider.createLiveSession!(
+      { model: "scribe_v2_realtime", language: "nb" },
+      { apiKey: "secret-key" },
+    );
+    expect(calls[0]!.url).toBe("https://api.elevenlabs.io/v1/single-use-token/realtime_scribe");
+    expect((calls[0]!.init.headers as Record<string, string>)["xi-api-key"]).toBe("secret-key");
+    const url = new URL(grant.url);
+    expect(url.origin + url.pathname).toBe("wss://api.elevenlabs.io/v1/speech-to-text/realtime");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      model_id: "scribe_v2_realtime",
+      token: "sutkn_abc",
+      audio_format: "pcm_16000",
+      commit_strategy: "vad",
+      include_timestamps: "true",
+      // ElevenLabs knows Norwegian as one language, so Bokmål goes as "no".
+      language_code: "no",
+    });
+    expect(grant.url).not.toContain("secret-key");
+    expect(grant.protocol).toBe("elevenlabs.scribe_realtime");
+    expect(grant.audio).toEqual({ encoding: "pcm_s16le", sampleRate: 16_000 });
+    expect(grant.expiresAt.toISOString()).toBe("2026-10-24T10:14:00.000Z");
+  });
+
+  test("a rejected key fails the live grant as unauthorized", async () => {
+    const provider = createElevenLabsRecordingTranscriptionProvider({
+      fetch: (async () => new Response("{}", { status: 401 })) as unknown as typeof fetch,
+    });
+    await expect(
+      provider.createLiveSession!({ model: "scribe_v2_realtime" }, { apiKey: "k" }),
+    ).rejects.toMatchObject({ code: "unauthorized" });
+  });
 });
 
 describe("registry and cost", () => {
@@ -283,5 +358,21 @@ describe("registry and cost", () => {
     expect(
       findRecordingTranscriptionModel(createRecordingTranscriptionProviderRegistry(), "x", "y"),
     ).toBeNull();
+  });
+
+  test("live and batch models are only found for their own use", () => {
+    const registry = createRecordingTranscriptionProviderRegistry();
+    expect(
+      findRecordingTranscriptionModel(registry, "elevenlabs", "scribe_v2_realtime"),
+    ).toBeNull();
+    expect(findRecordingTranscriptionModel(registry, "elevenlabs", "scribe_v2", "live")).toBeNull();
+    const live = findRecordingTranscriptionModel(
+      registry,
+      "elevenlabs",
+      "scribe_v2_realtime",
+      "live",
+    );
+    expect(live?.spec.capabilities.live).toBe(true);
+    expect(estimateRecordingTranscriptionCostMicros(live!.spec, 3_600_000)).toBe(390_000);
   });
 });

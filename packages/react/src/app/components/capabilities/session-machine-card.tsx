@@ -330,7 +330,7 @@ export function SessionMachineCapabilityCard({
               : "Allow"
             : offerThisComputer
               ? desktop.computer.acting
-                ? "Connecting…"
+                ? "Turning on…"
                 : "Use this computer"
               : "Connect a computer"
         }
@@ -350,15 +350,11 @@ export function SessionMachineCapabilityCard({
           if (allowHere) return void use(allowHere);
           if (!offerThisComputer) return openSetup();
           if (desktop.computer.acting) return;
-          if (thisComputerNeedsPermissions(desktop.computer.status)) return desktop.openSetup();
-          void (
-            desktop.computer.status?.state === "paused"
-              ? desktop.computer.resume().then(() => desktop.computer.status)
-              : desktop.computer.connect({ screenControl: true })
-          ).then((next) => {
-            if (thisComputerNeedsPermissions(next)) desktop.openSetup();
-            void fleet.refresh();
-          });
+          if (thisComputerNeedsPermissions(desktop.computer.status))
+            return desktop.allowPermissions();
+          // Resumes, registers afresh or starts the agent, whichever it needs,
+          // then asks for any missing permission itself.
+          void desktop.computer.turnOn().then(() => void fleet.refresh());
         }}
         onClose={closeSetup}
         opener={opener}
@@ -369,7 +365,7 @@ export function SessionMachineCapabilityCard({
               {desktop?.computer.actionError !== null &&
               desktop?.computer.actionError !== undefined ? (
                 <Notice tone="failed" live="assertive" className="mx-4 mb-3 text-xs">
-                  Couldn't connect this computer. {desktop.computer.actionError || "Try again."}
+                  Computer use couldn't turn on. {desktop.computer.actionError || "Try again."}
                 </Notice>
               ) : null}
               {/* Always mounted, so moves and new machines are announced. */}

@@ -1,7 +1,15 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { Manifest } from "@openai/agents/sandbox";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,11 +37,15 @@ type Client = {
 
 const client = localProvider.build({} as never) as unknown as Client;
 const opened: Session[] = [];
+const shellTempRoot = mkdtempSync(join(tmpdir(), "opengeni-durable-shell-test-"));
 
 // The SDK's default local PATH lists only FHS directories; keep the host's so
-// the supervisor finds mkfifo and friends on any test machine.
+// the supervisor finds mkfifo and friends on any test machine. TMPDIR must also
+// be explicit: the sandbox does not inherit the test process environment.
 function hostManifest(): Manifest {
-  return new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } });
+  return new Manifest({
+    environment: { PATH: process.env.PATH ?? "/usr/bin:/bin", TMPDIR: shellTempRoot },
+  });
 }
 
 async function workspace(): Promise<Session> {
@@ -58,7 +70,7 @@ function runDir(session: Session, id: number): string {
     .update(session.state.workspaceRootPath)
     .digest("hex")
     .slice(0, 16);
-  return join(process.env.TMPDIR || tmpdir() || "/tmp", `opengeni-exec-${uid}`, ns, String(id));
+  return join(shellTempRoot, `opengeni-exec-${uid}`, ns, String(id));
 }
 
 async function readUntilExit(session: Session, id: number, chars = ""): Promise<string> {
@@ -79,6 +91,7 @@ async function readUntilExit(session: Session, id: number, chars = ""): Promise<
 
 afterAll(async () => {
   for (const session of opened) await session.close().catch(() => undefined);
+  rmSync(shellTempRoot, { recursive: true, force: true });
 });
 
 describe("session-owned Docker/local processes", () => {

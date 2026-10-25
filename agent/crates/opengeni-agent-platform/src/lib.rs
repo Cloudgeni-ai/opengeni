@@ -72,6 +72,7 @@ pub use work_scope::{
 pub use cgroup::{establish_oom_isolation, OpCgroupConfig, OpCgroupConfigError, OpCgroups};
 pub use desktop::{
     fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
+    TurnedOffDesktop,
 };
 #[cfg(target_os = "linux")]
 pub use desktop::{

@@ -25,6 +25,7 @@ import {
   PlusIcon,
 } from "lucide-react";
 
+import { useOpenGeniText } from "../messages/runtime";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "./dropdown-menu";
 import { LogoTileSizeProvider, type LogoTileSize } from "./logo-tile";
 import { useSectionListFrame } from "./section-variant";
@@ -176,6 +177,7 @@ export function RowList({
   className,
   children,
 }: RowListProps) {
+  const t = useOpenGeniText();
   const value = useMemo<RowListContextValue>(() => ({ variant, columns }), [variant, columns]);
   // In settings (grouped sections) a flush list that is not already inside a
   // section card becomes the card itself: rows keep their 12px padding, the
@@ -187,7 +189,7 @@ export function RowList({
   } as CSSProperties;
   const busyNote = busy ? (
     <span role="status" className="sr-only">
-      Loading {label.toLocaleLowerCase()}
+      {t("list.loading", { label: label.toLocaleLowerCase() })}
     </span>
   ) : null;
 
@@ -825,14 +827,23 @@ export function ListRow({
               // Tables keep rows to one line once the columns show, unless
               // the line still has facts that aren't columns.
               table && metaItems.length === 0 && "@[640px]/list:hidden",
-              // Only folded facts: the line disappears once the columns show.
+              // Only folded facts (and a status, which moves to the row's end
+              // from 480px): the line disappears once the columns show.
               !table &&
                 !secondary &&
                 hasColumns &&
                 metaItems.length === 0 &&
-                !status &&
                 !narrowState &&
                 "@[640px]/list:hidden",
+              // Only a status: it moves to the row's end from 480px, taking
+              // the line with it, so the title stays centred.
+              !table &&
+                !secondary &&
+                !hasColumns &&
+                metaItems.length === 0 &&
+                status &&
+                !narrowState &&
+                "@[480px]/list:hidden",
             )}
           >
             {secondary && !(disabled && disabledReason) ? (

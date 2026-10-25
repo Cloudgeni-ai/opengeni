@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  VAULT_LIMITS,
   VAULT_PROVIDER_WIRE_LIMITS,
   VAULT_PROVIDER_WIRE_VERSION,
   VaultProviderWireItemMeta,
@@ -15,7 +16,7 @@ const request = (operation: unknown, extra: Record<string, unknown> = {}) => ({
   type: "request",
   requestId: REQUEST_ID,
   sentAt: "2026-10-15T12:00:00.000Z",
-  provider: "bitwarden",
+  provider: "external",
   connectionId: "6f1c3c1e-2b1a-4c55-9d1e-0a0b0c0d0e0f",
   authority: { accountId: "a", workspaceId: "w", subjectId: null, connectionWorkspaceId: "w" },
   operation,
@@ -32,6 +33,20 @@ const meta = {
 };
 
 describe("opengeni.vault.v1 wire", () => {
+  test("username display hints are optional, nullable and bounded", () => {
+    expect(VaultProviderWireItemMeta.parse(meta).username).toBeUndefined();
+    for (const username of [
+      null,
+      "",
+      "alice@example.com",
+      "u".repeat(VAULT_LIMITS.usernameMaxChars),
+    ]) {
+      expect(VaultProviderWireItemMeta.parse({ ...meta, username }).username).toBe(username);
+    }
+    for (const username of [42, {}, "u".repeat(VAULT_LIMITS.usernameMaxChars + 1)]) {
+      expect(VaultProviderWireItemMeta.safeParse({ ...meta, username }).success).toBe(false);
+    }
+  });
   test("requests are strict and bounded", () => {
     expect(VaultProviderWireRequest.safeParse(request({ op: "describe" })).success).toBe(true);
     expect(

@@ -51,13 +51,36 @@ describe("organization private-session product surface", () => {
     expect(migration).not.toContain("nested_agent_depth_exceeded");
     expect(migration).not.toContain("session_spawn_denials");
 
-    // Ordinary creates never run a per-create policy call; only an explicit
-    // private request reaches the target-free readiness preflight.
+    // Ordinary creates never run a private-session readiness call. Explicit
+    // private requests use the managed-human preflight unless the separate
+    // Teams admission seam has verified an internal durable inbox proof.
     const create = await readFile(join(repo, "packages/core/src/domain/sessions.ts"), "utf8");
     expect(create).not.toContain("getPrivateSessionCreatePolicy");
     expect(create).not.toContain("personalWorkspace");
-    expect(create).toContain(
-      'if (payload.visibility === "private" && !grant.metadata?.["sessionId"]) {',
+    const compactCreate = create.replace(/\s+/g, " ");
+    expect(compactCreate).toContain(
+      'if ( payload.visibility === "private" && !grant.metadata?.["sessionId"] && !teamsCommitAuthorizer ) {',
+    );
+    // A request-body flag or unverified proof never substitutes for admission.
+    expect(compactCreate).toContain("const teamsProof = requestOptions.teamsConversation;");
+    expect(compactCreate).toContain(
+      'const teamsCommitAuthorizer = teamsProof ? await authorizeTeamsConversationAdmission(unresolvedDeps, grant, { workspaceId, sessionId: payload.requestedSessionId, initialMessage: payload.initialMessage ?? "", creating: true, privateCreate: payload.visibility === "private", personal: payload.visibility === "private", proof: teamsProof, }) : undefined;',
+    );
+    expect(compactCreate).toContain(
+      "const externalBeforeCreateCommit = teamsCommitAuthorizer ? async (tx: Database) => { await teamsCommitAuthorizer(tx); await externalCommitAuthorizer?.(tx); } : externalCommitAuthorizer;",
+    );
+    const teamsAdmission = (
+      await readFile(join(repo, "packages/core/src/application/teams-private-session.ts"), "utf8")
+    ).replace(/\s+/g, " ");
+    expect(teamsAdmission).toContain("source = await requireTeamsConversationProof(db, accepted);");
+    expect(teamsAdmission).toContain(
+      "if (policy.personalWorkspace || !policy.platformAvailable || !policy.organizationEnabled)",
+    );
+    expect(teamsAdmission).toContain(
+      "await requireDeploymentAllowsOnlyMe( { ...deps, db }, { workspaceId: input.workspaceId, actorSubjectId: grant.subjectId }, );",
+    );
+    expect(teamsAdmission).toContain(
+      "await verify(deps.db); return async (tx) => verify(tx, true);",
     );
     const tenancy = await readFile(
       join(repo, "packages/core/src/application/session-tenancy.ts"),

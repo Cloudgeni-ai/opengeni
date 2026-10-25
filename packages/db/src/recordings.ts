@@ -1,19 +1,34 @@
-import type {
-  Recording,
-  RecordingDiarization,
-  RecordingPerson,
-  RecordingSpeaker,
-  RecordingTrack,
-  RecordingTranscriptionOptions,
-  RecordingTranscriptPage,
-  RecordingTranscriptSegment,
-  RecordingTranscriptVersion,
-  RecordingVisibility,
+import {
+  defaultRecordingSpeakerName,
+  type Recording,
+  type RecordingDiarization,
+  type RecordingPerson,
+  type RecordingNote,
+  type RecordingNoteKind,
+  type RecordingSpeaker,
+  type RecordingTrack,
+  type RecordingTranscriptionOptions,
+  type RecordingTranscriptPage,
+  type RecordingTranscriptSegment,
+  type RecordingTranscriptVersion,
+  type RecordingPurpose,
+  type RecordingVisibility,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, gt, inArray, isNotNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, ne, or, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
 import * as schema from "./schema";
 import type { RecordingWordTiming } from "./recordings-schema";
+import { CreditDebitAttribution } from "./credit-debit-attribution";
+import {
+  consentedVoiceprints,
+  forgetPersonVoice,
+  learnConfirmedVoices,
+  rejectedVoices,
+  rejectVoiceSuggestion,
+  suggestSpeakersByVoice,
+  syncSpeakerVoice,
+  type RecordingSpeakerVoice,
+} from "./recording-voices";
 
 type RecordingRow = typeof schema.recordings.$inferSelect;
 type TrackRow = typeof schema.recordingTracks.$inferSelect;
@@ -60,13 +75,27 @@ const fromVisibility = (value: RecordingRow["visibility"]): RecordingVisibility 
 function trackView(row: TrackRow): RecordingTrack {
   return {
     trackNumber: row.trackNumber,
-    kind: "audio",
+    kind: row.kind,
     source: row.source,
     mimeType: row.mimeType,
     chunkCount: row.chunkCount,
     totalBytes: Number(row.totalBytes),
     durationMilliseconds: row.durationMilliseconds,
     playable: row.preparedObjectKey !== null,
+    video:
+      row.videoWidth !== null && row.videoHeight !== null && row.videoFrameCount !== null
+        ? { width: row.videoWidth, height: row.videoHeight, frameCount: row.videoFrameCount }
+        : null,
+    live:
+      row.liveProviderId !== null && row.liveModel !== null
+        ? {
+            providerId: row.liveProviderId,
+            model: row.liveModel,
+            streamedMilliseconds: row.liveStreamedMilliseconds,
+            costUsd:
+              row.liveCostUsdMicros === null ? null : Number(row.liveCostUsdMicros) / 1_000_000,
+          }
+        : null,
   };
 }
 
@@ -104,6 +133,8 @@ function recordingView(
     ownerSubjectId: row.ownerSubjectId,
     visibility: fromVisibility(row.visibility),
     title: row.title,
+    purpose: row.purpose,
+    errorCode: row.errorCode,
     // Reads never return a recording being deleted; keep the type honest.
     state: row.state === "deleting" ? "failed" : row.state,
     startedAt: row.startedAt.toISOString(),
@@ -111,6 +142,7 @@ function recordingView(
     durationMilliseconds: row.durationMilliseconds,
     externalRef: row.externalRef,
     metadata: row.metadata,
+    audioDeletedAt: row.audioDeletedAt?.toISOString() ?? null,
     transcription: row.transcription as RecordingTranscriptionOptions,
     tracks: tracks
       .filter((track) => track.recordingId === row.id)
@@ -122,7 +154,7 @@ function recordingView(
   };
 }
 
-function personView(row: PersonRow): RecordingPerson {
+function personView(row: PersonRow, learned?: { updatedAt: Date } | null): RecordingPerson {
   return {
     id: row.id,
     displayName: row.displayName,
@@ -130,11 +162,60 @@ function personView(row: PersonRow): RecordingPerson {
     email: row.email,
     externalRef: row.externalRef,
     createdAt: row.createdAt.toISOString(),
+    voice:
+      row.voiceConsent && row.voiceConsentedAt
+        ? {
+            consent: row.voiceConsent,
+            consentedAt: row.voiceConsentedAt.toISOString(),
+            learned: Boolean(learned),
+            updatedAt: learned ? learned.updatedAt.toISOString() : null,
+          }
+        : null,
   };
+}
+
+/** When each person's voiceprint last changed, for people who have one. */
+async function voiceprintUpdates(
+  tx: Database,
+  workspaceId: string,
+  personIds: readonly string[],
+): Promise<Map<string, { updatedAt: Date }>> {
+  if (personIds.length === 0) return new Map();
+  const rows = await tx
+    .select({
+      personId: schema.recordingVoiceprints.personId,
+      updatedAt: sql<Date>`max(${schema.recordingVoiceprints.updatedAt})`.mapWith(
+        (value: string | Date) => new Date(value),
+      ),
+    })
+    .from(schema.recordingVoiceprints)
+    .where(
+      and(
+        eq(schema.recordingVoiceprints.workspaceId, workspaceId),
+        inArray(schema.recordingVoiceprints.personId, [...personIds]),
+      ),
+    )
+    .groupBy(schema.recordingVoiceprints.personId);
+  return new Map(rows.map((row) => [row.personId, { updatedAt: row.updatedAt }]));
 }
 
 function defaultTitle(startedAt: Date): string {
   return `Recording ${startedAt.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+/**
+ * A `to_tsquery('simple', …)` source that finds every word of `text` as a word
+ * prefix, so search finds "onboarding" while someone is still typing "onboard".
+ * Words are split as the simple parser splits them. Null when `text` has no
+ * letters or digits.
+ */
+function transcriptSearchQuery(text: string): string | null {
+  const words = text
+    .toLowerCase()
+    .match(/[\p{L}\p{N}]+/gu)
+    ?.slice(0, 16);
+  if (!words || words.length === 0) return null;
+  return words.map((word) => `'${word}':*`).join(" & ");
 }
 
 async function lockRecording(
@@ -196,6 +277,8 @@ async function insertEvent(
   type: (typeof schema.recordingEventTypeValues)[number],
   data: Record<string, unknown>,
 ): Promise<void> {
+  // A dictation is private typing, not a meeting: nothing outside its owner hears of it.
+  if (recording.purpose === "dictation") return;
   await tx.insert(schema.recordingEvents).values({
     accountId: recording.accountId,
     workspaceId: recording.workspaceId,
@@ -209,6 +292,7 @@ async function insertEvent(
       ownerSubjectId: recording.ownerSubjectId,
       visibility: fromVisibility(recording.visibility),
       externalRef: recording.externalRef,
+      purpose: recording.purpose,
       state: recording.state,
       ...data,
     },
@@ -218,6 +302,8 @@ async function insertEvent(
 export type CreateRecordingInput = RecordingActor & {
   accountId: string;
   recordingId: string;
+  /** meeting unless given; browser recordings have their own constructor. */
+  purpose?: "meeting" | "dictation" | undefined;
   title?: string | undefined;
   visibility?: RecordingVisibility | undefined;
   startedAt?: Date | undefined;
@@ -245,7 +331,11 @@ export async function createRecording(
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         ownerSubjectId: input.subjectId,
-        visibility: toVisibility(input.visibility ?? "private"),
+        purpose: input.purpose ?? "meeting",
+        // A dictation is only ever its owner's.
+        visibility: toVisibility(
+          input.purpose === "dictation" ? "private" : (input.visibility ?? "private"),
+        ),
         title: input.title ?? defaultTitle(startedAt),
         startedAt,
         externalRef: input.externalRef ?? null,
@@ -313,7 +403,18 @@ export async function getRecording(
 export type ListRecordingsInput = RecordingActor & {
   /** Words to find in titles and current transcripts. */
   query?: string | undefined;
+  /**
+   * A speaker named in the current transcript: a people-directory id, or part
+   * of a name. Names only suggested from a voice don't count.
+   */
+  person?: string | undefined;
+  /** Only recordings started at or after this instant. */
+  startedFrom?: Date | undefined;
+  /** Only recordings started before this instant. */
+  startedTo?: Date | undefined;
   externalRef?: string | undefined;
+  /** Meetings unless asked otherwise: browser recordings stay out of meeting lists. */
+  purpose?: RecordingPurpose | undefined;
   /** Only recordings started before this instant (the previous page's last `startedAt`). */
   before?: { startedAt: Date; id: string } | undefined;
   limit?: number | undefined;
@@ -329,8 +430,11 @@ export async function listRecordings(
     const conditions = [
       eq(schema.recordings.workspaceId, input.workspaceId),
       ne(schema.recordings.state, "deleting"),
+      eq(schema.recordings.purpose, input.purpose ?? "meeting"),
     ];
     if (input.externalRef) conditions.push(eq(schema.recordings.externalRef, input.externalRef));
+    if (input.startedFrom) conditions.push(gte(schema.recordings.startedAt, input.startedFrom));
+    if (input.startedTo) conditions.push(lt(schema.recordings.startedAt, input.startedTo));
     if (input.before) {
       conditions.push(
         or(
@@ -344,20 +448,48 @@ export async function listRecordings(
     }
     const query = input.query?.trim();
     if (query) {
-      const pattern = `%${query.replace(/[\\%_]/gu, (match) => `\\${match}`)}%`;
+      const pattern = likePattern(query);
+      const words = transcriptSearchQuery(query);
       conditions.push(
-        or(
-          sql`${schema.recordings.title} ILIKE ${pattern}`,
-          sql`EXISTS (
-            SELECT 1 FROM recording_transcript_segments segment
-            JOIN recording_transcript_versions version
-              ON version.id = segment.version_id AND version.is_current
-            WHERE segment.workspace_id = ${schema.recordings.workspaceId}
-              AND segment.recording_id = ${schema.recordings.id}
-              AND segment.search @@ plainto_tsquery('simple', ${query})
-          )`,
-        )!,
+        words === null
+          ? sql`${schema.recordings.title} ILIKE ${pattern}`
+          : or(
+              sql`${schema.recordings.title} ILIKE ${pattern}`,
+              // A corrected segment is found by its corrected words, not the original ones.
+              sql`EXISTS (
+                SELECT 1 FROM recording_transcript_segments segment
+                JOIN recording_transcript_versions version
+                  ON version.id = segment.version_id AND version.is_current
+                LEFT JOIN recording_segment_edits edit
+                  ON edit.version_id = segment.version_id
+                  AND edit.segment_index = segment.segment_index
+                WHERE segment.workspace_id = ${schema.recordings.workspaceId}
+                  AND segment.recording_id = ${schema.recordings.id}
+                  AND (
+                    (edit.text IS NULL AND segment.search @@ to_tsquery('simple', ${words}))
+                    OR to_tsvector('simple', coalesce(edit.text, '')) @@ to_tsquery('simple', ${words})
+                  )
+              )`,
+            )!,
       );
+    }
+    const person = input.person?.trim();
+    if (person) {
+      const personId = UUID.test(person) ? person.toLowerCase() : null;
+      conditions.push(sql`EXISTS (
+        SELECT 1 FROM recording_speaker_assignments assignment
+        JOIN recording_transcript_versions version
+          ON version.id = assignment.version_id AND version.is_current
+        LEFT JOIN recording_people person
+          ON person.workspace_id = assignment.workspace_id AND person.id = assignment.person_id
+        WHERE assignment.workspace_id = ${schema.recordings.workspaceId}
+          AND assignment.recording_id = ${schema.recordings.id}
+          AND assignment.source <> 'suggested'
+          AND (
+            ${personId}::uuid IS NOT NULL AND assignment.person_id = ${personId}::uuid
+            OR coalesce(person.display_name, assignment.display_name) ILIKE ${likePattern(person)}
+          )
+      )`);
     }
     const rows = await tx
       .select()
@@ -374,6 +506,120 @@ export async function listRecordings(
           ? { startedAt: last.startedAt.toISOString(), id: last.id }
           : null,
     };
+  });
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/** An ILIKE pattern that finds `text` anywhere, with its wildcards taken literally. */
+function likePattern(text: string): string {
+  return `%${text.replace(/[\\%_]/gu, (match) => `\\${match}`)}%`;
+}
+
+export type RecordingSearchMatch = {
+  startMilliseconds: number;
+  /** The speaker's resolved name, or null when the model gave no label. */
+  speaker: string | null;
+  text: string;
+};
+
+/**
+ * For a page of listed recordings: each one's speakers in its current
+ * transcript and, given `query`, its first transcript segments that contain
+ * the words. Recordings without a current transcript have neither. Set-based,
+ * so a page costs the same few queries however many recordings it holds.
+ */
+export async function getRecordingSearchDetails(
+  db: Database,
+  input: RecordingActor & {
+    recordingIds: readonly string[];
+    query?: string | undefined;
+    matchesPerRecording?: number | undefined;
+  },
+): Promise<Map<string, { speakers: RecordingSpeaker[]; matches: RecordingSearchMatch[] }>> {
+  const details = new Map<
+    string,
+    { speakers: RecordingSpeaker[]; matches: RecordingSearchMatch[] }
+  >();
+  if (input.recordingIds.length === 0) return details;
+  const perRecording = Math.min(Math.max(input.matchesPerRecording ?? 3, 1), 10);
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const versions = (
+      await tx
+        .select({ version: schema.recordingTranscriptVersions })
+        .from(schema.recordingTranscriptVersions)
+        .innerJoin(
+          schema.recordings,
+          and(
+            eq(schema.recordings.workspaceId, schema.recordingTranscriptVersions.workspaceId),
+            eq(schema.recordings.id, schema.recordingTranscriptVersions.recordingId),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.recordingTranscriptVersions.workspaceId, input.workspaceId),
+            inArray(schema.recordingTranscriptVersions.recordingId, [...input.recordingIds]),
+            eq(schema.recordingTranscriptVersions.isCurrent, true),
+            ne(schema.recordings.state, "deleting"),
+          ),
+        )
+    ).map((row) => row.version);
+    if (versions.length === 0) return details;
+    const speakersByVersion = await speakersForVersions(tx, input.workspaceId, versions);
+    for (const version of versions) {
+      details.set(version.recordingId, {
+        speakers: speakersByVersion.get(version.id) ?? [],
+        matches: [],
+      });
+    }
+    const words = input.query ? transcriptSearchQuery(input.query) : null;
+    if (words === null) return details;
+    const versionIds = versions.map((version) => version.id);
+    const rows = await rawRows<{
+      recording_id: string;
+      version_id: string;
+      start_milliseconds: number;
+      speaker_label: string | null;
+      text: string;
+    }>(
+      tx,
+      sql`SELECT recording_id, version_id, start_milliseconds, speaker_label, text FROM (
+        SELECT segment.recording_id, segment.version_id, segment.start_milliseconds,
+          coalesce(edit.speaker_label, segment.speaker_label) AS speaker_label,
+          coalesce(edit.text, segment.text) AS text,
+          row_number() OVER (
+            PARTITION BY segment.version_id ORDER BY segment.segment_index
+          ) AS position
+        FROM recording_transcript_segments segment
+        LEFT JOIN recording_segment_edits edit
+          ON edit.version_id = segment.version_id AND edit.segment_index = segment.segment_index
+        WHERE segment.workspace_id = ${input.workspaceId}
+          AND segment.version_id IN (${sql.join(
+            versionIds.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )})
+          AND (
+            (edit.text IS NULL AND segment.search @@ to_tsquery('simple', ${words}))
+            OR to_tsvector('simple', coalesce(edit.text, '')) @@ to_tsquery('simple', ${words})
+          )
+      ) ranked
+      WHERE position <= ${perRecording}
+      ORDER BY recording_id, start_milliseconds`,
+    );
+    for (const row of rows) {
+      const entry = details.get(row.recording_id);
+      if (!entry) continue;
+      entry.matches.push({
+        startMilliseconds: Number(row.start_milliseconds),
+        speaker:
+          row.speaker_label === null
+            ? null
+            : (entry.speakers.find((speaker) => speaker.label === row.speaker_label)?.name ??
+              row.speaker_label),
+        text: row.text,
+      });
+    }
+    return details;
   });
 }
 
@@ -395,6 +641,9 @@ export async function updateRecording(
     const visibility = input.visibility === undefined ? undefined : toVisibility(input.visibility);
     if (visibility !== undefined && visibility !== row.visibility) {
       if (row.ownerSubjectId !== input.subjectId) throw new RecordingForbiddenError();
+      if (row.purpose === "dictation") {
+        throw new RecordingConflictError("A dictation can't be shared", "dictation_private");
+      }
     }
     const [updated] = await tx
       .update(schema.recordings)
@@ -488,19 +737,28 @@ export async function listDeletingRecordingObjectKeys(
           ),
         ),
       tx
-        .select({ objectKey: schema.recordingTracks.preparedObjectKey })
+        .select({
+          objectKey: schema.recordingTracks.preparedObjectKey,
+          kind: schema.recordingTracks.kind,
+        })
         .from(schema.recordingTracks)
         .where(
           and(
             eq(schema.recordingTracks.workspaceId, input.workspaceId),
             eq(schema.recordingTracks.recordingId, input.recordingId),
-            isNotNull(schema.recordingTracks.preparedObjectKey),
           ),
         ),
     ]);
     return [
-      ...chunks.map((chunk) => chunk.objectKey),
-      ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
+      ...new Set([
+        ...chunks.map((chunk) => chunk.objectKey),
+        ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
+        // A browser recording's video and the action log beside it, even if
+        // the worker saved them without recording it yet.
+        ...(tracks.some((track) => track.kind === "video")
+          ? [browserRecordingVideoObjectKey(input), browserRecordingActionLogObjectKey(input)]
+          : []),
+      ]),
     ];
   });
 }
@@ -634,6 +892,363 @@ export async function getRecordingTrackPreparedObject(
     if (!row || row.state === "deleting") throw new RecordingNotFoundError();
     if (!row.objectKey || row.bytes === null) return null;
     return { objectKey: row.objectKey, bytes: Number(row.bytes) };
+  });
+}
+
+/**
+ * Browser recordings. An agent's recording of a browser tab is a recording
+ * whose purpose is "browser", with one video track. The track's one chunk is
+ * the frame bundle the browser host uploads; the worker encodes it into the
+ * track's prepared MP4 and saves the action log beside it.
+ */
+export const BROWSER_RECORDING_BUNDLE_MIME_TYPE = "application/vnd.opengeni.browser-recording";
+
+/** `text` cut to at most `maxBytes` of UTF-8 without splitting a character. */
+function truncateUtf8(text: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.byteLength <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return new TextDecoder().decode(bytes.subarray(0, end));
+}
+
+/** Where the browser host uploads a recording's frame bundle: its one chunk. */
+export function browserRecordingBundleObjectKey(input: {
+  workspaceId: string;
+  recordingId: string;
+  sha256: string;
+}): string {
+  return recordingChunkObjectKey({ ...input, trackNumber: 0, chunkNumber: 0 });
+}
+
+/** Where the worker saves a browser recording's MP4. */
+export function browserRecordingVideoObjectKey(input: {
+  workspaceId: string;
+  recordingId: string;
+}): string {
+  return recordingPreparedTrackObjectKey({ ...input, trackNumber: 0, extension: "mp4" });
+}
+
+/** Where the worker saves a browser recording's action log, beside its MP4. */
+export function browserRecordingActionLogObjectKey(input: {
+  workspaceId: string;
+  recordingId: string;
+}): string {
+  return recordingPreparedTrackObjectKey({ ...input, trackNumber: 0, extension: "actions.json" });
+}
+
+export type CreateBrowserRecordingInput = RecordingActor & {
+  accountId: string;
+  /** The browser host's id for the recording. */
+  recordingId: string;
+  visibility: RecordingVisibility;
+  startedAt: Date;
+  durationMilliseconds: number;
+  /** The uploaded frame bundle. */
+  bundle: { byteLength: number; sha256: string };
+};
+
+/**
+ * Record a browser recording whose bundle is uploaded; its video is made
+ * next. Creating it again with the same bundle returns it as it is now.
+ */
+export async function createBrowserRecording(
+  db: Database,
+  input: CreateBrowserRecordingInput,
+): Promise<{ recording: Recording; created: boolean }> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const duration = Math.max(0, Math.round(input.durationMilliseconds));
+    const objectKey = browserRecordingBundleObjectKey({
+      workspaceId: input.workspaceId,
+      recordingId: input.recordingId,
+      sha256: input.bundle.sha256,
+    });
+    const inserted = await tx
+      .insert(schema.recordings)
+      .values({
+        id: input.recordingId,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        ownerSubjectId: input.subjectId,
+        visibility: toVisibility(input.visibility),
+        title: `Browser recording ${input.startedAt.toISOString().slice(0, 16).replace("T", " ")} UTC`,
+        purpose: "browser",
+        state: "processing",
+        startedAt: input.startedAt,
+        captureEndedAt: new Date(input.startedAt.getTime() + duration),
+        durationMilliseconds: duration,
+      })
+      .onConflictDoNothing({ target: schema.recordings.id })
+      .returning();
+    const created = inserted.length > 0;
+    if (created) {
+      const scope = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        recordingId: input.recordingId,
+        trackNumber: 0,
+      };
+      await tx.insert(schema.recordingTracks).values({
+        ...scope,
+        kind: "video",
+        source: "browser_tab",
+        mimeType: BROWSER_RECORDING_BUNDLE_MIME_TYPE,
+        chunkCount: 1,
+        totalBytes: input.bundle.byteLength,
+        durationMilliseconds: duration,
+      });
+      await tx.insert(schema.recordingChunks).values({
+        ...scope,
+        chunkNumber: 0,
+        byteLength: input.bundle.byteLength,
+        sha256: input.bundle.sha256,
+        startMilliseconds: 0,
+        durationMilliseconds: duration,
+        objectKey,
+        state: "uploaded",
+        uploadedAt: sql`clock_timestamp()`,
+      });
+      await insertEvent(tx, inserted[0]!, "recording.started", {
+        startedAt: input.startedAt.toISOString(),
+        trackCount: 1,
+      });
+      await insertEvent(tx, inserted[0]!, "recording.finished", {
+        durationMilliseconds: duration,
+      });
+    }
+    const [row] = await tx
+      .select()
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      );
+    const [chunk] = row
+      ? await tx
+          .select({ objectKey: schema.recordingChunks.objectKey })
+          .from(schema.recordingChunks)
+          .where(
+            and(
+              eq(schema.recordingChunks.workspaceId, input.workspaceId),
+              eq(schema.recordingChunks.recordingId, input.recordingId),
+              eq(schema.recordingChunks.trackNumber, 0),
+              eq(schema.recordingChunks.chunkNumber, 0),
+            ),
+          )
+      : [];
+    // A reused id: another workspace's or person's, a meeting, or another bundle.
+    if (
+      !row ||
+      row.ownerSubjectId !== input.subjectId ||
+      row.purpose !== "browser" ||
+      row.state === "deleting" ||
+      chunk?.objectKey !== objectKey
+    ) {
+      throw new RecordingConflictError("This recording id is already used", "recording_id_taken");
+    }
+    const [recording] = await loadViews(tx, input.workspaceId, [row]);
+    return { recording: recording!, created };
+  });
+}
+
+/** A browser recording's state for its save, with why its video failed if it
+ * did; null when there is none yet. */
+export async function findBrowserRecording(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<{ recording: Recording; errorMessage: string | null } | null> {
+  let recording: Recording;
+  try {
+    recording = await getRecording(db, input);
+  } catch (error) {
+    if (error instanceof RecordingNotFoundError) return null;
+    throw error;
+  }
+  if (recording.purpose !== "browser") return null;
+  if (recording.state !== "failed") return { recording, errorMessage: null };
+  const [row] = await withWorkspaceSubjectRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (tx) =>
+      await tx
+        .select({ errorMessage: schema.recordings.errorMessage })
+        .from(schema.recordings)
+        .where(
+          and(
+            eq(schema.recordings.workspaceId, input.workspaceId),
+            eq(schema.recordings.id, input.recordingId),
+          ),
+        ),
+  );
+  return { recording, errorMessage: row?.errorMessage ?? null };
+}
+
+/** The bundle the worker encodes, while the recording still needs its video. */
+export async function claimBrowserRecordingVideo(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<{ recording: Recording; bundle: { objectKey: string; sha256: string } } | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const row = await lockRecording(tx, input.workspaceId, input.recordingId);
+    if (row.purpose !== "browser" || row.state !== "processing") return null;
+    const [chunk] = await tx
+      .select({
+        objectKey: schema.recordingChunks.objectKey,
+        sha256: schema.recordingChunks.sha256,
+      })
+      .from(schema.recordingChunks)
+      .where(
+        and(
+          eq(schema.recordingChunks.workspaceId, input.workspaceId),
+          eq(schema.recordingChunks.recordingId, input.recordingId),
+          eq(schema.recordingChunks.trackNumber, 0),
+          eq(schema.recordingChunks.chunkNumber, 0),
+        ),
+      );
+    if (!chunk) throw new RecordingNotFoundError("The recording has no bundle");
+    const [recording] = await loadViews(tx, input.workspaceId, [row]);
+    return { recording: recording!, bundle: chunk };
+  });
+}
+
+/** The worker made the video: the track is playable and the recording ready. */
+export async function completeBrowserRecordingVideo(
+  db: Database,
+  input: RecordingActor & {
+    recordingId: string;
+    video: {
+      objectKey: string;
+      bytes: number;
+      sha256: string;
+      durationMilliseconds: number;
+      width: number;
+      height: number;
+      frameCount: number;
+    };
+  },
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const row = await lockRecording(tx, input.workspaceId, input.recordingId);
+    if (row.purpose !== "browser" || row.state !== "processing") return false;
+    const duration = Math.max(0, Math.round(input.video.durationMilliseconds));
+    await tx
+      .update(schema.recordingTracks)
+      .set({
+        preparedObjectKey: input.video.objectKey,
+        preparedBytes: input.video.bytes,
+        preparedSha256: input.video.sha256,
+        durationMilliseconds: duration,
+        videoWidth: input.video.width,
+        videoHeight: input.video.height,
+        videoFrameCount: input.video.frameCount,
+      })
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, input.workspaceId),
+          eq(schema.recordingTracks.recordingId, input.recordingId),
+          eq(schema.recordingTracks.trackNumber, 0),
+        ),
+      );
+    await tx
+      .update(schema.recordings)
+      .set({
+        state: "ready",
+        durationMilliseconds: duration,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      );
+    return true;
+  });
+}
+
+/** The video could not be made; `errorCode` and `errorMessage` say why. */
+export async function failBrowserRecordingVideo(
+  db: Database,
+  input: RecordingActor & { recordingId: string; errorCode: string; errorMessage: string },
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const row = await lockRecording(tx, input.workspaceId, input.recordingId);
+    if (row.purpose !== "browser" || row.state !== "processing") return false;
+    await tx
+      .update(schema.recordings)
+      .set({
+        state: "failed",
+        errorCode: input.errorCode.slice(0, 128) || "processing_failed",
+        errorMessage: truncateUtf8(input.errorMessage, 2048) || null,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      );
+    return true;
+  });
+}
+
+/** A browser recording's saved video, for copying it into a chat's files. */
+export async function getBrowserRecordingVideo(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<{
+  objectKey: string;
+  actionLogObjectKey: string;
+  bytes: number;
+  sha256: string;
+  durationMilliseconds: number;
+  width: number;
+  height: number;
+  frameCount: number;
+} | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await tx
+      .select({ track: schema.recordingTracks, purpose: schema.recordings.purpose })
+      .from(schema.recordingTracks)
+      .innerJoin(
+        schema.recordings,
+        and(
+          eq(schema.recordings.workspaceId, schema.recordingTracks.workspaceId),
+          eq(schema.recordings.id, schema.recordingTracks.recordingId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, input.workspaceId),
+          eq(schema.recordingTracks.recordingId, input.recordingId),
+          eq(schema.recordingTracks.trackNumber, 0),
+          eq(schema.recordings.state, "ready"),
+        ),
+      );
+    const track = row?.purpose === "browser" ? row.track : null;
+    if (
+      !track?.preparedObjectKey ||
+      track.preparedBytes === null ||
+      !track.preparedSha256 ||
+      track.videoWidth === null ||
+      track.videoHeight === null ||
+      track.videoFrameCount === null
+    ) {
+      return null;
+    }
+    return {
+      objectKey: track.preparedObjectKey,
+      actionLogObjectKey: browserRecordingActionLogObjectKey(input),
+      bytes: Number(track.preparedBytes),
+      sha256: track.preparedSha256,
+      durationMilliseconds: track.durationMilliseconds,
+      width: track.videoWidth,
+      height: track.videoHeight,
+      frameCount: track.videoFrameCount,
+    };
   });
 }
 
@@ -786,6 +1401,8 @@ export type RecordingTranscriptionChoice = {
   providerId: string;
   model: string;
   options: RecordingTranscriptionOptions;
+  /** Who a deployment-funded transcript is billed to, from the request that asked for it. */
+  creditAttribution?: CreditDebitAttribution | undefined;
 };
 
 export type FinalizeRecordingInput = RecordingActor & {
@@ -941,6 +1558,7 @@ export async function finalizeRecording(
         model: input.transcription.model,
         options: input.transcription.options,
         requestedBySubjectId: input.subjectId,
+        creditAttribution: input.transcription.creditAttribution ?? null,
       })
       .returning();
     await insertEvent(tx, finalized!, "recording.finished", {
@@ -963,8 +1581,20 @@ export async function createRecordingTranscriptVersion(
 ): Promise<RecordingTranscriptVersion> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const recording = await lockRecording(tx, input.workspaceId, input.recordingId);
+    if (recording.purpose === "browser") {
+      throw new RecordingConflictError(
+        "Only meetings and dictations have transcripts",
+        "not_a_meeting",
+      );
+    }
     if (recording.state === "capturing") {
       throw new RecordingConflictError("This recording is still capturing", "still_capturing");
+    }
+    if (recording.audioDeletedAt) {
+      throw new RecordingConflictError(
+        "The audio was deleted under this workspace's retention, so it can't be transcribed again",
+        "audio_deleted",
+      );
     }
     const [pending] = await tx
       .select({ id: schema.recordingTranscriptVersions.id })
@@ -1006,6 +1636,7 @@ export async function createRecordingTranscriptVersion(
         model: input.transcription.model,
         options: input.transcription.options,
         requestedBySubjectId: input.subjectId,
+        creditAttribution: input.transcription.creditAttribution ?? null,
       })
       .returning();
     if (recording.state === "failed") {
@@ -1057,8 +1688,12 @@ export async function listRecordingTranscriptVersions(
 export type RecordingTranscriptionJob = {
   recording: Recording;
   version: RecordingTranscriptVersion;
+  /** Who a deployment-funded transcript is billed to; null for versions made before 0962. */
+  creditAttribution: CreditDebitAttribution | null;
   chunks: RecordingChunk[];
   processingOwner: string;
+  /** How long the version waited before its first attempt; null on later attempts. */
+  queuedMilliseconds: number | null;
 };
 
 /**
@@ -1125,8 +1760,13 @@ export async function claimRecordingTranscriptVersion(
     return {
       recording: recording!,
       version: recordingTranscriptVersionView(claimed),
+      creditAttribution: CreditDebitAttribution.safeParse(claimed.creditAttribution).data ?? null,
       chunks,
       processingOwner: input.processingOwner,
+      queuedMilliseconds:
+        claimed.attemptCount === 1 && claimed.processingStartedAt
+          ? Math.max(0, claimed.processingStartedAt.getTime() - claimed.createdAt.getTime())
+          : null,
     };
   });
 }
@@ -1279,10 +1919,22 @@ export async function completeRecordingTranscriptVersion(
     diarized: boolean;
     diarization: RecordingDiarization;
     costUsdMicros?: number | null | undefined;
+    /**
+     * The Opengeni credits the version was charged, for a deployment-funded
+     * model where credit billing is on. Such a version's cost does not count
+     * toward allowances again (0960).
+     */
+    creditCostMicros?: number | null | undefined;
     audioMilliseconds: number;
     segments: readonly CompletedRecordingSegment[];
     /** Speakers the capture itself identifies, such as the microphone's owner. */
     trackSpeakers?: ReadonlyArray<{ label: string; displayName: string; personId?: string | null }>;
+    /**
+     * Diarized speakers' voices, passed only while the workspace recognizes
+     * voices. They are kept with the version and matched against the
+     * voiceprints of people who agreed to be remembered.
+     */
+    voices?: readonly RecordingSpeakerVoice[];
   },
 ): Promise<RecordingTranscriptVersion | null> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
@@ -1357,6 +2009,10 @@ export async function completeRecordingTranscriptVersion(
           input.costUsdMicros === null || input.costUsdMicros === undefined
             ? null
             : Math.max(0, Math.round(input.costUsdMicros)),
+        creditCostMicros:
+          input.creditCostMicros === null || input.creditCostMicros === undefined
+            ? null
+            : Math.max(0, Math.round(input.creditCostMicros)),
         audioMilliseconds: Math.max(0, Math.round(input.audioMilliseconds)),
         segmentCount: ordered.length,
         processingOwner: null,
@@ -1440,9 +2096,58 @@ export async function completeRecordingTranscriptVersion(
         }
       }
     }
+    const voices = (input.voices ?? []).filter((voice) => labels.has(voice.label));
+    if (voices.length > 0) {
+      await tx.insert(schema.recordingSpeakerVoices).values(
+        voices.map((voice) => ({
+          accountId: recording.accountId,
+          workspaceId: input.workspaceId,
+          recordingId: recording.id,
+          versionId: version.id,
+          speakerLabel: voice.label,
+          channel: voice.channel,
+          model: voice.model,
+          embedding: [...voice.embedding],
+          speechMilliseconds: Math.max(0, Math.round(voice.speechMilliseconds)),
+        })),
+      );
+      const suggestions = suggestSpeakersByVoice({
+        voices,
+        known: await consentedVoiceprints(tx, input.workspaceId),
+        rejected: await rejectedVoices(tx, input.workspaceId, recording.id),
+        namedLabels: new Set(assignments.keys()),
+        namedPeople: new Set(
+          [...assignments.values()]
+            .map((assignment) => assignment.personId)
+            .filter((personId): personId is string => !!personId),
+        ),
+      });
+      for (const [label, suggestion] of suggestions) {
+        assignments.set(label, {
+          accountId: recording.accountId,
+          workspaceId: input.workspaceId,
+          recordingId: recording.id,
+          versionId: version.id,
+          speakerLabel: label,
+          personId: suggestion.personId,
+          displayName: null,
+          source: "suggested",
+          confidence: suggestion.confidence,
+        });
+      }
+    }
     if (assignments.size > 0) {
       await tx.insert(schema.recordingSpeakerAssignments).values([...assignments.values()]);
     }
+    // The live preview has done its job once a transcript is ready.
+    await tx
+      .delete(schema.recordingLiveSegments)
+      .where(
+        and(
+          eq(schema.recordingLiveSegments.workspaceId, input.workspaceId),
+          eq(schema.recordingLiveSegments.recordingId, recording.id),
+        ),
+      );
     const [ready] = await tx
       .update(schema.recordings)
       .set({
@@ -1566,22 +2271,40 @@ async function resolveVersion(
 }
 
 async function speakersFor(tx: Database, version: VersionRow): Promise<RecordingSpeaker[]> {
-  const [labelRows, overrideRows, assignments] = await Promise.all([
+  return (await speakersForVersions(tx, version.workspaceId, [version])).get(version.id) ?? [];
+}
+
+/** Each version's speakers with their resolved names, in label order. */
+async function speakersForVersions(
+  tx: Database,
+  workspaceId: string,
+  versions: readonly VersionRow[],
+): Promise<Map<string, RecordingSpeaker[]>> {
+  const versionIds = versions.map((version) => version.id);
+  const recordingIds = [...new Set(versions.map((version) => version.recordingId))];
+  const [labelRows, overrideRows, assignments, tracks] = await Promise.all([
     tx
-      .selectDistinct({ label: schema.recordingTranscriptSegments.speakerLabel })
+      .selectDistinct({
+        versionId: schema.recordingTranscriptSegments.versionId,
+        label: schema.recordingTranscriptSegments.speakerLabel,
+      })
       .from(schema.recordingTranscriptSegments)
       .where(
         and(
-          eq(schema.recordingTranscriptSegments.versionId, version.id),
+          inArray(schema.recordingTranscriptSegments.versionId, versionIds),
           isNotNull(schema.recordingTranscriptSegments.speakerLabel),
         ),
       ),
     tx
-      .selectDistinct({ label: schema.recordingSegmentEdits.speakerLabel })
+      .selectDistinct({
+        versionId: schema.recordingSegmentEdits.versionId,
+        label: schema.recordingSegmentEdits.speakerLabel,
+      })
       .from(schema.recordingSegmentEdits)
-      .where(eq(schema.recordingSegmentEdits.versionId, version.id)),
+      .where(inArray(schema.recordingSegmentEdits.versionId, versionIds)),
     tx
       .select({
+        versionId: schema.recordingSpeakerAssignments.versionId,
         label: schema.recordingSpeakerAssignments.speakerLabel,
         personId: schema.recordingSpeakerAssignments.personId,
         displayName: schema.recordingSpeakerAssignments.displayName,
@@ -1597,21 +2320,51 @@ async function speakersFor(tx: Database, version: VersionRow): Promise<Recording
           eq(schema.recordingPeople.id, schema.recordingSpeakerAssignments.personId),
         ),
       )
-      .where(eq(schema.recordingSpeakerAssignments.versionId, version.id)),
+      .where(inArray(schema.recordingSpeakerAssignments.versionId, versionIds)),
+    tx
+      .select({
+        recordingId: schema.recordingTracks.recordingId,
+        trackNumber: schema.recordingTracks.trackNumber,
+        source: schema.recordingTracks.source,
+      })
+      .from(schema.recordingTracks)
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, workspaceId),
+          inArray(schema.recordingTracks.recordingId, recordingIds),
+        ),
+      ),
   ]);
-  const labels = new Set<string>();
-  for (const row of [...labelRows, ...overrideRows]) if (row.label) labels.add(row.label);
-  const byLabel = new Map(assignments.map((assignment) => [assignment.label, assignment]));
-  return [...labels].sort(compareSpeakerLabels).map((label, index) => {
-    const assignment = byLabel.get(label);
-    return {
-      label,
-      name: assignment?.personName ?? assignment?.displayName ?? `Speaker ${index + 1}`,
-      personId: assignment?.personId ?? null,
-      source: assignment?.source ?? null,
-      confidence: assignment?.confidence ?? null,
-    };
-  });
+  const speakers = new Map<string, RecordingSpeaker[]>();
+  for (const version of versions) {
+    const labels = new Set<string>();
+    for (const row of [...labelRows, ...overrideRows]) {
+      if (row.versionId === version.id && row.label) labels.add(row.label);
+    }
+    const byLabel = new Map(
+      assignments
+        .filter((assignment) => assignment.versionId === version.id)
+        .map((assignment) => [assignment.label, assignment]),
+    );
+    const versionTracks = tracks.filter((track) => track.recordingId === version.recordingId);
+    speakers.set(
+      version.id,
+      [...labels].sort(compareSpeakerLabels).map((label) => {
+        const assignment = byLabel.get(label);
+        return {
+          label,
+          name:
+            assignment?.personName ??
+            assignment?.displayName ??
+            defaultRecordingSpeakerName(label, versionTracks),
+          personId: assignment?.personId ?? null,
+          source: assignment?.source ?? null,
+          confidence: assignment?.confidence ?? null,
+        };
+      }),
+    );
+  }
+  return speakers;
 }
 
 function compareSpeakerLabels(left: string, right: string): number {
@@ -1626,6 +2379,10 @@ export async function getRecordingTranscriptPage(
     versionId?: string | undefined;
     /** Segment index to continue after; omitted starts at the beginning. */
     after?: number | undefined;
+    /** Only segments still running at or after this point of the recording. */
+    fromMilliseconds?: number | undefined;
+    /** Only segments that start before this point of the recording. */
+    toMilliseconds?: number | undefined;
     limit?: number | undefined;
   },
 ): Promise<RecordingTranscriptPage> {
@@ -1635,6 +2392,14 @@ export async function getRecordingTranscriptPage(
     const conditions = [eq(schema.recordingTranscriptSegments.versionId, version.id)];
     if (input.after !== undefined)
       conditions.push(gt(schema.recordingTranscriptSegments.segmentIndex, input.after));
+    if (input.fromMilliseconds !== undefined)
+      conditions.push(
+        gt(schema.recordingTranscriptSegments.endMilliseconds, input.fromMilliseconds),
+      );
+    if (input.toMilliseconds !== undefined)
+      conditions.push(
+        lt(schema.recordingTranscriptSegments.startMilliseconds, input.toMilliseconds),
+      );
     const rows = await tx
       .select({
         index: schema.recordingTranscriptSegments.segmentIndex,
@@ -1682,6 +2447,8 @@ export type UpdateRecordingSpeakersInput = RecordingActor & {
       }>
     | undefined;
   segmentOverrides?: ReadonlyArray<{ segmentIndex: number; label: string }> | undefined;
+  /** Suggested names to turn down; the person is not suggested for that voice again. */
+  rejectSuggestions?: ReadonlyArray<{ label: string }> | undefined;
 };
 
 /**
@@ -1710,6 +2477,12 @@ export async function updateRecordingSpeakers(
               eq(schema.recordingSpeakerAssignments.speakerLabel, assignment.label),
             ),
           );
+        await syncSpeakerVoice(tx, {
+          workspaceId: input.workspaceId,
+          versionId: version.id,
+          label: assignment.label,
+          personId: null,
+        });
         continue;
       }
       if (personId) {
@@ -1749,6 +2522,22 @@ export async function updateRecordingSpeakers(
           ],
           set: values,
         });
+      await syncSpeakerVoice(tx, {
+        workspaceId: input.workspaceId,
+        versionId: version.id,
+        label: assignment.label,
+        personId,
+      });
+    }
+    for (const rejection of input.rejectSuggestions ?? []) {
+      await rejectVoiceSuggestion(tx, {
+        accountId: version.accountId,
+        workspaceId: input.workspaceId,
+        recordingId: input.recordingId,
+        versionId: version.id,
+        label: rejection.label,
+        subjectId: input.subjectId,
+      });
     }
     const overrides = input.segmentOverrides ?? [];
     if (overrides.length > 0) {
@@ -1966,6 +2755,123 @@ export async function setCurrentRecordingTranscriptVersion(
   });
 }
 
+type NoteRow = typeof schema.recordingNotes.$inferSelect;
+
+function noteView(row: NoteRow): RecordingNote {
+  return {
+    kind: row.kind,
+    body: row.body,
+    revision: row.revision,
+    updatedAt: row.updatedAt.toISOString(),
+    updatedBy: { subjectId: row.updatedBySubjectId, sessionId: row.updatedBySessionId },
+  };
+}
+
+/** A meeting's notepad and notes, for anyone who can see it. A kind nobody wrote is absent. */
+export async function listRecordingNotes(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<RecordingNote[]> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [recording] = await tx
+      .select({ state: schema.recordings.state })
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      );
+    if (!recording || recording.state === "deleting") throw new RecordingNotFoundError();
+    const rows = await tx
+      .select()
+      .from(schema.recordingNotes)
+      .where(
+        and(
+          eq(schema.recordingNotes.workspaceId, input.workspaceId),
+          eq(schema.recordingNotes.recordingId, input.recordingId),
+        ),
+      )
+      .orderBy(asc(schema.recordingNotes.kind));
+    return rows.map(noteView);
+  });
+}
+
+export type SaveRecordingNoteInput = RecordingActor & {
+  recordingId: string;
+  kind: RecordingNoteKind;
+  body: string;
+  /** Refuse the save unless the stored revision is this one (0: nobody has written it). */
+  expectedRevision?: number | undefined;
+  /** The chat whose agent saves it, when an agent does. */
+  sessionId?: string | null | undefined;
+};
+
+/**
+ * Replace one of a meeting's notes. Anyone who can see the meeting may, like
+ * its title and speakers. Saving the same text again changes nothing. Saving
+ * the notes (not the notepad, which saves as people type) is a
+ * `recording.notes.updated` event.
+ */
+export async function saveRecordingNote(
+  db: Database,
+  input: SaveRecordingNoteInput,
+): Promise<RecordingNote> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    // The recording's row lock also orders saves of its notes.
+    const recording = await lockRecording(tx, input.workspaceId, input.recordingId);
+    const where = and(
+      eq(schema.recordingNotes.workspaceId, input.workspaceId),
+      eq(schema.recordingNotes.recordingId, input.recordingId),
+      eq(schema.recordingNotes.kind, input.kind),
+    );
+    const [existing] = await tx.select().from(schema.recordingNotes).where(where);
+    if (
+      input.expectedRevision !== undefined &&
+      (existing?.revision ?? 0) !== input.expectedRevision
+    ) {
+      throw new RecordingConflictError(
+        "Someone saved newer notes. Load them and try again",
+        "notes_changed",
+      );
+    }
+    if (existing && existing.body === input.body) return noteView(existing);
+    const sessionId = input.sessionId ?? null;
+    const [saved] = existing
+      ? await tx
+          .update(schema.recordingNotes)
+          .set({
+            body: input.body,
+            revision: existing.revision + 1,
+            updatedBySubjectId: input.subjectId,
+            updatedBySessionId: sessionId,
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(where)
+          .returning()
+      : await tx
+          .insert(schema.recordingNotes)
+          .values({
+            accountId: recording.accountId,
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            kind: input.kind,
+            body: input.body,
+            updatedBySubjectId: input.subjectId,
+            updatedBySessionId: sessionId,
+          })
+          .returning();
+    if (input.kind === "notes") {
+      await insertEvent(tx, recording, "recording.notes.updated", {
+        noteKind: input.kind,
+        noteRevision: saved!.revision,
+        sessionId,
+      });
+    }
+    return noteView(saved!);
+  });
+}
+
 export async function listRecordingPeople(
   db: Database,
   input: RecordingActor & { query?: string | undefined; limit?: number | undefined },
@@ -1984,7 +2890,12 @@ export async function listRecordingPeople(
       .where(and(...conditions))
       .orderBy(asc(schema.recordingPeople.displayName), asc(schema.recordingPeople.id))
       .limit(limit);
-    return rows.map(personView);
+    const learned = await voiceprintUpdates(
+      tx,
+      input.workspaceId,
+      rows.filter((row) => row.voiceConsent).map((row) => row.id),
+    );
+    return rows.map((row) => personView(row, learned.get(row.id)));
   });
 }
 
@@ -2035,6 +2946,118 @@ export async function createRecordingPerson(
   });
 }
 
+async function lockPerson(tx: Database, workspaceId: string, personId: string): Promise<PersonRow> {
+  const [person] = await tx
+    .select()
+    .from(schema.recordingPeople)
+    .where(
+      and(
+        eq(schema.recordingPeople.workspaceId, workspaceId),
+        eq(schema.recordingPeople.id, personId),
+      ),
+    )
+    .for("update");
+  if (!person) throw new RecordingNotFoundError("Person not found");
+  return person;
+}
+
+/**
+ * Agree to have a person's voice remembered, then learn it from every
+ * speaker already confirmed as them. A member agrees only for themselves
+ * (`self`); for someone outside the workspace, the caller attests that they
+ * agreed (`attested`). The caller checks the workspace recognizes voices.
+ */
+export async function rememberRecordingPersonVoice(
+  db: Database,
+  input: RecordingActor & { personId: string; consent: "self" | "attested" },
+): Promise<RecordingPerson> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const person = await lockPerson(tx, input.workspaceId, input.personId);
+    if (person.memberSubjectId) {
+      if (input.consent !== "self" || person.memberSubjectId !== input.subjectId) {
+        throw new RecordingForbiddenError(
+          `Only ${person.displayName} can agree to have their voice remembered`,
+        );
+      }
+    } else if (input.consent !== "attested") {
+      throw new RecordingForbiddenError(
+        "Confirm that this person agreed to have their voice remembered",
+      );
+    }
+    const [updated] = await tx
+      .update(schema.recordingPeople)
+      .set({
+        voiceConsent: input.consent,
+        voiceConsentBySubjectId: input.subjectId,
+        voiceConsentedAt: person.voiceConsentedAt ?? sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(eq(schema.recordingPeople.id, person.id))
+      .returning();
+    await learnConfirmedVoices(tx, { workspaceId: input.workspaceId, personId: person.id });
+    const learned = await voiceprintUpdates(tx, input.workspaceId, [person.id]);
+    return personView(updated!, learned.get(person.id));
+  });
+}
+
+/**
+ * Forget a person's voice and withdraw their agreement. Members decide for
+ * themselves; anyone in the workspace may forget someone from outside it.
+ */
+export async function forgetRecordingPersonVoice(
+  db: Database,
+  input: RecordingActor & { personId: string },
+): Promise<RecordingPerson> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const person = await lockPerson(tx, input.workspaceId, input.personId);
+    if (person.memberSubjectId && person.memberSubjectId !== input.subjectId) {
+      throw new RecordingForbiddenError(`Only ${person.displayName} can forget their own voice`);
+    }
+    await forgetPersonVoice(tx, { workspaceId: input.workspaceId, personId: person.id });
+    const [updated] = await tx
+      .select()
+      .from(schema.recordingPeople)
+      .where(eq(schema.recordingPeople.id, person.id));
+    return personView(updated!);
+  });
+}
+
+/**
+ * Forget every voice in the workspace, for when it stops recognizing
+ * voices: voiceprints, stored speaker voices, turned-down suggestions and
+ * every agreement.
+ */
+export async function forgetWorkspaceRecordingVoices(
+  db: Database,
+  input: RecordingActor,
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    await tx
+      .delete(schema.recordingVoiceprints)
+      .where(eq(schema.recordingVoiceprints.workspaceId, input.workspaceId));
+    await tx
+      .delete(schema.recordingSpeakerVoices)
+      .where(eq(schema.recordingSpeakerVoices.workspaceId, input.workspaceId));
+    await tx
+      .delete(schema.recordingVoiceRejections)
+      .where(eq(schema.recordingVoiceRejections.workspaceId, input.workspaceId));
+    await tx
+      .update(schema.recordingPeople)
+      .set({
+        voiceConsent: null,
+        voiceConsentBySubjectId: null,
+        voiceConsentedAt: null,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schema.recordingPeople.workspaceId, input.workspaceId),
+          isNotNull(schema.recordingPeople.voiceConsent),
+        ),
+      );
+  });
+}
+
 /** Work the recovery sweep restarts: a transcript version or a deletion. */
 export type StalledRecordingWork = {
   kind: "transcript" | "deletion";
@@ -2070,4 +3093,152 @@ export async function listStalledRecordingWork(
     versionId: row.version_id,
     ownerSubjectId: row.owner_subject_id,
   }));
+}
+
+export type DueRecordingRetention = {
+  /** audio: delete the audio, keep the transcript. recording: delete the meeting. */
+  kind: "audio" | "recording";
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+  ownerSubjectId: string;
+};
+
+/**
+ * Meetings whose workspace retention has passed, across every workspace.
+ * Identity only; the caller acts on each as its owner.
+ */
+export async function listDueRecordingRetention(
+  db: Database,
+  limit = 50,
+): Promise<DueRecordingRetention[]> {
+  const rows = await rawRows<{
+    kind: "audio" | "recording";
+    account_id: string;
+    workspace_id: string;
+    recording_id: string;
+    owner_subject_id: string;
+  }>(db, sql`select * from opengeni_private.list_due_recording_retention_v1(${limit})`);
+  return rows.map((row) => ({
+    kind: row.kind,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    recordingId: row.recording_id,
+    ownerSubjectId: row.owner_subject_id,
+  }));
+}
+
+/**
+ * Retention is deleting a meeting's audio: stamp it, so nothing plays or
+ * transcribes it from now on, and return the audio objects to delete. Null
+ * when there is nothing to do (the meeting is gone, being deleted, still
+ * being captured or transcribed). Repeating it returns the same objects.
+ */
+export async function beginRecordingAudioExpiry(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<string[] | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      )
+      .for("update");
+    if (!row || row.purpose !== "meeting") return null;
+    if (row.state !== "ready" && row.state !== "failed") return null;
+    if (!row.audioDeletedAt) {
+      const [pending] = await tx
+        .select({ id: schema.recordingTranscriptVersions.id })
+        .from(schema.recordingTranscriptVersions)
+        .where(
+          and(
+            eq(schema.recordingTranscriptVersions.workspaceId, input.workspaceId),
+            eq(schema.recordingTranscriptVersions.recordingId, input.recordingId),
+            inArray(schema.recordingTranscriptVersions.state, ["queued", "processing"]),
+          ),
+        )
+        .limit(1);
+      if (pending) return null;
+      await tx
+        .update(schema.recordings)
+        .set({ audioDeletedAt: sql`clock_timestamp()`, updatedAt: sql`clock_timestamp()` })
+        .where(
+          and(
+            eq(schema.recordings.workspaceId, input.workspaceId),
+            eq(schema.recordings.id, input.recordingId),
+          ),
+        );
+    }
+    const [chunks, tracks] = await Promise.all([
+      tx
+        .select({ objectKey: schema.recordingChunks.objectKey })
+        .from(schema.recordingChunks)
+        .where(
+          and(
+            eq(schema.recordingChunks.workspaceId, input.workspaceId),
+            eq(schema.recordingChunks.recordingId, input.recordingId),
+          ),
+        ),
+      tx
+        .select({ objectKey: schema.recordingTracks.preparedObjectKey })
+        .from(schema.recordingTracks)
+        .where(
+          and(
+            eq(schema.recordingTracks.workspaceId, input.workspaceId),
+            eq(schema.recordingTracks.recordingId, input.recordingId),
+          ),
+        ),
+    ]);
+    return [
+      ...new Set([
+        ...chunks.map((chunk) => chunk.objectKey),
+        ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
+      ]),
+    ];
+  });
+}
+
+/**
+ * The audio objects are gone: drop the chunk rows and the tracks' pointers
+ * at prepared audio, which also takes the meeting off the retention sweep.
+ */
+export async function completeRecordingAudioExpiry(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await tx
+      .select({ audioDeletedAt: schema.recordings.audioDeletedAt })
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      )
+      .for("update");
+    if (!row?.audioDeletedAt) return;
+    await tx
+      .delete(schema.recordingChunks)
+      .where(
+        and(
+          eq(schema.recordingChunks.workspaceId, input.workspaceId),
+          eq(schema.recordingChunks.recordingId, input.recordingId),
+        ),
+      );
+    await tx
+      .update(schema.recordingTracks)
+      .set({ preparedObjectKey: null, preparedBytes: null, preparedSha256: null })
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, input.workspaceId),
+          eq(schema.recordingTracks.recordingId, input.recordingId),
+        ),
+      );
+  });
 }

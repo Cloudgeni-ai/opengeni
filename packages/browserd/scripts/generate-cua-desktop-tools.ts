@@ -1,6 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createCuaRuntime } from "../src/cua/sdk";
 
 // The desktop workflow tools agents may call. Lifecycle, escalation,
@@ -46,6 +47,14 @@ const ADMITTED = [
 // No app discovery, screenshots, native input, or permission prompts.
 // Run it on each platform: macOS defines the admitted set; Linux and Windows
 // publish their own schemas for that set and may omit tools they lack.
+// Each catalog names the CUA release it came from, so a catalog left behind
+// after a CUA pin change fails the catalog test instead of every call.
+const { version: cuaVersion } = JSON.parse(
+  await readFile(
+    join(dirname(fileURLToPath(import.meta.resolve("@trycua/cua-driver"))), "..", "package.json"),
+    "utf8",
+  ),
+) as { version: string };
 const suffix =
   process.platform === "linux" ? ".linux" : process.platform === "win32" ? ".windows" : "";
 const directory =
@@ -64,9 +73,9 @@ try {
   if (missing.length) console.log(`This platform omits: ${missing.join(", ")}`);
   await Bun.write(
     new URL(`../../contracts/src/cua-desktop-tools${suffix}.gen.json`, import.meta.url),
-    JSON.stringify(tools, null, 2) + "\n",
+    JSON.stringify({ cuaVersion, tools }, null, 2) + "\n",
   );
-  console.log(`Generated ${tools.length} upstream desktop tool definitions`);
+  console.log(`Generated ${tools.length} upstream desktop tool definitions from CUA ${cuaVersion}`);
 } finally {
   await runtime.shutdown();
   runtime.uniffiDestroy();

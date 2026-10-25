@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { markFailurePhase } from "./diagnostics";
+import { writeAttempted, writeResolved } from "./cycle-outcome";
 import {
   assertSha,
   canonical,
@@ -22,6 +23,8 @@ export class MergeConflict extends Error {
   }
 }
 export class GitStore {
+  private readonly promisors = new Map<string, string>();
+  private lastMaintenance = 0;
   constructor(
     readonly dir: string,
     readonly authEnv: Record<string, string> = {},
@@ -61,8 +64,127 @@ export class GitStore {
   commandTimeoutMs(args: string[]): number {
     return args[0] === "fetch" ? this.fetchTimeoutSeconds * 1000 : 60_000;
   }
-  async fetch(remote: string, refs: string[]): Promise<void> {
-    await this.exec(["fetch", "--no-tags", "--no-write-fetch-head", remote, ...refs]);
+  async fetch(
+    remote: string,
+    refs: string[],
+    cache: "state" | "candidate" | "objects" = "objects",
+  ): Promise<void> {
+    if (!refs.length) {
+      await this.retireCacheSlots(cache, 0);
+      return;
+    }
+    // One persistent promisor only. Git can batch missing blobs from different
+    // forks into one lazy request which neither source can satisfy. Distinct
+    // sources therefore use a complete exact-head fetch, not another promisor.
+    let source = this.promisors.get(remote);
+    if (!source) {
+      source = `batcher-${digest(remote).slice(0, 24)}`;
+      let primary = await this.exec(["config", "--default", "", "--get", "batcher.bloblessSource"]);
+      if (!primary) {
+        primary = source;
+        await this.exec(["config", "batcher.bloblessSource", primary]);
+      }
+      if (source === primary) {
+        await this.exec(["config", `remote.${source}.url`, remote]);
+        await this.exec(["config", `remote.${source}.promisor`, "true"]);
+        await this.exec(["config", `remote.${source}.partialclonefilter`, "blob:none"]);
+        await this.exec(["config", `remote.${source}.tagOpt`, "--no-tags"]);
+      } else source = remote;
+      this.promisors.set(remote, source);
+    }
+    // Raw-SHA fetches without refs cannot advertise their existing history on
+    // the next fetch. Main churn then downloads the full history repeatedly.
+    // These bounded LOCAL refs are negotiation hints, never queue/state proof.
+    // Keep state roots separate so a one-off candidate read cannot evict main.
+    const targets = refs.map((ref, index) =>
+      /^[a-f0-9]{40}$/.test(ref) && index < 64
+        ? `+${ref}:refs/batcher-cache/${cache}/${index}`
+        : ref,
+    );
+    await this.exec([
+      "fetch",
+      "--atomic",
+      "--no-tags",
+      "--no-write-fetch-head",
+      ...(source === remote ? ["--refetch", "--no-filter"] : ["--filter=blob:none"]),
+      "--no-auto-maintenance",
+      source,
+      ...targets,
+    ]);
+    await this.retireCacheSlots(cache, Math.min(refs.length, 64));
+  }
+  private async retireCacheSlots(cache: "state" | "candidate" | "objects", count: number) {
+    const prefix = `refs/batcher-cache/${cache}/`;
+    const rows = await this.exec(["for-each-ref", "--format=%(refname) %(objectname)", prefix]);
+    for (const row of rows.split("\n").filter(Boolean)) {
+      const [ref, sha] = row.split(" ");
+      const slot = ref!.slice(prefix.length);
+      if (/^(0|[1-9][0-9]*)$/.test(slot) && Number(slot) < 64 && Number(slot) >= count)
+        await this.exec(["update-ref", "-d", ref!, assertSha(sha!)]);
+    }
+  }
+  /** Local disposable pins only; called by the serialized active controller. */
+  async maintainLocal(ledger: Ledger, now: string): Promise<void> {
+    const at = Date.parse(now);
+    const retained = Number(
+      await this.exec(["config", "--default", "0", "--get", "batcher.lastMaintenance"]),
+    );
+    if (Number.isFinite(retained)) this.lastMaintenance = Math.max(this.lastMaintenance, retained);
+    if (!Number.isFinite(at) || at - this.lastMaintenance < 3600_000) return;
+    // Protect unresolved batches, not unrelated terminal history. Effects whose
+    // batch cannot be identified still hold all maintenance conservatively.
+    const protectedBatches = new Set([
+      ...Object.entries(ledger.missingRuns)
+        .filter(([, run]) => run.status !== "released")
+        .map(([id]) => id),
+      ...ledger.recovery.map((item) => item.batchId),
+      ...Object.values(ledger.landings)
+        .filter(
+          (item) =>
+            ![
+              "native-merged",
+              "already-contained",
+              "closed-unmerged",
+              "closed-newer-head",
+            ].includes(item.status),
+        )
+        .map((item) => item.batchId),
+    ]);
+    for (const effect of Object.values(ledger.effects)) {
+      if (effect.status === "done") continue;
+      if (effect.kind !== "rerun") return;
+      const id = effect.run.branch.split("/").at(-1);
+      if (!id || !/^[a-f0-9]{64}$/.test(id)) return;
+      protectedBatches.add(id);
+    }
+    // Persist the attempt before work: a local GC timeout must not be repeated
+    // every cycle or after every short-lived controller process restart.
+    this.lastMaintenance = at;
+    await this.exec(["config", "batcher.lastMaintenance", String(at)]);
+    const terminal = new Set([...ledger.landed, ...(ledger.parked ?? []).map((p) => p.batchId)]);
+    const refs = await this.exec([
+      "for-each-ref",
+      "--format=%(refname) %(objectname)",
+      "refs/batcher-local/",
+    ]);
+    for (const row of refs.split("\n").filter(Boolean)) {
+      const [ref, sha] = row.split(" ");
+      const id = ref?.slice("refs/batcher-local/".length);
+      if (id && /^[a-f0-9]{64}$/.test(id) && terminal.has(id) && !protectedBatches.has(id))
+        await this.exec(["update-ref", "-d", ref!, assertSha(sha!)]);
+    }
+    // Foreground, bounded by exec's timeout; preserve Git's normal grace period.
+    // No prune-now, remote refs, ledger, checkpoint or operator evidence writes.
+    // A partial pack intentionally lacks blob closure; full-closure bitmaps
+    // cannot be generated for that pack alongside locally authored commits.
+    await this.exec([
+      "-c",
+      "gc.autoDetach=false",
+      "-c",
+      "repack.writeBitmaps=false",
+      "gc",
+      "--prune=2.weeks.ago",
+    ]);
   }
   async ancestor(base: string, tip: string): Promise<boolean> {
     try {
@@ -260,6 +382,8 @@ export class AtomicGitWriter {
     const current = await this.git.remoteRefs(this.remote);
     if (updates.some((u) => (current.get(u.ref) ?? null) !== u.expected))
       throw new Error("Stale remote ref snapshot");
+    const outcomeKey = `git:${fence.next}`;
+    writeAttempted(outcomeKey);
     await this.git
       .exec([
         "push",
@@ -278,5 +402,6 @@ export class AtomicGitWriter {
       .catch((error) => {
         throw markFailurePhase(error, "atomic-push");
       });
+    writeResolved(outcomeKey);
   }
 }

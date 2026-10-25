@@ -26,6 +26,7 @@ import {
   editQueuedTurnInTransaction,
   getComposerDraftInTransaction,
   getSession,
+  retireArchivedChatWaits,
   setSessionArchive,
   getSessionEvent,
   getWorkspaceControlEvent,
@@ -1023,7 +1024,11 @@ function scheduleHumanControlPostCommit(
   ]);
 }
 
-/** Pause and personal visibility commit together; Restore never changes control. */
+/**
+ * Pause and personal visibility commit together; Restore never changes control.
+ * Pausing also retires the chat's one-time waits in the same transaction, so
+ * an archived chat is never woken by a "wake me when" it was waiting on.
+ */
 export async function archiveHumanSessionWorkstream(
   deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0],
   context: HumanSessionCommandContext,
@@ -1047,6 +1052,10 @@ export async function archiveHumanSessionWorkstream(
     sessionId: context.sessionId,
     beforeArchive: input.pause
       ? async (tx, archiveVersion) => {
+          await retireArchivedChatWaits(tx, {
+            workspaceId: context.workspaceId,
+            rootSessionId: context.sessionId,
+          });
           control = await mutateSessionControlInTransaction(tx, {
             accountId: context.accountId,
             workspaceId: context.workspaceId,

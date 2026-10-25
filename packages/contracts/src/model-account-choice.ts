@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { LatencyMode, ReasoningEffort } from "./index";
@@ -15,7 +16,9 @@ import { LatencyMode, ReasoningEffort } from "./index";
  * session, while personal accounts are allowed there. Choosing never widens
  * already accepted work; the database enforces the same authority boundary.
  */
-const ProviderId = /* @__PURE__ */ defineSchema(() => z.string().regex(/^[a-z][a-z0-9_]{1,31}$/));
+const ProviderId = /* @__PURE__ */ defineSchema(() =>
+  primitives.string.regex(/^[a-z][a-z0-9_]{1,31}$/),
+);
 
 /** Why a listed account cannot be chosen for this session. */
 export const ModelAccountChoiceRefusal = /* @__PURE__ */ defineSchema(() =>
@@ -40,7 +43,7 @@ export const ModelAccountUsageSnapshot = /* @__PURE__ */ defineSchema(() =>
     source: z.enum(["usage_endpoint", "response_headers", "refusal"]).nullable(),
     windows: z.array(
       z.object({
-        id: z.string(),
+        id: primitives.string,
         /** Null means unknown; values over 100 can represent overage. */
         usedPercent: z.number().finite().nonnegative().nullable(),
         resetsAt: z.string().datetime().nullable(),
@@ -56,18 +59,18 @@ export type ModelAccountUsageSnapshot = z.infer<typeof ModelAccountUsageSnapshot
 export const ModelAccountChoiceOption = /* @__PURE__ */ defineSchema(() =>
   z.object({
     provider: ProviderId,
-    connectionId: z.string().uuid(),
-    label: z.string().nullable(),
-    accountEmail: z.string().nullable(),
-    planType: z.string().nullable(),
-    status: z.string(),
+    connectionId: primitives.uuid,
+    label: primitives.nullableString,
+    accountEmail: primitives.nullableString,
+    planType: primitives.nullableString,
+    status: primitives.string,
     /** The caller's own personal account. */
-    personal: z.boolean(),
+    personal: primitives.boolean,
     /** The workspace pool a shared account belongs to, or `personal`. */
     source: z.enum(["workspace", "organization", "personal"]),
     /** Models the account may serve (null: every model the provider offers). */
-    allowedModelIds: z.array(z.string()).nullable(),
-    choosable: z.boolean(),
+    allowedModelIds: z.array(primitives.string).nullable(),
+    choosable: primitives.boolean,
     refusal: ModelAccountChoiceRefusal.nullable(),
     /** Omitted on older servers; null when this visible account has no decodable snapshot. */
     usage: ModelAccountUsageSnapshot.nullable().optional(),
@@ -79,7 +82,7 @@ export type ModelAccountChoiceOption = z.infer<typeof ModelAccountChoiceOption>;
 const SessionModelAccountBinding = /* @__PURE__ */ defineSchema(() =>
   z.object({
     provider: ProviderId,
-    connectionId: z.string().uuid().nullable(),
+    connectionId: primitives.nullableUuid,
     choice: z.enum(["explicit", "automatic"]),
   }),
 );
@@ -87,11 +90,11 @@ const SessionModelAccountBinding = /* @__PURE__ */ defineSchema(() =>
 /** Last lease-backed selection, not a queued choice or an unplaced proposal. */
 export const SessionModelAccountServing = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    turnId: z.string().uuid(),
+    turnId: primitives.uuid,
     provider: ProviderId,
-    connectionId: z.string().uuid().nullable(),
-    modelId: z.string().min(1),
-    preferredModelId: z.string().min(1),
+    connectionId: primitives.nullableUuid,
+    modelId: primitives.nonEmptyString,
+    preferredModelId: primitives.nonEmptyString,
     reasoningEffort: z.lazy(() => ReasoningEffort),
     latencyMode: z.lazy(() => LatencyMode),
   }),
@@ -115,11 +118,11 @@ export const SessionModelAccountChoiceResponse = /* @__PURE__ */ defineSchema(()
     accounts: z.array(ModelAccountChoiceOption),
     personal: z.object({
       /** Personal accounts are allowed in this workspace (effective setting). */
-      connectionsAllowed: z.boolean(),
+      connectionsAllowed: primitives.boolean,
       /** Personal fallback is allowed in this workspace (effective setting). */
-      fallbackAllowed: z.boolean(),
+      fallbackAllowed: primitives.boolean,
       /** The caller's own personal-fallback opt-in. */
-      fallbackOptIn: z.boolean(),
+      fallbackOptIn: primitives.boolean,
     }),
   }),
 );
@@ -132,9 +135,7 @@ export type SessionModelAccountChoiceResponse = z.infer<typeof SessionModelAccou
  * every provider's.
  */
 export const SetSessionModelAccountChoiceRequest = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({ connectionId: z.string().uuid().nullable(), provider: ProviderId.optional() })
-    .strict(),
+  z.object({ connectionId: primitives.nullableUuid, provider: ProviderId.optional() }).strict(),
 );
 export type SetSessionModelAccountChoiceRequest = z.infer<
   typeof SetSessionModelAccountChoiceRequest
@@ -142,11 +143,11 @@ export type SetSessionModelAccountChoiceRequest = z.infer<
 
 export const SetSessionModelAccountChoiceResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    changed: z.boolean(),
+    changed: primitives.boolean,
     /** A waiting turn re-places now; otherwise the choice applies from the next turn. */
     appliedTo: z.enum(["waiting_turn", "next_turn"]),
     provider: ProviderId.nullable(),
-    connectionId: z.string().uuid().nullable(),
+    connectionId: primitives.nullableUuid,
     choice: z.enum(["explicit", "automatic"]),
   }),
 );
@@ -157,9 +158,9 @@ export type SetSessionModelAccountChoiceResponse = z.infer<
 export const ModelAccountPreferences = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /** Use my personal accounts when every shared account is exhausted, where allowed. */
-    personalFallbackOptIn: z.boolean(),
+    personalFallbackOptIn: primitives.boolean,
     /** 0 before any preference was saved; pass it back as `expectedVersion`. */
-    version: z.number().int().nonnegative(),
+    version: primitives.nonnegativeInteger,
   }),
 );
 export type ModelAccountPreferences = z.infer<typeof ModelAccountPreferences>;
@@ -167,7 +168,7 @@ export type ModelAccountPreferences = z.infer<typeof ModelAccountPreferences>;
 export const UpdateModelAccountPreferencesRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      personalFallbackOptIn: z.boolean(),
+      personalFallbackOptIn: primitives.boolean,
       expectedVersion: z.number().int().nonnegative().optional(),
     })
     .strict(),

@@ -312,7 +312,12 @@ rather than falling back to the per-user workspace.
 Without `memberPermissions`, automatically added users (and anonymous
 visitors) receive workspace read, session create/read/control (including
 Send), file upload/read, and `mcp_servers:attach` for the host's per-session
-servers, never admin permissions. The organization key remains a
+servers, never admin permissions. Per-user workspaces also get
+`connections:personal`, so each person can connect their own accounts from
+the chat (see [Capability connection offers](./embedding.md#capability-connection-offers)).
+Set `identities: "per_user"` on the facade when each `user` you resolve is one
+real person, to give tenant users the same, or `identities: "shared"` when one
+`user` stands for many people, to keep it off everywhere. The organization key remains a
 permission ceiling on every request. Change an existing member's permissions
 with `updateExternalWorkspaceMember`; Opengeni never overwrites them. Supply
 MCP URLs and credentials only in the server's `createSession` hook, not
@@ -935,6 +940,9 @@ selection does not wait for lazy tool discovery or sandbox startup.
 `builtin:schedules` provides schedule-creation guidance when
 `scheduled_tasks_create` is configured. Like other bundles, it can be excluded
 by an explicit selection and does not grant tool permissions.
+`builtin:event-triggers` does the same for event triggers when the session also
+has `event_sources_list`. Leave `event_sources_list` and `events_get` out of a
+session's `firstPartyMcpTools` to keep its agent from setting event triggers.
 
 For an embedded support bot, start the agent from `capabilities: "none"`, which
 already omits the bundled guides; for any other agent, put

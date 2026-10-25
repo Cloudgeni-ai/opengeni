@@ -6,9 +6,12 @@ import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
+  createEventSource,
+  createScheduledTask,
   createSession,
   createSessionGoal,
   setSessionArchive,
+  setScheduledTaskEvents,
   mutateSessionControlInTransaction,
   createWorkspace,
   initializeSessionStartAtomically,
@@ -16,7 +19,7 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { signDelegatedAccessToken, type ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
@@ -464,4 +467,182 @@ describe("archiving a chat", () => {
       expect(command?.state).toBe("stopping");
       expect(command?.cancel_requested_at).not.toBeNull();
     });
+});
+
+describe("archiving a chat retires its one-time waits", () => {
+  async function waitsFixture() {
+    const chat = await freshChat("idle");
+    const space = { accountId: chat.accountId, workspaceId: chat.workspaceId };
+    const chatIn = async (parentSessionId?: string) =>
+      await createSession(db, {
+        ...space,
+        initialMessage: "another chat",
+        resources: [],
+        metadata: {},
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        ...(parentSessionId ? { parentSessionId } : {}),
+        createdBy: { kind: "subject", subjectId: OWNER },
+      });
+    const subChat = await chatIn(chat.sessionId);
+    const otherChat = await chatIn();
+    const { source } = await createEventSource(db, {
+      ...space,
+      createdBySubjectId: OWNER,
+      kind: "webhook",
+      adapter: "standard",
+      name: "Deploys",
+      ownerSubjectId: OWNER,
+      visibility: "workspace",
+      secretEncrypted: "encrypted-secret",
+    });
+    const automation = async (
+      name: string,
+      input: {
+        target: string;
+        schedule?: ScheduledTaskScheduleSpec;
+        once?: boolean;
+        owner?: string;
+        visibility?: "user_private" | "workspace_shared";
+      },
+    ) => {
+      const task = await createScheduledTask(db, {
+        ...space,
+        name,
+        status: "active",
+        schedule: input.schedule ?? { type: "manual" },
+        temporalScheduleId: crypto.randomUUID(),
+        runMode: "existing_session",
+        overlapPolicy: "skip",
+        targetSessionId: input.target,
+        agentConfig: { prompt: name, resources: [], tools: [], metadata: {} },
+        createdBy: { kind: "subject", subjectId: input.owner ?? OWNER },
+        visibility: input.visibility ?? "workspace_shared",
+        metadata: {},
+      });
+      if (input.once !== undefined) {
+        await setScheduledTaskEvents(db, {
+          ...space,
+          taskId: task.id,
+          triggers: [
+            {
+              sourceId: source.id,
+              eventTypes: ["deploy.finished"],
+              conditions: [],
+              includeOwnEvents: false,
+            },
+          ],
+          once: input.once,
+        });
+      }
+      return task.id;
+    };
+    const hourFromNow = new Date(Date.now() + 3_600_000).toISOString();
+    const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+    const retired = {
+      wakeOnEvent: await automation("Wake me when it deploys", {
+        target: chat.sessionId,
+        once: true,
+      }),
+      colleaguesPrivateWait: await automation("Tell me when it deploys", {
+        target: chat.sessionId,
+        once: true,
+        owner: COLLEAGUE,
+        visibility: "user_private",
+      }),
+      subChatWait: await automation("Sub-chat waits for the deploy", {
+        target: subChat.id,
+        once: true,
+      }),
+      wakeAtTime: await automation("Check back in an hour", {
+        target: chat.sessionId,
+        schedule: { type: "once", runAt: hourFromNow, timeZone: "UTC" },
+      }),
+    };
+    const kept = {
+      everyDeploy: await automation("After every deploy", {
+        target: chat.sessionId,
+        once: false,
+      }),
+      daily: await automation("Every morning", {
+        target: chat.sessionId,
+        schedule: { type: "calendar", hour: 9, minute: 0, timeZone: "UTC" },
+      }),
+      alreadyRan: await automation("Woke me already", { target: chat.sessionId, once: true }),
+      pastOneTimeRun: await automation("Checked back already", {
+        target: chat.sessionId,
+        schedule: { type: "once", runAt: hourAgo, timeZone: "UTC" },
+      }),
+      otherChatWait: await automation("Another chat's wait", {
+        target: otherChat.id,
+        once: true,
+      }),
+    };
+    await admin`update scheduled_task_event_settings set completed_at = now() where task_id = ${kept.alreadyRan}`;
+    return { chat, retired, kept };
+  }
+
+  const liveAutomations = async (workspaceId: string) =>
+    new Set(
+      (
+        await admin<{ id: string }[]>`
+          select id from scheduled_tasks where workspace_id = ${workspaceId} and deleted_at is null`
+      ).map((row) => row.id),
+    );
+
+  test("Pause-archive retires waits on the chat and its sub-chats; everything else stays", async () => {
+    if (!available) return;
+    const { chat, retired, kept } = await waitsFixture();
+    await archive(chat, await bearer(chat, OWNER));
+
+    expect(await liveAutomations(chat.workspaceId)).toEqual(new Set(Object.values(kept)));
+    const tombstones = await admin<{ id: string; status: string; reusable_session_id: null }[]>`
+      select id, status, reusable_session_id from scheduled_tasks
+      where id in ${admin(Object.values(retired))}`;
+    expect(tombstones).toHaveLength(4);
+    for (const row of tombstones) {
+      expect(row).toMatchObject({ status: "paused", reusable_session_id: null });
+    }
+    // Each retired automation's Temporal schedule is queued for the cleanup pump.
+    const [outbox] = await admin<{ count: number }[]>`
+      select count(*)::int as count from temporal_schedule_cleanup_outbox
+      where temporal_schedule_id in (
+        select temporal_schedule_id from scheduled_tasks where id in ${admin(Object.values(retired))}
+      )`;
+    expect(outbox!.count).toBe(4);
+
+    // Restoring the chat does not bring a retired wait back.
+    await archive(chat, await bearer(chat, OWNER), false);
+    expect(await liveAutomations(chat.workspaceId)).toEqual(new Set(Object.values(kept)));
+  });
+
+  test("a colleague's Pause-archive of a shared chat retires its waits too", async () => {
+    if (!available) return;
+    const { chat, kept } = await waitsFixture();
+    await archive(chat, await bearer(chat, COLLEAGUE));
+    expect(await liveAutomations(chat.workspaceId)).toEqual(new Set(Object.values(kept)));
+  });
+
+  test("Hide for me keeps every wait, and a refused archive retires nothing", async () => {
+    if (!available) return;
+    const { chat, retired, kept } = await waitsFixture();
+    const everything = new Set([...Object.values(retired), ...Object.values(kept)]);
+    await archive(chat, await bearer(chat, COLLEAGUE, ["sessions:read"]), true, {
+      mode: "hide_for_me",
+    });
+    expect(await liveAutomations(chat.workspaceId)).toEqual(everything);
+
+    const stale = await app.request(
+      `http://x/v1/workspaces/${chat.workspaceId}/sessions/${chat.sessionId}/archive`,
+      {
+        method: "PUT",
+        headers: { authorization: await bearer(chat, OWNER), "content-type": "application/json" },
+        body: JSON.stringify({ archived: true, expectedVersion: 99 }),
+      },
+    );
+    expect(stale.status).toBe(409);
+    expect(await liveAutomations(chat.workspaceId)).toEqual(everything);
+  });
 });

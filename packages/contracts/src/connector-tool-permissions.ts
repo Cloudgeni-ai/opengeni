@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { MCP_MAX_CATALOG_TOOL_ENTRIES } from "./mcp-catalog-limits";
@@ -14,15 +15,15 @@ export const ConnectorToolPermissionEntry = /* @__PURE__ */ defineSchema(() =>
     description: z.string().optional(),
     group: z.enum(["read", "write", "other"]),
     permission: ConnectorToolPermission,
-    inherited: z.boolean(),
+    inherited: primitives.boolean,
     resetReason: z.literal("operation_changed").optional(),
-    approvalRequired: z.boolean(),
+    approvalRequired: primitives.boolean,
     source: z.enum(["recommended", "connector_default", "tool", "action", "conflict"]).optional(),
-    conditional: z.boolean().optional(),
+    conditional: primitives.optionalBoolean,
     actionPermissions: z
       .array(
         z.object({
-          actionName: z.string(),
+          actionName: primitives.string,
           permission: ConnectorToolPermission,
         }),
       )
@@ -33,12 +34,12 @@ export type ConnectorToolPermissionEntry = z.infer<typeof ConnectorToolPermissio
 
 export const ConnectorToolPermissionsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    connectionId: z.string(),
-    serverId: z.string(),
+    connectionId: primitives.string,
+    serverId: primitives.string,
     defaultPermission: ConnectorToolPermission.nullable(),
     tools: z.array(ConnectorToolPermissionEntry),
-    discoveryError: z.string().nullable(),
-    canManage: z.boolean(),
+    discoveryError: primitives.nullableString,
+    canManage: primitives.boolean,
     appliesTo: z.literal("next_attempt").optional(),
     revision: z.string().optional(),
     accountLabel: z.string().optional(),
@@ -46,8 +47,8 @@ export const ConnectorToolPermissionsResponse = /* @__PURE__ */ defineSchema(() 
     accounts: z
       .array(
         z.object({
-          connectionId: z.string(),
-          label: z.string(),
+          connectionId: primitives.string,
+          label: primitives.string,
           scope: z.enum(["personal", "workspace", "none"]),
           instanceKey: z.string().optional(),
         }),

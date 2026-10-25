@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { normalizeAutomaticSessionTitle } from "./session-titles";
@@ -17,35 +18,32 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u;
 const NAMESPACE_PATTERN = /^[a-z0-9](?:[a-z0-9._:-]{0,62}[a-z0-9])?$/u;
 
 function boundedCanonicalText(maxBytes: number, label: string) {
-  return z
-    .string()
-    .min(1)
-    .superRefine((value, context) => {
-      if (value !== value.trim()) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `${label} must not have leading or trailing whitespace`,
-        });
-      }
-      if (value !== value.normalize("NFKC")) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `${label} must use canonical Unicode normalization`,
-        });
-      }
-      if (CONTROL_CHARACTERS.test(value)) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `${label} must not contain control characters`,
-        });
-      }
-      if (utf8Bytes(value) > maxBytes) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `${label} must be at most ${maxBytes} UTF-8 bytes`,
-        });
-      }
-    });
+  return primitives.nonEmptyString.superRefine((value, context) => {
+    if (value !== value.trim()) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${label} must not have leading or trailing whitespace`,
+      });
+    }
+    if (value !== value.normalize("NFKC")) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${label} must use canonical Unicode normalization`,
+      });
+    }
+    if (CONTROL_CHARACTERS.test(value)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${label} must not contain control characters`,
+      });
+    }
+    if (utf8Bytes(value) > maxBytes) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${label} must be at most ${maxBytes} UTF-8 bytes`,
+      });
+    }
+  });
 }
 
 export function normalizeWorkClaimNamespace(value: string): string {
@@ -63,9 +61,7 @@ export function normalizeWorkClaimDisplayLabel(value: string): string | null {
 }
 
 export const WorkClaimNamespace = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
-    .min(1)
+  primitives.nonEmptyString
     .max(WORK_CLAIM_NAMESPACE_MAX_BYTES)
     .regex(NAMESPACE_PATTERN)
     .refine((value) => value === normalizeWorkClaimNamespace(value), {
@@ -80,23 +76,20 @@ export const WorkClaimCanonicalKey = /* @__PURE__ */ defineSchema(() =>
 export type WorkClaimCanonicalKey = z.infer<typeof WorkClaimCanonicalKey>;
 
 export const WorkClaimDisplayLabel = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
-    .min(1)
-    .superRefine((value, context) => {
-      if (utf8Bytes(value) > WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `work claim display label must be at most ${WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES} UTF-8 bytes`,
-        });
-      }
-      if (normalizeWorkClaimDisplayLabel(value) !== value) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "work claim display label must be a safe concise semantic label",
-        });
-      }
-    }),
+  primitives.nonEmptyString.superRefine((value, context) => {
+    if (utf8Bytes(value) > WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `work claim display label must be at most ${WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+    if (normalizeWorkClaimDisplayLabel(value) !== value) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "work claim display label must be a safe concise semantic label",
+      });
+    }
+  }),
 );
 export type WorkClaimDisplayLabel = z.infer<typeof WorkClaimDisplayLabel>;
 
@@ -175,9 +168,9 @@ export type WorkClaimMutationKind = z.infer<typeof WorkClaimMutationKind>;
 
 export const WorkClaim = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    sessionId: z.string().uuid(),
-    rootSessionId: z.string().uuid(),
+    id: primitives.uuid,
+    sessionId: primitives.uuid,
+    rootSessionId: primitives.uuid,
     subject: z.object({
       namespace: WorkClaimNamespace,
       type: WorkClaimSubjectType,
@@ -186,7 +179,7 @@ export const WorkClaim = /* @__PURE__ */ defineSchema(() =>
     }),
     role: WorkClaimRole,
     state: WorkClaimState,
-    revision: z.number().int().positive(),
+    revision: primitives.positiveInteger,
     provenance: WorkClaimProvenance,
     version: z
       .object({
@@ -194,10 +187,10 @@ export const WorkClaim = /* @__PURE__ */ defineSchema(() =>
         value: WorkClaimVersionValue,
       })
       .nullable(),
-    observedAt: z.string().datetime({ offset: true }),
-    createdAt: z.string().datetime({ offset: true }),
-    updatedAt: z.string().datetime({ offset: true }),
-    settledAt: z.string().datetime({ offset: true }).nullable(),
+    observedAt: primitives.string.datetime({ offset: true }),
+    createdAt: primitives.string.datetime({ offset: true }),
+    updatedAt: primitives.string.datetime({ offset: true }),
+    settledAt: primitives.string.datetime({ offset: true }).nullable(),
   }),
 );
 export type WorkClaim = z.infer<typeof WorkClaim>;
@@ -206,7 +199,7 @@ export const WorkClaimMutationResult = /* @__PURE__ */ defineSchema(() =>
   z.object({
     claim: WorkClaim,
     mutation: WorkClaimMutationKind,
-    replayed: z.boolean(),
+    replayed: primitives.boolean,
   }),
 );
 export type WorkClaimMutationResult = z.infer<typeof WorkClaimMutationResult>;
@@ -264,7 +257,7 @@ export const WorkDiscoveryMatch = /* @__PURE__ */ defineSchema(() =>
       class: WorkDiscoveryMatchClass,
       field: WorkDiscoveryMatchedField,
       scoreBand: WorkDiscoveryScoreBand,
-      claimId: z.string().uuid().nullable(),
+      claimId: primitives.nullableUuid,
     })
     .strict(),
 );
@@ -279,9 +272,9 @@ export const WorkDiscoveryProjection = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       claims: z.array(WorkClaimDiscoverySummary).max(WORK_CLAIM_DISCOVERY_LIMIT),
-      claimsTruncated: z.boolean(),
+      claimsTruncated: primitives.boolean,
       match: WorkDiscoveryMatch.nullable(),
-      possibleOverlap: z.boolean(),
+      possibleOverlap: primitives.boolean,
       advisoryOnly: z.literal(true),
       noAdditionalAccess: z.literal(true),
     })

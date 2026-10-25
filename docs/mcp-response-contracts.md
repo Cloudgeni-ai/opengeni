@@ -213,6 +213,8 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `social_daily_analysis_context` | Read | Existing bounded analysis input projection |
 | First-party: `scheduled_tasks_list` | List | Compact, offset-paginated list result; scheduled-task entity bodies are not returned |
 | First-party: `scheduled_task_runs_list` | List | Existing caller-limited run list; not a redundant mutation echo |
+| First-party: `event_sources_list` | List/read | Compact list of the event sources the caller can use; with `sourceId`, that source and its event types |
+| First-party: `events_get` | Read | One stored event by id (data bounded at intake), or a run's event summaries, 50 per page with `nextOffset` |
 | First-party: `scheduled_tasks_get` | Read | Compact summary by default; optional explicitly bounded entity projection |
 | First-party: `knowledge_search`, `knowledge_prepare_save`, `knowledge_browse`, `knowledge_get` | List/read | Bounded canonical entry projection including publication status. A model call to `knowledge_search` or `knowledge_prepare_save` receives a compact copy without bookkeeping or repeated preview text; other callers receive the exact result ([details](knowledge.md#model-visible-discovery-results)) |
 | First-party: `sandboxes_list` | List | Existing fleet projection |
@@ -228,7 +230,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `sandbox_provision` | Action output | Essential provisioning or human enrollment result |
 | First-party: `github_connect_link` | Action output | Essential short-lived browser/configuration result |
 | First-party: `github_token` | Action output | Essential short-lived credential result; callers must handle it as a secret |
-| Codemode catalog tools (dynamic selected tool names) | Exact prepared-tool output | Preserve the exact executor result; Codemode adds no proxy/raw-transfer adaptation. Model-only projections (the 1 MiB spill and compact Knowledge discovery) never apply to Codemode |
+| Codemode catalog tools (dynamic selected tool names) | Exact prepared-tool output | Preserve the exact executor result; Codemode adds no proxy/raw-transfer adaptation. Model-only projections (the 1 MiB spill, compact Knowledge discovery and compact Gmail mail cards) never apply to Codemode |
 
 Reads, lists, and action outputs are not converted into receipts: their result
 contains information the caller did not already provide. This work removes

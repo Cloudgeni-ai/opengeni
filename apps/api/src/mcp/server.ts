@@ -17,6 +17,12 @@ import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
+import {
+  connectableIntegrationDefinitions,
+  integrationDefinitionCardPostedMessage,
+  integrationDefinitionSetupContext,
+  integrationDefinitionSetup,
+} from "./integration-definition-capabilities";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./user-setup-card";
 import {
@@ -26,6 +32,7 @@ import {
 } from "../site-uploads";
 import {
   sessionTargetContext,
+  isSecretReferenceError,
   SetSessionTargetRequest,
   CreateScheduledTaskRequest,
   ScheduledTaskAgentConfigInput,
@@ -187,12 +194,16 @@ import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools
 import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
+  scheduledTaskScheduleToolInput,
   scheduledTaskCreateToolValidation,
+  scheduledTaskEventsToolInput,
 } from "./scheduled-task-input";
+import { registerEventTools } from "./event-tools";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { vaultProviderRegistryFor } from "../routes/vault-providers";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
+import { registerMeetingTools } from "./meeting-tools";
 import { registerSecretTools } from "./secret-tools";
 import {
   attemptSecretWriteContext,
@@ -266,6 +277,7 @@ import {
 import {
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
+  eventTriggersEnabled,
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskForGrant,
@@ -288,6 +300,8 @@ import {
   updateScheduledTaskForApi,
   triggerScheduledTaskForGrant,
   validatedScheduledTaskUpdate,
+  withScheduledTaskEvents,
+  withScheduledTaskRunEventOccurrences,
 } from "@opengeni/core";
 import {
   acceptSessionUserMessageWithOutcome,
@@ -387,6 +401,7 @@ import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
+import { scheduleTimeZoneFacts, withAgentScheduleTimeZone } from "../scheduled-task-time-zone";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
@@ -412,12 +427,16 @@ export type McpServerOptions = {
   /** @deprecated Ignored compatibility input; Knowledge resolves scope at execution. */
   sessionMemory?: MemoryAgentScope | null | undefined;
   /**
-   * Set by the route only when the bound session has admin access right now
-   * (allowed by the organization, given by an owner or admin who still is
-   * one). It adds the admin tools whatever the session's tool selection;
-   * each call checks the access again.
+   * Set by the route for a bound session: how app actions reach the API, and
+   * the facts that list the app-action tools. A session a person started lists
+   * them when selected (fixed for the session's life); one with full access
+   * lists them whatever its selection, as before. Each call checks, live, as
+   * whom it runs and whether a change was confirmed.
    */
-  sessionAdminAccess?: SessionAdminAccessDispatch | null | undefined;
+  appActions?:
+    | { access: SessionAdminAccessDispatch; startedByPerson: boolean; fullAccess: boolean }
+    | null
+    | undefined;
 };
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
@@ -647,23 +666,31 @@ function staticToolInput<T>(build: () => T): () => T {
   return () => (value ??= build());
 }
 
-const scheduledTaskCreateToolProjection = staticToolInput(buildScheduledTaskCreateToolInput);
-const scheduledTaskUpdateToolInput = staticToolInput(() =>
+const scheduledTaskCreateToolProjections = {
+  withEvents: staticToolInput(() => buildScheduledTaskCreateToolInput({ events: true })),
+  withoutEvents: staticToolInput(() => buildScheduledTaskCreateToolInput({ events: false })),
+};
+const scheduledTaskCreateToolProjection = (events: boolean) =>
+  events
+    ? scheduledTaskCreateToolProjections.withEvents()
+    : scheduledTaskCreateToolProjections.withoutEvents();
+
+const buildScheduledTaskUpdateToolInput = (events: boolean) =>
   contractToolInput(
     z4
       .object({
         ...UpdateScheduledTaskRequest.out.shape,
         id: z4.string().uuid(),
+        schedule: scheduledTaskScheduleToolInput().optional(),
         action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
         agentConfig: z4
           .object(ScheduledTaskAgentConfigInput.shape)
           .omit({ slackBotChannelId: true, toolPolicy: true })
           .strict()
           .optional(),
+        ...(events ? { events: scheduledTaskEventsToolInput() } : {}),
       })
       // Only a person pins connector accounts; agents never do.
-      // Event triggers are not part of this tool; how agents set them is
-      // designed with the agent tools and their guidance.
       .omit({
         agentLearning: true,
         connectionAuthorities: true,
@@ -671,12 +698,19 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
         pinnedAccountsRequired: true,
         variableSetId: true,
         environmentId: true,
-        events: true,
+        ...(events ? {} : { events: true as const }),
       })
       .strict(),
     UpdateScheduledTaskRequest,
-  ),
-);
+  );
+const scheduledTaskUpdateToolInputs = {
+  withEvents: staticToolInput(() => buildScheduledTaskUpdateToolInput(true)),
+  withoutEvents: staticToolInput(() => buildScheduledTaskUpdateToolInput(false)),
+};
+const scheduledTaskUpdateToolInput = (events: boolean) =>
+  events
+    ? scheduledTaskUpdateToolInputs.withEvents()
+    : scheduledTaskUpdateToolInputs.withoutEvents();
 
 const sessionCreateToolInputs = new Map<string, ReturnType<typeof buildSessionCreateToolInput>>();
 
@@ -834,19 +868,19 @@ class PolicyMcpServer extends McpServer {
     private readonly grant: AccessGrant,
     private readonly sessionId: string | null,
     private readonly selectedTools: ReadonlySet<FirstPartyMcpToolName> | null,
-    private readonly sessionAdminAccess: boolean = false,
+    private readonly appActions: { startedByPerson: boolean; fullAccess: boolean } | null = null,
   ) {
     super({ name: "opengeni", version: "1.0.0" });
   }
 
   /**
    * Whether a selection-governed tool is both selected and authorized for this
-   * grant. Admin-access tools are never selection-governed, so a child
-   * selection can never carry them.
+   * grant. App-action tools act as a person, so a child selection can never
+   * carry them.
    */
   holdsSelectableTool(toolName: FirstPartyMcpToolName): boolean {
     const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
-    if (policy.adminAccessRequired) return false;
+    if (policy.personSessionRequired) return false;
     const authorized =
       (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
         true) &&
@@ -875,10 +909,15 @@ class PolicyMcpServer extends McpServer {
     if (catalogued) {
       const toolName = name as FirstPartyMcpToolName;
       const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
-      if (policy.adminAccessRequired) {
-        // Admin access, not the tool selection or the agent's own
-        // permissions, decides: the tools act as the person who gave it.
-        admitted = this.sessionId !== null && this.sessionAdminAccess;
+      if (policy.personSessionRequired) {
+        // The tools act as a person, not with the agent's own permissions:
+        // listed in a session a person started when selected, or whenever the
+        // session has full access.
+        admitted =
+          this.sessionId !== null &&
+          this.appActions !== null &&
+          (this.appActions.fullAccess ||
+            (this.appActions.startedByPerson && this.selectedTools?.has(toolName) === true));
       } else {
         admitted =
           (!policy.sessionRequired || this.sessionId !== null) &&
@@ -1071,18 +1110,25 @@ export function buildOpenGeniMcpServer(
     typeof nestedAgentDepth !== "number" ||
     typeof effectiveMaxNestedAgentDepth !== "number" ||
     nestedAgentDepth < effectiveMaxNestedAgentDepth;
-  const sessionAdminAccess =
-    sessionId !== null && exactAgentAttemptClaims(grant) !== null
-      ? (options.sessionAdminAccess ?? null)
-      : null;
-  const server = new PolicyMcpServer(grant, sessionId, selectedTools, sessionAdminAccess !== null);
-  if (sessionId !== null && sessionAdminAccess !== null) {
+  const attemptClaims = sessionId !== null ? exactAgentAttemptClaims(grant) : null;
+  const appActions = attemptClaims !== null ? (options.appActions ?? null) : null;
+  const server = new PolicyMcpServer(
+    grant,
+    sessionId,
+    selectedTools,
+    appActions && {
+      startedByPerson: appActions.startedByPerson,
+      fullAccess: appActions.fullAccess,
+    },
+  );
+  if (sessionId !== null && attemptClaims !== null && appActions !== null) {
     registerSessionAdminAccessTools({
       server,
       db: deps.db,
       grant,
       sessionId,
-      access: sessionAdminAccess,
+      attempt: { turnId: attemptClaims.turnId, attemptId: attemptClaims.attemptId },
+      access: appActions.access,
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
@@ -1148,6 +1194,16 @@ export function buildOpenGeniMcpServer(
   // Reading existing Knowledge and Skills remains available when authoring is Off.
   if (sessionId !== null) {
     registerKnowledgeEntryTools(server, deps, grant, sessionId);
+    // Recorded meetings, as the person this session works for (meeting-tools.ts).
+    registerMeetingTools({
+      server,
+      deps,
+      grant,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
     // secret_* (capability `secrets`): gated by permission and the signed
     // tool selection like every catalogued tool; agent attempts only.
     registerSecretTools(server, deps, grant, sessionId);
@@ -1855,6 +1911,12 @@ export function buildOpenGeniMcpServer(
   }
 
   if (can("scheduled_tasks:manage") || can("scheduled_tasks:run")) {
+    // Where the deployment runs event triggers, reads show them. Setting them
+    // belongs to sessions that can also find sources (event_sources_list).
+    const eventsRun = eventTriggersEnabled(deps.settings);
+    const eventTriggers = eventsRun && server.holdsSelectableTool("event_sources_list");
+    const withEvents = (tasks: ScheduledTask[]) =>
+      eventsRun ? withScheduledTaskEvents(deps.db, tasks) : Promise.resolve(tasks);
     // Someone else's Only me schedule is indistinguishable from a missing one.
     const requireVisibleTask = async (id: string) => {
       try {
@@ -1889,7 +1951,9 @@ export function buildOpenGeniMcpServer(
         );
         return json(
           boundScheduledTaskMcpPage({
-            tasks: rows.slice(0, limit).map((task) => scheduledTaskForGrant(task, grant)),
+            tasks: (await withEvents(rows.slice(0, limit))).map((task) =>
+              scheduledTaskForGrant(task, grant),
+            ),
             limit,
             offset,
             sourceHasMore: rows.length > limit,
@@ -1911,7 +1975,8 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ id, includeEntity, promptOffset, expectedExecutionDigest }) => {
-        const task = scheduledTaskForGrant(await requireVisibleTask(id), grant);
+        const [visible] = await withEvents([await requireVisibleTask(id)]);
+        const task = scheduledTaskForGrant(visible!, grant);
         if (promptOffset !== undefined)
           return json(scheduledTaskPromptPage(task, promptOffset, expectedExecutionDigest));
         return json(
@@ -1924,13 +1989,21 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Schedule a message in this chat by supplying name, schedule and prompt. Omitted destination uses the calling chat, with its model, tools, machine and attachments at run time. Choose reusable_session or new_session_per_run and agentConfig only when the user explicitly wants a separate agent; omit agentConfig.tools so each run gets the workspace's default connectors at that time, like a new chat, or list tools to give it exactly those. Each run uses the schedule owner’s current connected accounts; it never uses another chat owner’s credentials.",
+          "Schedule a message in this chat by supplying name, schedule and prompt. Omitted destination uses the calling chat, with its model, tools, machine and attachments at run time. Choose reusable_session or new_session_per_run and agentConfig only when the user explicitly wants a separate agent; omit agentConfig.tools so each run gets the workspace's default connectors at that time, like a new chat, or list tools to give it exactly those. Each run uses the schedule owner’s current connected accounts; it never uses another chat owner’s credentials." +
+          (eventTriggers
+            ? " To run when something happens in another app, add events with triggers on sources from event_sources_list, with or without a schedule. For “wake me when…”, set events.once and keep this chat as the destination."
+            : ""),
         inputSchema: contractToolInput(
-          scheduledTaskCreateToolProjection(),
+          scheduledTaskCreateToolProjection(eventTriggers),
           scheduledTaskCreateToolValidation(sessionId),
         ),
       },
-      async (args) => {
+      async (rawArgs) => {
+        const { input: args, timeZoneDefault } = await withAgentScheduleTimeZone(
+          deps.db,
+          grant,
+          rawArgs,
+        );
         const payload = resolveScheduledTaskCreateInput(args, sessionId);
         await requireLimit(deps, {
           accountId: grant.accountId,
@@ -1947,6 +2020,7 @@ export function buildOpenGeniMcpServer(
           toolsProvided: scheduledTaskToolsProvided(args),
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
+          eventSourceFetch: deps.eventSourceFetch,
         });
         try {
           await syncCreatedScheduledTask({
@@ -1964,10 +2038,15 @@ export function buildOpenGeniMcpServer(
               warnings: [
                 "The task database record committed, but Temporal schedule synchronization failed.",
               ],
+              ...scheduleTimeZoneReceiptFacts(timeZoneDefault),
             }),
           );
         }
-        return json(scheduledTaskReceipt("scheduled_tasks_create", task, "created", true));
+        return json(
+          scheduledTaskReceipt("scheduled_tasks_create", task, "created", true, {
+            ...scheduleTimeZoneReceiptFacts(timeZoneDefault),
+          }),
+        );
       },
     );
 
@@ -1975,12 +2054,21 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_update",
       {
         description:
-          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. For separate-agent model defaults use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input. A schedule whose configuration.connectors is workspace_default keeps following the workspace's default connectors; its agentConfig.tools lists only connectors added on top.",
-        inputSchema: scheduledTaskUpdateToolInput(),
+          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. For separate-agent model defaults use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input. A schedule whose configuration.connectors is workspace_default keeps following the workspace's default connectors; its agentConfig.tools lists only connectors added on top." +
+          (eventTriggers
+            ? " events replaces the event triggers and their run policy; triggers: [] removes them."
+            : ""),
+        inputSchema: scheduledTaskUpdateToolInput(eventTriggers),
       },
-      async ({ id, ...raw }) => {
+      async ({ id, ...requested }) => {
         const existing = await requireVisibleTask(id);
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
+        const { input: raw, timeZoneDefault } = await withAgentScheduleTimeZone(
+          deps.db,
+          grant,
+          requested,
+          existing.schedule,
+        );
         const payload = UpdateScheduledTaskRequest.parse(raw);
         const patchWarnings = (task: ScheduledTask) =>
           (payload.agentConfigPatch?.model !== undefined ||
@@ -2000,6 +2088,7 @@ export function buildOpenGeniMcpServer(
           toolsProvided: scheduledTaskToolsProvided(raw),
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
+          eventSourceFetch: deps.eventSourceFetch,
         }).catch((error: unknown) => {
           const conflict = scheduledTaskTargetAccessHttpError(error);
           if (conflict) return conflict;
@@ -2018,7 +2107,8 @@ export function buildOpenGeniMcpServer(
           };
         }
         const update = updateOrError;
-        if (!scheduledTaskUpdateChangesState(existing, update)) {
+        // events always rewrites the triggers, so it always counts as a change.
+        if (payload.events === undefined && !scheduledTaskUpdateChangesState(existing, update)) {
           return json(
             scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false, {
               warnings: patchWarnings(existing),
@@ -2035,6 +2125,7 @@ export function buildOpenGeniMcpServer(
         return json(
           scheduledTaskReceipt("scheduled_tasks_update", task, "updated", true, {
             warnings: patchWarnings(task),
+            ...scheduleTimeZoneReceiptFacts(timeZoneDefault),
           }),
         );
       },
@@ -2276,12 +2367,34 @@ export function buildOpenGeniMcpServer(
       },
       async ({ taskId, limit }) => {
         await requireVisibleTask(taskId);
+        const runs = await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100);
         return json({
-          runs: (await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100)).map(
-            (run) => scheduledTaskRunForGrant(run, grant),
+          runs: (eventsRun ? await withScheduledTaskRunEventOccurrences(deps.db, runs) : runs).map(
+            (run) => {
+              const visible = scheduledTaskRunForGrant(run, grant);
+              // Counts only: events_get with the run id reads its events.
+              return visible.eventOccurrence
+                ? {
+                    ...visible,
+                    eventOccurrence: {
+                      triggerIds: visible.eventOccurrence.triggerIds,
+                      eventCount: visible.eventOccurrence.eventCount,
+                    },
+                  }
+                : visible;
+            },
           ),
         });
       },
+    );
+
+    registerEventTools(
+      server,
+      deps,
+      grant,
+      json,
+      requireVisibleTask,
+      can("scheduled_tasks:manage"),
     );
   }
 
@@ -3167,8 +3280,14 @@ function registerGoalTools(
     "wait_for_input",
     {
       description:
-        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. The platform persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. The platform persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn. When this turn answers a person's message, put your complete answer in reply: it is shown to them exactly as written, while text written just before this call may reach them only as a short summary.",
       inputSchema: {
+        reply: z4
+          .string()
+          .nullish()
+          .describe(
+            "Your complete message to the person, shown to them verbatim as your reply (Markdown, tables and artifact images work). Pass it whenever this turn answers a person's message, and then do not also write the answer before this call. Omit it when there is nothing new to tell them.",
+          ),
         reason: inputWaitReasonSchema.describe(
           "Shown directly to the user; at most 2048 UTF-8 bytes. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
         ),
@@ -4156,6 +4275,14 @@ function registerPreferenceRegistryTools(
   );
 }
 
+/** Report the zone a schedule uses when the agent's call left it out. */
+function scheduleTimeZoneReceiptFacts(
+  timeZoneDefault: Parameters<typeof scheduleTimeZoneFacts>[0],
+): { facts?: Record<string, string> } {
+  const facts = scheduleTimeZoneFacts(timeZoneDefault);
+  return facts ? { facts } : {};
+}
+
 function scheduledTaskReceipt(
   operation: string,
   task: ScheduledTask,
@@ -4435,28 +4562,35 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
-      const typedOp = op as RunOnOp;
-      const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
-      // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
-      const claims = exactAgentAttemptClaims(grant);
-      const secretResolver =
-        claims && claims.sessionId === sessionId && typedOp.kind !== "read"
-          ? await createRunOnSecretResolver(
-              deps,
-              { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
-              (subjectId) =>
-                vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
-            )
-          : null;
-      return json(
-        await withUserSetupCard(
-          await runOnSandbox(services, await fleetContext(), target, typedOp, {
-            ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
-            ...(secretResolver ? { secretResolver } : {}),
-          }),
-          userSetupCard("run_on", target),
-        ),
-      );
+      try {
+        const typedOp = op as RunOnOp;
+        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+        // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
+        const claims = exactAgentAttemptClaims(grant);
+        const secretResolver =
+          claims && claims.sessionId === sessionId && typedOp.kind !== "read"
+            ? await createRunOnSecretResolver(
+                deps,
+                { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
+                (subjectId) =>
+                  vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
+              )
+            : null;
+        return json(
+          await withUserSetupCard(
+            await runOnSandbox(services, await fleetContext(), target, typedOp, {
+              ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+              ...(secretResolver ? { secretResolver } : {}),
+            }),
+            userSetupCard("run_on", target),
+          ),
+        );
+      } catch (error) {
+        if (isSecretReferenceError(error)) {
+          return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
+        }
+        throw error;
+      }
     },
   );
 
@@ -6522,15 +6656,26 @@ function registerWorkspaceOrchestrationTools(
       "session_set_model",
       {
         description:
-          "Set an existing session's model and reasoning defaults for future turns. Use a model from list_models and specify the intended reasoning effort. Does not send a message, resume a paused session, wake an idle session, change latency mode, or rewrite already accepted turns/scheduled occurrences. Older queued turns keep their settings but cannot undo this choice when they start. Reuse the exact idempotencyKey for retries; session_get detail=full reads current effective defaults. Requires sessions:control and ordinary target-session authorization.",
+          "Switch a session's model and reasoning effort for its future turns. Omit sessionId to switch this chat, for example when the person asks for a faster or smarter model: pick a sensible model from list_models, then tell them which model the chat uses now, that it applies from their next message, and that they can switch back by asking you or with the model chooser. Does not send a message, resume a paused session, wake an idle session, change latency mode, or rewrite already accepted turns/scheduled occurrences. Older queued turns keep their settings but cannot undo this choice when they start. Reuse the exact idempotencyKey for retries; session_get detail=full reads current effective defaults.",
         inputSchema: {
-          sessionId: z4.string().uuid(),
+          sessionId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe("The session to change; omit it for this chat."),
           model: z4.string().min(1).max(512),
           reasoningEffort: z4.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
           idempotencyKey: z4.string().uuid(),
         },
       },
-      async ({ sessionId, ...request }) => {
+      async ({ sessionId: requestedSessionId, ...request }) => {
+        const sessionId = requestedSessionId ?? callerSessionId;
+        if (!sessionId) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "Pass the sessionId of the session to change." }],
+          };
+        }
         const result = await setSessionModel(deps, grant, sessionId, request, "first_party_mcp");
         return json(
           mcpMutationReceipt({
@@ -6711,6 +6856,14 @@ function registerCapabilityDiscoveryTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
+  // Agent-only setup entries next to the workspace catalog: GitHub, Connected
+  // Machine and the reviewed integration definitions this workspace can connect.
+  const recommendations = () =>
+    nativeConnectionCapabilityRecommendations({
+      connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+      browserExtension: browserExtension(deps.settings),
+      integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
+    });
 
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
@@ -6722,7 +6875,9 @@ function registerCapabilityDiscoveryTools(
     let accountSelectionKnown = false;
     if (
       items.some(
-        (item) => item.enabled && (item.connectionRef || item.surfaceType === "first_party_fiken"),
+        (item) =>
+          (item.enabled && (item.connectionRef || item.surfaceType === "first_party_fiken")) ||
+          item.surfaceType === "integration_definition",
       )
     ) {
       const claims = exactAgentCommandContext(grant, sessionId);
@@ -6753,20 +6908,27 @@ function registerCapabilityDiscoveryTools(
         for (const id of readiness.accepted) acceptedServerIds.add(id);
       }
     }
+    // One read of the person's integration accounts and this chat's tool
+    // selection for every definition item.
+    const integrationContext = items.some((item) => item.surfaceType === "integration_definition")
+      ? await integrationDefinitionSetupContext(deps, grant, sessionId)
+      : null;
     return await Promise.all(
       items.map((item) =>
         item.id === EXCEL_ADDIN_CAPABILITY_ID
           ? excelAddinSetup(deps, grant, sessionId)
-          : capabilitySetupProjection(
-              deps,
-              grant.workspaceId,
-              item,
-              availableServerIds,
-              acceptedServerIds,
-              accountSelectionKnown,
-              availableFirstPartyTools,
-              new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
-            ),
+          : item.surfaceType === "integration_definition"
+            ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
+            : capabilitySetupProjection(
+                deps,
+                grant.workspaceId,
+                item,
+                availableServerIds,
+                acceptedServerIds,
+                accountSelectionKnown,
+                availableFirstPartyTools,
+                new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+              ),
       ),
     );
   };
@@ -6784,13 +6946,7 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const current = await catalog();
-      const candidates = [
-        ...current.items,
-        ...nativeConnectionCapabilityRecommendations({
-          connectedMachines: deps.settings.sandboxSelfhostedEnabled,
-          browserExtension: browserExtension(deps.settings),
-        }),
-      ];
+      const candidates = [...current.items, ...recommendations()];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       const setups = await setupProjections(ranked.map(({ item }) => item));
       const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
@@ -6858,13 +7014,9 @@ function registerCapabilityDiscoveryTools(
     async ({ capabilityId, rationale }) => {
       await authorize();
       const current = await catalog();
-      const item = [
-        ...current.items,
-        ...nativeConnectionCapabilityRecommendations({
-          connectedMachines: deps.settings.sandboxSelfhostedEnabled,
-          browserExtension: browserExtension(deps.settings),
-        }),
-      ].find((candidate) => candidate.id === capabilityId);
+      const item = [...current.items, ...recommendations()].find(
+        (candidate) => candidate.id === capabilityId,
+      );
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
@@ -6923,7 +7075,9 @@ function registerCapabilityDiscoveryTools(
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
-              : "The recommendation was posted for human confirmation. No access has been granted yet.",
+              : item.surfaceType === "integration_definition"
+                ? integrationDefinitionCardPostedMessage(item)
+                : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
   );

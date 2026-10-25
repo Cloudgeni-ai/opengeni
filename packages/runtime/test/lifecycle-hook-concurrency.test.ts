@@ -32,6 +32,43 @@ function hook(
 }
 
 describe("beforeAgentStart hook scheduling", () => {
+  test("observes only bounded setup phases without changing hook concurrency", async () => {
+    const log: string[] = [];
+    const observed: string[] = [];
+    const client = deferred();
+    const run = runBeforeAgentStartHooks(
+      {} as never,
+      [
+        hook("codemode-client", log, { independent: true, gate: client.promise }),
+        hook("codemode-token", log, { independent: true }),
+        hook("azure-cli-login", log),
+        hook("artifact-runtime-doctor", log, { independent: true }),
+        hook("repository-clone", log),
+      ],
+      {
+        environment: {},
+        measureSetup: async (phase, work) => {
+          observed.push(`start:${phase}`);
+          try {
+            await work();
+          } finally {
+            observed.push(`end:${phase}`);
+          }
+        },
+      },
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(log).toContain("end:repository-clone");
+    expect(observed).not.toContain("end:client_readiness");
+    client.resolve();
+    await run;
+    expect(observed.filter((entry) => entry.startsWith("end:")).sort()).toEqual([
+      "end:artifact_runtime",
+      "end:client_readiness",
+      "end:credential_hooks",
+      "end:credential_seed",
+    ]);
+  });
   for (const operation of ["create", "resume"] as const) {
     test(`${operation} waits for independent client installation and ordered seed, renewal and clone`, async () => {
       const log: string[] = [];

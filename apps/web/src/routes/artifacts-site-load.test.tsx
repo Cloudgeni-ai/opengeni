@@ -5,7 +5,9 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
   createMemoryHistory,
   createRootRoute,
+  createRoute,
   createRouter,
+  Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
 import { createElement, type ReactNode } from "react";
@@ -129,17 +131,26 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-async function renderDetail(initialEntry = "/") {
+async function renderDetail(initialEntry = "/?tab=versions") {
   const { ArtifactDetailRoute } = await import("@opengeni/react/app/routes/artifacts");
-  const route = createRootRoute({
+  const rootRoute = createRootRoute({ component: Outlet });
+  const detail = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/",
     component: () =>
       createElement(ArtifactDetailRoute, {
         workspaceId,
         artifactId: siteId,
       }),
   });
+  // Where the page sends people, for example the Site view.
+  const elsewhere = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "$",
+    component: () => null,
+  });
   const router = createRouter({
-    routeTree: route,
+    routeTree: rootRoute.addChildren([detail, elsewhere]),
     history: createMemoryHistory({ initialEntries: [initialEntry] }),
   });
   const container = document.createElement("div");
@@ -183,54 +194,62 @@ test("loaded Site keeps Archive and Edit with Opengeni behind permission checks"
   }
 });
 
-test("a link opens the Site full screen; leaving it shows the Site's page", async () => {
+const sitePath = (id = siteId) => `/workspaces/${workspaceId}/sites/${id}`;
+
+test("a link to the Site, or the Artifacts list's old one, opens the Site view in its place", async () => {
   loadError = null;
-  const { container, root, router } = await renderDetail("/");
-  const sandbox = () => container.querySelector('[data-testid="site-sandbox"]')!;
-  const toggle = () =>
-    [...container.querySelectorAll("button")].find(
-      (button) => button.textContent === "Toggle full screen",
-    )!;
-  try {
-    expect(sandbox().getAttribute("data-full-screen")).toBe("true");
-    await act(async () => toggle().click());
-    expect(router.state.location.search).toEqual({ browse: true });
-    expect(sandbox().getAttribute("data-full-screen")).toBe("false");
-    // Expanding from the page replaces the same history entry.
-    const entries = router.history.length;
-    await act(async () => toggle().click());
-    expect(router.state.location.search).toEqual({});
-    expect(sandbox().getAttribute("data-full-screen")).toBe("true");
-    expect(router.history.length).toBe(entries);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
+  for (const entry of ["/", "/?browse=true", "/?fromSession=s1"]) {
+    const { container, root, router } = await renderDetail(entry);
+    try {
+      expect(router.state.location.pathname).toBe(sitePath());
+      // Replaced, so Back leaves the Site instead of bouncing into it again.
+      expect(router.history.length).toBe(1);
+      expect(container.querySelector('[data-testid="site-sandbox"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   }
 });
 
-test("the Artifacts list and archived Sites open the Site's page", async () => {
+test("the Site tab and Edit with Opengeni open the Site view; Edit starts a new conversation there", async () => {
   loadError = null;
-  const listed = await renderDetail("/?browse=true");
+  const tab = await renderDetail("/?tab=versions");
   try {
-    expect(
-      listed.container
-        .querySelector('[data-testid="site-sandbox"]')
-        ?.getAttribute("data-full-screen"),
-    ).toBe("false");
+    const site = [...tab.container.querySelectorAll('[role="tab"]')].find(
+      (element) => element.textContent?.trim() === "Site",
+    ) as HTMLElement;
+    await act(async () => {
+      site.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+      site.click();
+    });
+    expect(tab.router.state.location.pathname).toBe(sitePath());
+    expect(tab.router.state.location.search).toEqual({});
   } finally {
-    await act(async () => listed.root.unmount());
-    listed.container.remove();
+    await act(async () => tab.root.unmount());
+    tab.container.remove();
   }
-  snapshot.detail.artifact.status = "archived" as "active";
-  const archived = await renderDetail("/");
+  const edit = await renderDetail("/?tab=conversations");
   try {
-    // Uncontrolled: the frame expands only when asked.
-    expect(
-      archived.container
-        .querySelector('[data-testid="site-sandbox"]')
-        ?.getAttribute("data-full-screen"),
-    ).toBe("undefined");
+    const button = [...edit.container.querySelectorAll("button")].find((element) =>
+      element.textContent?.includes("Edit with Opengeni"),
+    )!;
+    await act(async () => button.click());
+    expect(edit.router.state.location.pathname).toBe(sitePath());
+    expect(edit.router.state.location.search).toEqual({ new: true });
+  } finally {
+    await act(async () => edit.root.unmount());
+    edit.container.remove();
+  }
+});
+
+test("an archived Site's details say so and offer no edit", async () => {
+  loadError = null;
+  snapshot.detail.artifact.status = "archived" as "active";
+  const archived = await renderDetail();
+  try {
     expect(archived.container.textContent).toContain("This Site is archived");
+    expect(hasAction(archived.container, "Edit with Opengeni")).toBe(false);
   } finally {
     snapshot.detail.artifact.status = "active";
     await act(async () => archived.root.unmount());
@@ -253,7 +272,7 @@ test("missing Site hides Archive and Edit with Opengeni", async () => {
   }
 });
 
-test("read-only Site hides mutation actions but keeps its preview", async () => {
+test("read-only Site hides mutation actions but keeps its details", async () => {
   loadError = null;
   const permissions = accessContext.workspaceGrants[0]!.permissions;
   accessContext.workspaceGrants[0]!.permissions = [];
@@ -262,7 +281,7 @@ test("read-only Site hides mutation actions but keeps its preview", async () => 
     expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(hasAction(container, "Share with workspace")).toBe(false);
-    expect(container.querySelector('[data-testid="site-sandbox"]')).not.toBeNull();
+    expect(container.textContent).toContain("Café menu");
   } finally {
     accessContext.workspaceGrants[0]!.permissions = permissions;
     await act(async () => root.unmount());
@@ -324,17 +343,15 @@ test("Site read refusal explains missing artifact access instead of removal", as
   }
 });
 
-test("Site without an openable version shows a final state instead of loading forever", async () => {
+test("Site without an openable version still shows its details instead of loading forever", async () => {
   loadError = null;
   withoutContent = true;
   const { container, root } = await renderDetail();
   try {
     expect(container.textContent).toContain("Café menu");
-    expect(container.textContent).toContain("There's nothing to show for this Site");
     expect(container.textContent).not.toContain("Loading Site");
     expect(container.querySelector('[aria-busy="true"]')).toBeNull();
     expect(container.querySelector('[data-testid="site-sandbox"]')).toBeNull();
-    expect(hasAction(container, "Retry")).toBe(true);
   } finally {
     withoutContent = false;
     await act(async () => root.unmount());
@@ -342,7 +359,7 @@ test("Site without an openable version shows a final state instead of loading fo
   }
 });
 
-test("Duplicate in Settings copies the Site and opens the copy", async () => {
+test("Duplicate in Settings copies the Site and opens the copy in the Site view", async () => {
   loadError = null;
   withoutContent = false;
   siteClient.duplicateWorkspaceArtifact.mockClear();
@@ -358,7 +375,7 @@ test("Duplicate in Settings copies the Site and opens the copy", async () => {
       .calls[0] as [string, string, { idempotencyKey: string }];
     expect([calledWorkspace, calledSite]).toEqual([workspaceId, siteId]);
     expect(request.idempotencyKey).toBeString();
-    expect(router.state.location.pathname).toBe(`/workspaces/${workspaceId}/artifacts/${copyId}`);
+    expect(router.state.location.pathname).toBe(sitePath(copyId));
   } finally {
     await act(async () => root.unmount());
     container.remove();

@@ -81,6 +81,7 @@ const PREFIXES: ReadonlyArray<readonly [string, AgentToolMetricFamily]> = [
   ["computer_", "computer"],
   ["web_search", "web"],
   ["knowledge_", "memory"],
+  ["meeting", "memory"],
   ["memory_", "memory"],
   ["instruction_policy_", "memory"],
   ["preference_", "memory"],

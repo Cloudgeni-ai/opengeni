@@ -75,9 +75,12 @@ impl Answered {
 #[must_use]
 pub fn outcome(reply: &Reply) -> Outcome {
     match reply {
-        Reply::Done | Reply::Woken { .. } | Reply::Connected { .. } | Reply::Status(_) => {
-            Outcome::Done
-        }
+        Reply::Done
+        | Reply::Woken { .. }
+        | Reply::Connected { .. }
+        | Reply::Status(_)
+        | Reply::Preparing
+        | Reply::Prepared { .. } => Outcome::Done,
         Reply::Error { code, .. } => match code {
             ErrorCode::HostFull | ErrorCode::Unavailable | ErrorCode::Expired => Outcome::Refused,
             ErrorCode::NotFound => Outcome::NotFound,

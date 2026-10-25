@@ -769,11 +769,17 @@ export async function freezeConnectionAccounts(
       workspaceId: input.workspaceId,
       subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
       servers,
-      connections: await visibleMcpAccountConnections(input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        source: input.source,
-      }),
+      // No generic MCP route can consume these accounts without a selected
+      // connection-backed server. Dedicated repository/social authority is
+      // still resolved by freezePersonalConnectionDelegations below.
+      connections:
+        servers.length === 0
+          ? []
+          : await visibleMcpAccountConnections(input.db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              source: input.source,
+            }),
       ...(input.authoritySelections
         ? {
             selections: input.authoritySelections.filter((selection) =>
@@ -1009,11 +1015,19 @@ export async function freezePersonalConnectionDelegations(input: {
     }
     return [];
   }
-  const visibleConnections = await listOwnConnectionMetadata(input.db, {
-    accountId: input.source.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: ownerSubjectId,
-  });
+  // Social accounts have their own reader below. Native connection metadata
+  // is used only by MCP, personal repositories and enabled Atlassian tools.
+  // The live membership check above remains mandatory for every personal path.
+  const visibleConnections =
+    servers.length > 0 ||
+    personalGitHubResources.length > 0 ||
+    (includeFirstPartyConnections && input.atlassianEnabled)
+      ? await listOwnConnectionMetadata(input.db, {
+          accountId: input.source.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: ownerSubjectId,
+        })
+      : [];
   const selectedMcpServerIds = new Set(servers.map((server) => server.id));
   const supportedSelectionIds = new Set(selectedMcpServerIds);
   if (personalGitHubResources.length > 0) {

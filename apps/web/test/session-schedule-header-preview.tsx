@@ -30,6 +30,22 @@ const base = {
   },
 } as unknown as Session;
 
+const nextRun = new Date(Date.now() + 20 * 60 * 60_000);
+nextRun.setMinutes(0, 0, 0);
+
+const checks = {
+  source: { kind: "github" as const, name: "GitHub" },
+  eventTypes: ["check_suite.completed"],
+};
+const mentions = {
+  source: { kind: "slack" as const, name: "Acme Slack" },
+  eventTypes: ["app_mention", "message"],
+};
+const mail = {
+  source: { kind: "gmail" as const, name: "Gmail (ada@acme.dev)" },
+  eventTypes: ["message.received"],
+};
+
 const states: { label: string; session: Session }[] = [
   {
     label: "Active schedule with a future run",
@@ -39,6 +55,55 @@ const states: { label: string; session: Session }[] = [
       title: "Quarterly cloud cost report",
       hasSchedules: true,
       hasUpcomingSchedules: true,
+      automationWait: {
+        nextRunAt: nextRun.toISOString(),
+        event: null,
+        events: [],
+        automations: 1,
+      },
+    } as Session,
+  },
+  {
+    label: "Waiting for an app's event, with a schedule too",
+    session: {
+      ...base,
+      id: "00000000-0000-4000-9000-000000004004",
+      title: "Ship the billing migration",
+      hasSchedules: true,
+      hasUpcomingSchedules: true,
+      waitingForEvents: true,
+      automationWait: {
+        nextRunAt: nextRun.toISOString(),
+        event: checks,
+        events: [checks],
+        automations: 2,
+      },
+    } as Session,
+  },
+  {
+    label: "Two automations waiting on different apps",
+    session: {
+      ...base,
+      id: "00000000-0000-4000-9000-000000004006",
+      title: "Support inbox",
+      hasSchedules: true,
+      waitingForEvents: true,
+      automationWait: {
+        nextRunAt: null,
+        event: mentions,
+        events: [mentions, mail],
+        automations: 2,
+      },
+    } as Session,
+  },
+  {
+    label: "Waiting for an event, from a server without the details",
+    session: {
+      ...base,
+      id: "00000000-0000-4000-9000-000000004005",
+      title: "Follow up when the order ships",
+      hasSchedules: true,
+      waitingForEvents: true,
     } as Session,
   },
   {
@@ -81,7 +146,7 @@ createRoot(document.getElementById("root")!).render(
             onToggleInspector={() => undefined}
             onRename={async () => null}
             onPin={async () => null}
-            onOpenSchedule={session.hasSchedules ? () => undefined : null}
+            onOpenAutomations={session.hasSchedules ? () => undefined : null}
           />
         </section>
       ))}

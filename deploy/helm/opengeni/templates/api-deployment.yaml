@@ -45,6 +45,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with include "opengeni.computeControl.trustInitContainer" (dict "root" . "workload" .Values.api) }}
+      initContainers:
+        {{- . | nindent 8 }}
+      {{- end }}
       containers:
         - name: api
           image: {{ include "opengeni.image" (dict "root" . "image" .Values.api.image) | quote }}

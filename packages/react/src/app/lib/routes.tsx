@@ -110,7 +110,11 @@ export function artifactReturnSearch(search: Record<string, unknown>): ArtifactR
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 /** The Site view: the Site with its conversations beside it, one of them open. */
-export type SiteViewSearch = { conversation?: string | undefined };
+export type SiteViewSearch = {
+  conversation?: string | undefined;
+  /** Open with a new conversation, its composer focused (Edit with Opengeni). Dropped once used. */
+  new?: true | undefined;
+};
 
 export function siteViewSearch(search: Record<string, unknown>): SiteViewSearch {
   return {
@@ -118,6 +122,7 @@ export function siteViewSearch(search: Record<string, unknown>): SiteViewSearch 
       typeof search.conversation === "string" && UUID.test(search.conversation)
         ? search.conversation
         : undefined,
+    new: search.new === true || search.new === "true" || search.new === 1 ? true : undefined,
   };
 }
 

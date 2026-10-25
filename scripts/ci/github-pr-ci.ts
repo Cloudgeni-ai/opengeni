@@ -14,7 +14,7 @@ type Run = {
   run_attempt: number;
   display_title?: string;
 };
-type Job = { status: string; conclusion: string | null; name: string };
+type Job = { status: string; conclusion: string | null; name: string; id?: number };
 export function supersededPrRuns(
   runs: Run[],
   number: number,
@@ -37,6 +37,29 @@ export function supersededPrRuns(
     )
     .map((r) => r.id);
 }
+/**
+ * Main push CI whose only waiting job is the public-release approval for
+ * `Build API workload image`, with every other job completed or pending, holds
+ * no runner (the merge-batcher main approval-only rule). In ci.yml every job not
+ * downstream of that approval has its prerequisites completed when it waits, so
+ * such a job is queued, running (both hold) or finished, never pending. Unique
+ * positive job IDs are required; anything else is not proof of zero demand.
+ */
+export function mainReleaseApprovalOnly(run: Run, jobs: Job[]): boolean {
+  if (run.status !== "waiting") return false;
+  const ids = new Set<number>();
+  let waiting = 0;
+  for (const job of jobs) {
+    const id = job.id;
+    if (id === undefined || !Number.isSafeInteger(id) || id <= 0 || ids.has(id)) return false;
+    ids.add(id);
+    if (job.status === "waiting") {
+      if (job.name !== "Build API workload image") return false;
+      waiting++;
+    } else if (job.status !== "pending" && job.status !== "completed") return false;
+  }
+  return waiting === 1;
+}
 export function priorityHold(
   lane: "pr" | "batch",
   runs: { run: Run; jobs: Job[] }[],
@@ -52,6 +75,7 @@ export function priorityHold(
       run.event === "push" &&
       run.head_branch.startsWith("queue/");
     if (!main && !(lane === "pr" && batch)) continue;
+    if (main && mainReleaseApprovalOnly(run, jobs)) continue;
     // Completed testing plus only environment-approval waits is not runner demand.
     // An empty/pre-fanout or unknown job observation is not proof of spare capacity.
     if (!jobs.length || jobs.some((j) => !["completed", "waiting"].includes(j.status)))
@@ -86,34 +110,67 @@ export function supersededVersionValidationRuns(
     .map((r) => r.id);
 }
 
+// A provider gateway error or a dropped connection on a read is transient: the
+// same read can be repeated. Mutations are never repeated (their outcome is unknown).
+const TRANSIENT_READ_STATUSES = new Set([502, 503, 504]);
+const TRANSIENT_READ_RETRIES = 5;
+export function transientReadDelay(retry: number, random: () => number): number {
+  // 2 s doubling to at most 30 s, with up to half of it as jitter.
+  const base = Math.min(30000, 2000 * 2 ** retry);
+  return Math.round(base / 2 + (base / 2) * random());
+}
+
 export async function runPrCiCommand(
   action = process.argv[2],
   env: Record<string, string | undefined> = process.env,
   transport: typeof fetch = fetch,
   laneArgument = process.argv[3],
-  timing = { now: Date.now, sleep: (ms: number) => Bun.sleep(ms) },
+  timing: { now: () => number; sleep: (ms: number) => Promise<unknown>; random?: () => number } = {
+    now: Date.now,
+    sleep: (ms: number) => Bun.sleep(ms),
+  },
 ) {
   const repo = env.GITHUB_REPOSITORY,
     token = env.GITHUB_TOKEN;
   if (!repo || !token) throw Error("Repository and GitHub token required");
-  const deadline = timing.now() + 5 * 60 * 60 * 1000;
+  const random = timing.random ?? Math.random;
+  const admissionStartedAt = timing.now();
+  const deadline = admissionStartedAt + 5 * 60 * 60 * 1000;
+  const prPriorityYieldDeadline = admissionStartedAt + 15 * 60 * 1000;
   let readAfter = 0;
   async function api(path: string, method = "GET", body?: unknown): Promise<any> {
+    let transientRetries = 0;
+    // Waits before repeating a read after a transient failure, or reports that
+    // the bounded retries are spent.
+    const retryTransientRead = async (): Promise<boolean> => {
+      if (method !== "GET" || transientRetries >= TRANSIENT_READ_RETRIES) return false;
+      const delay = transientReadDelay(transientRetries++, random);
+      if (timing.now() + delay >= deadline) return false;
+      await timing.sleep(delay);
+      return true;
+    };
     for (;;) {
       if (method === "GET" && readAfter > timing.now()) {
         if (readAfter >= deadline) throw Error("Provider rate budget exceeds admission deadline");
         await timing.sleep(readAfter - timing.now());
       }
-      const r = await transport(`https://api.github.com/repos/${repo}/${path}`, {
-        method,
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-          "content-type": "application/json",
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(30000),
-      });
+      let r: Response;
+      try {
+        r = await transport(`https://api.github.com/repos/${repo}/${path}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "content-type": "application/json",
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          signal: AbortSignal.timeout(30000),
+        });
+      } catch (error) {
+        // A network error or the 30 s timeout.
+        if (await retryTransientRead()) continue;
+        throw error;
+      }
       const remaining = r.headers.get("x-ratelimit-remaining"),
         reset = Number(r.headers.get("x-ratelimit-reset")) * 1000;
       const retry = Number(r.headers.get("retry-after")) * 1000;
@@ -134,6 +191,7 @@ export async function runPrCiCommand(
         );
         continue; // authenticated reads only; never replay a mutation
       }
+      if (TRANSIENT_READ_STATUSES.has(r.status) && (await retryTransientRead())) continue;
       if (!r.ok) throw Error(`GitHub ${method} ${r.status}`);
       return r.status === 204 ? null : r.json();
     }
@@ -213,6 +271,14 @@ export async function runPrCiCommand(
       const hold = priorityHold(lane, observations, Number(env.GITHUB_RUN_ID));
       if (!hold) {
         console.log("Higher-priority observed demand clear; repository admission granted");
+        return;
+      }
+      // PR CI already serializes one complete fast fanout. Main priority is a
+      // bounded courtesy, not a provider scheduling guarantee: continuous main
+      // pushes must not starve the PRs that repair main. Only a complete known
+      // inventory reaches this branch; unknown demand still holds above.
+      if (lane === "pr" && timing.now() >= prPriorityYieldDeadline) {
+        console.log("PR priority yield reached 15 minutes; admitting one serialized fast fanout");
         return;
       }
       console.log(hold);

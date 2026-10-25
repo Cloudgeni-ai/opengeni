@@ -31,6 +31,49 @@ export type IntegrationPresentationCopy = {
 export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
   Record<string, IntegrationPresentationCopy>
 > = {
+  "microsoft-teams": {
+    providerName: "Microsoft",
+    introduction:
+      "Let agents read Teams conversations and send messages as the work or school account you connect.",
+    capabilities: [
+      {
+        title: "Read conversations",
+        description:
+          "Find your teams, channels and chats, then read messages and replies you can access.",
+      },
+      {
+        title: "Send messages",
+        description:
+          "Post chat and channel messages or reply to a channel thread as your connected account.",
+      },
+    ],
+    permissionSummary:
+      "Microsoft asks for delegated Teams access. Reading channel messages requires tenant administrator consent. This does not install the Teams bot.",
+    scopeLabels: {
+      "Team.ReadBasic.All": {
+        label: "List teams",
+        description: "Read basic team details available to your account.",
+      },
+      "Channel.ReadBasic.All": {
+        label: "List channels",
+        description: "Read channel names and basic details.",
+      },
+      "ChannelMessage.Read.All": {
+        label: "Read channel messages",
+        description:
+          "Read messages in channels your account can access; administrator consent is required.",
+      },
+      "ChannelMessage.Send": {
+        label: "Send channel messages",
+        description: "Post messages and replies as your account.",
+      },
+      "Chat.Read": { label: "Read chats", description: "Read your chats and their messages." },
+      "ChatMessage.Send": {
+        label: "Send chat messages",
+        description: "Send messages in your chats as your account.",
+      },
+    },
+  },
   "microsoft-outlook-mail": {
     providerName: "Microsoft",
     icon: "mail",

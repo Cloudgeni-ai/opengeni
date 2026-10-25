@@ -38,7 +38,7 @@ import Svg, { Path } from "react-native-svg";
 import { Icon } from "./icon";
 import { useNativeTimelineMessages } from "./messages";
 import { withAlpha } from "./primitives";
-import { fontStyle, useNativeTimelineTheme, type WebColorToken } from "./theme";
+import { BAR_MAX_FONT_SCALE, fontStyle, useNativeTimelineTheme, type WebColorToken } from "./theme";
 
 /* ----------------------------------------------------------------------------
    The web app's session list rows at phone width (Recent sessions on the
@@ -379,6 +379,7 @@ export function SessionHeaderTitle({
   statusLabel,
   align = Platform.OS === "ios" ? "center" : "left",
   sideInset = 116,
+  fullAccess = false,
 }: {
   title: string;
   /** The display status: pass `blocked` for an admission-blocked session. */
@@ -393,6 +394,11 @@ export function SessionHeaderTitle({
    * running under them.
    */
   sideInset?: number | undefined;
+  /**
+   * The session has full access (its agent acts as the person who gave it):
+   * a small shield and "Full access" on the status line, as on the web header.
+   */
+  fullAccess?: boolean | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
@@ -407,11 +413,14 @@ export function SessionHeaderTitle({
     presentation?.tone === "running" ||
     presentation?.tone === "waiting" ||
     presentation?.tone === "failed";
+  const spoken = [title, label, fullAccess ? "Full access is on" : undefined]
+    .filter(Boolean)
+    .join(", ");
   return (
     <View
       accessible
       accessibilityRole="header"
-      accessibilityLabel={label ? `${title}, ${label}` : title}
+      accessibilityLabel={spoken}
       // iOS sizes a custom title view once, often before the session (and its
       // title) has loaded; a fixed width keeps a late title from collapsing to
       // "H…". Centered, it stays clear of the wider side's buttons on both sides.
@@ -426,24 +435,56 @@ export function SessionHeaderTitle({
     >
       <Text
         numberOfLines={1}
+        maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
         style={{ ...fontStyle(theme, 600), fontSize: 16, lineHeight: 20, color: c.fg }}
       >
         {title}
       </Text>
-      {presentation && label ? (
+      {(presentation && label) || fullAccess ? (
         <View style={{ flexDirection: "row", alignItems: "center", gap: 5, marginTop: 1 }}>
-          <StatusDot tone={presentation.tone} pulse={presentation.pulse} size={6} />
-          <Text
-            numberOfLines={1}
-            style={{
-              ...fontStyle(theme, 500),
-              fontSize: 12,
-              lineHeight: 15,
-              color: emphasized ? c[TONE_COLOR[presentation.tone]] : c["fg-muted"],
-            }}
-          >
-            {label}
-          </Text>
+          {presentation && label ? (
+            <>
+              <StatusDot tone={presentation.tone} pulse={presentation.pulse} size={6} />
+              <Text
+                numberOfLines={1}
+                maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
+                style={{
+                  ...fontStyle(theme, 500),
+                  fontSize: 12,
+                  lineHeight: 15,
+                  flexShrink: 1,
+                  color: emphasized ? c[TONE_COLOR[presentation.tone]] : c["fg-muted"],
+                }}
+              >
+                {label}
+              </Text>
+            </>
+          ) : null}
+          {fullAccess ? (
+            <View
+              testID="session-full-access-badge"
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 3,
+                marginLeft: presentation && label ? 3 : 0,
+              }}
+            >
+              <Icon name="shield-check" size={11} color={c["status-waiting"]} />
+              <Text
+                numberOfLines={1}
+                maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
+                style={{
+                  ...fontStyle(theme, 500),
+                  fontSize: 12,
+                  lineHeight: 15,
+                  color: c["fg-muted"],
+                }}
+              >
+                Full access
+              </Text>
+            </View>
+          ) : null}
         </View>
       ) : null}
     </View>

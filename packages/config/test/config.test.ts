@@ -70,6 +70,61 @@ describe(".env.example", () => {
   });
 });
 
+describe("recording transcription settings", () => {
+  const endpoint = "https://speech.example.cognitiveservices.azure.com";
+
+  test("reads the deployment's Azure Speech account and its Entra identity", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT: endpoint,
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_FEDERATED_TOKEN_FILE: "/var/run/secrets/azure/tokens/azure-identity-token",
+        AZURE_AUTHORITY_HOST: "https://login.microsoftonline.com/",
+      },
+      () => getSettings(),
+    );
+    expect(settings.recordingAzureSpeechEndpoint).toBe(endpoint);
+    expect(settings.azureTenantId).toBe("tenant");
+    expect(settings.azureFederatedTokenFile).toBe(
+      "/var/run/secrets/azure/tokens/azure-identity-token",
+    );
+  });
+
+  test("refuses an account it can't sign in to, a path in the endpoint and an unknown default", () => {
+    expect(() =>
+      withEnv({ OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT: endpoint }, () => getSettings()),
+    ).toThrow("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT: `${endpoint}/speechtotext`,
+          OPENGENI_RECORDING_AZURE_SPEECH_API_KEY: "key",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("HTTPS origin");
+    expect(() =>
+      withEnv({ OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT: "azure-speech/MAI-Transcribe-2" }, () =>
+        getSettings(),
+      ),
+    ).toThrow("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT is not set");
+    expect(() =>
+      withEnv({ OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT: "acme/model" }, () => getSettings()),
+    ).toThrow("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT must name one of");
+    expect(
+      withEnv(
+        {
+          OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT: endpoint,
+          OPENGENI_RECORDING_AZURE_SPEECH_API_KEY: "key",
+          OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT: "elevenlabs/scribe_v2",
+        },
+        () => getSettings(),
+      ).recordingTranscriptionDefault,
+    ).toBe("elevenlabs/scribe_v2");
+  });
+});
+
 describe("optional resource credits and verified signup trial", () => {
   test("keeps every new charge and grant off by default", () => {
     const settings = withEnv({}, () => getSettings());
@@ -645,6 +700,22 @@ describe("Google Drive integration settings", () => {
     expect(settings.googleDriveClientSecret).toBe("client-secret");
   });
 
+  test("loads a webhook address separate from the public address", () => {
+    const separate = withEnv(
+      {
+        OPENGENI_PUBLIC_BASE_URL: "https://console.example.test",
+        OPENGENI_WEBHOOK_BASE_URL: "https://hooks.example.test:8443",
+      },
+      () => getSettings(),
+    );
+    expect(separate.publicBaseUrl).toBe("https://console.example.test");
+    expect(separate.webhookBaseUrl).toBe("https://hooks.example.test:8443");
+    const same = withEnv({ OPENGENI_PUBLIC_BASE_URL: "https://console.example.test" }, () =>
+      getSettings(),
+    );
+    expect(same.webhookBaseUrl).toBeUndefined();
+  });
+
   test("requires the Google OAuth client id and secret together", () => {
     expect(() =>
       withEnv(
@@ -1065,8 +1136,10 @@ describe("Docker workspace materialization", () => {
 });
 
 describe("agent stable release selection", () => {
-  test("uses an exact stable version and supports an explicit operator promotion", () => {
-    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.54");
+  test("leaves the stable version to the build unless an operator pins an exact one", () => {
+    // Unset, the API serves the agent release of its own source tree; a fixed
+    // default here once kept every unconfigured deployment on an old release.
+    expect(withEnv({}, () => getSettings()).agentStableVersion).toBeUndefined();
     expect(
       withEnv({ OPENGENI_AGENT_STABLE_VERSION: "1.4.2" }, () => getSettings()).agentStableVersion,
     ).toBe("1.4.2");
@@ -1573,6 +1646,18 @@ describe("sandbox preparation profiles", () => {
       withEnv({ OPENGENI_AGENT_OP_STREAM_ENABLED: "false" }, () => getSettings())
         .agentOpStreamEnabled,
     ).toBe(false);
+  });
+
+  test("embedded app-action changes stay off unless a deployment turns them on", () => {
+    expect(withEnv({}, () => getSettings()).delegatedSignInAppActionChangesEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES: "false" }, () => getSettings())
+        .delegatedSignInAppActionChangesEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES: "true" }, () => getSettings())
+        .delegatedSignInAppActionChangesEnabled,
+    ).toBe(true);
   });
 
   test("retries startup dependency operations with bounded backoff", async () => {

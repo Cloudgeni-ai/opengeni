@@ -17,7 +17,7 @@ use crate::observe::notes::Notes;
 use crate::observe::{Alarm, Cause, alarm_event};
 use crate::pool::{Loaning, Template};
 use crate::protocol::{Id, StepStats};
-use crate::restore_notice::ask_commands;
+use crate::restore_notice::{Commands, REACH_LIMIT, ask_commands};
 use crate::state::{Disk, Record};
 use crate::step::{After, Job, Live, LiveMemory, Meter, Reading, Report};
 use crate::store::Store;
@@ -25,8 +25,10 @@ use crate::store::Store;
 use super::observe::Why;
 use super::{Event, HostAgent, HostError, Leftover, Reply, Running, Slot, TEARDOWN_RETRY, Woke};
 
-/// How long a guest may take to say whether commands still run before its
-/// sandbox sleeps anyway.
+/// How long a guest that took the connection may take to say whether
+/// commands still run before its sandbox sleeps anyway. It has as long to
+/// take the connection as a check gives it ([`REACH_LIMIT`]), so a guest
+/// slow to take one but not stopped is not kept awake for it.
 const ASK_LIMIT: Duration = Duration::from_secs(1);
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
@@ -76,12 +78,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
+            Event::Checked {
+                id,
+                incarnation,
+                reach,
+                unfrozen,
+            } => self.checked(id, incarnation, reach, unfrozen),
             Event::Asked {
                 id,
                 op,
                 step,
-                running,
-            } => self.asked(id, op, step, running),
+                stays,
+            } => self.asked(id, op, step, stays),
             Event::TemplateChecked { shape, result } => {
                 self.template_checked(shape, *result);
                 self.refill();
@@ -388,22 +396,29 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             && slot.vm.is_some()
         {
             // A command started through the guest's helper keeps it awake
-            // however quiet it is: ask before the step takes the VM.
+            // however quiet it is: ask before the step takes the VM. A
+            // guest that takes no connection may have stopped, and saving
+            // it would keep it stopped: it stays awake until it takes one
+            // or is found stopped (see `check`).
             let vsock = slot.spec.vsock_path();
             let events = self.events_tx.clone();
             tokio::spawn(async move {
-                let running = match ask_commands(&vsock, port, ASK_LIMIT).await {
-                    Ok(count) => count > 0,
-                    Err(error) => {
+                let stays = match ask_commands(&vsock, port, REACH_LIMIT, ASK_LIMIT).await {
+                    Commands::Running(count) => count > 0,
+                    Commands::Unknown(error) => {
                         tracing::debug!(%id, %error, "no command count; sleeping");
                         false
+                    }
+                    Commands::Unreached(error) => {
+                        tracing::debug!(%id, %error, "guest took no connection; staying awake");
+                        true
                     }
                 };
                 let _ = events.send(Event::Asked {
                     id,
                     op,
                     step,
-                    running,
+                    stays,
                 });
             });
             return;
@@ -425,11 +440,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             })
     }
 
-    /// The guest answered whether a command still runs: one that does
-    /// cancels the step, before it took effect, and counts as activity, so
-    /// the sandbox stays running for another idle period. Otherwise, or if
-    /// the VM ended meanwhile, the step goes ahead.
-    fn asked(&mut self, id: Id, op: OpId, step: Step, running: bool) {
+    /// The guest answered whether a command still runs: one that does, or
+    /// a guest that took no connection, cancels the step, before it took
+    /// effect, and counts as activity, so the sandbox stays running for
+    /// another idle period. Otherwise, or if the VM ended meanwhile, the
+    /// step goes ahead.
+    fn asked(&mut self, id: Id, op: OpId, step: Step, stays: bool) {
         let Some(slot) = self.slots.get_mut(&id.0) else {
             return;
         };
@@ -441,7 +457,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         else {
             return;
         };
-        if running
+        if stays
             && !cancelled
             && slot.dead.is_none()
             && let Some(live) = slot.vm.take()
@@ -490,6 +506,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         let (spec, paths) = (VmSpec::clone(&slot.spec), Paths::clone(&slot.paths));
         let live = if needs_vm { slot.vm.take() } else { None };
+        if live.is_some() {
+            // The step may pause the guest from now on, whenever the
+            // agent next notes it, until it hands the VM back.
+            slot.runs_since = None;
+        }
         let link_clock = slot.link_clock.clone();
         // A sandbox paused for memory is known to wait for room before
         // any step can leave it saved: a restart then still wakes it.
@@ -793,6 +814,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         }
         tracing::warn!(%id, "VM process ended on its own; running programs are lost");
+        self.lost_vm(id, incarnation);
+    }
+
+    /// Ends VM process `incarnation` of `id`, which is lost (it ended on its
+    /// own, or its guest stopped), and tells the core.
+    pub(super) fn lost_vm(&mut self, id: Id, incarnation: u64) {
+        let Some(slot) = self.slots.get_mut(&id.0) else {
+            return;
+        };
         // Whatever starts it again puts things right.
         slot.asked = Some(Why::plain(Cause::Recovery));
         if let Some(live) = slot.vm.take() {
@@ -821,10 +851,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Notice::Retrying { step, failures } => {
                 tracing::warn!(%id, ?step, failures, "step failed; retrying");
             }
-            Notice::Unsavable => tracing::warn!(
-                %id,
-                "no copy of the VM can be trusted; it sleeps no deeper than compressed"
-            ),
+            Notice::Unsavable => {
+                tracing::warn!(
+                    %id,
+                    "no copy of the VM can be trusted; it sleeps no deeper than compressed"
+                );
+                // A hand-off needs a copy, so one under way ends.
+                self.continue_hand_off(id);
+            }
             Notice::Broken => {
                 tracing::error!(%id, "sandbox broken on this host");
                 self.alarm(id, Alarm::Broken, "sandbox broken on this host");

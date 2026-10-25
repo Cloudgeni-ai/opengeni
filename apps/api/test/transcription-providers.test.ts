@@ -6,7 +6,7 @@ import {
   createTranscriptionService,
   orderedProviders,
   remainingTranscriptionProviderRequestMilliseconds,
-} from "../src/transcription/service";
+} from "@opengeni/core/transcription-service";
 
 const audio = new Uint8Array([1, 2, 3]);
 

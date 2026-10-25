@@ -52,8 +52,15 @@ const updateSessionToolPolicy = mock(
       firstPartyMcpTools: request.mode === "explicit" ? request.firstPartyMcpTools : [],
     }) as Session,
 );
+const continueAfterCapabilitySetup = mock(
+  async (_workspaceId: string, _sessionId: string, _request: { capabilityId: string }) => ({
+    outcome: "queued" as const,
+    updateId: "update",
+  }),
+);
 const context = {
   client: {
+    continueAfterCapabilitySetup,
     connectTransport: () => ({}),
     listCapabilities: async () => ({
       items: [
@@ -172,6 +179,7 @@ async function render(
 ) {
   sessionAccess = null;
   updateSessionToolPolicy.mockClear();
+  continueAfterCapabilitySetup.mockClear();
   context.accessContext.subjectId = "human";
   personal = personalAccount;
   liveCatalogItem = currentCatalogItem;
@@ -369,6 +377,10 @@ describe("conversation connection card", () => {
         "parent",
         "session",
       ]);
+      // The agent continues its request only after the reviewed access applied.
+      expect(continueAfterCapabilitySetup.mock.calls).toEqual([
+        ["workspace", "session", { capabilityId: "api:fiken" }],
+      ]);
       expect(createConnection).not.toHaveBeenCalled();
       expect(updateConnection).not.toHaveBeenCalled();
     } finally {
@@ -381,6 +393,7 @@ describe("conversation connection card", () => {
       await act(async () => button(h.container, "Add tools").click());
       await act(async () => button(h.container, "Cancel").click());
       expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+      expect(continueAfterCapabilitySetup).not.toHaveBeenCalled();
     } finally {
       await h.close();
     }
@@ -835,6 +848,9 @@ describe("conversation connection card", () => {
     expect(enableCapability).toHaveBeenCalledTimes(1);
     expect(h.container.textContent).toContain("Connected · Available in this conversation");
     expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+    expect(continueAfterCapabilitySetup.mock.calls).toEqual([
+      ["workspace", "session", { capabilityId: "example" }],
+    ]);
     expect(h.container.querySelector("button")).toBeNull();
     expect(h.container.textContent).not.toContain("secret-for-provider-only");
     await h.close();
@@ -847,7 +863,7 @@ describe("conversation connection card", () => {
         await act(async () => button(h.container, "Add API key").click());
         const dialog = document.querySelector("[role=dialog]");
         expect(dialog?.textContent).toContain(
-          "Your messages and personal schedules can use this account.",
+          "Your messages and personal automations can use this account.",
         );
         expect(dialog?.querySelector("input[type=checkbox]")).toBeNull();
         const add = button(h.container, "Add tools");
@@ -855,6 +871,7 @@ describe("conversation connection card", () => {
         await act(async () => add.click());
         expect(createConnection).not.toHaveBeenCalled();
         expect(h.container.textContent).toContain("Connected · Available in this conversation");
+        expect(continueAfterCapabilitySetup).toHaveBeenCalledTimes(1);
       } finally {
         await h.close();
       }
@@ -884,10 +901,13 @@ describe("conversation connection card", () => {
     await submit();
     expect(h.container.textContent).toContain("Enable failed");
     expect(h.container.querySelector('[data-state="complete"]')).toBeNull();
+    // A failed setup keeps its own error state and never wakes the agent.
+    expect(continueAfterCapabilitySetup).not.toHaveBeenCalled();
     await submit();
     expect(createConnection).toHaveBeenCalledTimes(1);
     expect(updateConnection).toHaveBeenCalledTimes(1);
     expect(h.container.textContent).toContain("Connected · Available in this conversation");
+    expect(continueAfterCapabilitySetup).toHaveBeenCalledTimes(1);
     await h.close();
   });
 });

@@ -1,8 +1,8 @@
 /** Build-time-only schema namespace discovery; never import this from the API. */
 import * as contracts from "@opengeni/contracts";
 import { z } from "zod";
-import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-types";
-import { ACTION_CATALOG } from "../../apps/api/src/mcp/action-catalog.gen";
+import type { ActionCatalogEntry } from "../../packages/contracts/src/app-action-catalog-types";
+import { ACTION_CATALOG } from "../../packages/contracts/src/app-action-catalog.gen";
 
 export const ACTION_SCHEMA_IMPORTS_PATH = new URL(
   "../../apps/api/src/mcp/action-schema-imports.gen.ts",

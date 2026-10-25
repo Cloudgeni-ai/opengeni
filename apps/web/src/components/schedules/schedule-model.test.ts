@@ -12,6 +12,7 @@ import {
   cadenceOfSchedule,
   createRequestFromDraft,
   deriveScheduleName,
+  draftFromTemplate,
   mergeSchedulePinnedAccounts,
   newScheduleDraft,
   nextRunOf,
@@ -19,9 +20,11 @@ import {
   scheduleErrorText,
   scheduleInheritsChatSettings,
   scheduleConnectionAccountIntent,
+  scheduleTemplates,
   scheduleWords,
   sortSchedulesForList,
   specFromCadence,
+  templateById,
   updateRequestFromDraft,
   type ScheduleDraft,
 } from "./schedule-model";
@@ -129,6 +132,67 @@ describe("schedule names", () => {
     );
     expect(long.length).toBeLessThanOrEqual(61);
     expect(long.endsWith("…")).toBe(true);
+  });
+});
+
+describe("schedule templates", () => {
+  test("event templates are offered only where event triggers run", () => {
+    expect(scheduleTemplates(false).some((template) => template.triggers.length > 0)).toBe(false);
+    expect(templateById("pr-review", false)).toBeUndefined();
+    expect(templateById("pr-review", true)?.triggers[0]?.source).toEqual({ kind: "github" });
+    expect(templateById("meeting-notes", true)?.triggers[0]?.source).toEqual({
+      kind: "workspace",
+    });
+  });
+
+  test("the pull request review runs on events only and skips drafts until they are ready", () => {
+    const template = templateById("pr-review")!;
+    const draft = draftFromTemplate(
+      template,
+      { includeOpenGeniTool: false },
+      { timeZone: "Europe/Oslo" },
+    );
+    expect(draft.cadence).toBeNull();
+    expect(draft.prompt).toBe(template.instructions);
+    const sourceId = "00000000-0000-4000-8000-000000000001";
+    const request = createRequestFromDraft(
+      {
+        ...draft,
+        events: {
+          ...draft.events,
+          triggers: draft.events.triggers.map((trigger) => ({ ...trigger, sourceId })),
+        },
+      },
+      { now: NOW, learningScope: "personal" },
+    );
+    expect(request.schedule).toEqual({ type: "manual" });
+    expect("events" in request ? request.events?.triggers : undefined).toEqual([
+      expect.objectContaining({
+        sourceId,
+        eventTypes: ["pull_request.opened", "pull_request.ready_for_review"],
+        conditions: [{ field: "data.pull_request.draft", op: "equals", value: false }],
+      }),
+    ]);
+  });
+
+  test("a scheduled template runs at its time in the viewer's time zone", () => {
+    const draft = draftFromTemplate(
+      templateById("morning-brief")!,
+      { includeOpenGeniTool: false },
+      { timeZone: "Europe/Oslo" },
+    );
+    expect(draft.cadence?.timeZone).toBe("Europe/Oslo");
+    expect(draft.events.triggers).toEqual([]);
+    const request = createRequestFromDraft(draft, { now: NOW, learningScope: "personal" });
+    expect(request.schedule).toEqual(
+      expect.objectContaining({
+        type: "calendar",
+        hour: 8,
+        minute: 0,
+        timeZone: "Europe/Oslo",
+        daysOfWeek: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+      }),
+    );
   });
 });
 
@@ -892,7 +956,7 @@ describe("scheduleAgentOpeningMessage", () => {
       "Europe/Oslo",
     );
     expect(message).toBe(
-      "Help me create a schedule in this workspace.\n\nEvery weekday morning, summarize new Sentry errors and post them to #eng\n\nMy time zone is Europe/Oslo.",
+      "Help me create an automation in this workspace.\n\nEvery weekday morning, summarize new Sentry errors and post them to #eng\n\nMy time zone is Europe/Oslo.",
     );
   });
 });

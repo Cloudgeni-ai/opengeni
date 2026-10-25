@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 /**
  * `opengeni.vault.v1`: the signed remote vault-provider protocol.
  *
@@ -10,7 +11,8 @@
  * key (`vaultProviderWireResponseKey`) so a response can never be replayed as
  * a request.
  *
- * Every shape is strict and bounded. Metadata shapes have no value fields.
+ * Every shape is strict and bounded. Item metadata may carry a username display
+ * hint, but never other field values.
  * Mutations carry an idempotency key; Opengeni never retries a mutation
  * automatically and reports an ambiguous outcome instead.
  */
@@ -19,6 +21,7 @@ import { defineSchema } from "./define-schema";
 import {
   VAULT_LIMITS,
   VaultFieldKind,
+  VaultItemCategory,
   VaultItemType,
   VaultProviderOperations,
   isReservedVaultFieldName,
@@ -96,9 +99,7 @@ export function isVaultProviderWireMutation(
 }
 
 /** Remote providers that use this protocol. */
-export const VaultProviderWireProvider = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["external", "bitwarden"]),
-);
+export const VaultProviderWireProvider = /* @__PURE__ */ defineSchema(() => z.enum(["external"]));
 export type VaultProviderWireProvider = z.infer<typeof VaultProviderWireProvider>;
 
 // oxlint-disable-next-line no-control-regex
@@ -110,9 +111,7 @@ export function vaultProviderWireUtf8Bytes(value: string): number {
 }
 
 function boundedText(max: number) {
-  return z
-    .string()
-    .min(1)
+  return primitives.nonEmptyString
     .max(max)
     .refine((value) => !CONTROL_CHARACTERS.test(value), "control characters are not allowed");
 }
@@ -124,15 +123,13 @@ const NativeId = /* @__PURE__ */ defineSchema(() =>
   boundedText(VAULT_PROVIDER_WIRE_LIMITS.nativeIdMaxChars),
 );
 const ItemName = /* @__PURE__ */ defineSchema(() =>
-  z.string().refine(isValidSecretName, "invalid_secret_name"),
+  primitives.string.refine(isValidSecretName, "invalid_secret_name"),
 );
 const FieldName = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
-    .refine(
-      (name) => isValidSecretName(name) && !isReservedVaultFieldName(name),
-      "invalid_secret_name",
-    ),
+  primitives.string.refine(
+    (name) => isValidSecretName(name) && !isReservedVaultFieldName(name),
+    "invalid_secret_name",
+  ),
 );
 const Website = /* @__PURE__ */ defineSchema(() => boundedText(VAULT_LIMITS.websiteMaxChars));
 const Version = /* @__PURE__ */ defineSchema(() =>
@@ -206,8 +203,7 @@ export const VaultProviderWireWriteField = /* @__PURE__ */ defineSchema(() =>
       name: FieldName,
       kind: VaultFieldKind,
       /** Omitted on an update: keep the current value. */
-      value: z
-        .string()
+      value: primitives.string
         .refine(
           (value) => vaultProviderWireUtf8Bytes(value) <= VAULT_LIMITS.textValueMaxBytes,
           "secret_value_too_large",
@@ -232,6 +228,7 @@ export const VaultProviderWireWriteItem = /* @__PURE__ */ defineSchema(() =>
       expectedVersion: Version.nullable().optional(),
       name: ItemName,
       type: VaultItemType.refine((type) => type !== "passkey", "passkeys are hosted only"),
+      category: VaultItemCategory.nullable().optional(),
       websites: z.array(Website).max(VAULT_LIMITS.websitesPerItem),
       fields: z.array(VaultProviderWireWriteField).max(VAULT_LIMITS.fieldsPerItem),
     })
@@ -253,7 +250,7 @@ export type VaultProviderWireWriteItem = z.infer<typeof VaultProviderWireWriteIt
 
 const ReadContext = {
   /** Recheck upstream; never bypasses authorization or upstream rate limits. */
-  forceRefresh: z.boolean(),
+  forceRefresh: primitives.boolean,
   /** Opengeni's mirror freshness epoch, for receiver-side cache invalidation. */
   cacheEpoch: CacheEpoch,
 };
@@ -315,10 +312,10 @@ export const VaultProviderWireRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       version: z.literal(VAULT_PROVIDER_WIRE_VERSION),
       type: z.literal("request"),
-      requestId: z.string().uuid(),
-      sentAt: z.string().datetime(),
+      requestId: primitives.uuid,
+      sentAt: primitives.dateTime,
       provider: VaultProviderWireProvider,
-      connectionId: z.string().uuid(),
+      connectionId: primitives.uuid,
       authority: VaultProviderWireAuthority,
       operation: VaultProviderWireOperation,
     })
@@ -365,13 +362,15 @@ export const VaultProviderWireFieldMeta = /* @__PURE__ */ defineSchema(() =>
 );
 export type VaultProviderWireFieldMeta = z.infer<typeof VaultProviderWireFieldMeta>;
 
-/** Item metadata. There is deliberately no value field. */
+/** Item metadata, including an optional username display hint but no other values. */
 export const VaultProviderWireItemMeta = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       externalItemId: ExternalId,
       name: ItemName,
       type: VaultItemType,
+      username: z.string().max(VAULT_LIMITS.usernameMaxChars).nullable().optional(),
+      category: VaultItemCategory.nullable().optional(),
       websites: z.array(Website).max(VAULT_LIMITS.websitesPerItem),
       fields: z
         .array(VaultProviderWireFieldMeta)
@@ -398,11 +397,9 @@ export const VaultProviderWireFieldValue = /* @__PURE__ */ defineSchema(() =>
         z
           .object({
             type: z.literal("text"),
-            value: z
-              .string()
-              .refine(
-                (value) => vaultProviderWireUtf8Bytes(value) <= VAULT_LIMITS.textValueMaxBytes,
-              ),
+            value: primitives.string.refine(
+              (value) => vaultProviderWireUtf8Bytes(value) <= VAULT_LIMITS.textValueMaxBytes,
+            ),
           })
           .strict(),
         /** An `otpauth://` URI or Base32 seed; Opengeni computes codes at use. */
@@ -412,8 +409,7 @@ export const VaultProviderWireFieldValue = /* @__PURE__ */ defineSchema(() =>
         z
           .object({
             type: z.literal("bytes"),
-            base64: z
-              .string()
+            base64: primitives.string
               .max(Math.ceil(VAULT_LIMITS.fileValueMaxBytes / 3) * 4)
               .regex(BASE64),
           })
@@ -436,7 +432,7 @@ export const VaultProviderWireDescribeResult = /* @__PURE__ */ defineSchema(() =
       accountId: boundedText(VAULT_PROVIDER_WIRE_LIMITS.accountIdMaxChars),
       accountName: boundedText(VAULT_PROVIDER_WIRE_LIMITS.accountNameMaxChars).nullable(),
       operations: VaultProviderOperations,
-      capabilities: z.object({ totp: z.boolean(), files: z.boolean() }).strict(),
+      capabilities: z.object({ totp: primitives.boolean, files: primitives.boolean }).strict(),
       /** One fixed inventory per connection, independent of the acting subject. */
       inventoryScope: z.literal("connection"),
     })
@@ -521,7 +517,7 @@ export const VaultProviderWireResponseEnvelope = /* @__PURE__ */ defineSchema(()
       .object({
         version: z.literal(VAULT_PROVIDER_WIRE_VERSION),
         type: z.literal("response"),
-        requestId: z.string().uuid(),
+        requestId: primitives.uuid,
         ok: z.literal(true),
         op: z.enum(VAULT_PROVIDER_WIRE_OPERATIONS),
         result: z.unknown(),
@@ -532,7 +528,7 @@ export const VaultProviderWireResponseEnvelope = /* @__PURE__ */ defineSchema(()
       .object({
         version: z.literal(VAULT_PROVIDER_WIRE_VERSION),
         type: z.literal("response"),
-        requestId: z.string().uuid(),
+        requestId: primitives.uuid,
         ok: z.literal(false),
         op: z.enum(VAULT_PROVIDER_WIRE_OPERATIONS),
         error: VaultProviderWireError,

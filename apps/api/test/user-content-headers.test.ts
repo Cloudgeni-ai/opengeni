@@ -33,6 +33,7 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
   "company-brain.ts": { count: 1, userContent: true, why: "Company Brain export" },
   "computer-sessions.ts": { count: 1, userContent: true, why: "live computer frame" },
   "editable-artifacts.ts": { count: 1, userContent: true, why: "materialized export download" },
+  "feedback.ts": { count: 1, userContent: true, why: "the author's own feedback screenshot bytes" },
   "files.ts": { count: 1, userContent: true, why: "retained file and screenshot content" },
   "install.ts": { count: 2, userContent: false, why: "operator-built install script and assets" },
   "managed-auth-session-sets.ts": {
@@ -69,6 +70,8 @@ const SIGNED_GET_URLS: Record<string, { calls: number; withUserContentOptions: n
   "routes/documents.ts": { calls: 1, withUserContentOptions: 1 },
   "routes/files.ts": { calls: 2, withUserContentOptions: 2 },
   "routes/knowledge.ts": { calls: 1, withUserContentOptions: 1 },
+  // Playback links to a recording track's worker-prepared audio.
+  "routes/recordings.ts": { calls: 1, withUserContentOptions: 1 },
   // Capture manifests and file bodies are stored as JSON/octet-stream and fetched by the client.
   "routes/workspace-capture.ts": { calls: 2, withUserContentOptions: 0 },
   // Site HTML downloads; the JSON source bundle is never active markup.

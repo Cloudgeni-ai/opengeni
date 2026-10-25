@@ -1,14 +1,18 @@
 import type {
   RecordingDiarization,
+  RecordingLiveProtocol,
   RecordingTrackSource,
   RecordingTranscriptionCapabilities,
+  RecordingTranscriptionFunding,
 } from "@opengeni/contracts";
+import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 
 /**
- * Recording transcription: one interface for every speech-to-text provider
- * a recording can use, plus the pure pieces that turn per-track words into
- * a transcript. Providers declare what each model can do; callers only ask
- * for what the chosen model supports.
+ * Speech to text: one interface for every provider any transcription uses
+ * (meetings, dictation and whatever comes later), plus the pure pieces that
+ * turn per-track words into a transcript. Providers declare what each model
+ * can do and who pays for it; callers only ask for what the chosen model
+ * supports.
  */
 
 export type RecordingTranscriptionModelSpec = {
@@ -19,12 +23,37 @@ export type RecordingTranscriptionModelSpec = {
   usdPerHour: number | null;
   /** Extra price share when keyterms are used (0.3 is 30% more). */
   keytermsPremium?: number;
+  /**
+   * Containers the model accepts. The worker converts other audio to the
+   * first one; absent means any format a recording is prepared in.
+   */
+  audioFormats?: readonly RecordingProviderAudioFormat[];
+  /**
+   * The Opengeni credit price of a deployment-funded model, from the
+   * deployment's voice pricing. Calls are charged in credits when credit
+   * billing is on; without a price such a call is refused.
+   */
+  creditPricing?: VoiceInputPricing | null;
 };
+
+/** Audio containers a transcription model can be sent. */
+export type RecordingProviderAudioFormat = "flac" | "wav" | "mp3" | "webm" | "mp4";
 
 export type RecordingTranscriptionAudio = {
   bytes: Uint8Array;
   mimeType: string;
   fileName: string;
+};
+
+/**
+ * Who a call is for. Providers that sign in as the workspace (a connected
+ * subscription) use it to find that sign-in; the request id is for logs.
+ */
+export type RecordingTranscriptionScope = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  requestId: string;
 };
 
 export type RecordingTranscriptionRequest = {
@@ -38,6 +67,8 @@ export type RecordingTranscriptionRequest = {
   maxSpeakers?: number | undefined;
   keyterms?: readonly string[] | undefined;
   signal?: AbortSignal | undefined;
+  /** Required by providers funded by a workspace subscription. */
+  scope?: RecordingTranscriptionScope | undefined;
 };
 
 export type RecordingTranscribedWord = {
@@ -51,23 +82,75 @@ export type RecordingTranscribedWord = {
 };
 
 export type RecordingTranscriptionResult = {
+  /** BCP 47 language tags ("en", "nb"), whatever form the provider reports them in. */
   languages: string[];
   /** Audio length the provider measured, when it says. */
   audioMilliseconds: number | null;
   diarized: boolean;
+  /** Empty for models without word timestamps, which return `text` instead. */
   words: RecordingTranscribedWord[];
+  /** The whole text, from models that give no word timings. */
+  text?: string | undefined;
+  /** What the provider reports it billed, for credit settlement. */
+  usage?: VoiceInputUsage | null | undefined;
 };
 
-export type RecordingTranscriptionCredentials = { apiKey: string };
+/** A provider key, or a short-lived token for providers that take one (Microsoft Entra ID). */
+export type RecordingTranscriptionCredentials = { apiKey: string } | { accessToken: string };
+
+/** A live session a client opens itself, straight to the provider. */
+export type RecordingLiveSessionGrant = {
+  protocol: RecordingLiveProtocol;
+  /** WebSocket URL carrying a single-use credential; never the provider key. */
+  url: string;
+  audio: { encoding: "pcm_s16le"; sampleRate: number };
+  expiresAt: Date;
+};
+
+export type RecordingLiveSessionRequest = {
+  model: string;
+  /** ISO 639 hint; omitted means detect. */
+  language?: string | undefined;
+  signal?: AbortSignal | undefined;
+};
 
 export type RecordingTranscriptionProvider = {
   id: string;
   name: string;
+  /**
+   * Who pays: the workspace's own key from its model connections, a
+   * subscription the workspace signed in to (never charged by Opengeni), or
+   * an account the deployment holds.
+   */
+  funding: RecordingTranscriptionFunding;
   models: readonly RecordingTranscriptionModelSpec[];
+  /**
+   * Whether the provider can serve this workspace now, for providers whose
+   * credential is not a key (a subscription sign-in). Key and deployment
+   * providers are available when their credential resolves. Without a
+   * scope it answers whether the deployment offers the provider at all.
+   */
+  available?(scope?: {
+    accountId?: string;
+    workspaceId: string;
+    subjectId?: string;
+  }): boolean | Promise<boolean>;
+  /**
+   * Transcribe a whole file. Only called for models with `capabilities.batch`.
+   * `credentials` is null for subscription providers, which use `scope`.
+   */
   transcribe(
     request: RecordingTranscriptionRequest,
-    credentials: RecordingTranscriptionCredentials,
+    credentials: RecordingTranscriptionCredentials | null,
   ): Promise<RecordingTranscriptionResult>;
+  /**
+   * Grant a client one live session. Present when some model has
+   * `capabilities.live`; only called for those models.
+   */
+  createLiveSession?(
+    request: RecordingLiveSessionRequest,
+    credentials: RecordingTranscriptionCredentials,
+  ): Promise<RecordingLiveSessionGrant>;
 };
 
 export type RecordingTranscriptionErrorCode =
@@ -114,6 +197,20 @@ export type SpeakerTurn = {
   speaker: string;
 };
 
+/** A diarized speaker's voice: a unit-length embedding of what they said. */
+export type DiarizedVoice = {
+  speaker: string;
+  speechMilliseconds: number;
+  embedding: number[];
+};
+
+export type RecordingDiarizerResult = {
+  turns: SpeakerTurn[];
+  voices: DiarizedVoice[];
+  /** The speaker model behind `voices`; vectors only compare within one model. */
+  voiceModel: string;
+};
+
 /**
  * Tells speakers apart in audio on its own, for models that cannot. Our CPU
  * diarizer implements this; GPU diarizers can later sit behind it too.
@@ -123,8 +220,62 @@ export type RecordingDiarizer = {
   diarize(
     audio: RecordingTranscriptionAudio,
     options: { maxSpeakers?: number | undefined; signal?: AbortSignal | undefined },
-  ): Promise<SpeakerTurn[]>;
+  ): Promise<RecordingDiarizerResult>;
 };
+
+// --- Word alignment --------------------------------------------------------
+
+/** Where the aligner placed each word, in the order it was given them. */
+export type RecordingAlignedWords = {
+  words: Array<{
+    startMilliseconds: number;
+    endMilliseconds: number;
+    /** Mean log-probability of the word's sound; null when it was spread or untimed. */
+    score: number | null;
+  }>;
+  /** Words fixed by agreement with the aligner's own reading of the audio. */
+  anchoredWords: number;
+  /** Words spread evenly over a stretch that could not be aligned exactly. */
+  spreadWords: number;
+  /** Words with nothing to place (symbols); they take their neighbour's time. */
+  untimedWords: number;
+};
+
+/**
+ * Places a transcript's words on the audio (forced alignment), for models
+ * that return only text. Our CPU aligner implements this.
+ */
+export type RecordingWordAligner = {
+  id: string;
+  align(
+    audio: RecordingTranscriptionAudio,
+    words: readonly string[],
+    options: { signal?: AbortSignal | undefined },
+  ): Promise<RecordingAlignedWords>;
+};
+
+/** A text-only model's text as the words the aligner places, split at whitespace. */
+export function recordingTextWords(text: string | undefined): string[] {
+  const trimmed = text?.trim() ?? "";
+  return trimmed ? trimmed.split(/\s+/u) : [];
+}
+
+/** The words of `text` with the times the aligner gave them. */
+export function alignedTranscribedWords(
+  words: readonly string[],
+  aligned: RecordingAlignedWords,
+): RecordingTranscribedWord[] {
+  if (aligned.words.length !== words.length) {
+    throw new Error(`the aligner placed ${aligned.words.length} of ${words.length} words`);
+  }
+  return words.map((text, index) => ({
+    text,
+    startMilliseconds: aligned.words[index]!.startMilliseconds,
+    endMilliseconds: aligned.words[index]!.endMilliseconds,
+    speaker: null,
+    spaceBefore: index > 0,
+  }));
+}
 
 /**
  * Give each word the speaker whose turn overlaps it most. A word inside no
@@ -178,6 +329,106 @@ export function labelWordsFromTurns(
     }
     return { ...word, speaker };
   });
+}
+
+// --- Pieces of long tracks --------------------------------------------------
+
+/** A stretch of a track sent to the model on its own, on the track's timeline. */
+export type RecordingTranscriptionPiece = {
+  startMilliseconds: number;
+  endMilliseconds: number;
+  /** Words that start in [keepFrom, keepUntil) are taken from this piece. */
+  keepFromMilliseconds: number;
+  keepUntilMilliseconds: number;
+};
+
+/** Pieces overlap by this much on each side, so no word is cut at a boundary. */
+export const RECORDING_PIECE_OVERLAP_MILLISECONDS = 10_000;
+
+/**
+ * Split a track a model can't take whole into overlapping pieces. Each word
+ * is kept from the one piece whose keep window it starts in, and that piece
+ * holds the whole word because the pieces overlap past their windows.
+ */
+export function planRecordingTranscriptionPieces(
+  durationMilliseconds: number,
+  maxPieceMilliseconds: number | null,
+  overlapMilliseconds = RECORDING_PIECE_OVERLAP_MILLISECONDS,
+): RecordingTranscriptionPiece[] {
+  const duration = Math.max(0, Math.ceil(durationMilliseconds));
+  if (maxPieceMilliseconds === null || duration <= maxPieceMilliseconds) {
+    return [
+      {
+        startMilliseconds: 0,
+        endMilliseconds: duration,
+        keepFromMilliseconds: 0,
+        keepUntilMilliseconds: Number.POSITIVE_INFINITY,
+      },
+    ];
+  }
+  const overlap = Math.min(overlapMilliseconds, Math.floor(maxPieceMilliseconds / 4));
+  const stride = maxPieceMilliseconds - 2 * overlap;
+  const count = Math.ceil(duration / stride);
+  const pieces: RecordingTranscriptionPiece[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const keepFrom = index * stride;
+    const last = index === count - 1;
+    const keepUntil = last ? Number.POSITIVE_INFINITY : (index + 1) * stride;
+    pieces.push({
+      startMilliseconds: Math.max(0, keepFrom - overlap),
+      endMilliseconds: last ? duration : Math.min(duration, keepUntil + overlap),
+      keepFromMilliseconds: keepFrom,
+      keepUntilMilliseconds: keepUntil,
+    });
+  }
+  return pieces;
+}
+
+/**
+ * Join the pieces' results into one track result. Speaker ids are only
+ * meaningful inside one call, so a track sent in several pieces has none.
+ */
+export function mergeRecordingTranscriptionPieces(
+  parts: ReadonlyArray<{
+    piece: RecordingTranscriptionPiece;
+    result: RecordingTranscriptionResult;
+  }>,
+): RecordingTranscriptionResult {
+  if (parts.length === 1) {
+    const [{ piece, result }] = parts as [(typeof parts)[number]];
+    if (piece.startMilliseconds === 0) return result;
+  }
+  const several = parts.length > 1;
+  const words: RecordingTranscribedWord[] = [];
+  const languages = new Set<string>();
+  let audioMilliseconds: number | null = 0;
+  for (const { piece, result } of parts) {
+    for (const language of result.languages) languages.add(language);
+    audioMilliseconds =
+      audioMilliseconds === null || result.audioMilliseconds === null
+        ? null
+        : Math.max(audioMilliseconds, piece.startMilliseconds + result.audioMilliseconds);
+    let firstOfPiece = true;
+    for (const word of result.words) {
+      const start = word.startMilliseconds + piece.startMilliseconds;
+      if (start < piece.keepFromMilliseconds || start >= piece.keepUntilMilliseconds) continue;
+      const spaceBefore = words.length > 0 && (word.spaceBefore || firstOfPiece);
+      firstOfPiece = false;
+      words.push({
+        ...word,
+        startMilliseconds: start,
+        endMilliseconds: word.endMilliseconds + piece.startMilliseconds,
+        speaker: several ? null : word.speaker,
+        spaceBefore,
+      });
+    }
+  }
+  return {
+    languages: [...languages],
+    audioMilliseconds,
+    diarized: !several && (parts[0]?.result.diarized ?? false),
+    words,
+  };
 }
 
 // --- Tracks and segments ----------------------------------------------------
@@ -255,6 +506,29 @@ function trackLabeler(track: RecordingTrackWords, prefixTracks: boolean) {
 }
 
 /**
+ * The transcript label each diarized speaker id gets on each track, as
+ * buildRecordingSegments assigns them, so per-speaker data (such as voices)
+ * can follow the speakers into the transcript.
+ */
+export function recordingSpeakerLabels(
+  tracks: readonly RecordingTrackWords[],
+): Map<number, Map<string, string>> {
+  const diarizedTracks = tracks.filter((track) => !track.fixedLabel).length;
+  const labels = new Map<number, Map<string, string>>();
+  for (const track of tracks) {
+    if (track.fixedLabel) continue;
+    const label = trackLabeler(track, diarizedTracks > 1);
+    const byId = new Map<string, string>();
+    for (const word of track.words) {
+      if (!word.text.trim() || word.speaker === null || byId.has(word.speaker)) continue;
+      byId.set(word.speaker, label(word.speaker)!);
+    }
+    labels.set(track.trackNumber, byId);
+  }
+  return labels;
+}
+
+/**
  * Turn per-track words into transcript segments ordered by time. A segment
  * ends when the speaker changes, after a pause over two seconds, at a
  * sentence end once it passes a minute, or at three minutes regardless.
@@ -328,6 +602,11 @@ export function recordingDiarizationKind(input: {
 // --- ElevenLabs Scribe ------------------------------------------------------
 
 const ELEVENLABS_SPEECH_TO_TEXT_URL = "https://api.elevenlabs.io/v1/speech-to-text";
+const ELEVENLABS_API_BASE_URL = "https://api.elevenlabs.io";
+const ELEVENLABS_REALTIME_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime";
+/** ElevenLabs single-use tokens last 15 minutes; grant a little less. */
+const ELEVENLABS_LIVE_TOKEN_MILLISECONDS = 14 * 60 * 1_000;
+const LIVE_SAMPLE_RATE = 16_000;
 /** Long recordings are chunked server-side; an hour can take a few minutes. */
 const ELEVENLABS_REQUEST_TIMEOUT_MILLISECONDS = 60 * 60 * 1_000;
 
@@ -347,6 +626,23 @@ const SCRIBE_CAPABILITIES: RecordingTranscriptionCapabilities = {
   maxFileBytes: 3 * 1024 * 1024 * 1024,
 };
 
+/** Scribe v2 Realtime: words as they are spoken, per track, without speakers. */
+const SCRIBE_REALTIME_CAPABILITIES: RecordingTranscriptionCapabilities = {
+  batch: false,
+  live: true,
+  diarization: false,
+  liveDiarization: false,
+  multichannel: false,
+  maxSpeakers: null,
+  wordTimestamps: true,
+  languages: [],
+  languageDetection: true,
+  keyterms: false,
+  speakerLibrary: false,
+  maxDurationSeconds: null,
+  maxFileBytes: null,
+};
+
 type ElevenLabsWord = {
   text?: unknown;
   type?: unknown;
@@ -360,6 +656,26 @@ type ElevenLabsResponse = {
   words?: unknown;
   audio_duration_secs?: unknown;
 };
+
+/**
+ * The shortest standard form of a provider's language code: ISO 639-3 "eng"
+ * and "nob" become "en" and "nb"; a code Intl can't read is kept as given.
+ */
+/**
+ * ElevenLabs knows Norwegian as one language ("no", "nor"), so Bokmål and
+ * Nynorsk are sent as Norwegian.
+ */
+export function elevenLabsLanguage(code: string): string {
+  return code === "nb" || code === "nn" || code === "nob" || code === "nno" ? "no" : code;
+}
+
+export function canonicalLanguageTag(code: string): string {
+  try {
+    return Intl.getCanonicalLocales(code.trim())[0] ?? code;
+  } catch {
+    return code;
+  }
+}
 
 function seconds(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
@@ -400,7 +716,7 @@ export function parseElevenLabsTranscript(body: unknown): RecordingTranscription
   }
   const language =
     typeof response.language_code === "string" && response.language_code
-      ? [response.language_code]
+      ? [canonicalLanguageTag(response.language_code)]
       : [];
   return {
     languages: language,
@@ -410,8 +726,12 @@ export function parseElevenLabsTranscript(body: unknown): RecordingTranscription
   };
 }
 
-function elevenLabsError(status: number, detail: string): RecordingTranscriptionError {
-  const message = `ElevenLabs could not transcribe this audio (HTTP ${status}${detail ? `: ${detail}` : ""})`;
+function elevenLabsError(
+  status: number,
+  detail: string,
+  action = "transcribe this audio",
+): RecordingTranscriptionError {
+  const message = `ElevenLabs could not ${action} (HTTP ${status}${detail ? `: ${detail}` : ""})`;
   if (status === 401 || status === 403) {
     return new RecordingTranscriptionError(message, "unauthorized", false);
   }
@@ -423,6 +743,12 @@ function elevenLabsError(status: number, detail: string): RecordingTranscription
   if (status === 429) return new RecordingTranscriptionError(message, "rate_limited", true);
   if (status >= 500) return new RecordingTranscriptionError(message, "unavailable", true);
   return new RecordingTranscriptionError(message, "provider", false);
+}
+
+/** ElevenLabs takes only its own API key. */
+function elevenLabsApiKey(credentials: RecordingTranscriptionCredentials | null): string {
+  if (credentials && "apiKey" in credentials && credentials.apiKey) return credentials.apiKey;
+  throw new RecordingTranscriptionError("ElevenLabs needs an API key", "unauthorized", false);
 }
 
 async function errorDetail(response: Response): Promise<string> {
@@ -437,12 +763,18 @@ async function errorDetail(response: Response): Promise<string> {
 
 /** ElevenLabs Scribe, using the workspace's or organization's own ElevenLabs key. */
 export function createElevenLabsRecordingTranscriptionProvider(
-  options: { fetch?: typeof fetch; url?: string; timeoutMilliseconds?: number } = {},
+  options: {
+    fetch?: typeof fetch;
+    url?: string;
+    timeoutMilliseconds?: number;
+    now?: () => Date;
+  } = {},
 ): RecordingTranscriptionProvider {
   const request = options.fetch ?? fetch;
   return {
     id: "elevenlabs",
     name: "ElevenLabs",
+    funding: "workspace_key",
     models: [
       {
         model: "scribe_v2",
@@ -451,7 +783,57 @@ export function createElevenLabsRecordingTranscriptionProvider(
         usdPerHour: 0.22,
         keytermsPremium: 0.3,
       },
+      {
+        model: "scribe_v2_realtime",
+        name: "Scribe v2 Realtime",
+        capabilities: SCRIBE_REALTIME_CAPABILITIES,
+        usdPerHour: 0.39,
+      },
     ],
+    async createLiveSession(input, credentials) {
+      const now = options.now?.() ?? new Date();
+      let response: Response;
+      try {
+        response = await request(`${ELEVENLABS_API_BASE_URL}/v1/single-use-token/realtime_scribe`, {
+          method: "POST",
+          headers: { "xi-api-key": elevenLabsApiKey(credentials) },
+          signal: input.signal
+            ? AbortSignal.any([input.signal, AbortSignal.timeout(15_000)])
+            : AbortSignal.timeout(15_000),
+        });
+      } catch (error) {
+        if (input.signal?.aborted) throw error;
+        throw new RecordingTranscriptionError("Could not reach ElevenLabs", "network", true);
+      }
+      if (!response.ok) {
+        throw elevenLabsError(
+          response.status,
+          await errorDetail(response),
+          "start a live transcript",
+        );
+      }
+      const body = (await response.json().catch(() => null)) as { token?: unknown } | null;
+      if (typeof body?.token !== "string" || body.token.length === 0) {
+        throw new RecordingTranscriptionError(
+          "ElevenLabs returned no live session token",
+          "provider",
+          true,
+        );
+      }
+      const url = new URL(ELEVENLABS_REALTIME_URL);
+      url.searchParams.set("model_id", input.model);
+      url.searchParams.set("token", body.token);
+      url.searchParams.set("audio_format", `pcm_${LIVE_SAMPLE_RATE}`);
+      url.searchParams.set("commit_strategy", "vad");
+      url.searchParams.set("include_timestamps", "true");
+      if (input.language) url.searchParams.set("language_code", elevenLabsLanguage(input.language));
+      return {
+        protocol: "elevenlabs.scribe_realtime",
+        url: url.toString(),
+        audio: { encoding: "pcm_s16le", sampleRate: LIVE_SAMPLE_RATE },
+        expiresAt: new Date(now.getTime() + ELEVENLABS_LIVE_TOKEN_MILLISECONDS),
+      };
+    },
     async transcribe(input, credentials) {
       const form = new FormData();
       form.append(
@@ -463,7 +845,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
       form.append("timestamps_granularity", "word");
       form.append("tag_audio_events", "false");
       form.append("diarize", input.diarize ? "true" : "false");
-      if (input.language) form.append("language_code", input.language);
+      if (input.language) form.append("language_code", elevenLabsLanguage(input.language));
       if (input.diarize && input.maxSpeakers) {
         form.append("num_speakers", String(Math.min(32, Math.max(1, input.maxSpeakers))));
       }
@@ -476,7 +858,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
       try {
         response = await request(options.url ?? ELEVENLABS_SPEECH_TO_TEXT_URL, {
           method: "POST",
-          headers: { "xi-api-key": credentials.apiKey },
+          headers: { "xi-api-key": elevenLabsApiKey(credentials) },
           body: form,
           signal,
         });
@@ -508,13 +890,26 @@ export function createRecordingTranscriptionProviderRegistry(
 }
 
 export const DEFAULT_RECORDING_TRANSCRIPTION = { providerId: "elevenlabs", model: "scribe_v2" };
+/** The live model a recorder streams to when a request names none. */
+export const DEFAULT_RECORDING_LIVE_TRANSCRIPTION = {
+  providerId: "elevenlabs",
+  model: "scribe_v2_realtime",
+};
 
+/**
+ * A provider's model, if it is offered for this use: `batch` transcribes
+ * whole tracks, `live` streams while recording.
+ */
 export function findRecordingTranscriptionModel(
   registry: RecordingTranscriptionProviderRegistry,
   providerId: string,
   model: string,
+  use: "batch" | "live" = "batch",
 ): { provider: RecordingTranscriptionProvider; spec: RecordingTranscriptionModelSpec } | null {
   const provider = registry.get(providerId);
   const spec = provider?.models.find((candidate) => candidate.model === model);
-  return provider && spec ? { provider, spec } : null;
+  if (!provider || !spec) return null;
+  if (use === "live")
+    return spec.capabilities.live && provider.createLiveSession ? { provider, spec } : null;
+  return spec.capabilities.batch ? { provider, spec } : null;
 }

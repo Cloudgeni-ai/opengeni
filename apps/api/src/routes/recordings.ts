@@ -1,59 +1,117 @@
 import {
+  AppendRecordingLiveSegmentsRequest,
   CompleteRecordingChunksRequest,
+  CreateRecordingLiveSessionRequest,
   CreateRecordingPersonRequest,
   CreateRecordingRequest,
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
+  RecordingCapturePurpose,
   FinalizeRecordingRequest,
+  RecordingNoteKind,
+  RememberRecordingPersonVoiceRequest,
+  resolveWorkspaceVoiceInputEnabled,
   resolveWorkspaceRecordingSettings,
+  SaveRecordingNoteRequest,
   UpdateRecordingRequest,
   UpdateRecordingSegmentsRequest,
   UpdateRecordingSpeakersRequest,
+  WorkspaceVoiceInputSettings,
   type Recording,
   type RecordingChunkUpload,
+  type RecordingLiveSession,
   type RecordingTranscriptionModel,
   type RecordingTranscriptionOptions,
+  type RecordingTranscriptionRequest,
+  type WorkspaceRecordingSettings,
 } from "@opengeni/contracts";
 import {
-  createRecordingTranscriptionProviderRegistry,
-  DEFAULT_RECORDING_TRANSCRIPTION,
+  DEFAULT_RECORDING_LIVE_TRANSCRIPTION,
+  estimateRecordingTranscriptionCostMicros,
   findRecordingTranscriptionModel,
+  RecordingTranscriptionError,
   requireAccessGrant,
+  TranscriptionBillingRefusedError,
   type ApiRouteDeps,
-  type RecordingTranscriptionProviderRegistry,
 } from "@opengeni/core";
 import {
+  appendRecordingLiveSegments,
+  checkWorkspaceAllowance,
   createRecording,
   createRecordingPerson,
   createRecordingTranscriptVersion,
   finalizeRecording,
+  forgetRecordingPersonVoice,
   getRecording,
   getRecordingTrackPreparedObject,
   getRecordingTranscriptPage,
   getWorkspace,
   listRecordingChunks,
+  listRecordingLiveSegments,
+  listRecordingNotes,
   listRecordingPeople,
   listRecordings,
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
+  recordAuditEvent,
   RecordingConflictError,
+  rememberRecordingPersonVoice,
   RecordingForbiddenError,
   RecordingNotFoundError,
   reserveRecordingChunks,
+  saveRecordingNote,
   setCurrentRecordingTranscriptVersion,
+  startRecordingLiveTrack,
   updateRecording,
   updateRecordingSegments,
   updateRecordingSpeakers,
+  type CreditDebitAttribution,
 } from "@opengeni/db";
+import { voiceInputCreditBillingActive } from "@opengeni/config";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
-import { elevenLabsKeyAvailable } from "../realtime-websocket";
+import { userContentSignedGetUrlOptions } from "../http/user-content";
+import {
+  createSpeechToTextDeployment,
+  dictationProviders,
+  speechToTextModelFor,
+  speechToTextServesMeetings,
+  type SpeechToTextDeployment,
+} from "@opengeni/core/transcription-service";
+import { creditDebitAttributionForGrant } from "../access-grant-rls";
 
 const UPLOAD_URL_SECONDS = 15 * 60;
 const PLAYBACK_URL_SECONDS = 60 * 60;
+
+/** The type the worker stored a prepared track with, read from its key's extension. */
+function preparedTrackContentType(objectKey: string): string {
+  return objectKey.endsWith(".m4a") ? "audio/mp4" : "audio/webm";
+}
+
+/**
+ * A new recording's language: the request's, else the workspace's meeting
+ * language. Null asks to detect it even when the workspace names one. It is
+ * settled when recording starts, because the live transcript streams from
+ * the first second, and kept with the recording.
+ */
+export function meetingLanguage(
+  requested: string | null | undefined,
+  settings: WorkspaceRecordingSettings,
+): string | undefined {
+  if (requested === null) return undefined;
+  return requested ?? settings.language;
+}
+
+/** Options as stored: a null language (detect) is the same as none. */
+function storedTranscription(
+  requested: RecordingTranscriptionRequest,
+): RecordingTranscriptionOptions {
+  const { language, ...rest } = requested;
+  return { ...rest, ...(language ? { language } : {}) };
+}
 
 /**
  * Recordings: captured conversations made of audio tracks. Clients record
@@ -63,16 +121,65 @@ const PLAYBACK_URL_SECONDS = 60 * 60;
 export function registerRecordingRoutes(
   app: Hono,
   deps: ApiRouteDeps,
-  options: { registry?: RecordingTranscriptionProviderRegistry } = {},
+  options: { deployment?: SpeechToTextDeployment } = {},
 ): void {
-  const { db } = deps;
-  const registry = options.registry ?? createRecordingTranscriptionProviderRegistry();
+  const { db, observability } = deps;
+  /** Telemetry failures never reach the request. */
+  const count = (name: string, help: string, labels: Record<string, string>, amount = 1) => {
+    try {
+      observability?.incrementCounter({ name, help, labels, amount });
+    } catch {
+      // Product execution never inherits an observability failure.
+    }
+  };
+  const deployment =
+    options.deployment ??
+    deps.speechToText ??
+    createSpeechToTextDeployment({ settings: deps.settings, db });
+  const registry = deployment.registry;
   const base = "/v1/workspaces/:workspaceId/recordings";
 
   async function actorFor(c: Context, permission: "sessions:read" | "sessions:create") {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(c, deps, workspaceId, permission);
-    return { workspaceId, subjectId: grant.subjectId, accountId: grant.accountId };
+    return {
+      workspaceId,
+      subjectId: grant.subjectId,
+      accountId: grant.accountId,
+      /** Who a deployment-funded transcript this request asks for is billed to. */
+      creditAttribution: creditDebitAttributionForGrant(grant),
+    };
+  }
+
+  /**
+   * Transcripts and live previews count toward the workspace's usage
+   * allowance at the provider's list price (0976), so new transcription work
+   * is refused once the workspace's or the person's allowance is used up.
+   * Work already started finishes.
+   */
+  async function admitRecordingUsage(actor: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+  }): Promise<void> {
+    const exhausted = await checkWorkspaceAllowance(db, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      fundedWithoutCredits: true,
+    });
+    if (!exhausted) return;
+    throw new ApiHttpError(402, {
+      code: exhausted.code,
+      message: exhausted.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: {
+        scope: exhausted.scope,
+        resetsAt: exhausted.resetsAt,
+        ...(exhausted.subjectId ? { subjectId: exhausted.subjectId } : {}),
+      },
+    });
   }
 
   function recordingIdParam(c: Context): string {
@@ -99,19 +206,29 @@ export function registerRecordingRoutes(
     return deps.objectStorage;
   }
 
-  /** The request's model, else the workspace's default, else the deployment default. */
+  /**
+   * The deployment's pinned model, else the request's, else the workspace's
+   * default, else the deployment default. A pinned deployment refuses any
+   * other model a request names.
+   */
   async function transcriptionChoice(
     workspaceId: string,
-    requested: RecordingTranscriptionOptions,
+    requested: RecordingTranscriptionRequest,
   ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
     const workspace = await getWorkspace(db, workspaceId);
-    const defaults =
-      resolveWorkspaceRecordingSettings(workspace?.settings).transcription ??
-      DEFAULT_RECORDING_TRANSCRIPTION;
+    const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
+    const defaults = speechToTextModelFor(deployment, "meeting", settings.transcription)!;
     const providerId = requested.providerId ?? defaults.providerId;
     const model = requested.model ?? (requested.providerId ? undefined : defaults.model);
-    const found = model ? findRecordingTranscriptionModel(registry, providerId, model) : null;
-    if (!found) {
+    const pinnedAway =
+      deployment.pinned !== null &&
+      (providerId !== deployment.pinned.providerId ||
+        (model !== undefined && model !== deployment.pinned.model));
+    const found =
+      model && !pinnedAway ? findRecordingTranscriptionModel(registry, providerId, model) : null;
+    // A meeting transcript places every word in time; a model that returns
+    // only text serves meetings only where the deployment aligns its words.
+    if (!found || !speechToTextServesMeetings(deployment, found.spec)) {
       throw new ApiHttpError(400, {
         code: "validation_failed",
         message: "This transcription model is not offered here.",
@@ -119,8 +236,131 @@ export function registerRecordingRoutes(
         details: { code: "unknown_model", providerId, model: model ?? null },
       });
     }
-    const { providerId: _provider, model: _model, ...rest } = requested;
-    return { providerId, model: found.spec.model, options: rest };
+    const { providerId: _provider, model: _model, ...rest } = storedTranscription(requested);
+    const diarizer = rest.diarizer ?? settings.diarizer;
+    return {
+      providerId,
+      model: found.spec.model,
+      options: { ...rest, ...(diarizer ? { diarizer } : {}) },
+    };
+  }
+
+  /**
+   * A dictation is transcribed by the workspace's voice input: its preferred
+   * provider, else the first ready one, as text without speakers. The
+   * version records the provider and the model it runs; the worker may
+   * still fall over to another provider that refused before hearing it.
+   */
+  async function dictationChoice(actor: {
+    workspaceId: string;
+    accountId: string;
+    subjectId: string;
+  }): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
+    const voiceInput = await dictationPolicy(actor.workspaceId);
+    const service = deps.transcription!;
+    const providerId = service.selectProvider
+      ? await service.selectProvider({
+          workspaceId: actor.workspaceId,
+          accountId: actor.accountId,
+          subjectId: actor.subjectId,
+          preferredProvider: voiceInput?.preferredProvider,
+          fallbackEnabled: voiceInput?.fallbackEnabled,
+        })
+      : "host";
+    if (!providerId) throw dictationUnavailable();
+    const model =
+      dictationProviders(deployment).find((provider) => provider.id === providerId)?.model.model ??
+      "voice-input";
+    return { providerId, model, options: {} };
+  }
+
+  /** The workspace's voice input settings, refusing when voice input can't run. */
+  async function dictationPolicy(workspaceId: string) {
+    const workspace = await getWorkspace(db, workspaceId);
+    if (resolveWorkspaceVoiceInputEnabled(workspace?.settings) === false) {
+      throw new ApiHttpError(403, {
+        code: "forbidden",
+        message: "Voice input is turned off for this workspace.",
+        retryable: false,
+        details: { code: "policy_blocked" },
+      });
+    }
+    if (!deps.transcription || !(await deps.transcription.available({ workspaceId }))) {
+      throw dictationUnavailable();
+    }
+    return WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
+  }
+
+  function dictationUnavailable(): ApiHttpError {
+    return new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: "Voice input isn't available on this deployment right now.",
+      retryable: true,
+      details: { code: "unavailable" },
+    });
+  }
+
+  /**
+   * The transcription a recording's next version uses, with who it is
+   * billed to. A model the deployment pays for is admitted against the
+   * payer's credits first, where credit billing is on, so a payer without
+   * credits is refused before any audio is sent.
+   */
+  async function versionChoice(
+    actor: {
+      workspaceId: string;
+      accountId: string;
+      subjectId: string;
+      creditAttribution: CreditDebitAttribution;
+    },
+    recording: Recording,
+    requested: RecordingTranscriptionRequest,
+  ) {
+    const choice =
+      recording.purpose === "dictation"
+        ? await dictationChoice(actor)
+        : await transcriptionChoice(actor.workspaceId, requested);
+    const provider = registry.get(choice.providerId);
+    const spec = provider?.models.find((candidate) => candidate.model === choice.model);
+    if (
+      provider?.funding === "deployment" &&
+      voiceInputCreditBillingActive(deps.settings) &&
+      (recording.purpose === "dictation" || spec?.creditPricing)
+    ) {
+      await admitCredits(() =>
+        deps.transcription?.admit?.({
+          providerId: choice.providerId,
+          accountId: actor.accountId,
+          workspaceId: actor.workspaceId,
+          attribution: actor.creditAttribution,
+        }),
+      );
+    }
+    return {
+      ...choice,
+      creditAttribution: actor.creditAttribution,
+    };
+  }
+
+  /** A credit refusal as the same 402 or 429 a session admission gives. */
+  async function admitCredits(admit: () => Promise<void> | undefined): Promise<void> {
+    try {
+      await admit();
+    } catch (error) {
+      if (!(error instanceof TranscriptionBillingRefusedError)) throw error;
+      throw new ApiHttpError(error.status, {
+        code:
+          error.code === "allowance_exhausted"
+            ? "allowance_exhausted"
+            : error.code === "insufficient_credits"
+              ? "payment_required"
+              : "limit_exceeded",
+        message: error.message,
+        retryable: false,
+        outcomeUnknown: false,
+        details: { ...error.details, code: error.code },
+      });
+    }
   }
 
   async function startTranscript(
@@ -138,6 +378,33 @@ export function registerRecordingRoutes(
     });
   }
 
+  /** The live model a request names, else the provider's first, else the deployment's. */
+  function liveModelChoice(requested: {
+    providerId?: string | undefined;
+    model?: string | undefined;
+  }) {
+    const providerId = requested.providerId ?? DEFAULT_RECORDING_LIVE_TRANSCRIPTION.providerId;
+    const model =
+      requested.model ??
+      (requested.providerId
+        ? registry.get(providerId)?.models.find((spec) => spec.capabilities.live)?.model
+        : DEFAULT_RECORDING_LIVE_TRANSCRIPTION.model);
+    // A pinned deployment sends audio only to its one provider.
+    const found =
+      model && (!deployment.pinned || deployment.pinned.providerId === providerId)
+        ? findRecordingTranscriptionModel(registry, providerId, model, "live")
+        : null;
+    if (!found) {
+      throw new ApiHttpError(400, {
+        code: "validation_failed",
+        message: "This live transcription model is not offered here.",
+        retryable: false,
+        details: { code: "unknown_model", providerId, model: model ?? null },
+      });
+    }
+    return found;
+  }
+
   app.get(base, async (c) => {
     const actor = await actorFor(c, "sessions:read");
     const beforeStartedAt = c.req.query("beforeStartedAt");
@@ -153,12 +420,27 @@ export function registerRecordingRoutes(
     }
     const query = c.req.query("query")?.slice(0, 200);
     const externalRef = c.req.query("externalRef")?.slice(0, 512);
+    const person = c.req.query("person")?.slice(0, 200);
+    // Dictations are private, so listing them shows the caller's own.
+    const purpose = RecordingCapturePurpose.safeParse(c.req.query("purpose") ?? "meeting");
+    if (!purpose.success) throw invalid("purpose must be meeting or dictation");
+    const instant = (name: string): Date | undefined => {
+      const value = c.req.query(name);
+      if (!value) return undefined;
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) throw invalid(`${name} must be a date and time`);
+      return parsed;
+    };
     return c.json(
       await listRecordings(db, {
         workspaceId: actor.workspaceId,
         subjectId: actor.subjectId,
         query: query || undefined,
+        person: person || undefined,
+        startedFrom: instant("startedFrom"),
+        startedTo: instant("startedTo"),
         externalRef: externalRef || undefined,
+        purpose: purpose.data,
         before,
         limit: Number.isFinite(limit) ? limit : 50,
       }),
@@ -168,9 +450,49 @@ export function registerRecordingRoutes(
   app.post(base, async (c) => {
     const actor = await actorFor(c, "sessions:create");
     const body = await parseRequestJson(c, CreateRecordingRequest);
+    if (body.purpose === "dictation") {
+      // Dictation is typing by voice: the workspace's voice input decides
+      // whether and how it is heard, and only its owner ever sees it.
+      await dictationPolicy(actor.workspaceId);
+      if (body.tracks.length !== 1 || body.tracks[0]!.source !== "microphone") {
+        throw invalid("A dictation has exactly one microphone track");
+      }
+      if (body.transcription) throw invalid("A dictation uses the workspace's voice input model");
+      const result = await guard(() =>
+        createRecording(db, {
+          ...actor,
+          purpose: "dictation",
+          recordingId: body.recordingId,
+          title: body.title ?? "Dictation",
+          visibility: "private",
+          startedAt: body.startedAt ? new Date(body.startedAt) : undefined,
+          externalRef: body.externalRef,
+          metadata: body.metadata,
+          tracks: body.tracks,
+        }),
+      );
+      if (result.recording.purpose !== "dictation") {
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: "This recording id is already a meeting.",
+          retryable: false,
+          details: { code: "purpose_mismatch" },
+        });
+      }
+      return c.json(result.recording, result.created ? 201 : 200);
+    }
+    await admitRecordingUsage(actor);
     const workspace = await getWorkspace(db, actor.workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
     if (body.transcription) await transcriptionChoice(actor.workspaceId, body.transcription);
+    const language = meetingLanguage(body.transcription?.language, settings);
+    const transcription =
+      body.transcription || language
+        ? {
+            ...storedTranscription(body.transcription ?? {}),
+            ...(language ? { language } : {}),
+          }
+        : undefined;
     const result = await guard(() =>
       createRecording(db, {
         ...actor,
@@ -181,9 +503,17 @@ export function registerRecordingRoutes(
         externalRef: body.externalRef,
         metadata: body.metadata,
         tracks: body.tracks,
-        transcription: body.transcription,
+        transcription,
       }),
     );
+    if (result.recording.purpose !== "meeting") {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: "This recording id is already a dictation.",
+        retryable: false,
+        details: { code: "purpose_mismatch" },
+      });
+    }
     return c.json(result.recording, result.created ? 201 : 200);
   });
 
@@ -262,6 +592,24 @@ export function registerRecordingRoutes(
         };
       }),
     );
+    const issued = uploads.filter((upload) => upload.url !== null);
+    if (issued.length > 0) {
+      // Signed URLs are bearer capabilities: record the issuance (never the URL or key).
+      await recordAuditEvent(db, {
+        accountId: actor.accountId,
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+        action: "recording.signed_upload.issued",
+        targetType: "recording",
+        targetId: recordingId,
+        metadata: {
+          recordingId,
+          trackNumber: body.trackNumber,
+          chunkNumbers: issued.map((upload) => upload.chunkNumber),
+          expiresAt: issued[0]!.expiresAt,
+        },
+      });
+    }
     return c.json({ uploads });
   });
 
@@ -280,6 +628,7 @@ export function registerRecordingRoutes(
     );
     const missing: number[] = [];
     const present: number[] = [];
+    let newlyStoredBytes = 0;
     for (const chunkNumber of new Set(body.chunkNumbers)) {
       const row = rows.find((item) => item.chunkNumber === chunkNumber);
       if (!row) {
@@ -291,8 +640,10 @@ export function registerRecordingRoutes(
         continue;
       }
       const size = await storedSize(objects, row.objectKey);
-      if (size === row.byteLength) present.push(chunkNumber);
-      else missing.push(chunkNumber);
+      if (size === row.byteLength) {
+        present.push(chunkNumber);
+        newlyStoredBytes += row.byteLength;
+      } else missing.push(chunkNumber);
     }
     const updated = await guard(() =>
       markRecordingChunksUploaded(db, {
@@ -302,6 +653,14 @@ export function registerRecordingRoutes(
         chunkNumbers: present,
       }),
     );
+    if (newlyStoredBytes > 0) {
+      count(
+        "opengeni_recording_stored_bytes_total",
+        "Bytes of recording audio written to object storage, by kind.",
+        { kind: "chunks" },
+        newlyStoredBytes,
+      );
+    }
     return c.json({
       uploaded: updated.filter((row) => row.state === "uploaded").map((row) => row.chunkNumber),
       missing: missing.sort((left, right) => left - right),
@@ -313,7 +672,7 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, FinalizeRecordingRequest);
     const current = await guard(() => getRecording(db, { ...actor, recordingId }));
-    const transcription = await transcriptionChoice(actor.workspaceId, current.transcription);
+    const transcription = await versionChoice(actor, current, current.transcription);
     const result = await guard(() =>
       finalizeRecording(db, {
         ...actor,
@@ -344,8 +703,14 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingTranscriptRequest);
     const recording = await guard(() => getRecording(db, { ...actor, recordingId }));
-    const transcription = await transcriptionChoice(
-      actor.workspaceId,
+    if (recording.purpose === "dictation" && body.transcription) {
+      throw invalid("A dictation uses the workspace's voice input model");
+    }
+    // Dictations are paid for with credits, which their ledger debit counts.
+    if (recording.purpose !== "dictation") await admitRecordingUsage(actor);
+    const transcription = await versionChoice(
+      actor,
+      recording,
       body.transcription ?? recording.transcription,
     );
     const version = await guard(() =>
@@ -357,6 +722,12 @@ export function registerRecordingRoutes(
       }),
     );
     await startTranscript(actor.accountId, recording, version.id);
+    // Asking again is the clearest sign a transcript wasn't good enough.
+    count("opengeni_recording_transcript_reruns_total", "Transcripts asked for again.", {
+      purpose: recording.purpose,
+      provider: version.providerId,
+      model: version.model,
+    });
     return c.json(version, 202);
   });
 
@@ -407,6 +778,7 @@ export function registerRecordingRoutes(
           versionId: versionIdQuery(c),
           assignments: body.assignments,
           segmentOverrides: body.segmentOverrides,
+          rejectSuggestions: body.rejectSuggestions,
         }),
       ),
     });
@@ -426,6 +798,34 @@ export function registerRecordingRoutes(
         }),
       ),
     });
+  });
+
+  /** The meeting's notepad and written-up notes. */
+  app.get(`${base}/:recordingId/notes`, async (c) => {
+    const actor = await actorFor(c, "sessions:read");
+    const recordingId = recordingIdParam(c);
+    return c.json({
+      notes: await guard(() => listRecordingNotes(db, { ...actor, recordingId })),
+    });
+  });
+
+  app.put(`${base}/:recordingId/notes/:kind`, async (c) => {
+    const actor = await actorFor(c, "sessions:create");
+    const recordingId = recordingIdParam(c);
+    const kind = RecordingNoteKind.safeParse(c.req.param("kind"));
+    if (!kind.success) throw notFound("Notes not found");
+    const body = await parseRequestJson(c, SaveRecordingNoteRequest);
+    return c.json(
+      await guard(() =>
+        saveRecordingNote(db, {
+          ...actor,
+          recordingId,
+          kind: kind.data,
+          body: body.body,
+          expectedRevision: body.expectedRevision,
+        }),
+      ),
+    );
   });
 
   /** A short-lived link to a track's prepared audio, for playback. */
@@ -450,6 +850,16 @@ export function registerRecordingRoutes(
       key: prepared.objectKey,
       expiresInSeconds: PLAYBACK_URL_SECONDS,
       audience: "public",
+      ...userContentSignedGetUrlOptions(preparedTrackContentType(prepared.objectKey)),
+    });
+    await recordAuditEvent(db, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      action: "recording.signed_audio.issued",
+      targetType: "recording",
+      targetId: recordingId,
+      metadata: { recordingId, trackNumber, expiresAt: link.expiresAt.toISOString() },
     });
     return c.json({
       url: link.url,
@@ -471,10 +881,7 @@ export function registerRecordingRoutes(
 
   app.post("/v1/workspaces/:workspaceId/recording-people", async (c) => {
     const actor = await actorFor(c, "sessions:create");
-    const body = await parseRequestJson(
-      c,
-      CreateRecordingPersonRequest.extend({ personId: z.string().uuid().optional() }),
-    );
+    const body = await parseRequestJson(c, CreateRecordingPersonRequest);
     const { personId, ...person } = body;
     const result = await guard(() =>
       createRecordingPerson(db, { ...actor, personId: personId ?? crypto.randomUUID(), ...person }),
@@ -482,28 +889,256 @@ export function registerRecordingRoutes(
     return c.json(result.person, result.created ? 201 : 200);
   });
 
-  app.get("/v1/workspaces/:workspaceId/recording-models", async (c) => {
-    const actor = await actorFor(c, "sessions:read");
-    const elevenLabs = await elevenLabsKeyAvailable(db, {
+  function personIdParam(c: Context): string {
+    const personId = c.req.param("personId") ?? "";
+    if (!z.string().uuid().safeParse(personId).success) throw notFound("Person not found");
+    return personId;
+  }
+
+  /** Agree to have a person's voice remembered (members for themselves). */
+  app.put("/v1/workspaces/:workspaceId/recording-people/:personId/voice", async (c) => {
+    const actor = await actorFor(c, "sessions:create");
+    const personId = personIdParam(c);
+    const body = await parseRequestJson(c, RememberRecordingPersonVoiceRequest);
+    const workspace = await getWorkspace(db, actor.workspaceId);
+    if (resolveWorkspaceRecordingSettings(workspace?.settings).voiceprints !== true) {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message:
+          "This workspace does not recognize voices. An admin can turn it on in Meetings settings.",
+        retryable: false,
+        details: { code: "voice_recognition_off" },
+      });
+    }
+    const person = await guard(() =>
+      rememberRecordingPersonVoice(db, { ...actor, personId, consent: body.consent }),
+    );
+    await recordAuditEvent(db, {
       accountId: actor.accountId,
       workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      action: "recording.voice.remembered",
+      targetType: "recording_person",
+      targetId: personId,
+      metadata: { personId, consent: body.consent },
     });
+    return c.json(person);
+  });
+
+  /** Forget a person's voice and withdraw their agreement. */
+  app.delete("/v1/workspaces/:workspaceId/recording-people/:personId/voice", async (c) => {
+    const actor = await actorFor(c, "sessions:create");
+    const personId = personIdParam(c);
+    const person = await guard(() => forgetRecordingPersonVoice(db, { ...actor, personId }));
+    await recordAuditEvent(db, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      action: "recording.voice.forgotten",
+      targetType: "recording_person",
+      targetId: personId,
+      metadata: { personId },
+    });
+    return c.json(person);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/recording-models", async (c) => {
+    const actor = await actorFor(c, "sessions:read");
     const workspace = await getWorkspace(db, actor.workspaceId);
-    const defaults =
-      resolveWorkspaceRecordingSettings(workspace?.settings).transcription ??
-      DEFAULT_RECORDING_TRANSCRIPTION;
-    const models: RecordingTranscriptionModel[] = [...registry.values()].flatMap((provider) =>
-      provider.models.map((spec) => ({
-        providerId: provider.id,
-        providerName: provider.name,
-        model: spec.model,
-        name: spec.name,
-        available: provider.id === "elevenlabs" ? elevenLabs : false,
-        capabilities: spec.capabilities,
-        usdPerHour: spec.usdPerHour,
-      })),
+    const defaults = speechToTextModelFor(
+      deployment,
+      "meeting",
+      resolveWorkspaceRecordingSettings(workspace?.settings).transcription,
+    )!;
+    const offered = deployment.pinned
+      ? [registry.get(deployment.pinned.providerId)!]
+      : [...registry.values()];
+    const availability = new Map(
+      await Promise.all(
+        offered.map(
+          async (provider) =>
+            [
+              provider.id,
+              await deployment.available(provider.id, {
+                accountId: actor.accountId,
+                workspaceId: actor.workspaceId,
+                subjectId: actor.subjectId,
+              }),
+            ] as const,
+        ),
+      ),
     );
-    return c.json({ models, default: defaults });
+    // The models a meeting can use: each places every word in time, or the
+    // deployment does it for them.
+    const models: RecordingTranscriptionModel[] = offered.flatMap((provider) =>
+      provider.models
+        .filter((spec) => !deployment.pinned || spec.model === deployment.pinned.model)
+        .filter((spec) => speechToTextServesMeetings(deployment, spec))
+        .map((spec) => ({
+          providerId: provider.id,
+          providerName: provider.name,
+          model: spec.model,
+          name: spec.name,
+          available: availability.get(provider.id) ?? false,
+          funding: provider.funding,
+          capabilities: spec.capabilities,
+          usdPerHour: spec.usdPerHour,
+        })),
+    );
+    const voiceInput = WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
+    const preferred = voiceInput?.preferredProvider
+      ? dictationProviders(deployment).find(
+          (provider) =>
+            provider.id ===
+            (voiceInput.preferredProvider === "azure-mai"
+              ? "azure-speech"
+              : voiceInput.preferredProvider),
+        )
+      : undefined;
+    const dictationDefault = deployment.pinned
+      ? deployment.pinned
+      : preferred
+        ? { providerId: preferred.id, model: preferred.model.model }
+        : null;
+    return c.json({ models, default: defaults, dictationDefault, pinned: !!deployment.pinned });
+  });
+
+  /**
+   * A grant to stream one track of a recording being captured to a live
+   * model. The client connects to the provider itself; the grant carries a
+   * single-use credential, never the workspace's key.
+   */
+  app.post(`${base}/:recordingId/live-session`, async (c) => {
+    const actor = await actorFor(c, "sessions:create");
+    const recordingId = recordingIdParam(c);
+    const body = await parseRequestJson(c, CreateRecordingLiveSessionRequest);
+    const { provider, spec } = liveModelChoice(body);
+    await admitRecordingUsage(actor);
+    const resolved = await deployment.credentials(provider.id, actor);
+    const credentials = resolved === "missing" ? null : resolved.credentials;
+    const liveLabels = { provider: provider.id, model: spec.model, funding: provider.funding };
+    const liveHelp = "Live transcript sessions asked for, by outcome.";
+    if (!credentials) {
+      count("opengeni_recording_live_sessions_total", liveHelp, {
+        ...liveLabels,
+        outcome: "no_credentials",
+      });
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: `Add an ${provider.name} API key to this workspace's models to see a live transcript.`,
+        retryable: false,
+        details: { code: "credential_unavailable", providerId: provider.id },
+      });
+    }
+    const { language } = await guard(() =>
+      startRecordingLiveTrack(db, {
+        ...actor,
+        recordingId,
+        trackNumber: body.trackNumber,
+        providerId: provider.id,
+        model: spec.model,
+      }),
+    );
+    let grant;
+    try {
+      grant = await provider.createLiveSession!(
+        { model: spec.model, language: language ?? undefined },
+        credentials,
+      );
+    } catch (error) {
+      count("opengeni_recording_live_sessions_total", liveHelp, {
+        ...liveLabels,
+        outcome: error instanceof RecordingTranscriptionError ? `provider_${error.code}` : "error",
+      });
+      if (!(error instanceof RecordingTranscriptionError)) throw error;
+      const rejected = error.code === "unauthorized";
+      throw new ApiHttpError(rejected ? 409 : 502, {
+        code: rejected ? "conflict" : "upstream_unavailable",
+        message: rejected
+          ? `${provider.name} rejected this workspace's API key.`
+          : error.code === "quota_exceeded"
+            ? `${provider.name} has no credit left for a live transcript.`
+            : `${provider.name} could not start a live transcript. Try again.`,
+        retryable: error.retryable,
+        details: { code: error.code, providerId: provider.id },
+      });
+    }
+    count("opengeni_recording_live_sessions_total", liveHelp, {
+      ...liveLabels,
+      outcome: "started",
+    });
+    const session: RecordingLiveSession = {
+      providerId: provider.id,
+      model: spec.model,
+      protocol: grant.protocol,
+      url: grant.url,
+      audio: grant.audio,
+      expiresAt: grant.expiresAt.toISOString(),
+    };
+    c.header("cache-control", "no-store");
+    return c.json(session, 201);
+  });
+
+  /** Save finished live text for one track; only the person recording may. */
+  app.post(`${base}/:recordingId/live-segments`, async (c) => {
+    const actor = await actorFor(c, "sessions:create");
+    const recordingId = recordingIdParam(c);
+    const body = await parseRequestJson(c, AppendRecordingLiveSegmentsRequest);
+    const recording = await guard(() => getRecording(db, { ...actor, recordingId }));
+    const live = recording.tracks.find((track) => track.trackNumber === body.trackNumber)?.live;
+    const spec = live
+      ? findRecordingTranscriptionModel(registry, live.providerId, live.model, "live")?.spec
+      : undefined;
+    const result = await guard(() =>
+      appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: body.trackNumber,
+        streamedMilliseconds: body.streamedMilliseconds,
+        costUsdMicros: spec
+          ? estimateRecordingTranscriptionCostMicros(spec, body.streamedMilliseconds)
+          : null,
+        segments: body.segments,
+      }),
+    );
+    const streamedSeconds = (body.streamedMilliseconds - (live?.streamedMilliseconds ?? 0)) / 1_000;
+    if (live && streamedSeconds > 0) {
+      const provider = registry.get(live.providerId);
+      const labels = {
+        provider: live.providerId,
+        model: live.model,
+        funding: provider?.funding ?? "none",
+      };
+      count(
+        "opengeni_recording_live_audio_seconds_total",
+        "Seconds of audio streamed to live transcript models.",
+        labels,
+        streamedSeconds,
+      );
+      const costMicros = spec
+        ? estimateRecordingTranscriptionCostMicros(spec, streamedSeconds * 1_000)
+        : null;
+      if (costMicros !== null) {
+        count(
+          "opengeni_recording_live_cost_usd_total",
+          "Live transcript provider spend at list price, in US dollars.",
+          labels,
+          costMicros / 1_000_000,
+        );
+      }
+    }
+    return c.json(result);
+  });
+
+  /** Live text saved after `after`, for anyone who can see the recording. */
+  app.get(`${base}/:recordingId/live-segments`, async (c) => {
+    const actor = await actorFor(c, "sessions:read");
+    const recordingId = recordingIdParam(c);
+    const after = Number(c.req.query("after") ?? 0);
+    if (!Number.isSafeInteger(after) || after < 0) throw invalid("after must be a sequence number");
+    return c.json(
+      await guard(() => listRecordingLiveSegments(db, { ...actor, recordingId, after })),
+    );
   });
 }
 

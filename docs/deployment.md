@@ -28,6 +28,24 @@ no event runs start; stored deliveries and events still expire on schedule
 (delivery bodies after 7 days, events after 30). See
 [automations and events](design/automations-and-events.md).
 
+Webhook senders and the GitHub App are given addresses under
+`OPENGENI_PUBLIC_BASE_URL`. If the console is reachable only on a private
+network, publish just `POST /v1/webhooks/events/*` and `POST /v1/webhooks/github`
+at a public address and set `OPENGENI_WEBHOOK_BASE_URL` to it (for example
+`https://hooks.example.com`); webhook URLs, the GitHub App's webhook and MCP
+Events callbacks then use that address. Without a public https address, MCP
+event sources poll instead of receiving webhooks.
+
+GitHub event sources also need the platform GitHub App's webhook secret,
+`OPENGENI_GITHUB_WEBHOOK_SECRET`, and a public webhook address. The
+App sends its webhooks to `/v1/webhooks/github`; adding a workspace's GitHub
+source points an App without a webhook URL there automatically. An App whose
+webhook already points elsewhere is left alone, and the person adding the
+source is told what to change. The events a trigger can use are the ones the
+App subscribes to under its Permissions & events settings: issues, issue
+comments, pull requests, reviews, review comments, pushes and releases, plus
+check runs, check suites and workflow runs for CI.
+
 Allowance accounting tables are in `opengeni_private`, with FORCE RLS and
 EXECUTE-only lifecycle access. This preserves older binaries' exact data-schema
 inventory during a rolling upgrade; no maintenance drain is required for these
@@ -2105,6 +2123,32 @@ later change to a reviewed Version path fails closed; choose an earlier green
 tip. The admission job reports `release_source_sha`, `version_provenance_sha`
 and `release_admission_mode`; the candidate receipt schema is unchanged.
 
+A reviewed, green Version PR that lands as a merge commit stays releasable from
+its exact head. With an empty `provenance_sha`, `source_sha` may be the bot
+Version PR head itself instead of its merge result (`release_admission_mode`
+`merge-version-head`). The candidate then builds that head's own tree; the merge
+commit is used only to prove how the head landed, never as release content, so
+changesets merged to `main` after the Version base cannot reach the candidate.
+Admission requires, fail-closed:
+
+- `source_sha` is the second parent of a two-parent merge commit retained by
+  `main`, and that merge commit is the `merge_commit_sha` of exactly one merged
+  `github-actions[bot]` PR from `changeset-release/main` into `main` whose single
+  commit is `source_sha`, directly on its reviewed base; any other PR head,
+  including an ordinary feature PR, is rejected;
+- the exact-head `Automation PR CI` check on `source_sha` succeeded, and a green
+  `workflow_dispatch` CI run on `main` at the Version base binds this PR, head and
+  base in its `Report exact-head automation CI` job log, with the admission,
+  required source and report jobs green in its latest attempt (the newest bound
+  run is recorded; every successful run that binds this head must record a
+  successful exact-head completion, and a later failed completion turns the
+  exact-head check red and fails admission);
+- the source-admission check, retained `opengeni-release-head-<source_sha>`
+  evidence and no pending `.changeset/*.md` at `source_sha`.
+
+The controller must descend from `source_sha` on `main`, as on the exact-source
+lane. Re-checking this evidence depends on GitHub retaining the job log.
+
 Recover a failed full-main run intended for release with **Re-run all jobs**, not
 "Re-run failed jobs": the canary image and full-green receipts must come from the
 same selected attempt. A green provider run with stale image receipts is still
@@ -3805,12 +3849,20 @@ and the self-update channel. Route these paths (and an optional `get.<domain>`
 host) to the `api` service in the ingress.
 
 `/agent/latest/<asset>` is a compatibility route backed by the immutable
-versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.54`).
-`OPENGENI_AGENT_RELEASES_BASE_URL` selects the archive origin. Promote or roll
-back the stable channel by changing the configured version only after the
-corresponding `agent-v<version>` release and its signed assets exist; never move
-or delete an agent release tag. A baked asset still takes precedence so a
-deployed control-plane image serves its release-coherent binary directly.
+versioned release selected by `OPENGENI_AGENT_STABLE_VERSION`. Unset, it is the
+agent release of the control plane's own source tree (the `agent/Cargo.toml`
+version it was built from), so Windows and macOS installs and the stable update
+channel advance with each control-plane deploy, matching the baked Linux agent.
+An image built from an agent release commit serves that release once its
+release workflow has published it. An API that runs without that file (for
+example from the published npm package) and without the setting has no stable
+release: `/agent/latest/<asset>` and the stable manifest answer 404 and no
+automatic update is requested. `OPENGENI_AGENT_RELEASES_BASE_URL` selects
+the archive origin. Pin, promote or roll back the stable channel by setting the
+version only after the corresponding `agent-v<version>` release and its signed
+assets exist; never move or delete an agent release tag. A baked asset still
+takes precedence so a deployed control-plane image serves its release-coherent
+binary directly.
 Explicit `/agent/v<version>/<asset>` binary and signature requests always use
 that immutable archive release; a baked canary cannot override a version pin.
 Linux canary builds use `scripts/bake-agent.sh` with the exact source commit as
@@ -4119,6 +4171,12 @@ Useful settings:
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
+- `OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT=true` makes each API request span a child of the caller's W3C `traceparent`, so a calling service sees Opengeni's spans inside its own trace. Leave it off (the default) when untrusted clients can reach the API: the request span then starts its own trace and carries a span link to the caller's context. See `docs/application-observability.md`.
+- For a private collector CA alongside compute-control TLS, the Helm chart's
+  `computeControl.apiTls.additionalCaConfigMaps` composes explicitly selected
+  public CA bundles with compute trust before API/control/turn startup. See the
+  [chart trust configuration](../deploy/helm/opengeni/README.md#additional-trust-beside-compute-control-tls).
+  CA changes require a normal pod rollout; never disable TLS verification.
 
 The Helm chart has optional Prometheus Operator wiring, off by default:
 

@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createFfmpegTranscriptionSegmenter,
   TranscriptionSegmenterError,
-} from "../src/transcription/segmenter";
+} from "@opengeni/core/transcription-service";
 
 async function* chunks(): AsyncIterable<Uint8Array> {
   yield new Uint8Array([1]);

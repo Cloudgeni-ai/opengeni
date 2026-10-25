@@ -10,6 +10,7 @@ import {
   loadConnectionCredentialForBroker,
   loadDirectModelProviderConnection,
   loadOrganizationModelProviderApiKey,
+  loadOrganizationModelProviderCredential,
   workspaceProviderApiKeyConnectionSpec,
   type Database,
 } from "@opengeni/db";
@@ -144,15 +145,37 @@ export async function sessionTitleApiConnectionId(input: {
       throw new SessionTitleRouteUnavailableError("Title organization provider is unsupported");
     const scope = { accountId, workspaceId, providerKind: kind };
     const id = await getOrganizationModelProviderExecutionConnectionId(db, scope);
-    if (
-      !id ||
-      (await loadOrganizationModelProviderApiKey(db, settings, scope)) !== provider.apiKey
-    ) {
+    if (!id || !(await organizationCredentialUnchanged(db, settings, scope, provider))) {
       throw new SessionTitleRouteUnavailableError("Title model connection changed");
     }
     return id;
   }
   return null;
+}
+
+/** Whether the active organization row still holds the credential the route resolved. */
+async function organizationCredentialUnchanged(
+  db: Database,
+  settings: Settings,
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    providerKind: (typeof providerKinds)[keyof typeof providerKinds];
+  },
+  provider: ResolvedModelProvider,
+): Promise<boolean> {
+  if (scope.providerKind !== "azure_openai" || !provider.azureEntra)
+    return (await loadOrganizationModelProviderApiKey(db, settings, scope)) === provider.apiKey;
+  // Microsoft Entra ID sign-in: the same method and app, secret included.
+  const credential = await loadOrganizationModelProviderCredential(db, settings, {
+    ...scope,
+    providerKind: "azure_openai",
+  });
+  return (
+    credential !== null &&
+    "azureEntra" in credential &&
+    JSON.stringify(credential.azureEntra) === JSON.stringify(provider.azureEntra)
+  );
 }
 
 export function sessionTitleRouteIdentity(route: SessionTitleRoute) {

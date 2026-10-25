@@ -16,6 +16,7 @@ import {
   platformRefusal,
   publicationRequest,
   readinessTitle,
+  splitReadinessWarnings,
   sitePublicationLoadFromError,
   sitesClientConfig,
   suggestedLabel,
@@ -239,6 +240,19 @@ describe("Site publishing helpers", () => {
       "2 things won't work for public visitors",
     );
     expect(readinessTitle([warning], "invited")).toBe("1 thing won't work for invited people");
+    const notice = {
+      code: "public_sign_in_required" as const,
+      message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+      suggestion: "Anyone with the link can open it after signing in.",
+      fix: null,
+    };
+    expect(readinessTitle([notice, warning], "public")).toBe(
+      "1 thing won't work for public visitors",
+    );
+    expect(splitReadinessWarnings([notice, warning])).toEqual({
+      notices: [notice],
+      problems: [warning],
+    });
     expect(viewAsVisitorUrl({ ...saved, access: "public" })).toBe(
       "https://team-crm-4k9x.sites.example.test/?og_view_as=public",
     );

@@ -41,6 +41,7 @@ the inventory; never automatically repeat the create.
 | Error | What to do |
 |---|---|
 | `vault_read_only` | A connected vault is read-only. Save to a workspace vault (`saveTo` without `vault`) or ask the user to make it writable. |
+| `vault_operation_unsupported` | The connected vault is writable, but its password manager cannot do this one thing (`details.operation` says which, for example an item type, a file or a one-time password). Save that item to a workspace vault instead; other writes to the vault still work. |
 | `vault_item_name_conflict` | `mode: "create"` hit an existing item. Use `update` or `upsert`, or another name. |
 | `human_auth_required` | `saveTo: "user"` needs a person in the turn (schedules and automations have none). Use `task` or `workspace`. |
 | `vault_permission_denied`, `secret_save_forbidden` | This session cannot write there. Pick another `saveTo` or vault. |

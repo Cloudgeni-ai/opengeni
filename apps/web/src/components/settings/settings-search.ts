@@ -58,6 +58,18 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "server",
     "self-hosted",
   ],
+  "workspace:/workspaces/$workspaceId/computer-use": [
+    "permissions",
+    "computer use",
+    "this computer",
+    "screen control",
+    "screen recording",
+    "accessibility",
+    "chrome extension",
+    "app-shots",
+    "microphone",
+    "privacy",
+  ],
   "organization:general": ["organization name", "organization id", "rename organization"],
   "organization:people": ["members", "invite", "roles", "owner", "admin", "team"],
   "organization:workspaces": ["new workspace", "create workspace", "delete workspace"],
@@ -174,6 +186,10 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
   ],
   "organization:security": [
     { label: "Data retention", keywords: ["retention", "delete data"] },
+    {
+      label: "Actions in chat",
+      keywords: ["agents", "confirm", "invite", "share", "settings in chat"],
+    },
     { label: "Full access for agent sessions", keywords: ["agents", "admin", "elevate"] },
   ],
   "account:security": [

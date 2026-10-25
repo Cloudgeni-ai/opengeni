@@ -67,12 +67,22 @@ export interface Run {
   retryable: boolean;
   startedAt?: string | null;
   infrastructureRetryReason?: InfrastructureRetryReason;
+  /** Complete trusted failing task classes; absent means comparison unavailable. */
+  failedClasses?: ("source" | "units")[];
 }
 export interface Candidate {
   manifest: Manifest;
   branch: string;
   runs: Run[];
   containedInBase: boolean;
+  headRefresh?: HeadRefresh;
+}
+export interface HeadRefresh {
+  baseSha: string;
+  testedTip: string;
+  testedTree: string;
+  tipSha: string;
+  pulls: (Pull & { mergeSha: string })[];
 }
 export interface Ejection {
   pull: Pull;
@@ -183,8 +193,10 @@ export type DurableEffect = EffectState &
     | { kind: "rerun"; run: Run }
     | { kind: "comment"; number: number; body: string; marker: string }
     | { kind: "followup"; request: FollowupRequest }
+    | { kind: "disable-auto-merge"; number: number; headSha: string; parkedAt: string }
   );
 export interface LandedPull {
+  testedSnapshot?: { tipSha: string; treeSha: string; headSha: string };
   batchId: string;
   tipSha: string;
   mergeSha: string;
@@ -193,6 +205,9 @@ export interface LandedPull {
   status:
     | "pending"
     | "unchanged"
+    | "native-merged"
+    | "awaiting-native-merge"
+    | "closed-unmerged"
     | "requeued"
     | "awaiting-evidence"
     | "already-contained"
@@ -216,12 +231,16 @@ export interface Headroom {
   mainDemand?: number;
   reservedMain: number;
   candidateSlots: 18;
-  /** Active runs whose latest jobs were read in this observation. */
+  /** Active runs whose latest jobs were read or verified approval proof reused. */
   scannedRuns?: number;
   /** Scanned runs proven to be waiting only for approval (no runner demand). */
   approvalOnlyRuns?: number;
+  /** Reused verified main approval tails; absent if the scan was incomplete. */
+  cachedApprovalOnlyRuns?: number;
   /** Provider capacity fields; see `capacityDecision`. */
   capacity?: CapacityObservation;
+  /** Live admission uses provider queueing; valid capacity holds are telemetry only. */
+  capacityInformational?: boolean;
 }
 // GitHub job statuses. Only jobs that hold or are about to request a hosted
 // runner are demand: queued and in_progress jobs, plus requested jobs (created
@@ -265,17 +284,6 @@ export const ACTIVE_RUN_STATUSES = [
  * and callers re-read before publication.
  */
 export const RUN_LIST_PASSES = 2;
-/** Runs that hold or may imminently request runners; above this the scan holds. */
-export const MAX_RUNNER_RELEVANT_RUNS = 32;
-/**
- * Absolute per-observation job-scan bound, independent of the runner-relevant
- * cap: at most this many distinct active runs have their jobs read, so a
- * backlog of approval-waiting runs cannot turn one observation into an
- * unbounded scan. Worst case is 10 run-list requests (5 statuses, 2 passes)
- * plus this many job requests, 74 in total, per observation. Larger backlogs
- * hold.
- */
-export const MAX_SCANNED_ACTIVE_RUNS = 64;
 /** Wall-clock bound for one scan; exceeding it holds instead of admitting. */
 export const ACTIVE_RUN_SCAN_DEADLINE_MS = 120_000;
 
@@ -300,12 +308,29 @@ export function approvalOnlyRun(run: unknown, jobs: readonly unknown[]): boolean
   return waiting;
 }
 
+const APPROVAL_ONLY_CACHE_MS = 15 * 60_000;
+function publicReleaseApprovalJobs(run: unknown, jobs: unknown): jobs is unknown[] {
+  if (!Array.isArray(jobs) || !approvalOnlyRun(run, jobs)) return false;
+  const ids = new Set<number>();
+  let waiting = 0;
+  for (const raw of jobs) {
+    if (!raw || typeof raw !== "object") return false;
+    const job = raw as Record<string, unknown>;
+    if (!Number.isSafeInteger(job.id) || (job.id as number) <= 0 || ids.has(job.id as number))
+      return false;
+    ids.add(job.id as number);
+    if (job.status === "waiting") {
+      if (job.name !== "Build API workload image") return false;
+      waiting++;
+    }
+  }
+  return waiting === 1;
+}
+
 export type RunnerScanHold =
   | "incomplete-runs"
   | "invalid-run"
   | "batch-slot"
-  | "scan-bound"
-  | "runner-run-bound"
   | "incomplete-jobs"
   | "unknown-job-status"
   | "deadline";
@@ -316,6 +341,7 @@ export type RunnerScan =
       otherDemand: number;
       scannedRuns: number;
       approvalOnlyRuns: number;
+      cachedApprovalOnlyRuns: number;
       runnerRelevantRuns: number;
       /** Newest active full-main push CI run (highest run ID), or null when none is active. */
       latestMain: LatestMainObservation | null;
@@ -355,17 +381,13 @@ export interface LatestMainObservation {
 }
 
 /**
- * Shared bounded runner-demand scan for the batcher and traffic-shadow
- * readers. It keeps the complete run inventory (every status page must be a
- * complete single page, and every status is listed `RUN_LIST_PASSES` times)
- * and reads the complete latest-job page of every
- * active run up to `MAX_SCANNED_ACTIVE_RUNS`. Only runs proven
- * approval-only are excluded from `MAX_RUNNER_RELEVANT_RUNS`; their demand is
- * still computed from their jobs (and is zero by construction). Mixed,
- * job-less, queued, otherwise unproven runs, and runs listed with any
- * non-waiting status during the listing count toward the cap. Incomplete
- * pages, unknown statuses, a second Batch CI run, the scan bound and the
- * deadline hold. Provider errors propagate to the caller, which holds.
+ * Shared time-bounded runner-demand scan. Paginate every status and latest-job
+ * inventory to its reported total; reject inconsistent totals, short pages and
+ * duplicate identities within a listing. Two complete status passes retain runs
+ * observed across a status transition. There is no run-count admission limit.
+ * Live PR-demand exclusion follows complete inventory and Batch-slot validation;
+ * traffic-shadow still accounts for PR demand. Unknown statuses, incomplete
+ * observations and the deadline hold. Provider errors propagate to the caller.
  * Approval can still be granted after observation; callers re-read before
  * publication, as with every other observed status.
  */
@@ -373,24 +395,27 @@ export async function scanRunnerDemand(input: {
   get: (path: string) => Promise<unknown>;
   batchWorkflow: string;
   baseBranch: string;
+  /** PR fast checks use the provider queue, not Batch submission backpressure. */
+  excludePrCiDemand?: boolean;
   /** Run ID validator; return null to hold, or throw. Defaults to positive safe integers. */
   runId?: (value: unknown) => number | null;
   now?: () => number;
-  maxScannedRuns?: number;
-  maxRunnerRelevantRuns?: number;
   deadlineMs?: number;
+  approvalCache?: {
+    get(key: string): Promise<unknown>;
+    set(key: string, value: unknown): Promise<void>;
+  };
 }): Promise<RunnerScan> {
   const now = input.now ?? Date.now;
   const started = now();
-  const maxScanned = input.maxScannedRuns ?? MAX_SCANNED_ACTIVE_RUNS;
-  const maxRelevant = input.maxRunnerRelevantRuns ?? MAX_RUNNER_RELEVANT_RUNS;
   const deadline = input.deadlineMs ?? ACTIVE_RUN_SCAN_DEADLINE_MS;
   const runId =
     input.runId ??
     ((value: unknown) =>
       Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : null);
   let scannedRuns = 0,
-    approvalOnlyRuns = 0;
+    approvalOnlyRuns = 0,
+    cachedApprovalOnlyRuns = 0;
   const hold = (reason: RunnerScanHold): RunnerScan => ({
     ok: false,
     hold: reason,
@@ -398,31 +423,75 @@ export async function scanRunnerDemand(input: {
     approvalOnlyRuns,
   });
   const runs = new Map<number, Record<string, unknown>>();
+  // IDs are mandatory across paginated responses so overlap cannot hide a gap.
+  // Single-page job fixtures may omit IDs; run identities are always validated below.
+  async function list(path: string, key: "workflow_runs" | "jobs") {
+    const items: unknown[] = [];
+    const ids = new Set<number>();
+    let total: number | undefined;
+    for (let pageNumber = 1; ; pageNumber++) {
+      if (now() - started > deadline) return { error: "deadline" } as const;
+      const page = (await input.get(`${path}&per_page=100&page=${pageNumber}`)) as Record<
+        string,
+        unknown
+      > | null;
+      const count = page?.total_count;
+      const values = page?.[key];
+      if (
+        !page ||
+        Array.isArray(page) ||
+        !Number.isSafeInteger(count) ||
+        (count as number) < 0 ||
+        !Array.isArray(values) ||
+        (total !== undefined && count !== total)
+      )
+        return { error: "incomplete" } as const;
+      total ??= count as number;
+      if (values.length !== Math.min(100, total - items.length))
+        return { error: "incomplete" } as const;
+      for (const value of values) {
+        const id =
+          value !== null && typeof value === "object" ? (value as { id?: unknown }).id : undefined;
+        if (key === "workflow_runs" && runId(id) === null) return { error: "invalid-run" } as const;
+        if (total > 100 || id !== undefined) {
+          if (!Number.isSafeInteger(id) || (id as number) <= 0 || ids.has(id as number))
+            return { error: "incomplete" } as const;
+          ids.add(id as number);
+        }
+        items.push(value);
+      }
+      if (items.length === total) return { items };
+    }
+  }
   // Runs listed with a non-waiting status in any listing of this observation;
   // they cannot be approval-only even if their latest listing is waiting.
   const listedNotWaiting = new Set<number>();
+  const changedUpdate = new Set<number>();
+  const waitingPasses = new Map<number, Set<number>>();
   const listings = Array.from({ length: RUN_LIST_PASSES }, () => ACTIVE_RUN_STATUSES).flat();
-  for (const status of listings) {
+  for (const [listingIndex, status] of listings.entries()) {
     if (now() - started > deadline) return hold("deadline");
-    const page = (await input.get(`actions/runs?status=${status}&per_page=100&page=1`)) as {
-      workflow_runs?: unknown;
-      total_count?: unknown;
-    } | null;
-    if (
-      page === null ||
-      typeof page !== "object" ||
-      Array.isArray(page) ||
-      !Array.isArray(page.workflow_runs) ||
-      !Number.isSafeInteger(page.total_count) ||
-      (page.total_count as number) > 100 ||
-      page.workflow_runs.length !== page.total_count
-    )
-      return hold("incomplete-runs");
-    for (const run of page.workflow_runs as unknown[]) {
+    const page = await list(`actions/runs?status=${status}`, "workflow_runs");
+    if ("error" in page) return hold(page.error === "incomplete" ? "incomplete-runs" : page.error);
+    for (const run of page.items) {
       if (run === null || typeof run !== "object") return hold("invalid-run");
       const id = runId((run as { id?: unknown }).id);
       if (id === null) return hold("invalid-run");
       const record = run as Record<string, unknown>;
+      if (status === "waiting" && record.status === "waiting") {
+        const passes = waitingPasses.get(id) ?? new Set<number>();
+        passes.add(Math.floor(listingIndex / ACTIVE_RUN_STATUSES.length));
+        waitingPasses.set(id, passes);
+      }
+      const prior = runs.get(id);
+      if (prior && prior.updated_at !== record.updated_at) changedUpdate.add(id);
+      if (
+        prior &&
+        ["path", "event", "head_branch", "head_sha", "run_attempt"].some(
+          (key) => prior[key] !== record[key],
+        )
+      )
+        return hold("invalid-run");
       // A run listed as completed holds no runner and is not added; an earlier
       // active listing of the same run is kept (conservative).
       if (record.status === "completed") continue;
@@ -432,36 +501,110 @@ export async function scanRunnerDemand(input: {
     }
   }
   if ([...runs.values()].some((run) => run.path === input.batchWorkflow)) return hold("batch-slot");
-  if (runs.size > maxScanned) return hold("scan-bound");
+  if (input.excludePrCiDemand) {
+    for (const [id, run] of runs) {
+      if (
+        run.path === ".github/workflows/pr-ci.yml" &&
+        (run.event === "pull_request" || run.event === "workflow_dispatch") &&
+        ACTIVE_RUN_STATUSES.includes(run.status as (typeof ACTIVE_RUN_STATUSES)[number])
+      ) {
+        runs.delete(id);
+      }
+    }
+  }
   let mainDemand = 0,
     otherDemand = 0,
     runnerRelevantRuns = 0,
     mainQueuedJobs = 0;
   const preFanoutMainRuns: number[] = [];
   let latestMain: { id: number; jobs: unknown[] } | null = null;
-  for (const [id, run] of runs) {
+  // Bound independent read-only job observations without serializing provider
+  // latency across the entire inventory. Pagination within each run remains
+  // sequential and validated by list(); the shared deadline is unchanged.
+  const entries = [...runs];
+  const pages: Awaited<ReturnType<typeof list>>[] = new Array(entries.length);
+  const reused = new Set<number>();
+  let next = 0;
+  let failed = false;
+  let failure: unknown;
+  await Promise.all(
+    Array.from({ length: Math.min(4, entries.length) }, async () => {
+      while (!failed) {
+        const index = next++;
+        if (index >= entries.length) return;
+        try {
+          const [id, run] = entries[index]!;
+          const main =
+            run.path === ".github/workflows/ci.yml" &&
+            run.event === "push" &&
+            run.head_branch === input.baseBranch;
+          const identity =
+            main &&
+            typeof run.head_sha === "string" &&
+            /^[a-f0-9]{40}$/.test(run.head_sha) &&
+            Number.isSafeInteger(run.run_attempt) &&
+            (run.run_attempt as number) > 0 &&
+            typeof run.updated_at === "string" &&
+            Number.isFinite(Date.parse(run.updated_at))
+              ? `approval-main-v1:${digest([id, run.run_attempt, run.head_sha, run.path, run.event, run.head_branch, run.updated_at])}`
+              : null;
+          const eligible =
+            identity &&
+            run.status === "waiting" &&
+            waitingPasses.get(id)?.size === RUN_LIST_PASSES &&
+            !listedNotWaiting.has(id) &&
+            !changedUpdate.has(id);
+          if (input.approvalCache && identity) {
+            if (!eligible) await input.approvalCache.set(identity, null).catch(() => {});
+            else {
+              const raw = await input.approvalCache.get(identity).catch(() => null);
+              const cached =
+                raw && typeof raw === "object" ? (raw as { at?: unknown; jobs?: unknown }) : null;
+              if (
+                cached &&
+                typeof cached.at === "number" &&
+                Number.isFinite(cached.at) &&
+                now() >= cached.at &&
+                now() - cached.at <= APPROVAL_ONLY_CACHE_MS &&
+                publicReleaseApprovalJobs(run, cached.jobs)
+              ) {
+                pages[index] = { items: cached.jobs };
+                reused.add(id);
+                continue;
+              }
+            }
+          }
+          const page = await list(`actions/runs/${id}/jobs?filter=latest`, "jobs");
+          pages[index] = page;
+          if (
+            input.approvalCache &&
+            eligible &&
+            !("error" in page) &&
+            publicReleaseApprovalJobs(run, page.items)
+          )
+            await input.approvalCache
+              .set(identity, { at: now(), jobs: page.items })
+              .catch(() => {});
+        } catch (error) {
+          failed = true;
+          failure = error;
+        }
+      }
+    }),
+  );
+  if (failed) throw failure;
+  for (const [index, [id, run]] of entries.entries()) {
     if (now() - started > deadline) return hold("deadline");
-    const page = (await input.get(`actions/runs/${id}/jobs?filter=latest&per_page=100&page=1`)) as {
-      jobs?: unknown;
-      total_count?: unknown;
-    } | null;
-    if (
-      page === null ||
-      typeof page !== "object" ||
-      Array.isArray(page) ||
-      !Array.isArray(page.jobs) ||
-      !Number.isSafeInteger(page.total_count) ||
-      (page.total_count as number) > 100 ||
-      page.jobs.length !== page.total_count
-    )
-      return hold("incomplete-jobs");
+    const page = pages[index]!;
+    if ("error" in page) return hold(page.error === "incomplete" ? "incomplete-jobs" : page.error);
     scannedRuns++;
-    const jobs = page.jobs as unknown[];
+    if (reused.has(id)) cachedApprovalOnlyRuns++;
+    const jobs = page.items;
     const demand = runnerJobDemand(jobs);
     if (demand === null) return hold("unknown-job-status");
     const approvalOnly = !listedNotWaiting.has(id) && approvalOnlyRun(run, jobs);
     if (approvalOnly) approvalOnlyRuns++;
-    else if (++runnerRelevantRuns > maxRelevant) return hold("runner-run-bound");
+    else runnerRelevantRuns++;
     const isMain =
       run.path === ".github/workflows/ci.yml" &&
       run.head_branch === input.baseBranch &&
@@ -489,6 +632,7 @@ export async function scanRunnerDemand(input: {
     otherDemand,
     scannedRuns,
     approvalOnlyRuns,
+    cachedApprovalOnlyRuns,
     runnerRelevantRuns,
     latestMain: latestMain ? observeMainQueue(latestMain.id, latestMain.jobs, finished) : null,
     mainQueuedJobs,
@@ -687,10 +831,11 @@ export interface Observation {
 }
 export interface BaseCiEvidence {
   sha: string;
-  status: "green" | "red" | "unknown";
+  status: "green" | "red" | "classes" | "unknown";
   runId: number | null;
   attempt: number | null;
   reason: string;
+  classes?: Record<"source" | "units", "green" | "red" | "unknown">;
 }
 export interface Config {
   repository: string;

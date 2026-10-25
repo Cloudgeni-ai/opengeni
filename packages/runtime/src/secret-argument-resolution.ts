@@ -2,10 +2,10 @@
  * Gateway argument resolution for secret references (design §10.4, §10B.2).
  *
  * `literal` sources (remote MCP servers and Codex apps) receive the values in
- * place of each `{{secret:…}}`; `preserve` sources (interaction tools, which
- * the API resolves, and first-party Opengeni tools, which store references
- * verbatim) receive the arguments unchanged. The resolver only ever sees a
- * deep copy, so persisted arguments keep their references.
+ * place of each `{{secret:…}}`; tools with their own delivery boundary
+ * (interaction tools and run_on), and secret tools whose arguments name
+ * references, receive the arguments unchanged. The resolver only ever sees
+ * a deep copy, so persisted arguments keep their references.
  */
 import {
   collectInvalidReferencesDeep,
@@ -25,16 +25,20 @@ export type SecretArgumentMode = "literal" | "preserve";
 
 /**
  * One rule for every tool: a reference is used where it is written, and an
- * escaped reference passes on as the literal reference. Two kinds keep their
- * arguments unchanged: interaction tools, which the API resolves at dispatch
- * so their journals keep references, and Opengeni's secret tools, whose
- * arguments name references rather than use them.
+ * escaped reference passes on as the literal reference. Tools with their own
+ * delivery boundary keep references AND escapes intact until that boundary:
+ * interaction tools resolve at API dispatch; run_on resolves exec/write at
+ * the target (exec uses the same secret carry as exec_command). Opengeni's
+ * secret tools name references rather than use them.
  */
 export function secretArgumentMode(
   entry: Pick<ToolGatewayCatalogEntry, "source" | "identity">,
 ): SecretArgumentMode {
   if (entry.source === "interaction") return "preserve";
-  if (entry.source === "opengeni" && entry.identity.toolName.startsWith("secret_")) {
+  if (
+    entry.source === "opengeni" &&
+    (entry.identity.toolName === "run_on" || entry.identity.toolName.startsWith("secret_"))
+  ) {
     return "preserve";
   }
   return "literal";
@@ -93,6 +97,10 @@ export function createSecretArgumentResolver(input: {
       toolName: entry.modelName,
       operationId: call.operationId,
       ...(context.sourceCallId === undefined ? {} : { sourceCallId: context.sourceCallId }),
+      // The connector the value goes to, for a person approving the use.
+      ...(entry.codemodePath.length > 1
+        ? { destination: entry.codemodePath.slice(0, -1).join(".") }
+        : {}),
     });
     const values = new Map<string, string>();
     const binary: string[] = [];

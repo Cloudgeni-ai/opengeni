@@ -1,3 +1,4 @@
+import { teamsAuthReturnPath } from "@/lib/teams-connect";
 // The console primarily uses `@opengeni/sdk`. Bootstrap, managed-session,
 // and optional connector routes share this authenticated request helper so
 // connector-only code does not increase the core session bundle.
@@ -984,6 +985,8 @@ export async function signInEmail(input: {
  */
 function authReturnBase(): string {
   if (typeof window === "undefined") return "/";
+  const teamsReturn = teamsAuthReturnPath(window.location);
+  if (teamsReturn) return teamsReturn;
   return window.location.pathname === "/connect-agent" ||
     window.location.pathname === "/native-sign-in" ||
     window.location.pathname === "/site-auth/authorize"

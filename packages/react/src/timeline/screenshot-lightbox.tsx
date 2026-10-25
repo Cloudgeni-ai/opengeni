@@ -13,7 +13,14 @@ import {
 } from "react";
 import { Dialog } from "radix-ui";
 import { containedPortal } from "../ui/portal-container";
+import {
+  useZoomPan,
+  useZoomPanShortcuts,
+  ZoomControls,
+  ZoomPanSurface,
+} from "../components/zoom-pan-image";
 import { cn } from "../lib/cn";
+import { isTextEntryTarget } from "../lib/keyboard-targets";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useOpenGeniText } from "../messages/runtime";
 
@@ -49,6 +56,9 @@ export type LightboxControlLabels = {
   close?: string | undefined;
   previous?: string | undefined;
   next?: string | undefined;
+  zoomIn?: string | undefined;
+  zoomOut?: string | undefined;
+  fit?: string | undefined;
 };
 
 const LightboxContext = createContext<LightboxController | null>(null);
@@ -81,15 +91,6 @@ const LightboxGalleryContext = createContext<LightboxGalleryRegistry | null>(nul
 
 /** Images in one timeline page together; elsewhere the whole document does. */
 const GALLERY_ROOT_SELECTOR = "[data-og-timeline-scroller]";
-
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return (
-    target.isContentEditable ||
-    target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') !==
-      null
-  );
-}
 
 /**
  * Adds the element's image to the lightbox gallery so an open lightbox can page
@@ -185,6 +186,9 @@ function LightboxRoot({ children }: { children: ReactNode }) {
   } | null>(null);
   // Fences stale gallery discovery and navigation after a newer open or step.
   const generation = useRef(0);
+  // Each image opens fitted; paging to the next one starts fitted again.
+  const zoom = useZoomPan(state?.src ?? "");
+  useZoomPanShortcuts(zoom, state !== null);
 
   const registry = useMemo<LightboxGalleryRegistry>(
     () => ({
@@ -309,7 +313,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
       // Arrow keys typed into a field move its caret; they never page images.
-      if (isEditableTarget(event.target)) return;
+      if (isTextEntryTarget(event.target)) return;
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
         step(event.key === "ArrowLeft" ? -1 : 1);
@@ -380,25 +384,36 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                       onClick={() => step(-1)}
                     />
                   ) : null}
-                  {/* The figure is one self-contained object: image, caption, and
-                      its own close control. The close button anchors to a wrapper
-                      sized to the IMAGE (w-fit), so it hugs the real top-right
-                      corner regardless of aspect ratio — never floating into the
-                      empty space of a wide figure column. */}
-                  <figure className="m-0 flex max-h-full max-w-5xl flex-col items-center gap-3">
-                    <div className="relative flex min-h-0 w-fit max-w-full">
+                  {/* The image fills the window and zooms and pans in place;
+                      its caption, zoom controls and position sit below it. */}
+                  <figure
+                    className={cn(
+                      "m-0 flex size-full min-h-0 flex-col items-center gap-3",
+                      gallery && "px-12 sm:px-16",
+                    )}
+                  >
+                    <div className="relative min-h-0 w-full flex-1">
                       {/* A plain <img>: this SDK is framework-agnostic, with no host Image component. */}
-                      <img
+                      <ZoomPanSurface
+                        controller={zoom}
                         src={state.src}
                         alt={state.caption ?? state.label}
-                        className="min-h-0 max-h-[82vh] w-auto max-w-full rounded-og-md border border-white/10 object-contain shadow-og-lg"
-                      />
-                      <ScreenshotLightboxControls
-                        src={state.src}
-                        downloadFilename={state.downloadFilename}
-                        controlLabels={state.controlLabels}
+                        onBackdropClick={close}
+                        imageClassName="rounded-og-md border border-white/10 shadow-og-lg"
                       />
                     </div>
+                    <ZoomControls
+                      controller={zoom}
+                      labels={{
+                        zoomIn:
+                          state.controlLabels?.zoomIn ?? t("timeline.screenshotLightbox.zoomIn"),
+                        zoomOut:
+                          state.controlLabels?.zoomOut ?? t("timeline.screenshotLightbox.zoomOut"),
+                        fit: state.controlLabels?.fit ?? t("timeline.screenshotLightbox.fit"),
+                      }}
+                      className="rounded-full border border-white/15 bg-black/60 px-1 text-white/70 backdrop-blur"
+                      buttonClassName="rounded-full text-white/70 hover:bg-white/10 hover:text-white disabled:text-white/30"
+                    />
                     {gallery ? (
                       <figcaption className="flex max-w-2xl flex-col items-center gap-1 text-center font-og-mono text-og-xs">
                         {state.caption ? (
@@ -421,6 +436,11 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                       </figcaption>
                     )}
                   </figure>
+                  <ScreenshotLightboxControls
+                    src={state.src}
+                    downloadFilename={state.downloadFilename}
+                    controlLabels={state.controlLabels}
+                  />
                   {gallery ? (
                     <LightboxStepButton
                       direction="next"
@@ -481,7 +501,7 @@ export function ScreenshotLightboxControls({
 }) {
   const t = useOpenGeniText();
   return (
-    <div className="absolute -right-3 -top-3 flex items-center gap-2">
+    <div className="absolute right-3 top-3 z-10 flex items-center gap-2 sm:right-6 sm:top-6">
       {downloadFilename ? (
         <a
           href={src}

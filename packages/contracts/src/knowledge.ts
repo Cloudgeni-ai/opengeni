@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -28,7 +29,7 @@ export const KNOWLEDGE_QUERY_MAX_BYTES = 4 * 1_024;
 
 const utf8Bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
 const boundedUtf8 = (maxBytes: number) =>
-  z.string().superRefine((value, ctx) => {
+  primitives.string.superRefine((value, ctx) => {
     if (utf8Bytes(value) > maxBytes) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -79,11 +80,9 @@ function boundedJson(value: unknown): boolean {
 }
 
 export const KnowledgeRecordId = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
-    .regex(
-      /^(document|document_chunk):[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
-    ),
+  primitives.string.regex(
+    /^(document|document_chunk):[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
+  ),
 );
 export type KnowledgeRecordId = z.infer<typeof KnowledgeRecordId>;
 
@@ -111,12 +110,12 @@ export const KnowledgeSource = /* @__PURE__ */ defineSchema(() =>
       "web",
       "other",
     ]),
-    uri: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)).nullable(),
+    uri: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(primitives.nonEmptyString).nullable(),
     externalId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
     title: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
     author: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
-    createdAt: z.string().nullable(),
-    updatedAt: z.string().nullable(),
+    createdAt: primitives.nullableString,
+    updatedAt: primitives.nullableString,
     version: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
   }),
 );
@@ -125,16 +124,16 @@ export type KnowledgeSource = z.infer<typeof KnowledgeSource>;
 export const KnowledgeSearchRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      query: boundedUtf8(KNOWLEDGE_QUERY_MAX_BYTES).pipe(z.string().min(1)),
-      baseIds: z.array(z.string().uuid()).max(50).optional(),
+      query: boundedUtf8(KNOWLEDGE_QUERY_MAX_BYTES).pipe(primitives.nonEmptyString),
+      baseIds: z.array(primitives.uuid).max(50).optional(),
       mode: z.enum(["hybrid", "vector", "keyword"]).optional(),
       sourceKinds: z.array(KnowledgeSource.shape.kind).max(8).optional(),
       authorityKinds: z.array(KnowledgeAuthority.shape.kind).max(3).optional(),
       aclTags: z
-        .array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(z.string().min(1)))
+        .array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(primitives.nonEmptyString))
         .max(64)
         .optional(),
-      limit: z.number().int().positive().max(KNOWLEDGE_SEARCH_MAX_RESULTS).default(5),
+      limit: primitives.positiveInteger.max(KNOWLEDGE_SEARCH_MAX_RESULTS).default(5),
     })
     .strict(),
 );
@@ -144,13 +143,10 @@ export const KnowledgeBrowseRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       parentId: KnowledgeRecordId.optional(),
-      topic: boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(z.string().min(1)).optional(),
+      topic: boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(primitives.nonEmptyString).optional(),
       sourceKinds: z.array(KnowledgeSource.shape.kind).max(8).optional(),
-      cursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).optional(),
-      limit: z
-        .number()
-        .int()
-        .positive()
+      cursor: primitives.nonEmptyString.max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).optional(),
+      limit: primitives.positiveInteger
         .max(KNOWLEDGE_BROWSE_MAX_LIMIT)
         .default(KNOWLEDGE_BROWSE_DEFAULT_LIMIT),
     })
@@ -173,11 +169,13 @@ export const KnowledgeProviderCitation = /* @__PURE__ */ defineSchema(() =>
     providerRevision: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
     sourceVersion: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES),
     driveId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
-    deepLink: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)).nullable(),
-    aclRevision: z.string().regex(/^[0-9a-f]{64}$/u),
-    authorizationObservedAt: z.string().datetime({ offset: true }),
-    authorizationExpiresAt: z.string().datetime({ offset: true }),
-    reauthorizedAt: z.string().datetime({ offset: true }),
+    deepLink: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES)
+      .pipe(primitives.nonEmptyString)
+      .nullable(),
+    aclRevision: primitives.string.regex(/^[0-9a-f]{64}$/u),
+    authorizationObservedAt: primitives.string.datetime({ offset: true }),
+    authorizationExpiresAt: primitives.string.datetime({ offset: true }),
+    reauthorizedAt: primitives.string.datetime({ offset: true }),
   }),
 );
 export type KnowledgeProviderCitation = z.infer<typeof KnowledgeProviderCitation>;
@@ -190,7 +188,7 @@ export const KnowledgeLinkTarget = /* @__PURE__ */ defineSchema(() =>
     }),
     z.object({
       kind: z.literal("external"),
-      uri: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)),
+      uri: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(primitives.nonEmptyString),
     }),
   ]),
 );
@@ -221,29 +219,29 @@ export const KnowledgeRecord = /* @__PURE__ */ defineSchema(() =>
       body: boundedUtf8(KNOWLEDGE_BODY_MAX_BYTES).nullable(),
       summary: boundedUtf8(KNOWLEDGE_SUMMARY_MAX_BYTES).nullable(),
       topics: z.array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES)).max(KNOWLEDGE_TOPICS_MAX_ITEMS),
-      metadata: z.record(z.string(), z.unknown()).refine(boundedJson, {
+      metadata: z.record(primitives.string, z.unknown()).refine(boundedJson, {
         message: "knowledge metadata exceeds its JSON projection boundary",
       }),
     }),
     authority: KnowledgeAuthority,
     provenance: z.object({
       source: KnowledgeSource,
-      indexedAt: z.string(),
+      indexedAt: primitives.string,
       citation: KnowledgeProviderCitation.nullable().optional(),
     }),
     lifecycle: z.object({
       state: z.literal("active"),
-      updatedAt: z.string(),
+      updatedAt: primitives.string,
     }),
     quality: z.object({
       trust: z.literal("sourced"),
-      freshnessAt: z.string(),
+      freshnessAt: primitives.string,
       conflict: z.literal("not_evaluated"),
       correction: z.literal("current_source_version"),
     }),
     links: z.array(KnowledgeLink).max(8),
     projection: z.object({
-      truncated: z.boolean(),
+      truncated: primitives.boolean,
       fields: z
         .array(
           z.enum([
@@ -283,7 +281,7 @@ export const KnowledgeSearchResult = /* @__PURE__ */ defineSchema(() =>
         .max(2),
       freshness: z.enum(["current", "aging", "stale"]),
       qualityAdjustment: z.number().min(0).max(1),
-      duplicateCount: z.number().int().nonnegative(),
+      duplicateCount: primitives.nonnegativeInteger,
     }),
   }),
 );
@@ -302,26 +300,24 @@ export const KnowledgeSearchResponse = /* @__PURE__ */ defineSchema(() =>
         policy: z.literal("exact_textual_content"),
       }),
       candidates: z.object({
-        ranked: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-        rechecked: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-        omittedOnRecheck: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        ranked: primitives.nonnegativeInteger.max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        rechecked: primitives.nonnegativeInteger.max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        omittedOnRecheck: primitives.nonnegativeInteger.max(KNOWLEDGE_SEARCH_MAX_RESULTS),
       }),
       omitted: z.object({
-        belowRelevanceFloor: z
-          .number()
-          .int()
-          .nonnegative()
-          .max(KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS),
-        asDuplicate: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-        forLimit: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-        forResponseBudget: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        belowRelevanceFloor: primitives.nonnegativeInteger.max(
+          KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS,
+        ),
+        asDuplicate: primitives.nonnegativeInteger.max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        forLimit: primitives.nonnegativeInteger.max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        forResponseBudget: primitives.nonnegativeInteger.max(KNOWLEDGE_SEARCH_MAX_RESULTS),
       }),
       budget: z.object({
         maxResults: z.literal(KNOWLEDGE_SEARCH_MAX_RESULTS),
         maxResponseBytes: z.literal(KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES),
-        responseBytes: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES),
+        responseBytes: primitives.nonnegativeInteger.max(KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES),
         tokenEstimateBytesPerToken: z.literal(KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN),
-        estimatedTokens: z.number().int().nonnegative(),
+        estimatedTokens: primitives.nonnegativeInteger,
         maxEstimatedTokens: z.literal(
           Math.ceil(
             KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
@@ -343,19 +339,19 @@ export type KnowledgeGetResponse = z.infer<typeof KnowledgeGetResponse>;
 export const KnowledgeBrowseResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     records: z.array(KnowledgeRecord).max(KNOWLEDGE_BROWSE_MAX_LIMIT),
-    nextCursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).nullable(),
-    hasMore: z.boolean(),
+    nextCursor: primitives.nonEmptyString.max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).nullable(),
+    hasMore: primitives.boolean,
     selection: z.object({
       omitted: z.object({
-        forResponseBudget: z.number().int().nonnegative().max(KNOWLEDGE_BROWSE_MAX_LIMIT),
+        forResponseBudget: primitives.nonnegativeInteger.max(KNOWLEDGE_BROWSE_MAX_LIMIT),
       }),
       compactedRecordCount: z.number().int().nonnegative().max(1),
       budget: z.object({
         maxResults: z.literal(KNOWLEDGE_BROWSE_MAX_LIMIT),
         maxResponseBytes: z.literal(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
-        responseBytes: z.number().int().nonnegative().max(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
+        responseBytes: primitives.nonnegativeInteger.max(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
         tokenEstimateBytesPerToken: z.literal(KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN),
-        estimatedTokens: z.number().int().nonnegative(),
+        estimatedTokens: primitives.nonnegativeInteger,
         maxEstimatedTokens: z.literal(
           Math.ceil(
             KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,

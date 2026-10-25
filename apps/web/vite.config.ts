@@ -172,14 +172,21 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // Zod, Permission and the pure Skill receipt schemas initialize
-              // before the contracts barrel and organization-access read them.
-              // Keep these leaves outside shared app chunks that import their
-              // consumers back; otherwise eager Permission.options or
-              // SkillWriteReceipt reads can run before initialization.
+              // Zod, Permission, the shared contract primitives and the pure
+              // Skill receipt schemas initialize before the contracts barrel and
+              // organization-access read them. Keep these leaves outside shared
+              // app chunks that import their consumers back; otherwise eager
+              // Permission.options, SkillWriteReceipt or primitive reads can run
+              // before initialization. The primitives depend only on Zod, and
+              // both this group and startup-contract-tables import them, so they
+              // must live here rather than in a shared app chunk.
               // Co-locating them avoids an extra initial graph request too.
+              // Every schema here calls the dependency-free defineSchema leaf
+              // while loading, so it lives here too; left to automatic
+              // splitting it can land in a shared app chunk that imports this
+              // group back, and these schemas would then read it too early.
               name: "zod-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/](?:permissions|skills)\.tsx?$)/,
+              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/](?:define-schema|permissions|primitives|skills)\.tsx?$)/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
@@ -395,7 +402,7 @@ export default defineConfig({
               // reads the rail context, so those leaves (and the icons both
               // sides draw) stay here rather than in the lazy action chunk.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive|archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-square-text|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-ccw-clock|rotate-cw|save|server|text-search)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive|archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-square-text|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-ccw-clock|rotate-cw|save|server|text-search|zap|zap-off)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -468,6 +475,8 @@ export default defineConfig({
               // its RowSelect) into a direct workspace load. Connection access renders a Models
               // form page, so it lives here, not in model-connection-settings,
               // whose shared icons the eager workspace graph imports.
+              // Workspace meeting defaults render only on the settings page, but
+              // entry-aware merging can fold them into a chunk direct sessions load.
               // Organization provider connections and Codex subscriptions are imported by the Models
               // pages above and by the lazy organization Models section; outside
               // this group they land in the section's chunk and form a cycle
@@ -481,7 +490,7 @@ export default defineConfig({
               // so the lazy agent consent route cannot read uninitialized data
               // across a settings-pages/organization-access-fields chunk cycle.
               name: "settings-pages",
-              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.tsx?)$/,
+              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:components[\\/](?:connection-access-settings|meetings[\\/]meeting-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.tsx?)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -508,6 +517,18 @@ export default defineConfig({
               // session load imports, so pin it to its own lazy unit.
               name: "agent-learning-settings",
               test: /packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]knowledge[\\/]agent-learning-settings\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
+              // The Meetings hooks load only with the lazy recorder host and
+              // the Meetings pages. Entry-aware merging otherwise folds them
+              // into the shared chunk that carries the session page's media
+              // icons, so a direct session downloads them. The SDK recordings
+              // client stays out of this group: composer dictation uses it as
+              // soon as a session opens, so it belongs to the session graph.
+              name: "recordings",
+              test: /packages[\\/]react[\\/]src[\\/](?:recordings|hooks[\\/]use-recordings)\.ts$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

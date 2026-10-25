@@ -7,6 +7,7 @@ import {
   ListEventSourcesResponse,
   ListEventTypesResponse,
   ListInboundEventsResponse,
+  ListReadyEventSourcesResponse,
   ReplayEventDeliveryResponse,
   RotateEventSourceSecretResponse,
   SendTestEventRequest,
@@ -18,8 +19,12 @@ import {
   deleteEventSourceForViewer,
   eventSourceAccess,
   eventSourceForClient,
+  GITHUB_WEBHOOK_PATH,
+  inboundWebhookBaseUrl,
   listEventSourceTypes,
+  listReadyEventSources,
   receiveEventWebhook,
+  receiveGitHubWebhook,
   replayEventDelivery,
   requireAccessGrant,
   requireEventSource,
@@ -29,11 +34,13 @@ import {
   sendTestEvent,
   updateEventSourceForViewer,
   type ApiRouteDeps,
+  type EventSourceViewer,
 } from "@opengeni/core";
 import { listEventDeliveries, listEventSources, listInboundEvents } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { githubAppWebhookPort } from "../github-access";
 import { integrationBaseUrl } from "../integrations/oauth-client";
 import { parseRequestJson, readBoundedRawBody } from "../http/request-body";
 
@@ -45,7 +52,7 @@ import { parseRequestJson, readBoundedRawBody } from "../http/request-body";
 export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db } = deps;
   const baseUrl = (c: Context): string =>
-    integrationBaseUrl(deps.settings.publicBaseUrl, c.req.url);
+    integrationBaseUrl(inboundWebhookBaseUrl(deps.settings), c.req.url);
 
   async function viewerFor(
     c: Context,
@@ -56,6 +63,14 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, permission);
     const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     return { grant, viewer, workspaceId };
+  }
+
+  // REST reads say what the reading person may do, so clients never re-derive it.
+  function forViewer(viewer: EventSourceViewer, source: EventSource): EventSource {
+    return {
+      ...source,
+      viewerAccess: eventSourceAccess(viewer, source) === "manage" ? "manage" : "use",
+    };
   }
 
   function sourceIdParam(c: Context): string {
@@ -84,7 +99,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       ListEventSourcesResponse.parse({
         sources: sources
           .filter((source) => eventSourceAccess(viewer, source) !== "none")
-          .map((source) => eventSourceForClient(source, baseUrl(c))),
+          .map((source) => forViewer(viewer, eventSourceForClient(source, baseUrl(c)))),
       }),
     );
   });
@@ -101,15 +116,35 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       viewer,
       request,
       baseUrl: baseUrl(c),
+      githubApp: request.kind === "github" ? githubAppWebhookPort(deps) : null,
+      ...(deps.eventSourceFetch ? { fetch: deps.eventSourceFetch } : {}),
     });
     c.header("cache-control", "private, no-store");
-    return c.json(CreateEventSourceResponse.parse(created), 201);
+    return c.json(
+      CreateEventSourceResponse.parse({ ...created, source: forViewer(viewer, created.source) }),
+      201,
+    );
+  });
+
+  // Sources the caller can use without setting them up, listed by key until used.
+  app.get("/v1/workspaces/:workspaceId/event-sources/ready", async (c) => {
+    const { grant, viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
+    const sources = await listReadyEventSources(
+      {
+        db,
+        settings: deps.settings,
+        ...(deps.eventSourceFetch ? { fetch: deps.eventSourceFetch } : {}),
+      },
+      { accountId: grant.accountId, workspaceId, ownerSubjectId: viewer.subjectId },
+    );
+    c.header("cache-control", "private, no-store");
+    return c.json(ListReadyEventSourcesResponse.parse({ sources }));
   });
 
   app.get("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {
     const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
     const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "use");
-    return c.json(EventSource.parse(eventSourceForClient(source, baseUrl(c))));
+    return c.json(EventSource.parse(forViewer(viewer, eventSourceForClient(source, baseUrl(c)))));
   });
 
   app.patch("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {
@@ -123,7 +158,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       request,
       baseUrl: baseUrl(c),
     });
-    return c.json(EventSource.parse(updated));
+    return c.json(EventSource.parse(forViewer(viewer, updated)));
   });
 
   app.delete("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {
@@ -167,7 +202,12 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!z.string().uuid().safeParse(deliveryId).success) {
         throw new HTTPException(404, { message: "event delivery not found" });
       }
-      const delivery = await replayEventDelivery({ db, source, deliveryId });
+      const delivery = await replayEventDelivery({
+        db,
+        settings: deps.settings,
+        source,
+        deliveryId,
+      });
       return c.json(ReplayEventDeliveryResponse.parse({ delivery }), 201);
     },
   );
@@ -185,8 +225,41 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/event-sources/:sourceId/event-types", async (c) => {
     const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
     const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "use");
-    const eventTypes = await listEventSourceTypes({ db, source });
+    const eventTypes = await listEventSourceTypes({
+      db,
+      settings: deps.settings,
+      source,
+      githubApp: source.kind === "github" ? githubAppWebhookPort(deps) : null,
+      ...(deps.eventSourceFetch ? { fetch: deps.eventSourceFetch } : {}),
+    });
     return c.json(ListEventTypesResponse.parse({ sourceId: source.id, eventTypes }));
+  });
+
+  // The deployment's GitHub App sends every webhook here. The App's webhook
+  // secret authenticates GitHub; each delivery goes to the GitHub source of
+  // every workspace bound to its installation and repository.
+  app.post(GITHUB_WEBHOOK_PATH, async (c) => {
+    const body = await readBoundedRawBody(
+      c.req.raw,
+      EVENT_DELIVERY_BODY_MAX_BYTES,
+      "webhook payload is too large",
+    );
+    const result = await receiveGitHubWebhook({
+      db,
+      settings: deps.settings,
+      headers: c.req.raw.headers,
+      body,
+    });
+    switch (result.outcome) {
+      case "not_found":
+        return c.json({ error: "not found" }, 404);
+      case "rejected":
+        return c.json({ error: result.reason }, 401);
+      case "unreadable":
+        return c.json({ error: result.reason }, 400);
+      case "received":
+        return c.json({ deliveries: result.deliveries }, 200);
+    }
   });
 
   // The public intake. The URL names the source; the signature authenticates
@@ -211,6 +284,11 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
     switch (result.outcome) {
       case "not_found":
         return c.json({ error: "not found" }, 404);
+      case "gone":
+        // An MCP subscription that ended: the server must stop retrying.
+        return c.json({ error: "subscription ended" }, 410);
+      case "challenge":
+        return c.json({ challenge: result.challenge }, 200);
       case "rejected":
         return c.json({ error: result.reason }, 401);
       case "stored":

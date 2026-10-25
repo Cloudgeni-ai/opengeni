@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { TurnExecutionPolicyV1 } from "./index";
@@ -26,9 +27,9 @@ export const TurnServingPolicyV1 = /* @__PURE__ */ defineSchema(() =>
     .object({
       schemaVersion: z.literal(1),
       policy: z.lazy(() => TurnExecutionPolicyV1),
-      executionGeneration: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      executionGeneration: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
       /** Selection reference; advisory until the generation is placed. */
-      connectionId: z.string().uuid(),
+      connectionId: primitives.uuid,
       reason: ServingReason,
       /** Highest session history position at recording, including inactive rows.
        * Fractional positions exist in historical compaction layouts. A revision
@@ -67,10 +68,10 @@ export const TurnPendingServingPolicyV1 = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       schemaVersion: z.literal(1),
-      sourceExecutionGeneration: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      sourceAttemptId: z.string().uuid(),
+      sourceExecutionGeneration: primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
+      sourceAttemptId: primitives.uuid,
       policy: z.lazy(() => TurnExecutionPolicyV1),
-      connectionId: z.string().uuid(),
+      connectionId: primitives.uuid,
       reason: ServingReason,
     })
     .strict()

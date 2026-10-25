@@ -13,6 +13,9 @@
 {{- $_ := set $reserved .name true -}}
 {{- end -}}
 {{- end -}}
+{{- if include "opengeni.computeControl.trusted" .root -}}
+{{- $_ := set $reserved "NODE_EXTRA_CA_CERTS" true -}}
+{{- end -}}
 {{- $seen := dict -}}
 {{- range .entries -}}
 {{- if not (kindIs "map" .) -}}

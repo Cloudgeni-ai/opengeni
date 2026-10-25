@@ -1,14 +1,16 @@
 import {
+  forwardRef,
   useId,
   useRef,
   useState,
-  type ComponentProps,
+  type ComponentPropsWithoutRef,
   type MouseEvent,
   type ReactNode,
 } from "react";
 import { Loader2Icon } from "lucide-react";
 import { Switch as SwitchPrimitive } from "radix-ui";
 import { cn } from "../lib/cn";
+import { useMergedRefs } from "../lib/refs";
 import { DisabledReasonTooltip, joinIds, useSettingRowControl } from "./setting-row";
 
 /**
@@ -23,7 +25,7 @@ export type SwitchVariant = "brand" | "neutral";
 export type SwitchSize = "md" | "sm";
 
 export interface SwitchProps extends Omit<
-  ComponentProps<typeof SwitchPrimitive.Root>,
+  ComponentPropsWithoutRef<typeof SwitchPrimitive.Root>,
   "asChild" | "children"
 > {
   variant?: SwitchVariant | undefined;
@@ -47,29 +49,33 @@ export interface SwitchProps extends Omit<
 
 const DEFAULT_STATE_LABELS = { on: "On", off: "Off" };
 
-export function Switch({
-  variant = "brand",
-  size = "md",
-  pending = false,
-  disabled = false,
-  disabledReason,
-  showStateText = false,
-  stateLabels = DEFAULT_STATE_LABELS,
-  checked: checkedProp,
-  defaultChecked,
-  onCheckedChange,
-  onClick,
-  className,
-  id: idProp,
-  "aria-label": ariaLabel,
-  "aria-labelledby": ariaLabelledByProp,
-  "aria-describedby": ariaDescribedByProp,
-  ...props
-}: SwitchProps) {
+export const Switch = /* @__PURE__ */ forwardRef<HTMLButtonElement, SwitchProps>(function Switch(
+  {
+    variant = "brand",
+    size = "md",
+    pending = false,
+    disabled = false,
+    disabledReason,
+    showStateText = false,
+    stateLabels = DEFAULT_STATE_LABELS,
+    checked: checkedProp,
+    defaultChecked,
+    onCheckedChange,
+    onClick,
+    className,
+    id: idProp,
+    "aria-label": ariaLabel,
+    "aria-labelledby": ariaLabelledByProp,
+    "aria-describedby": ariaDescribedByProp,
+    ...props
+  },
+  forwardedRef,
+) {
   // Takes the row's control id unless given its own, so clicking the row label toggles it.
   const field = useSettingRowControl(idProp === undefined);
   const reasonId = useId();
   const rootRef = useRef<HTMLButtonElement>(null);
+  const ref = useMergedRefs(rootRef, forwardedRef);
   const [uncontrolled, setUncontrolled] = useState(defaultChecked ?? false);
   const checked = checkedProp ?? uncontrolled;
   const hasReason = disabled && disabledReason !== undefined && disabledReason !== null;
@@ -88,7 +94,7 @@ export function Switch({
 
   const root = (
     <SwitchPrimitive.Root
-      ref={rootRef}
+      ref={ref}
       data-slot="switch"
       data-variant={variant}
       data-size={size}
@@ -188,4 +194,4 @@ export function Switch({
       ) : null}
     </>
   );
-}
+});

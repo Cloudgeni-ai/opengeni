@@ -25,7 +25,18 @@ export const recordingStateValues = [
   "failed",
   "deleting",
 ] as const;
-export const recordingTrackSourceValues = ["microphone", "system", "mixed", "upload"] as const;
+export const recordingTrackSourceValues = [
+  "microphone",
+  "system",
+  "mixed",
+  "upload",
+  // Migration 0945. A browser tab an agent recorded.
+  "browser_tab",
+] as const;
+export const recordingTrackKindValues = ["audio", "video"] as const;
+// Migration 0945. "browser": an agent's browser recording, kept out of meeting lists.
+// Migration 0962. "dictation": speech recorded to type it; private and short-lived.
+export const recordingPurposeValues = ["meeting", "browser", "dictation"] as const;
 export const recordingChunkStateValues = ["pending", "uploaded"] as const;
 export const recordingTranscriptVersionStateValues = [
   "queued",
@@ -46,9 +57,14 @@ export const recordingEventTypeValues = [
   "recording.transcript.failed",
   "recording.transcript.current_changed",
   "recording.speakers.updated",
+  // Migration 0954.
+  "recording.notes.updated",
   "recording.deleted",
 ] as const;
 export const recordingDiarizationValues = ["provider", "ours", "tracks", "none"] as const;
+// Migration 0940. The kind of audio a voice was heard in.
+export const recordingVoiceChannelValues = ["microphone", "call", "room"] as const;
+export const recordingVoiceConsentValues = ["self", "attested"] as const;
 
 const tsvector = customType<{ data: string }>({ dataType: () => "tsvector" });
 
@@ -63,6 +79,10 @@ export const recordings = pgTable(
       .notNull()
       .default("user_private"),
     title: text("title").notNull(),
+    purpose: text("purpose", { enum: recordingPurposeValues }).notNull().default("meeting"),
+    // Migration 0945. Why a browser recording's video could not be made.
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
     state: text("state", { enum: recordingStateValues }).notNull().default("capturing"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     captureEndedAt: timestamp("capture_ended_at", { withTimezone: true }),
@@ -70,6 +90,8 @@ export const recordings = pgTable(
     externalRef: text("external_ref"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     transcription: jsonb("transcription").$type<Record<string, unknown>>().notNull().default({}),
+    // Migration 0946. When the workspace retention deleted the audio.
+    audioDeletedAt: timestamp("audio_deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -89,9 +111,7 @@ export const recordingTracks = pgTable(
     workspaceId: uuid("workspace_id").notNull(),
     recordingId: uuid("recording_id").notNull(),
     trackNumber: integer("track_number").notNull(),
-    kind: text("kind", { enum: ["audio"] })
-      .notNull()
-      .default("audio"),
+    kind: text("kind", { enum: recordingTrackKindValues }).notNull().default("audio"),
     source: text("source", { enum: recordingTrackSourceValues }).notNull(),
     mimeType: text("mime_type").notNull(),
     chunkCount: integer("chunk_count").notNull().default(0),
@@ -99,6 +119,16 @@ export const recordingTracks = pgTable(
     durationMilliseconds: integer("duration_milliseconds").notNull().default(0),
     preparedObjectKey: text("prepared_object_key"),
     preparedBytes: bigint("prepared_bytes", { mode: "number" }),
+    // Migration 0945.
+    preparedSha256: text("prepared_sha256"),
+    videoWidth: integer("video_width"),
+    videoHeight: integer("video_height"),
+    videoFrameCount: integer("video_frame_count"),
+    // Migration 0942. The live transcript streamed for this track, if any.
+    liveProviderId: text("live_provider_id"),
+    liveModel: text("live_model"),
+    liveStreamedMilliseconds: integer("live_streamed_milliseconds").notNull().default(0),
+    liveCostUsdMicros: bigint("live_cost_usd_micros", { mode: "number" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -158,7 +188,11 @@ export const recordingTranscriptVersions = pgTable(
     audioMilliseconds: integer("audio_milliseconds").notNull().default(0),
     segmentCount: integer("segment_count").notNull().default(0),
     costUsdMicros: bigint("cost_usd_micros", { mode: "number" }),
+    // Migration 0960. Credits charged for a deployment-funded model; null when not charged in credits.
+    creditCostMicros: bigint("credit_cost_micros", { mode: "number" }),
     requestedBySubjectId: text("requested_by_subject_id").notNull(),
+    // Migration 0962. The credit debit attribution of the request that asked for this version.
+    creditAttribution: jsonb("credit_attribution").$type<Record<string, unknown>>(),
     attemptCount: integer("attempt_count").notNull().default(0),
     processingOwner: uuid("processing_owner"),
     processingStartedAt: timestamp("processing_started_at", { withTimezone: true }),
@@ -209,11 +243,62 @@ export const recordingPeople = pgTable(
     email: text("email"),
     externalRef: text("external_ref"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
+    voiceConsent: text("voice_consent", { enum: recordingVoiceConsentValues }),
+    voiceConsentBySubjectId: text("voice_consent_by_subject_id"),
+    voiceConsentedAt: timestamp("voice_consented_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [unique("recording_people_workspace_id_uq").on(table.workspaceId, table.id)],
 );
+
+export const recordingVoiceprints = pgTable(
+  "recording_voiceprints",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    personId: uuid("person_id").notNull(),
+    channel: text("channel", { enum: recordingVoiceChannelValues }).notNull(),
+    model: text("model").notNull(),
+    embedding: real("embedding").array().notNull(),
+    speechMilliseconds: bigint("speech_milliseconds", { mode: "number" }).notNull().default(0),
+    sampleCount: integer("sample_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.personId, table.channel, table.model] }),
+  ],
+);
+
+export const recordingSpeakerVoices = pgTable(
+  "recording_speaker_voices",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    recordingId: uuid("recording_id").notNull(),
+    versionId: uuid("version_id").notNull(),
+    speakerLabel: text("speaker_label").notNull(),
+    channel: text("channel", { enum: recordingVoiceChannelValues }).notNull(),
+    model: text("model").notNull(),
+    embedding: real("embedding").array().notNull(),
+    speechMilliseconds: integer("speech_milliseconds").notNull(),
+    learnedPersonId: uuid("learned_person_id"),
+  },
+  (table) => [primaryKey({ columns: [table.versionId, table.speakerLabel] })],
+);
+
+export const recordingVoiceRejections = pgTable("recording_voice_rejections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull(),
+  workspaceId: uuid("workspace_id").notNull(),
+  recordingId: uuid("recording_id").notNull(),
+  personId: uuid("person_id").notNull(),
+  model: text("model").notNull(),
+  embedding: real("embedding").array().notNull(),
+  rejectedBySubjectId: text("rejected_by_subject_id").notNull(),
+  rejectedAt: timestamp("rejected_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const recordingSpeakerAssignments = pgTable(
   "recording_speaker_assignments",
@@ -247,6 +332,56 @@ export const recordingSegmentEdits = pgTable(
     editedAt: timestamp("edited_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [primaryKey({ columns: [table.versionId, table.segmentIndex] })],
+);
+
+// Migration 0942. Finished live text per track while recording, a preview
+// that is removed once the first transcript is ready.
+export const recordingLiveSegments = pgTable(
+  "recording_live_segments",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    recordingId: uuid("recording_id").notNull(),
+    trackNumber: integer("track_number").notNull(),
+    segmentNumber: integer("segment_number").notNull(),
+    startMilliseconds: integer("start_milliseconds").notNull(),
+    endMilliseconds: integer("end_milliseconds").notNull(),
+    text: text("text").notNull(),
+    sequence: bigint("sequence", { mode: "number" }).notNull().generatedAlwaysAsIdentity(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.recordingId, table.trackNumber, table.segmentNumber] }),
+    index("recording_live_segments_sequence_idx").on(
+      table.workspaceId,
+      table.recordingId,
+      table.sequence,
+    ),
+  ],
+);
+
+// Migration 0954. A meeting's notepad (jotted while recording) and its notes
+// (written up afterwards), as Markdown, one row each.
+export const recordingNoteKindValues = ["notepad", "notes"] as const;
+
+export const recordingNotes = pgTable(
+  "recording_notes",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    recordingId: uuid("recording_id").notNull(),
+    kind: text("kind", { enum: recordingNoteKindValues }).notNull(),
+    body: text("body").notNull(),
+    revision: integer("revision").notNull().default(1),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    updatedBySessionId: uuid("updated_by_session_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.recordingId, table.kind] }),
+    index("recording_notes_workspace_idx").on(table.workspaceId, table.recordingId),
+  ],
 );
 
 export const recordingEvents = pgTable(
