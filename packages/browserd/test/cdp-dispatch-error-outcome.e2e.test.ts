@@ -29,13 +29,16 @@ document.getElementById("search").addEventListener("submit", (event) => {
 </script>`;
 
 const NATIVE_DROPDOWN = `<!doctype html><title>Order</title>
-<label>Size <select id="size"><option value="s">Small</option><option value="m">Medium</option><option value="l" disabled>Large</option><option value="x" hidden>Extra large</option></select></label>
+<label>Size <select id="size"><option value="s">Small</option><option value="m">Medium</option><option value="l" disabled>Large</option><option value="x" hidden>Extra large</option><option value="t" style="display:none">Tiny</option><optgroup label="Seasonal" hidden><option value="p">Pumpkin</option></optgroup></select></label>
 <label>Delivery <select id="delivery"><option>Standard</option><option>Express</option></select></label>
 <label>Toppings <select id="toppings" multiple size="3"><option>Cheese</option><option>Olives</option></select></label>
 <label>City <input list="cities"></label><datalist id="cities"><option value="Lisbon"></option></datalist>
 <script>
 globalThis.changes = 0;
 globalThis.events = [];
+globalThis.keys = [];
+for (const type of ["keydown", "keypress", "keyup"])
+  document.addEventListener(type, (event) => keys.push(type + " " + event.key), true);
 const size = document.getElementById("size");
 size.addEventListener("change", () => changes++);
 for (const type of ["focus", "blur", "input", "change", "keydown"])
@@ -179,6 +182,8 @@ e2e(
       // The page saw what a person's choice produces: focus from opening the
       // list, then input and change, and no blur or key on the way.
       expect(await evaluate("events")).toEqual(["focus", "input", "change"]);
+      // Closing the list made no key event anywhere on the page.
+      expect(await evaluate("keys")).toEqual([]);
       // The dropdown's list closed, as after a person's choice.
       expect(
         await evaluate(
@@ -200,18 +205,20 @@ e2e(
       );
       expect(disabled.state).toBe("failed");
       expect(disabled.error?.code).toBe("invalid_action");
-      // So is a hidden one.
-      const hidden = await controller.run(
-        command(
-          view,
-          { type: "click", locator: { kind: "css", selector: '#size option[value="x"]' } },
-          "none",
-        ),
-      );
-      expect(hidden.state).toBe("failed");
-      expect(hidden.error?.message).toBe(
-        "this option of a native dropdown is disabled or hidden and cannot be chosen",
-      );
+      // So is a hidden one: by its own attribute, by style, or by its group.
+      for (const value of ["x", "t", "p"]) {
+        const hidden = await controller.run(
+          command(
+            view,
+            { type: "click", locator: { kind: "css", selector: `#size option[value="${value}"]` } },
+            "none",
+          ),
+        );
+        expect(hidden.state).toBe("failed");
+        expect(hidden.error?.message).toBe(
+          "this option of a native dropdown is disabled or hidden and cannot be chosen",
+        );
+      }
       expect(await evaluate('[document.getElementById("size").value, changes]')).toEqual(["s", 2]);
 
       // An option of a list box has its own box and is clicked like any element.
