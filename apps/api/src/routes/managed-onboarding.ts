@@ -29,6 +29,7 @@ import {
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
+import { parseRequestBody, requestValidationError } from "../http/request-body";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
@@ -64,7 +65,8 @@ export function registerManagedOnboardingRoutes(
     );
     if (!parsed.success) {
       recordOrganizationSetupOutcome(deps.observability, "failed");
-      throw new HTTPException(422, {
+      throw requestValidationError(parsed.error, "body", {
+        status: 422,
         message: "invalid organization setup request",
       });
     }
@@ -131,17 +133,16 @@ export function registerManagedOnboardingRoutes(
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
     enforceAccountSetupRateLimit(context, deps, accountSetupLimiter);
-    const parsed = PreviewOrganizationUserSetupRequest.safeParse(
+    const parsed = parseRequestBody(
+      PreviewOrganizationUserSetupRequest,
       await context.req.json().catch(() => null),
+      { status: 422, message: "invalid account setup preview request" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid account setup preview request" });
-    }
     return context.json(
       OrganizationUserSetupPreview.parse(
         await previewOrganizationUserSetup(
           deps.db,
-          await organizationUserSetupTokenDigest(parsed.data.token),
+          await organizationUserSetupTokenDigest(parsed.token),
         ),
       ),
     );
@@ -152,16 +153,13 @@ export function registerManagedOnboardingRoutes(
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
     enforceAccountSetupRateLimit(context, deps, accountSetupLimiter);
-    const parsed = CompleteOrganizationUserSetupRequest.safeParse(
+    const parsed = parseRequestBody(
+      CompleteOrganizationUserSetupRequest,
       await context.req.json().catch(() => null),
+      { status: 422, message: "invalid account setup request" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, {
-        message: "invalid account setup request",
-      });
-    }
-    const name = parsed.data.name.trim();
-    const tokenDigest = await organizationUserSetupTokenDigest(parsed.data.token);
+    const name = parsed.name.trim();
+    const tokenDigest = await organizationUserSetupTokenDigest(parsed.token);
     const preflight = await preflightOrganizationUserSetup(deps.db, tokenDigest);
     if (preflight === "unavailable") {
       throw new HTTPException(404, {
@@ -171,18 +169,18 @@ export function registerManagedOnboardingRoutes(
     const requestFingerprint = await organizationUserSetupRequestFingerprint(deps.settings, {
       tokenDigest,
       name,
-      password: parsed.data.password,
+      password: parsed.password,
     });
     const passwordHash =
       preflight === "completed"
         ? completedSetupReplayPasswordHash
-        : await hashPassword(parsed.data.password);
+        : await hashPassword(parsed.password);
     try {
       return context.json(
         CompleteOrganizationUserSetupResponse.parse(
           await completeOrganizationUserSetup(deps.db, {
             tokenDigest,
-            operationId: parsed.data.operationId,
+            operationId: parsed.operationId,
             requestFingerprint,
             authUserId: crypto.randomUUID(),
             name,

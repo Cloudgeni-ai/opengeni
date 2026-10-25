@@ -52,6 +52,7 @@ import {
   type EditableArtifactRouteDependencies,
 } from "./editable-artifacts";
 import { fileAuthoritySubjectIdForGrant } from "./files";
+import { parseRequestQuery, requestValidationError } from "../http/request-body";
 
 type Dependencies = ApiRouteDeps & EditableArtifactRouteDependencies;
 const editableKinds = new Set(["document", "spreadsheet", "presentation"]);
@@ -84,12 +85,16 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
     const requestedId = context.req.param("artifactId");
     if (
       !kind.success ||
-      !body.success ||
       !(editableKinds.has(kind.data)
         ? /^[0-9a-f]{32}$/.test(requestedId)
         : z.string().uuid().safeParse(requestedId).success)
     )
       throw new HTTPException(422, { message: "Invalid artifact pin request" });
+    if (!body.success)
+      throw requestValidationError(body.error, "body", {
+        status: 422,
+        message: "Invalid artifact pin request",
+      });
     const artifactId = editableKinds.has(kind.data) ? requestedId : requestedId.toLowerCase();
     const fileKind = kind.data === "file" || kind.data === "image";
     if (!hasPermission(grant.permissions, fileKind ? "files:read" : "artifacts:read"))
@@ -168,10 +173,11 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
     const workspaceId = context.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(context, deps, workspaceId);
     const grant = authorization.grant;
-    const parsed = ArtifactCatalogListQuery.safeParse(context.req.query());
-    if (!parsed.success)
-      throw new HTTPException(422, { message: "Invalid artifact catalog query" });
-    const query = parsed.data;
+    const parsed = parseRequestQuery(ArtifactCatalogListQuery, context.req.query(), {
+      status: 422,
+      message: "Invalid artifact catalog query",
+    });
+    const query = parsed;
     const artifactsAllowed = hasPermission(grant.permissions, "artifacts:read");
     const filesAllowed = hasPermission(grant.permissions, "files:read");
     if (!artifactsAllowed && !filesAllowed)

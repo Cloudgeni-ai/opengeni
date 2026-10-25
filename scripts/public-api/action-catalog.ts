@@ -6,8 +6,11 @@
  * Regenerate with `bun scripts/public-api/action-catalog.ts --write`; a test
  * fails when a registered route is neither in the catalog nor exempt.
  */
+import * as contracts from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing/settings";
+import { parseSync } from "oxc-parser";
+import { z } from "zod";
 
 import { createApp } from "../../apps/api/src/app";
 import surface from "./surface.gen.json";
@@ -110,153 +113,225 @@ export function actionCatalogBrowserOnlyReason(method: string, path: string): st
   return ACTION_CATALOG_BROWSER_ONLY.find((rule) => rule.pattern.test(key))?.reason;
 }
 
-export type RegisteredRoute = { method: string; path: string };
+/** A registered route and the source of its handlers, which name its inputs. */
+export type RegisteredRoute = { method: string; path: string; sources?: readonly string[] };
+
+/** What a route reads from the request, as its handler source shows. */
+export type RouteInputs = {
+  body: string[];
+  query: string[];
+  queryParameters: string[];
+  /** The replacement a retired route names (`routeRetired("METHOD /path", ...)`). */
+  retired?: string;
+};
 
 /**
- * Request bodies the public surface manifest can't name because the SDK sends
- * them inline, matched against "METHOD /path". Without a name, describe shows
- * an agent no input and it has to guess the body. Each names a schema exported
- * by @opengeni/contracts that the route accepts.
+ * Request bodies neither the handler source nor the SDK names, because the
+ * handler reads loose fields itself or hands the request to a shared helper.
+ * Matched against "METHOD /path"; each names a schema exported by
+ * @opengeni/contracts that the route accepts. A test keeps every entry needed.
  */
 export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: string }> = [
   {
-    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vault-providers\/connections$/,
-    request: "InstallVaultProviderRequest",
-  },
-  {
-    pattern:
-      /^PUT \/v1\/workspaces\/:workspaceId\/vault-providers\/connections\/:connectionId\/credentials$/,
-    request: "ReplaceVaultProviderCredentialsRequest",
-  },
-  {
-    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/approval$/,
-    request: "SetVaultItemApprovalRequest",
-  },
-  { pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults$/, request: "CreateVaultRequest" },
-  {
-    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId$/,
-    request: "UpdateVaultRequest",
-  },
-  {
-    pattern: /^DELETE \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId$/,
-    request: "DeleteVaultRequest",
-  },
-  {
-    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults\/link$/,
-    request: "LinkProviderVaultRequest",
-  },
-  {
-    pattern: /^POST \/v1\/workspaces\/:workspaceId\/connections\/:connectionId\/managed-vaults$/,
-    request: "CreateManagedProviderVaultRequest",
-  },
-  {
-    pattern: /^GET \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items$/,
-    request: "ListVaultItemsQuery",
-  },
-  {
-    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items$/,
-    request: "CreateVaultItemRequest",
-  },
-  {
-    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId$/,
-    request: "UpdateVaultItemRequest",
-  },
-  {
-    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/move$/,
-    request: "MoveVaultItemRequest",
-  },
-  {
-    pattern:
-      /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/fields\/:fieldId\/reveal$/,
-    request: "RevealVaultFieldRequest",
-  },
-  {
-    pattern:
-      /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/fields\/:fieldId\/restore$/,
-    request: "RestoreVaultFieldVersionRequest",
-  },
-  {
-    pattern:
-      /^PUT \/v1\/(organizations|workspaces)\/:scopeId\/model-connections\/:kind\/:connectionId\/access$/,
-    request: "ModelConnectionAccessPolicy",
-  },
-  {
-    pattern: /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/accounts\/:accountId$/,
+    pattern: /^PATCH \/v1\/\w+\/:\w+\/codex\/accounts\/:accountId$/,
     request: "SubscriptionAccountRenameRequest",
   },
   {
-    pattern:
-      /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/accounts\/:accountId\/(allocator|extra-credits)$/,
-    request: "SubscriptionAccountToggleRequest",
-  },
-  {
-    pattern: /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/settings$/,
+    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/codex\/settings$/,
     request: "SubscriptionRotationSettingsRequest",
   },
   {
-    pattern: /^POST \/v1\/\w+\/:\w+\/(codex|supergrok)\/connect\/poll$/,
+    pattern: /^POST \/v1\/\w+\/:\w+\/codex\/connect\/poll$/,
     request: "SubscriptionConnectPollRequest",
-  },
-  {
-    pattern: /^POST \/v1\/workspaces\/:workspaceId\/supergrok\/connect\/start$/,
-    request: "SupergrokConnectStartRequest",
-  },
-  {
-    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/codex\/source$/,
-    request: "CodexSourceRequest",
   },
   {
     pattern: /^POST \/v1\/workspaces\/:workspaceId\/codex\/apps$/,
     request: "CodexAppsDesignationRequest",
   },
-  {
-    pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/codex-account$/,
-    request: "SessionCodexAccountPinRequest",
-  },
-  {
-    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/model-policy$/,
-    request: "UpdateWorkspaceModelPolicyRequest",
-  },
-  {
-    pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/control$/,
-    request: "SessionControlRequest",
-  },
-  {
-    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication$/,
-    request: "UpsertSitePublicationRequest",
-  },
-  {
-    pattern:
-      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/fixes$/,
-    request: "SitePublishWarningFix",
-  },
-  {
-    pattern:
-      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/takedown$/,
-    request: "SiteTakedownRequest",
-  },
-  {
-    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/site-limit-profile$/,
-    request: "SiteLimitProfile",
-  },
-  {
-    pattern: /^POST \/v1\/workspaces\/:workspaceId\/connections\/1password\/install$/,
-    request: "InstallOnePasswordRequest",
-  },
-  {
-    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/connections\/:connectionId\/1password\/token$/,
-    request: "ReplaceOnePasswordTokenRequest",
-  },
-  {
-    pattern: /^POST \/v1\/workspaces\/:workspaceId\/enrollments\/device\/deny$/,
-    request: "DeviceEnrollmentDenyRequest",
-  },
 ];
 
-function inlineRequestSchemas(method: string, path: string): string[] {
+export function fallbackRequestSchemas(method: string, path: string): string[] {
   const key = `${method} ${path}`;
   const match = ACTION_REQUEST_SCHEMAS.find((rule) => rule.pattern.test(key));
   return match ? [match.request] : [];
+}
+
+const CONTRACTS = contracts as Record<string, unknown>;
+
+function contractSchema(name: string): z.ZodType | null {
+  const candidate = CONTRACTS[name];
+  return candidate instanceof z.ZodType ? candidate : null;
+}
+
+// oxc-parser's ESTree nodes, loosely typed: only a few fields are read.
+type AstNode = { type: string; [key: string]: any };
+
+function astNodes(root: unknown): AstNode[] {
+  const nodes: AstNode[] = [];
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const child of value) visit(child);
+      return;
+    }
+    const node = value as AstNode;
+    if (typeof node.type === "string") nodes.push(node);
+    for (const [key, child] of Object.entries(node)) if (key !== "parent") visit(child);
+  };
+  visit(root);
+  return nodes;
+}
+
+function calleeName(call: AstNode): string | null {
+  const callee = call.callee;
+  if (callee?.type === "Identifier") return callee.name;
+  if (callee?.type === "MemberExpression" && !callee.computed) return callee.property.name;
+  return null;
+}
+
+function propertyName(node: AstNode | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "Identifier") return node.name;
+  if (node.type === "Literal" && typeof node.value === "string") return node.value;
+  return null;
+}
+
+/** `<context>.req.query("name")`, `<context>.req.queries()` and the like. */
+function requestQueryCall(call: AstNode): boolean {
+  const callee = call.callee;
+  return (
+    callee?.type === "MemberExpression" &&
+    !callee.computed &&
+    (callee.property.name === "query" || callee.property.name === "queries") &&
+    callee.object?.type === "MemberExpression" &&
+    !callee.object.computed &&
+    callee.object.property.name === "req"
+  );
+}
+
+/** Top-level keys of an inline `z.object({...})` schema, through chained calls. */
+function inlineObjectKeys(node: AstNode | undefined): string[] {
+  let current = node;
+  while (current?.type === "CallExpression") {
+    const callee = current.callee;
+    if (
+      callee?.type === "MemberExpression" &&
+      callee.property?.name === "object" &&
+      current.arguments[0]?.type === "ObjectExpression"
+    ) {
+      return objectKeys(current.arguments[0]);
+    }
+    current = callee?.type === "MemberExpression" ? callee.object : undefined;
+  }
+  return [];
+}
+
+function objectKeys(node: AstNode | undefined): string[] {
+  if (node?.type !== "ObjectExpression" && node?.type !== "ObjectPattern") return [];
+  return node.properties.flatMap((property: AstNode) =>
+    property.type === "Property" && !property.computed ? [propertyName(property.key)!] : [],
+  );
+}
+
+/**
+ * The inputs a route reads, from its handler source. Routes validate client
+ * input with `parseRequestJson(c, Schema)`, `parseRequestBody(Schema, body)`
+ * and `parseRequestQuery(Schema, query)` (apps/api/src/http/request-body.ts),
+ * or a route-local helper that takes the context and a schema
+ * (`parseBody(c, Schema)`), and read query parameters with
+ * `c.req.query("name")` or from `c.req.query()`. Only body and query schemas
+ * exported by @opengeni/contracts count: those are the ones describe can show.
+ */
+export function routeInputs(sources: readonly string[]): RouteInputs {
+  const body: string[] = [];
+  const looseBody: string[] = [];
+  const query: string[] = [];
+  const queryParameters = new Set<string>();
+  let retired: string | undefined;
+  for (const source of sources) {
+    const parsed = parseSync("handler.js", `(${source});`);
+    if (parsed.errors.length > 0) continue;
+    const nodes = astNodes(parsed.program);
+    const handler = nodes.find(
+      (node) =>
+        node.type === "ArrowFunctionExpression" ||
+        node.type === "FunctionExpression" ||
+        node.type === "FunctionDeclaration",
+    );
+    const context = handler?.params?.[0]?.type === "Identifier" ? handler.params[0].name : null;
+    const readsBody = nodes.some(
+      (node) =>
+        node.type === "CallExpression" &&
+        (calleeName(node) === "readRequestJson" ||
+          (calleeName(node) === "json" &&
+            node.callee.object?.type === "MemberExpression" &&
+            node.callee.object.property?.name === "req")),
+    );
+    // Values bound to the whole query (`const query = c.req.query()`).
+    const queryBindings = new Set<string>();
+    for (const node of nodes) {
+      if (node.type === "VariableDeclarator" && node.init?.type === "CallExpression") {
+        if (requestQueryCall(node.init) && node.init.arguments.length === 0) {
+          if (node.id.type === "Identifier") queryBindings.add(node.id.name);
+          for (const key of objectKeys(node.id)) queryParameters.add(key);
+        }
+      }
+      if (node.type !== "CallExpression") continue;
+      const name = calleeName(node);
+      const [first, second] = node.arguments as AstNode[];
+      if (name === "routeRetired") {
+        if (first?.type === "Literal" && typeof first.value === "string") retired = first.value;
+        continue;
+      }
+      if (requestQueryCall(node)) {
+        const parameter = propertyName(first);
+        if (first?.type === "Literal" && parameter) queryParameters.add(parameter);
+        continue;
+      }
+      if (name === "parseRequestQuery") {
+        if (first?.type === "Identifier" && contractSchema(first.name)) {
+          query.push(first.name);
+          const schema = contractSchema(first.name);
+          if (schema instanceof z.ZodObject) {
+            for (const key of Object.keys(schema.shape)) queryParameters.add(key);
+          }
+        }
+        for (const key of inlineObjectKeys(first)) queryParameters.add(key);
+        continue;
+      }
+      // `parseRequestBody` also validates values a route assembles from its
+      // path, so it names the body only when the handler reads one.
+      if (name === "parseRequestBody" && first?.type === "Identifier" && readsBody) {
+        if (contractSchema(first.name)) looseBody.push(first.name);
+        continue;
+      }
+      if (
+        context &&
+        first?.type === "Identifier" &&
+        first.name === context &&
+        second?.type === "Identifier" &&
+        contractSchema(second.name)
+      ) {
+        body.push(second.name);
+      }
+    }
+    for (const node of nodes) {
+      if (
+        node.type === "MemberExpression" &&
+        node.object?.type === "Identifier" &&
+        queryBindings.has(node.object.name)
+      ) {
+        const key = node.computed ? propertyName(node.property) : node.property.name;
+        if (key) queryParameters.add(key);
+      }
+    }
+  }
+  return {
+    body: [...new Set([...body, ...looseBody])].slice(0, 1),
+    query: [...new Set(query)],
+    queryParameters: [...queryParameters].sort(),
+    ...(retired ? { retired } : {}),
+  };
 }
 
 /**
@@ -284,7 +359,7 @@ function inlineResponseSchemas(method: string, path: string): string[] {
  * (including the MCP servers themselves) are not actions.
  */
 export function registeredApiRoutes(): RegisteredRoute[] {
-  const seen = new Map<string, RegisteredRoute>();
+  const seen = new Map<string, { method: string; path: string; sources: string[] }>();
   for (const productAccessMode of ["managed", "configured"] as const) {
     const settings = testSettings({
       authRequired: true,
@@ -315,7 +390,11 @@ export function registeredApiRoutes(): RegisteredRoute[] {
     for (const route of app.routes) {
       if (route.method === "ALL" || route.handler.length >= 2) continue;
       if (!route.path.startsWith("/v1/")) continue;
-      seen.set(`${route.method} ${route.path}`, { method: route.method, path: route.path });
+      const key = `${route.method} ${route.path}`;
+      const known = seen.get(key) ?? { method: route.method, path: route.path, sources: [] };
+      const source = route.handler.toString();
+      if (!known.sources.includes(source)) known.sources.push(source);
+      seen.set(key, known);
     }
   }
   return [...seen.values()];
@@ -347,19 +426,35 @@ export function buildActionCatalog(
   manifest: ReadonlyArray<ManifestRoute> = surface.routes,
 ): ActionCatalogEntry[] {
   const described = new Map(manifest.map((route) => [`${route.method} ${route.path}`, route]));
-  const keys = new Set(registered.map((route) => `${route.method} ${route.path}`));
+  const sources = new Map(
+    registered.map((route) => [`${route.method} ${route.path}`, route.sources ?? []] as const),
+  );
+  const keys = new Set(sources.keys());
   for (const route of manifest) keys.add(`${route.method} ${route.path}`);
   const included = [...keys]
     .map((key) => {
       const [method, path] = [key.slice(0, key.indexOf(" ")), key.slice(key.indexOf(" ") + 1)];
       const route = described.get(key);
-      const request = route?.request ?? [];
+      const inputs = routeInputs(sources.get(key) ?? []);
+      const reads = method === "GET" || method === "HEAD";
+      // What the handler validates is the action's input; the SDK's parameter
+      // types name it only where the handler shows nothing.
+      const derived = reads ? inputs.query : inputs.body;
+      const manifested = route?.request ?? [];
+      const request =
+        derived.length > 0
+          ? derived
+          : manifested.length > 0
+            ? manifested
+            : fallbackRequestSchemas(method, path);
       const response = route?.response ?? [];
       return {
         method,
         path,
         sdk: route?.sdk ?? [],
-        request: request.length > 0 ? request : inlineRequestSchemas(method, path),
+        request,
+        query: inputs.queryParameters,
+        retired: inputs.retired,
         response: response.length > 0 ? response : inlineResponseSchemas(method, path),
       };
     })
@@ -384,8 +479,10 @@ export function buildActionCatalog(
         method: route.method,
         path: route.path,
         request: [...route.request],
+        ...(route.query.length > 0 ? { query: [...route.query] } : {}),
         response: [...route.response],
         ...(browserOnly ? { browserOnly } : {}),
+        ...(route.retired ? { retired: route.retired } : {}),
         ...(secretFields.length > 0 ? { secretFields } : {}),
       };
     })

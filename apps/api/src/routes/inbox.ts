@@ -39,6 +39,7 @@ import {
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { parseRequestBody } from "../http/request-body";
 
 /**
  * Only a person has an inbox: a signed-in person, or the one human of a local
@@ -203,12 +204,10 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/inbox/items/:itemId", async (c) => {
     const context = await requireAccessContext(c, deps);
     const subjectId = requirePerson(context);
-    const parsed = UpdateInboxItemRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "Invalid inbox update",
-      });
-    }
+    const parsed = parseRequestBody(UpdateInboxItemRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid inbox update",
+    });
     const itemId = c.req.param("itemId");
     // A relay pinned to one workspace passes it, so an item elsewhere is absent.
     const workspaceFilter = c.req.query("workspaceId") ?? null;
@@ -220,11 +219,9 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
         itemId,
         accountId,
         subjectId,
-        ...(parsed.data.seen ? { seen: true } : {}),
-        ...(parsed.data.snoozedUntil !== undefined
-          ? { snoozedUntil: parsed.data.snoozedUntil }
-          : {}),
-        ...(parsed.data.dismissed ? { dismissed: true } : {}),
+        ...(parsed.seen ? { seen: true } : {}),
+        ...(parsed.snoozedUntil !== undefined ? { snoozedUntil: parsed.snoozedUntil } : {}),
+        ...(parsed.dismissed ? { dismissed: true } : {}),
       });
       return c.json({ ok: true });
     }
@@ -251,8 +248,10 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.put("/v1/inbox/settings", async (c) => {
     const context = await requireAccessContext(c, deps);
     const subjectId = requirePerson(context);
-    const parsed = InboxSettings.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HTTPException(400, { message: "Invalid inbox settings" });
+    const parsed = parseRequestBody(InboxSettings, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid inbox settings",
+    });
     // The setting is the person's own; apply it in every organization they belong to.
     let settings: InboxSettings = {
       tidyPolicy: "own_sessions",
@@ -264,10 +263,10 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
       settings = await setInboxSettings(deps.db, {
         accountId,
         subjectId,
-        tidyPolicy: parsed.data.tidyPolicy,
-        pausedGoals: parsed.data.pausedGoals,
-        replies: parsed.data.replies,
-        timeSensitiveNeedsYou: parsed.data.timeSensitiveNeedsYou,
+        tidyPolicy: parsed.tidyPolicy,
+        pausedGoals: parsed.pausedGoals,
+        replies: parsed.replies,
+        timeSensitiveNeedsYou: parsed.timeSensitiveNeedsYou,
       });
     }
     return c.json(InboxSettings.parse(settings));
@@ -293,17 +292,18 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     const subjectId = requirePerson(context);
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    const parsed = MemberNotificationsSetting.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "Invalid member notification setting" });
-    }
+    const parsed = parseRequestBody(
+      MemberNotificationsSetting,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "Invalid member notification setting" },
+    );
     return c.json(
       MemberNotificationsSetting.parse({
         allowOthers: await setMemberNotificationsAllowed(deps.db, {
           accountId: grant.accountId,
           workspaceId,
           subjectId,
-          allowed: parsed.data.allowOthers,
+          allowed: parsed.allowOthers,
         }),
       }),
     );
@@ -342,9 +342,11 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    const parsed = SessionInboxMute.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HTTPException(400, { message: "Invalid session mute" });
-    const repliesMuted = parsed.data.repliesMuted;
+    const parsed = parseRequestBody(SessionInboxMute, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid session mute",
+    });
+    const repliesMuted = parsed.repliesMuted;
     const authorization = await requireSessionAuthorization(deps, grant, {
       sessionId,
       operation: "session.attention.write",

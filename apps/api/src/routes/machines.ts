@@ -67,7 +67,7 @@ import {
   machineAudienceRequestFor,
 } from "../sandbox/machine-audience";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
 import { requireFullAccessIfAgent } from "../http/acting-person";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
@@ -196,13 +196,10 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "operation policy body must be valid JSON",
       });
     }
-    const parsed = UpdateMachineOperationPolicyRequest.safeParse(json);
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid machine operation policy",
-      });
-    }
-    const body = parsed.data;
+    const body = parseRequestBody(UpdateMachineOperationPolicyRequest, json, {
+      status: 400,
+      message: "invalid machine operation policy",
+    });
     const current = await requireScopedEnrollment(grant, enrollmentId);
     if (
       current.scope === "organization" &&
@@ -362,12 +359,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
-    const parsed = OpenMachinePrivacySettingsRequest.safeParse(
+    const parsed = parseRequestBody(
+      OpenMachinePrivacySettingsRequest,
       await c.req.json().catch(() => null),
+      { status: 400, message: "invalid privacy settings request" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid privacy settings request" });
-    }
     const enrollment = await requireScopedEnrollment(grant, enrollmentId);
     if (
       enrollment.scope === "organization" &&
@@ -381,7 +377,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       await openMachinePrivacySettings(
         { db, settings, bus, observability: deps.observability },
-        { enrollment, access: enrollmentAccess(enrollment, grant), pane: parsed.data.pane },
+        { enrollment, access: enrollmentAccess(enrollment, grant), pane: parsed.pane },
       ),
     );
   });

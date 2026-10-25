@@ -869,6 +869,7 @@ describe("API helpers", () => {
     expect(errorCodeForStatus(401)).toBe("unauthenticated");
     expect(errorCodeForStatus(402)).toBe("payment_required");
     expect(errorCodeForStatus(409)).toBe("conflict");
+    expect(errorCodeForStatus(410)).toBe("gone");
     expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
   });
 

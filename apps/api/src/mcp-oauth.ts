@@ -53,6 +53,7 @@ import {
   prepareWorkspaceToolGateway,
   requireWorkspaceToolGatewayAuthorization,
 } from "./workspace-tool-gateway";
+import { parseRequestBody } from "./http/request-body";
 
 const CLIENT_PREFIX = "ogmcp_client_";
 const REQUEST_PREFIX = "ogmcp_req_";
@@ -404,9 +405,11 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireSameOriginBrowserMutation(c, deps);
     const person = await requireBrowserPerson(c, deps);
     const request = await requirePendingOrganizationRequest(deps, c.req.param("request"), person);
-    const parsed = McpConnectionDecision.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid sign-in decision" });
-    const decision = parsed.data;
+    const parsed = parseRequestBody(McpConnectionDecision, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "invalid sign-in decision",
+    });
+    const decision = parsed;
     if (decision.decision === "deny") {
       await deleteMcpOAuthAuthorizationRequest(deps.db, request.requestHash);
       return c.json({

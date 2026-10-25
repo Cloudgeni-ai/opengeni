@@ -46,7 +46,7 @@ import {
   requirePersonalGitHubRepositoryConnection,
   verifyLivePersonalGitHubRepositories,
 } from "../integrations/personal-github-repositories";
-import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { parsePathParam } from "../http/path-identifier";
 
 export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -122,7 +122,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         subjectId: access.grant.subjectId,
         connectionId,
       });
-      const query = ListPersonalGitHubRepositoriesQuery.parse(c.req.query());
+      const query = parseRequestQuery(ListPersonalGitHubRepositoriesQuery, c.req.query());
       try {
         const selection = await loadRepositorySelectionState(deps, access.grant, connection);
         const page = await listLivePersonalGitHubRepositories(deps, {
@@ -216,7 +216,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         "connections:read",
       );
       assertPersonalConnectionOwnerPrincipal(access, "My GitHub repositories");
-      const query = ListGitHubRepositoryBranchesQuery.parse(c.req.query());
+      const query = parseRequestQuery(ListGitHubRepositoryBranchesQuery, c.req.query());
       const repositoryId = parsePathParam(c, "repositoryId", PersonalGitHubRepositoryId);
       try {
         return c.json(

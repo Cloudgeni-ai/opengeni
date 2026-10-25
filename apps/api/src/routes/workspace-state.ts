@@ -25,6 +25,7 @@ import { HTTPException } from "hono/http-exception";
 import { serializeWorkspaceStateExport } from "../workspace-state-export";
 import { projectWorkspaceState } from "../workspace-state-projection";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import { parseRequestQuery } from "../http/request-body";
 
 async function readWorkspaceState(
   deps: ApiRouteDeps,
@@ -108,7 +109,7 @@ export function registerWorkspaceStateRoutes(app: Hono, deps: ApiRouteDeps): voi
 
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const query = WorkspaceStateQuery.parse(context.req.query());
+    const query = parseRequestQuery(WorkspaceStateQuery, context.req.query());
     const access = await requireAccessGrantAuthorization(
       context,
       deps,
@@ -122,7 +123,7 @@ export function registerWorkspaceStateRoutes(app: Hono, deps: ApiRouteDeps): voi
 
   app.get(`${base}/export`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const query = WorkspaceStateQuery.parse(context.req.query());
+    const query = parseRequestQuery(WorkspaceStateQuery, context.req.query());
     const access = await requireAccessGrantAuthorization(
       context,
       deps,

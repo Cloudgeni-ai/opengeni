@@ -237,6 +237,21 @@ describe("app actions in an ordinary chat end to end", () => {
     );
     expect(described).toMatchObject({ changes: true });
 
+    // A retired action runs nothing, so it needs no confirmation: describe and
+    // call both name its replacement instead.
+    const retiredId = "POST /v1/workspaces/:workspaceId/knowledge/search";
+    const retiredDescribe = await describeAction({ id: retiredId });
+    expect(retiredDescribe.isError).toBe(true);
+    expect(textOf(retiredDescribe)).toContain("was removed. Use the ");
+    const retiredCall = await call({
+      id: retiredId,
+      pathParameters: { workspaceId },
+      query: {},
+      body: { query: "x" },
+    });
+    expect(retiredCall.isError).toBe(true);
+    expect(textOf(retiredCall)).toContain("was removed. Use the ");
+
     const invite = {
       id: "createOrganizationInvitation",
       pathParameters: { organizationId },

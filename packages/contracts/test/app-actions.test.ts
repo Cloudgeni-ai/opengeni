@@ -27,9 +27,13 @@ test("reads are told apart from changes; anything unrecognised counts as a chang
     expect(appActionCallChangesState(unknown)).toBe(true);
   }
   // A read-only POST stays a read.
-  const search = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/search");
+  const search = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/entries/search");
   expect(search).toBeDefined();
   expect(appActionCallChangesState({ id: search!.id })).toBe(false);
+  // A retired action runs nothing (it only names its replacement), so it never asks.
+  const retired = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/search");
+  expect(retired?.retired).toBeDefined();
+  expect(appActionCallChangesState({ id: retired!.id })).toBe(false);
 });
 
 test("the confirmation is a plain question built only from checked values", () => {

@@ -42,7 +42,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { githubAppWebhookPort } from "../github-access";
 import { integrationBaseUrl } from "../integrations/oauth-client";
-import { parseRequestJson, readBoundedRawBody } from "../http/request-body";
+import { parseRequestBody, parseRequestJson, readBoundedRawBody } from "../http/request-body";
 
 /**
  * Event sources: webhook endpoints and connected apps that deliver events into
@@ -180,9 +180,11 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
     const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "manage");
     const body = await c.req.json().catch(() => ({}));
-    const parsed = SendTestEventRequest.safeParse(body ?? {});
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid test event" });
-    const result = await sendTestEvent({ db, viewer, source, request: parsed.data });
+    const request = parseRequestBody(SendTestEventRequest, body ?? {}, {
+      status: 400,
+      message: "invalid test event",
+    });
+    const result = await sendTestEvent({ db, viewer, source, request });
     return c.json(SendTestEventResponse.parse(result), 201);
   });
 
