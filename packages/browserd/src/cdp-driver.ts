@@ -105,6 +105,7 @@ import {
 } from "./headless-session-cookies";
 import { BrowserWindowParking } from "./window-parking";
 import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
+import type { BrowserRelaunchedTabs, BrowserRelaunchReason } from "./stopped-browser-tabs";
 
 /** The request deadline that carries an action is derived from this bound and
  * the other declared waits (see browserActionDeadlineMs). */
@@ -580,6 +581,49 @@ export type BrowserRuntimeSnapshot = {
   tabs: Array<{ url: string; selected: boolean }>;
 };
 
+/** How many vanished tabs the driver remembers, to say why each is gone. */
+const MAX_GONE_TARGETS = 64;
+
+/** What the driver knows about a tab that no longer exists. */
+export type GoneBrowserTarget =
+  | { kind: "closed"; at: string; byCloseCall: boolean }
+  | {
+      kind: "relaunched";
+      reason: BrowserRelaunchReason;
+      idleReleaseMinutes?: number;
+      replacementId: string | null;
+    };
+
+const LIST_CURRENT_TABS = "list the current tabs and use one of their IDs";
+
+/** The answer for a tab ID that names no open tab: why it is gone when the
+ * driver knows, and how to carry on. Always starts "browser target does not
+ * exist", which callers match. */
+export function goneBrowserTargetMessage(gone: GoneBrowserTarget | null): string {
+  if (!gone) {
+    return `browser target does not exist: this ID is not one of this browser's tabs; ${LIST_CURRENT_TABS}`;
+  }
+  if (gone.kind === "closed") {
+    const by = gone.byCloseCall
+      ? "by a close-tab call"
+      : "by its page, or by a person or agent using this browser";
+    return `browser target does not exist: this tab was closed at ${gone.at} ${by}; ${LIST_CURRENT_TABS}`;
+  }
+  const minutes = gone.idleReleaseMinutes;
+  const why =
+    gone.reason === "idle_release"
+      ? `this browser was stopped after going unused${minutes ? ` for ${minutes} minute${minutes === 1 ? "" : "s"}` : ""} and relaunched on its next call`
+      : gone.reason === "controller_restart"
+        ? "this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call"
+        : gone.reason === "browser_lost"
+          ? "this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched"
+          : "this browser restarted to save its profile state";
+  const next = gone.replacementId
+    ? `this tab's page is now tab ${gone.replacementId}`
+    : LIST_CURRENT_TABS;
+  return `browser target does not exist: ${why}, so its tabs reopened with new IDs and unsaved page input may be lost; ${next}`;
+}
+
 function hasBrowserEmulation(
   value: BrowserSessionEmulation | undefined,
 ): value is BrowserSessionEmulation {
@@ -618,6 +662,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly createdTargetIds = new Set<string>();
   /** Blank tabs this session closed itself, most recent last. */
   private readonly closedBlankTargetIds = new Set<string>();
+  /** Tabs that vanished while this driver knew them, or that a relaunch
+   * replaced, most recent last: a later call naming one learns why. */
+  private readonly goneTargets = new Map<string, GoneBrowserTarget>();
+  /** Tabs a close-tab call of this driver is closing. */
+  private readonly closingTargetIds = new Set<string>();
   /** The tab an earlier runtime of this session was using; start continues
    * in it rather than opening another. */
   private rebindTargetId: string | null = null;
@@ -1069,7 +1118,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
-    await connection.send("Target.closeTarget", { targetId });
+    this.closingTargetIds.add(targetId);
+    try {
+      await connection.send("Target.closeTarget", { targetId });
+    } catch (error) {
+      this.closingTargetIds.delete(targetId);
+      throw error;
+    }
     // The browser closed the tab. Losing the connection before the tab list
     // is read must not report the close as a failure (attached Chrome can
     // end the connection right after the tab closes).
@@ -1079,6 +1134,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     } catch (error) {
       settleFailure = error;
     }
+    this.rememberClosedTarget(targetId, true);
+    this.closingTargetIds.delete(targetId);
     this.removeState(targetId);
     this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
@@ -1379,6 +1436,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
     if (!info && this.closedBlankTargetIds.has(targetId))
       throw this.closedBlankTargetError(targetId);
+    if (!info && this.goneTargets.has(targetId)) throw this.missingTargetError(targetId);
     if (!info || !isVisibleTarget(info)) return null;
     const state = await this.ensureTargetState(info);
     // A JavaScript dialog blocks ordinary page-domain inspection. Keep the
@@ -2353,7 +2411,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await connection.send("Target.setDiscoverTargets", { discover: true });
       this.browserUnsubscribe.push(
         connection.on("Target.targetDestroyed", (event) => {
-          if (typeof event.params.targetId === "string") this.removeState(event.params.targetId);
+          if (typeof event.params.targetId !== "string") return;
+          this.rememberClosedTarget(event.params.targetId);
+          this.removeState(event.params.targetId);
         }),
         connection.on("Target.detachedFromTarget", (event) => {
           const sessionId = event.params.sessionId;
@@ -7041,9 +7101,57 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!info || !isVisibleTarget(info)) {
       if (!info && this.closedBlankTargetIds.has(targetId))
         throw this.closedBlankTargetError(targetId);
-      throw new InteractionDefiniteDriverError("target_not_found", "browser target does not exist");
+      throw this.missingTargetError(info ? null : targetId);
     }
     return info;
+  }
+
+  /** No open tab has this ID: say why when this driver knows, and how to
+   * carry on. */
+  private missingTargetError(targetId: string | null): InteractionDefiniteDriverError {
+    return new InteractionDefiniteDriverError(
+      "target_not_found",
+      goneBrowserTargetMessage(targetId ? (this.goneTargets.get(targetId) ?? null) : null),
+    );
+  }
+
+  /** A tab this driver knew closed. A close this driver asked for says so;
+   * any other close came from the page or from someone using the browser. */
+  private rememberClosedTarget(targetId: string, byCloseCall = false): void {
+    const closing = byCloseCall || this.closingTargetIds.has(targetId);
+    const existing = this.goneTargets.get(targetId);
+    if (existing?.kind === "relaunched") return;
+    if (existing && !closing) return;
+    if (!closing && !this.firstSeenAt.has(targetId) && !this.states.has(targetId)) return;
+    this.rememberGoneTarget(targetId, {
+      kind: "closed",
+      at: this.timestamp().replace(/\.\d{3}Z$/u, "Z"),
+      byCloseCall: closing,
+    });
+  }
+
+  private rememberGoneTarget(targetId: string, gone: GoneBrowserTarget): void {
+    this.goneTargets.delete(targetId);
+    this.goneTargets.set(targetId, gone);
+    while (this.goneTargets.size > MAX_GONE_TARGETS) {
+      this.goneTargets.delete(this.goneTargets.keys().next().value!);
+    }
+  }
+
+  /** The browser this driver runs replaced an earlier one, whose tabs it
+   * reopened with new IDs: a call naming an earlier tab learns why it is gone
+   * and which tab shows its page now. */
+  noteRelaunchedTabs(relaunched: BrowserRelaunchedTabs): void {
+    for (const tab of relaunched.tabs) {
+      this.rememberGoneTarget(tab.targetId, {
+        kind: "relaunched",
+        reason: relaunched.reason,
+        ...(relaunched.idleReleaseMinutes !== undefined
+          ? { idleReleaseMinutes: relaunched.idleReleaseMinutes }
+          : {}),
+        replacementId: tab.replacementId,
+      });
+    }
   }
 
   /** The session closed its own empty tab when it last let go of the
