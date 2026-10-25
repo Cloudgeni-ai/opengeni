@@ -36,7 +36,8 @@ finish the current bounded transaction and checkpoint before stopping. A lock
 or statement timeout exits with the previous checkpoint intact: inspect the
 failure and resume. Defaults are a 1-second lock wait and 10-second statement
 timeout, configurable with `--lock-timeout-ms` and `--statement-timeout-ms`.
-These timeouts/pacing apply only to this maintenance job, not other workloads.
+These timeouts also cover the initial inspection. Timeouts/pacing apply only to
+this maintenance job, not other workloads.
 
 The job owns one session advisory lock unrelated to application locking. Each
 batch verifies the backend identity so a disconnected/reconnected client cannot
@@ -45,6 +46,8 @@ continue after losing ownership. There is no new database role or schema object.
 ## Correctness and costs
 
 The initial upper primary-key boundary and last scanned UUID are checkpointed.
+Selection and ordering retain the native UUID type, so both the upper-bound read
+and each frontier read use the existing primary-key index without a text sort.
 Each transaction scans a bounded ID range and updates only missing projections
 whose current payload resolves a value. It retains the same JSON text extraction
 and alias order as the existing trigger. Missing/oversized identities are not

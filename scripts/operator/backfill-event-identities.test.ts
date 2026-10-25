@@ -273,3 +273,87 @@ test("standalone bundle runs with the same resumable CLI", async () => {
   expect(JSON.parse(stdout.trim().split("\n").at(-1)!).event).toBe("complete");
   expect(readCheckpoint(JSON.parse(await readFile(checkpoint, "utf8"))).done).toBe(true);
 }, 180000);
+
+test("actual startup and frontier SQL use bounded UUID index scans in both plan modes", async () => {
+  const [tail] =
+    await fixture.admin`select coalesce(max(sequence),0)::int as sequence from session_events where session_id=${sessionId}`;
+  await fixture.admin`insert into session_events(account_id,workspace_id,session_id,sequence,type,payload)
+    select ${accountId}::uuid,${workspaceId}::uuid,${sessionId}::uuid,n,'agent.message.delta','{"text":"fixture"}'::jsonb
+    from generate_series(${Number(tail!.sequence) + 1}::int,${Number(tail!.sequence) + 12000}::int) n`;
+  await fixture.admin`analyze session_events`;
+  const queries: { text: string; parameters: unknown[] }[] = [];
+  const connection = postgres(fixture.adminUrl, {
+    max: 1,
+    prepare: false,
+    debug: (_id, text, parameters) => queries.push({ text, parameters: [...parameters] }),
+  });
+  try {
+    await inspectIdentityBackfill(connection);
+    await backfillIdentityBatch(connection, await initial(), { ...options, batchSize: 128 });
+    const selections = queries.filter(({ text }) =>
+      /select \(select id|select id(?:::text)? from session_events/.test(text),
+    );
+    expect(selections).toHaveLength(2);
+    const literal = (value: unknown) =>
+      typeof value === "number" ? String(value) : `'${String(value).replaceAll("'", "''")}'`;
+    for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+      await connection.unsafe(`set plan_cache_mode=${mode}`);
+      for (const [n, query] of selections.entries()) {
+        await connection.unsafe(`prepare identity_frontier_probe as ${query.text}`);
+        const argumentsSql = query.parameters.length
+          ? `(${query.parameters.map(literal).join(",")})`
+          : "";
+        const result = await connection.unsafe(
+          `explain(analyze,buffers,format json) execute identity_frontier_probe${argumentsSql}`,
+        );
+        const plan = result[0]!["QUERY PLAN"][0].Plan;
+        const nodes: Record<string, any>[] = [];
+        const visit = (node: Record<string, any>) => {
+          nodes.push(node);
+          for (const child of node.Plans ?? []) visit(child);
+        };
+        visit(plan);
+        expect(nodes.some((node) => node["Node Type"].includes("Sort"))).toBe(false);
+        const index = nodes.find((node) => node["Index Name"] === "session_events_pkey");
+        expect(index).toBeDefined();
+        expect(index!["Actual Rows"]).toBe(n === 0 ? 1 : 128);
+        console.log(
+          JSON.stringify({
+            probe: "uuid-frontier",
+            mode,
+            selection: n,
+            buffers: plan["Shared Hit Blocks"],
+            rows: index!["Actual Rows"],
+          }),
+        );
+        await connection.unsafe("deallocate identity_frontier_probe");
+      }
+    }
+  } finally {
+    await connection.end();
+  }
+}, 180000);
+
+test("configured statement timeout covers initial inspection before any checkpoint write", async () => {
+  const ready = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const held = fixture.admin.begin(async (tx) => {
+    await tx`lock table session_events in access exclusive mode`;
+    ready.resolve();
+    await release.promise;
+  });
+  await ready.promise;
+  const path = join(directory, "inspection-timeout.json");
+  try {
+    await expect(
+      runIdentityBackfill(
+        ["--checkpoint", path, "--statement-timeout-ms", "50", "--lock-timeout-ms", "1000"],
+        { OPENGENI_MAINTENANCE_DATABASE_URL: fixture.adminUrl },
+      ),
+    ).rejects.toMatchObject({ code: "57014" });
+    await expect(readFile(path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    release.resolve();
+    await held;
+  }
+}, 180000);
