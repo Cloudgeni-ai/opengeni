@@ -25,6 +25,7 @@ import {
 import type {
   EventSource,
   OpenGeniClient,
+  ReadyEventSource,
   ScheduledTask,
   ScheduledTaskRun,
   WorkspaceAutomationTemplate,
@@ -94,8 +95,9 @@ export interface AutomationsPanelProps {
   /** Offer event triggers. Default: whenever this server runs them. */
   eventTriggers?: boolean | undefined;
   /**
-   * MCP servers whose events people can pick right away, such as the host's
-   * own. The person's event source for a server is added the first time they
+   * MCP servers to offer by name, such as the host's own. Servers the person
+   * is signed in to that offer events, and their Gmail accounts, are offered
+   * without this. The person's source for one is added the first time they
    * pick it.
    */
   eventServers?: readonly AutomationEventServer[] | undefined;
@@ -227,11 +229,31 @@ export function AutomationsPanel({
   }, [client, workspaceId, eventTriggersProp, sourcesAttempt]);
   const eventTriggers = eventTriggersProp !== false && eventsRun === true;
 
+  // What the person can use without setting it up; it can take a moment to learn.
+  const [readySources, setReadySources] = useState<ReadyEventSource[] | undefined>(undefined);
+  useEffect(() => {
+    if (!eventTriggers) return;
+    let live = true;
+    client.listReadyEventSources(workspaceId).then(
+      (list) => {
+        if (live) setReadySources(list);
+      },
+      () => {
+        // Without the list, the sources the person has are still offered.
+        if (live) setReadySources((current) => current ?? []);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, workspaceId, eventTriggers, sourcesAttempt]);
+
   // Sources that need no setting up stand in for the person's own until picked.
   const standIns = useEventSourceStandIns({
     client,
     workspaceId,
     sources,
+    readySources,
     eventServers,
     workspaceEvents,
   });

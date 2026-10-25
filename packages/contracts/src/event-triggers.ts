@@ -300,6 +300,85 @@ export const ListEventSourcesResponse = /* @__PURE__ */ defineSchema(() =>
 export type ListEventSourcesResponse = z.infer<typeof ListEventSourcesResponse>;
 
 /**
+ * Sources that need no setting up, named by a key until they are used: an
+ * MCP server the person is signed in to that offers events
+ * (`mcp-server:<serverId>`), a Gmail account they connected
+ * (`gmail:<connectionId>`), and "This workspace" (`workspace`). A trigger may
+ * name one by its key: the person's own source is added the first time it is
+ * used, and using the key again finds that same source.
+ */
+export const READY_EVENT_SOURCE_KINDS = ["mcp", "gmail", "workspace"] as const;
+export type ReadyEventSourceKind = (typeof READY_EVENT_SOURCE_KINDS)[number];
+
+/** What adds a ready source: the matching create request. */
+export type ReadyEventSourceRequest =
+  | { kind: "mcp"; serverId: string }
+  | { kind: "gmail"; connectionId: string }
+  | { kind: "workspace" };
+
+const MCP_SERVER_KEY_PREFIX = "mcp-server:";
+const GMAIL_KEY_PREFIX = "gmail:";
+const WORKSPACE_KEY = "workspace";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const SERVER_ID_MAX_LENGTH = 256;
+
+export function readyEventSourceKey(request: ReadyEventSourceRequest): string {
+  if (request.kind === "mcp") return `${MCP_SERVER_KEY_PREFIX}${request.serverId}`;
+  if (request.kind === "gmail") return `${GMAIL_KEY_PREFIX}${request.connectionId}`;
+  return WORKSPACE_KEY;
+}
+
+/** The source a key names, or null when it is not a ready source's key. */
+export function readyEventSourceRequest(key: string): ReadyEventSourceRequest | null {
+  if (key === WORKSPACE_KEY) return { kind: "workspace" };
+  if (key.startsWith(MCP_SERVER_KEY_PREFIX)) {
+    const serverId = key.slice(MCP_SERVER_KEY_PREFIX.length);
+    return serverId.length > 0 && serverId.length <= SERVER_ID_MAX_LENGTH
+      ? { kind: "mcp", serverId }
+      : null;
+  }
+  if (key.startsWith(GMAIL_KEY_PREFIX)) {
+    const connectionId = key.slice(GMAIL_KEY_PREFIX.length);
+    return UUID_PATTERN.test(connectionId) ? { kind: "gmail", connectionId } : null;
+  }
+  return null;
+}
+
+export const ReadyEventSource = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Use it wherever a trigger names a source; see `readyEventSourceRequest`. */
+      key: z.string(),
+      kind: z.enum(READY_EVENT_SOURCE_KINDS),
+      name: z.string(),
+    })
+    .strict(),
+);
+export type ReadyEventSource = z.infer<typeof ReadyEventSource>;
+
+export const ListReadyEventSourcesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ sources: z.array(ReadyEventSource) }).strict(),
+);
+export type ListReadyEventSourcesResponse = z.infer<typeof ListReadyEventSourcesResponse>;
+
+/** A source's id, or a ready source's key. */
+export const EventSourceRef = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(MCP_SERVER_KEY_PREFIX.length + SERVER_ID_MAX_LENGTH)
+    .refine(
+      (ref) => UUID_PATTERN.test(ref) || readyEventSourceRequest(ref) !== null,
+      "Use an event source's id or a ready source's key",
+    ),
+);
+
+/** Whether a trigger's source names a ready source by its key rather than an id. */
+export function isReadyEventSourceKey(ref: string): boolean {
+  return !UUID_PATTERN.test(ref) && readyEventSourceRequest(ref) !== null;
+}
+
+/**
  * Who caused an event. `opengeni` marks Opengeni's own identities (its GitHub
  * App bot, its Slack bot); triggers ignore those events unless they opt in.
  */
@@ -485,7 +564,8 @@ export type EventCondition = z.infer<typeof EventCondition>;
 export const EventTriggerInput = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      sourceId: Uuid,
+      /** The source's id, or a ready source's key: the owner's source is added on first use. */
+      sourceId: EventSourceRef,
       /** Event types that fire the trigger. An MCP trigger names exactly one. */
       eventTypes: z.array(EventTypeName).min(1).max(EVENT_TRIGGER_TYPES_MAX),
       /** All conditions must hold. */

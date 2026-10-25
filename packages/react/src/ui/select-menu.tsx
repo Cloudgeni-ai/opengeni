@@ -731,6 +731,8 @@ export function MenuSelect<V extends string>({
         </Popover.Anchor>
         <PopoverContainedPortal>
           <Popover.Content
+            // The trigger is a combobox whose popup is the listbox inside, not a dialog.
+            role="presentation"
             align={align}
             side="bottom"
             sideOffset={6}

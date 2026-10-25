@@ -185,7 +185,16 @@ export async function createEventSourceForViewer(
     GitHubEventSourceAccess,
 ): Promise<CreateEventSourceResponse> {
   const request = input.request;
-  if (request.kind === "mcp") return await createMcpEventSource(input, request);
+  if (request.kind === "mcp") {
+    const source = await addMcpEventSource({
+      ...input,
+      ownerSubjectId: input.viewer.subjectId,
+      serverId: request.serverId,
+      connectionId: request.connectionId,
+      name: request.name,
+    });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
   if (request.kind === "github") {
     const source = await createGitHubEventSource({ ...input, name: request.name });
     return { source: eventSourceForClient(source, input.baseUrl) };
@@ -280,13 +289,23 @@ export function mcpSourceHttpError(error: unknown, serverName: string): HTTPExce
 
 /**
  * An MCP source listens to one connector with its creator's own sign-in, so
- * it is always private to that person. The server must offer events.
+ * it is always private to that person. The server must offer events. Adding
+ * it again returns the source the person already has.
  */
-async function createMcpEventSource(
-  input: Parameters<typeof createEventSourceForViewer>[0] & McpEventSourceNetwork,
-  request: Extract<ParsedCreateEventSourceRequest, { kind: "mcp" }>,
-): Promise<CreateEventSourceResponse> {
-  const owner = input.viewer.subjectId;
+export async function addMcpEventSource(
+  input: {
+    db: Database;
+    settings: Settings;
+    accountId: string;
+    workspaceId: string;
+    createdBySubjectId: string;
+    ownerSubjectId: string | null;
+    serverId: string;
+    connectionId?: string | undefined;
+    name?: string | undefined;
+  } & McpEventSourceNetwork,
+): Promise<EventSourceRecord> {
+  const owner = input.ownerSubjectId;
   if (!owner) {
     throw new HTTPException(422, {
       message: "An MCP event source listens with a person's own sign-in. Create it as that person.",
@@ -297,8 +316,8 @@ async function createMcpEventSource(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     ownerSubjectId: owner,
-    mcpServerId: request.serverId,
-    connectionId: request.connectionId ?? null,
+    mcpServerId: input.serverId,
+    connectionId: input.connectionId ?? null,
   };
   let connection: { name: string; connectionId: string | null };
   try {
@@ -314,21 +333,21 @@ async function createMcpEventSource(
       },
     );
   } catch (error) {
-    throw mcpSourceHttpError(error, request.serverId);
+    throw mcpSourceHttpError(error, input.serverId);
   }
   const { source } = await createEventSource(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     createdBySubjectId: input.createdBySubjectId,
     kind: "mcp",
-    name: request.name ?? connection.name,
+    name: input.name ?? connection.name,
     ownerSubjectId: owner,
     visibility: "private",
-    mcpServerId: request.serverId,
+    mcpServerId: input.serverId,
     connectionId: connection.connectionId,
   });
   forgetMcpSourceEventTypes(source.id);
-  return { source: eventSourceForClient(source, input.baseUrl) };
+  return source;
 }
 
 export async function updateEventSourceForViewer(input: {

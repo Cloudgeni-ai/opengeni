@@ -6,6 +6,7 @@ import type {
   EventSource,
   EventTypeDescriptor,
   OpenGeniClient,
+  ReadyEventSource,
   ScheduledTask,
   ScheduledTaskRun,
   WorkspaceAutomationTemplate,
@@ -25,19 +26,22 @@ registerDom();
 const selectMenu = await import("../src/ui/select-menu");
 
 // Popover menus need layout the test DOM lacks; plain option lists stand in,
-// and `pick` chooses by the menu's label.
+// and `pick` chooses by the menu's label, or its placeholder when unlabelled.
 const menus = new Map<string, (value: string) => void>();
 mock.module("../src/ui/select-menu", () => {
   const OptionList = ({
     options,
     onValueChange,
+    placeholder,
     "aria-label": ariaLabel,
   }: {
     options: ReadonlyArray<{ value: string; label: string }>;
     onValueChange?: (value: string) => void;
+    placeholder?: unknown;
     "aria-label"?: string;
   }) => {
-    if (ariaLabel && onValueChange) menus.set(ariaLabel, onValueChange);
+    const name = ariaLabel ?? (typeof placeholder === "string" ? placeholder : undefined);
+    if (name && onValueChange) menus.set(name, onValueChange);
     return (
       <ul aria-label={ariaLabel}>
         {options.map((option) => (
@@ -180,6 +184,7 @@ function fakeClient(
   options: {
     tasks?: ScheduledTask[];
     sources?: EventSource[] | "off";
+    ready?: ReadyEventSource[];
     templates?: WorkspaceAutomationTemplate[] | "off";
   } = {},
 ) {
@@ -190,6 +195,7 @@ function fakeClient(
       if (options.sources === "off") throw notFound();
       return options.sources ?? [];
     }),
+    listReadyEventSources: mock(async () => options.ready ?? []),
     createEventSource: mock(async (_workspaceId: string, request: CreateEventSourceRequest) => ({
       source: request.kind === "workspace" ? workspaceSource : mcpSource,
     })),
@@ -454,6 +460,47 @@ test("the host's MCP server is offered before its source exists, and saving adds
         },
       ],
     },
+  });
+});
+
+test("servers and mailboxes the person can use are offered without the host naming them", async () => {
+  const connectionId = "4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a";
+  const client = fakeClient({
+    sources: [],
+    ready: [
+      { key: "mcp-server:orders-mcp", kind: "mcp", name: "Orders" },
+      { key: `gmail:${connectionId}`, kind: "gmail", name: "Gmail (me@example.com)" },
+      { key: "workspace", kind: "workspace", name: "This workspace" },
+    ],
+  });
+  const container = await render(client, {
+    sessionId: SESSION_ID,
+    argumentDefaults: { projectId: "3f2e1d0c-9b8a-4c7d-8e6f-5a4b3c2d1e0f" },
+  });
+  await click(button(container, "New automation"));
+  await click(button(container, "Add an event"));
+  await flush();
+  // Each is offered, and only the one picked is added. This workspace's own
+  // events wait for the host to offer them.
+  expect(container.textContent).toContain("Gmail (me@example.com)");
+  expect(container.textContent).not.toContain("This workspace");
+  expect(client.createEventSource).not.toHaveBeenCalled();
+  await pick("Choose a source", "mcp-server:orders-mcp");
+  expect(client.createEventSource).toHaveBeenCalledTimes(1);
+  expect(client.createEventSource).toHaveBeenCalledWith(WORKSPACE_ID, {
+    kind: "mcp",
+    serverId: "orders-mcp",
+  });
+  await pick("Choose an event", "order.created");
+  await change(container.querySelector("textarea")!, "Tell me about each new order.");
+  await click(button(container, "Create automation"));
+  expect(client.createEventSource).toHaveBeenCalledTimes(1);
+  const [, request] = client.createScheduledTask.mock.calls[0] as unknown as [
+    string,
+    Record<string, unknown>,
+  ];
+  expect(request).toMatchObject({
+    events: { triggers: [{ sourceId: SOURCE_ID, eventTypes: ["order.created"] }] },
   });
 });
 

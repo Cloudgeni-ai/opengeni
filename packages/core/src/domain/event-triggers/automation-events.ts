@@ -1,6 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   ScheduledTaskEventsInput,
+  isReadyEventSourceKey,
   type ParsedEventTriggerInput,
   type ParsedScheduledTaskEventsInput,
   type ScheduledTask,
@@ -27,6 +28,7 @@ import {
   mcpWebhookBaseUrl,
 } from "./mcp-event-types";
 import type { McpEventType } from "./mcp-events-protocol";
+import { addReadyEventSource } from "./ready-sources";
 import { eventTriggersEnabled, mcpSourceHttpError, type McpEventSourceNetwork } from "./sources";
 
 /**
@@ -45,9 +47,12 @@ export async function validateScheduledTaskEvents(
   input: {
     settings: Settings;
     db: Database;
+    accountId: string;
     workspaceId: string;
     /** The automation's owner; a private source fires only that person's automations. */
     ownerSubjectId: string | null;
+    /** Who is saving it, recorded as the creator of a ready source it adds. */
+    actorSubjectId: string;
     /** The automation being edited: its unchanged MCP triggers stay valid if the server is unreachable. */
     taskId?: string;
     schedule: ScheduledTaskScheduleSpec;
@@ -70,10 +75,43 @@ export async function validateScheduledTaskEvents(
     });
   }
   const sources = new Map<string, Awaited<ReturnType<typeof getEventSource>>>();
+  // A ready source's key names the owner's own source, added on first use.
+  const ready = new Map<string, Promise<string>>();
+  const network = {
+    db: input.db,
+    settings: input.settings,
+    ...(input.fetch ? { fetch: input.fetch } : {}),
+  };
+  const sourceIdOf = async (ref: string, index: number): Promise<string> => {
+    if (!isReadyEventSourceKey(ref)) return ref;
+    let added = ready.get(ref);
+    if (!added) {
+      added = addReadyEventSource(network, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        ownerSubjectId: input.ownerSubjectId,
+        createdBySubjectId: input.actorSubjectId,
+        key: ref,
+      }).then((source) => source.id);
+      ready.set(ref, added);
+    }
+    try {
+      return await added;
+    } catch (error) {
+      const problem =
+        error instanceof HTTPException
+          ? error
+          : new HTTPException(503, { message: "The source couldn't be added. Try again shortly." });
+      throw new HTTPException(problem.status, {
+        message: `Trigger ${index + 1}: ${problem.message}`,
+      });
+    }
+  };
   const mcpTypes = new Map<string, Promise<McpEventType[]>>();
   let existingStreams: Set<string> | undefined;
   const triggers: ValidatedEventTrigger[] = [];
-  for (const [index, trigger] of events.triggers.entries()) {
+  for (const [index, requested] of events.triggers.entries()) {
+    const trigger = { ...requested, sourceId: await sourceIdOf(requested.sourceId, index) };
     if (!sources.has(trigger.sourceId)) {
       sources.set(
         trigger.sourceId,
@@ -97,14 +135,8 @@ export async function validateScheduledTaskEvents(
       const streamKey = mcpEventStreamKey(type, args);
       let types = mcpTypes.get(source.id);
       if (!types) {
-        types = withMcpEventSourceClient(
-          {
-            db: input.db,
-            settings: input.settings,
-            ...(input.fetch ? { fetch: input.fetch } : {}),
-          },
-          source,
-          (client, { server }) => mcpSourceEventTypes(client, source, mcpServerDisplayName(server)),
+        types = withMcpEventSourceClient(network, source, (client, { server }) =>
+          mcpSourceEventTypes(client, source, mcpServerDisplayName(server)),
         );
         // Settled below; a rejection here must not go unhandled meanwhile.
         types.catch(() => undefined);

@@ -270,6 +270,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
       verifySlackChannel: slackChannelVerifier(grant),
+      eventSourceFetch: deps.eventSourceFetch,
     });
     await syncCreatedScheduledTask({ db, workflowClient, task });
     const [created] = await withScheduledTaskEvents(db, [task]);
@@ -454,6 +455,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
       verifySlackChannel: slackChannelVerifier(grant),
+      eventSourceFetch: deps.eventSourceFetch,
     });
     const task = await updateScheduledTaskForApi(
       db,

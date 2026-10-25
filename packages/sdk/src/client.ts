@@ -50,6 +50,7 @@ import type {
   ListAutomationTemplatesResponse,
   ListEventDeliveriesResponse,
   ListInboundEventsResponse,
+  ReadyEventSource,
   RotateEventSourceSecretResponse,
   SendTestEventRequest,
   SendTestEventResponse,
@@ -7613,6 +7614,21 @@ export class OpenGeniClient {
     const response = await this.requestJson<{ sources: EventSource[] }>(
       "GET",
       `/v1/workspaces/${workspaceId}/event-sources`,
+    );
+    return response.sources;
+  }
+
+  /**
+   * Sources the caller can use without setting them up, listed by key until
+   * used: MCP servers they are signed in to that offer events, their Gmail
+   * accounts and This workspace. Create one with `createEventSource` and the
+   * request `readyEventSourceRequest(key)` gives; adding it again returns the
+   * same source. A trigger may also name one by its key.
+   */
+  async listReadyEventSources(workspaceId: string): Promise<ReadyEventSource[]> {
+    const response = await this.requestJson<{ sources: ReadyEventSource[] }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/event-sources/ready`,
     );
     return response.sources;
   }
