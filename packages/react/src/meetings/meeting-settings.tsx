@@ -225,7 +225,7 @@ export function MeetingDefaultsView({
       value === DETECT_LANGUAGE
         ? msg("meetings.settings.newMeetingsDetectTheirLanguage")
         : msg("meetings.settings.newMeetingsAreTranscribedIn", {
-            languageName: languageName(value),
+            languageName: languageName(value, msg.locale),
           }),
     );
   };

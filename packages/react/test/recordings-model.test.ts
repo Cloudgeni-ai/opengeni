@@ -9,17 +9,20 @@ import type {
 
 import {
   activeSegmentIndex,
+  defaultMeetingTitle,
   defaultSpeakerName,
   formatClock,
   formatDuration,
   groupTranscriptTurns,
   languageName,
   meetingPhase,
+  meetingStatusLabel,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
   transcriptErrorText,
 } from "../src/recordings-model";
+import { createOpenGeniText } from "../src/messages/runtime";
 
 function segment(
   index: number,
@@ -266,4 +269,31 @@ test("error codes from the worker and providers read as plain advice", () => {
   expect(transcriptErrorText("missing_provider_key")).toContain("Organization settings");
   expect(transcriptErrorText("provider_quota_exceeded")).toContain("no credit left");
   expect(transcriptErrorText("something_new")).toContain("Try again");
+});
+
+test("a host's catalog and locale reach every label the helpers make", () => {
+  const msg = createOpenGeniText({
+    locale: "nb",
+    messages: {
+      "meetings.recordings.durationSeconds": "{seconds}\u00a0sek",
+      "meetings.recordings.durationHoursMinutes": "{hours}\u00a0t {minutes}\u00a0min",
+      "meetings.recordings.uploading": "Laster opp",
+      "meetings.recordings.speakerNumber": "Taler {number}",
+      "meetings.recordings.microphone": "Mikrofon",
+      "meetings.recordings.unknownSpeaker": "Ukjent taler",
+      "meetings.recordings.errorUnknown": "Noe gikk galt.",
+      "meetings.recordings.defaultTitle": "Møte {date} {time}",
+    },
+  });
+  expect(formatDuration(45_000, msg)).toBe("45\u00a0sek");
+  expect(formatDuration(65 * 60_000, msg)).toBe("1\u00a0t 5\u00a0min");
+  expect(meetingStatusLabel({ kind: "uploading" }, msg)?.label).toBe("Laster opp");
+  expect(speakerDisplayName("t1_speaker_3", [], tracks, msg)).toBe("Taler 4");
+  expect(speakerDisplayName(null, [], tracks, msg)).toBe("Ukjent taler");
+  expect(defaultSpeakerName("track-0", tracks, msg)).toBe("Mikrofon");
+  expect(transcriptErrorText("something_new", msg)).toBe("Noe gikk galt.");
+  expect(defaultMeetingTitle(new Date(2026, 9, 23, 14, 5), msg)).toStartWith("Møte ");
+  // Language names follow the locale and start upper case, as a label does.
+  expect(languageName("nob", "nb")).toBe("Norsk bokmål");
+  expect(languageName("en", "nb")).toBe("Engelsk");
 });

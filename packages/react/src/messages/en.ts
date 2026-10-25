@@ -2589,6 +2589,41 @@ export const englishMessages = {
     "The usage allowance is used up, so new meetings can't be transcribed until it renews.",
   "meetings.recorderPanel.yourBrowserAsksWhatTo":
     "Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio.",
+  /** A recording's length. Non-breaking spaces keep "23 sec" together when text wraps. */
+  "meetings.recordings.durationSeconds": "{seconds}\u00a0sec",
+  "meetings.recordings.durationMinutes": "{minutes}\u00a0min",
+  "meetings.recordings.durationHours": "{hours}\u00a0h",
+  "meetings.recordings.durationHoursMinutes": "{hours}\u00a0h {minutes}\u00a0min",
+  /** A meeting's state in the list. */
+  "meetings.recordings.uploading": "Uploading",
+  "meetings.recordings.transcribing": "Transcribing",
+  "meetings.recordings.transcriptFailed": "Transcript failed",
+  "meetings.recordings.noTranscript": "No transcript",
+  "meetings.recordings.errorMissingProviderKey":
+    "No transcription provider is connected for this workspace. An organization admin can connect one in Organization settings, under Models.",
+  "meetings.recordings.errorProviderUnauthorized":
+    "The transcription provider didn't accept its key. An organization admin can reconnect it in Organization settings, under Models.",
+  "meetings.recordings.errorProviderQuotaExceeded":
+    "The transcription provider refused the job because its account has no credit left. Ask an organization admin to check it, then transcribe again.",
+  "meetings.recordings.errorProviderTooLarge":
+    "This recording is longer than the model accepts. Try another model.",
+  "meetings.recordings.errorModelUnavailable":
+    "That model isn't available anymore. Try another model.",
+  "meetings.recordings.errorInvalidAudio":
+    "The audio couldn't be read. Part of the upload may be damaged.",
+  "meetings.recordings.errorStorageUnavailable":
+    "The audio couldn't be fetched from storage. Try again in a few minutes.",
+  "meetings.recordings.errorUnknown":
+    "Something went wrong while transcribing. Try again, or pick another model.",
+  /** A speaker nobody has named yet. */
+  "meetings.recordings.speakerNumber": "Speaker {number}",
+  "meetings.recordings.microphone": "Microphone",
+  /** The other side of a call, recorded from the computer's or a tab's audio. */
+  "meetings.recordings.sharedAudio": "Shared audio",
+  "meetings.recordings.trackNumber": "Track {number}",
+  "meetings.recordings.unknownSpeaker": "Unknown speaker",
+  /** A new recording's title until someone names it: "Meeting, Oct 23, 14:05". */
+  "meetings.recordings.defaultTitle": "Meeting, {date}, {time}",
   "meetings.settings.agreedForThemselves": "Agreed for themselves",
   "meetings.settings.agreedForThemselvesNotHeard":
     "Agreed for themselves · Not heard in a meeting yet",
