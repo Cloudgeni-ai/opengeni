@@ -56,11 +56,12 @@ impl std::fmt::Debug for NativePlatform {
         f.debug_struct("NativePlatform")
             .field("workspace_root", &self.workspace_root)
             .field("home_dir", &self.home_dir)
-            .field("has_display", &self.desktop.probe().is_some())
             .field("has_stream_registry", &self.stream_registry.is_some())
             .field("has_browser_control", &self.browser_control.is_some())
             .field("has_oom_isolation", &self.cgroups.is_some())
-            .finish()
+            // The desktop is left out: probing it opens displays and reads
+            // session state, which formatting must not do.
+            .finish_non_exhaustive()
     }
 }
 

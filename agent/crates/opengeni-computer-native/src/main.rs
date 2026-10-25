@@ -18,7 +18,17 @@ async fn main() {
     }
     // `window presence|restore|console`: one-shot window commands, JSON on stdin.
     let mut arguments = std::env::args().skip(1);
-    if arguments.next().as_deref() == Some("window") {
+    let first = arguments.next();
+    // `desktop-session`: the person's desktop, for a controller started
+    // without one (JSON on stdout).
+    if first.as_deref() == Some("desktop-session") {
+        println!(
+            "{}",
+            opengeni_computer_native::run_desktop_session_command()
+        );
+        return;
+    }
+    if first.as_deref() == Some("window") {
         let command = arguments.next().unwrap_or_default();
         let mut input = String::new();
         let answer = tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input)

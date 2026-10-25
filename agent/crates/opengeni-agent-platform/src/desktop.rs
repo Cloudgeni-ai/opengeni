@@ -33,7 +33,7 @@ use crate::error::{PlatformError, PlatformResult};
 #[cfg(target_os = "linux")]
 pub use crate::linux::{
     linux_layout_text_keysyms, linux_named_key_chord_keysyms, validate_linux_named_key_chord,
-    LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+    LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect, X11Display, XServerCheck,
 };
 
 /// A captured desktop frame: PNG-encoded image bytes plus the geometry they were
@@ -290,24 +290,226 @@ impl DesktopBackend for TurnedOffDesktop {
     }
 }
 
+/// The least time between two attempts to open a desktop that is not there,
+/// so a burst of callers (a probe, then a capture) makes one attempt. The
+/// agent's desktop status refresh probes every few seconds, so a desktop that
+/// appears is found within that refresh.
+const REOPEN_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A desktop that comes and goes while the agent runs: the person signs in
+/// after a per-user service started, signs out, or the display manager writes
+/// a new cookie at login. Every probe, capture and input opens it again when
+/// it is not open, and a probe that finds the open one gone drops it and looks
+/// again, so availability follows the machine both ways without restarting
+/// the agent. While none opens, [`DesktopBackend::capture_blocked_reason`]
+/// says why in plain words.
+pub struct ReopeningDesktop<D> {
+    inner: std::sync::Arc<ReopeningInner<D>>,
+}
+
+type DesktopOpener<D> = Box<dyn Fn() -> Result<D, String> + Send + Sync>;
+
+struct ReopeningInner<D> {
+    open: DesktopOpener<D>,
+    state: std::sync::Mutex<ReopenState<D>>,
+    /// Held while opening, so concurrent callers make one attempt.
+    opening: std::sync::Mutex<()>,
+}
+
+struct ReopenState<D> {
+    /// The open desktop and the generation it was opened in.
+    current: Option<(u64, D)>,
+    generation: u64,
+    /// Why the last attempt found no desktop.
+    reason: Option<String>,
+    attempted: Option<std::time::Instant>,
+}
+
+impl<D: DesktopBackend + Clone + 'static> ReopeningDesktop<D> {
+    /// A desktop opened by `open`, tried once now and again whenever it is
+    /// needed and not open.
+    pub fn new(open: impl Fn() -> Result<D, String> + Send + Sync + 'static) -> Self {
+        let desktop = Self {
+            inner: std::sync::Arc::new(ReopeningInner {
+                open: Box::new(open),
+                state: std::sync::Mutex::new(ReopenState {
+                    current: None,
+                    generation: 0,
+                    reason: None,
+                    attempted: None,
+                }),
+                opening: std::sync::Mutex::new(()),
+            }),
+        };
+        let _ = desktop.inner.ensure();
+        desktop
+    }
+}
+
+impl<D: DesktopBackend + Clone> ReopeningInner<D> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ReopenState<D>> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The open desktop, opening it when there is none. Blocking.
+    fn ensure(&self) -> Result<(u64, D), String> {
+        if let Some(current) = self.lock().current.clone() {
+            return Ok(current);
+        }
+        let _opening = self
+            .opening
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        {
+            let state = self.lock();
+            if let Some(current) = state.current.clone() {
+                return Ok(current);
+            }
+            if let (Some(reason), Some(attempted)) = (&state.reason, state.attempted) {
+                if attempted.elapsed() < REOPEN_MIN_INTERVAL {
+                    return Err(reason.clone());
+                }
+            }
+        }
+        let opened = (self.open)();
+        let mut state = self.lock();
+        state.attempted = Some(std::time::Instant::now());
+        match opened {
+            Ok(desktop) => {
+                state.generation += 1;
+                let current = (state.generation, desktop);
+                state.current = Some(current.clone());
+                if state.reason.take().is_some() {
+                    tracing::info!("desktop is available again");
+                }
+                Ok(current)
+            }
+            Err(reason) => {
+                if state.reason.as_deref() != Some(reason.as_str()) {
+                    tracing::info!(reason = %reason, "desktop unavailable");
+                }
+                state.reason = Some(reason.clone());
+                Err(reason)
+            }
+        }
+    }
+
+    /// Drops the desktop opened in `generation`, which no longer answers.
+    fn lost(&self, generation: u64) {
+        let mut state = self.lock();
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|(open, _)| *open == generation)
+        {
+            state.current = None;
+            // The next attempt runs at once, not after the minimum interval.
+            state.attempted = None;
+        }
+    }
+}
+
+impl<D: DesktopBackend + Clone + 'static> ReopeningDesktop<D> {
+    /// The open desktop and its generation, opened on the blocking pool when
+    /// there is none.
+    async fn ensure_async(&self) -> PlatformResult<(u64, D)> {
+        if let Some(current) = self.inner.lock().current.clone() {
+            return Ok(current);
+        }
+        let inner = std::sync::Arc::clone(&self.inner);
+        crate::spawn_blocking_reserved(move || inner.ensure())
+            .await
+            .map_err(|error| PlatformError::os(format!("desktop open task join: {error}")))?
+            .map_err(PlatformError::Unsupported)
+    }
+
+    /// After a capture or input failed: when the desktop opened in
+    /// `generation` no longer answers, drops it and looks for the current
+    /// one. `None` while the failed desktop still answers (the failure was the
+    /// operation's own), else the desktop found now or why there is none.
+    async fn recheck_after_failure(
+        &self,
+        generation: u64,
+        failed: D,
+    ) -> Option<PlatformResult<(u64, D)>> {
+        let answering = crate::spawn_blocking_reserved(move || failed.probe().is_some())
+            .await
+            .unwrap_or(false);
+        if answering {
+            return None;
+        }
+        self.inner.lost(generation);
+        Some(self.ensure_async().await)
+    }
+}
+
+#[async_trait]
+impl<D: DesktopBackend + Clone + 'static> DesktopBackend for ReopeningDesktop<D> {
+    fn probe(&self) -> Option<v1::Display> {
+        let (generation, desktop) = self.inner.ensure().ok()?;
+        if let Some(display) = desktop.probe() {
+            return Some(display);
+        }
+        // The desktop went away (sign-out, a restarted display server): look
+        // for the current one.
+        self.inner.lost(generation);
+        let (_, desktop) = self.inner.ensure().ok()?;
+        desktop.probe()
+    }
+
+    async fn capture(&self) -> PlatformResult<CapturedFrame> {
+        let (generation, desktop) = self.ensure_async().await?;
+        let error = match desktop.capture().await {
+            Ok(frame) => return Ok(frame),
+            Err(error) => error,
+        };
+        match self.recheck_after_failure(generation, desktop).await {
+            None => Err(error),
+            // A capture of whichever desktop is there now is still a capture.
+            Some(Ok((_, current))) => current.capture().await,
+            Some(Err(reason)) => Err(reason),
+        }
+    }
+
+    async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
+        let (generation, desktop) = self.ensure_async().await?;
+        let error = match desktop.inject(input).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        match self.recheck_after_failure(generation, desktop).await {
+            // Input meant for the lost desktop is never replayed on another.
+            None | Some(Ok(_)) => Err(error),
+            Some(Err(reason)) => Err(reason),
+        }
+    }
+
+    fn capture_blocked_reason(&self) -> Option<String> {
+        let state = self.inner.lock();
+        match &state.current {
+            Some((_, desktop)) => desktop.capture_blocked_reason(),
+            None => state.reason.clone(),
+        }
+    }
+}
+
 /// Resolves the desktop backend for the current host.
 ///
-/// On Linux, attempts to open the X11 display named by `$DISPLAY` (real screen or
-/// an Xvfb virtual framebuffer the caller spawned via [`crate::virtual_desktop`]);
-/// if none is reachable, falls back to [`NoDesktop`] (the host reports
-/// `display_unavailable`). On macOS/Windows, returns the native backend, which
-/// probes the signed-in session's display. Other targets get [`NoDesktop`].
+/// On Linux, opens the desktop of the user the agent runs as: `$DISPLAY` when it
+/// is set (a real screen, or an Xvfb virtual framebuffer the caller spawned via
+/// [`crate::virtual_desktop`]), otherwise the display of that user's graphical
+/// login session. The desktop is opened again whenever it is needed and not
+/// open ([`ReopeningDesktop`]), so an agent started before the person signs in
+/// finds the desktop once they do. On macOS/Windows, returns the native backend,
+/// which probes the signed-in session's display. Other targets get
+/// [`NoDesktop`].
 #[must_use]
 pub fn resolve_desktop() -> Box<dyn DesktopBackend> {
     #[cfg(target_os = "linux")]
     {
-        match LinuxDesktop::open_default() {
-            Ok(desktop) => Box::new(desktop),
-            Err(reason) => {
-                tracing::info!(reason = %reason, "no X11 display reachable; desktop unavailable");
-                Box::new(NoDesktop)
-            }
-        }
+        Box::new(ReopeningDesktop::new(LinuxDesktop::open_default))
     }
     #[cfg(target_os = "macos")]
     {
@@ -494,5 +696,211 @@ mod tests {
             .expect("fitted macOS png must decode");
         assert_eq!(decoded.width(), fitted.width);
         assert_eq!(decoded.height(), fitted.height);
+    }
+
+    /// A machine's screen as the agent finds it: what the next open returns,
+    /// and whether the display opened last still answers.
+    #[derive(Default)]
+    struct Screen {
+        /// `Ok(display name)` or `Err(reason)` for the next open.
+        next_open: std::sync::Mutex<Option<Result<String, String>>>,
+        answering: std::sync::atomic::AtomicBool,
+        opens: std::sync::atomic::AtomicUsize,
+    }
+
+    #[derive(Clone)]
+    struct ScreenDesktop {
+        name: String,
+        screen: std::sync::Arc<Screen>,
+    }
+
+    #[async_trait]
+    impl DesktopBackend for ScreenDesktop {
+        fn probe(&self) -> Option<v1::Display> {
+            self.screen
+                .answering
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .then(|| v1::Display {
+                    id: self.name.clone(),
+                    width: 1280,
+                    height: 800,
+                    r#virtual: false,
+                })
+        }
+
+        async fn capture(&self) -> PlatformResult<CapturedFrame> {
+            if self.probe().is_none() {
+                return Err(PlatformError::os("the display stopped answering"));
+            }
+            Ok(CapturedFrame {
+                png: self.name.clone().into_bytes(),
+                width: 1280,
+                height: 800,
+            })
+        }
+
+        async fn inject(&self, _input: &v1::DesktopInput) -> PlatformResult<()> {
+            match self.probe() {
+                Some(_) => Ok(()),
+                None => Err(PlatformError::os("the display stopped answering")),
+            }
+        }
+    }
+
+    impl Screen {
+        fn set(&self, next: Result<&str, &str>) {
+            *self.next_open.lock().unwrap() =
+                Some(next.map(str::to_string).map_err(str::to_string));
+        }
+
+        fn desktop(self: &std::sync::Arc<Self>) -> ReopeningDesktop<ScreenDesktop> {
+            let screen = std::sync::Arc::clone(self);
+            ReopeningDesktop::new(move || {
+                screen
+                    .opens
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let name = screen
+                    .next_open
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("scripted open")?;
+                screen
+                    .answering
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(ScreenDesktop {
+                    name,
+                    screen: std::sync::Arc::clone(&screen),
+                })
+            })
+        }
+
+        fn opens(&self) -> usize {
+            self.opens.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Waits out the least time between attempts to open a missing desktop.
+    fn after_reopen_interval() {
+        std::thread::sleep(REOPEN_MIN_INTERVAL + std::time::Duration::from_millis(50));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_cookie_at_startup_clears_once_the_login_writes_the_new_one() {
+        // The agent's service starts a moment before the display manager writes
+        // the session's cookie: the first open is refused.
+        let screen = std::sync::Arc::new(Screen::default());
+        screen.set(Err(
+            "The desktop on display :0 could not be opened: X11 setup failed: 'Invalid MIT-MAGIC-COOKIE-1 key'.",
+        ));
+        let desktop = screen.desktop();
+        assert!(desktop.probe().is_none());
+        assert!(desktop
+            .capture_blocked_reason()
+            .is_some_and(|reason| reason.contains("Invalid MIT-MAGIC-COOKIE-1 key")));
+        assert!(matches!(
+            desktop.capture().await,
+            Err(PlatformError::Unsupported(reason)) if reason.contains("MIT-MAGIC-COOKIE-1")
+        ));
+        // A burst of callers makes one attempt.
+        assert_eq!(screen.opens(), 1);
+        // The login writes the new cookie; the next check opens the desktop.
+        screen.set(Ok(":0"));
+        after_reopen_interval();
+        assert_eq!(
+            desktop.probe().map(|display| display.id).as_deref(),
+            Some(":0")
+        );
+        assert_eq!(desktop.capture_blocked_reason(), None);
+        assert_eq!(desktop.capture().await.unwrap().png, b":0");
+        // An open desktop is reused, not opened again.
+        assert!(desktop.probe().is_some());
+        assert_eq!(screen.opens(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_desktop_that_appears_later_is_found_by_capture_and_input_too() {
+        let screen = std::sync::Arc::new(Screen::default());
+        screen.set(Err("No one is signed in to a desktop on this machine."));
+        let desktop = screen.desktop();
+        assert!(!desktop.can_offer_display());
+        screen.set(Ok(":1"));
+        after_reopen_interval();
+        // Capture and input open it on demand, without waiting for a probe.
+        assert_eq!(desktop.capture().await.unwrap().png, b":1");
+        desktop.inject(&v1::DesktopInput::default()).await.unwrap();
+        assert!(desktop.can_offer_display());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_desktop_that_goes_away_is_reported_with_the_reason_and_found_again() {
+        let screen = std::sync::Arc::new(Screen::default());
+        screen.set(Ok(":0"));
+        let desktop = screen.desktop();
+        assert!(desktop.probe().is_some());
+        // The person signs out: the display stops answering and no session is left.
+        screen
+            .answering
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        screen.set(Err("No one is signed in to a desktop on this machine."));
+        assert!(desktop.probe().is_none());
+        assert_eq!(
+            desktop.capture_blocked_reason().as_deref(),
+            Some("No one is signed in to a desktop on this machine.")
+        );
+        assert!(matches!(
+            desktop.capture().await,
+            Err(PlatformError::Unsupported(reason)) if reason.starts_with("No one is signed in")
+        ));
+        // They sign in again, on another display.
+        screen.set(Ok(":1"));
+        after_reopen_interval();
+        assert_eq!(
+            desktop.probe().map(|display| display.id).as_deref(),
+            Some(":1")
+        );
+        assert_eq!(desktop.capture_blocked_reason(), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_capture_or_input_drops_a_desktop_that_went_away() {
+        let screen = std::sync::Arc::new(Screen::default());
+        screen.set(Ok(":0"));
+        let desktop = screen.desktop();
+        // The person signs out between two captures: the capture fails, the
+        // dead desktop is dropped at once, and the error says why.
+        screen
+            .answering
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        screen.set(Err("No one is signed in to a desktop on this machine."));
+        assert!(matches!(
+            desktop.capture().await,
+            Err(PlatformError::Unsupported(reason)) if reason.starts_with("No one is signed in")
+        ));
+        assert_eq!(screen.opens(), 2);
+        assert!(desktop.capture_blocked_reason().is_some());
+        // They sign in again: the next capture finds the new desktop.
+        screen.set(Ok(":1"));
+        after_reopen_interval();
+        assert_eq!(desktop.capture().await.unwrap().png, b":1");
+        // Input to a desktop that went away fails and is not replayed on the
+        // desktop found in its place, which becomes the current one.
+        screen
+            .answering
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        screen.set(Ok(":2"));
+        assert!(matches!(
+            desktop.inject(&v1::DesktopInput::default()).await,
+            Err(PlatformError::Os { .. })
+        ));
+        assert_eq!(
+            desktop.probe().map(|display| display.id).as_deref(),
+            Some(":2")
+        );
+        // A failure while the desktop still answers is the operation's own and
+        // does not reopen anything.
+        let opens = screen.opens();
+        assert!(desktop.capture().await.is_ok());
+        assert_eq!(screen.opens(), opens);
     }
 }
