@@ -101,6 +101,9 @@ class BoundedDispatchTrace implements InteractionDispatchTrace {
   }
 }
 
+/** See InteractionDriver.connectionState. */
+export type InteractionDriverConnectionState = "connected" | "lost" | "unresponsive";
+
 type InteractionDriver<
   TCommand extends InteractionCoreCommand,
   TTarget extends InteractionCoreTarget,
@@ -111,9 +114,10 @@ type InteractionDriver<
   validate?(command: TCommand, target: TTarget): Promise<void> | void;
   validateSession?(command: TCommand): Promise<void> | void;
   dispatch(command: TCommand, trace?: InteractionDispatchTrace): Promise<TObservation | null>;
-  /** Bounded liveness probe: false only when the browser or computer, or the
-   * driver's connection to it, is gone. */
-  isAvailable?(): Promise<boolean>;
+  /** Bounded probe of the driver's connection: "connected" when the browser
+   * or computer answered, "lost" when it or the connection to it is gone,
+   * "unresponsive" when it did not answer in time. */
+  connectionState?(): Promise<InteractionDriverConnectionState>;
 };
 
 type InteractionCoreAdapter<
@@ -522,16 +526,23 @@ export class InteractionControllerCore<
     const label = this.adapter.resourceLabel;
     if (error instanceof InteractionControllerError && error.code !== "journal_full")
       return { code: error.code, message: error.message, retryable: false };
-    let available = false;
+    let connection: InteractionDriverConnectionState = "lost";
     try {
-      available = (await this.driver.isAvailable?.()) === true;
+      connection = (await this.driver.connectionState?.()) ?? "lost";
     } catch {
       // A probe that fails cannot show the connection is still there.
     }
-    if (available) {
+    if (connection === "connected") {
       return {
         code: "driver_failed",
         message: `${label} command failed unexpectedly after dispatch and its outcome is unknown; the ${label} is still connected, so check its current state before repeating the command`,
+        retryable: false,
+      };
+    }
+    if (connection === "unresponsive") {
+      return {
+        code: "driver_failed",
+        message: `${label} command failed unexpectedly after dispatch and its outcome is unknown; the ${label} did not answer a check right afterwards, so check its current state before repeating the command`,
         retryable: false,
       };
     }

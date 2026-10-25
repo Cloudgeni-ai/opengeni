@@ -499,9 +499,10 @@ describe("BrowserInteractionController", () => {
   });
 
   test("an unclassified dispatch error is a lost controller only when the driver is gone", async () => {
+    type State = "connected" | "lost" | "unresponsive";
     const run = async (
       thrown: unknown,
-      isAvailable: (() => Promise<boolean>) | undefined,
+      probe: (() => Promise<State>) | undefined,
     ): Promise<{ state: string; error: unknown; probes: number }> => {
       let probes = 0;
       const base = driver(new Map([["target-1", target()]]), async () => {
@@ -510,12 +511,12 @@ describe("BrowserInteractionController", () => {
       const controller = new BrowserInteractionController({
         browserSessionId,
         controllerGeneration,
-        driver: isAvailable
+        driver: probe
           ? {
               ...base,
-              isAvailable: async () => {
+              connectionState: async () => {
                 probes += 1;
-                return await isAvailable();
+                return await probe();
               },
             }
           : base,
@@ -526,12 +527,23 @@ describe("BrowserInteractionController", () => {
     const pageError = new Error("Node does not have a layout object");
 
     // The browser still answers: the command failed, its effect is unknown.
-    expect(await run(pageError, async () => true)).toEqual({
+    expect(await run(pageError, async () => "connected")).toEqual({
       state: "outcome_unknown",
       error: {
         code: "driver_failed",
         message:
           "browser command failed unexpectedly after dispatch and its outcome is unknown; the browser is still connected, so check its current state before repeating the command",
+        retryable: false,
+      },
+      probes: 1,
+    });
+    // A browser that does not answer in time is neither connected nor lost.
+    expect(await run(pageError, async () => "unresponsive")).toEqual({
+      state: "outcome_unknown",
+      error: {
+        code: "driver_failed",
+        message:
+          "browser command failed unexpectedly after dispatch and its outcome is unknown; the browser did not answer a check right afterwards, so check its current state before repeating the command",
         retryable: false,
       },
       probes: 1,
@@ -545,7 +557,7 @@ describe("BrowserInteractionController", () => {
         retryable: false,
       },
     };
-    expect(await run(pageError, async () => false)).toEqual({ ...lost, probes: 1 });
+    expect(await run(pageError, async () => "lost")).toEqual({ ...lost, probes: 1 });
     expect(
       await run(pageError, async () => {
         throw new Error("probe failed");
@@ -556,7 +568,7 @@ describe("BrowserInteractionController", () => {
     expect(
       await run(
         new InteractionControllerError("tab_crashed", "browser tab crashed", true),
-        async () => true,
+        async () => "connected",
       ),
     ).toEqual({
       state: "outcome_unknown",

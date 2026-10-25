@@ -29,12 +29,19 @@ document.getElementById("search").addEventListener("submit", (event) => {
 </script>`;
 
 const NATIVE_DROPDOWN = `<!doctype html><title>Order</title>
-<label>Size <select id="size"><option value="s">Small</option><option value="m">Medium</option><option value="l" disabled>Large</option></select></label>
+<label>Size <select id="size"><option value="s">Small</option><option value="m">Medium</option><option value="l" disabled>Large</option><option value="x" hidden>Extra large</option></select></label>
+<label>Delivery <select id="delivery"><option>Standard</option><option>Express</option></select></label>
 <label>Toppings <select id="toppings" multiple size="3"><option>Cheese</option><option>Olives</option></select></label>
 <label>City <input list="cities"></label><datalist id="cities"><option value="Lisbon"></option></datalist>
 <script>
 globalThis.changes = 0;
-document.getElementById("size").addEventListener("change", () => changes++);
+globalThis.events = [];
+const size = document.getElementById("size");
+size.addEventListener("change", () => changes++);
+for (const type of ["focus", "blur", "input", "change", "keydown"])
+  size.addEventListener(type, () => events.push(type));
+// A page that confirms a choice with a dialog from its change handler.
+document.getElementById("delivery").addEventListener("change", (event) => alert("Delivery: " + event.target.value));
 </script>`;
 
 async function withBrowser(
@@ -169,6 +176,9 @@ e2e(
       expect(picked.error).toBeNull();
       expect(picked.state).toBe("completed");
       expect(await evaluate('[document.getElementById("size").value, changes]')).toEqual(["m", 1]);
+      // The page saw what a person's choice produces: focus from opening the
+      // list, then input and change, and no blur or key on the way.
+      expect(await evaluate("events")).toEqual(["focus", "input", "change"]);
       // The dropdown's list closed, as after a person's choice.
       expect(
         await evaluate(
@@ -190,6 +200,18 @@ e2e(
       );
       expect(disabled.state).toBe("failed");
       expect(disabled.error?.code).toBe("invalid_action");
+      // So is a hidden one.
+      const hidden = await controller.run(
+        command(
+          view,
+          { type: "click", locator: { kind: "css", selector: '#size option[value="x"]' } },
+          "none",
+        ),
+      );
+      expect(hidden.state).toBe("failed");
+      expect(hidden.error?.message).toBe(
+        "this option of a native dropdown is disabled or hidden and cannot be chosen",
+      );
       expect(await evaluate('[document.getElementById("size").value, changes]')).toEqual(["s", 2]);
 
       // An option of a list box has its own box and is clicked like any element.
@@ -211,10 +233,37 @@ e2e(
         ),
       );
       expect(suggestion.state).toBe("failed");
-      expect(suggestion.error).toMatchObject({
+      expect(suggestion.error).toEqual({
         code: "invalid_action",
-        message: expect.stringContaining("has no box on the page"),
+        message: "browser element has no box on the page to act on; it is hidden or not rendered",
+        retryable: false,
       });
+
+      // A choice whose change handler opens a dialog did run: the value
+      // changed, and the receipt says so and shows the dialog to answer.
+      for (const action of [
+        { type: "click" as const, locator: option("Express") },
+        {
+          type: "select",
+          locator: { kind: "role", role: "combobox", name: "Delivery" },
+          values: ["Standard"],
+        },
+      ] satisfies BrowserActionCommand["action"][]) {
+        const current = await driver.observe(initial.target.id);
+        const confirmed = await controller.run(command(current, action));
+        expect(confirmed.state).not.toBe("failed");
+        expect(confirmed.error?.message ?? "").not.toContain("did not run");
+        expect(confirmed.observation?.dialog?.message).toBe(
+          `Delivery: ${action.type === "click" ? "Express" : "Standard"}`,
+        );
+        const answered = await controller.run(
+          command(confirmed.observation!, { type: "handle_dialog", response: "accept" }, "none"),
+        );
+        expect(answered.state).toBe("completed");
+        expect(await evaluate('document.getElementById("delivery").value')).toBe(
+          action.type === "click" ? "Express" : "Standard",
+        );
+      }
     });
   },
   60_000,

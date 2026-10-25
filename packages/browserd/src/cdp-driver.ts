@@ -325,6 +325,24 @@ function classifyActionFailure(error: unknown, command: BrowserActionCommandValu
   );
 }
 
+/** The definite refusal for an element Chromium would not scroll into view,
+ * by its reply: one removed from the page is stale, and one the page does not
+ * render (hidden, or drawn by the browser rather than the page) has no box to
+ * scroll to or point at. Null for any other reply. */
+export function scrollRefusal(message: string): InteractionDefiniteDriverError | null {
+  if (/no node with given id|node is detached/iu.test(message))
+    return new InteractionDefiniteDriverError(
+      "locator_not_found",
+      "browser element is no longer present",
+    );
+  if (/does not have a layout object/iu.test(message))
+    return new InteractionDefiniteDriverError(
+      "invalid_action",
+      "browser element has no box on the page to act on; it is hidden or not rendered",
+    );
+  return null;
+}
+
 /** Page reads cannot complete while a JavaScript dialog is open: the page's
  * renderer is blocked until the dialog is answered. */
 class DialogBlockedError extends InteractionControllerError {
@@ -1072,6 +1090,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return true;
     } catch (error) {
       return error instanceof CdpCommandTimeoutError || !(error instanceof CdpTransportError);
+    }
+  }
+
+  /** Whether the browser answered a bounded probe ("connected"), its
+   * connection is gone ("lost"), or it did not answer in time
+   * ("unresponsive"), which proves neither. */
+  async connectionState(): Promise<"connected" | "lost" | "unresponsive"> {
+    if (!this.started || !this.connection) return "lost";
+    try {
+      await this.connection.send("Browser.getVersion", {}, { timeoutMs: 2_000 });
+      return "connected";
+    } catch (error) {
+      if (error instanceof CdpCommandTimeoutError) return "unresponsive";
+      return error instanceof CdpTransportError ? "lost" : "connected";
     }
   }
 
@@ -4712,7 +4744,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.selectPopupOptions(state, node, inspected, action.values);
           return;
         }
-        const result = await this.callOnNode(
+        const result = await this.changeSelection(
           state,
           node.backendDOMNodeId,
           SELECT_OPTIONS_FUNCTION,
@@ -4726,9 +4758,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               : "browser locator is not a selectable control",
           );
         }
-        // This function returns false before any change for an invalid control.
-        // A true reply confirms a selection effect before later fencing checks.
-        state.actionEffectCount += 1;
         return;
       }
       case "check": {
@@ -5756,22 +5785,77 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       (!synthetic && !/option/iu.test(node.role))
     )
       return false;
-    const chosen = await this.callOnNode(
+    const option = await this.callOnNode(
       state,
       node.backendDOMNodeId,
-      CHOOSE_DROPDOWN_OPTION_FUNCTION,
+      DROPDOWN_OPTION_FUNCTION,
       [],
     );
-    if (chosen === "disabled") {
+    if (!isRecord(option) || option.kind === "other") return false;
+    if (option.kind === "unavailable") {
       throw new InteractionDefiniteDriverError(
         "invalid_action",
-        "this option of a native dropdown is disabled and cannot be chosen",
+        "this option of a native dropdown is disabled or hidden and cannot be chosen",
       );
     }
-    // Choosing the option that is already selected changes nothing, as for a
-    // person, beyond closing an open list.
-    if (chosen === "changed" || chosen === "closed") state.actionEffectCount += 1;
-    return chosen === "changed" || chosen === "closed" || chosen === "unchanged";
+    // As for a person: the option is chosen (the page sees input and change
+    // only when that changes the value), and then the open list closes.
+    if (option.kind === "choosable") {
+      const chosen = await this.changeSelection(
+        state,
+        node.backendDOMNodeId,
+        CHOOSE_DROPDOWN_OPTION_FUNCTION,
+        [],
+      );
+      if (chosen !== true) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "this option of a native dropdown is disabled or hidden and cannot be chosen",
+        );
+      }
+    }
+    if (option.open === true) await this.closeDropdownList(state);
+    return true;
+  }
+
+  /**
+   * Runs a page function that changes a select's value and then dispatches
+   * input and change, returning true, or returns false before any change.
+   * The page's handlers run inside the call, and one of them may open a
+   * JavaScript dialog that holds the call open, so the call counts as an
+   * effect from the moment it is sent; only a false reply undoes that.
+   */
+  private async changeSelection(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    functionDeclaration: string,
+    args: Array<{ value?: unknown }>,
+  ): Promise<unknown> {
+    const effectsBefore = state.actionEffectCount;
+    const result = await this.callOnNode(state, backendDOMNodeId, functionDeclaration, args, {
+      potentialEffect: true,
+    });
+    if (result !== true) state.actionEffectCount = effectsBefore;
+    return result;
+  }
+
+  /**
+   * Closes the list a native dropdown shows while it is open. The browser
+   * draws that list itself and gives it the keyboard, so Escape closes it
+   * without reaching the page, as a person's choice does: no blur or focus
+   * on the select, which keeps its focus. Best effort: a list that stays open
+   * changes nothing about the choice already made.
+   */
+  private async closeDropdownList(state: TargetState): Promise<void> {
+    for (const type of ["rawKeyDown", "keyUp"] as const) {
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type,
+        key: "Escape",
+        code: "Escape",
+        windowsVirtualKeyCode: 27,
+        nativeVirtualKeyCode: 27,
+      });
+    }
   }
 
   private async clickNode(
@@ -6085,14 +6169,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     } catch (error) {
       // -32001: the tab's session is gone, which is not about this element.
       if (!(error instanceof CdpProtocolError) || error.code === -32_001) throw error;
-      // The browser refused the scroll itself, so nothing moved: an element
-      // that is not rendered (hidden, or drawn by the browser rather than
-      // the page) has no box to scroll to or point at.
+      // The browser refused the scroll itself, so nothing moved.
       state.actionEffectCount = effectsBeforeElementScroll;
-      throw new InteractionDefiniteDriverError(
-        "invalid_action",
-        `browser element has no box on the page to act on (${redactInteractionDriverMessage(error.message)}); it is hidden or not rendered`,
-      );
+      throw scrollRefusal(error.message) ?? error;
     }
     if (
       scrollBefore !== null &&
@@ -8845,24 +8924,31 @@ const SELECT_OPTIONS_FUNCTION = `function(values) {
   return true;
 }`;
 
-// Chooses an option of a native dropdown, whose options are never laid out on
-// the page: "changed"; when it was already chosen, "closed" if that closed the
-// open list, else "unchanged"; "disabled"; or "other" for anything else
-// (including an option a pointer can reach).
-const CHOOSE_DROPDOWN_OPTION_FUNCTION = `function() {
-  if (!(this instanceof HTMLOptionElement) || this.getClientRects().length > 0) return "other";
+// What a click on an option of a native dropdown (whose options are never
+// laid out on the page) does, read without changing anything: kind
+// "choosable", "selected" when it is already chosen, "unavailable" when it is
+// disabled or hidden, or "other" for anything else (including an option a
+// pointer can reach); open says whether the dropdown's list is showing.
+const DROPDOWN_OPTION_FUNCTION = `function() {
+  if (!(this instanceof HTMLOptionElement) || this.getClientRects().length > 0) return { kind: "other" };
   const select = this.closest("select");
-  if (!(select instanceof HTMLSelectElement) || select.multiple || select.getClientRects().length === 0) return "other";
-  if (select.matches(":disabled") || this.matches(":disabled")) return "disabled";
-  // Choosing closes the dropdown's list, if it is open, and leaves focus on it.
+  if (!(select instanceof HTMLSelectElement) || select.multiple || select.getClientRects().length === 0) return { kind: "other" };
   let open = false;
   try { open = select.matches(":open"); } catch {}
-  if (open) { select.blur(); select.focus({ preventScroll: true }); }
-  if (this.selected) return open ? "closed" : "unchanged";
+  if (select.matches(":disabled") || this.matches(":disabled") || this.hidden) return { kind: "unavailable", open };
+  return { kind: this.selected ? "selected" : "choosable", open };
+}`;
+
+// Chooses that option, as the browser does when a person picks it from the
+// list; false, before any change, when it cannot be chosen.
+const CHOOSE_DROPDOWN_OPTION_FUNCTION = `function() {
+  const select = this instanceof HTMLOptionElement ? this.closest("select") : null;
+  if (!(select instanceof HTMLSelectElement) || select.matches(":disabled") || this.matches(":disabled") || this.hidden) return false;
+  if (this.selected) return true;
   this.selected = true;
   select.dispatchEvent(new Event("input", { bubbles: true }));
   select.dispatchEvent(new Event("change", { bubbles: true }));
-  return "changed";
+  return true;
 }`;
 
 /** How long select waits for a custom popup's option to show after opening it. */

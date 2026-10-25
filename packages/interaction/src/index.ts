@@ -34,6 +34,7 @@ import {
   secretFreeCommandDigest,
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
+  type InteractionDriverConnectionState,
   type InteractionOperationJournalRecord,
 } from "./controller-core";
 
@@ -44,6 +45,7 @@ export {
   secretFreeCommandDigest,
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
+  type InteractionDriverConnectionState,
 };
 
 export type BrowserInteractionDriver = {
@@ -55,10 +57,9 @@ export type BrowserInteractionDriver = {
     command: BrowserActionCommandValue,
     trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null>;
-  /** Bounded liveness probe: false only when the browser or the connection
-   * to it is gone. Without it, a dispatch error the driver did not classify
-   * counts as a lost controller. */
-  isAvailable?(): Promise<boolean>;
+  /** Bounded probe of the browser connection. Without it, a dispatch error
+   * the driver did not classify counts as a lost controller. */
+  connectionState?(): Promise<InteractionDriverConnectionState>;
 };
 
 export type BrowserInteractionAuthority = {
@@ -283,8 +284,6 @@ export type ComputerInteractionDriver = {
     command: ComputerActionCommandValue,
     trace?: InteractionDispatchTrace,
   ): Promise<ComputerObservationValue | null>;
-  /** See BrowserInteractionDriver.isAvailable. */
-  isAvailable?(): Promise<boolean>;
   validateNative?(command: ComputerNativeCommand): Promise<void>;
   dispatchNative?(command: ComputerNativeCommand): Promise<ComputerNativeResult>;
 };
