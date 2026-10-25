@@ -8,6 +8,7 @@ import {
   prepare,
   prepareAppOnly,
   appOnlyCheckName,
+  appOnlyNamespaceName,
   verify,
   writable,
   validatePlan,
@@ -126,6 +127,7 @@ describe("offline batcher administration contract", () => {
     const plan = prepareAppOnly(before, 5425399, 174101112);
     const onlyApp = [{ actor_id: 5425399, actor_type: "Integration", bypass_mode: "always" }];
     expect(plan.schemaVersion).toBe(4);
+    expect(plan.namespace.name).toBe(appOnlyNamespaceName);
     expect(plan.admission.bypass_actors).toEqual(onlyApp);
     expect(plan.namespace.bypass_actors).toEqual(onlyApp);
     expect(plan.admission.rules).toContainEqual({
@@ -148,6 +150,85 @@ describe("offline batcher administration contract", () => {
       expect(() => verify(plan, current, phase, receipts)).not.toThrow();
     }
     expect(() => verify(plan, before, "restored", {})).not.toThrow();
+  });
+
+  test("v4 guidance preserves exact legacy plans and both reverse paths", () => {
+    const before = fixture();
+    const oldName = "Merges go through the batcher: add the queue-ready label";
+    const legacy = prepare(before, 5425399, 174101112);
+    const old = prepareAppOnly(before, 5425399, 174101112, "legacy");
+    const next = prepareAppOnly(before, 5425399, 174101112);
+    expect(legacy.namespace.name).toBe(oldName);
+    expect(old.namespace.name).toBe(oldName);
+    expect(next.namespace.name).toBe(
+      "Merges go through the batcher: use gh pr merge --auto or add the queue-ready label",
+    );
+    expect({ ...next, namespace: { ...next.namespace, name: oldName } }).toEqual(old);
+    for (const plan of [old, next]) {
+      const retained = JSON.stringify(plan);
+      expect(() => validatePlan(plan)).not.toThrow();
+      expect(plan.restore).toEqual(legacy.restore);
+      const { current, receipts } = staged(plan, "applied");
+      expect(() => verify(plan, current, "applied", receipts)).not.toThrow();
+      current.rulesets[0] = { ...plan.restore, id: plan.admissionId };
+      expect(() => verify(plan, current, "namespace", receipts)).not.toThrow();
+      current.rulesets = current.rulesets.filter((r) => r.id !== receipts.namespace!.id);
+      expect(() => verify(plan, current, "guard", receipts)).not.toThrow();
+      current.rulesets = current.rulesets.filter((r) => r.id !== receipts.guard!.id);
+      expect(() => verify(plan, current, "restored", receipts)).not.toThrow();
+      expect(JSON.stringify(plan)).toBe(retained);
+    }
+    for (const plan of [old, next]) {
+      const { current, receipts } = staged(plan, "applied");
+      const namespace = current.rulesets.find((r) => r.id === receipts.namespace!.id)!;
+      namespace.name = plan === old ? appOnlyNamespaceName : oldName;
+      expect(() => verify(plan, current, "applied", receipts)).toThrow("readback drift");
+      const wrongReceipt = structuredClone(receipts);
+      wrongReceipt.namespace!.name = namespace.name;
+      expect(() => verify(plan, current, "applied", wrongReceipt)).toThrow();
+    }
+  });
+
+  test("v4 labels reject arbitrary names, collisions and unrelated policy changes", () => {
+    const plan = prepareAppOnly(fixture(), 5425399, 174101112);
+    for (const name of [
+      appOnlyNamespaceName + " ",
+      "arbitrary",
+      "",
+      "Opengeni batcher dedicated writer",
+    ]) {
+      const changed = structuredClone(plan);
+      changed.namespace.name = name;
+      expect(() => validatePlan(changed)).toThrow();
+    }
+    for (const name of [
+      plan.namespace.name,
+      prepare(fixture(), 5425399, 174101112).namespace.name,
+    ]) {
+      const before = fixture();
+      before.rulesets.push({ ...plan.namespace, id: 999, name });
+      expect(() => prepareAppOnly(before, 5425399, 174101112)).toThrow("reconcile prior execution");
+    }
+    const renamed = structuredClone(plan);
+    renamed.namespace.bypass_actors = [
+      { actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" },
+    ];
+    expect(() => validatePlan(renamed)).toThrow();
+    const scoped = structuredClone(plan);
+    scoped.namespace.conditions = { ref_name: { include: ["~ALL"], exclude: [] } };
+    expect(() => validatePlan(scoped)).toThrow();
+  });
+
+  test("fresh native-auto Manual snapshots retain true without relaxing repository equality", () => {
+    const before = fixture();
+    Object.assign(before.repository, { allow_auto_merge: true });
+    const plan = prepareAppOnly(before, 5425399, 174101112);
+    expect(plan.before.repository).toMatchObject({ allow_auto_merge: true });
+    expect(() => verify(plan, before, "restored")).not.toThrow();
+    const changed = structuredClone(before);
+    Object.assign(changed.repository, { allow_auto_merge: false });
+    expect(() => verify(plan, changed, "restored")).toThrow("Repository configuration");
+    expect(plan.restore).toEqual(writable(before.rulesets[0]!));
   });
 
   test("App-only plans reject admin bypass and unbound guiding checks; legacy plans remain exact", () => {

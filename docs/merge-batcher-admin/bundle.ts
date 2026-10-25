@@ -33,6 +33,8 @@ export type Phase =
 const writableKeys = ["name", "target", "enforcement", "bypass_actors", "conditions", "rules"];
 const guardName = "Opengeni batcher immutable refs";
 const namespaceName = "Merges go through the batcher: add the queue-ready label";
+export const appOnlyNamespaceName =
+  "Merges go through the batcher: use gh pr merge --auto or add the queue-ready label";
 export const appOnlyCheckName = "merge-batcher: run gh pr merge --auto (or add queue-ready)";
 const refs = ["refs/heads/queue/live/**", "refs/heads/batcher-state"];
 
@@ -122,6 +124,7 @@ export function prepare(before: Snapshot, appId: number, installationId: number)
       (r) =>
         r.name === guardName ||
         r.name === namespaceName ||
+        r.name === appOnlyNamespaceName ||
         r.name === "Opengeni batcher dedicated writer",
     )
   )
@@ -231,7 +234,12 @@ export function verify(
 }
 
 /** Explicit new policy; legacy plans and their exact restore payload remain unchanged. */
-export function prepareAppOnly(before: Snapshot, appId: number, installationId: number): Plan {
+export function prepareAppOnly(
+  before: Snapshot,
+  appId: number,
+  installationId: number,
+  namespaceLabel: "auto" | "legacy" = "auto",
+): Plan {
   const legacy = prepare(before, appId, installationId);
   const bypass = [{ actor_id: appId, actor_type: "Integration", bypass_mode: "always" }];
   return {
@@ -252,7 +260,11 @@ export function prepareAppOnly(before: Snapshot, appId: number, installationId: 
         },
       ],
     },
-    namespace: { ...legacy.namespace, bypass_actors: bypass },
+    namespace: {
+      ...legacy.namespace,
+      name: namespaceLabel === "legacy" ? namespaceName : appOnlyNamespaceName,
+      bypass_actors: bypass,
+    },
   };
 }
 
@@ -260,11 +272,17 @@ export function prepareAppOnly(before: Snapshot, appId: number, installationId: 
 export function validatePlan(plan: Plan): void {
   if (plan.schemaVersion !== 3 && plan.schemaVersion !== 4)
     throw new Error("Rollout requires a reviewed version 3 or version 4 plan");
-  const expected = (plan.schemaVersion === 4 ? prepareAppOnly : prepare)(
-    plan.before,
-    plan.appId,
-    plan.installationId,
-  );
+  // Preserve exact retained v4 payloads. Only these two generated names are
+  // supported; full plan/receipt/readback equality still rejects live renames.
+  const expected =
+    plan.schemaVersion === 4
+      ? prepareAppOnly(
+          plan.before,
+          plan.appId,
+          plan.installationId,
+          plan.namespace.name === namespaceName ? "legacy" : "auto",
+        )
+      : prepare(plan.before, plan.appId, plan.installationId);
   equal(plan as unknown as Json, expected as unknown as Json, "Prepared exclusive-main plan");
 }
 
