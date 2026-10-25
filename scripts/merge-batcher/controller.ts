@@ -90,12 +90,11 @@ export class LiveReader implements Reader {
       "state",
     );
     const admission = await this.github.ready();
-    if (admission.ready.length)
-      await this.git.fetch(
-        remote,
-        admission.ready.map((p) => p.headSha),
-        "candidate",
-      );
+    await this.git.fetch(
+      remote,
+      admission.ready.map((p) => p.headSha),
+      "candidate",
+    );
     const ledger = stateSha ? await this.git.readLedger(stateSha) : emptyLedger();
     if (this.config.mode === "active") requireInitializedState(stateSha, ledger);
     // A new head on an already-landed PR is admitted only when it retains that

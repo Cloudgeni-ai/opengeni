@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { GitHubActiveExecutor } from "./active";
 import { main } from "./main";
 import { Controller, LiveReader } from "./controller";
-import { AtomicGitWriter, GitStore, type RefUpdate } from "./git";
+import { AtomicGitWriter, GitFailure, GitStore, type RefUpdate } from "./git";
 import { proveHeadRefresh } from "./head-refresh";
 import {
   GitHubAuth,
@@ -33,6 +33,36 @@ import {
 
 const NOW = "2026-10-21T12:00:00.000Z";
 const roots: string[] = [];
+test("LiveReader clears candidate slots only after complete empty readiness", async () => {
+  const f = await fixture();
+  const reader = new LiveReader(f.api, f.git, f.cfg);
+  await reader.observe();
+  const slots = () =>
+    f.git.exec(["for-each-ref", "--format=%(refname)", "refs/batcher-cache/candidate/"]);
+  expect(await slots()).not.toBe("");
+  f.api.ready = async () => {
+    throw new Error("readiness observation failed");
+  };
+  await expect(reader.observe()).rejects.toThrow("readiness observation failed");
+  expect(await slots()).not.toBe("");
+  f.api.ready = async () => ({ ready: [], excluded: [] });
+  await reader.observe();
+  expect(await slots()).toBe("");
+});
+test("local cache GC failure is diagnostic, not unknown remote-write failure", async () => {
+  const f = await fixture();
+  await f.publish();
+  f.git.maintainLocal = async () => {
+    throw new GitFailure(128);
+  };
+  expect(await f.executor().maintain()).toContain(
+    "Local Git cache maintenance deferred (exit 128)",
+  );
+  f.git.maintainLocal = async () => {
+    throw new Error("unexpected implementation failure");
+  };
+  await expect(f.executor().maintain()).rejects.toThrow("unexpected implementation failure");
+});
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -148,8 +178,12 @@ async function fixture() {
     override remoteRefs(_remote: string) {
       return super.remoteRefs(origin.dir);
     }
-    override fetch(_remote: string, refs: string[]) {
-      return super.fetch(origin.dir, refs);
+    override fetch(
+      _remote: string,
+      refs: string[],
+      cache: "state" | "candidate" | "objects" = "objects",
+    ) {
+      return super.fetch(origin.dir, refs, cache);
     }
     override async exec(args: string[], input?: string, extraEnv: Record<string, string> = {}) {
       if (args[0] === "push") {
