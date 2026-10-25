@@ -70,22 +70,20 @@ async function run(
   const stderr: Buffer[] = [];
   child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-  let timedOut = false;
-  const timer =
-    timeoutMs === undefined
-      ? undefined
-      : setTimeout(() => {
-          timedOut = true;
-          child.kill("SIGKILL");
-        }, timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const exited = new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", resolve);
+    // Gives up when the timer fires, without waiting for the killed helper
+    // to exit: one stuck in an uninterruptible call may never close.
+    if (timeoutMs !== undefined)
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`computer-native window ${command} timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
   });
   child.stdin.end(JSON.stringify(request));
   const code = await exited.finally(() => clearTimeout(timer));
-  if (timedOut)
-    throw new Error(`computer-native window ${command} timed out after ${timeoutMs} ms`);
   if (code !== 0)
     throw new Error(
       `computer-native window ${command} failed: ${Buffer.concat(stderr).toString("utf8").trim().slice(0, 2_000)}`,

@@ -14,6 +14,14 @@ test("a screen check whose helper hangs gives up instead of stalling the compute
     await expect(computerNativeMacWindows(helper, 200).console()).rejects.toThrow("timed out");
     expect(Date.now() - started).toBeLessThan(5_000);
 
+    // A helper whose output stays open after the kill (here a child it left
+    // behind; on macOS also one stuck in an uninterruptible call) never
+    // closes: the check gives up when its timer fires all the same.
+    await writeFile(helper, "#!/bin/sh\nsleep 4 &\nexec sleep 30\n");
+    const stuck = Date.now();
+    await expect(computerNativeMacWindows(helper, 200).console()).rejects.toThrow("timed out");
+    expect(Date.now() - stuck).toBeLessThan(2_000);
+
     await writeFile(helper, '#!/bin/sh\ncat >/dev/null\necho \'{"console":"locked"}\'\n');
     expect(await computerNativeMacWindows(helper, 2_000).console()).toBe("locked");
   } finally {
