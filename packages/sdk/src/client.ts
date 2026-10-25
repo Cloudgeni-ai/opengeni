@@ -125,6 +125,7 @@ import type {
   SetWorkspaceArtifactStatusRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
@@ -8755,6 +8756,24 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactDetailResponse>(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * The Site and its current version without its history: a cheap check for
+   * whether a new version is live. Read `getWorkspaceArtifact` for history.
+   */
+  async getWorkspaceArtifactCurrent(
+    workspaceId: string,
+    artifactId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactCurrentResponse> {
+    return await this.requestJson<WorkspaceArtifactCurrentResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/current`,
       undefined,
       undefined,
       options,

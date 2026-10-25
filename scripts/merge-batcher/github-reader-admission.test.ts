@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
 import { GitHubAuth, GitHubReader } from "./github";
+import { appOnlyGuidanceContext } from "./github-admission";
 import { config } from "./model";
 const roots: string[] = [];
 afterEach(async () => {
@@ -54,6 +55,12 @@ async function fixture() {
     unresolved: false,
     classic: false,
     queueReady: true,
+    autoEnabled: false,
+    autoTimeline: true,
+    autoCurrentHead: sha,
+    autoCurrentAt: "2026-10-23T00:01:00Z" as string | null,
+    autoReadStatus: 200,
+    staleAutoEvent: false,
     protected: false,
     secondRulePage: false,
     missingRunOnce: false,
@@ -64,6 +71,8 @@ async function fixture() {
     protectionStatus: 404,
     checkStatus: 200,
     checkAuthorization: [] as string[],
+    guidanceApp: null as number | null,
+    guidanceContext: appOnlyGuidanceContext,
   };
   const transport = (async (
     input: Parameters<typeof fetch>[0],
@@ -111,13 +120,37 @@ async function fixture() {
             },
           },
         };
-      else if (query.includes("ReadyTimeline"))
+      else if (query.includes("autoMergeRequest{enabledAt}")) {
+        if (state.autoReadStatus !== 200)
+          return Response.json({}, { status: state.autoReadStatus });
+        body = {
+          data: {
+            repository: {
+              pullRequest: {
+                id: "PR_fixture",
+                headRefOid: state.autoCurrentHead,
+                autoMergeRequest:
+                  state.autoCurrentAt === null ? null : { enabledAt: state.autoCurrentAt },
+              },
+            },
+          },
+        };
+      } else if (query.includes("ReadyTimeline"))
         body = {
           data: {
             repository: {
               pullRequest: {
                 timelineItems: {
                   nodes: [
+                    ...((state.autoEnabled && state.autoTimeline) || state.staleAutoEvent
+                      ? [
+                          {
+                            __typename: "AutoMergeEnabledEvent",
+                            id: "auto-1",
+                            createdAt: "2026-10-23T00:01:00Z",
+                          },
+                        ]
+                      : []),
                     {
                       __typename: "LabeledEvent",
                       id: "ready-1",
@@ -141,7 +174,7 @@ async function fixture() {
             head: { sha, ref: "feature" },
             draft: false,
             labels: state.queueReady ? [{ name: "queue-ready" }] : [],
-            auto_merge: {},
+            auto_merge: state.autoEnabled ? {} : null,
           },
         ];
       else if (path === "branches/main") body = { protected: state.protected };
@@ -213,12 +246,25 @@ async function fixture() {
       } else throw Error(`Unexpected path ${path}`);
     }
     if (url.pathname.endsWith("/pulls") && state.twoPulls) body.push({ ...body[0], number: 2 });
+    if (url.pathname.endsWith("/rules/branches/main") && state.guidanceApp !== null)
+      body.push({
+        type: "required_status_checks",
+        parameters: {
+          required_status_checks: [
+            { context: state.guidanceContext, integration_id: state.guidanceApp },
+          ],
+        },
+      });
     return Response.json(body);
   }) as typeof fetch;
   const c = config({ BATCHER_OUTPUT_DIR: root });
   return {
     state,
-    reader: new GitHubReader(c, new GitHubAuth({ GH_TOKEN: "fixture" }, transport), transport),
+    reader: new GitHubReader(
+      c,
+      new GitHubAuth({ GH_TOKEN: "fixture", GITHUB_APP_ID: "5425399" }, transport),
+      transport,
+    ),
   };
 }
 test("real reader never fetches prose evidence and binds hosted exact-head proof", async () => {
@@ -229,6 +275,19 @@ test("real reader never fetches prose evidence and binds hosted exact-head proof
   expect(result.ready[0]!.binding.evidenceId).toBe("github-ci:100");
   expect(f.state.checkAuthorization).toEqual(["Bearer fixture"]);
 });
+test("effective App-only guidance rules do not replace or block hosted CI proof", async () => {
+  const f = await fixture();
+  f.state.guidanceApp = 5425399;
+  expect((await f.reader.ready()).ready).toHaveLength(1);
+  f.state.guidanceApp = 123;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+  f.state.guidanceApp = 5425399;
+  f.state.guidanceContext += " altered";
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+  f.state.guidanceContext = appOnlyGuidanceContext;
+  f.state.jobCheckId = 999;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+});
 test("denied check reads fail closed without anonymous or credential fallback", async () => {
   for (const status of [401, 403, 404, 500]) {
     const f = await fixture();
@@ -238,7 +297,11 @@ test("denied check reads fail closed without anonymous or credential fallback", 
       expect(result.ready).toHaveLength(0);
       expect(result.excluded[0]?.reason).toBe("Exact-head hosted run or job no longer readable");
     } else await expect(f.reader.ready()).rejects.toThrow();
-    expect(f.state.checkAuthorization).toEqual(["Bearer fixture"]);
+    // Transient reads retry with the same credential; never fall back to an
+    // anonymous read or a different identity to manufacture admission evidence.
+    expect(f.state.checkAuthorization).toEqual(
+      Array(status === 500 ? 5 : 1).fill("Bearer fixture"),
+    );
   }
 });
 test("latest attempt must contain the required check, not an older successful job", async () => {
@@ -270,11 +333,53 @@ test("native ruleset and classic review requirements both apply without added re
     expect((await f.reader.ready()).ready).toHaveLength(1);
   }
 });
-test("auto-merge alone does not admit", async () => {
+test("auto-merge requires the current native request and exact-head CI", async () => {
   const f = await fixture();
   f.state.queueReady = false;
   expect((await f.reader.ready()).ready).toHaveLength(0);
+  f.state.autoEnabled = true;
+  expect((await f.reader.ready()).ready[0]?.binding.source).toBe("auto-merge");
+  f.state.jobCheckId = 999;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
   expect(f.state.commentsRead).toBe(false);
+});
+test("native auto request admits without a timeline event and keeps a stable identity when it appears", async () => {
+  const f = await fixture();
+  f.state.queueReady = false;
+  f.state.autoEnabled = true;
+  f.state.autoTimeline = false;
+  const first = (await f.reader.ready()).ready[0]!;
+  expect(first.binding.source).toBe("auto-merge");
+  expect(first.binding.eventId).toBe("auto-merge:PR_fixture:2026-10-23T00:01:00Z");
+  f.state.autoTimeline = true;
+  expect((await f.reader.ready()).ready[0]!.binding).toEqual(first.binding);
+  f.state.autoCurrentAt = "2026-10-23T00:02:00Z";
+  expect((await f.reader.ready()).ready[0]!.binding.eventId).not.toBe(first.binding.eventId);
+});
+test("disabled, changed-head and malformed current requests cannot use stale timeline proof", async () => {
+  const f = await fixture();
+  f.state.queueReady = false;
+  f.state.autoEnabled = true;
+  f.state.autoCurrentAt = null;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+  f.state.autoCurrentAt = "2026-10-23T00:01:00Z";
+  f.state.autoCurrentHead = "b".repeat(40);
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+  f.state.autoCurrentHead = sha;
+  f.state.autoCurrentAt = "invalid";
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+});
+test("native request authorization errors abort observation rather than using timeline proof", async () => {
+  const f = await fixture();
+  f.state.autoEnabled = true;
+  f.state.autoReadStatus = 403;
+  await expect(f.reader.ready()).rejects.toThrow();
+});
+test("a stale timeline enable without current REST auto_merge cannot admit", async () => {
+  const f = await fixture();
+  f.state.queueReady = false;
+  f.state.staleAutoEvent = true;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
 });
 test("required workflow on second rule page cannot be ignored", async () => {
   const f = await fixture();

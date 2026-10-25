@@ -682,7 +682,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
           workspace.members.length > 0
             ? `${peopleLine} ${workspace.members.length === 1 ? "loses" : "lose"} access.`
             : "Nobody has access to it right now.",
-          "Its chats, files, schedules and knowledge are deleted.",
+          "Its chats, files, automations and knowledge are deleted.",
           "This can't be undone.",
         ]}
         confirmLabel="Delete workspace"

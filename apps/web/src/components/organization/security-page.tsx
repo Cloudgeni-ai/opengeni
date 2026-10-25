@@ -44,7 +44,7 @@ import type {
 import { useOrganizationDirectory } from "./organization-directory";
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Security & data: Only me chats and schedules, full access for
+   Organization settings > Security & data: Only me chats and automations, full access for
    agent sessions, how long a removed person's data is kept, and recovery
    (owners, managed sign-in only).
    -------------------------------------------------------------------------- */
@@ -59,7 +59,7 @@ export function OrganizationSecurityPage() {
   return (
     <SectionStack>
       {managedPeople && administrator ? (
-        <Section title="Chats and schedules">
+        <Section title="Chats and automations">
           <PrivateChatsRow
             client={client}
             identity={directory.identity}
@@ -180,7 +180,7 @@ function RowLoadFailure({
   );
 }
 
-/* ----------------------------------------------- Only me chats and schedules */
+/* ----------------------------------------------- Only me chats and automations */
 
 type PrivacyChoice = Partial<
   Pick<
@@ -296,17 +296,17 @@ export function PrivateChatsRow({
         }
       />
       <SettingRow
-        label="Only me chats and schedules"
+        label="Only me chats and automations"
         description={
           available
             ? personalWorkspaces
-              ? "Lets people start chats and schedules only they can see in shared workspaces. Personal workspaces are always private."
-              : "Lets people start chats and schedules only they can see in shared workspaces."
+              ? "Lets people start chats and automations only they can see in shared workspaces. Personal workspaces are always private."
+              : "Lets people start chats and automations only they can see in shared workspaces."
             : `Only me is off. ${LOCKED_FOR_APP}`
         }
         control={
           <Switch
-            aria-label="Only me chats and schedules"
+            aria-label="Only me chats and automations"
             checked={enabled}
             pending={pending !== null}
             disabled={!available}
@@ -327,8 +327,8 @@ export function PrivateChatsRow({
                 setSettings(value);
                 toast.success(
                   next
-                    ? "People can start Only me chats and schedules"
-                    : "Only me is off for new chats and schedules",
+                    ? "People can start Only me chats and automations"
+                    : "Only me is off for new chats and automations",
                 );
               } catch (saveError) {
                 if (!owns(operation)) return;
@@ -345,7 +345,7 @@ export function PrivateChatsRow({
       >
         {enabled ? (
           <SettingRow
-            label="New chats and schedules"
+            label="New chats and automations"
             description={
               privacy.limits.defaultVisibilityLocked
                 ? `Start as Workspace. ${LOCKED_FOR_APP}`
@@ -355,15 +355,15 @@ export function PrivateChatsRow({
             control={
               <SegmentedControl<"workspace" | "private">
                 size="sm"
-                aria-label="Who can see new chats and schedules"
+                aria-label="Who can see new chats and automations"
                 value={defaultVisibility}
                 onValueChange={(next) => {
                   if (next === defaultVisibility) return;
                   void savePrivacy(
                     { defaultVisibility: next },
                     next === "private"
-                      ? "New chats and schedules start as Only me"
-                      : "New chats and schedules start as Workspace",
+                      ? "New chats and automations start as Only me"
+                      : "New chats and automations start as Workspace",
                   );
                 }}
                 options={[
@@ -382,17 +382,17 @@ export function PrivateChatsRow({
         ) : null}
       </SettingRow>
       <SettingRow
-        label="Admins see Only me schedules"
+        label="Admins see Only me automations"
         description={
           privacy.limits.adminsSeePrivateSchedulesLocked
             ? `Admins see who owns each one, how often it runs and what it costs, and can pause it. ${LOCKED_FOR_APP}`
             : adminsSee
               ? "Admins see who owns each one, how often it runs and what it costs, and can pause it. Never its name, message or chats."
-              : "Admins can't see other people's Only me schedules at all, like Only me chats."
+              : "Admins can't see other people's Only me automations at all, like Only me chats."
         }
         control={
           <Switch
-            aria-label="Admins see Only me schedules"
+            aria-label="Admins see Only me automations"
             checked={adminsSee}
             pending={privacyPending?.adminsSeePrivateSchedules !== undefined}
             disabled={privacy.limits.adminsSeePrivateSchedulesLocked}
@@ -400,8 +400,8 @@ export function PrivateChatsRow({
               void savePrivacy(
                 { adminsSeePrivateSchedules: next },
                 next
-                  ? "Admins see that Only me schedules exist"
-                  : "Only me schedules are hidden from admins",
+                  ? "Admins see that Only me automations exist"
+                  : "Only me automations are hidden from admins",
               )
             }
           />

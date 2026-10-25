@@ -138,7 +138,7 @@ describe("plain tool details", () => {
       }),
       { details: "plain" },
     );
-    expect(row.title).toBe("Setting up a scheduled task");
+    expect(row.title).toBe("Setting up an automation");
     expect(row.preview).toBeUndefined();
     expect(row.body).toEqual({ kind: "none" });
     expect(JSON.stringify(row)).not.toContain("cron");

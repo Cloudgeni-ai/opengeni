@@ -165,11 +165,13 @@ import {
   ScheduledTaskEvents,
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
+  SessionAutomationWaitSummary,
 } from "./event-triggers";
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-resolution";
+export * from "./secret-use-approvals";
 export * from "./secret-generator";
 export * from "./secret-totp";
 
@@ -186,6 +188,7 @@ export {
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactEvent,
   WorkspaceArtifactEventType,
@@ -16093,6 +16096,13 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * has not run yet.
      */
     waitingForEvents: z.boolean().optional(),
+    /**
+     * What the automations the reader can see are waiting for before they
+     * continue this session: the next scheduled run and the first event.
+     * Null when none of them can start a run; omitted by older servers and
+     * for readers without schedule access.
+     */
+    automationWait: SessionAutomationWaitSummary.nullable().optional(),
     initialMessage: z.string(),
     title: z.string().nullable(),
     titleSource: z.enum(["user", "agent"]).nullable(),
@@ -16441,6 +16451,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     hasSchedules: true,
     hasUpcomingSchedules: true,
     waitingForEvents: true,
+    automationWait: true,
     title: true,
     titleSource: true,
     createdBy: true,
@@ -16551,6 +16562,8 @@ export const SessionLineageResponse = /* @__PURE__ */ defineSkillContractSchema(
     sessionHasUpcomingSchedules: z.boolean().optional(),
     /** An active automation targeting the requested session is waiting for an event. */
     sessionWaitingForEvents: z.boolean().optional(),
+    /** What the automations continuing the requested session are waiting for. */
+    sessionAutomationWait: SessionAutomationWaitSummary.nullable().optional(),
     ancestors: z.array(Session),
     children: z.array(LineageNode),
     truncated: z.boolean().default(false),

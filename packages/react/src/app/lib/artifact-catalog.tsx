@@ -43,12 +43,17 @@ export function artifactRoute(kind: ArtifactKind) {
   return "/workspaces/$workspaceId/artifacts/editable/$artifactId" as const;
 }
 
-/** The artifact's own page, as a plain URL (row links, Copy link). */
+/**
+ * Where the artifact opens, as a plain URL (row links, Copy link): a Site in
+ * the Site view with its chat beside it, anything else on its own page.
+ */
 export function artifactPath(
   workspaceId: string,
   item: { kind: ArtifactKind; id: string },
   fromSession?: string,
 ): string {
+  if (item.kind === "site")
+    return `/workspaces/${encodeURIComponent(workspaceId)}/sites/${encodeURIComponent(item.id)}`;
   const base = artifactRoute(item.kind)
     .replace("$workspaceId", encodeURIComponent(workspaceId))
     .replace("$artifactId", encodeURIComponent(item.id));

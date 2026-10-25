@@ -39,6 +39,11 @@ export const Windows = z.object({
         // window server keeps ordered out (one no person ever sees).
         space_ids: z.array(id).max(1_024).nullish(),
         on_current_space: z.boolean().nullish(),
+        // Stacking order: the highest z_index is frontmost; null when the
+        // platform cannot tell. macOS also gives the window layer, where 0
+        // holds ordinary app windows and higher layers menus and overlays.
+        z_index: z.number().int().nullish(),
+        layer: z.number().int().nullish(),
       }),
     )
     .max(4096),
@@ -53,6 +58,8 @@ export const Element = z.object({
   value: z.union([text, z.number().finite(), z.boolean()]).optional(),
   enabled: z.boolean().optional(),
   focused: z.boolean().optional(),
+  // Whether a checkbox, switch, radio, tab or row is on or selected.
+  selected: z.boolean().optional(),
   frame: ElementRect.optional(),
   actions: z.array(text).max(64).default([]),
 });
@@ -118,6 +125,11 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   write_not_applied: "driver_failed",
   // A step that sets a checked state found an element that has none.
   not_a_toggle: "invalid_action",
+  // A step's name fits several elements once the window settled; nothing ran.
+  ambiguous: "locator_ambiguous",
+  // A web <select> whose menu would bring the browser in front; nothing was
+  // sent, and set_value chooses its options.
+  select_menu_would_raise_window: "unsupported",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can

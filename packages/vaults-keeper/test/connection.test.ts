@@ -7,7 +7,7 @@ import {
 } from "@opengeni/vaults";
 import { openKeeperConnection } from "../src/connection";
 import { KEEPER_OPERATIONS } from "../src/provider";
-import { restrictToOperations } from "../src/operations";
+import { restrictToOperations } from "@opengeni/vaults";
 import { FakeKsm, loginData } from "./fake-ksm";
 
 const ctx = () => ({ connectionId: "conn-open", budget: createProviderCallBudget(50) });

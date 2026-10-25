@@ -15,11 +15,19 @@ import type {
   UpdateScheduledTaskRequest,
 } from "@opengeni/sdk";
 
-import type { OpenGeniText } from "../../messages/runtime";
+import type { OpenGeniMessageKey, OpenGeniText } from "../../messages/runtime";
+import { inSentence } from "../../ui/relative-time";
+import {
+  sessionAutomationWait,
+  sessionAutomationWaitLabel,
+  type SessionAutomationWait,
+  type SessionListRow,
+} from "../../session-list-model";
 import {
   DEFAULT_CADENCE_TIME,
   cadenceFromScheduleSpec,
   describeCadence,
+  formatRunTime,
   nextRuns,
   toScheduleSpec,
   validateCadence,
@@ -31,6 +39,7 @@ import {
   eventTriggersDraftFrom,
   eventTriggersInputFrom,
   eventTriggersShortLabel,
+  eventTypesLabel,
   hasEventTriggerIssues,
   sameEventTriggers,
   validateEventTriggers,
@@ -289,6 +298,64 @@ export function automationRunTriggerLabel(
   }
 }
 
+type RunErrorKey = Extract<OpenGeniMessageKey, `automations.run.error.${string}`>;
+
+/** The recorded reason codes of failed and skipped runs, by what a person reads. */
+const RUN_ERROR_KEYS: Readonly<Record<string, RunErrorKey>> = {
+  scheduled_turn_failed: "automations.run.error.turnFailed",
+  scheduled_update_failed: "automations.run.error.turnFailed",
+  scheduled_turn_cancelled: "automations.run.error.turnStopped",
+  scheduled_update_cancelled: "automations.run.error.turnStopped",
+  scheduled_turn_superseded: "automations.run.error.turnInterrupted",
+  scheduled_update_superseded: "automations.run.error.turnInterrupted",
+  scheduled_turn_withdrawn_for_edit: "automations.run.error.turnWithdrawn",
+  scheduled_session_not_idle: "automations.run.error.chatBusy",
+  scheduled_session_paused: "automations.run.error.chatPaused",
+  session_cancelled: "automations.run.error.chatEnded",
+  scheduled_target_session_unavailable: "automations.run.error.chatGone",
+  scheduled_target_execution_changed: "automations.run.error.chatChanged",
+  scheduled_workspace_paused: "automations.run.error.workspacePaused",
+  scheduled_task_paused_before_claim: "automations.run.error.automationInactive",
+  scheduled_task_deleted_before_claim: "automations.run.error.automationInactive",
+  scheduled_task_inactive_before_claim: "automations.run.error.automationInactive",
+  scheduled_machine_unavailable: "automations.run.error.machineUnavailable",
+  machine_target_unavailable: "automations.run.error.machineUnavailable",
+  machine_enrollment_inactive: "automations.run.error.machineUnavailable",
+  scheduled_authority_unavailable: "automations.run.error.accessUnavailable",
+  scheduled_authority_exhausted: "automations.run.error.accessUnavailable",
+  scheduled_authority_snapshot_missing: "automations.run.error.accessUnavailable",
+  connection_account_unavailable: "automations.run.error.accountUnavailable",
+  scheduled_model_unavailable: "automations.run.error.modelUnavailable",
+  variable_set_unavailable: "automations.run.error.variableSetUnavailable",
+  rig_version_unavailable: "automations.run.error.rigUnavailable",
+  insufficient_credits: "automations.run.error.outOfCredits",
+  allowance_exhausted: "automations.run.error.allowanceUsed",
+  monthly_model_cost_limit: "automations.run.error.monthlyCostLimit",
+  monthly_agent_run_limit: "automations.run.error.monthlyRunLimit",
+  session_usage_limit: "automations.run.error.usageLimit",
+};
+
+/** Older runs recorded an unavailable model as the API's own sentence. */
+const MODEL_UNAVAILABLE_TEXT =
+  /^(?:model is not available: .+|Turn execution policy model is (?:not present in the configured catalog|retired from new selection|no longer configured))$/;
+
+const REASON_CODE = /^[a-z][a-z0-9_]*$/;
+
+/**
+ * Why a run failed or was skipped, as a sentence for people: "Skipped because
+ * the chat was still busy with earlier work." Runs record a reason code; a
+ * code this version doesn't know reads as a plain "something went wrong", never
+ * as the code. An error recorded as a sentence passes through.
+ */
+export function automationRunErrorText(t: OpenGeniText, error: string): string {
+  const trimmed = error.trim();
+  const key = Object.hasOwn(RUN_ERROR_KEYS, trimmed) ? RUN_ERROR_KEYS[trimmed] : undefined;
+  if (key) return t(key);
+  if (MODEL_UNAVAILABLE_TEXT.test(trimmed)) return t("automations.run.error.modelUnavailable");
+  if (!trimmed || REASON_CODE.test(trimmed)) return t("automations.run.error.unknown");
+  return trimmed;
+}
+
 /* ----------------------------------------------------------------------------
    Names.
    -------------------------------------------------------------------------- */
@@ -485,5 +552,87 @@ export function automationUpdateRequest(
               ? eventTriggersInputFrom(draft.events)
               : { triggers: [] },
         }),
+  };
+}
+
+/* ----------------------------------------------------------------------------
+   What a chat waits for.
+   -------------------------------------------------------------------------- */
+
+export interface SessionAutomationWaitWords {
+  /** An event can start a run (it wins when both apply), or only the schedule will. */
+  kind: SessionAutomationWait;
+  /**
+   * A sentence for a tooltip or hover card: "Waiting for deploy.finished from
+   * Deploys", "Next run: Tomorrow, 09:00", both, and how many more automations
+   * wait. Servers without the details get the plain "Waiting for an event".
+   */
+  label: string;
+  /** A few words for a chip: "Waiting on Deploys", "Next: Tomorrow, 09:00". */
+  short: string;
+}
+
+/**
+ * What the automations posting into a chat are waiting for, in words, or null
+ * when none of them will start a run. Times are in `timeZone` (the viewer's).
+ */
+export function sessionAutomationWaitWords(
+  t: OpenGeniText,
+  session: Pick<
+    SessionListRow,
+    "hasSchedules" | "hasUpcomingSchedules" | "waitingForEvents" | "automationWait"
+  >,
+  { now, timeZone = viewerTimeZone() }: { now: Date; timeZone?: string },
+): SessionAutomationWaitWords | null {
+  const summary = session.automationWait;
+  // The details cover only automations this person can see; without them the
+  // plain facts still say a chat waits on someone else's Only me automation.
+  const kind: SessionAutomationWait | null = summary
+    ? summary.event
+      ? "event"
+      : "schedule"
+    : sessionAutomationWait(session);
+  if (!kind) return null;
+  if (!summary) {
+    const label = sessionAutomationWaitLabel(t, kind);
+    return {
+      kind,
+      label,
+      short: kind === "event" ? t("automations.wait.chip.anyEvent") : label,
+    };
+  }
+  const source = summary.event?.source?.name ?? null;
+  const types = summary.event ? eventTypesLabel(t, summary.event.eventTypes) : null;
+  const event =
+    summary.event && types
+      ? t("automations.trigger.short", {
+          // "Every event" reads "every event" mid-sentence; event names keep their case.
+          events: summary.event.eventTypes[0]?.endsWith("*") ? inSentence(types, t) : types,
+          source: source ?? t("automations.trigger.hiddenSourceInline"),
+        })
+      : null;
+  const time = summary.nextRunAt
+    ? formatRunTime(new Date(summary.nextRunAt), { timeZone, now, text: t })
+    : null;
+  const wait =
+    event && time
+      ? t("automations.wait.eventOrNextRun", { event, time })
+      : event
+        ? t("automations.wait.eventFrom", { event })
+        : time
+          ? t("automations.wait.nextRun", { time })
+          : sessionAutomationWaitLabel(t, kind);
+  const more = summary.automations - 1;
+  return {
+    kind,
+    label: more > 0 ? t("automations.wait.more", { wait, count: more }) : wait,
+    short:
+      kind === "event"
+        ? source
+          ? t("automations.wait.chip.event", { source })
+          : t("automations.wait.chip.anyEvent")
+        : time
+          ? t("automations.wait.chip.nextRun", { time })
+          : sessionAutomationWaitLabel(t, kind),
   };
 }

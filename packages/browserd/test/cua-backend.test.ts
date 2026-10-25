@@ -7,7 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
-import { CuaComputerBackend, namedOperation } from "../src/cua/backend";
+import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
 import type {
@@ -322,6 +322,135 @@ describe("CUA desktop boundary", () => {
       expect(fixture.selectAllPressed).toBe(true);
     } finally {
       await backend.close();
+    }
+  });
+
+  test("on Linux and Windows set_value true or false reads a checkbox's selected state", async () => {
+    const cases: ReadonlyArray<readonly ["linux" | "windows", string, typeof Fixture]> = [
+      ["linux", "check box", LinuxPermissionsFixture],
+      ["windows", "CheckBox", WindowsFixture],
+    ];
+    for (const [platform, role, Base] of cases) {
+      class SelectedFixture extends Base {
+        checked = false;
+        presses = 0;
+        async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+          if (name !== "get_window_state" && args.element_token === `s${this.snapshot}:2`) {
+            this.presses += 1;
+            this.checked = !this.checked;
+          }
+          const response = await super.callTool(name, argumentsJson);
+          if (name !== "get_window_state" || !response.structuredJson) return response;
+          const data = JSON.parse(response.structuredJson);
+          if (data.elements)
+            data.elements.push({
+              element_index: 2,
+              element_token: `s${this.snapshot}:2`,
+              role,
+              label: "Reminders",
+              selected: this.checked,
+              actions: platform === "linux" ? ["click"] : ["invoke", "toggle"],
+            });
+          response.structuredJson = JSON.stringify(data);
+          return response;
+        }
+      }
+      const fixture = new SelectedFixture();
+      const backend = await CuaComputerBackend.open(fixture, platform);
+      const clicks = () => ({ length: fixture.presses });
+      const target = (await backend.targets())[0]!;
+      const setTo = async (value: boolean) => {
+        const observation = await backend.observe(target.id);
+        const node = observation.roots.find((root) => root.name === "Reminders")!;
+        expect(node.value).toBe(fixture.checked ? "1" : "0");
+        return await backend.dispatch({
+          ...command(observation),
+          action: {
+            type: "semantic",
+            action: "set_value",
+            locator: { kind: "ref", ref: node.ref },
+            value,
+          },
+        });
+      };
+      try {
+        await setTo(true);
+        expect(fixture.checked).toBe(true);
+        expect(clicks()).toHaveLength(1);
+        // Already checked: nothing is pressed.
+        await setTo(true);
+        expect(clicks()).toHaveLength(1);
+        await setTo(false);
+        expect(fixture.checked).toBe(false);
+        expect(clicks()).toHaveLength(2);
+      } finally {
+        await backend.close();
+      }
+    }
+  });
+
+  test("the frontmost ordinary window is the focused target", async () => {
+    class StackFixture extends LinuxPermissionsFixture {
+      windows: Array<Record<string, unknown>> = [];
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        if (name !== "list_windows") return await super.callTool(name, argumentsJson);
+        return result({ windows: this.windows });
+      }
+    }
+    const window = (window_id: number, extra: Record<string, unknown>) => ({
+      pid: 42,
+      window_id,
+      title: `Window ${window_id}`,
+      app_name: "Fixture",
+      bounds: { x: 0, y: 0, width: 200, height: 100 },
+      ...extra,
+    });
+    const fixture = new StackFixture();
+    const backend = await CuaComputerBackend.open(fixture, "linux");
+    const focused = async () =>
+      (await backend.targets()).filter((target) => target.focused).map((target) => target.id);
+    try {
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 7 })];
+      expect(await focused()).toEqual(["cua:window:42:2"]);
+      // A menu or overlay above the windows is not the window in front.
+      fixture.windows = [window(1, { z_index: 3, layer: 0 }), window(2, { z_index: 9, layer: 25 })];
+      expect(await focused()).toEqual(["cua:window:42:1"]);
+      // Without stacking, no window is marked.
+      fixture.windows = [window(1, {}), window(2, { z_index: null })];
+      expect(await focused()).toEqual([]);
+      // A minimized or unmapped window high in the stack is not in front.
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, is_on_screen: false })];
+      expect(await focused()).toEqual(["cua:window:42:1"]);
+      // An untitled strip above a window (a status bubble, an emulator's
+      // toolbar) is part of that window; a small titled window is not.
+      const strip = { title: "", bounds: { x: 0, y: 0, width: 243, height: 22 } };
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, ...strip })];
+      expect(await focused()).toEqual(["cua:window:42:1"]);
+      const palette = { bounds: { x: 0, y: 0, width: 90, height: 60 } };
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, ...palette })];
+      expect(await focused()).toEqual(["cua:window:42:2"]);
+      // An untitled window of ordinary size, such as a message dialog, is.
+      const dialog = { title: "", bounds: { x: 0, y: 0, width: 300, height: 150 } };
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, ...dialog })];
+      expect(await focused()).toEqual(["cua:window:42:2"]);
+      // A reading does not carry the mark, which only a listing keeps current.
+      expect((await backend.observe("cua:window:42:1")).target.focused).toBe(false);
+    } finally {
+      await backend.close();
+    }
+    // Windows stacks cloaked and always-on-top windows as ordinary ones.
+    class WindowsStackFixture extends WindowsFixture {
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        if (name !== "list_windows") return await super.callTool(name, argumentsJson);
+        return result({ windows: [window(1, { z_index: 3, layer: 0 })] });
+      }
+    }
+    const windows = await CuaComputerBackend.open(new WindowsStackFixture(), "windows");
+    try {
+      expect((await windows.targets()).filter((target) => target.focused)).toEqual([]);
+    } finally {
+      await windows.close();
     }
   });
 
@@ -1037,11 +1166,15 @@ describe("CUA desktop boundary", () => {
     try {
       const target = (await backend.targets())[0]!;
       const billing = await backend.observe(target.id);
+      // The observation names the window by the page its reading shows.
+      expect(billing.target.title).toBe("Billing - Northwind Admin");
       // An action opened another page: the window still lists the old title
       // until the windows are listed again, but the reading shows the new one.
       fixture.windowName = "Accounts - Northwind Admin";
       const opened = await backend.observe(target.id);
       expect(opened.roots[0]!.ref).not.toBe(billing.roots[0]!.ref);
+      expect(opened.target.title).toBe("Accounts - Northwind Admin");
+      expect((await backend.targets())[0]!.title).toBe("Fixture");
       fixture.title = "Accounts - Northwind Admin";
       await backend.targets();
       const relisted = await backend.observe(target.id);
@@ -1058,6 +1191,22 @@ describe("CUA desktop boundary", () => {
       expect(
         [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
       ).toMatchObject({ element_token: `s${latest}:0` });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("an observation's title is its window element's own label, clipped, or else the listed title", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      fixture.windowName = "";
+      expect((await backend.observe(target.id)).target.title).toBe("Fixture");
+      fixture.windowName = "Report ".repeat(1_000);
+      const long = await backend.observe(target.id);
+      expect(long.target.title).toHaveLength(4_096);
+      expect(long.target.title.startsWith("Report Report")).toBe(true);
     } finally {
       await backend.close();
     }
@@ -2937,6 +3086,10 @@ describe("CUA desktop boundary", () => {
             role: "AXCheckBox",
             label: "Reminders",
             value: "0",
+            // Two checkboxes, each in its own place.
+            ...(data.elements[0].frame
+              ? { frame: { ...data.elements[0].frame, y: data.elements[0].frame.y + index * 30 } }
+              : {}),
           });
           if (data.elements) data.elements.push(checkbox(2), ...(this.twin ? [checkbox(3)] : []));
           response.structuredJson = JSON.stringify(data);
@@ -3402,6 +3555,140 @@ describe("CUA desktop boundary", () => {
         }
       });
 
+      test("a later action naming one of several shown goes to CUA by role and name", async () => {
+        const fixture = new LinkFixture();
+        fixture.links = ["Juniper Printing", "Juniper Printing"];
+        const { backend, observation } = await open(fixture);
+        try {
+          // An earlier action (a search typed a moment ago) may narrow them:
+          // CUA's step waits for the window to settle before it decides.
+          await backend.dispatch(
+            asBatch(named(observation, "button", "Apply"), {
+              type: "semantic",
+              locator: { kind: "role", role: "link", name: "Juniper Printing", exact: true },
+              action: "invoke",
+            } as ComputerBackendActionCommand["action"]),
+          );
+          const steps = fixture.calls.find((call) => call.name === "run_steps")!.args.steps as {
+            args: Record<string, unknown>;
+          }[];
+          expect(steps[1]!.args.element_token).toBeUndefined();
+          expect(steps[1]!.args).toMatchObject({
+            role: "link",
+            name: "Juniper Printing",
+            exact: true,
+          });
+        } finally {
+          await backend.close();
+        }
+        // The first action has nothing before it to narrow them.
+        const first = new LinkFixture();
+        first.links = ["Juniper Printing", "Juniper Printing"];
+        const opened = await open(first);
+        try {
+          const failure = await opened.backend
+            .dispatch(asBatch(named(opened.observation, "link", "Juniper Printing"), enter))
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_ambiguous", dispatched: false });
+          expect(first.ran).toBe(false);
+        } finally {
+          await opened.backend.close();
+        }
+        // Still several once settled: nothing was pressed, and the message
+        // points at refs, as an action here has no `nth`.
+        const settled = new LinkFixture();
+        settled.links = ["Juniper Printing", "Juniper Printing"];
+        settled.reply = {
+          ok: false,
+          total: 2,
+          executed: 2,
+          failed_step: 1,
+          steps: [
+            { index: 0, ok: true, message: "ok" },
+            {
+              index: 1,
+              ok: false,
+              code: "ambiguous",
+              phase: "find",
+              message:
+                '2 elements match link "Juniper Printing" in window 7; add `nth` or a more exact name: nth 0: [15] AXLink "Juniper Printing"; nth 1: [20] AXLink "Juniper Printing"',
+            },
+          ],
+        };
+        const third = await open(settled);
+        try {
+          const failure = await third.backend
+            .dispatch(
+              asBatch(named(third.observation, "button", "Apply"), {
+                type: "semantic",
+                locator: { kind: "role", role: "link", name: "Juniper Printing", exact: true },
+                action: "invoke",
+              } as ComputerBackendActionCommand["action"]),
+            )
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_ambiguous" });
+          const message = (failure as Error).message;
+          expect(message).toContain(
+            'give a more exact name, or observe the window and act on the one meant by its ref: AXLink "Juniper Printing"; AXLink "Juniper Printing"',
+          );
+          expect(message).not.toContain("nth");
+        } finally {
+          await third.backend.close();
+        }
+
+        // Elements of other roles with that name are listed without CUA's
+        // element numbers too.
+        const otherRoles = new LinkFixture();
+        otherRoles.links = ["Juniper Printing", "Juniper Printing"];
+        otherRoles.reply = {
+          ok: false,
+          total: 2,
+          executed: 2,
+          failed_step: 1,
+          steps: [
+            { index: 0, ok: true, message: "ok" },
+            {
+              index: 1,
+              ok: false,
+              code: "ambiguous",
+              phase: "find",
+              message:
+                'no link "Juniper Printing" in window 7, and 2 elements of other roles have that exact name; name the role of the one meant: [15] AXButton "Juniper Printing"; [20] AXStaticText "Juniper Printing"',
+            },
+          ],
+        };
+        const fourth = await open(otherRoles);
+        try {
+          const failure = await fourth.backend
+            .dispatch(
+              asBatch(named(fourth.observation, "button", "Apply"), {
+                type: "semantic",
+                locator: { kind: "role", role: "link", name: "Juniper Printing", exact: true },
+                action: "invoke",
+              } as ComputerBackendActionCommand["action"]),
+            )
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_ambiguous" });
+          const message = (failure as Error).message;
+          expect(message).toContain(
+            'name the role of the one meant: AXButton "Juniper Printing"; AXStaticText "Juniper Printing"',
+          );
+          expect(message).not.toMatch(/\[\d+\]/);
+        } finally {
+          await fourth.backend.close();
+        }
+
+        // A name or window title that itself reads like a candidate number
+        // is kept as it is.
+        expect(
+          ambiguityForRefs(
+            '2 elements match button "Tab: [1] new" in window 7 "Mail: [3] unread"; add `nth` or a more exact name: nth 0: [15] AXButton "Tab: [1] new"; nth 1: [20] AXButton "Tab: [1] new" (waited 1503 ms)',
+          ),
+        ).toBe(
+          '2 elements match button "Tab: [1] new" in window 7 "Mail: [3] unread"; give a more exact name, or observe the window and act on the one meant by its ref: AXButton "Tab: [1] new"; AXButton "Tab: [1] new" (waited 1503 ms)',
+        );
+      });
+
       test("the receipt names each stand-in, without a typed secret", async () => {
         const secret = "synthetic-pin-4711";
         const fixture = new LinkFixture();
@@ -3557,6 +3844,22 @@ describe("CUA desktop boundary", () => {
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
+        // A web dropdown whose menu would bring the browser forward was not
+        // opened: say how to choose its option, without CUA's input modes.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "select_menu_would_raise_window",
+            message: 'Open the menu with delivery_mode:"foreground" only if the user agreed',
+          }),
+          expected: {
+            code: "unsupported",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent. For a list of options, set_value on its ref with the option's text; a menu button's menu cannot be opened while the browser is in the background",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
         // One that could not be proven to be in the window at all keeps
         // CUA's own reason, and is still a definite refusal.
         {
@@ -3650,6 +3953,10 @@ describe("CUA desktop boundary", () => {
         /** What the parts read once run_steps ran, when Chrome leaves the
          * field itself without a value. */
         partsAfterRun: string[] | null = null;
+        /** Whether the field shows Chrome's "Show date picker" button. */
+        picker = false;
+        /** Whether CUA gives the field's parts their own tokens. */
+        partTokens = true;
         async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
           const response = await super.callTool(name, argumentsJson);
           if (name === "run_steps" && !this.reply && !this.partsAfterRun)
@@ -3673,13 +3980,25 @@ describe("CUA desktop boundary", () => {
             },
             ...parts.map((part, index) => ({
               element_index: 2 + index,
-              element_token: `${s}:${2 + index}`,
+              ...(this.partTokens ? { element_token: `${s}:${2 + index}` } : {}),
               parent_index: 1,
               role: "AXIncrementor",
               label: `${part} Meeting`,
               value: (ran && this.partsAfterRun?.[index]) || "--",
               actions: ["AXIncrement", "AXDecrement"],
             })),
+            ...(this.picker
+              ? [
+                  {
+                    element_index: 2 + parts.length,
+                    element_token: `${s}:${2 + parts.length}`,
+                    parent_index: 1,
+                    role: "AXPopUpButton",
+                    label: "Show date picker Meeting",
+                    actions: ["AXPress"],
+                  },
+                ]
+              : []),
           ];
           response.structuredJson = JSON.stringify(data);
           return response;
@@ -3696,7 +4015,7 @@ describe("CUA desktop boundary", () => {
       const field = (observation: ComputerBackendObservation) =>
         observation.roots.find((node) => node.role === "AXDateField")!;
 
-      test("set_value presses the field, then reaches and types each part, as one run_steps", async () => {
+      test("set_value focuses and types each part, as one run_steps", async () => {
         const fixture = new DateFixture();
         const { backend, observation } = await open(fixture);
         try {
@@ -3710,11 +4029,47 @@ describe("CUA desktop boundary", () => {
           expect(mutations(fixture)).toHaveLength(0);
           const steps = calls[0]!.args.steps as { tool: string; args: Record<string, unknown> }[];
           const s = observation.observationId.split(":").pop();
+          // Pressing the field focuses no part while Chrome is in the
+          // background, so each part is focused through accessibility.
+          expect(
+            steps.map((step) =>
+              step.tool === "type_text"
+                ? String(step.args.text)
+                : `${step.tool}:${String(step.args.action)}:${String(step.args.element_token)}:${String(step.args.delivery_mode)}`,
+            ),
+          ).toEqual([
+            `click:focus:${s}:2:background`,
+            "07",
+            `click:focus:${s}:3:background`,
+            "03",
+            `click:focus:${s}:4:background`,
+            "2027",
+            `click:focus:${s}:5:background`,
+            "14",
+            `click:focus:${s}:6:background`,
+            "05",
+          ]);
+          expect(steps.some((step) => step.tool === "press_key")).toBe(false);
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("parts without tokens are reached from the pressed field with Left and Right", async () => {
+        const fixture = new DateFixture();
+        fixture.partTokens = false;
+        const { backend, observation } = await open(fixture);
+        try {
+          await backend.dispatch(setDate(observation, field(observation).ref, "2027-03-07T14:05"));
+          const steps = fixture.calls.find((call) => call.name === "run_steps")!.args.steps as {
+            tool: string;
+            args: Record<string, unknown>;
+          }[];
+          const s = observation.observationId.split(":").pop();
           expect(steps[0]).toMatchObject({
             tool: "click",
             args: { element_token: `${s}:1`, delivery_mode: "background" },
           });
-          // Each part is reached from the first: four Lefts, then Rights.
           const compact = steps
             .slice(1)
             .map((step) =>
@@ -3776,6 +4131,47 @@ describe("CUA desktop boundary", () => {
               message: `This is one part of the date or time field ${field(observation).ref} ("Meeting"), which is filled as a whole: set_value on ${field(observation).ref} with its value in the form YYYY-MM-DDTHH:MM`,
             });
           }
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("the field's date picker button points to the field, and nothing is sent", async () => {
+        const fixture = new DateFixture();
+        fixture.picker = true;
+        const { backend, observation } = await open(fixture);
+        try {
+          const picker = observation.roots.find(
+            (node) => node.name === "Show date picker Meeting",
+          )!;
+          const ref = field(observation).ref;
+          const before = fixture.calls.length;
+          const failure = await backend
+            .dispatch({
+              ...command(observation),
+              action: {
+                type: "semantic",
+                locator: { kind: "ref", ref: picker.ref },
+                action: "invoke",
+              },
+            })
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({
+            code: "unsupported",
+            dispatched: false,
+            message: `This button opens the date picker of the date or time field ${ref} ("Meeting"), which would bring the browser in front of the person's window, so nothing was sent: set_value on ${ref} with its value in the form YYYY-MM-DDTHH:MM`,
+          });
+          expect(mutations(fixture)).toHaveLength(0);
+          expect(fixture.calls.slice(before).some((call) => call.name === "click")).toBe(false);
+          const typed = await backend
+            .dispatch({ ...setDate(observation, picker.ref, "2027-03-07") })
+            .catch((error: unknown) => error);
+          expect(typed).toMatchObject({
+            code: "unsupported",
+            dispatched: false,
+            message: `This button opens the date picker of the date or time field ${ref} ("Meeting"), which would bring the browser in front of the person's window, so nothing was sent: set_value on ${ref} with its value in the form YYYY-MM-DDTHH:MM`,
+          });
+          expect(mutations(fixture)).toHaveLength(0);
         } finally {
           await backend.close();
         }
@@ -3864,22 +4260,23 @@ describe("CUA desktop boundary", () => {
           const one = setDate(observation, field(observation).ref, "2027-03-07T14:05").action;
           const many: ComputerBackendActionCommand = {
             ...command(observation),
-            action: { type: "batch", actions: [one, one, one] as never },
+            action: { type: "batch", actions: Array.from({ length: 7 }, () => one) as never },
           };
           await backend.dispatch(many);
           const calls = fixture.calls.filter((call) => call.name === "run_steps");
-          expect(calls.map((call) => (call.args.steps as unknown[]).length)).toEqual([64, 44]);
+          // Ten steps for each action, at most 64 for each run_steps call.
+          expect(calls.map((call) => (call.args.steps as unknown[]).length)).toEqual([64, 6]);
           // Stopped inside the second action's input: it ran in part.
           const stopping = new DateFixture();
           stopping.reply = {
             ok: true,
             total: 64,
-            executed: 41,
-            failed_step: 40,
+            executed: 16,
+            failed_step: 15,
             steps: [
-              ...Array.from({ length: 40 }, (_, index) => ({ index, ok: true, message: "ok" })),
+              ...Array.from({ length: 15 }, (_, index) => ({ index, ok: true, message: "ok" })),
               {
-                index: 40,
+                index: 15,
                 ok: false,
                 phase: "action",
                 code: "stale_element_token",

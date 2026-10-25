@@ -74,7 +74,7 @@ function stream(project = "core") {
 describe("discovery", () => {
   test("a server that advertises the extension lists its event types", async () => {
     const client = await connect(start());
-    expect(serverOffersMcpEvents(client)).toBe(true);
+    expect(await serverOffersMcpEvents(client, OPTIONS)).toBe(true);
     const types = await listMcpEventTypes(client, OPTIONS);
     expect(types.map((type) => [type.name, type.delivery])).toEqual([
       ["issue.opened", ["poll", "webhook"]],
@@ -85,7 +85,16 @@ describe("discovery", () => {
 
   test("a server without the extension is recognized", async () => {
     const client = await connect(start({ advertiseEvents: false }));
-    expect(serverOffersMcpEvents(client)).toBe(false);
+    expect(await serverOffersMcpEvents(client, OPTIONS)).toBe(false);
+  });
+
+  test("a server built for ChatGPT advertises events as a top-level capability", async () => {
+    const client = await connect(start({ profile: "chatgpt" }));
+    expect(await serverOffersMcpEvents(client, OPTIONS)).toBe(true);
+    expect((await listMcpEventTypes(client, OPTIONS)).map((type) => type.name)).toEqual([
+      "issue.opened",
+      "deploy.finished",
+    ]);
   });
 });
 
@@ -285,6 +294,37 @@ describe("errors", () => {
     expect(await poll("issue.opened")).toMatchObject({ kind: "transient" });
   });
 
+  test("a server built for ChatGPT numbers the same errors the sketch's way", async () => {
+    const server = start({ profile: "chatgpt" });
+    const client = await connect(server);
+    const poll = (name: string) =>
+      pollMcpEvents(
+        client,
+        { name, arguments: {}, cursor: null, maxEvents: 1, maxAgeMs: 60_000 },
+        OPTIONS,
+      ).catch((error: unknown) => classifyMcpEventsError(error));
+
+    expect(await poll("missing.type")).toEqual({ kind: "event_type_gone" });
+    expect(await poll("deploy.finished")).toEqual({ kind: "delivery_mode_unsupported" });
+    server.failNext("events/poll", { code: -32_012, message: "Forbidden", data: {} });
+    expect(await poll("issue.opened")).toEqual({ kind: "forbidden", detail: "Forbidden" });
+    server.failNext("events/poll", {
+      code: -32_014,
+      message: "Unsupported",
+      data: { reason: "schema_changed" },
+    });
+    expect(await poll("issue.opened")).toEqual({ kind: "schema_changed" });
+    server.failNext("events/poll", { code: -32_013, message: "Slow down" });
+    expect(await poll("issue.opened")).toMatchObject({ kind: "transient" });
+    expect(
+      classifyMcpEventsProtocolError({
+        code: -32_015,
+        message: "Callback endpoint error",
+        data: { reason: "challenge_failed" },
+      }),
+    ).toEqual({ kind: "callback_unreachable", reason: "challenge_failed" });
+  });
+
   test("an HTTP 401 is unauthorized", async () => {
     const server = start({ bearerToken: "right" });
     const failure = await connect(server, { authorization: "Bearer wrong" }).catch(
@@ -292,7 +332,7 @@ describe("errors", () => {
     );
     expect(failure).toEqual({ kind: "unauthorized" });
     const client = await connect(server, { authorization: "Bearer right" });
-    expect(serverOffersMcpEvents(client)).toBe(true);
+    expect(await serverOffersMcpEvents(client, OPTIONS)).toBe(true);
   });
 
   test("terminated envelopes classify like protocol errors", () => {

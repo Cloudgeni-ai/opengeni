@@ -51,6 +51,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     observabilityMetricsEnabled: true,
     observabilityOtlpEndpoint: undefined,
     observabilityOtlpHeaders: "",
+    observabilityTrustIncomingTraceContext: false,
     observabilityDiagnosticsEndpoint: undefined,
     observabilityDiagnosticsHeaders: "",
     analyticsEnabled: false,

@@ -170,7 +170,7 @@ import {
   sessionInputWait,
   visualTreeDepth,
 } from "../../lib/session-rail";
-import { sessionAutomationWait } from "../../../session-list-model";
+import { sessionAutomationWaitWords } from "../../../components/automations/automation-model";
 import {
   cancelSessionRowRevealIntent,
   consumeSessionRowRevealIntent,
@@ -5038,6 +5038,7 @@ function SessionRow(props: {
   const childCountAria = sessionDescendantCountAria(props.childCount, props.childCountTruncated);
   const depthLabel = props.depth > MAX_VISUAL_TREE_DEPTH ? `Level ${props.depth + 1}` : null;
   const relativeTime = relativeTimeLabel(t, props.session.updatedAt);
+  const automationWait = sessionAutomationWaitWords(t, props.session, { now: new Date() });
   // Indent nested rows without changing the root title column. Parents and
   // leaves reserve the same compact disclosure slot, so the chevron does not
   // push a parent title away from the leaf titles beside it.
@@ -5112,7 +5113,8 @@ function SessionRow(props: {
         />
         <RailTrailingMetadata
           summary={props.aggregateStatus}
-          automationWait={sessionAutomationWait(props.session)}
+          automationWait={automationWait?.kind ?? null}
+          automationWaitLabel={automationWait?.label}
           relativeTime={rail.isMobile ? undefined : relativeTime}
           creator={creator}
         />
@@ -5247,7 +5249,8 @@ function SessionRow(props: {
                   descendantLabel={descendantLabel}
                   mobile={rail.isMobile}
                   summary={props.aggregateStatus}
-                  automationWait={sessionAutomationWait(props.session)}
+                  automationWait={automationWait?.kind ?? null}
+                  automationWaitLabel={automationWait?.label}
                   relativeTime={rail.isMobile ? undefined : relativeTime}
                   jumpKey={jumpKey}
                   creator={creator}

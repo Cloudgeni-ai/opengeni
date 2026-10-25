@@ -761,7 +761,10 @@ Model admission overlaps pooled metadata, preserving authority;
 transaction handles stay serial. Public connection and custom-model metadata
 share a short scope through `packages/db/src/workspace-model-catalog-inputs.ts`;
 default selection and fresh admission still read independently, outside provider
-discovery and credential I/O. Enums remain additive within major releases;
+discovery and credential I/O. The HTTP model-catalog route reuses that public
+metadata scope on pooled connections, retaining its own provider lists and fresh
+subscription readiness; see [HTTP catalog resources](http-model-catalog-resources.md).
+Enums remain additive within major releases;
 parity tests pin mirrors.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
@@ -1940,7 +1943,7 @@ behind a generic 500, so its session lookups run through
 | `packages/vaults-keeper` | `@opengeni/vaults-keeper` | Keeper Secrets Manager vault provider on the pinned official SDK (a fresh, filesystem-less SDK instance per operation, DNS-pinned requests), loaded only by dynamic import from the API and worker |
 | `packages/vaults-onepassword` | `@opengeni/vaults-onepassword` | 1Password service-account vault provider (pinned `@1password/sdk`), loaded only by dynamic import from the API and worker |
 | `packages/vaults-protonpass` | `@opengeni/vaults-protonpass` | Proton Pass vault provider that runs an operator-installed, version-pinned `pass-cli` under a scoped token in private per-token sessions, loaded only by dynamic import from the API and worker |
-| `packages/vaults-bitwarden-bridge` | `@opengeni/vaults-bitwarden-bridge` | Customer-run bridge (private, unpublished) serving the signed remote vault protocol from an already-unlocked `bw serve` on a private Unix socket |
+| `packages/vaults-bitwarden` | `@opengeni/vaults-bitwarden` | Bitwarden and Vaultwarden vault provider over the server's client API with the account's personal API key; decrypts locally, keeps no values, loaded only by dynamic import from the API and worker |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
@@ -3041,15 +3044,23 @@ requires proven stopped/zero-instance operation. The controller reconstructs sta
 from Git objects and GitHub, builds one merge commit per admitted PR without checking
 out candidate code, and submits only the combined tip to `batch-ci.yml`. Exact
 run-attempt receipts distinguish assertion failures from infrastructure and
-cancellation. Landing requires the exact tested tip, a fast-forward base fence and
-a final head/readiness reread; late PR-head races require post-land reconciliation,
+cancellation. Landing requires the exact tested tree, a fast-forward base fence and
+a final head/readiness reread. Normally the tested tip itself lands; a narrowly
+verified merge-main-only head refresh may append same-tree ancestry commits for
+native PR merge identity, retaining immutable tested-tip/run evidence and explicit
+old/new-head linkage. `scripts/merge-batcher/head-refresh.ts` proves clean main-only
+merge ancestry and whole-batch tree identity; the final executor recomputes it
+before CAS. Late PR-head races require post-land reconciliation,
 never a claim that the newer head was tested. Post-merge full CI remains independent.
 Candidate plan/source/selected-unit/ready success may land on red or unknown
 full-main CI. A two-hour latency breaker retains raw measurements and deducts only
 bounded recorded main-capacity holds. Latency-stop backpressure holds new work, not an otherwise eligible
 trusted-green landing; all landing fences still apply. Failed cohorts split sequentially; failed singletons are durably
 parked without attribution, while unrelated ready heads proceed. Parking survives
-main advancement and readiness churn for the same PR head; new heads can re-enter.
+main advancement and label churn for the same PR head; new heads or explicit native
+auto-merge re-enables after parking can re-enter. Intake accepts a current native
+auto-merge request or queue-ready label with exact-head checks. Parking durably
+disables auto-merge; native MERGED readback is distinct from ledger landing/closure.
 Comparable base evidence and trusted same-way failure fingerprints are not yet
 available; neither full-main success nor matching job names proves member blame.
 `queue-health.yml` records provider batch timing separately from the controller's
@@ -3059,6 +3070,10 @@ with one hosted candidate in flight; it never updates main or PR readiness.
 Its portable container and deployment/rollback boundary are documented in
 [merge batcher](merge-batcher.md); the historical measurements and inactive
 native/vendor configurations remain in [merge queue](merge-queue.md).
+The offline [administration bundle](merge-batcher-admin/README.md) keeps legacy
+version 3 plans verifiable and offers explicit version 4 App-only plans with an
+App-bound guiding check. Both retain exact saved Manual rollback; an offline
+plan is not authorization or qualification for a live policy transition.
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |

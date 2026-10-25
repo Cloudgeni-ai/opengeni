@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cli, type Snapshot } from "../docs/merge-batcher-admin/bundle";
+import { cli, prepare, type Plan, type Snapshot } from "../docs/merge-batcher-admin/bundle";
 import manifest from "../docs/merge-batcher-admin/app-manifest.json";
 import { bindStop, verifyStop } from "../docs/merge-batcher-admin/off";
 
@@ -227,7 +227,7 @@ if(process.env.DRIFT_ON_SLEEP) {
 }
 `;
 
-async function harness() {
+async function harness(appOnly = false) {
   const root = await mkdtemp(join(tmpdir(), "batcher-admin-operator-"));
   await mkdir(join(root, "bin"));
   const before: Snapshot = {
@@ -261,6 +261,10 @@ async function harness() {
     ],
   };
   const state = join(root, "state.json");
+  if (appOnly)
+    before.rulesets[0]!.bypass_actors = [
+      { actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" },
+    ];
   const log = join(root, "requests.jsonl");
   await writeFile(state, JSON.stringify(before));
   await writeFile(log, "");
@@ -272,7 +276,7 @@ async function harness() {
     await writeFile(join(root, "bin", name!), body!);
     await chmod(join(root, "bin", name!), 0o700);
   }
-  await cli(["prepare", state, "501", "999", join(root, "plan")]);
+  await cli([appOnly ? "prepare-app-only" : "prepare", state, "501", "999", join(root, "plan")]);
   const fixtureEnv = {
     ...process.env,
     PATH: `${join(root, "bin")}:${process.env.PATH}`,
@@ -389,6 +393,103 @@ test("explicit write opt-in, unknown actions and classic-read failure issue zero
     await h.close();
   }
 });
+test("App-only policy runs existing OFF back to exact saved Manual with administrator bypass", async () => {
+  const h = await harness(true);
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    const operator = await offHarness(h);
+    for (const action of ["create-guard", "create-namespace", "admit"]) {
+      const result = await h.run(action, "--apply-after-go");
+      expect(result.stderr).toBe("");
+      expect(result.code).toBe(0);
+    }
+    const applied = JSON.parse(await readFile(h.state, "utf8"));
+    const protection = applied.rulesets.find((r: { id: number }) => r.id === 101);
+    expect(protection.bypass_actors).toEqual([
+      { actor_id: 501, actor_type: "Integration", bypass_mode: "always" },
+    ]);
+    expect(
+      protection.rules.some((r: { type: string }) => r.type === "required_status_checks"),
+    ).toBe(true);
+    const result = await operator.run();
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect((await h.run("check-stable", "original")).code).toBe(0);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+  } finally {
+    await h.close();
+  }
+});
+
+for (const phase of [
+  "legacy-applied",
+  "upgrade-admission",
+  "legacy-namespace",
+  "applied",
+] as const) {
+  test(`v4 OFF restores exact Manual from mocked ${phase} upgrade inventory and retains creation evidence`, async () => {
+    const h = await harness(true);
+    try {
+      const operator = await offHarness(h);
+      for (const action of ["create-guard", "create-namespace", "admit"])
+        expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+      const plan = JSON.parse(await readFile(join(h.root, "plan/plan.json"), "utf8")) as Plan;
+      const legacy = prepare(plan.before, plan.appId, plan.installationId);
+      const snapshot = JSON.parse(await readFile(h.state, "utf8")) as Snapshot;
+      const receiptPath = join(h.root, "plan/namespace-receipt.json");
+      const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+      const retained = JSON.stringify({ ...receipt, ...legacy.namespace });
+      // Mock provider setup only: the new immutable plan is already installed,
+      // while these exact remote inventories model the successive upgrade edges.
+      await writeFile(receiptPath, retained);
+      snapshot.rulesets = snapshot.rulesets.map((rule) => {
+        if (rule.id === plan.admissionId)
+          return {
+            ...rule,
+            ...(phase === "legacy-applied"
+              ? legacy.admission
+              : phase === "legacy-namespace"
+                ? plan.restore
+                : plan.admission),
+          };
+        if (rule.id === receipt.id && phase !== "applied") return { ...rule, ...legacy.namespace };
+        return rule;
+      });
+      await writeFile(h.state, JSON.stringify(snapshot));
+      expect((await h.run("check", phase)).code).toBe(0);
+      const result = await operator.run();
+      expect(result.stderr).toBe("");
+      expect(result.code).toBe(0);
+      expect((await h.run("check-stable", "original")).code).toBe(0);
+      expect(await readFile(receiptPath, "utf8")).toBe(retained);
+    } finally {
+      await h.close();
+    }
+  });
+}
+
+test("v4 OFF refuses an unresolved upgrade write rather than infer finality from a later inventory", async () => {
+  const h = await harness(true);
+  try {
+    const operator = await offHarness(h);
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    await mkdir(join(h.root, "plan/upgrade-admission-attempt"));
+    await writeFile(join(h.root, "plan/upgrade-admission-attempt/intent"), "unresolved");
+    const before = await h.events();
+    const result = await operator.run();
+    expect(result.code).not.toBe(0);
+    expect(
+      (await h.events())
+        .slice(before.length)
+        .filter((e) => e.method !== "GET")
+        .map((e) => e.method),
+    ).toEqual(["STOP"]);
+  } finally {
+    await h.close();
+  }
+});
+
 test("provider omitted update default survives live-shaped receipt, apply and one-command OFF", async () => {
   const h = await harness();
   try {

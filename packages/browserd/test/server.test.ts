@@ -1488,6 +1488,12 @@ async function withServer(
     ...(options.uploadArtifact ? { uploadArtifact: options.uploadArtifact } : {}),
     ...(options.uploadDownload ? { uploadDownload: options.uploadDownload } : {}),
   });
+  // Opening starts sweeps for browsers an earlier controller left behind, and
+  // the controller does not report itself empty until they finish. Join them
+  // so every test starts from a controller that holds nothing, however slow
+  // the machine running it.
+  await supervisor.releaseDetachedBrowsers();
+  await supervisor.releaseAttachedLeftovers();
   const computerSupervisor = options.linkedComputer
     ? ({
         launchEnvironment(reference: { computerSessionId: string; controllerGeneration: string }) {

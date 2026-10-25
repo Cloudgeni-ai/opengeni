@@ -34,11 +34,14 @@ import {
   dateFieldFormat,
   dateFields,
   dateFieldTyping,
+  distinctElements,
   locate,
   observedRole,
   opensOnInvoke,
   parseDateValue,
   projectElements,
+  readWindowTitle,
+  TOGGLE_ROLES,
   unindexedRows,
   unindexedTextByElement,
   type DateSegment,
@@ -98,6 +101,11 @@ type Operation = {
  * but quick, without a pause after each click. */
 const CURSOR_MOTION = { timing: "fixed", glide_duration_ms: 150, dwell_after_click_ms: 0 };
 
+/** An untitled window with a side shorter than this is a strip attached to
+ * another window (Chrome's status bubble is 22 px tall, an Android
+ * emulator's toolbar 54 px wide), never the window in front. */
+const UNTITLED_STRIP_MAX_SIDE = 100;
+
 /** How long a field check waits before reading a window again, when the
  * reading straight after the input does not show it yet. */
 const INPUT_REREAD_MS = 150;
@@ -109,7 +117,9 @@ const INPUT_REREAD_MS = 150;
  * editor's placeholder) can be content that stays. */
 const SETTLE_MAX_MS = 5_000;
 const SETTLE_TEXT_MAX_MS = 2_500;
-const SETTLE_POLL_MS = 250;
+/** A reading of an ordinary window takes about 50 ms, so a save or load
+ * that finishes is seen within about a tenth of a second. */
+const SETTLE_POLL_MS = 100;
 
 /** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
@@ -141,10 +151,17 @@ export class CuaComputerBackend implements ComputerBackend {
    * element (AXOpen) instead of pressing it. */
   private readonly openingTokens = new Map<string, Set<string>>();
   /** Per window, the web date and time fields of its latest reading: each
-   * field's parts by its CUA token, and the field each part belongs to. */
+   * field's parts by its CUA token, the tokens of those parts in order, the
+   * field each part (or its date picker button) belongs to, and those picker
+   * buttons. */
   private readonly dateFieldTokens = new Map<
     string,
-    { fields: Map<string, DateSegment[]>; owners: Map<string, string> }
+    {
+      fields: Map<string, DateSegment[]>;
+      parts: Map<string, string[]>;
+      owners: Map<string, string>;
+      pickers: Set<string>;
+    }
   >();
   /** Per window, the element's own label behind each CUA token of its latest
    * reading: what CUA's lookup by name matches. An observed name can instead
@@ -713,7 +730,9 @@ export class CuaComputerBackend implements ComputerBackend {
           outcome.message,
         )))
       : null;
-    const reason = refusal?.message ?? outcome.message;
+    const reason =
+      refusal?.message ??
+      (outcome.cuaCode === "ambiguous" ? ambiguityForRefs(outcome.message) : outcome.message);
     const message = single
       ? `CUA stopped part way through the input: ${reason}`
       : `CUA stopped the batch at action ${action + 1}: ${reason}`;
@@ -807,6 +826,27 @@ export class CuaComputerBackend implements ComputerBackend {
         !(macos && window.is_on_screen === false && window.space_ids === null),
     );
     const presences = await this.offScreenPresences(windows);
+    // The frontmost ordinary window is the one the person has in front: CUA
+    // reports stacking, not keyboard focus. Windows' listing also stacks
+    // cloaked and always-on-top windows as ordinary ones, so it marks none.
+    // An untitled strip stacked above its app's window is part of that
+    // window, not one a person works in: Chrome's link status bubble, an
+    // emulator's side toolbar.
+    let front: { id: string; z: number } | null = null;
+    for (const window of this.identity.platform === "windows" ? [] : windows) {
+      const id = `cua:window:${window.pid}:${window.window_id}`;
+      if (
+        typeof window.z_index !== "number" ||
+        (window.layer ?? 0) !== 0 ||
+        presences.has(id) ||
+        // Minimized, hidden or unmapped on every platform.
+        window.is_on_screen === false ||
+        (!window.title.trim() &&
+          Math.min(window.bounds.width, window.bounds.height) < UNTITLED_STRIP_MAX_SIDE)
+      )
+        continue;
+      if (!front || window.z_index > front.z) front = { id, z: window.z_index };
+    }
     const live = new Set<string>();
     for (const window of windows) {
       const id = `cua:window:${window.pid}:${window.window_id}`;
@@ -833,7 +873,7 @@ export class CuaComputerBackend implements ComputerBackend {
           processId: window.pid,
           title: window.title || window.app_name,
           bounds: window.bounds,
-          focused: false,
+          focused: id === front?.id,
           ...(onScreen || restorable ? {} : { offScreen: true as const }),
         },
       });
@@ -1090,6 +1130,14 @@ export class CuaComputerBackend implements ComputerBackend {
   ): Promise<ComputerBackendError | null> {
     const target = this.targetsById.get(targetId);
     if (!target) return null;
+    // CUA's wording names an input mode this tool does not offer.
+    if (cuaCode === "select_menu_would_raise_window")
+      return new ComputerBackendError(
+        code,
+        "Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent. For a list of options, set_value on its ref with the option's text; a menu button's menu cannot be opened while the browser is in the background",
+        false,
+        false,
+      );
     if (cuaCode === "element_in_attached_window")
       return new ComputerBackendError(
         code,
@@ -1178,7 +1226,8 @@ export class CuaComputerBackend implements ComputerBackend {
       this.identity.platform,
       unindexedTextByElement(state.tree_markdown, this.identity.platform),
     );
-    const document = documentTitle(projected, target.native.title);
+    const shownTitle = readWindowTitle(state.elements, this.identity.platform);
+    const document = documentTitle(shownTitle, target.native.title);
     const roots = this.stabilizeRefs(targetId, document, projected);
     // The rows folded into a field are its text, typed by the person.
     const refTokens = this.tokens.get(targetId);
@@ -1223,23 +1272,48 @@ export class CuaComputerBackend implements ComputerBackend {
     if (this.identity.platform === "macos") {
       const byIndex = new Map(state.elements.map((element) => [element.element_index, element]));
       const fields = new Map<string, DateSegment[]>();
+      const parts = new Map<string, string[]>();
       const owners = new Map<string, string>();
+      const pickers = new Set<string>();
+      const dateFieldByIndex = new Map<number, string>();
       for (const [index, field] of dateFields(state.elements)) {
         const token = byIndex.get(index)!.element_token!;
         fields.set(token, field.segments);
-        for (const part of field.parts) {
-          const partToken = byIndex.get(part)?.element_token;
-          if (partToken) owners.set(partToken, token);
+        dateFieldByIndex.set(index, token);
+        const partTokens = field.parts.map((part) => byIndex.get(part)?.element_token);
+        for (const partToken of partTokens) if (partToken) owners.set(partToken, token);
+        if (partTokens.every((partToken) => partToken !== undefined))
+          parts.set(token, partTokens as string[]);
+      }
+      // Chrome shows a "Show date picker" button inside the field. Its menu
+      // would bring the browser in front, so it is refused, as a <select> is.
+      for (const element of state.elements) {
+        const field =
+          element.parent_index === undefined
+            ? undefined
+            : dateFieldByIndex.get(element.parent_index);
+        if (field && element.role === "AXPopUpButton" && element.element_token) {
+          owners.set(element.element_token, field);
+          pickers.add(element.element_token);
         }
       }
-      if (fields.size) this.dateFieldTokens.set(targetId, { fields, owners });
+      if (fields.size) this.dateFieldTokens.set(targetId, { fields, parts, owners, pickers });
       while (this.dateFieldTokens.size > 32)
         this.dateFieldTokens.delete(this.dateFieldTokens.keys().next().value!);
     }
     const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {
       observationId: `${this.session}:${state.snapshot_id}`,
-      target: { ...target.native, bounds: state.window_bounds ?? target.native.bounds },
+      // Named as the reading shows the window: its listed title is the one it
+      // had when the windows were last listed, the page before an action.
+      target: {
+        ...target.native,
+        title: shownTitle ?? target.native.title,
+        bounds: state.window_bounds ?? target.native.bounds,
+        // Which window is in front is known only when windows are listed;
+        // a reading after an action or a switch would show it stale.
+        focused: false,
+      },
       frameId:
         [...this.frames.entries()]
           .reverse()
@@ -1337,7 +1411,12 @@ export class CuaComputerBackend implements ComputerBackend {
   private dateFieldOf(
     targetId: string,
     ref: string,
-  ): { ref: string; name: string | undefined; segments: DateSegment[] } | null {
+  ): {
+    ref: string;
+    name: string | undefined;
+    segments: DateSegment[];
+    picker: boolean;
+  } | null {
     const known = this.dateFieldTokens.get(targetId);
     const token = this.tokens.get(targetId)?.get(ref);
     const fieldToken = token === undefined ? undefined : known?.owners.get(token);
@@ -1347,24 +1426,50 @@ export class CuaComputerBackend implements ComputerBackend {
     )?.[0];
     if (!fieldRef) return null;
     const name = this.observations.get(targetId)?.roots.find((node) => node.ref === fieldRef)?.name;
-    return { ref: fieldRef, name, segments: known.fields.get(fieldToken)! };
+    return {
+      ref: fieldRef,
+      name,
+      segments: known.fields.get(fieldToken)!,
+      picker: known.pickers.has(token!),
+    };
   }
 
   /**
-   * The input that fills a web date or time field: press the field, which
-   * focuses it, then for each part move to it and type its digits. A browser
-   * moves on to the next part by itself after some parts and not after
-   * others (a month part of a month field, a year that may take six digits),
-   * so each part is reached from the first one: Left as many times as there
-   * are parts stops at the first, then Right to the part. Typing over a part
-   * replaces what it held, so a filled field is changed the same way.
+   * The input that fills a web date or time field: for each part, give it
+   * the keyboard focus through accessibility and type its digits. Pressing
+   * the field instead focuses no part while the browser is not the active
+   * app, so its keys are dropped; and a browser moves on to the next part by
+   * itself after some parts only, so each part is focused on its own. Typing
+   * over a part replaces what it held, so a filled field is changed the same
+   * way. Without a token for every part, the field is pressed and each part
+   * reached from the first one with Left and Right.
    */
   private dateFieldInput(
     args: Record<string, unknown>,
     token: string,
+    parts: readonly string[] | undefined,
     texts: readonly string[],
   ): Operation[] {
     const delivery_mode = this.inputDelivery();
+    const type = (text: string): Operation => ({
+      name: "type_text",
+      args: { ...args, text, delivery_mode },
+      fillsField: true,
+    });
+    if (parts?.length === texts.length)
+      return texts.flatMap((text, index): Operation[] => [
+        {
+          name: "click",
+          args: {
+            ...args,
+            element_token: parts[index]!,
+            action: "focus",
+            delivery_mode: "background",
+          },
+          fillsField: true,
+        },
+        type(text),
+      ]);
     const key = (name: "left" | "right"): Operation => ({
       name: "press_key",
       args: { ...args, key: name, modifiers: [], delivery_mode },
@@ -1381,7 +1486,7 @@ export class CuaComputerBackend implements ComputerBackend {
       if (texts.length > 1)
         for (let step = 0; step < texts.length - 1; step++) input.push(key("left"));
       for (let step = 0; step < index; step++) input.push(key("right"));
-      input.push({ name: "type_text", args: { ...args, text, delivery_mode }, fillsField: true });
+      input.push(type(text));
     });
     return input;
   }
@@ -1654,10 +1759,18 @@ export class CuaComputerBackend implements ComputerBackend {
         // Not in the batch's observation: an earlier action may bring it up,
         // or the element shown under the other role pressed alike may be the
         // one meant, which CUA's step decides once the window has settled.
-        const named =
-          (laterInBatch || (inBatch && mayStandIn(observed.roots, action))) &&
+        // Several shown by that name: an earlier action may narrow them (a
+        // search filtering a list), and CUA's step waits for the window to
+        // settle before it reports them.
+        const unseen = error instanceof ComputerBackendError && error.code === "locator_not_found";
+        const several =
+          laterInBatch &&
           error instanceof ComputerBackendError &&
-          error.code === "locator_not_found" &&
+          error.code === "locator_ambiguous" &&
+          action.locator.kind !== "ref" &&
+          action.locator.kind !== "identifier";
+        const named =
+          (unseen ? laterInBatch || (inBatch && mayStandIn(observed.roots, action)) : several) &&
           (ACTIONS_ON_UNSEEN.has(action.action) ||
             // select or deselect means a state only on a checkbox or switch.
             ((action.action === "select" || action.action === "deselect") &&
@@ -1668,6 +1781,15 @@ export class CuaComputerBackend implements ComputerBackend {
         if (!named) throw error;
         return [named];
       }
+      // A date field's picker button opens a menu that would bring the
+      // browser in front; the field itself takes the whole value.
+      const picker = this.dateFieldOf(command.targetId, node.ref);
+      if (picker?.picker)
+        throw unsupported(
+          `This button opens the date picker of the date or time field ${picker.ref}${
+            picker.name ? ` ("${picker.name}")` : ""
+          }, which would bring the browser in front of the person's window, so nothing was sent: set_value on ${picker.ref} with its value in the form ${dateFieldFormat(picker.segments)}`,
+        );
       // set_value true or false (or select, deselect) on a checkbox or switch
       // presses it only when it is not in that state already.
       const wanted = toggleWanted(node.role, action);
@@ -1700,8 +1822,9 @@ export class CuaComputerBackend implements ComputerBackend {
         const findable =
           node.name !== undefined &&
           node.name === this.ownLabels.get(command.targetId)?.get(token) &&
-          observed.roots.filter((other) => other.role === node.role && other.name === node.name)
-            .length === 1;
+          distinctElements(
+            observed.roots.filter((other) => other.role === node.role && other.name === node.name),
+          ).length === 1;
         const named = findable ? namedOperation(this.identity.platform, args, action, node) : null;
         if (!named || !this.initialCapabilities.actionBatches)
           throw unsupported(
@@ -1752,8 +1875,9 @@ export class CuaComputerBackend implements ComputerBackend {
         if (
           findable &&
           !special &&
-          observed.roots.filter((other) => other.role === node.role && other.name === node.name)
-            .length > 1
+          distinctElements(
+            observed.roots.filter((other) => other.role === node.role && other.name === node.name),
+          ).length > 1
         )
           throw unsupported(
             "Several elements here have this element's role and name, and it comes after an action that names an element not yet shown, so it cannot be told apart in the same batch: act on it in its own call",
@@ -1789,12 +1913,13 @@ export class CuaComputerBackend implements ComputerBackend {
             false,
           );
         const token = this.elementToken(command.targetId, node.ref);
-        const segments = this.dateFieldTokens.get(command.targetId)?.fields.get(token);
+        const known = this.dateFieldTokens.get(command.targetId);
+        const segments = known?.fields.get(token);
         if (segments) {
           const typing = dateFieldTyping(segments, String(action.value));
           if ("error" in typing)
             throw new ComputerBackendError("invalid_action", typing.error, false, false);
-          const input = this.dateFieldInput(args, token, typing.texts);
+          const input = this.dateFieldInput(args, token, known!.parts.get(token), typing.texts);
           input[0]!.expectDate = { ref: node.ref, value: String(action.value), segments };
           return input;
         }
@@ -2115,6 +2240,28 @@ const NAMED_STEP_FIND_MS = 1_000;
  * of the other with that name, once the window has settled. */
 const PRESSED_ALIKE_ROLES: ReadonlySet<string> = new Set(["button", "link"]);
 
+/** CUA's ambiguity message, worded for an action here: CUA's lookup can take
+ * an `nth`, while an action here names one element of several by its ref.
+ * CUA's `nth` and element numbers are left out of each candidate the message
+ * lists; names and window titles are kept as they are. */
+export function ambiguityForRefs(message: string): string {
+  const reworded = message.replace(
+    "; add `nth` or a more exact name: ",
+    "; give a more exact name, or observe the window and act on the one meant by its ref: ",
+  );
+  for (const lead of ["act on the one meant by its ref: ", "name the role of the one meant: "]) {
+    const at = reworded.lastIndexOf(lead);
+    if (at < 0) continue;
+    const listStart = at + lead.length;
+    const candidates = reworded
+      .slice(listStart)
+      .split("; ")
+      .map((candidate) => candidate.replace(/^(?:nth \d+: )?(?:\[\d+\] )?/, ""));
+    return reworded.slice(0, listStart) + candidates.join("; ");
+  }
+  return reworded;
+}
+
 /** Whether the first action of a batch, naming a button or link its
  * observation does not show, may mean an element shown with that name under
  * the other role: its step then goes to CUA by role and name, which uses that
@@ -2233,15 +2380,6 @@ function selectsByPressing(
   );
 }
 
-/** Checkbox and switch roles as observations show them on each platform. */
-const TOGGLE_ROLES: ReadonlySet<string> = new Set([
-  "checkbox",
-  "check box",
-  "switch",
-  "toggle button",
-  "check menu item",
-]);
-
 const CHECKED_WORDS: Readonly<Record<string, boolean>> = {
   true: true,
   on: true,
@@ -2350,13 +2488,13 @@ function inProgressText(text: string): boolean {
   return words.length > 0 && words.length <= MAX_PROGRESS_WORDS;
 }
 
-/** The title of the document a reading shows: its window element's, which
- * the reading itself carries, or else the window's listed title. A window's
+/** The title of the document a reading shows: its window element's own
+ * label, which the reading itself carries, or else the window's listed title
+ * (never the page text an unlabeled window element is named by). A window's
  * listed title is the one it had when the windows were last listed, so after
  * an action that opened another page it still names the page before. */
-function documentTitle(nodes: readonly InteractionSemanticNodeValue[], listed: string): string {
-  const window = nodes.find((node) => node.role === "window" && node.name);
-  return window ? `window\u0000${window.name}` : listed;
+function documentTitle(shown: string | undefined, listed: string): string {
+  return shown !== undefined ? `window\u0000${shown}` : listed;
 }
 
 /** A button among the rows CUA leaves unindexed: on macOS a disabled button

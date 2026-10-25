@@ -14,6 +14,13 @@
  * made for a secret that may exist (external vaults §9). Hosted and
  * explicitly named healthy vaults are never blocked by unrelated outages, and
  * lower-priority vaults never block a miss a higher tier decided.
+ *
+ * Items and fields a person marked "ask me each time" (0952) resolve for an
+ * agent only under that person's grant: one use, the chat, or a time window.
+ * Without one, nothing is read; the use is recorded as a request and the
+ * failure carries a ready approval card. The check sits after every
+ * reference is chosen and before any provider read or decryption, so it is
+ * the same for hosted and connected vaults and for every delivery surface.
  */
 import {
   buildMissingSecretAskCard,
@@ -23,6 +30,7 @@ import {
   referenceKey,
   secretNameKey,
   SecretReferenceError,
+  secretUseApprovalHumanInput,
   VAULT_LIMITS,
   type ResolvedSecretValue,
   type SecretMaterial,
@@ -30,14 +38,20 @@ import {
   type SecretReference,
   type SecretReferenceFailure,
   type SecretResolver,
+  type SecretUseApprovalTarget,
   type SecretUseContext,
   type VaultProviderFreshness,
 } from "@opengeni/contracts";
 import {
   decryptEnvironmentValue,
+  listSecretApprovalRules,
+  listUsableSecretUseGrants,
   listVaultsForSubject,
   recordVaultSecretUse,
+  requestSecretUseApproval,
   resolveSecretReferenceCandidates,
+  secretUseApprovalView,
+  useSecretUseOnceGrants,
   type SecretReferenceCandidate,
   type SecretReferenceLookup,
   type SecretResolutionMeta,
@@ -352,6 +366,28 @@ function isFailure(
   return "code" in value;
 }
 
+function fieldKeyOf(candidate: SecretReferenceCandidate): string {
+  return secretNameKey(candidate.fieldName ?? "");
+}
+
+function displayName(candidate: SecretReferenceCandidate): string {
+  return candidate.fieldName ? `${candidate.itemName}/${candidate.fieldName}` : candidate.itemName;
+}
+
+function approvalTarget(candidate: SecretReferenceCandidate): SecretUseApprovalTarget {
+  return {
+    vaultId: candidate.vaultId,
+    itemId: candidate.itemId,
+    fieldKey: fieldKeyOf(candidate),
+    vaultName: candidate.vaultName,
+    itemName: candidate.itemName,
+    fieldName: candidate.fieldName ?? "",
+  };
+}
+
+/** The grants a use relies on: once grants to use up and lasting ones to audit. */
+type UseApprovals = { once: string[]; lasting: string[] };
+
 /**
  * One provider-read budget per agent attempt in this process. The API builds a
  * resolver per browser action, gateway call and `run_on`; sharing the budget
@@ -384,6 +420,101 @@ export function createSecretResolver(
 ): SecretResolver {
   const budget = opts.attemptBudget ?? sharedAttemptBudget(principal);
   const context = { kind: "principal" as const, principal };
+  const scope = { accountId: principal.accountId, workspaceId: principal.workspaceId };
+
+  /**
+   * Check the chosen references against "ask me each time" rules. Returns
+   * the grants the use relies on; throws `approval_required` with a ready
+   * card, after recording the request, when a reference is not covered.
+   */
+  async function approvalsFor(
+    chosen: readonly Chosen[],
+    meta: SecretResolutionMeta,
+    use: SecretUseContext,
+  ): Promise<UseApprovals> {
+    const none: UseApprovals = { once: [], lasting: [] };
+    const rules = await listSecretApprovalRules(
+      deps.db,
+      scope,
+      chosen.map((entry) => entry.candidate.itemId),
+    );
+    if (rules.length === 0) return none;
+    const ruled = new Set(rules.map((rule) => `${rule.itemId}|${rule.fieldKey}`));
+    const gated = chosen.filter(
+      ({ candidate }) =>
+        ruled.has(`${candidate.itemId}|`) ||
+        ruled.has(`${candidate.itemId}|${fieldKeyOf(candidate)}`),
+    );
+    if (gated.length === 0) return none;
+    // A person resolving their own reference is the one who would approve.
+    if (principal.kind === "human") return none;
+    const refuse = (message: string): never => {
+      throw new SecretReferenceError(
+        gated.map(({ reference }) => ({ raw: reference.raw, code: "denied", message })),
+      );
+    };
+    if (principal.kind === "site_viewer") {
+      refuse("this secret needs a person's approval for each use, which a Site cannot ask for");
+    }
+    if (principal.kind !== "attempt") return refuse("this secret needs approval for each use");
+    const approver = meta.humanExpected && meta.humanValid ? meta.subjectId : null;
+    if (approver === null) {
+      return refuse(
+        "this secret needs a person's approval for each use, and this run acts for no one who can give it",
+      );
+    }
+    const grants = await listUsableSecretUseGrants(deps.db, scope, {
+      sessionId: principal.sessionId,
+      approverSubjectId: approver,
+    });
+    const covers = (grant: (typeof grants)[number], candidate: SecretReferenceCandidate) =>
+      grant.targets.some(
+        (target) => target.itemId === candidate.itemId && target.fieldKey === fieldKeyOf(candidate),
+      );
+    const once = new Set<string>();
+    const lasting = new Set<string>();
+    const uncovered: Chosen[] = [];
+    for (const entry of gated) {
+      // A chat or time-window grant is preferred, so a once grant is kept.
+      const kept = grants.find((grant) => grant.scope !== "once" && covers(grant, entry.candidate));
+      if (kept) {
+        lasting.add(kept.id);
+        continue;
+      }
+      const single = grants.find(
+        (grant) => grant.scope === "once" && covers(grant, entry.candidate),
+      );
+      if (single) {
+        once.add(single.id);
+        continue;
+      }
+      uncovered.push(entry);
+    }
+    if (uncovered.length === 0) return { once: [...once], lasting: [...lasting] };
+    const targets = new Map<string, SecretUseApprovalTarget>();
+    for (const { candidate } of uncovered) {
+      targets.set(`${candidate.itemId}|${fieldKeyOf(candidate)}`, approvalTarget(candidate));
+    }
+    const destination =
+      use.destination ?? (await use.lookupDestination?.().catch(() => null)) ?? null;
+    const request = await requestSecretUseApproval(deps.db, scope, {
+      sessionId: principal.sessionId,
+      approverSubjectId: approver,
+      targets: [...targets.values()],
+      surface: use.surface,
+      toolName: use.toolName,
+      destination,
+    });
+    throw new SecretReferenceError(
+      uncovered.map(({ reference, candidate }) => ({
+        raw: reference.raw,
+        code: "approval_required",
+        message: `${displayName(candidate)} needs the person's approval for each use; they have not allowed this one yet`,
+      })),
+      null,
+      secretUseApprovalHumanInput(secretUseApprovalView(request)),
+    );
+  }
 
   async function resolve(
     refs: readonly SecretReference[],
@@ -499,6 +630,8 @@ export function createSecretResolver(
         buildMissingSecretAskCard(failures, { hasActingHuman }),
       );
     }
+    // Before any provider read or decryption.
+    const approvals = await approvalsFor(chosen, meta, use);
 
     // Provider values: one readFields call per provider item.
     const providerValues = new Map<string, SecretMaterial>();
@@ -617,8 +750,36 @@ export function createSecretResolver(
       );
     }
 
+    // Use up once grants only now that every value is in hand. A grant
+    // another use took first is looked for again, which asks the person
+    // when nothing else covers the reference.
+    let once = approvals.once;
+    const approvalIds = new Set([...approvals.once, ...approvals.lasting]);
+    for (let round = 0; once.length > 0; round += 1) {
+      const used = await useSecretUseOnceGrants(deps.db, scope, { ids: once });
+      if (used.length === once.length) break;
+      try {
+        if (round >= 2) {
+          throw new SecretReferenceError(
+            chosen.map(({ reference }) => ({
+              raw: reference.raw,
+              code: "approval_required",
+              message: "another call used this approval at the same time; try again",
+            })),
+          );
+        }
+        const again = await approvalsFor(chosen, meta, use);
+        for (const id of [...again.once, ...again.lasting]) approvalIds.add(id);
+        once = again.once;
+      } catch (error) {
+        resolved.clear();
+        throw error;
+      }
+    }
+
+    const { lookupDestination: _lookup, ...audited } = use;
     await recordVaultSecretUse(deps.db, context, {
-      use,
+      use: approvalIds.size > 0 ? { ...audited, approvalIds: [...approvalIds] } : audited,
       items: [...resolved.values()].map((value) => ({
         itemId: value.itemId,
         vaultId: value.vaultId,

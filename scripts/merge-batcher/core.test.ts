@@ -142,6 +142,17 @@ function observation(ready = [pull(1)], candidates: Candidate[] = []): Observati
     ledger: emptyLedger(),
   };
 }
+test("only complete verified receipts identify failed task classes for base comparison", () => {
+  const c = candidate();
+  const data = receiptResult(c);
+  Object.assign(data.tasks[1]!, { exitCode: 1, outcome: "code_failure", retryable: true });
+  Object.assign(data.jobs, { source: "failure" });
+  Object.assign(data, { outcome: "code_failure", retryable: true });
+  expect(verifyResult(data, c.manifest, 100, 1)?.failedClasses).toEqual(["source"]);
+  data.tasks.shift();
+  expect(verifyResult(data, c.manifest, 100, 1)?.outcome).toBe("code_failure");
+  expect(verifyResult(data, c.manifest, 100, 1)?.failedClasses).toBeUndefined();
+});
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "merge-batcher-"));
   roots.push(root);
@@ -307,11 +318,10 @@ describe("readiness and deterministic planning", () => {
     o.ledger.recovery = [{ batchId: digest("failed-parent"), pulls: [pull(2)] }];
     expect(plan(o, { ...cfg, maxInflight: 2 }).kind).toBe("wait");
   });
-  test("first code failure retries once before split, with backoff and durable intent", () => {
+  test("first code failure retries immediately once before split, with durable intent", () => {
     const c = candidate([pull(1), pull(2)]);
     c.runs = [run(c, "code_failure")];
     const o = observation(c.manifest.pulls, [c]);
-    o.now = new Date(Date.parse(NOW) + 61000).toISOString();
     expect(plan(o, cfg).kind).toBe("retry");
     expect(infrastructureRetryReason(c, c.runs[0]!, cfg)).toBe("failed-batch");
     o.ledger.retries[c.manifest.batchId] = {
@@ -362,6 +372,13 @@ describe("readiness and deterministic planning", () => {
     const next = plan(o, cfg);
     expect(next.kind).toBe("build");
     if (next.kind === "build") expect(next.spec.pulls.map((p) => p.number)).toEqual([2]);
+    o.ready[0]!.binding.source = "auto-merge";
+    o.ready[0]!.binding.at = new Date(Date.parse(o.now) + 1000).toISOString();
+    const explicitlyRetried = plan(o, cfg);
+    expect(explicitlyRetried.kind).toBe("build");
+    if (explicitlyRetried.kind === "build")
+      expect(explicitlyRetried.spec.pulls.map((p) => p.number).sort()).toEqual([1, 2]);
+    o.ready[0]!.binding.at = pull(1).binding.at;
     o.ready[0]!.headSha = "c".repeat(40);
     const changed = plan(o, cfg);
     expect(changed.kind).toBe("build");
@@ -407,13 +424,13 @@ describe("readiness and deterministic planning", () => {
     if (next.kind === "build") expect(next.spec.pulls.map((p) => p.number)).toEqual([5500]);
   });
   test.each(["cancelled", "infrastructure", "unknown"] as const)(
-    "%s never incriminates PRs and backs off",
+    "%s never incriminates PRs and preserves the single retry bound",
     (outcome) => {
       const c = candidate();
       c.runs = [run(c, outcome, 1, false)];
       const o = observation([pull(1)], [c]);
       o.now = NOW;
-      expect(plan(o, cfg).kind).toBe("wait");
+      expect(plan(o, cfg).kind).toBe(outcome === "unknown" ? "wait" : "retry");
       o.now = "2026-10-21T12:00:00Z";
       expect(plan(o, cfg).kind).toBe(outcome === "unknown" ? "wait" : "retry");
       c.runs.push(run(c, outcome, 2, false));
@@ -1068,6 +1085,19 @@ describe("wire adapters and CLI", () => {
         });
       }
       if (url.endsWith("/attempts/2")) return Response.json(row);
+      if (url.includes("/attempts/2/jobs"))
+        return Response.json({
+          total_count: 1,
+          jobs: [
+            {
+              id: 501,
+              run_id: id,
+              name: "Source and type contracts",
+              status: "completed",
+              conclusion: "failure",
+            },
+          ],
+        });
       if (url.endsWith("/artifacts?per_page=100&page=1"))
         return Response.json({
           artifacts:
@@ -1088,6 +1118,7 @@ describe("wire adapters and CLI", () => {
       ["green", "prior-and-current"].includes(kind) ? "green" : kind === "red" ? "red" : "unknown",
     );
     expect(result.sha).toBe(sha);
+    if (kind === "red") expect(result.classes).toEqual({ source: "red", units: "unknown" });
   });
   test.each([
     "success",
@@ -1309,7 +1340,7 @@ describe("integration boundaries and queue-only shadow CI", () => {
     });
     expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
   });
-  test.each(["red", "unknown", "green"] as const)(
+  test.each(["green"] as const)(
     "#5243 inherited %s base splits without ejecting or blaming innocent members",
     (status) => {
       const c = candidate([pull(5436), pull(5439), pull(5440)]);
@@ -1331,6 +1362,65 @@ describe("integration boundaries and queue-only shadow CI", () => {
       expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
     },
   );
+  test("completed relevant base classes permit only the existing one retry with safety holds intact", () => {
+    const c = candidate();
+    c.runs = [{ ...run(c, "code_failure"), failedClasses: ["units"] }];
+    const o = observation(c.manifest.pulls, [c]);
+    o.baseCI = { ...o.baseCI!, status: "classes", classes: { source: "unknown", units: "green" } };
+    expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("retry");
+    expect(plan({ ...o, mainBusy: true }, { ...cfg, mode: "active" }).kind).toBe("wait");
+    o.ledger.retries[c.manifest.batchId] = { runId: 100, fromAttempt: 1, requestedAt: NOW };
+    expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+    delete o.ledger.retries[c.manifest.batchId];
+    o.baseCI.classes!.units = "unknown";
+    expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+  });
+  test("exact red base holds failed cohorts before retry or split, never a green landing", () => {
+    const c = candidate([pull(5436), pull(5439)]);
+    const o = observation(c.manifest.pulls, [c]);
+    o.baseCI!.status = "red";
+    const before = canonical(o.ledger);
+    for (const attempt of [1, 2]) {
+      c.runs = [run(c, "code_failure", attempt)];
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+      expect(canonical(o.ledger)).toBe(before);
+    }
+    for (const invalid of [
+      { ...o.baseCI!, sha: "f".repeat(40) },
+      { ...o.baseCI!, runId: null },
+      { ...o.baseCI!, attempt: 0 },
+    ]) {
+      expect(plan({ ...o, baseCI: invalid }, { ...cfg, mode: "active" }).kind).toBe("wait");
+    }
+    c.runs = [run(c, "success")];
+    expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
+  });
+  test("latency alert cannot trap failed roots behind red or unknown base holds after withdrawal", () => {
+    for (const status of ["red", "unknown"] as const) {
+      const c = candidate([pull(5436), pull(5439)]);
+      c.runs = [run(c, "code_failure", 2)];
+      const o = observation(c.manifest.pulls, [c]);
+      o.baseCI!.status = status;
+      o.telemetry = {
+        status: "stop",
+        p95ReadyToCiSeconds: 3989,
+        samples: 2,
+        coverageSince: NOW,
+        completeWindow: false,
+      };
+      expect(plan(o, cfg).kind).toBe("wait");
+      const withdrawn = plan({ ...o, ready: [] }, cfg);
+      expect(withdrawn.kind).toBe("record");
+      if (withdrawn.kind !== "record") throw Error("expected supported invalidation");
+      expect(withdrawn.ledger.invalidated).toContain(c.manifest.batchId);
+      expect(withdrawn.ledger.ejected).toEqual([]);
+      expect(withdrawn.ledger.recovery).toEqual([]);
+      const next = plan({ ...o, ready: [pull(5929)], ledger: withdrawn.ledger }, cfg);
+      expect(next.kind).toBe("build");
+      if (next.kind === "build") expect(next.publish).toBe(true);
+      expect(plan({ ...o, baseSha: "f".repeat(40) }, cfg).kind).toBe("record");
+    }
+  });
   test("batch retry eligibility rejects ambiguous, second-attempt, Version and unrelated runs", () => {
     const c = candidate();
     const good = run(c, "infrastructure");
@@ -1513,6 +1603,22 @@ describe("integration boundaries and queue-only shadow CI", () => {
       BATCHER_OUTPUT_DIR: join(f.root, "stage"),
     });
     const snapshot = { ...observation([pull(1, f.first)]), baseSha: f.base };
+    snapshot.ledger.stages.slow = {
+      batchId: "slow",
+      readyAt: "2026-10-21T10:00:00Z",
+      readyBindings: [
+        { key: "slow-binding", number: 99, headSha: SHA, readyAt: "2026-10-21T10:00:00Z" },
+      ],
+      builtAt: null,
+      publishedAt: null,
+      ciStartedAt: "2026-10-21T10:40:00Z",
+      ciCompletedAt: null,
+      landedAt: null,
+      observedAt: NOW,
+    };
+    expect((await new ObservationJournal(settings).observe(snapshot)).telemetry?.status).toBe(
+      "stop",
+    );
     const publisher = new QueueOnlyPublisher(
       settings,
       new AtomicGitWriter(f.git, f.origin.dir, settings.stateRef, "refs/heads/main"),
@@ -2158,7 +2264,7 @@ describe("review regressions: observation, admission and telemetry", () => {
     expect(next.kind).toBe("build");
     if (next.kind === "build") expect(next.publish).toBe(false);
   });
-  test("latency stop drains only an otherwise eligible trusted-green candidate", () => {
+  test("latency alerts preserve admission and recovery decisions without weakening safety", () => {
     const c = candidate();
     c.runs = [run(c, "success")];
     const o = observation([pull(1)], [c]);
@@ -2170,14 +2276,24 @@ describe("review regressions: observation, admission and telemetry", () => {
       completeWindow: false,
     };
     expect(plan(o, cfg).kind).toBe("land");
-    expect(plan({ ...o, candidates: [] }, cfg).kind).toBe("wait");
+    expect(plan({ ...o, candidates: [] }, cfg).kind).toBe("build");
     expect(plan({ ...o, mainBusy: true }, cfg).kind).toBe("wait");
-    expect(plan({ ...o, ready: [] }, cfg).kind).toBe("wait");
-    expect(plan({ ...o, ready: [pull(1, "f".repeat(40))] }, cfg).kind).toBe("wait");
-    expect(plan({ ...o, baseSha: "f".repeat(40) }, cfg).kind).toBe("wait");
+    expect(plan({ ...o, ready: [] }, cfg).kind).toBe("record");
+    expect(plan({ ...o, ready: [pull(1, "f".repeat(40))] }, cfg).kind).toBe("record");
+    expect(plan({ ...o, baseSha: "f".repeat(40) }, cfg).kind).toBe("record");
     for (const outcome of ["code_failure", "infrastructure", "unknown", "cancelled"] as const) {
       c.runs = [run(c, outcome)];
-      expect(plan(o, cfg).kind).toBe("wait");
+      const unmeasured = { ...o };
+      delete unmeasured.telemetry;
+      expect(plan(o, cfg)).toEqual(plan(unmeasured, cfg));
+    }
+    c.runs = [run(c, "code_failure")];
+    expect(plan(o, cfg).kind).toBe("retry");
+    c.runs = [run(c, "code_failure", 2)];
+    const parked = plan(o, cfg);
+    expect(parked.kind).toBe("record");
+    if (parked.kind === "record") {
+      expect(plan({ ...o, ledger: parked.ledger }, cfg).kind).toBe("park");
     }
     c.runs = [run(c, "success", 1, false)];
     expect(plan(o, cfg).kind).toBe("wait");
@@ -2191,6 +2307,67 @@ describe("review regressions: observation, admission and telemetry", () => {
     expect(plan({ ...o, telemetry: { ...o.telemetry, completeWindow: true } }, cfg).kind).toBe(
       "land",
     );
+  });
+  test("performance metric matrix preserves recovery and genuine safety decisions", () => {
+    const failed = candidate([pull(1), pull(2)]);
+    failed.runs = [run(failed, "code_failure", 2)];
+    const retry = candidate();
+    retry.runs = [run(retry, "infrastructure")];
+    const landed = candidate();
+    landed.runs = [run(landed, "success")];
+    const pending = candidate();
+    pending.runs = [{ ...run(pending, "unknown"), status: "in_progress" }];
+    const scenarios = [
+      { o: observation(), expected: "build" },
+      { o: observation([], [failed]), expected: "record" },
+      { o: observation(failed.manifest.pulls, [failed]), expected: "record" },
+      { o: observation([pull(1)], [retry]), expected: "retry" },
+      { o: observation([pull(1)], [landed]), expected: "land" },
+      { o: { ...observation([pull(1)], [landed]), mainBusy: true }, expected: "wait" },
+      { o: observation([pull(1)], [pending]), expected: "wait" },
+    ];
+    for (const { o, expected } of scenarios) {
+      const before = plan(o, cfg);
+      expect(String(before.kind)).toBe(expected);
+      for (const hold of [
+        "repository-budget",
+        "provider-limit",
+        "main-queued",
+        "main-pre-fanout",
+      ] as const) {
+        const measured: Observation = {
+          ...o,
+          telemetry: {
+            status: "stop",
+            p95ReadyToCiSeconds: 3989,
+            samples: 2,
+            coverageSince: NOW,
+            completeWindow: false,
+          },
+          headroom: {
+            allowed: !o.mainBusy,
+            reason: "informational demand",
+            budget: 52,
+            occupied: 1000,
+            mainDemand: 900,
+            reservedMain: 900,
+            candidateSlots: 18,
+            capacity: {
+              providerJobLimit: 60,
+              otherRepositoryAllowance: 28,
+              providerRequired: 1046,
+              latestMain: null,
+              mainQueuedJobs: 900,
+              preFanoutMainRuns: [],
+              hold,
+            },
+          },
+        };
+        expect(plan(measured, cfg)).toEqual(before);
+        expect(measured.telemetry!.p95ReadyToCiSeconds).toBe(3989);
+        expect(measured.headroom!.capacity!.hold).toBe(hold);
+      }
+    }
   });
   test("measured stages and rolling latency survive restart; missing history is unknown, not green", async () => {
     const f = await fixture(),
@@ -2210,7 +2387,7 @@ describe("review regressions: observation, admission and telemetry", () => {
     expect(measured.telemetry?.samples).toBe(1);
     expect(measured.telemetry?.completeWindow).toBe(false);
     expect(plan(measured, settings).kind).toBe("land");
-    expect(plan({ ...measured, candidates: [] }, settings).kind).toBe("wait");
+    expect(plan({ ...measured, candidates: [] }, settings).kind).toBe("build");
     const records = await journal.records(o.now);
     expect(records.stages[c.manifest.batchId]?.builtAt).toBeNull();
     expect(records.stages[c.manifest.batchId]?.landedAt).toBeNull();

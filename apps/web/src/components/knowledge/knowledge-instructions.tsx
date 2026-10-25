@@ -304,7 +304,7 @@ export function InstructionsPage({
         leading={<LogoTile icon={<ScrollTextIcon />} />}
         title={personal ? "Instructions for your Personal workspace" : "Workspace instructions"}
         meta={[
-          `Added to every chat and schedule in ${workspaceName}`,
+          `Added to every chat and automation in ${workspaceName}`,
           loading ? null : head ? (
             <span key="changed">
               changed <RelativeTime date={head.activatedAt} inSentence />
@@ -665,7 +665,7 @@ export function InstructionsEditPage({
       title={
         instructions.configured ? "Edit workspace instructions" : "Write workspace instructions"
       }
-      description={`Added to every chat and schedule in ${personal ? "your Personal workspace" : workspaceName}. The old version stays in History.`}
+      description={`Added to every chat and automation in ${personal ? "your Personal workspace" : workspaceName}. The old version stays in History.`}
       back={{ label: "Instructions", onClick: onClose }}
       submitLabel="Save instructions"
       pendingLabel="Saving…"

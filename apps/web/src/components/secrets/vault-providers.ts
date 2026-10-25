@@ -77,10 +77,10 @@ export const PROVIDERS: Record<VaultProviderId, ProviderInfo> = {
   bitwarden: {
     id: "bitwarden",
     name: "Bitwarden",
-    summary: "Link vaults through a bridge you run.",
-    credential: "the bridge address and signing secret",
-    renewLabel: "Update bridge",
-    vaultNoun: { one: "vault", many: "vaults" },
+    summary: "Link your vault and collections with an API key. Works with Vaultwarden.",
+    credential: "the API key and master password",
+    renewLabel: "Reconnect",
+    vaultNoun: { one: "vault or collection", many: "vaults and collections" },
     home: "Bitwarden",
   },
   external: {
@@ -126,9 +126,9 @@ export function connectionName(connection: {
   );
 }
 
-/** A bridge or a service is a machine that can be offline; vendors are "unavailable". */
+/** Your own service is a machine that can be offline; vendors are "unavailable". */
 export function isSelfHosted(provider: VaultProviderId | null): boolean {
-  return provider === "bitwarden" || provider === "external";
+  return provider === "external";
 }
 
 /** Providers this server can't connect, each with the reason the picker shows. */
@@ -238,9 +238,7 @@ export function writesPausedReason(vault: Partial<HealthInput>): string | null {
     case "auth_expired":
       return `Changes wait until ${home} is reconnected.`;
     case "locked":
-      return provider === "bitwarden"
-        ? `Changes wait until ${home} is unlocked on the bridge.`
-        : `Changes wait until ${home} is unlocked.`;
+      return `Changes wait until ${home} is unlocked.`;
     case "unavailable":
       return isSelfHosted(provider)
         ? `Changes wait until ${home} is reachable again.`
@@ -413,7 +411,7 @@ export function stillPending(result: InstallVaultProviderResponse): InstallVault
 const RENEWED: Record<ExternalVaultProviderKind, { done: string; saved: string }> = {
   protonpass: { done: "Token replaced", saved: "Saved the new token" },
   keeper: { done: "Reconnected", saved: "Saved the new device" },
-  bitwarden: { done: "Bridge updated", saved: "Saved the bridge settings" },
+  bitwarden: { done: "Reconnected", saved: "Saved the new API key" },
   external: { done: "Service updated", saved: "Saved the service settings" },
 };
 
@@ -437,14 +435,12 @@ export function renewalNotice(
 }
 
 /**
- * A provider that says its vault is locked, in its own words: a Bitwarden
- * account on the customer's bridge, a Proton Pass session, a remote service.
+ * A provider that says its vault is locked, in its own words: a Proton Pass
+ * session or a remote service.
  */
 export function lockedText(provider: VaultProviderId, then: "connect" | "retry"): string {
   const next = then === "connect" ? "then connect again" : "then try again";
   switch (provider) {
-    case "bitwarden":
-      return `Bitwarden is locked on the bridge. Unlock it there, ${next}.`;
     case "protonpass":
       return `Proton Pass says this session is locked. Unlock Proton Pass, ${next}.`;
     case "external":

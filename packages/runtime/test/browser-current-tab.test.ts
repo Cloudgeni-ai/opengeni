@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  BROWSER_LOCATOR_KIND_WORDS,
   BrowserTargetResolutionError,
   CurrentBrowserTab,
   expandRefShorthand,
@@ -121,5 +122,76 @@ describe("current browser tab", () => {
     });
     const untouched = { type: "press", key: "Enter" };
     expect(expandRefShorthand(untouched)).toBe(untouched);
+  });
+
+  test("expands role:name locators to the element with that role and exact name", () => {
+    expect(expandRefShorthand({ type: "click", locator: "link:Quartz Analytics" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "link", name: "Quartz Analytics", exact: true },
+    });
+    // Only the first colon splits, and the name is trimmed.
+    expect(expandRefShorthand({ type: "click", locator: "button: Time: 10:30 " })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "button", name: "Time: 10:30", exact: true },
+    });
+    expect(
+      expandRefShorthand({
+        type: "batch",
+        actions: [{ type: "drag", from: "menu_item:Inbox", to: "e3" }],
+      }),
+    ).toEqual({
+      type: "batch",
+      actions: [
+        {
+          type: "drag",
+          from: { kind: "role", role: "menu_item", name: "Inbox", exact: true },
+          to: { kind: "ref", ref: "e3" },
+        },
+      ],
+    });
+    // A colon with nothing named after it, or no role word before it, is a ref.
+    for (const ref of ["button:", "button:  ", ":Save", "e1a2b3c4d", "1x:Save"]) {
+      expect(expandRefShorthand({ type: "click", locator: ref })).toEqual({
+        type: "click",
+        locator: { kind: "ref", ref },
+      });
+    }
+  });
+
+  test("role:name takes roles of several words", () => {
+    expect(expandRefShorthand({ type: "click", locator: "push button:Save" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "push button", name: "Save", exact: true },
+    });
+    expect(expandRefShorthand({ type: "click", locator: "check box :Remember me" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "check box", name: "Remember me", exact: true },
+    });
+    // Roles are shown in lower case; a capitalised one means the same role.
+    expect(expandRefShorthand({ type: "click", locator: "Button:Save" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "button", name: "Save", exact: true },
+    });
+  });
+
+  test("kind words name their locator kind where the surface has no such role", () => {
+    const kindWords = BROWSER_LOCATOR_KIND_WORDS;
+    expect(
+      expandRefShorthand({ type: "fill", locator: "label:Email", value: "x" }, kindWords),
+    ).toEqual({ type: "fill", locator: { kind: "label", text: "Email" }, value: "x" });
+    expect(
+      expandRefShorthand(
+        { type: "batch", actions: [{ type: "fill", locator: "Placeholder: Search ", value: "x" }] },
+        kindWords,
+      ),
+    ).toEqual({
+      type: "batch",
+      actions: [{ type: "fill", locator: { kind: "placeholder", text: "Search" }, value: "x" }],
+    });
+    // Without kind words (desktop readings, where label is a role) it stays a role.
+    expect(expandRefShorthand({ type: "click", locator: "label:Email" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "label", name: "Email", exact: true },
+    });
   });
 });

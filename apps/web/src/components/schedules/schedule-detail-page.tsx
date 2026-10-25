@@ -867,9 +867,9 @@ function Instructions({ text }: { text: string }) {
 }
 
 const EACH_RUN: Record<ScheduledTask["runMode"], string> = {
-  new_session_per_run: "New chat each run",
-  reusable_session: "One ongoing chat",
-  existing_session: "Posts into an existing chat",
+  new_session_per_run: "Starts a new chat",
+  reusable_session: "Continues one ongoing chat",
+  existing_session: "Continues an existing chat",
 };
 
 const IF_STILL_RUNNING: Record<ScheduledTask["overlapPolicy"], string> = {

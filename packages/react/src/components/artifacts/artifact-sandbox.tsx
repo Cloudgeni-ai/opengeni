@@ -6,15 +6,23 @@ import {
   RefreshCwIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { SiteViewer } from "@opengeni/sdk";
 
 import { cn } from "../../lib/cn";
+import { PortalContainerProvider, usePortalContainer } from "../../ui/portal-container";
 import { ArtifactBadge, ArtifactButton, useArtifactLabels } from "./artifact-chrome";
 import {
   PublishedHtmlArtifactFrame,
   type PublishedHtmlArtifactToolBridge,
 } from "./published-html-artifact-frame";
+
+/**
+ * What the frame's Live label says when the host watches the Site for new
+ * versions: showing the current version, loading a newer one, or unable to
+ * check for them.
+ */
+export type SiteLiveState = "live" | "updating" | "reconnecting";
 
 export type ArtifactSandboxProps = {
   html: string;
@@ -31,6 +39,12 @@ export type ArtifactSandboxProps = {
    * published Site. `null` shows nothing there; omit it for the default.
    */
   liveStatus?: ReactNode | undefined;
+  /**
+   * The real state of the Site on screen, from a host that watches it for new
+   * versions. `updating` and `reconnecting` show beside the Live indicator
+   * (or the host's replacement); without it the plain "Live" badge shows.
+   */
+  liveState?: SiteLiveState | undefined;
   versionLabel?: string | undefined;
   className?: string | undefined;
   editDisabled?: boolean | undefined;
@@ -55,6 +69,11 @@ export type ArtifactSandboxProps = {
   showToolbar?: boolean | undefined;
   /** Reload the Site whenever this changes, from a host-drawn reload control. */
   reloadToken?: number | undefined;
+  /**
+   * The page the frame shows, for example its version: a new key replaces
+   * the frame in the same render as its HTML, so the Site loads once.
+   */
+  frameKey?: string | undefined;
 };
 
 /**
@@ -73,6 +92,14 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
   };
   const frameRef = useRef<HTMLDialogElement>(null);
   const modalRef = useRef(false);
+  // In full screen everything outside the modal is inert, so menus opened
+  // from the header (the version menu) draw inside it.
+  const inheritedPortal = usePortalContainer();
+  const [frameElement, setFrameElement] = useState<HTMLDialogElement | null>(null);
+  const attachFrame = useCallback((element: HTMLDialogElement | null) => {
+    frameRef.current = element;
+    setFrameElement(element);
+  }, []);
   useLayoutEffect(() => {
     const frame = frameRef.current;
     if (!frame) return;
@@ -94,7 +121,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
   };
   return (
     <dialog
-      ref={frameRef}
+      ref={attachFrame}
       open
       aria-label={props.title}
       data-artifact-fullscreen={focused || undefined}
@@ -138,7 +165,13 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
           {props.showTitle !== false && (
             <span className="truncate text-xs font-semibold text-fg">{props.title}</span>
           )}
-          {props.headerControls}
+          {props.headerControls ? (
+            <PortalContainerProvider
+              container={focused && frameElement ? frameElement : inheritedPortal}
+            >
+              {props.headerControls}
+            </PortalContainerProvider>
+          ) : null}
           {props.versionLabel ? (
             <ArtifactBadge className="hidden h-5 rounded-md border-border/80 px-1.5 text-2xs font-normal text-fg-muted sm:inline-flex">
               {props.versionLabel}
@@ -173,14 +206,20 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
               <span className="sm:hidden">{labels.editShort}</span>
             </ArtifactButton>
           ) : null}
-          {props.showLiveStatus !== false && props.liveStatus !== undefined
-            ? props.liveStatus
-            : null}
+          {props.showLiveStatus !== false && props.liveStatus !== undefined ? (
+            // The host's replacement (a link to the published Site) draws its
+            // tooltips inside the full-screen frame too.
+            <PortalContainerProvider
+              container={focused && frameElement ? frameElement : inheritedPortal}
+            >
+              {props.liveState !== undefined ? (
+                <LiveStateBeside status={props.liveState} labels={labels} />
+              ) : null}
+              {props.liveStatus}
+            </PortalContainerProvider>
+          ) : null}
           {props.showLiveStatus !== false && props.liveStatus === undefined && (
-            <span className="mr-1 hidden items-center gap-1.5 text-2xs font-medium text-fg-muted sm:inline-flex">
-              <span className="size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10" />
-              {labels.live}
-            </span>
+            <LiveLabel status={props.liveState} labels={labels} />
           )}
           <ArtifactButton
             variant="ghost"
@@ -205,7 +244,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         </div>
       </div>
       <PublishedHtmlArtifactFrame
-        key={`${reloadKey}:${props.reloadToken ?? 0}`}
+        key={`${reloadKey}:${props.reloadToken ?? 0}:${props.frameKey ?? ""}`}
         title={props.title}
         html={props.html}
         autoHeight={Boolean(props.autoHeight && !focused)}
@@ -220,5 +259,93 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         )}
       />
     </dialog>
+  );
+}
+
+/**
+ * Beside a host's replacement for Live: only Updating or Reconnecting shows.
+ * The status region stays mounted and only its text changes, so screen
+ * readers announce each change.
+ */
+function LiveStateBeside({
+  status,
+  labels,
+}: {
+  status: SiteLiveState;
+  labels: ReturnType<typeof useArtifactLabels>;
+}) {
+  const busy = status === "updating" || status === "reconnecting";
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      data-live-state-region=""
+      data-live-status={busy ? status : undefined}
+      className={
+        busy
+          ? "mr-1 inline-flex items-center gap-1.5 text-2xs font-medium text-fg-muted"
+          : "sr-only"
+      }
+    >
+      {busy ? (
+        <>
+          <span
+            aria-hidden="true"
+            className={cn(
+              "size-1.5 rounded-full",
+              status === "updating"
+                ? "bg-status-running ring-4 ring-status-running/15 motion-safe:animate-pulse"
+                : "bg-status-waiting ring-4 ring-status-waiting/15",
+            )}
+          />
+          <span className="max-sm:sr-only">
+            {status === "updating" ? labels.liveUpdating : labels.liveReconnecting}
+          </span>
+        </>
+      ) : null}
+    </span>
+  );
+}
+
+/**
+ * Live, or what the host watching the Site knows: a newer version loading,
+ * or no way to check for one right now. Announced politely when it changes;
+ * on a narrow screen only its dot shows, and it is still announced.
+ */
+function LiveLabel({
+  status,
+  labels,
+}: {
+  status: SiteLiveState | undefined;
+  labels: ReturnType<typeof useArtifactLabels>;
+}) {
+  const text =
+    status === "updating"
+      ? labels.liveUpdating
+      : status === "reconnecting"
+        ? labels.liveReconnecting
+        : labels.live;
+  return (
+    <span
+      className={cn(
+        "mr-1 items-center gap-1.5 text-2xs font-medium text-fg-muted sm:inline-flex",
+        status ? "inline-flex" : "hidden",
+      )}
+      data-live-status={status}
+      {...(status ? { role: "status", "aria-live": "polite" as const } : {})}
+    >
+      <span
+        aria-hidden="true"
+        className={cn(
+          "size-1.5 rounded-full",
+          status === "updating"
+            ? "bg-status-running ring-4 ring-status-running/15 motion-safe:animate-pulse"
+            : status === "reconnecting"
+              ? "bg-status-waiting ring-4 ring-status-waiting/15"
+              : "bg-status-success ring-4 ring-status-success/10",
+        )}
+      />
+      <span className={status ? "max-sm:sr-only" : undefined}>{text}</span>
+    </span>
   );
 }

@@ -2,7 +2,11 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 // Pin the source we tested, including fixes newer than the published SDK.
-export const cuaSourceRevision = "11b06dbb457240bbf2c54dbe2ae6e5633f6a150a";
+// A pin that changes a tool's schema also needs the macOS and Linux catalogs
+// regenerated (scripts/generate-cua-desktop-tools.ts) and their byte and sha256
+// pins in scripts/check-public-repo-hygiene.ts updated: native calls are refused
+// when the worker's schema differs from the bundled one.
+export const cuaSourceRevision = "7f9625f82aa67c3431744651a0c1352a1c8256a9";
 const repository = "https://github.com/Cloudgeni-ai/cua.git";
 
 export async function buildCuaWorker(architecture: string): Promise<string> {

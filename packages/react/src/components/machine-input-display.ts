@@ -6,7 +6,7 @@ import { type OpenGeniText } from "../messages/runtime";
 export const MACHINE_INPUT_META = (
   t: OpenGeniText,
 ): Record<MachineInputMember["kind"], string> => ({
-  scheduled_occurrence: t("machineInputDisplay.scheduledUpdate"),
+  scheduled_occurrence: t("machineInputDisplay.automationRun"),
   goal_continuation: t("machineInputDisplay.goalContinued"),
   background_command_result: t("machineInputDisplay.commandResultReceived"),
   session_wait_timeout: t("machineInputDisplay.waitEnded"),
@@ -61,8 +61,8 @@ export function machineInputBatchLabel(
           : t("machineInputDisplay.goalContinuationsCount", { count: n });
       case "scheduled_occurrence":
         return n === 1
-          ? t("machineInputDisplay.scheduledUpdate")
-          : t("machineInputDisplay.scheduledUpdatesCount", { count: n });
+          ? t("machineInputDisplay.automationRun")
+          : t("machineInputDisplay.automationRunsCount", { count: n });
       case "agent_message":
         return n === 1
           ? t("machineInputDisplay.agentUpdate")

@@ -29,14 +29,12 @@ import {
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
   markRecordingDeleting,
-  nestedPostgresSqlState,
   purgeDeletingRecording,
   recordingPreparedTrackObjectKey,
   RecordingNotFoundError,
   recordingVoiceChannel,
   setRecordingTrackPrepared,
   type Database,
-  type DueRecordingRetention,
   type RecordingSpeakerVoice,
   type StalledRecordingWork,
 } from "@opengeni/db";
@@ -552,14 +550,10 @@ export function createRecordingActivities(
     return { found: work.length, started, failed };
   }
 
-  let reportedRetentionWithheld = false;
-
   /**
    * Apply each workspace's recording retention: delete the audio of meetings
    * past their audio period (the transcript stays), and delete meetings past
-   * their transcript period, as their owner would. While the runtime's
-   * EXECUTE on the retention inventory is still withheld (migration 0946), a
-   * pass is a no-op, logged once at debug level.
+   * their transcript period, as their owner would.
    */
   async function applyRecordingRetention(): Promise<{
     found: number;
@@ -568,18 +562,7 @@ export function createRecordingActivities(
     failed: number;
   }> {
     const { db, objectStorage, startRecordingWorkflow, observability } = await services();
-    const none = { found: 0, audioDeleted: 0, recordingsDeleted: 0, failed: 0 };
-    let due: DueRecordingRetention[];
-    try {
-      due = await listDueRecordingRetention(db, 50);
-    } catch (error) {
-      if (nestedPostgresSqlState(error) !== "42501") throw error;
-      if (!reportedRetentionWithheld) {
-        reportedRetentionWithheld = true;
-        observability.debug("Recording retention skipped: runtime EXECUTE is not granted yet");
-      }
-      return none;
-    }
+    const due = await listDueRecordingRetention(db, 50);
     let audioDeleted = 0;
     let recordingsDeleted = 0;
     let failed = 0;

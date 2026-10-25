@@ -196,6 +196,8 @@ export type TranscriptionAvailabilityContext = {
   preferredProvider?: string | null | undefined;
   fallbackEnabled?: boolean | undefined;
   excludedProviders?: readonly string[] | undefined;
+  /** Account from the caller's verified workspace grant; providers still recheck their pool. */
+  accountId?: string | undefined;
   workspaceId?: string | undefined;
   subjectId?: string | undefined;
 };

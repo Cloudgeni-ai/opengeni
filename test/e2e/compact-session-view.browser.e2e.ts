@@ -787,6 +787,10 @@ describe("compact session view on the live local workspace route (API fixture)",
   for (const { localArchived, continuationFirst } of [true, false].flatMap((archived) =>
     [false, true].map((first) => ({ localArchived: archived, continuationFirst: first })),
   )) {
+    // Each case walks a whole archive, continuation, search and workspace
+    // round trip: about 20 s locally and up to twice that on shared CI
+    // runners. The budget only bounds a hang; every step waits on its own
+    // condition.
     test(`retained local ${localArchived ? "archive" : "restore"} receipt reconciles browse children independently of global search${continuationFirst ? " with stale first-page overlap" : ""}`, async () => {
       const root = {
         ...rows[0]!,
@@ -1184,7 +1188,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       ).toBe(true);
       await page.keyboard.press("Escape");
       await dialog.waitFor({ state: "hidden" });
-    }, 45_000);
+    }, 90_000);
   }
 
   test("failure cleanup releases consumed and unconsumed fixture gates", async () => {

@@ -62,6 +62,7 @@ import {
   isVaultError,
   listVaultFieldVersions,
   listVaultItems,
+  listSecretApprovalRules,
   listVaultsForSubject,
   vaultItemCursor,
   moveVaultItem,
@@ -800,7 +801,12 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   async function agentItemByReference(
     principal: SecretPrincipal,
     raw: string,
-  ): Promise<{ itemId: string; fieldId: string | null; version: number | null }> {
+  ): Promise<{
+    itemId: string;
+    fieldId: string | null;
+    fieldName: string | null;
+    version: number | null;
+  }> {
     let reference;
     try {
       reference = parseSecretReference(raw.startsWith("{{") ? raw : `{{secret:${raw}}}`);
@@ -839,6 +845,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     return {
       itemId: outcome.candidate.itemId,
       fieldId: outcome.candidate.fieldId,
+      fieldName: outcome.candidate.fieldName,
       version: outcome.candidate.version,
     };
   }
@@ -1450,6 +1457,22 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const target = await agentItemByReference(principal, input.reference);
       if (target.fieldId === null) {
         throw new VaultError("vault_field_not_found", "the reference names no field");
+      }
+      // A value that needs the person's approval for each use never reaches
+      // an agent's context, approved or not.
+      if (principal.kind !== "human") {
+        const fieldKey = secretNameKey(target.fieldName ?? "");
+        const rules = await listSecretApprovalRules(
+          deps.db,
+          { accountId: principal.accountId, workspaceId: principal.workspaceId },
+          [target.itemId],
+        );
+        if (rules.some((rule) => rule.fieldKey === "" || rule.fieldKey === fieldKey)) {
+          throw new VaultError(
+            "vault_permission_denied",
+            "this secret needs the person's approval for each use, so its value is never shown to an agent; use its reference where the value is needed",
+          );
+        }
       }
       const read = await readVaultFieldCiphertext(deps.db, principalContext(principal), {
         fieldId: target.fieldId,

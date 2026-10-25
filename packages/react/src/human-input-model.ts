@@ -7,10 +7,21 @@ import type {
   HumanInputSecretSaveTo,
   HumanInputSecretSpec,
 } from "@opengeni/sdk";
+import { secretUseApprovalIdFromQuestionId } from "@opengeni/sdk/secret-use-approval";
 import { type OpenGeniText } from "./messages/runtime";
 
 /* Pure drafting and validation rules for structured human-input requests,
    shared by the web HumanInputForm and non-DOM renderers. */
+
+/**
+ * Host-owned choice questions (a Skill review, a secret approval) take only
+ * their own options; every other choice question also offers Other.
+ */
+export function choiceOffersOther(
+  question: Pick<HumanInputQuestion, "id" | "skillReview">,
+): boolean {
+  return !question.skillReview && secretUseApprovalIdFromQuestionId(question.id) === null;
+}
 
 export type HumanInputAnswerDraft = {
   values: string[];

@@ -2053,7 +2053,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           return await this.untilDialog(state, async () => {
             if (last !== "navigate" && last !== "history" && last !== "wait")
               await this.settleActionRequests(state, requestsBeforeActions);
+            // Taken before animations settle: a handler may start its request
+            // while a click ripple or transition is still running.
+            const late =
+              last !== undefined && LATE_REQUEST_ACTIONS.has(last) ? settleBaseline(state) : null;
             await this.settleFiniteAnimations(state);
+            if (late) await this.settleLateActionRequests(state, late);
             const currentInfo = await this.requireTargetInfo(
               await this.ensureConnection(),
               info.targetId,
@@ -4226,6 +4231,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "fill": {
         const node = await this.resolveActionLocator(state, action.locator);
         if (await this.fillNativeDateTimeInput(state, node.backendDOMNodeId, action.value)) return;
+        if (await this.fillSlider(state, node.backendDOMNodeId, action.value)) return;
         await this.assertFillableTarget(state, node.backendDOMNodeId);
         await this.focusNode(state, node.backendDOMNodeId);
         await this.selectAllAndDelete(state, node.backendDOMNodeId);
@@ -5833,6 +5839,151 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /**
+   * Sets a slider to a number. A native range input takes the value
+   * directly, the way dragging its handle commits one. A custom slider
+   * (role slider) only moves the way its page lets a person move it, so press
+   * the arrow keys toward the value, reading its aria-valuenow after each
+   * press. Returns false for every other element.
+   */
+  private async fillSlider(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    value: string,
+  ): Promise<boolean> {
+    if (backendDOMNodeId === null) return false;
+    const target = value.trim() === "" ? Number.NaN : Number(value.trim());
+    const read = async (): Promise<SliderState | null> =>
+      sliderState(
+        await this.callOnNode(state, backendDOMNodeId, SLIDER_STATE_FUNCTION, [
+          { value: Number.isFinite(target) ? target : null },
+        ]),
+      );
+    const initial = await read();
+    if (initial === null) return false;
+    if (initial.disabled) {
+      throw new InteractionDefiniteDriverError("invalid_action", "this slider is disabled");
+    }
+    const range = `${initial.min ?? "its minimum"} to ${initial.max ?? "its maximum"}`;
+    if (
+      !Number.isFinite(target) ||
+      (initial.min !== null && target < initial.min) ||
+      (initial.max !== null && target > initial.max)
+    ) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `this slider takes a number from ${range}; it is at ${initial.value ?? "an unknown value"}`,
+      );
+    }
+    if (initial.kind === "range") {
+      if (initial.nearest !== null && initial.nearest !== target) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          `this slider moves in steps; the nearest value it takes is ${initial.nearest}`,
+        );
+      }
+      const result = await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        SET_RANGE_VALUE_FUNCTION,
+        [{ value: target }],
+        { potentialEffect: true },
+      );
+      if (!isRecord(result) || result.kind !== "set") {
+        if (isRecord(result) && result.kind === "disabled") {
+          throw new InteractionDefiniteDriverError("invalid_action", "this slider is disabled");
+        }
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "browser set the slider's value but the page did not keep it; check the current page before continuing",
+        );
+      }
+      return true;
+    }
+    if (initial.value === null) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "this slider does not report its value; drag its handle or press its keys and check the page",
+      );
+    }
+    if (sameSliderValue(initial.value, target)) return true;
+    await this.focusNode(state, backendDOMNodeId);
+    let current = initial.value;
+    let presses = 0;
+    const press = async (key: string): Promise<number | null> => {
+      presses += 1;
+      await this.pressKey(state, this.parseActionKey(key));
+      let next = (await read())?.value ?? null;
+      if (next !== null && sameSliderValue(next, current)) {
+        await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
+        next = (await read())?.value ?? null;
+      }
+      return next !== null && sameSliderValue(next, current) ? null : next;
+    };
+    // Which arrow raises the value depends on the slider: a vertical one may
+    // listen only for up and down, and a right-to-left one lowers with the
+    // right arrow. Learn it from the first press that moves the slider.
+    const [primary, secondary] = initial.vertical
+      ? [SLIDER_VERTICAL_KEYS, SLIDER_HORIZONTAL_KEYS]
+      : [SLIDER_HORIZONTAL_KEYS, SLIDER_VERTICAL_KEYS];
+    let keys: { raise: string; lower: string } | null = null;
+    while (!sameSliderValue(current, target)) {
+      if (presses >= SLIDER_MAX_KEY_PRESSES) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `the slider moved from ${initial.value} to ${current} in ${presses} arrow key presses without reaching ${target}; drag its handle the rest of the way`,
+        );
+      }
+      const up = current < target;
+      let next: number | null = null;
+      if (keys === null) {
+        const candidates = up
+          ? [primary.raise, secondary.raise, primary.lower]
+          : [primary.lower, secondary.lower, primary.raise];
+        for (const key of candidates) {
+          next = await press(key);
+          if (next === null) continue;
+          const opposite = SLIDER_OPPOSITE_KEY[key] ?? key;
+          keys = next > current ? { raise: key, lower: opposite } : { raise: opposite, lower: key };
+          break;
+        }
+        if (next === null) {
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `this slider did not move when its arrow keys were pressed (it is at ${current}); drag its handle or click its track instead`,
+          );
+        }
+        // A first press the wrong way only taught which key is which.
+        if (up ? next < current : next > current) {
+          current = next;
+          continue;
+        }
+      } else {
+        next = await press(up ? keys.raise : keys.lower);
+        if (next === null) {
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `this slider did not move when its arrow key was pressed (it is at ${current}); drag its handle or click its track instead`,
+          );
+        }
+        if (up ? next < current : next > current) {
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `this slider moved away from ${target} when its arrow keys were pressed; it is now at ${next}`,
+          );
+        }
+      }
+      if (!sameSliderValue(next, target) && (up ? next > target : next < target)) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `this slider moves in steps of ${Number(Math.abs(next - current).toPrecision(12))} and cannot be set to ${target}; it is now at ${next}`,
+        );
+      }
+      current = next;
+    }
+    return true;
+  }
+
+  /**
    * Fill replaces the text of an editable field. Refuse any other element
    * before focusing or typing, with the action that does work on it: typing
    * into a select or a custom combobox would at best do nothing and at worst
@@ -6490,6 +6641,43 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    */
   private async settleFiniteAnimations(state: TargetState): Promise<void> {
     if (this.engine !== "chromium" || state.dialog) return;
+    await this.evaluateForSettle(
+      state,
+      SETTLE_FINITE_ANIMATIONS_EXPRESSION,
+      ANIMATION_SETTLE_LIMIT_MS + 1_000,
+    );
+  }
+
+  /**
+   * Many handlers await something before their request: reading the chosen
+   * file, hashing a password, a validation promise. When the action's first
+   * settle ran, that request had not started, so the result would show the
+   * page before the response the agent is waiting for. Give such a handler
+   * one frame to start its request, and settle every request started since
+   * `later` (taken before animations settled) like the others. A page that
+   * starts nothing pays only that frame.
+   */
+  private async settleLateActionRequests(
+    state: TargetState,
+    later: ActionSettleBaseline,
+  ): Promise<void> {
+    if (this.engine !== "chromium" || state.dialog) return;
+    await this.evaluateForSettle(state, LATE_REQUEST_FRAME_EXPRESSION, 1_000);
+    await this.settleActionRequests(state, later);
+    if (
+      state.networkActivitySequence !== later.activity ||
+      state.navigationSequence !== later.navigation
+    ) {
+      await this.settleFiniteAnimations(state);
+    }
+  }
+
+  /** Evaluates a settle wait where page scripts cannot see or stall it. */
+  private async evaluateForSettle(
+    state: TargetState,
+    expression: string,
+    timeoutMs: number,
+  ): Promise<void> {
     try {
       const world = await this.sendTarget<{ executionContextId?: unknown }>(
         state,
@@ -6501,12 +6689,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state,
         "Runtime.evaluate",
         {
-          expression: SETTLE_FINITE_ANIMATIONS_EXPRESSION,
+          expression,
           contextId: world.executionContextId,
           returnByValue: true,
           awaitPromise: true,
         },
-        { timeoutMs: ANIMATION_SETTLE_LIMIT_MS + 1_000 },
+        { timeoutMs },
       );
     } catch {
       // Settling only improves the snapshot; it never decides the outcome.
@@ -7277,7 +7465,7 @@ function accessibilityLocatorMatches(
         entry.role.toLowerCase() === locator.role.toLowerCase() &&
         (locator.name === undefined ||
           (locator.exact
-            ? entry.name === locator.name
+            ? sameAccessibleName(entry.name, locator.name)
             : (entry.name ?? "").toLocaleLowerCase().includes(locator.name.toLocaleLowerCase()))),
     );
   }
@@ -7285,7 +7473,7 @@ function accessibilityLocatorMatches(
     return entries.filter(
       (entry) =>
         entry.backendDOMNodeId !== null &&
-        entry.name === locator.text &&
+        sameAccessibleName(entry.name, locator.text) &&
         isFormControlRole(entry.role),
     );
   }
@@ -7517,6 +7705,44 @@ const ACTION_REQUEST_SETTLE_LIMIT_MS = 1_500;
 // result on the page as it is, still loading.
 const ACTION_NAVIGATION_SETTLE_LIMIT_MS = 10_000;
 const ACTION_REQUEST_POLL_MS = 20;
+// Input after which a page handler commonly starts a request: a click or
+// key that submits, a choice, a chosen file, a click at a point, typed keys
+// (a code box that submits after its last digit).
+const LATE_REQUEST_ACTIONS: ReadonlySet<string> = new Set([
+  "click",
+  "double_click",
+  "press",
+  "type",
+  "select",
+  "check",
+  "upload",
+  "pointer",
+]);
+
+/** What an action's settle had seen, to tell later requests apart. */
+function settleBaseline(state: TargetState): ActionSettleBaseline {
+  return {
+    open: new Set(state.inflightRequests),
+    activity: state.networkActivitySequence,
+    navigation: state.navigationSequence,
+  };
+}
+
+/** Resolves after the next frame and the task after it, or within 50 ms when
+ * the page does not animate. A hidden tab neither draws frames nor runs short
+ * timers promptly, so there two message-channel tasks stand in for them. */
+const LATE_REQUEST_FRAME_EXPRESSION = `new Promise((resolve) => {
+  const done = () => resolve(true);
+  if (document.visibilityState === "hidden") {
+    const channel = new MessageChannel();
+    let turns = 0;
+    channel.port1.onmessage = () => (++turns >= 2 ? done() : channel.port2.postMessage(0));
+    channel.port2.postMessage(0);
+    return;
+  }
+  setTimeout(done, 50);
+  requestAnimationFrame(() => setTimeout(done, 0));
+})`;
 // The response handler runs after the network layer reports the load finished.
 const ACTION_RESPONSE_APPLY_MS = 50;
 
@@ -8148,6 +8374,108 @@ const FILL_TARGET_FUNCTION = `function() {
     return { kind: "popup", role: role || "button" };
   }
   return { kind: "other", role: role || tag || "element" };
+}`;
+
+// Enough arrow presses for a 0 to 100 slider end to end, twice over.
+const SLIDER_MAX_KEY_PRESSES = 250;
+
+const SLIDER_HORIZONTAL_KEYS = { raise: "ArrowRight", lower: "ArrowLeft" };
+const SLIDER_VERTICAL_KEYS = { raise: "ArrowUp", lower: "ArrowDown" };
+const SLIDER_OPPOSITE_KEY: Record<string, string> = {
+  ArrowRight: "ArrowLeft",
+  ArrowLeft: "ArrowRight",
+  ArrowUp: "ArrowDown",
+  ArrowDown: "ArrowUp",
+};
+
+// Page sliders often step in tenths, which add up to values like
+// 0.30000000000000004; those count as the value asked for.
+function sameSliderValue(a: number, b: number): boolean {
+  return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+}
+
+type SliderState = {
+  kind: "range" | "aria";
+  value: number | null;
+  min: number | null;
+  max: number | null;
+  /** For a range input, the value it would take for the requested one. */
+  nearest: number | null;
+  disabled: boolean;
+  /** The slider says it runs up and down. */
+  vertical: boolean;
+};
+
+function sliderState(value: unknown): SliderState | null {
+  if (!isRecord(value) || (value.kind !== "range" && value.kind !== "aria")) return null;
+  const number = (field: unknown): number | null =>
+    typeof field === "number" && Number.isFinite(field) ? field : null;
+  return {
+    kind: value.kind,
+    value: number(value.value),
+    min: number(value.min),
+    max: number(value.max),
+    nearest: number(value.nearest),
+    disabled: value.disabled === true,
+    vertical: value.vertical === true,
+  };
+}
+
+// A native range input, or an element with role slider and its ARIA value. A
+// control is disabled the way a person meets it: disabled itself or by a
+// disabled fieldset, or marked aria-disabled on itself or an ancestor.
+const SLIDER_STATE_FUNCTION = `function(expected) {
+  if (!(this instanceof Element) || !this.isConnected) return { kind: "other" };
+  const number = (text) => {
+    if (text === null || text === undefined || String(text).trim() === "") return null;
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const disabled = this.matches(":disabled") || this.closest('[aria-disabled="true"]') !== null;
+  if (String(this.tagName || "").toLowerCase() === "input" && String(this.type).toLowerCase() === "range") {
+    let nearest = null;
+    if (typeof expected === "number") {
+      const probe = this.ownerDocument.createElement("input");
+      probe.type = "range";
+      for (const name of ["min", "max", "step"]) if (this.hasAttribute(name)) probe.setAttribute(name, this.getAttribute(name));
+      probe.value = String(expected);
+      nearest = Number(probe.value);
+    }
+    return {
+      kind: "range",
+      value: number(this.value),
+      min: number(this.min) ?? 0,
+      max: number(this.max) ?? 100,
+      nearest,
+      disabled,
+      vertical: false,
+    };
+  }
+  if (String(this.getAttribute("role") || "").toLowerCase() !== "slider") return { kind: "other" };
+  return {
+    kind: "aria",
+    value: number(this.getAttribute("aria-valuenow")),
+    min: number(this.getAttribute("aria-valuemin")),
+    max: number(this.getAttribute("aria-valuemax")),
+    disabled,
+    vertical: String(this.getAttribute("aria-orientation") || "").toLowerCase() === "vertical",
+  };
+}`;
+
+// Sets a native range input through the prototype setter, which bypasses the
+// per-instance value trackers frameworks install, then notifies listeners as
+// a drag does.
+const SET_RANGE_VALUE_FUNCTION = `async function(expected) {
+  if (!(this instanceof HTMLInputElement) || !this.isConnected) return { kind: "gone" };
+  if (this.matches(":disabled") || this.closest('[aria-disabled="true"]') !== null) return { kind: "disabled" };
+  const view = this.ownerDocument.defaultView;
+  const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value").set;
+  this.focus();
+  setter.call(this, String(expected));
+  this.dispatchEvent(new view.Event("input", { bubbles: true, composed: true }));
+  this.dispatchEvent(new view.Event("change", { bubbles: true }));
+  await Promise.resolve();
+  return this.isConnected && Number(this.value) === Number(expected) ? { kind: "set" } : { kind: "lost" };
 }`;
 
 const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {

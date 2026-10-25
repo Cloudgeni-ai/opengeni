@@ -26,6 +26,19 @@ function member(
 }
 
 describe("machineInputBatchLabel", () => {
+  test("names automation runs as automations, whatever started them", () => {
+    // A run can start from a schedule, an event or a manual run, so the label never says "scheduled".
+    expect(machineInputBatchLabel(englishText, [member("scheduled_occurrence")])).toBe(
+      "Automation run",
+    );
+    expect(
+      machineInputBatchLabel(englishText, [
+        member("scheduled_occurrence", "", "a"),
+        member("scheduled_occurrence", "", "b"),
+      ]),
+    ).toBe("2 automation runs");
+  });
+
   test("counts result receipts without claiming their agents finished", () => {
     expect(
       machineInputBatchLabel(englishText, [

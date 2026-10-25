@@ -67,9 +67,21 @@ const RETRYABLE_REFUSAL_TEXT: Record<string, string> = {
 /**
  * How many failed or skipped runs in a row the owner can afford to wait for
  * after `run`, and whether a later run is due at all. Unknown or unparseable
- * specs tell at once.
+ * specs tell at once. Repeating event triggers keep an automation running
+ * after its schedule's last run, and a run-once automation that completed has
+ * no later run whatever its schedule says.
  */
 export function scheduledTaskBlockerCadence(
+  schedule: unknown,
+  run: Pick<ScheduledTaskBlockerRun, "createdAt">,
+  events: ScheduledTaskBlockerFacts["task"]["events"] = null,
+): { streak: number; laterRuns: boolean } {
+  if (events?.once && events.completed) return { streak: 1, laterRuns: false };
+  const cadence = scheduleCadence(schedule, run);
+  return events && !events.once ? { ...cadence, laterRuns: true } : cadence;
+}
+
+function scheduleCadence(
   schedule: unknown,
   run: Pick<ScheduledTaskBlockerRun, "createdAt">,
 ): { streak: number; laterRuns: boolean } {
@@ -257,7 +269,7 @@ export function decideScheduledTaskBlocker(
     };
   }
   if (review?.state === "notified") return none(latest.id);
-  const cadence = scheduledTaskBlockerCadence(task.schedule, latest);
+  const cadence = scheduledTaskBlockerCadence(task.schedule, latest, task.events);
   const streak: ScheduledTaskBlockerRun[] = [];
   for (const run of runs) {
     if (!SETTLED.has(run.status) || run.status === "succeeded" || !current(run)) break;

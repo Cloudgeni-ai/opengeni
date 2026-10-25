@@ -6,6 +6,7 @@ import { GitHubActiveExecutor } from "./active";
 import { main } from "./main";
 import { Controller, LiveReader } from "./controller";
 import { AtomicGitWriter, GitStore, type RefUpdate } from "./git";
+import { proveHeadRefresh } from "./head-refresh";
 import {
   GitHubAuth,
   GitHubMutations,
@@ -19,11 +20,10 @@ import {
   config,
   digest,
   emptyLedger,
-  MAX_RUNNER_RELEVANT_RUNS,
-  MAX_SCANNED_ACTIVE_RUNS,
   runnerJobDemand,
   scanRunnerDemand,
   type Ledger,
+  type BaseCiEvidence,
   type Manifest,
   type Pull,
   type Run,
@@ -35,6 +35,106 @@ const NOW = "2026-10-21T12:00:00.000Z";
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+describe("parked native auto-merge effects", () => {
+  type Mode = "ok" | "lost-applied" | "lost-unapplied" | "errors" | "forbidden";
+  const setup = async (mode: Mode) => {
+    const f = await fixture();
+    const request = {
+      id: "PR_x",
+      headSha: f.head,
+      enabledAt: new Date(Date.parse(NOW) - 3600000).toISOString() as string | null,
+    };
+    const calls = { reads: 0, mutations: 0, failReadAt: -1 };
+    f.api.autoMergeState = async () => {
+      if (++calls.reads === calls.failReadAt) throw Error("observation unavailable");
+      return { ...request };
+    };
+    const original = f.api.transport;
+    const transport: typeof fetch = (async (url, init) => {
+      if (!String(url).endsWith("/graphql")) return original(url, init);
+      expect(JSON.parse(String(init?.body)).query).toStartWith("mutation");
+      calls.mutations++;
+      if (mode === "forbidden") return new Response("", { status: 403 });
+      if (mode === "errors") return Response.json({ errors: [{ message: "rejected" }] });
+      if (mode === "lost-unapplied") throw Error("transport lost before apply");
+      request.enabledAt = null;
+      if (mode === "lost-applied") throw Error("response lost after apply");
+      return Response.json({
+        data: { disablePullRequestAutoMerge: { pullRequest: { id: "PR_x" } } },
+      });
+    }) as typeof fetch;
+    Object.defineProperty(f.api, "transport", { value: transport });
+    const manifest = await f.publish();
+    f.verdict(manifest, "code_failure").attempt = 2;
+    await f.controller().step();
+    expect((await f.controller().step()).action.kind).toBe("park");
+    const effect = async () =>
+      Object.values((await f.state()).ledger.effects).find((e) => e.kind === "disable-auto-merge")!;
+    expect(await effect()).toBeDefined();
+    const drive = async (count: number) => {
+      for (let i = 0; i < count; i++) {
+        await f.executor().maintain();
+        f.advance();
+      }
+    };
+    return { f, request, calls, effect, drive };
+  };
+  test("successful submission stays uncertain until provider observation", async () => {
+    const x = await setup("ok");
+    await x.drive(1);
+    expect(x.calls.mutations).toBe(1);
+    expect((await x.effect()).status).toBe("uncertain");
+    await x.drive(4);
+    expect((await x.effect()).status).toBe("done");
+    expect(x.calls.mutations).toBe(1);
+  });
+  for (const mode of ["lost-applied", "lost-unapplied", "errors", "forbidden"] as const) {
+    test(`${mode} is reconciled without mutation replay`, async () => {
+      const x = await setup(mode);
+      await x.drive(14);
+      expect(x.calls.mutations).toBe(1);
+      expect((await x.effect()).status).toBe(mode === "lost-applied" ? "done" : "blocked");
+    });
+  }
+  test("a failed pre-submit observation safely retries before the first mutation", async () => {
+    const x = await setup("ok");
+    x.calls.failReadAt = 2;
+    await x.drive(1);
+    expect(x.calls.mutations).toBe(0);
+    expect((await x.effect()).status).toBe("pending");
+    await x.drive(5);
+    expect(x.calls.mutations).toBe(1);
+    expect((await x.effect()).status).toBe("done");
+  });
+  test("changed head suppresses disable", async () => {
+    const x = await setup("ok");
+    x.request.headSha = "b".repeat(40);
+    await x.drive(4);
+    expect(x.calls.mutations).toBe(0);
+    expect((await x.effect()).status).toBe("done");
+  });
+  test("newer enable is preserved; only a new post-park native event retries", async () => {
+    const x = await setup("ok");
+    const parked = (await x.f.state()).ledger.parked![0]!;
+    const later = new Date(Date.parse(parked.parkedAt) + 60000).toISOString();
+    x.request.enabledAt = later;
+    await x.drive(4);
+    expect(x.calls.mutations).toBe(0);
+    expect((await x.effect()).status).toBe("done");
+    const pull = x.f.api.pulls[0]!;
+    for (const binding of [
+      { ...pull.binding, source: "queue-ready" as const, eventId: "label-new", at: later },
+      { ...pull.binding, source: "auto-merge" as const, eventId: "old", at: parked.parkedAt },
+      { ...parked.pull.binding, source: "auto-merge" as const, at: later },
+    ]) {
+      pull.binding = binding;
+      expect((await x.f.controller().step()).action.kind).not.toBe("build");
+    }
+    pull.binding = { ...pull.binding, source: "auto-merge", eventId: "auto-new", at: later };
+    expect((await x.f.controller().step()).action.kind).toBe("build");
+  });
 });
 
 async function fixture() {
@@ -103,7 +203,7 @@ async function fixture() {
   let clock = Date.parse(NOW);
   class MockGitHub extends GitHubReader {
     baseStatus: "green" | "red" | "unknown" = "green";
-    override async baseCI(sha: string) {
+    override async baseCI(sha: string): Promise<BaseCiEvidence> {
       return {
         sha,
         status: this.baseStatus,
@@ -149,6 +249,9 @@ async function fixture() {
     override async pullSnapshot(_number: number) {
       this.onSnapshot?.();
       return { ...this.snapshot };
+    }
+    override async autoMergeState(_number: number): Promise<import("./github").AutoMergeState> {
+      return { id: "PR_fixture", headSha: this.snapshot.headSha, enabledAt: null };
     }
     override async findFollowup(request: FollowupRequest) {
       const matches = this.followups.filter(
@@ -354,6 +457,256 @@ async function mergedOriginalWithDelta() {
 }
 
 describe("actual active executor with local bare Git and mocked GitHub", () => {
+  async function refreshedFixture() {
+    const f = await fixture();
+    const advancedMain = await f.commit({ base: "base", main: "advance" }, [f.base]);
+    await f.origin.exec(["update-ref", "refs/heads/main", advancedMain]);
+    const manifest = await f.publish();
+    const refreshed = await f.origin.commit(
+      await f.origin.mergeTree(f.head, advancedMain),
+      [f.head, advancedMain],
+      "Merge main",
+      NOW,
+    );
+    await f.origin.exec(["update-ref", "refs/heads/feature", refreshed]);
+    f.api.snapshot.headSha = refreshed;
+    f.api.snapshot.branchHeadSha = refreshed;
+    f.api.pulls = [
+      {
+        ...f.makePull(),
+        headSha: refreshed,
+        binding: {
+          ...f.makePull().binding,
+          evidenceId: "fresh",
+          evidenceDigest: digest(refreshed),
+        },
+      },
+    ];
+    return { ...f, main: advancedMain, manifest, refreshed };
+  }
+  test("clean merge-main refresh lands same tested tree with native new-head ancestry and retained proof", async () => {
+    const f = await refreshedFixture();
+    f.verdict(f.manifest);
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("land");
+    const refs = await f.git.remoteRefs(f.origin.dir),
+      tip = refs.get("refs/heads/main")!;
+    expect(tip).not.toBe(f.manifest.tipSha);
+    expect(await f.git.ancestor(f.manifest.tipSha, tip)).toBe(true);
+    expect(await f.git.ancestor(f.refreshed, tip)).toBe(true);
+    expect(await f.git.exec(["rev-parse", `${tip}^{tree}`])).toBe(
+      await f.git.exec(["rev-parse", `${f.manifest.tipSha}^{tree}`]),
+    );
+    const record = (await f.state()).ledger.landings[`${f.manifest.batchId}:1`]!;
+    expect(record.pull.headSha).toBe(f.refreshed);
+    expect(record.testedSnapshot?.headSha).toBe(f.head);
+    expect(record.testedSnapshot?.tipSha).toBe(f.manifest.tipSha);
+    expect(record.tipSha).toBe(tip);
+  });
+  test("clean refresh preserves in-progress candidate without rerun or early landing", async () => {
+    const f = await refreshedFixture();
+    const run = f.verdict(f.manifest);
+    run.status = "in_progress";
+    run.completedAt = null;
+    await f.controller().step();
+    expect((await f.state()).ledger.invalidated).not.toContain(f.manifest.batchId);
+    expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(f.main);
+    expect(f.api.calls.some((x) => x.includes("/rerun"))).toBe(false);
+  });
+  test("changed-head equivalence never transfers a failed result into retry or blame", async () => {
+    const f = await refreshedFixture();
+    f.verdict(f.manifest, "code_failure");
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("record");
+    expect((await f.state()).ledger.invalidated).toContain(f.manifest.batchId);
+    expect(f.api.calls.some((x) => x.includes("/rerun"))).toBe(false);
+  });
+  test("refresh rejects extra edits, linear commits, readiness churn and changed main", async () => {
+    const f = await refreshedFixture();
+    await f.git.fetch(f.origin.dir, [f.refreshed]);
+    expect(await proveHeadRefresh(f.git, f.manifest, f.api.pulls, f.main)).not.toBeNull();
+    const changed = await f.commit({ base: "base", main: "advance", feature: "changed" }, [
+      f.head,
+      f.main,
+    ]);
+    const linear = await f.commit({ base: "base", main: "advance", feature: "old" }, [f.head]);
+    await f.git.fetch(f.origin.dir, [changed, linear]);
+    for (const headSha of [changed, linear])
+      expect(
+        await proveHeadRefresh(f.git, f.manifest, [{ ...f.api.pulls[0]!, headSha }], f.main),
+      ).toBeNull();
+    expect(
+      await proveHeadRefresh(
+        f.git,
+        f.manifest,
+        [{ ...f.api.pulls[0]!, binding: { ...f.api.pulls[0]!.binding, eventId: "relabel" } }],
+        f.main,
+      ),
+    ).toBeNull();
+    expect(await proveHeadRefresh(f.git, f.manifest, f.api.pulls, f.base)).toBeNull();
+  });
+  test("final branch-head race cannot land a refresh proof", async () => {
+    const f = await refreshedFixture();
+    f.verdict(f.manifest);
+    f.api.onSnapshot = () => {
+      f.api.snapshot.branchHeadSha = f.newer;
+    };
+    await expect(f.controller().step()).rejects.toThrow("Final source branch head changed");
+    expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(f.main);
+  });
+  test("final equivalence recomputation rejects a changed tree despite stable head metadata", async () => {
+    const f = await refreshedFixture();
+    f.verdict(f.manifest);
+    const merge = f.git.mergeTree.bind(f.git);
+    f.api.onSnapshot = () => {
+      f.git.mergeTree = async (left, right) =>
+        right === f.refreshed ? "a".repeat(40) : merge(left, right);
+    };
+    await expect(f.controller().step()).rejects.toThrow("Head refresh equivalence changed");
+    expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(f.main);
+  });
+  test("refresh proof rejects side-branch merges, reversed ancestry and excessive merge chains", async () => {
+    const f = await refreshedFixture();
+    const side = await f.commit({ base: "base", side: "not-main" }, [f.base]);
+    const sideMerge = await f.origin.commit(
+      await f.origin.mergeTree(f.head, side),
+      [f.head, side],
+      "side",
+      NOW,
+    );
+    const reversed = await f.origin.commit(
+      await f.origin.mergeTree(f.head, f.main),
+      [f.main, f.head],
+      "reverse",
+      NOW,
+    );
+    let long = f.head;
+    for (let i = 0; i < 9; i++)
+      long = await f.origin.commit(
+        await f.origin.mergeTree(long, f.main),
+        [long, f.main],
+        `main${i}`,
+        NOW,
+      );
+    await f.git.fetch(f.origin.dir, [sideMerge, reversed, long]);
+    for (const headSha of [sideMerge, reversed, long])
+      expect(
+        await proveHeadRefresh(f.git, f.manifest, [{ ...f.api.pulls[0]!, headSha }], f.main),
+      ).toBeNull();
+  });
+  test("multiple refreshed members retain every new head and the full tested tree", async () => {
+    const f = await refreshedFixture();
+    const second = await f.commit({ base: "base", second: "feature" }, [f.base]);
+    const secondRefresh = await f.origin.commit(
+      await f.origin.mergeTree(second, f.main),
+      [second, f.main],
+      "main into second",
+      NOW,
+    );
+    await f.git.fetch(f.origin.dir, [f.refreshed, second, secondRefresh]);
+    const oldSecond = { ...f.makePull(second), number: 2, headRef: "second" };
+    const tested = await f.git.build({
+      schemaVersion: 1,
+      baseSha: f.main,
+      predecessor: null,
+      recoveryOf: null,
+      createdAt: NOW,
+      pulls: [f.makePull(), oldSecond],
+    });
+    const proof = await proveHeadRefresh(
+      f.git,
+      tested,
+      [
+        f.api.pulls[0]!,
+        {
+          ...oldSecond,
+          headSha: secondRefresh,
+          binding: {
+            ...oldSecond.binding,
+            evidenceId: "fresh-second",
+            evidenceDigest: digest(secondRefresh),
+          },
+        },
+      ],
+      f.main,
+    );
+    expect(proof).not.toBeNull();
+    expect(await f.git.ancestor(f.refreshed, proof!.tipSha)).toBe(true);
+    expect(await f.git.ancestor(secondRefresh, proof!.tipSha)).toBe(true);
+    expect(await f.git.ancestor(tested.tipSha, proof!.tipSha)).toBe(true);
+    expect(await f.git.exec(["rev-parse", `${proof!.tipSha}^{tree}`])).toBe(proof!.testedTree);
+  });
+  test("refresh rebuild conflict rejects equivalence but unexpected errors propagate", async () => {
+    const f = await refreshedFixture();
+    await f.git.fetch(f.origin.dir, [f.refreshed]);
+    const { MergeConflict } = await import("./git");
+    const build = f.git.build.bind(f.git);
+    let failure: Error = new MergeConflict(1);
+    f.git.build = async (spec) => {
+      if (spec.pulls.some((p) => p.headSha === f.refreshed)) throw failure;
+      return build(spec);
+    };
+    expect(await proveHeadRefresh(f.git, f.manifest, f.api.pulls, f.main)).toBeNull();
+    await f.controller().step();
+    expect((await f.state()).ledger.invalidated).toContain(f.manifest.batchId);
+    expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(f.main);
+    for (const message of ["provider unavailable", "unknown write outcome"]) {
+      failure = new Error(message);
+      await expect(proveHeadRefresh(f.git, f.manifest, f.api.pulls, f.main)).rejects.toBe(failure);
+    }
+  });
+  test("refresh requires unchanged identity, root membership and bounded merge lineage", async () => {
+    const f = await refreshedFixture();
+    await f.git.fetch(f.origin.dir, [f.refreshed]);
+    const p = f.api.pulls[0]!;
+    for (const changed of [
+      { ...p, headRef: "other" },
+      { ...p, controlPlane: true },
+      { ...p, binding: { ...p.binding, source: "auto-merge" as const } },
+      { ...p, binding: { ...p.binding, at: "2026-10-21T12:00:01.000Z" } },
+      { ...f.makePull(), binding: { ...f.makePull().binding, evidenceId: "fresh" } },
+    ])
+      expect(await proveHeadRefresh(f.git, f.manifest, [changed], f.main)).toBeNull();
+    expect(
+      await proveHeadRefresh(f.git, { ...f.manifest, predecessor: "a".repeat(64) }, [p], f.main),
+    ).toBeNull();
+    expect(await proveHeadRefresh(f.git, f.manifest, [], f.main)).toBeNull();
+    let chain = f.head;
+    for (let i = 1; i <= 9; i++) {
+      chain = await f.origin.commit(
+        await f.origin.mergeTree(chain, f.main),
+        [chain, f.main],
+        `m${i}`,
+        NOW,
+      );
+      if (i < 8) continue;
+      await f.git.fetch(f.origin.dir, [chain]);
+      const proof = await proveHeadRefresh(f.git, f.manifest, [{ ...p, headSha: chain }], f.main);
+      expect(proof === null).toBe(i === 9);
+    }
+  });
+  test("content-neutral non-main ancestry, evil-revert and octopus refreshes are rejected", async () => {
+    const f = await refreshedFixture();
+    const p = f.api.pulls[0]!;
+    const mainTree = await f.origin.exec(["rev-parse", `${f.main}^{tree}`]);
+    const cherry = await f.origin.commit(mainTree, [f.base], "cherry-picked main", NOW);
+    const viaCherry = await f.origin.commit(
+      await f.origin.mergeTree(f.head, cherry),
+      [f.head, cherry],
+      "merge cherry",
+      NOW,
+    );
+    const clean = await f.origin.mergeTree(f.head, f.main);
+    const evil = await f.commit({ base: "base", main: "advance", feature: "old", injected: "x" }, [
+      f.head,
+      f.main,
+    ]);
+    const revert = await f.origin.commit(clean, [evil, f.main], "evil revert", NOW);
+    const octopus = await f.origin.commit(clean, [f.head, f.main, cherry], "octopus", NOW);
+    await f.git.fetch(f.origin.dir, [viaCherry, revert, octopus]);
+    for (const headSha of [viaCherry, revert, octopus])
+      expect(await proveHeadRefresh(f.git, f.manifest, [{ ...p, headSha }], f.main)).toBeNull();
+  });
   test("missing initialized state alerts and refuses activation without provider writes", async () => {
     const f = await fixture();
     await f.origin.exec(["update-ref", "-d", f.cfg.stateRef]);
@@ -363,13 +716,28 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(f.api.calls).toHaveLength(0);
     expect((await f.git.remoteRefs(f.origin.dir)).has(f.cfg.stateRef)).toBe(false);
   });
+  test.each([false, true])("native MERGED is distinct from CLOSED (merged=%s)", async (merged) => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    f.api.snapshot.state = "closed";
+    f.api.snapshot.merged = merged;
+    f.advance();
+    await f.executor().maintain();
+    expect((await f.state()).ledger.landings[`${m.batchId}:1`]?.status).toBe(
+      merged ? "native-merged" : "closed-unmerged",
+    );
+  });
   test("publishes create-only, lands exact tested tip, reconstructs without duplicate landing", async () => {
     const f = await fixture(),
       m = await f.publish();
     f.verdict(m);
     expect((await f.controller().step()).action.kind).toBe("land");
     expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
-    expect((await f.state()).ledger.landings[`${m.batchId}:1`]?.status).toBe("unchanged");
+    expect((await f.state()).ledger.landings[`${m.batchId}:1`]?.status).toBe(
+      "awaiting-native-merge",
+    );
     expect(f.api.comments[0]).toContain(f.head);
     expect(f.api.comments[0]).toContain(m.tipSha);
     expect((await f.controller().step()).action.kind).toBe("wait");
@@ -517,7 +885,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await expect(f.publish()).rejects.toThrow();
     expect((await f.state()).sha).toBe(f.initializedSha);
   });
-  test("main headroom blocks hosted publication, retry and landing", async () => {
+  test("blocking reader evidence prevents hosted publication, retry and landing", async () => {
+    // This stub models incomplete/unknown evidence or an occupied Batch slot.
+    // Valid numeric/main-capacity estimates are informational in the live reader.
     const f = await fixture();
     f.api.busy = true;
     const local = await f.controller().step();
@@ -535,6 +905,60 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect((await f.controller().step()).action.kind).toBe("wait");
     expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
   });
+  test.each(["publish", "retry", "land"] as const)(
+    "live capacity observation permits %s while preserving executor checks",
+    async (phase) => {
+      const f = await fixture();
+      const live = new GitHubReader(
+        config({ BATCHER_MODE: "active", BATCHER_RUNNER_BUDGET: "52", BATCHER_MAIN_RESERVE: "30" }),
+        new GitHubAuth({}),
+        (async (url: string | URL | Request) => {
+          const path = String(url);
+          if (path.includes("/jobs?"))
+            return Response.json({
+              total_count: 4,
+              jobs: [
+                { status: "queued" },
+                ...Array.from({ length: 3 }, () => ({ status: "completed" })),
+              ],
+            });
+          const status = new URL(path).searchParams.get("status");
+          const runs =
+            status === "in_progress"
+              ? [
+                  {
+                    id: 900,
+                    status,
+                    path: ".github/workflows/ci.yml",
+                    head_branch: "main",
+                    event: "push",
+                  },
+                ]
+              : [];
+          return Response.json({ total_count: runs.length, workflow_runs: runs });
+        }) as typeof fetch,
+      );
+      f.api.mainBusy = () => live.mainBusy();
+      const m = await f.publish();
+      if (phase === "retry") {
+        f.verdict(m, "infrastructure");
+        f.advance(61);
+        expect((await f.controller().step()).action.kind).toBe("retry");
+        await f.executor().maintain();
+        expect(f.api.calls).toHaveLength(1);
+        expect(f.api.calls[0]).toEndWith("/rerun");
+      } else if (phase === "land") {
+        f.verdict(m);
+        expect((await f.controller().step()).action.kind).toBe("land");
+        expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
+      }
+      expect(live.lastHeadroom).toMatchObject({
+        allowed: true,
+        capacityInformational: true,
+        capacity: { hold: "main-queued", mainQueuedJobs: 1 },
+      });
+    },
+  );
   test("whole-run retry lost response is observed by attempt after restart, never duplicated", async () => {
     const f = await fixture(),
       m = await f.publish();
@@ -874,7 +1298,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("done");
     expect(f.api.calls).toHaveLength(1);
   });
-  test.each(["red", "unknown", "green"] as const)(
+  test.each(["green"] as const)(
     "inherited #5243-style singleton is parked without blame on %s main; new base does not retry it",
     async (status) => {
       const f = await fixture();
@@ -889,8 +1313,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect((await f.controller().step()).action.kind).toBe("park");
       expect(f.api.calls).toEqual([]);
       await f.controller().step();
+      await f.executor().maintain(); // Reconcile native disable before the parking comment.
       expect(f.api.comments).toHaveLength(1);
-      expect(f.api.comments[0]).toContain("not a culprit attribution");
+      expect(f.api.comments[0]).toContain("singleton Batch CI failed");
       await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
       f.api.baseStatus = "green";
       expect((await f.controller().step()).action.kind).toBe("wait");
@@ -915,6 +1340,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     f.verdict(m, "code_failure").attempt = 2;
     await f.controller().step();
     expect((await f.controller().step()).action.kind).toBe("park");
+    await f.executor().maintain(); // Already-disabled native request is reconciled first.
     f.api.response = "lost";
     await f.executor().maintain();
     expect(f.api.calls).toHaveLength(1);
@@ -950,6 +1376,50 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(f.api.calls.every((call) => call.endsWith("/comments"))).toBe(true);
     },
   );
+  test("relevant green classes on a pending base drive one durable retry through the real executor", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    const failed = f.verdict(m, "code_failure");
+    failed.failedClasses = ["units"];
+    f.api.baseCI = async (sha) => ({
+      sha,
+      status: "classes",
+      runId: 50,
+      attempt: 1,
+      reason: "relevant tests complete; release image waiting",
+      classes: { source: "green", units: "green" },
+    });
+    f.advance(61);
+    expect((await f.controller().step()).action.kind).toBe("retry");
+    expect((await f.state()).ledger.retries[m.batchId]?.fromAttempt).toBe(1);
+    await f.executor().maintain();
+    expect(f.api.calls.filter((call) => call.endsWith("/rerun"))).toHaveLength(1);
+    f.advance();
+    await f.executor().maintain();
+    expect(f.api.calls.filter((call) => call.endsWith("/rerun"))).toHaveLength(1);
+    expect((await f.state()).ledger.parked ?? []).toEqual([]);
+  });
+  test("real reader observes exact red base before retrying or parking a failed batch", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    f.api.baseStatus = "red";
+    for (const [attempt, status] of [
+      [1, "red"],
+      [2, "unknown"],
+      [2, "red"],
+    ] as const) {
+      f.api.baseStatus = status;
+      f.verdict(m, "code_failure").attempt = attempt;
+      const result = await f.controller().step();
+      expect(result.action.kind).toBe("wait");
+      expect(result.reason).toContain("no retry, split or parking");
+      const ledger = (await f.state()).ledger;
+      expect(ledger.retries).toEqual({});
+      expect(ledger.recovery).toEqual([]);
+      expect(ledger.parked ?? []).toEqual([]);
+      expect(ledger.invalidated).not.toContain(m.batchId);
+    }
+  });
   test("legacy pending code-failure comment holds even with green full-main CI", async () => {
     const f = await fixture();
     await f.seed((l) => {
@@ -1094,7 +1564,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         return Response.json({ total_count: runs.length, workflow_runs: runs });
       }) as typeof fetch;
       const reader = new GitHubReader(cfg, new GitHubAuth({}), transport);
-      expect(await reader.mainBusy()).toBe(held);
+      expect(await reader.mainBusy()).toBe(false);
+      expect(Boolean(reader.lastHeadroom?.capacity?.hold)).toBe(held);
       expect(reader.lastHeadroom?.reservedMain).toBe(Math.max(40, mainJobs));
       expect(reader.lastHeadroom?.occupied).toBe(mainJobs + otherJobs);
       expect(reader.lastHeadroom?.candidateSlots).toBe(18);
@@ -1176,9 +1647,11 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       ],
     ] as const)("%s", async (_name, statuses, demand, allowed) => {
       const r = reader([{ id: 2, status: "queued", ...OTHER }], { 2: page(jobs(...statuses)) });
-      expect(await r.mainBusy()).toBe(!allowed);
+      expect(await r.mainBusy()).toBe(false);
+      expect(Boolean(r.lastHeadroom?.capacity?.hold)).toBe(!allowed);
       expect(r.lastHeadroom).toMatchObject({
-        allowed,
+        allowed: true,
+        capacityInformational: true,
         occupied: demand,
         reservedMain: 40,
         candidateSlots: 18,
@@ -1211,7 +1684,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(await fits.mainBusy()).toBe(false);
       expect(fits.lastHeadroom).toMatchObject({ occupied: 48, reservedMain: 45 });
       const tight = busy("65");
-      expect(await tight.mainBusy()).toBe(true);
+      expect(await tight.mainBusy()).toBe(false);
       expect(tight.lastHeadroom).toMatchObject({ occupied: 48, reservedMain: 45 });
       // An idle main run never shrinks the configured reserve.
       const quiet = reader(
@@ -1244,7 +1717,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(r.lastHeadroom?.reason).toContain(reason);
       expect(r.lastHeadroom?.allowed).toBe(false);
     });
-    test("run scan boundaries still hold with idle jobs", async () => {
+    test("idle run volume is allowed but malformed inventories still hold", async () => {
       const idle = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [i + 1, page([])]));
       const many = Array.from({ length: 33 }, (_, i) => ({
         id: i + 1,
@@ -1252,8 +1725,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ...OTHER,
       }));
       const tooMany = reader(many, idle, "1000");
-      expect(await tooMany.mainBusy()).toBe(true);
-      expect(tooMany.lastHeadroom?.reason).toContain("32-run");
+      expect(await tooMany.mainBusy()).toBe(false);
+      expect(tooMany.lastHeadroom?.scannedRuns).toBe(33);
       const invalid = reader([{ id: 0, status: "queued", ...OTHER }], idle, "1000");
       expect(await invalid.mainBusy()).toBe(true);
       expect(invalid.lastHeadroom?.reason).toContain("Invalid active run");
@@ -1265,7 +1738,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         workflow_runs: Array.from({ length: 101 }, (_, i) => ({ id: i + 1, status: "queued" })),
       }));
       expect(await oversized.mainBusy()).toBe(true);
-      expect(oversized.lastHeadroom?.reason).toContain("oversized");
+      expect(oversized.lastHeadroom?.reason).toContain("Incomplete");
       const batch = reader(
         [{ id: 7, status: "waiting", ...OTHER, path: ".github/workflows/batch-ci.yml" }],
         { 7: page([]) },
@@ -1362,7 +1835,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ...idleOther(21),
       ];
       // Negative control: the previous readers held on 37 distinct active runs before reading jobs.
-      expect(fixtures.length).toBeGreaterThan(MAX_RUNNER_RELEVANT_RUNS);
+      expect(fixtures.length).toBeGreaterThan(32);
       const fits = reader(fixtures);
       expect(await fits.github.mainBusy()).toBe(false);
       expect(fits.github.lastHeadroom).toMatchObject({
@@ -1384,18 +1857,18 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ...busyOther(5),
         ...idleOther(20),
       ]);
-      expect(await tight.github.mainBusy()).toBe(true);
+      expect(await tight.github.mainBusy()).toBe(false);
       expect(tight.github.lastHeadroom).toMatchObject({
-        allowed: false,
+        allowed: true,
+        capacityInformational: true,
         occupied: 5,
         approvalOnlyRuns: 12,
       });
-      // Runner-relevant runs still cap at 32 even beside approval-only runs.
+      // More than 32 idle non-approval runs do not create a volume-only hold.
       nextId = 1;
       const crossing = reader([...approvalMain(10), ...approvalOther(2), ...idleOther(33)], "1000");
-      expect(await crossing.github.mainBusy()).toBe(true);
-      expect(crossing.github.lastHeadroom?.reason).toContain("32-run");
-      expect(crossing.github.lastHeadroom?.reason).toContain("approval-only");
+      expect(await crossing.github.mainBusy()).toBe(false);
+      expect(crossing.github.lastHeadroom).toMatchObject({ scannedRuns: 45, occupied: 0 });
       nextId = 1;
       const atCap = reader([...approvalMain(10), ...approvalOther(2), ...idleOther(32)], "1000");
       expect(await atCap.github.mainBusy()).toBe(false);
@@ -1412,19 +1885,18 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         scannedRuns: 40,
         approvalOnlyRuns: 40,
       });
-      // The absolute scan bound admits exactly MAX_SCANNED_ACTIVE_RUNS runs with 10 + 64 requests.
+      // Former 64-run boundary is not an admission limit.
       nextId = 1;
-      const bound = reader(approvalMain(MAX_SCANNED_ACTIVE_RUNS));
+      const bound = reader(approvalMain(64));
       expect(await bound.github.mainBusy()).toBe(false);
       expect(bound.github.lastHeadroom?.approvalOnlyRuns).toBe(64);
-      expect(bound.requests.length).toBe(10 + MAX_SCANNED_ACTIVE_RUNS);
-      // One more distinct active run holds before any job page is read.
+      expect(bound.requests.length).toBe(10 + 64);
+      // Every one of 65 runs is observed, rather than holding before job reads.
       nextId = 1;
-      const over = reader(approvalMain(MAX_SCANNED_ACTIVE_RUNS + 1));
-      expect(await over.github.mainBusy()).toBe(true);
-      expect(over.github.lastHeadroom).toMatchObject({ allowed: false, scannedRuns: 0 });
-      expect(over.github.lastHeadroom?.reason).toContain("64-run job scan");
-      expect(over.requests.length).toBe(10);
+      const over = reader(approvalMain(65));
+      expect(await over.github.mainBusy()).toBe(false);
+      expect(over.github.lastHeadroom).toMatchObject({ allowed: true, scannedRuns: 65 });
+      expect(over.requests.length).toBe(75);
     });
     test("an approval-waiting run that becomes queued counts toward demand and the cap", async () => {
       nextId = 1;
@@ -1444,17 +1916,17 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       // Approval granted: the run status may still read waiting while jobs queue.
       approved = true;
       const after = reader(fixtures, "1000");
-      expect(await after.github.mainBusy()).toBe(true);
-      expect(after.github.lastHeadroom?.reason).toContain("32-run");
+      expect(await after.github.mainBusy()).toBe(false);
+      expect(after.github.lastHeadroom?.capacity?.hold).toBe("main-queued");
       // With room under the cap, the queued main jobs are main demand, and
       // because they wait for runners on the newest main run, admission holds.
       const roomy = reader([transition, ...idleOther(3)], "1000");
-      expect(await roomy.github.mainBusy()).toBe(true);
+      expect(await roomy.github.mainBusy()).toBe(false);
       expect(roomy.github.lastHeadroom).toMatchObject({ occupied: 2, approvalOnlyRuns: 0 });
       expect(roomy.github.lastHeadroom?.capacity?.hold).toBe("main-queued");
       transition.run.status = "queued";
       const queued = reader([transition, ...idleOther(3)], "1000");
-      expect(await queued.github.mainBusy()).toBe(true);
+      expect(await queued.github.mainBusy()).toBe(false);
       expect(queued.github.lastHeadroom).toMatchObject({ occupied: 2, approvalOnlyRuns: 0 });
       expect(queued.github.lastHeadroom?.capacity?.latestMain).toMatchObject({
         runId: 1000,
@@ -1487,7 +1959,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           name,
           { occupied: demand, approvalOnlyRuns: 5, scannedRuns: 37 },
         ]);
-        // With 32 other runner-relevant runs the subject crosses the cap.
+        // With 32 other idle runs, the subject's demand is still accounted for.
         nextId = 1;
         const over = reader(
           [
@@ -1497,10 +1969,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           ],
           "1000",
         );
-        expect([name, await over.github.mainBusy()]).toEqual([name, true]);
-        expect([name, over.github.lastHeadroom?.reason]).toEqual([
+        expect([name, await over.github.mainBusy()]).toEqual([name, false]);
+        expect([name, over.github.lastHeadroom]).toMatchObject([
           name,
-          expect.stringContaining("32-run"),
+          { occupied: demand, approvalOnlyRuns: 5, scannedRuns: 38 },
         ]);
       }
     });
@@ -1590,9 +2062,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       // the run entirely (waiting read too early, in_progress read too late).
       const running = page(jobs(...Array(20).fill("in_progress"), "waiting"));
       const other = flipping("in_progress", "waiting", "waiting", OTHER, running);
-      expect(await other.github.mainBusy()).toBe(true);
+      expect(await other.github.mainBusy()).toBe(false);
       expect(other.github.lastHeadroom).toMatchObject({
-        allowed: false,
+        allowed: true,
+        capacityInformational: true,
         occupied: 20,
         reservedMain: 30,
         scannedRuns: 1,
@@ -1607,7 +2080,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         MAIN,
         page(jobs(...Array(35).fill("in_progress"), "waiting")),
       );
-      expect(await mainRun.github.mainBusy()).toBe(true);
+      expect(await mainRun.github.mainBusy()).toBe(false);
       expect(mainRun.github.lastHeadroom).toMatchObject({ occupied: 35, reservedMain: 35 });
       // queued -> waiting and in_progress -> queued flips are observed too.
       for (const [from, to] of [
@@ -1615,7 +2088,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ["in_progress", "queued"],
       ] as const) {
         const flip = flipping(from, to, to, OTHER, running);
-        expect([from, to, await flip.github.mainBusy()]).toEqual([from, to, true]);
+        expect([from, to, await flip.github.mainBusy()]).toEqual([from, to, false]);
         expect(flip.github.lastHeadroom).toMatchObject({ occupied: 20, scannedRuns: 1 });
       }
       // Approval to queued during the listing: demand is counted.
@@ -1626,7 +2099,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         OTHER,
         page(jobs(...Array(5).fill("queued"), "completed")),
       );
-      expect(await approved.github.mainBusy()).toBe(true);
+      expect(await approved.github.mainBusy()).toBe(false);
       expect(approved.github.lastHeadroom).toMatchObject({ occupied: 5, approvalOnlyRuns: 0 });
       // A run listed with a non-waiting status in any listing is never
       // approval-only, even when its later listing and job page look idle.
@@ -1641,8 +2114,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         "30",
         idleOther(32),
       );
-      expect(await settling.github.mainBusy()).toBe(true);
-      expect(settling.github.lastHeadroom?.reason).toContain("32-run");
+      expect(await settling.github.mainBusy()).toBe(false);
+      expect(settling.github.lastHeadroom).toMatchObject({ approvalOnlyRuns: 0, scannedRuns: 33 });
       nextId = 1;
       const steady = flipping(
         "waiting",
@@ -1674,11 +2147,11 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           now: () => clock,
         });
       };
-      // The only (last) job page arrives late.
+      // The only (last) job page arrives late, before ordered reduction starts.
       expect(await oneRun(/\/jobs\?/, ACTIVE_RUN_SCAN_DEADLINE_MS + 1)).toMatchObject({
         ok: false,
         hold: "deadline",
-        scannedRuns: 1,
+        scannedRuns: 0,
       });
       expect(await oneRun(/\/jobs\?/, ACTIVE_RUN_SCAN_DEADLINE_MS)).toMatchObject({ ok: true });
       // With no active runs, the last run-list page arriving late also holds.
@@ -1736,6 +2209,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         otherDemand: 0,
         scannedRuns: 10,
         approvalOnlyRuns: 10,
+        cachedApprovalOnlyRuns: 0,
         runnerRelevantRuns: 0,
         latestMain: {
           runId: 10,
@@ -1746,14 +2220,6 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         mainQueuedJobs: 0,
         preFanoutMainRuns: [],
       });
-      // A smaller explicit scan bound holds before reading jobs.
-      const bounded = listed({ waiting });
-      expect(await scan(bounded.get, { maxScannedRuns: 9 })).toMatchObject({
-        ok: false,
-        hold: "scan-bound",
-        scannedRuns: 0,
-      });
-      expect(bounded.requests.length).toBe(10);
       // The wall-clock deadline holds mid-scan instead of admitting partial demand.
       let clock = 0;
       const slow = listed({ waiting });
@@ -1794,6 +2260,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         otherDemand: 0,
         scannedRuns: 1,
         approvalOnlyRuns: 0,
+        cachedApprovalOnlyRuns: 0,
         runnerRelevantRuns: 1,
         latestMain: {
           runId: 1,
@@ -1992,7 +2459,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect((await controller.journal.records(NOW)).stages[manifest.batchId]?.landedAt).toBeNull();
     expect((await f.state()).ledger.stages[manifest.batchId]?.landedAt).toBeNull();
   });
-  test("latency stop signal also holds an already-durable whole-run retry intent", async () => {
+  test("latency alert does not hold an already-durable whole-run retry intent", async () => {
     const f = await fixture(),
       manifest = await f.publish();
     f.verdict(manifest, "infrastructure");
@@ -2003,8 +2470,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     });
     f.advance(3601);
     await f.executor().maintain();
-    expect(f.api.calls).toHaveLength(0);
-    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("pending");
+    expect(f.api.calls).toHaveLength(1);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("done");
   });
   test("auto-merged original gets one durable follow-up, with no inherited evidence or readiness", async () => {
     const f = await mergedOriginalWithDelta();

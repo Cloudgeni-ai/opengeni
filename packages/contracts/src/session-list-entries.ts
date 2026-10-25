@@ -58,6 +58,8 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     backgroundCommandActivity: session.backgroundCommandActivity,
     hasSchedules: session.hasSchedules,
     hasUpcomingSchedules: session.hasUpcomingSchedules,
+    waitingForEvents: session.waitingForEvents,
+    automationWait: session.automationWait,
     title: session.title,
     titleSource: session.titleSource,
     displayTitle: deriveSessionDisplayTitle(session),

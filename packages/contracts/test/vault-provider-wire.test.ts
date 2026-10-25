@@ -15,7 +15,7 @@ const request = (operation: unknown, extra: Record<string, unknown> = {}) => ({
   type: "request",
   requestId: REQUEST_ID,
   sentAt: "2026-10-15T12:00:00.000Z",
-  provider: "bitwarden",
+  provider: "external",
   connectionId: "6f1c3c1e-2b1a-4c55-9d1e-0a0b0c0d0e0f",
   authority: { accountId: "a", workspaceId: "w", subjectId: null, connectionWorkspaceId: "w" },
   operation,

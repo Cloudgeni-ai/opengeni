@@ -6,6 +6,19 @@ import { join } from "node:path";
 const raw = readFileSync(".github/workflows/batch-ci.yml", "utf8");
 const workflow = Bun.YAML.parse(raw) as any;
 
+test("Batch planning starts without a workflow-internal main-priority wait", () => {
+  expect(workflow.jobs.plan["timeout-minutes"]).toBe(20);
+  expect(raw).not.toContain("github-pr-ci.ts priority");
+  expect(workflow.jobs.plan.steps.slice(0, 3).map((step: any) => step.id ?? step.uses)).toEqual([
+    "actions/checkout@v6",
+    "oven-sh/setup-bun@v2",
+    "plan",
+  ]);
+  expect(workflow.jobs.plan.steps[2].run).toContain('inspect --tip "$GITHUB_SHA" --git-dir .git');
+  expect(workflow.jobs.ready.needs).toEqual(["plan", "source", "units"]);
+  expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
+});
+
 test("previous-binary unavailable database records infrastructure, not PR blame", () => {
   const directory = mkdtempSync(join(tmpdir(), "batch-posture-infra-"));
   const step = workflow.jobs.source.steps.find((s: any) =>

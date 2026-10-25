@@ -364,6 +364,8 @@ if (previewParameters.get("scenario") === "hover") {
       primaryBlocker: parent.effectiveControl.primaryBlocker,
     },
   });
+  const nextRun = new Date(Date.now() + 20 * 60 * 60_000);
+  nextRun.setMinutes(0, 0, 0);
   const finished = hoverRow(
     3006,
     "Quarterly cloud cost report",
@@ -373,11 +375,25 @@ if (previewParameters.get("scenario") === "hover") {
       unread: true,
       hasSchedules: true,
       hasUpcomingSchedules: true,
+      automationWait: { nextRunAt: nextRun.toISOString(), event: null, automations: 1 },
       model: "codex/gpt-6-astra",
       reasoningEffort: "medium",
     },
     jamie,
   );
+  // A "wake me when" from the chat: it waits for an app's event.
+  const wakeOnEvent = hoverRow(3008, "Ship the billing migration", 90, {
+    status: "idle",
+    hasSchedules: true,
+    waitingForEvents: true,
+    automationWait: {
+      nextRunAt: null,
+      event: { source: { kind: "github", name: "GitHub" }, eventTypes: ["check_suite.completed"] },
+      automations: 1,
+    },
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "high",
+  });
   // Targeted only by a paused or already-past one-time schedule: no clock icon.
   const lapsedSchedule = hoverRow(3007, "Release stabilization checkpoint", 300, {
     status: "idle",
@@ -395,6 +411,7 @@ if (previewParameters.get("scenario") === "hover") {
     parent,
     pausedChild,
     finished,
+    wakeOnEvent,
     lapsedSchedule,
   );
 }
@@ -697,89 +714,115 @@ client.listSessionSummaryPage = async (workspace, options) => {
 
 // The Site view: each Site's page and its conversations' history.
 if (sitesScenario) {
-  Object.assign(
-    client,
-    siteViewPreviewClient({
-      workspaceId,
-      rows,
-      sites: [
-        { id: usageSiteId, title: "Opengeni usage", html: usageSiteHtml },
-        { id: ipoSiteId, title: "IPO research dashboard", html: usageSiteHtml },
-        {
-          id: pricingSiteId,
-          title: "Pricing calculator",
-          html: siteHtml("Pricing calculator", "Plans, seats and annual pricing"),
-        },
-        {
-          id: checklistSiteId,
-          title: "Launch checklist",
-          html: siteHtml("Launch checklist", "Readiness across teams for the next release"),
-        },
+  const siteClient = siteViewPreviewClient({
+    workspaceId,
+    rows,
+    // `?published=1`: the usage Site is on the web, so the header links to it.
+    // `?htmlDelay=<ms>`: loading a version takes that long, to show Updating.
+    publishedHost: previewParameters.has("published")
+      ? (siteId) => (siteId === usageSiteId ? "usage.sites.opengeni.ai" : "")
+      : undefined,
+    htmlDelayMs: Number(previewParameters.get("htmlDelay") ?? 0) || undefined,
+    // "Make the header blue": the agent publishes the Site with a blue header.
+    edit: (text) =>
+      /blue/iu.test(text)
+        ? {
+            tool: "artifact_publish",
+            arguments: { siteId: usageSiteId, entrypoint: "index.html" },
+            html: (current) =>
+              current.replace(
+                "</style>",
+                "main>h1{color:#fff;background:#3157f5;margin:-28px -32px 0;padding:24px 32px 4px}main>h1+p{color:#dfe6ff;background:#3157f5;margin:0 -32px;padding:0 32px 22px}</style>",
+              ),
+            reply:
+              "Done. The header is now a blue band with white text, published as version 5. It's live beside this chat; Undo in the version menu puts version 4 back.",
+          }
+        : null,
+    sites: [
+      { id: usageSiteId, title: "Opengeni usage", html: usageSiteHtml },
+      { id: ipoSiteId, title: "IPO research dashboard", html: usageSiteHtml },
+      {
+        id: pricingSiteId,
+        title: "Pricing calculator",
+        html: siteHtml("Pricing calculator", "Plans, seats and annual pricing"),
+      },
+      {
+        id: checklistSiteId,
+        title: "Launch checklist",
+        html: siteHtml("Launch checklist", "Readiness across teams for the next release"),
+      },
+    ],
+    history: new Map([
+      [
+        siteConversationId(901),
+        [
+          [
+            "Can the date range apply to every graph at once?",
+            "Yes. The range picker at the top now filters all four graphs together: active users, sessions, tokens and spend. Each graph keeps its own zoom, and the range is kept in the address so a shared link opens the same view.",
+          ],
+        ],
       ],
-      history: new Map([
+      [
+        siteConversationId(902),
         [
-          siteConversationId(901),
           [
-            [
-              "Can the date range apply to every graph at once?",
-              "Yes. The range picker at the top now filters all four graphs together: active users, sessions, tokens and spend. Each graph keeps its own zoom, and the range is kept in the address so a shared link opens the same view.",
-            ],
+            "Break weekly active users down by plan.",
+            "Weekly active users last week: Team 412, Pro 268, Free 151. Team grew 9% week over week; Free was flat.",
           ],
         ],
+      ],
+      [
+        siteConversationId(903),
         [
-          siteConversationId(902),
           [
-            [
-              "Break weekly active users down by plan.",
-              "Weekly active users last week: Team 412, Pro 268, Free 151. Team grew 9% week over week; Free was flat.",
-            ],
+            "Export the usage table to CSV.",
+            "The export has one row per workspace and week, with sessions, tokens and spend. Use **Download CSV** above the table.",
           ],
         ],
-        [
-          siteConversationId(903),
-          [
-            [
-              "Export the usage table to CSV.",
-              "The export has one row per workspace and week, with sessions, tokens and spend. Use **Download CSV** above the table.",
-            ],
-          ],
-        ],
-      ]),
-    }),
-    {
-      recordSiteOpened: async (_workspace: string, siteId: string) => {
-        evidence.siteOpens.push(siteId);
-        // Opening a Site again restores it to the sidebar.
-        const state = siteSidebar.get(siteId);
-        if (state) state.archived = false;
-        return { openedAt: new Date().toISOString() };
-      },
-      updateSiteSidebarState: async (
-        _workspace: string,
-        siteId: string,
-        request: { pinned?: boolean; archived?: boolean },
-      ) => {
-        evidence.siteSidebarCalls.push({ siteId, ...request });
-        const state = siteSidebar.get(siteId) ?? { pinnedAt: null, archived: false };
-        if (request.pinned !== undefined)
-          state.pinnedAt = request.pinned ? (state.pinnedAt ?? new Date().toISOString()) : null;
-        if (request.archived !== undefined) state.archived = request.archived;
-        siteSidebar.set(siteId, state);
-        return {
-          siteId,
-          pinned: state.pinnedAt !== null,
-          pinnedAt: state.pinnedAt,
-          archived: state.archived,
-          archivedAt: state.archived ? new Date().toISOString() : null,
-        };
-      },
-      tools: {
-        forWorkspace: () => ({
-          $catalog: async () => ({ tools: [], revision: "preview" }),
-        }),
-      },
+      ],
+    ]),
+  });
+  Object.assign(client, siteClient, {
+    recordSiteOpened: async (_workspace: string, siteId: string) => {
+      evidence.siteOpens.push(siteId);
+      // Opening a Site again restores it to the sidebar.
+      const state = siteSidebar.get(siteId);
+      if (state) state.archived = false;
+      return { openedAt: new Date().toISOString() };
     },
-  );
+    updateSiteSidebarState: async (
+      _workspace: string,
+      siteId: string,
+      request: { pinned?: boolean; archived?: boolean },
+    ) => {
+      evidence.siteSidebarCalls.push({ siteId, ...request });
+      const state = siteSidebar.get(siteId) ?? { pinnedAt: null, archived: false };
+      if (request.pinned !== undefined)
+        state.pinnedAt = request.pinned ? (state.pinnedAt ?? new Date().toISOString()) : null;
+      if (request.archived !== undefined) state.archived = request.archived;
+      siteSidebar.set(siteId, state);
+      return {
+        siteId,
+        pinned: state.pinnedAt !== null,
+        pinnedAt: state.pinnedAt,
+        archived: state.archived,
+        archivedAt: state.archived ? new Date().toISOString() : null,
+      };
+    },
+    tools: {
+      forWorkspace: () => ({
+        $catalog: async () => ({ tools: [], revision: "preview" }),
+      }),
+    },
+  });
+  // Preview control for checks: a version published elsewhere (another
+  // person, an agent in another chat) shows in the open Site view.
+  Object.assign(window, {
+    sitePreviewPublishElsewhere: () =>
+      siteClient.publishPreviewVersion(usageSiteId, (current) =>
+        current.replace("<h1>Opengeni usage</h1>", "<h1>Opengeni usage · Q4</h1>"),
+      ),
+  });
 }
 
 // `?hints=1` serves the workspace live stream, so the sidebar runs in commit
@@ -841,9 +884,13 @@ const context = {
       {
         workspaceId,
         // Row actions run as a controller, so archive pauses rather than hides.
-        permissions: rowActionsScenario
-          ? ["sessions:create", "sessions:control", "artifacts:read"]
-          : ["sessions:create", "artifacts:read"],
+        // `?publish=1`: a member who may publish, so the Site view edits live.
+        permissions: [
+          "sessions:create",
+          ...(rowActionsScenario ? ["sessions:control"] : []),
+          "artifacts:read",
+          ...(previewParameters.has("publish") ? ["artifacts:publish"] : []),
+        ],
       },
     ],
   },
@@ -864,6 +911,8 @@ const context = {
 } as unknown as AppContextValue;
 
 export const useAppContext = () => context;
+// The session header reads the context optionally; the sidebar preview always provides it.
+export const useOptionalAppContext = () => context;
 export const useRail = () => ({
   workspaceId,
   isMobile: window.innerWidth < 768,

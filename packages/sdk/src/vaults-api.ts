@@ -15,11 +15,13 @@ import type {
   ReplaceOnePasswordTokenRequest,
   RevealVaultFieldResponse,
   SessionSecretsView,
+  SetVaultItemApprovalRequest,
   UpdateVaultItemRequest,
   UpdateVaultRequest,
   VaultErrorCode,
   VaultFieldVersionMeta,
   VaultItem,
+  VaultItemApproval,
   VaultItemSummary,
   VaultSummary,
   InstallVaultProviderRequest,
@@ -129,6 +131,19 @@ export function vaultsApi(client: VaultClientLike, workspaceId: string) {
       json<VaultItem>("POST", `${item(vaultId, itemId)}/restore`, {}),
     moveItem: (vaultId: string, itemId: string, request: MoveVaultItemRequest) =>
       json<VaultItem>("POST", `${item(vaultId, itemId)}/move`, request),
+    /** Which agent uses of the item need approval each time, and the approvals in force. */
+    getItemApproval: (vaultId: string, itemId: string, signal?: AbortSignal) =>
+      json<VaultItemApproval>("GET", `${item(vaultId, itemId)}/approval`, undefined, {}, signal),
+    /** People only: replaces the item's "ask me each time" marks. */
+    setItemApproval: (vaultId: string, itemId: string, request: SetVaultItemApprovalRequest) =>
+      json<VaultItemApproval>("PUT", `${item(vaultId, itemId)}/approval`, request),
+    /** People only: ends one approval in force for the item. */
+    revokeItemGrant: (vaultId: string, itemId: string, grantId: string) =>
+      json<VaultItemApproval>(
+        "POST",
+        `${item(vaultId, itemId)}/approval/grants/${enc(grantId)}/revoke`,
+        {},
+      ),
     /** Plaintext. Audited server-side. Never cache the result. */
     revealField: (vaultId: string, itemId: string, fieldId: string, version?: number) =>
       json<RevealVaultFieldResponse>(

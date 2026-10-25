@@ -16,7 +16,13 @@ let conversations: Session[] = [];
 let listPage: ((options: SessionListPageOptions) => object) | null = null;
 let fullSessions: Record<string, Session> = {};
 let siteDetails: () => Promise<unknown> = async () => ({
-  artifact: { title: "Opengeni usage", status: "active", currentVersion: { id: "version-4" } },
+  artifact: {
+    title: "Opengeni usage",
+    status: "active",
+    currentVersion: { id: "version-4", revision: 4 },
+  },
+  versions: [],
+  events: [],
 });
 let hintRefresh: (() => Promise<void>) | null = null;
 let hintOptions: { siteConversations?: boolean } | undefined;
@@ -27,6 +33,19 @@ const requests: Array<{ path: string; init: RequestInit | undefined }> = [];
 const conversationProps: Array<Record<string, unknown>> = [];
 const composerProps: Array<Record<string, unknown>> = [];
 const opens: string[] = [];
+const siteViewProps: Array<Record<string, unknown>> = [];
+const versionMenuProps: Array<Record<string, unknown>> = [];
+let siteReads = 0;
+/** The Site as read with version `revision` live. */
+const siteAt = (revision: number, title = "Opengeni usage") => ({
+  artifact: {
+    title,
+    status: "active",
+    currentVersion: { id: `version-${revision}`, revision },
+  },
+  versions: [],
+  events: [],
+});
 const client = {
   recordSiteOpened: async (_workspace: string, opened: string) => {
     opens.push(opened);
@@ -42,7 +61,10 @@ const client = {
     if (!session) throw new OpenGeniApiError(404, "");
     return session;
   },
-  getWorkspaceArtifact: async () => await siteDetails(),
+  getWorkspaceArtifact: async () => {
+    siteReads++;
+    return await siteDetails();
+  },
   // The header's published-link read; these tests are about the chat panel,
   // so the link stays the plain "Live" an API without the route gives.
   getSitePublicationLink: async () => {
@@ -107,9 +129,29 @@ mock.module("../lib/use-session-list-hint-refresh", () => ({
   },
 }));
 mock.module("../../artifacts", () => ({
-  SiteView: (props: { siteId: string; archivedMessage?: string }) => (
-    <div data-site-view={props.siteId} data-archived-message={props.archivedMessage} />
-  ),
+  SiteView: (props: {
+    siteId: string;
+    archivedMessage?: string;
+    versionId?: string | null;
+    versionControl?: ReactNode;
+  }) => {
+    siteViewProps.push(props);
+    return (
+      <div
+        data-site-view={props.siteId}
+        data-version={props.versionId ?? ""}
+        data-archived-message={props.archivedMessage}
+      >
+        {props.versionControl}
+      </div>
+    );
+  },
+}));
+mock.module("../components/artifacts/site-version-menu", () => ({
+  SiteVersionMenu: (props: Record<string, unknown>) => {
+    versionMenuProps.push(props);
+    return <span data-version-menu="" />;
+  },
 }));
 mock.module("../../components/session-conversation", () => ({
   SessionConversation: (props: { sessionId: string }) => {
@@ -125,24 +167,27 @@ mock.module("../../components/new-conversation", () => ({
   }) => {
     composerProps.push(props);
     return (
-      <button
-        type="button"
-        data-composer={props.labels.title}
-        onClick={() =>
-          void props
-            .createSession("Why did spend rise?", "key-1", { model: "m", resources: ["x"] })
-            .then((sessionId) =>
-              props.onCreated({
-                sessionId,
-                initialMessage: "Why did spend rise?",
-                sentAt: "2026-10-22T12:00:00.000Z",
-                draft: { text: "and churn?" },
-              }),
-            )
-        }
-      >
-        Send
-      </button>
+      <>
+        <textarea data-composer-input="" />
+        <button
+          type="button"
+          data-composer={props.labels.title}
+          onClick={() =>
+            void props
+              .createSession("Why did spend rise?", "key-1", { model: "m", resources: ["x"] })
+              .then((sessionId) =>
+                props.onCreated({
+                  sessionId,
+                  initialMessage: "Why did spend rise?",
+                  sentAt: "2026-10-22T12:00:00.000Z",
+                  draft: { text: "and churn?" },
+                }),
+              )
+          }
+        >
+          Send
+        </button>
+      </>
     );
   },
 }));
@@ -173,9 +218,10 @@ afterEach(() => {
   permissions = ["sessions:create"];
   subjectId = "me";
   fullSessions = {};
-  siteDetails = async () => ({
-    artifact: { title: "Opengeni usage", status: "active", currentVersion: { id: "version-4" } },
-  });
+  siteDetails = async () => siteAt(4);
+  siteReads = 0;
+  siteViewProps.length = 0;
+  versionMenuProps.length = 0;
   hintRefresh = null;
   hintOptions = undefined;
   listPage = null;
@@ -207,14 +253,19 @@ const settle = () =>
     await new Promise((resolve) => setTimeout(resolve, 10));
   });
 
-async function render(selected?: string) {
+async function render(selected?: string, { startNew }: { startNew?: boolean } = {}) {
   const container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  const draw = async (next?: string) => {
+  const draw = async (next?: string, nextStartNew = startNew) => {
     await act(async () => {
       root!.render(
-        <module.SiteViewRoute workspaceId={workspaceId} siteId={siteId} conversation={next} />,
+        <module.SiteViewRoute
+          workspaceId={workspaceId}
+          siteId={siteId}
+          conversation={next}
+          startNew={nextStartNew}
+        />,
       );
     });
     await settle();
@@ -422,6 +473,7 @@ test("choosing a conversation ends composing", async () => {
 });
 
 test("the menu opens the conversation as a full chat or the Site's details", async () => {
+  permissions = ["sessions:create", "artifacts:publish"];
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
   await act(async () => link(container, "Open as a full chat")!.click());
@@ -434,11 +486,50 @@ test("the menu opens the conversation as a full chat or the Site's details", asy
     {
       to: "/workspaces/$workspaceId/artifacts/$artifactId",
       params: { workspaceId, artifactId: siteId },
+      // Without a tab the address opens the Site view again.
+      search: { tab: "settings" },
     },
   ]);
   expect(container.querySelector("[data-site-view]")?.getAttribute("data-archived-message")).toBe(
     "This Site is archived. Restore it from Site details.",
   );
+});
+
+test("an archived Site links to its details, where it can be restored", async () => {
+  permissions = ["sessions:create", "artifacts:publish"];
+  conversations = [];
+  siteDetails = async () => ({
+    ...siteAt(4),
+    artifact: { ...siteAt(4).artifact, status: "archived" },
+  });
+  const { container } = await render();
+  expect(container.querySelector("[data-site-view]")).toBeNull();
+  expect(container.textContent).toContain("This Site is archived.");
+  await act(async () => link(container, "Restore it from Site details")!.click());
+  expect(navigations.at(-1)).toEqual({
+    to: "/workspaces/$workspaceId/artifacts/$artifactId",
+    params: { workspaceId, artifactId: siteId },
+    search: { tab: "settings" },
+  });
+});
+
+test("someone who can't restore an archived Site isn't told to restore it", async () => {
+  conversations = [];
+  siteDetails = async () => ({
+    ...siteAt(4),
+    artifact: { ...siteAt(4).artifact, status: "archived" },
+  });
+  const { container } = await render();
+  expect(container.textContent).toContain("This Site is archived.");
+  expect(container.textContent).not.toContain("Restore");
+  await act(async () => link(container, "View Site details")!.click());
+  // Without a tab the address opens the Site view again; details pick the
+  // first tab this person can see.
+  expect(navigations.at(-1)).toEqual({
+    to: "/workspaces/$workspaceId/artifacts/$artifactId",
+    params: { workspaceId, artifactId: siteId },
+    search: { tab: "settings" },
+  });
 });
 
 test("without permission to start chats there is no New, and an empty Site says so", async () => {
@@ -460,9 +551,7 @@ test("an empty Site waits for its details, and offers to retry when they fail", 
   await act(async () => release!());
   await settle();
   expect(container.textContent).toContain("Couldn’t load this Site.");
-  siteDetails = async () => ({
-    artifact: { title: "Opengeni usage", status: "active", currentVersion: { id: "version-4" } },
-  });
+  siteDetails = async () => siteAt(4);
   await act(async () => button(container, "Try again")!.click());
   await settle();
   expect(container.querySelector("[data-composer]")).not.toBeNull();
@@ -598,4 +687,159 @@ test("another person signing in on the page gets their own layout", async () => 
   );
   expect(JSON.parse(localStorage.getItem("og.site-view.chat:v1:someone")!).collapsed).toBe(false);
   expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({ width: 512, collapsed: false });
+});
+
+const shownVersion = (container: HTMLElement) =>
+  container.querySelector("[data-site-view]")?.getAttribute("data-version");
+
+test("a publish from the side chat reloads the preview with the new version", async () => {
+  conversations = [conversation(1, "Make the header blue", 2)];
+  const { container } = await render();
+  expect(shownVersion(container)).toBe("version-4");
+  expect(siteViewProps.at(-1)).toMatchObject({ versionId: "version-4", watch: "live" });
+  const onEvent = conversationProps.at(-1)!.onEvent as (event: { type: string }) => void;
+  // The agent publishes version 5; its tool call returns in this conversation.
+  siteDetails = async () => siteAt(5);
+  const before = siteReads;
+  await act(async () => onEvent({ type: "agent.toolCall.output" }));
+  await settle();
+  expect(siteReads).toBe(before + 1);
+  expect(shownVersion(container)).toBe("version-5");
+  // The chip follows, with the version now live.
+  expect(
+    (versionMenuProps.at(-1)!.detail as ReturnType<typeof siteAt>).artifact.currentVersion,
+  ).toEqual({ id: "version-5", revision: 5 });
+  // Streaming text changes nothing, so it reads nothing.
+  await act(async () => onEvent({ type: "agent.message.delta" }));
+  await settle();
+  expect(siteReads).toBe(before + 1);
+});
+
+test("a rollback restored from the version chip reloads the preview", async () => {
+  conversations = [conversation(1, "Make the header blue", 2)];
+  siteDetails = async () => siteAt(5);
+  const { container } = await render();
+  expect(shownVersion(container)).toBe("version-5");
+  siteDetails = async () => siteAt(4);
+  await act(async () => (versionMenuProps.at(-1)!.onRestored as () => void)());
+  await settle();
+  expect(shownVersion(container)).toBe("version-4");
+});
+
+test("the chip offers Undo only to people who may publish the Site", async () => {
+  conversations = [];
+  await render();
+  expect(versionMenuProps.at(-1)).toMatchObject({ workspaceId, siteId, canPublish: false });
+  act(() => root?.unmount());
+  permissions = ["sessions:create", "artifacts:publish"];
+  await render();
+  expect(versionMenuProps.at(-1)).toMatchObject({ canPublish: true });
+});
+
+test("a version published elsewhere shows within a few seconds while the Site is open", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  permissions = ["sessions:create", "artifacts:publish"];
+  const intervals: Array<{ run: () => void; ms: number }> = [];
+  const setIntervalBefore = window.setInterval;
+  window.setInterval = ((run: () => void, ms: number) => {
+    intervals.push({ run, ms });
+    return intervals.length;
+  }) as unknown as typeof window.setInterval;
+  try {
+    const { container } = await render();
+    expect(shownVersion(container)).toBe("version-4");
+    const poll = intervals.find((interval) => interval.ms === 5_000)!;
+    expect(poll).toBeDefined();
+    siteDetails = async () => siteAt(6);
+    await act(async () => poll.run());
+    await settle();
+    expect(shownVersion(container)).toBe("version-6");
+    // The context of the next message names the version now live.
+    const sendExtras = (conversationProps.at(-1)!.composerOptions as { sendExtras: () => object })
+      .sendExtras;
+    expect(sendExtras()).toEqual({
+      modelContext: expect.stringContaining("at version 6 (version id version-6)"),
+    });
+  } finally {
+    window.setInterval = setIntervalBefore;
+  }
+});
+
+test("a failed check says the Site is reconnecting, and the next one makes it live again", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  const { container } = await render();
+  const onEvent = conversationProps.at(-1)!.onEvent as (event: { type: string }) => void;
+  siteDetails = async () => {
+    throw new Error("offline");
+  };
+  await act(async () => onEvent({ type: "turn.completed" }));
+  await settle();
+  expect(siteViewProps.at(-1)).toMatchObject({ watch: "reconnecting" });
+  // What was shown stays shown.
+  expect(shownVersion(container)).toBe("version-4");
+  siteDetails = async () => siteAt(4);
+  await act(async () => window.dispatchEvent(new Event("online")));
+  await settle();
+  expect(siteViewProps.at(-1)).toMatchObject({ watch: "live" });
+});
+
+test("every message in the side chat says which Site and version it is about", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  permissions = ["sessions:create", "artifacts:publish"];
+  siteDetails = async () => siteAt(4, "Spend  dashboard");
+  await render();
+  const { sendExtras } = conversationProps.at(-1)!.composerOptions as {
+    sendExtras: () => { modelContext?: string };
+  };
+  const context = sendExtras().modelContext!;
+  expect(context).toContain(`“Spend dashboard” (Site id ${siteId})`);
+  expect(context).toContain("at version 4 (version id version-4)");
+  expect(context).toContain("publish the change as a new version of this Site");
+});
+
+test("someone who can't publish the Site gets no editing context, as from the API", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  await render();
+  const { sendExtras } = conversationProps.at(-1)!.composerOptions as {
+    sendExtras: () => { modelContext?: string };
+  };
+  expect(sendExtras()).toEqual({});
+});
+
+test("Edit with Opengeni opens a new conversation beside the Site, composer focused", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  // Even with the chat hidden last time.
+  localStorage.setItem(storageKey, JSON.stringify({ width: 400, collapsed: true }));
+  const { container } = await render(undefined, { startNew: true });
+  await settle();
+  expect(panel(container).hidden).toBe(false);
+  expect(container.querySelector("[data-composer]")).not.toBeNull();
+  expect(openConversation(container)).toBeUndefined();
+  expect(document.activeElement?.hasAttribute("data-composer-input")).toBe(true);
+  // The address drops the request, so going back or reloading doesn't repeat it.
+  expect(navigations).toEqual([siteRoute({}, true)]);
+});
+
+test("Edit with Opengeni waits for the Site before focusing the composer", async () => {
+  conversations = [];
+  let release: (() => void) | undefined;
+  siteDetails = () => new Promise((resolve) => (release = () => resolve(siteAt(4))));
+  const { container } = await render(undefined, { startNew: true });
+  expect(container.textContent).toContain("Loading Site");
+  await act(async () => release!());
+  await settle();
+  await settle();
+  expect(document.activeElement?.hasAttribute("data-composer-input")).toBe(true);
+});
+
+test("Edit with Opengeni on a Site already open starts a new conversation once", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  const { container, rerender } = await render(id(1));
+  expect(openConversation(container)).toBe(id(1));
+  await rerender(id(1), true);
+  expect(container.querySelector("[data-composer]")).not.toBeNull();
+  expect(navigations).toEqual([siteRoute({}, true)]);
+  // Until the address drops the request, rendering again asks nothing more.
+  await rerender(id(1), true);
+  expect(navigations).toHaveLength(1);
 });

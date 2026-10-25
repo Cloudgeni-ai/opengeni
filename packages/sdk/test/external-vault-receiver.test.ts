@@ -248,7 +248,6 @@ describe("external vault receiver authorization", () => {
   test("native bindings and the host mapping are checked on every operation", async () => {
     const { instance, calls } = receiver();
     const denied = [
-      await signedRequest({ op: "describe" }, { provider: "bitwarden" }),
       await signedRequest({ op: "describe" }, { authority: { ...AUTHORITY, accountId: "acct_2" } }),
       await signedRequest(
         { op: "describe" },
@@ -267,6 +266,11 @@ describe("external vault receiver authorization", () => {
     expect(calls.handlers).toEqual({});
     // Only the last case reached the host mapping (bindings fail first).
     expect(calls.authorize).toHaveLength(1);
+    // Only "external" speaks this protocol; Bitwarden is a native provider now.
+    const native = await instance.handle(
+      await signedRequest({ op: "describe" }, { provider: "bitwarden" }),
+    );
+    expect(native.status).toBe(400);
     const read = await signedRequest({
       op: "read_fields",
       externalVaultId: "v",

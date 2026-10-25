@@ -223,9 +223,19 @@ export function NextRunValue({ task, now }: { task: ScheduledTask; now: Date }) 
   if (isFinishedOnce(task)) return <span className="text-fg-subtle">Finished</span>;
   const next = nextRunOf(task, now);
   if (next) return <RelativeTime date={next} format="absolute" />;
-  if (hasEventTriggers(task)) return <span className="text-fg-subtle">On events</span>;
+  if (runsOnEventsOnly(task, now)) return <span className="text-fg-subtle">On events</span>;
   if (task.schedule.type === "manual") return <span className="text-fg-subtle">On demand</span>;
   return <span className="text-fg-subtle">No runs left</span>;
+}
+
+/** Whether only events start it next: it is on, listening, and has no scheduled run. */
+export function runsOnEventsOnly(task: ScheduledTask, now: Date): boolean {
+  return (
+    scheduledTaskStateLabel(task).active &&
+    !isFinishedOnce(task) &&
+    !nextRunOf(task, now) &&
+    hasEventTriggers(task)
+  );
 }
 
 const RUN_BADGE: Record<

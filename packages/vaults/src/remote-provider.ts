@@ -50,7 +50,7 @@ import {
 } from "./provider";
 import { collectProviderPages } from "./provider-pages";
 
-export type RemoteVaultProviderKind = "external" | "bitwarden";
+export type RemoteVaultProviderKind = "external";
 
 /** Case-insensitive header lookup, satisfied by `Headers`. */
 export interface RemoteVaultHeaders {
@@ -374,7 +374,7 @@ function toProviderVault(vault: VaultProviderWireVault): ProviderVault {
 export function createRemoteVaultProvider(
   options: RemoteVaultProviderOptions,
 ): RemoteVaultProvider {
-  if (options.provider !== "external" && options.provider !== "bitwarden") {
+  if (options.provider !== "external") {
     fail("provider_unavailable");
   }
   const endpoint = validEndpoint(options.endpoint, options.allowInsecureHttp === true);

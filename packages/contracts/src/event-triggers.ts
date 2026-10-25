@@ -436,6 +436,36 @@ export const EventTrigger = /* @__PURE__ */ defineSchema(() =>
 );
 export type EventTrigger = z.infer<typeof EventTrigger>;
 
+/**
+ * What the automations that continue a chat are waiting for, as the chat list
+ * and header show it: the soonest scheduled run and the first event that can
+ * start a run. Only automations the reader can see contribute; a chat that
+ * waits only on someone else's private automation has none.
+ */
+export const SessionAutomationWaitSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** The soonest scheduled run into the chat, or null when none is ahead. */
+      nextRunAt: z.string().datetime({ offset: true }).nullable(),
+      /**
+       * The first active event trigger that can start a run: its event types
+       * (empty for every event) and its source, null when the reader can't
+       * see the source. Null when no event can start a run.
+       */
+      event: z
+        .object({
+          source: z.object({ kind: EventSourceKind, name: z.string() }).strict().nullable(),
+          eventTypes: z.array(z.string()),
+        })
+        .strict()
+        .nullable(),
+      /** How many automations can still start a run in the chat, this one included. */
+      automations: z.number().int().positive(),
+    })
+    .strict(),
+);
+export type SessionAutomationWaitSummary = z.infer<typeof SessionAutomationWaitSummary>;
+
 /** Event triggers and the event run policy of an automation. */
 export const ScheduledTaskEventsInput = /* @__PURE__ */ defineSchema(() =>
   z

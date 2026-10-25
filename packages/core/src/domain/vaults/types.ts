@@ -23,4 +23,10 @@ export interface VaultRequestActor {
   grant: AccessGrant;
   /** The caller holds `account:admin` on the organization (organization vaults). */
   accountAdmin: boolean;
+  /**
+   * The request comes from the person's own Opengeni sign-in (browser,
+   * desktop or phone app), not an agent, personal key or integration acting
+   * as them. Only such a request may change which secrets need approval.
+   */
+  personSignedIn?: boolean;
 }

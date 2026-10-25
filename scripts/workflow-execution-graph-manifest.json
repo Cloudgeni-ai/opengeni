@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/batch-ci.yml",
-      "sha256": "8373203c1e3a7313da4bcae83d236a0ce91d2b84b8c9262db6a60631dd51a6c8"
+      "sha256": "605daeab2bf825d6073906c38ee7de215548d8b9e7d8464a83731acc48740093"
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
@@ -74,7 +74,7 @@
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "6624cfe0c3c4f9643f7ab49e739b016015279e05f33d56a59fcb87542f6902e5"
+      "sha256": "51d5273fd5cb8c0e364575c0bd6e9ecbb0502cfe479aaf9126d2e6af3d68cf90"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -596,12 +596,6 @@
       "job": "plan",
       "step": "Verify candidate provenance and plan the complete combined tree",
       "sha256": "174176c895ef72cebb813592e508df2ee3b4d9c42f256a2412b2da89d7cf4510"
-    },
-    {
-      "workflow": ".github/workflows/batch-ci.yml",
-      "job": "plan",
-      "step": "Yield candidate fan-out to full main CI",
-      "sha256": "ab5e0510fc370cc259f71aad85e00d7393f66623aed423a5117351059b21ae3b"
     },
     {
       "workflow": ".github/workflows/batch-ci.yml",
@@ -1469,27 +1463,27 @@
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",
-      "job": "contracts",
-      "step": "Check affected source guards",
-      "sha256": "4a78dbd7472b3ef68a18d4a22fda28a2fc35507782efb1a6faa8b1e77d7a95fb"
-    },
-    {
-      "workflow": ".github/workflows/pr-ci.yml",
-      "job": "contracts",
+      "job": "fast",
       "step": "Check affected types",
-      "sha256": "8dc8f077609b6faf0f7e654da0a732c51be9fbdeeab28fd4c84c54a74213460a"
+      "sha256": "7ff9667365af5aac5786b314c47d7e0d8bb04d7e8ecbce3c257fd69eb59841b8"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",
-      "job": "contracts",
+      "job": "fast",
       "step": "Fast lint gate",
-      "sha256": "2de893bed08bab285ab407ecd102b965045b8211b800d52b43fb642b3fbe1d0c"
+      "sha256": "d5782d2936c1af91b374c32dba950ef4ccae16fa4fbcf9f1c2692e0d3d1b142a"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",
-      "job": "contracts",
+      "job": "fast",
       "step": "Install contract dependencies",
-      "sha256": "a2ce0da0ebcf0968c09392947973b1f7880b56d6cadaaa98633326d7b8ae1edd"
+      "sha256": "f93c72c15f981c04cb1177b22341ea7d10b045cfee77c697badfa2c474cb8aa2"
+    },
+    {
+      "workflow": ".github/workflows/pr-ci.yml",
+      "job": "fast",
+      "step": "Test every selected unit file",
+      "sha256": "deb77911f6adb7986708a8b658fd8a8152704359c67db0ba55fcc2622f1ffb0b"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",
@@ -1501,31 +1495,13 @@
       "workflow": ".github/workflows/pr-ci.yml",
       "job": "plan",
       "step": "Plan all affected files",
-      "sha256": "fc25d299aaa31df4f6a234f478b95d4d51f78caf44ae208c472bda40b19df1ae"
-    },
-    {
-      "workflow": ".github/workflows/pr-ci.yml",
-      "job": "plan",
-      "step": "Yield admission to main and candidate CI",
-      "sha256": "d33619169e8e553da018a43e3200371b8d54faa7d03a9b9308566064261a9ee2"
+      "sha256": "7e6c3820a130bd5a6da344c626fa48f0737b8962fdc5795a04c87cd9df1871ec"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",
       "job": "ready",
       "step": "Require all selected hosted work",
-      "sha256": "b3176fa0c5c7d26235f6d61f25f64f83f9ab041518e00d62c5f08dc3bfec98e4"
-    },
-    {
-      "workflow": ".github/workflows/pr-ci.yml",
-      "job": "units",
-      "step": "Install unit dependencies",
-      "sha256": "311b1fa7d452b43bb2a83742c7d86c814785216926c0bccf009e580e9e5cc2a8"
-    },
-    {
-      "workflow": ".github/workflows/pr-ci.yml",
-      "job": "units",
-      "step": "Test every selected unit file",
-      "sha256": "3691f3674786787426710c5a229f187fec89dc52fd36aa03709b448d945c7607"
+      "sha256": "88049466ca9af445aae288aa6329af89434fcfdfc78306e5ec2351812a464f97"
     },
     {
       "workflow": ".github/workflows/production-pr-heads.yml",
