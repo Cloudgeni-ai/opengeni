@@ -35,6 +35,6 @@ export function meetingLanguageOptions(
   if (current && current !== DETECT_LANGUAGE && !codes.includes(current)) codes.push(current);
   return [
     { value: DETECT_LANGUAGE, label: detectLabel ?? msg("meetings.languages.detectAutomatically") },
-    ...codes.map((code) => ({ value: code, label: languageName(code) })),
+    ...codes.map((code) => ({ value: code, label: languageName(code, msg.locale) })),
   ];
 }

@@ -252,7 +252,7 @@ export function MeetingsListPage({
               flush
             >
               {list.recordings.map((recording) => {
-                const status = meetingStatusLabel(meetingPhase(recording));
+                const status = meetingStatusLabel(meetingPhase(recording), msg);
                 const isLive = recording.id === liveId && recorder?.state !== "stopped";
                 return (
                   <ListRow
@@ -288,7 +288,7 @@ export function MeetingsListPage({
                         ? [
                             <RelativeTime key="recorded" date={recording.startedAt} />,
                             recording.durationMilliseconds > 0
-                              ? formatDuration(recording.durationMilliseconds)
+                              ? formatDuration(recording.durationMilliseconds, msg)
                               : null,
                           ].filter(Boolean)
                         : undefined
@@ -297,7 +297,7 @@ export function MeetingsListPage({
                       length:
                         recording.durationMilliseconds > 0 ? (
                           <span className="tabular-nums">
-                            {formatDuration(recording.durationMilliseconds)}
+                            {formatDuration(recording.durationMilliseconds, msg)}
                           </span>
                         ) : (
                           <span className="text-fg-subtle">—</span>

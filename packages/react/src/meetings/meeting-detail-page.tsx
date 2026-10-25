@@ -27,9 +27,9 @@ import type {
   RecordingTranscriptVersion,
   RecordingVisibility,
 } from "@opengeni/contracts";
-import { defaultRecordingSpeakerName } from "@opengeni/contracts";
 import {
   activeSegmentIndex,
+  defaultSpeakerName,
   formatDuration,
   languageName,
   meetingPhase,
@@ -303,11 +303,11 @@ function TranscribeAgainDialog({
             estimate !== null
               ? estimate < 0.01
                 ? msg("meetings.detailPage.aboutLessThan001", {
-                    duration: formatDuration(recording.durationMilliseconds),
+                    duration: formatDuration(recording.durationMilliseconds, msg),
                   })
                 : msg("meetings.detailPage.aboutEstimateForThisDuration", {
                     estimate: estimate.toFixed(2),
-                    duration: formatDuration(recording.durationMilliseconds),
+                    duration: formatDuration(recording.durationMilliseconds, msg),
                   })
               : undefined
           }
@@ -474,7 +474,7 @@ function PhaseNotice({
           </Button>
         }
       >
-        {transcriptErrorText(phase.version?.errorCode ?? null)}
+        {transcriptErrorText(phase.version?.errorCode ?? null, msg)}
       </Notice>
     );
   }
@@ -494,7 +494,7 @@ function versionLine(
     parts.push(msg("meetings.detailPage.transcribing"));
   if (version.state === "failed") parts.push(msg("meetings.detailPage.failed"));
   if (version.state === "complete" && version.languages.length > 0) {
-    parts.push(version.languages.map(languageName).join(", "));
+    parts.push(version.languages.map((code) => languageName(code, msg.locale)).join(", "));
   }
   return parts.join(" · ");
 }
@@ -541,7 +541,7 @@ function RerunNotice({
         }
       >
         {msg("meetings.detailPage.transcripterrortextThisVersionIsUnchanged", {
-          transcriptErrorText: transcriptErrorText(newest.errorCode),
+          transcriptErrorText: transcriptErrorText(newest.errorCode, msg),
         })}
       </Notice>
     );
@@ -867,7 +867,7 @@ export function MeetingDetailPage({
 
   const speakerButtons = (variant: "list" | "chips", labels: readonly string[] = speakerLabels) =>
     labels.map((label) => {
-      const name = speakerDisplayName(label, transcript.speakers, recording.tracks);
+      const name = speakerDisplayName(label, transcript.speakers, recording.tracks, msg);
       const suggested = speakerIsSuggested(label, transcript.speakers);
       const unnamed = !speakerIsNamed(label, transcript.speakers);
       const menuLabel = suggested
@@ -1010,9 +1010,9 @@ export function MeetingDetailPage({
       }
       meta={
         <DetailMeta>
-          {formatAbsoluteTime(recording.startedAt)}
+          {formatAbsoluteTime(recording.startedAt, { text: msg })}
           {recording.durationMilliseconds > 0
-            ? formatDuration(recording.durationMilliseconds)
+            ? formatDuration(recording.durationMilliseconds, msg)
             : null}
           {speakerLabels.length > 0
             ? msg("meetings.detailPage.countSpeakers", { count: speakerLabels.length })
@@ -1150,7 +1150,7 @@ export function MeetingDetailPage({
           <Notice tone="muted">
             {recording.audioDeletedAt
               ? msg("meetings.detailPage.theAudioWasDeletedOn", {
-                  formatAbsoluteTime: formatAbsoluteTime(recording.audioDeletedAt),
+                  formatAbsoluteTime: formatAbsoluteTime(recording.audioDeletedAt, { text: msg }),
                 })
               : msg("meetings.detailPage.theAudioForThisMeeting")}
           </Notice>
@@ -1240,7 +1240,7 @@ export function MeetingDetailPage({
                   heading={false}
                   lines={savedLive.segments}
                   speakerName={(trackNumber) =>
-                    defaultRecordingSpeakerName(`track-${trackNumber}`, recording.tracks)
+                    defaultSpeakerName(`track-${trackNumber}`, recording.tracks, msg)
                   }
                   status={
                     savedLive.error
@@ -1330,7 +1330,7 @@ export function MeetingDetailPage({
         label={namingFromAside}
         displayName={
           namingFromAside
-            ? speakerDisplayName(namingFromAside, transcript.speakers, recording.tracks)
+            ? speakerDisplayName(namingFromAside, transcript.speakers, recording.tracks, msg)
             : ""
         }
         actions={actions}

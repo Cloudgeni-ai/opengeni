@@ -244,7 +244,7 @@ function WrittenNotes({
             <BotIcon aria-hidden="true" className="size-3.5" />
             <span>
               {msg("meetings.notes.writtenByAgent", {
-                time: formatAbsoluteTime(note.updatedAt),
+                time: formatAbsoluteTime(note.updatedAt, { text: msg }),
               })}
             </span>
             {onOpenChat ? (
@@ -258,7 +258,11 @@ function WrittenNotes({
             ) : null}
           </>
         ) : (
-          <span>{msg("meetings.notes.edited", { time: formatAbsoluteTime(note.updatedAt) })}</span>
+          <span>
+            {msg("meetings.notes.edited", {
+              time: formatAbsoluteTime(note.updatedAt, { text: msg }),
+            })}
+          </span>
         )}
       </p>
     </div>

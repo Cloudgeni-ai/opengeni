@@ -4,13 +4,16 @@
  * No React here, so each rule is tested on its own.
  */
 import {
-  defaultRecordingSpeakerName,
+  recordingSpeakerDefault,
   type Recording,
   type RecordingSpeaker,
   type RecordingTrack,
   type RecordingTranscriptSegment,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
+import { createOpenGeniText, type OpenGeniText } from "./messages/runtime";
+
+const defaultText = createOpenGeniText();
 
 /** "4:07", "1:02:09". Never negative; rounds down to the second. */
 export function formatClock(milliseconds: number): string {
@@ -22,16 +25,17 @@ export function formatClock(milliseconds: number): string {
   return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${ss}` : `${minutes}:${ss}`;
 }
 
-/** "45 sec", "12 min", "1 h 5 min": a recording's length in a list. */
-export function formatDuration(milliseconds: number): string {
-  // Non-breaking spaces keep "23 sec" together when large text wraps a line.
+/** "45 sec", "12 min", "1 h 5 min": a recording's length in a list, in `msg`'s language. */
+export function formatDuration(milliseconds: number, msg: OpenGeniText = defaultText): string {
   const seconds = Math.round(Math.max(0, milliseconds) / 1000);
-  if (seconds < 60) return `${seconds}\u00a0sec`;
+  if (seconds < 60) return msg("meetings.recordings.durationSeconds", { seconds });
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}\u00a0min`;
+  if (minutes < 60) return msg("meetings.recordings.durationMinutes", { minutes });
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
-  return rest === 0 ? `${hours}\u00a0h` : `${hours}\u00a0h ${rest}\u00a0min`;
+  return rest === 0
+    ? msg("meetings.recordings.durationHours", { hours })
+    : msg("meetings.recordings.durationHoursMinutes", { hours, minutes: rest });
 }
 
 export type MeetingPhase =
@@ -64,16 +68,17 @@ export function meetingPhase(recording: Recording): MeetingPhase {
 /** The one-word state a list row shows, or null when there is nothing to say. */
 export function meetingStatusLabel(
   phase: MeetingPhase,
+  msg: OpenGeniText = defaultText,
 ): { label: string; tone: "progress" | "danger" | "neutral" } | null {
   switch (phase.kind) {
     case "uploading":
-      return { label: "Uploading", tone: "progress" };
+      return { label: msg("meetings.recordings.uploading"), tone: "progress" };
     case "transcribing":
-      return { label: "Transcribing", tone: "progress" };
+      return { label: msg("meetings.recordings.transcribing"), tone: "progress" };
     case "failed":
-      return { label: "Transcript failed", tone: "danger" };
+      return { label: msg("meetings.recordings.transcriptFailed"), tone: "danger" };
     case "no_transcript":
-      return { label: "No transcript", tone: "neutral" };
+      return { label: msg("meetings.recordings.noTranscript"), tone: "neutral" };
     case "ready":
       return null;
   }
@@ -84,27 +89,27 @@ export function meetingStatusLabel(
  * codes are the worker's: its own (`missing_provider_key`, `invalid_audio`,
  * ...) and the provider's, prefixed `provider_`.
  */
-export function transcriptErrorText(code: string | null): string {
+export function transcriptErrorText(code: string | null, msg: OpenGeniText = defaultText): string {
   switch (code) {
     case "missing_provider_key":
-      return "No transcription provider is connected for this workspace. An organization admin can connect one in Organization settings, under Models.";
+      return msg("meetings.recordings.errorMissingProviderKey");
     case "provider_unauthorized":
-      return "The transcription provider didn't accept its key. An organization admin can reconnect it in Organization settings, under Models.";
+      return msg("meetings.recordings.errorProviderUnauthorized");
     case "provider_quota_exceeded":
-      return "The transcription provider refused the job because its account has no credit left. Ask an organization admin to check it, then transcribe again.";
+      return msg("meetings.recordings.errorProviderQuotaExceeded");
     case "provider_too_large":
-      return "This recording is longer than the model accepts. Try another model.";
+      return msg("meetings.recordings.errorProviderTooLarge");
     case "provider_not_supported":
     case "model_unavailable":
-      return "That model isn't available anymore. Try another model.";
+      return msg("meetings.recordings.errorModelUnavailable");
     case "invalid_audio":
     case "provider_invalid_audio":
     case "ffmpeg_failed":
-      return "The audio couldn't be read. Part of the upload may be damaged.";
+      return msg("meetings.recordings.errorInvalidAudio");
     case "storage_unavailable":
-      return "The audio couldn't be fetched from storage. Try again in a few minutes.";
+      return msg("meetings.recordings.errorStorageUnavailable");
     default:
-      return "Something went wrong while transcribing. Try again, or pick another model.";
+      return msg("meetings.recordings.errorUnknown");
   }
 }
 
@@ -116,15 +121,33 @@ export function speakerDisplayName(
   label: string | null,
   speakers: readonly RecordingSpeaker[],
   tracks: readonly RecordingTrack[],
+  msg: OpenGeniText = defaultText,
 ): string {
-  if (!label) return "Unknown speaker";
+  if (!label) return msg("meetings.recordings.unknownSpeaker");
   const speaker = speakers.find((candidate) => candidate.label === label);
   if (speaker && speakerIsNamed(label, speakers) && speaker.name.trim()) return speaker.name;
-  return defaultSpeakerName(label, tracks);
+  return defaultSpeakerName(label, tracks, msg);
 }
 
-export function defaultSpeakerName(label: string, tracks: readonly RecordingTrack[]): string {
-  return defaultRecordingSpeakerName(label, tracks);
+/** "Speaker 2", "Microphone" or "Shared audio" for an unnamed label, in `msg`'s language. */
+export function defaultSpeakerName(
+  label: string,
+  tracks: readonly RecordingTrack[],
+  msg: OpenGeniText = defaultText,
+): string {
+  const named = recordingSpeakerDefault(label, tracks);
+  switch (named.kind) {
+    case "speaker":
+      return msg("meetings.recordings.speakerNumber", { number: named.number });
+    case "microphone":
+      return msg("meetings.recordings.microphone");
+    case "system":
+      return msg("meetings.recordings.sharedAudio");
+    case "track":
+      return msg("meetings.recordings.trackNumber", { number: named.number });
+    case "label":
+      return named.label;
+  }
 }
 
 /** True when the label has a name of its own: a person, a plain name, or a suggestion. */
@@ -214,9 +237,10 @@ export function activeSegmentIndex(
 export function versionSummary(
   version: RecordingTranscriptVersion,
   modelName: string | null,
+  locale?: string,
 ): string[] {
   const parts = [modelName ?? version.model];
-  const languages = version.languages.map(languageName).filter(Boolean);
+  const languages = version.languages.map((code) => languageName(code, locale)).filter(Boolean);
   if (languages.length > 0) parts.push(languages.join(", "));
   return parts;
 }
@@ -300,8 +324,11 @@ const THREE_LETTER_LANGUAGES: Record<string, string> = {
   chi: "zh",
 };
 
-/** "English" for "en" or a provider's "eng"; the code itself when no name is known. */
-export function languageName(code: string): string {
+/**
+ * "English" for "en" or a provider's "eng", named in `locale` ("engelsk" in Norwegian);
+ * the code itself when no name is known.
+ */
+export function languageName(code: string, locale?: string): string {
   let tag = code;
   try {
     tag = Intl.getCanonicalLocales(code)[0] ?? code;
@@ -312,8 +339,11 @@ export function languageName(code: string): string {
   const twoLetter = THREE_LETTER_LANGUAGES[primary!.toLowerCase()];
   if (twoLetter) tag = [twoLetter, ...rest].join("-");
   try {
-    const name = new Intl.DisplayNames(["en"], { type: "language" }).of(tag);
-    if (name && name !== tag) return name;
+    const name = new Intl.DisplayNames(locale ? [locale, "en"] : ["en"], { type: "language" }).of(
+      tag,
+    );
+    // Some languages write language names in lower case ("norsk"); a label starts upper case.
+    if (name && name !== tag) return name.charAt(0).toLocaleUpperCase(locale) + name.slice(1);
   } catch {
     // No Intl.DisplayNames here.
   }
@@ -321,10 +351,10 @@ export function languageName(code: string): string {
 }
 
 /** A short, readable default title for a new recording: "Meeting, Oct 23, 14:05". */
-export function defaultMeetingTitle(now: Date): string {
-  const date = now.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  const time = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  return `Meeting, ${date}, ${time}`;
+export function defaultMeetingTitle(now: Date, msg: OpenGeniText = defaultText): string {
+  const date = now.toLocaleDateString(msg.locale, { month: "short", day: "numeric" });
+  const time = now.toLocaleTimeString(msg.locale, { hour: "2-digit", minute: "2-digit" });
+  return msg("meetings.recordings.defaultTitle", { date, time });
 }
 
 /** A finished stretch of live text on one track, as the live preview shows it. */

@@ -530,7 +530,7 @@ export function MeetingTranscript({
   const labels = useMemo(() => [...slots.keys()], [slots]);
   const [naming, setNaming] = useState<string | null>(null);
   const [editing, setEditing] = useState<TranscriptTurn | null>(null);
-  const nameOf = (label: string | null) => speakerDisplayName(label, speakers, tracks);
+  const nameOf = (label: string | null) => speakerDisplayName(label, speakers, tracks, msg);
   const listRef = useRef<HTMLOListElement>(null);
   // Follow playback: keep the playing line in view while the reader is
   // following it, and stop following once they scroll elsewhere.

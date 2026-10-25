@@ -687,6 +687,36 @@ export type RecordingSpeaker = z.infer<typeof RecordingSpeaker>;
 const DIARIZED_SPEAKER_LABEL = /^(?:t\d+_)?speaker_(\d+)$/u;
 const TRACK_SPEAKER_LABEL = /^track-(\d+)$/u;
 
+/** What an unnamed speaker label stands for, for clients that word it in the reader's language. */
+export type RecordingSpeakerDefault =
+  | { kind: "speaker"; number: number }
+  | { kind: "microphone" }
+  | { kind: "system" }
+  | { kind: "track"; number: number }
+  | { kind: "label"; label: string };
+
+/**
+ * What a speaker label stands for until someone names it: the diarizer's
+ * `speaker_1` (or `t0_speaker_1`) is speaker 2, and a whole-track label such as
+ * `track-0` is that track's microphone, shared audio or plain track number.
+ */
+export function recordingSpeakerDefault(
+  label: string,
+  tracks: readonly { trackNumber: number; source: RecordingTrackSource }[],
+): RecordingSpeakerDefault {
+  const diarized = DIARIZED_SPEAKER_LABEL.exec(label);
+  if (diarized) return { kind: "speaker", number: Number(diarized[1]) + 1 };
+  const track = TRACK_SPEAKER_LABEL.exec(label);
+  if (track) {
+    const trackNumber = Number(track[1]);
+    const source = tracks.find((candidate) => candidate.trackNumber === trackNumber)?.source;
+    if (source === "microphone") return { kind: "microphone" };
+    if (source === "system") return { kind: "system" };
+    return { kind: "track", number: trackNumber + 1 };
+  }
+  return { kind: "label", label };
+}
+
 /**
  * The name a speaker label has until someone names it: "Speaker 2" for a
  * diarizer's `speaker_1` (or `t0_speaker_1` when several tracks were
@@ -698,17 +728,19 @@ export function defaultRecordingSpeakerName(
   label: string,
   tracks: readonly { trackNumber: number; source: RecordingTrackSource }[],
 ): string {
-  const diarized = DIARIZED_SPEAKER_LABEL.exec(label);
-  if (diarized) return `Speaker ${Number(diarized[1]) + 1}`;
-  const track = TRACK_SPEAKER_LABEL.exec(label);
-  if (track) {
-    const trackNumber = Number(track[1]);
-    const source = tracks.find((candidate) => candidate.trackNumber === trackNumber)?.source;
-    if (source === "microphone") return "Microphone";
-    if (source === "system") return "Shared audio";
-    return `Track ${trackNumber + 1}`;
+  const named = recordingSpeakerDefault(label, tracks);
+  switch (named.kind) {
+    case "speaker":
+      return `Speaker ${named.number}`;
+    case "microphone":
+      return "Microphone";
+    case "system":
+      return "Shared audio";
+    case "track":
+      return `Track ${named.number}`;
+    case "label":
+      return named.label;
   }
-  return label;
 }
 
 export const UpdateRecordingSpeakersResponse = /* @__PURE__ */ defineSchema(() =>
