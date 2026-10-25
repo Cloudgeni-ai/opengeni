@@ -665,6 +665,23 @@ describe("recording routes", () => {
     ).toBe(false);
   });
 
+  test("a deployment that aligns words itself offers text-only models for meetings", async () => {
+    const scope = await fixture({ settings: { recordingWordAlignment: true } });
+    const models = await scope.owner.call("GET", "/recording-models");
+    expect(
+      models.body.models.find((model: { providerId: string }) => model.providerId === "openai"),
+    ).toMatchObject({ model: "gpt-transcribe", capabilities: { wordTimestamps: false } });
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+          transcription: { providerId: "openai", model: "gpt-transcribe" },
+        })
+      ).status,
+    ).toBe(201);
+  });
+
   test("a pinned deployment offers its one model for everything and refuses any other", async () => {
     const scope = await fixture({
       settings: {

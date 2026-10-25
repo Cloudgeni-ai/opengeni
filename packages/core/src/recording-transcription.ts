@@ -223,6 +223,60 @@ export type RecordingDiarizer = {
   ): Promise<RecordingDiarizerResult>;
 };
 
+// --- Word alignment --------------------------------------------------------
+
+/** Where the aligner placed each word, in the order it was given them. */
+export type RecordingAlignedWords = {
+  words: Array<{
+    startMilliseconds: number;
+    endMilliseconds: number;
+    /** Mean log-probability of the word's sound; null when it was spread or untimed. */
+    score: number | null;
+  }>;
+  /** Words fixed by agreement with the aligner's own reading of the audio. */
+  anchoredWords: number;
+  /** Words spread evenly over a stretch that could not be aligned exactly. */
+  spreadWords: number;
+  /** Words with nothing to place (symbols); they take their neighbour's time. */
+  untimedWords: number;
+};
+
+/**
+ * Places a transcript's words on the audio (forced alignment), for models
+ * that return only text. Our CPU aligner implements this.
+ */
+export type RecordingWordAligner = {
+  id: string;
+  align(
+    audio: RecordingTranscriptionAudio,
+    words: readonly string[],
+    options: { signal?: AbortSignal | undefined },
+  ): Promise<RecordingAlignedWords>;
+};
+
+/** A text-only model's text as the words the aligner places, split at whitespace. */
+export function recordingTextWords(text: string | undefined): string[] {
+  const trimmed = text?.trim() ?? "";
+  return trimmed ? trimmed.split(/\s+/u) : [];
+}
+
+/** The words of `text` with the times the aligner gave them. */
+export function alignedTranscribedWords(
+  words: readonly string[],
+  aligned: RecordingAlignedWords,
+): RecordingTranscribedWord[] {
+  if (aligned.words.length !== words.length) {
+    throw new Error(`the aligner placed ${aligned.words.length} of ${words.length} words`);
+  }
+  return words.map((text, index) => ({
+    text,
+    startMilliseconds: aligned.words[index]!.startMilliseconds,
+    endMilliseconds: aligned.words[index]!.endMilliseconds,
+    speaker: null,
+    spaceBefore: index > 0,
+  }));
+}
+
 /**
  * Give each word the speaker whose turn overlaps it most. A word inside no
  * turn takes the nearest turn's speaker, so short gaps keep their speaker.

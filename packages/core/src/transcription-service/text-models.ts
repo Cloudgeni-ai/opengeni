@@ -14,8 +14,9 @@ import type {
 
 /**
  * What a speech-to-text model that returns plain text can do: no word
- * timings and no speakers of its own. Meetings get both from our diarizer,
- * which cuts the audio at each speaker's turns before it is sent.
+ * timings and no speakers of its own. A meeting gets its words placed on the
+ * audio by our aligner and its speakers from our diarizer, when the
+ * deployment runs them.
  */
 export function textModelCapabilities(limits: {
   maxDurationSeconds: number | null;

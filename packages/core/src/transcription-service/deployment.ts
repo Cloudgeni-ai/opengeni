@@ -27,6 +27,7 @@ import {
   findRecordingTranscriptionModel,
   RecordingTranscriptionError,
   type RecordingTranscriptionCredentials,
+  type RecordingTranscriptionModelSpec,
   type RecordingTranscriptionProvider,
   type RecordingTranscriptionProviderRegistry,
 } from "../recording-transcription";
@@ -57,6 +58,12 @@ export type SpeechToTextDeployment = {
   pinned: SpeechToTextModelRef | null;
   /** The model new meeting transcripts use when a workspace names none. */
   meetingDefault: SpeechToTextModelRef;
+  /**
+   * Whether the deployment places a text-only model's words on the audio
+   * itself, so every model can serve meetings, not only those that time
+   * their words.
+   */
+  wordAlignment: boolean;
   /**
    * The credential a call to this provider carries: the workspace's or its
    * organization's key for key providers, null for providers that hold or
@@ -214,6 +221,7 @@ export function createSpeechToTextDeployment(
     order,
     pinned,
     meetingDefault,
+    wordAlignment: settings.recordingWordAlignment,
     async credentials(providerId, scope) {
       const provider = registry.get(providerId);
       if (!provider) return "missing";
@@ -315,6 +323,18 @@ function azureSpeechAccount(
     creditPricing: voiceMai?.kind === "azure-mai" ? (voiceMai.pricing ?? null) : null,
     ...fetchOption,
   });
+}
+
+/**
+ * Whether a model can transcribe meetings here: a meeting places every word
+ * in time, which the model does itself or, when the deployment aligns words,
+ * the worker does from the model's text.
+ */
+export function speechToTextServesMeetings(
+  deployment: Pick<SpeechToTextDeployment, "wordAlignment">,
+  spec: Pick<RecordingTranscriptionModelSpec, "capabilities">,
+): boolean {
+  return spec.capabilities.wordTimestamps || deployment.wordAlignment;
 }
 
 function modelRef(value: string | undefined | null): SpeechToTextModelRef | null {

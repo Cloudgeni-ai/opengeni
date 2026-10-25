@@ -9,16 +9,21 @@
 //! opengeni-speakers diarize --models DIR [--threads N] [--min-speakers N]
 //!     [--max-speakers N] [--threshold D] [--step S] < audio.f32
 //! opengeni-speakers embed --models DIR --segments FILE < audio.f32
+//! opengeni-speakers align --models DIR --words FILE [--threads N] < audio.f32
 //! opengeni-speakers describe MODEL.onnx
 //! ```
 //!
 //! `--models DIR` holds `segmentation.onnx` (pyannote segmentation 3.0) and
 //! `embedding.onnx` (a speaker-embedding model exported for sherpa-onnx);
 //! `--segmentation` and `--embedding` name the files directly instead.
+//! `align` reads `alignment.onnx` (Omnilingual ASR CTC) and
+//! `alignment-tokens.txt` from the same directory, and a JSON array of the
+//! transcript's words from `--words`.
 
 // Frame and speaker arithmetic reads more clearly with explicit indices.
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
+mod align;
 mod cluster;
 mod diarize;
 mod fbank;
@@ -42,7 +47,7 @@ fn parse_args() -> Result<Args> {
     let mut raw = std::env::args().skip(1);
     let command = raw
         .next()
-        .ok_or("usage: opengeni-speakers diarize|embed|describe ...")?;
+        .ok_or("usage: opengeni-speakers diarize|embed|align|describe ...")?;
     let mut values = HashMap::new();
     let mut positional = Vec::new();
     while let Some(arg) = raw.next() {
@@ -270,11 +275,53 @@ fn run_embed(args: &Args) -> Result<String> {
     serde_json::to_string(&voices).map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+struct AlignOutput {
+    #[serde(flatten)]
+    result: align::Alignment,
+    #[serde(rename = "elapsedMs")]
+    elapsed_ms: u64,
+}
+
+/// Word timings for a transcript that came without them.
+fn run_align(args: &Args) -> Result<String> {
+    let started = Instant::now();
+    let threads = args.threads()?;
+    let file = args.values.get("words").ok_or("--words FILE is needed")?;
+    let words: Vec<String> = serde_json::from_slice(
+        &std::fs::read(file).map_err(|error| format!("reading {file}: {error}"))?,
+    )
+    .map_err(|error| format!("{file}: {error}"))?;
+    let model = args.model("alignment")?;
+    let tokens = match args.values.get("tokens") {
+        Some(path) => PathBuf::from(path),
+        None => model.with_file_name("alignment-tokens.txt"),
+    };
+    let env = ort::init()
+        .with_name("opengeni-speakers")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut aligner = align::Aligner::load(&env, &model, &tokens, threads)?;
+    let result = match args.values.get("input") {
+        Some(path) => aligner.align(
+            std::fs::File::open(path).map_err(|error| format!("reading {path}: {error}"))?,
+            &words,
+        )?,
+        None => aligner.align(std::io::stdin().lock(), &words)?,
+    };
+    let output = AlignOutput {
+        result,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    };
+    serde_json::to_string(&output).map_err(|e| e.to_string())
+}
+
 fn run() -> Result<String> {
     let args = parse_args()?;
     match args.command.as_str() {
         "diarize" => run_diarize(&args),
         "embed" => run_embed(&args),
+        "align" => run_align(&args),
         "describe" => {
             let path = args
                 .positional

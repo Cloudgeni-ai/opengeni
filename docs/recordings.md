@@ -213,12 +213,59 @@ and who pays for it, its `funding`:
 - `deployment`: an account the deployment runs (Azure Speech, OpenAI, Azure
   OpenAI). Charged as credits when credit billing is on.
 
-A meeting needs a model that places every word in time (Scribe and
-MAI-Transcribe-2), because speakers, playback and the transcript's turns are
-built from word timings. Models that return only text (the subscription
-models, OpenAI and Azure OpenAI) serve dictation; `GET …/recording-models`
-does not offer them for meetings and a meeting that names one is refused.
-Any model can serve dictation; each provider uses one model for it.
+A meeting needs every word placed in time, because speakers, playback and
+the transcript's turns are built from word timings. Scribe and
+MAI-Transcribe-2 time their own words. Models that return only text (the
+subscription models, OpenAI and Azure OpenAI) get theirs from Opengeni's
+word aligner, below, where the deployment runs it
+(`OPENGENI_RECORDING_WORD_ALIGNMENT=true`, which the stock images set);
+without it they serve dictation only, `GET …/recording-models` does not
+offer them for meetings and a meeting that names one is refused. Any model
+can serve dictation; each provider uses one model for it.
+
+### Opengeni's word aligner
+
+A text-only model hears each track whole, or in the largest overlapping
+pieces it accepts, so it keeps the conversation's context. `opengeni-speakers
+align` then places the returned words on the same audio (forced alignment):
+Meta's Omnilingual ASR CTC 300M model (Apache-2.0, about 1,600 languages, as
+exported to int8 ONNX by sherpa-onnx, 365 MB) scores every 20 ms of audio
+against its characters, and the transcript's words are laid along the most
+likely path. Speakers come from Opengeni's diarizer as for any other model.
+
+Long audio is never aligned in one piece. The model's own quick reading of
+the audio is matched word for word against the transcript, and runs of
+agreeing words become fixed points that cut the recording into short blocks,
+each aligned exactly; a block still too long is cut again at looser
+agreement. Speech the transcript left out is skipped rather than forced onto
+nearby words. The audio streams through window by window, so memory does
+not grow with the recording.
+
+The worker image ships the model as `alignment.onnx` and
+`alignment-tokens.txt` (with its license) next to the speaker models,
+pinned by checksum.
+
+Measured against ElevenLabs Scribe v2's own word timings, on a 16-core
+desktop CPU with 8 threads:
+
+| Audio | Words | Starts within 100 ms | Within 200 ms | Median start error |
+| --- | --- | --- | --- | --- |
+| English meeting, 5 min | 412 | 91.0% | 92.7% | 20 ms |
+| Norwegian read speech, 7 min | 649 | 99.4% | 99.8% | 20 ms |
+| English meeting, 36 min, much crosstalk | 7,094 | 76.9% | 82.6% | 24 ms |
+| English meeting, 1 h 55 min | 19,618 | 89.9% | 93.3% | 20 ms |
+
+Words spoken over another speaker align worst (63% within 100 ms on the
+36-minute meeting, against 89% for the rest), mostly where the transcript
+leaves the crosstalk out; their low `score` marks them. Alignment takes
+about 0.6 CPU-seconds per second of audio (about 70 CPU-minutes for a
+two-hour meeting) and about 0.95 GB of memory whatever the length.
+
+`opengeni-speakers align --words FILE` reads a JSON array of words and 16
+kHz mono f32 audio on stdin or from `--input`, and prints each word's
+`startMs`, `endMs` and `score` (mean log-probability), with how many were
+anchored, spread over a stretch it could not align exactly, or untimed
+(symbols with no sound).
 
 `OPENGENI_SPEECH_TO_TEXT_PINNED` (`provider/model`, such as
 `azure-speech/MAI-Transcribe-2`) makes one model the only one for every use.
@@ -276,6 +323,7 @@ provider, model and who pays (`deployment`, `workspace_key`,
 | `prepare` | Download the chunks and write one seekable file per track (ffmpeg) |
 | `convert` | Re-encode a track, or cut it into pieces a model accepts (ffmpeg) |
 | `diarize` | Opengeni's speaker models, decoding included |
+| `align` | Opengeni's word aligner, for text-only models, decoding included |
 | `transcribe` | Waiting on the transcription provider |
 | `segment` | Cut a dictation into the voice input's pieces (ffmpeg) |
 | `finish` | Store the transcript and settle its charge |
@@ -297,6 +345,9 @@ provider, model and who pays (`deployment`, `workspace_key`,
   `opengeni_recording_diarization_total`,
   `opengeni_recording_diarizer_fallbacks_total` and
   `opengeni_recording_speakers` show speed and quality next to cost.
+  For text-only models, `opengeni_recording_aligned_words_total` counts how
+  the aligner placed each word and `opengeni_recording_alignment_score` is
+  its mean fit per transcript.
 - The live preview counts `opengeni_recording_live_sessions_total`,
   `opengeni_recording_live_audio_seconds_total` and
   `opengeni_recording_live_cost_usd_total`. The browser streams to the

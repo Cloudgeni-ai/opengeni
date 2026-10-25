@@ -10,6 +10,7 @@ import type { Attributes, Observability } from "@opengeni/observability";
  * - prepare: download the chunks and write one seekable file per track.
  * - convert: re-encode a track or cut it into pieces a model accepts.
  * - diarize: our speaker models (decoding included).
+ * - align: our aligner placing a text-only model's words (decoding included).
  * - transcribe: waiting on the transcription provider.
  * - segment: cut a dictation into the voice input's pieces.
  * - finish: store the transcript and settle its charge.
@@ -18,6 +19,7 @@ export const RECORDING_USAGE_STAGES = [
   "prepare",
   "convert",
   "diarize",
+  "align",
   "transcribe",
   "segment",
   "finish",
@@ -260,6 +262,16 @@ export type RecordingProcessingReport = RecordingUsageLabels & {
   diarization: string | null;
   speakers: number | null;
   ourDiarizerFailed: boolean;
+  /** How our aligner placed a text-only model's words, when it ran. */
+  alignment: {
+    words: number;
+    anchoredWords: number;
+    spreadWords: number;
+    untimedWords: number;
+    /** Words with their own score, and those scores' sum (mean log-probability). */
+    scoredWords: number;
+    scoreSum: number;
+  } | null;
   stages: ReadonlyMap<RecordingUsageStage, Readonly<RecordingStageUsage>>;
 };
 
@@ -380,6 +392,32 @@ export function reportRecordingProcessing(
           labels: { provider: report.provider },
           value: report.speakers,
           buckets: [0, 1, 2, 3, 4, 5, 6, 8, 10, 15, 20],
+        });
+      }
+    }
+    if (report.outcome === "complete" && report.alignment && report.alignment.words > 0) {
+      const { words, anchoredWords, spreadWords, untimedWords } = report.alignment;
+      for (const [placement, count] of [
+        ["anchored", anchoredWords],
+        ["aligned", words - anchoredWords - spreadWords - untimedWords],
+        ["spread", spreadWords],
+        ["untimed", untimedWords],
+      ] as const) {
+        if (count <= 0) continue;
+        observability.incrementCounter({
+          name: "opengeni_recording_aligned_words_total",
+          help: "Words our aligner placed for text-only models, by how: anchored, aligned, spread or untimed.",
+          labels: { ...labels, placement },
+          amount: count,
+        });
+      }
+      if (report.alignment.scoredWords > 0) {
+        observability.observeHistogram({
+          name: "opengeni_recording_alignment_score",
+          help: "Mean log-probability of the aligned words' sound per transcript; nearer 0 fits better.",
+          labels: { provider: report.provider, model: report.model },
+          value: report.alignment.scoreSum / report.alignment.scoredWords,
+          buckets: [-12, -10, -8, -6, -5, -4, -3, -2, -1, -0.5, 0],
         });
       }
     }

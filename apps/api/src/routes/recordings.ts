@@ -78,6 +78,7 @@ import {
   createSpeechToTextDeployment,
   dictationProviders,
   speechToTextModelFor,
+  speechToTextServesMeetings,
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
@@ -226,8 +227,8 @@ export function registerRecordingRoutes(
     const found =
       model && !pinnedAway ? findRecordingTranscriptionModel(registry, providerId, model) : null;
     // A meeting transcript places every word in time; a model that returns
-    // only text serves dictation, not meetings.
-    if (!found || !found.spec.capabilities.wordTimestamps) {
+    // only text serves meetings only where the deployment aligns its words.
+    if (!found || !speechToTextServesMeetings(deployment, found.spec)) {
       throw new ApiHttpError(400, {
         code: "validation_failed",
         message: "This transcription model is not offered here.",
@@ -967,11 +968,12 @@ export function registerRecordingRoutes(
         ),
       ),
     );
-    // The models a meeting can use: each places every word in time.
+    // The models a meeting can use: each places every word in time, or the
+    // deployment does it for them.
     const models: RecordingTranscriptionModel[] = offered.flatMap((provider) =>
       provider.models
         .filter((spec) => !deployment.pinned || spec.model === deployment.pinned.model)
-        .filter((spec) => spec.capabilities.wordTimestamps)
+        .filter((spec) => speechToTextServesMeetings(deployment, spec))
         .map((spec) => ({
           providerId: provider.id,
           providerName: provider.name,
