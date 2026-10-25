@@ -360,6 +360,13 @@ describe("Recorder errors", () => {
       body: "Turn on System Audio Recording for Opengeni in System Settings.",
     });
   });
+
+  test("a used-up usage allowance says so in the person's words", async () => {
+    const { uploadFailureReason } = await import("./recorder-panel");
+    expect(uploadFailureReason("The workspace usage allowance is exhausted.")).toBe(
+      "The usage allowance is used up, so new meetings can't be transcribed until it renews.",
+    );
+  });
 });
 
 describe("Live transcript", () => {

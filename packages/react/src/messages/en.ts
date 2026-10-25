@@ -2457,6 +2457,8 @@ export const englishMessages = {
     "You can use other pages while it records. Closing or reloading this tab stops it, and everything recorded until then is kept.",
   "meetings.recorderPanel.youNoLongerHavePermission":
     "You no longer have permission to add recordings to this workspace.",
+  "meetings.recorderPanel.theUsageAllowanceIsUsed":
+    "The usage allowance is used up, so new meetings can't be transcribed until it renews.",
   "meetings.recorderPanel.yourBrowserAsksWhatTo":
     "Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio.",
   "meetings.settings.agreedForThemselves": "Agreed for themselves",

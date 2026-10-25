@@ -95,6 +95,9 @@ export function uploadFailureReason(message: string, msg: OpenGeniText = default
     return msg("meetings.recorderPanel.youNoLongerHavePermission");
   }
   if (/too large|\b413\b/i.test(text)) return msg("meetings.recorderPanel.aPieceOfTheAudio");
+  if (/usage allowance|\b402\b/i.test(text)) {
+    return msg("meetings.recorderPanel.theUsageAllowanceIsUsed");
+  }
   if (!text) return msg("meetings.recorderPanel.theServerRefusedTheAudio");
   return msg("meetings.recorderPanel.theServerRefusedTheAudio2", {
     value: text.replace(/[.\s]+$/, ""),
