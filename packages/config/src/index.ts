@@ -993,6 +993,13 @@ const SettingsSchema = z.object({
   recordingSpeakersBinaryPath: z.string().trim().min(1).max(1024).optional(),
   recordingSpeakerModelsDir: z.string().trim().min(1).max(1024).optional(),
   /**
+   * Place a text-only model's words on the audio ourselves (forced alignment
+   * with `alignment.onnx` from the speaker models directory), so models
+   * that return only text can serve meetings. The API and the worker both
+   * read it; the worker also needs the model.
+   */
+  recordingWordAlignment: EnvBoolean.default(false),
+  /**
    * The deployment's own Azure Speech account for meeting transcripts
    * (MAI-Transcribe), as its HTTPS origin. Audio is processed in the
    * account's region. It authenticates with the account key when one is set,
@@ -5476,6 +5483,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     recordingSpeakersBinaryPath: optional("OPENGENI_RECORDING_SPEAKERS_BINARY_PATH"),
     recordingSpeakerModelsDir: optional("OPENGENI_RECORDING_SPEAKER_MODELS_DIR"),
+    recordingWordAlignment: optional("OPENGENI_RECORDING_WORD_ALIGNMENT"),
     recordingAzureSpeechEndpoint: optional("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT"),
     recordingAzureSpeechApiKey: optional("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY"),
     recordingTranscriptionDefault: optional("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT"),

@@ -371,22 +371,22 @@ impl Aligner {
         wanted.dedup();
         let emissions = self.emissions(audio, &wanted)?;
         let heard = self.heard(&emissions);
-        let anchors = anchors(&tokenized, &heard);
-
+        // Cut before each anchor: block k runs from cut k to cut k + 1.
+        let mut cuts: Vec<(usize, usize)> = vec![(0, 0)];
+        cuts.extend(block_cuts(
+            &tokenized,
+            &heard,
+            (0, 0),
+            (words.len(), emissions.frames),
+            0,
+        ));
+        cuts.push((words.len(), emissions.frames));
         let mut result = Alignment {
             words: vec![WordTiming::default(); words.len()],
-            anchored_words: anchors.len(),
+            anchored_words: cuts.len() - 2,
             audio_ms: (emissions.samples * 1000 / SAMPLE_RATE) as u64,
             ..Default::default()
         };
-        // Cut before each anchor: block k runs from cut k to cut k + 1.
-        let mut cuts: Vec<(usize, usize)> = vec![(0, 0)];
-        for &(word, frame) in &anchors {
-            if word > cuts.last().unwrap().0 && frame > cuts.last().unwrap().1 {
-                cuts.push((word, frame));
-            }
-        }
-        cuts.push((words.len(), emissions.frames));
         let mut placed: Vec<Option<Span>> = vec![None; words.len()];
         for pair in cuts.windows(2) {
             let ((word_from, frame_from), (word_to, frame_to)) = (pair[0], pair[1]);
@@ -396,7 +396,7 @@ impl Aligner {
             result.blocks += 1;
             let block = &tokenized[word_from..word_to];
             let frames = frame_to.max(frame_from + 1) - frame_from;
-            let states = 2 * block.iter().map(|(_, ids)| ids.len() + 1).sum::<usize>() + 3;
+            let states = block_states(block);
             result.largest_block_cells = result.largest_block_cells.max(frames * states);
             let exact = if frames * states <= MAX_CELLS {
                 self.viterbi(&emissions, block, frame_from, frames)
@@ -588,11 +588,64 @@ impl Aligner {
     }
 }
 
+/// How sure a run of agreeing words must be to anchor the audio: its words
+/// and letters. The first level cuts every recording; a block still too large
+/// to align exactly is cut again with the next, looser one.
+const ANCHOR_LEVELS: [(usize, usize); 3] = [(3, MIN_ANCHOR_LETTERS), (2, 8), (1, 5)];
+
+/// States a block of words needs in the alignment trellis.
+fn block_states(block: &[(String, Vec<u32>)]) -> usize {
+    2 * block.iter().map(|(_, ids)| ids.len() + 1).sum::<usize>() + 3
+}
+
+/// The cuts strictly between `from` and `to` (each a word and the frame it
+/// starts on): anchors at `level`, then, inside any block still too large to
+/// align exactly, anchors at the looser levels.
+fn block_cuts(
+    transcript: &[(String, Vec<u32>)],
+    heard: &[(String, usize, usize)],
+    from: (usize, usize),
+    to: (usize, usize),
+    level: usize,
+) -> Vec<(usize, usize)> {
+    let cells = (to.1 - from.1) * block_states(&transcript[from.0..to.0]);
+    if level >= ANCHOR_LEVELS.len() || (level > 0 && cells <= MAX_CELLS) {
+        return Vec::new();
+    }
+    let first = heard.partition_point(|word| word.1 < from.1);
+    let last = heard.partition_point(|word| word.1 < to.1);
+    let mut cuts = Vec::new();
+    let mut previous = from;
+    for (word, frame) in anchors(
+        &transcript[from.0..to.0],
+        &heard[first..last],
+        ANCHOR_LEVELS[level],
+    ) {
+        let cut = (from.0 + word, frame);
+        if cut.0 > previous.0 && cut.1 > previous.1 && cut.0 < to.0 && cut.1 < to.1 {
+            cuts.push(cut);
+            previous = cut;
+        }
+    }
+    let mut result = Vec::new();
+    let mut start = from;
+    for end in cuts.iter().copied().chain(std::iter::once(to)) {
+        result.extend(block_cuts(transcript, heard, start, end, level + 1));
+        if end != to {
+            result.push(end);
+        }
+        start = end;
+    }
+    result
+}
+
 /// Transcript words that agree with the model's own reading, inside a run of
-/// at least three agreeing words, with the frame the heard word starts on.
+/// agreeing words sure enough for `(words, letters)`, with the frame the
+/// heard word starts on.
 fn anchors(
     transcript: &[(String, Vec<u32>)],
     heard: &[(String, usize, usize)],
+    (min_run, min_letters): (usize, usize),
 ) -> Vec<(usize, usize)> {
     let keyed: Vec<usize> = (0..transcript.len())
         .filter(|&index| !transcript[index].0.is_empty())
@@ -689,9 +742,17 @@ fn anchors(
             .map(|&(i, _)| transcript[keyed[i]].0.as_str())
             .collect::<std::collections::HashSet<_>>()
             .len();
-        if run.len() >= 3 && letters >= MIN_ANCHOR_LETTERS && distinct >= 2 {
-            for &(i, j) in &run[1..run.len() - 1] {
-                result.push((keyed[i], heard[j].1));
+        // A long run anchors its inner words, whose neighbours agree too; a
+        // short one, allowed only at the looser levels, anchors them all.
+        if run.len() >= min_run && letters >= min_letters {
+            if run.len() >= 3 && distinct >= 2 {
+                for &(i, j) in &run[1..run.len() - 1] {
+                    result.push((keyed[i], heard[j].1));
+                }
+            } else if run.len() < 3 {
+                for &(i, j) in run {
+                    result.push((keyed[i], heard[j].1));
+                }
             }
         }
         start = end;

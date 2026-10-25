@@ -1,5 +1,6 @@
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import {
+  alignedTranscribedWords,
   buildRecordingSegments,
   createVoiceInputBilling,
   estimateRecordingTranscriptionCostMicros,
@@ -10,11 +11,13 @@ import {
   planRecordingTranscriptionPieces,
   recordingDiarizationKind,
   recordingSpeakerLabels,
+  recordingTextWords,
   RecordingTranscriptionError,
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
   type RecordingDiarizerResult,
   type RecordingDiarizer,
+  type RecordingAlignedWords,
   type RecordingTranscribedWord,
   type RecordingTranscriptionAudio,
   type RecordingTranscriptionCredentials,
@@ -24,6 +27,7 @@ import {
   type RecordingTranscriptionRequest,
   type RecordingTranscriptionResult,
   type RecordingTrackWords,
+  type RecordingWordAligner,
   type TranscriptionBilling,
   type TranscriptionSegmenter,
   type TranscriptionService,
@@ -94,7 +98,12 @@ import {
   type RecordingPieceFormat,
 } from "./recording-audio";
 import type { ControlActivityServices } from "./types";
-import { createLocalDiarizer, recordingSpeakersConfig } from "./recording-speakers";
+import {
+  createLocalAligner,
+  createLocalDiarizer,
+  recordingAlignerConfig,
+  recordingSpeakersConfig,
+} from "./recording-speakers";
 
 /** One recording's work: a transcript version, or the recording's deletion. */
 export type RecordingWorkInput = {
@@ -138,6 +147,11 @@ export type RecordingActivityOptions = {
   cancellationSignal?: () => AbortSignal | undefined;
   /** Our own diarizer; defaults to the configured CPU speaker models, if any. */
   diarizer?: (settings: Settings) => RecordingDiarizer | null;
+  /**
+   * Places a text-only model's words on the audio; defaults to the
+   * configured CPU aligner when the deployment aligns words.
+   */
+  aligner?: (settings: Settings) => RecordingWordAligner | null;
   /**
    * The voice input service that transcribes dictations; defaults to the
    * deployment's configured voice input providers, with credit billing.
@@ -218,6 +232,10 @@ export async function transcribeTrack(input: {
   request: Omit<RecordingTranscriptionRequest, "audio">;
   onPiece?: (index: number) => void;
   tempRoot?: string;
+  /** Places the words of a model that returns only text. */
+  aligner?: RecordingWordAligner | null;
+  /** Adds each aligned piece's placement counts and scores. */
+  onAligned?: (aligned: RecordingAlignedWords) => void;
 }): Promise<RecordingTranscriptionResult> {
   const { source, format, maxPieceMilliseconds } = pieceShape(input.spec, input.audio.extension);
   const pieces = planRecordingTranscriptionPieces(input.durationMilliseconds, maxPieceMilliseconds);
@@ -258,9 +276,33 @@ export async function transcribeTrack(input: {
     ).catch((error: unknown) => {
       throw asRecordingTranscriptionError(error);
     });
-    parts.push({ piece, result });
+    parts.push({ piece, result: await alignPiece(input, audio, result) });
   }
   return mergeRecordingTranscriptionPieces(parts);
+}
+
+/**
+ * Give a text-only model's piece word timings by aligning its text on the
+ * same audio it heard. Results that already time their words pass through.
+ */
+async function alignPiece(
+  input: {
+    aligner?: RecordingWordAligner | null;
+    onAligned?: (aligned: RecordingAlignedWords) => void;
+    request: { signal?: AbortSignal | undefined };
+  },
+  audio: RecordingTranscriptionAudio,
+  result: RecordingTranscriptionResult,
+): Promise<RecordingTranscriptionResult> {
+  if (result.words.length > 0 || !input.aligner) return result;
+  const text = recordingTextWords(result.text);
+  if (text.length === 0) return result;
+  const aligner = input.aligner;
+  const aligned = await measureRecordingStage("align", () =>
+    aligner.align(audio, text, { signal: input.request.signal }),
+  );
+  input.onAligned?.(aligned);
+  return { ...result, words: alignedTranscribedWords(text, aligned) };
 }
 
 /**
@@ -305,6 +347,30 @@ function pieceShape(
  * deployment that does not charge credits) counts toward the workspace's
  * allowance at its list price.
  */
+/** Count one aligned piece into the version's alignment telemetry. */
+function addAlignment(
+  telemetry: { alignment: RecordingProcessingReport["alignment"] },
+  aligned: RecordingAlignedWords,
+): void {
+  const total = (telemetry.alignment ??= {
+    words: 0,
+    anchoredWords: 0,
+    spreadWords: 0,
+    untimedWords: 0,
+    scoredWords: 0,
+    scoreSum: 0,
+  });
+  total.words += aligned.words.length;
+  total.anchoredWords += aligned.anchoredWords;
+  total.spreadWords += aligned.spreadWords;
+  total.untimedWords += aligned.untimedWords;
+  for (const word of aligned.words) {
+    if (word.score === null) continue;
+    total.scoredWords += 1;
+    total.scoreSum += word.score;
+  }
+}
+
 function meetingCharge(
   settings: Settings,
   provider: RecordingTranscriptionProvider,
@@ -353,6 +419,15 @@ export function createRecordingActivities(
       defaultDiarizer = { settings, diarizer: config ? createLocalDiarizer(config) : null };
     }
     return defaultDiarizer.diarizer;
+  };
+  let defaultAligner: { settings: Settings; aligner: RecordingWordAligner | null } | null = null;
+  const alignerFor = (settings: Settings): RecordingWordAligner | null => {
+    if (options.aligner) return options.aligner(settings);
+    if (defaultAligner?.settings !== settings) {
+      const config = recordingAlignerConfig(settings);
+      defaultAligner = { settings, aligner: config ? createLocalAligner(config) : null };
+    }
+    return defaultAligner.aligner;
   };
   let defaultDictation: {
     settings: Settings;
@@ -449,6 +524,7 @@ export function createRecordingActivities(
       diarization: null,
       speakers: null,
       ourDiarizerFailed: false,
+      alignment: null,
     };
     let finished: RecordingTranscriptOutcome | null = null;
     let retryCode = "unknown";
@@ -504,8 +580,10 @@ export function createRecordingActivities(
           throw new PermanentRecordingFailure("model_unavailable");
         }
         // A meeting transcript places every word in time, to tell speakers
-        // apart and to play from; a model that returns only text can't yet.
-        if (!found.spec.capabilities.wordTimestamps) {
+        // apart and to play from. A model that returns only text needs our
+        // aligner to do it.
+        const aligner = found.spec.capabilities.wordTimestamps ? null : alignerFor(settings);
+        if (!found.spec.capabilities.wordTimestamps && !aligner) {
           throw new PermanentRecordingFailure("model_unavailable");
         }
         const resolved = await deployment.credentials(job.version.providerId, {
@@ -628,6 +706,8 @@ export function createRecordingActivities(
                 credentials,
                 onPiece,
                 request,
+                aligner,
+                onAligned: (aligned) => addAlignment(telemetry, aligned),
               }),
               runOurs(),
             ]);
