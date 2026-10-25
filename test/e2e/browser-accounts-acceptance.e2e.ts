@@ -1579,20 +1579,27 @@ const WEBKIT_PAGE_ERROR_DELIVERY_QUIET_MS = 4_000;
 // evidence, so this cannot authorize an error from another lifecycle step.
 const WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS = 30_000;
 
-function correlatedWebKitReauthenticationTerminalIndex(
+// Phases that deliberately replace a document whose finite reads WebKit can
+// report twice: once as a request terminal and once as a renderer page error.
+type WebKitReplacedDocumentPhase =
+  | "slot-revocation-reauthentication"
+  | "independent-set-after-other-logout-all";
+
+function correlatedWebKitAccessControlTerminalIndex(
   pageError: BrowserProblems["pageErrorEvidence"][number],
   acceptedRequestTerminals: BrowserProblems["acceptedRequestTerminals"],
+  phase: WebKitReplacedDocumentPhase,
 ): number | null {
   const match =
-    /^\[slot-revocation-reauthentication\] \/127\.0\.0\.1:\d+(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_./?=&%-]+) due to access control checks\.$/u.exec(
+    /^\[(?<messagePhase>[a-z-]+)\] \/127\.0\.0\.1:\d+(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_./?=&%-]+) due to access control checks\.$/u.exec(
       pageError.message,
     );
   const pathnameAndSearch = match?.groups?.pathnameAndSearch;
-  if (pathnameAndSearch === undefined) return null;
+  if (pathnameAndSearch === undefined || match?.groups?.messagePhase !== phase) return null;
   const matchingTerminalIndexes = acceptedRequestTerminals
     .flatMap((terminal, index) => {
       const distance = Math.abs(pageError.observedAt - terminal.observedAt);
-      return terminal.responsePhase === "slot-revocation-reauthentication" &&
+      return terminal.responsePhase === phase &&
         terminal.pathnameAndSearch === pathnameAndSearch &&
         distance <= WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS
         ? [{ distance, index }]
@@ -1604,9 +1611,10 @@ function correlatedWebKitReauthenticationTerminalIndex(
   return nearest.index;
 }
 
-function optionalWebKitReauthenticationAccessControlPageError(
+function optionalWebKitAccessControlPageErrors(
   problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence">,
   engine: EngineName,
+  phase: WebKitReplacedDocumentPhase,
 ): string[] {
   if (engine !== "webkit") return [];
   // WebKit can surface reads from the deliberately replaced document as page
@@ -1623,9 +1631,10 @@ function optionalWebKitReauthenticationAccessControlPageError(
   }));
   const candidates: Array<{ terminalIndex: number; message: string }> = [];
   for (const pageError of problems.pageErrorEvidence) {
-    const availableIndex = correlatedWebKitReauthenticationTerminalIndex(
+    const availableIndex = correlatedWebKitAccessControlTerminalIndex(
       pageError,
       available.map(({ terminal }) => terminal),
+      phase,
     );
     if (availableIndex === null) return [];
     const [matched] = available.splice(availableIndex, 1);
@@ -4005,6 +4014,20 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/config/other`,
       }),
     ).toContain("/v1/config/other");
+    const correlateReauthenticationPageError = (
+      pageError: Parameters<typeof correlatedWebKitAccessControlTerminalIndex>[0],
+      terminals: Parameters<typeof correlatedWebKitAccessControlTerminalIndex>[1],
+    ) =>
+      correlatedWebKitAccessControlTerminalIndex(
+        pageError,
+        terminals,
+        "slot-revocation-reauthentication",
+      );
+    const reauthenticationAccessControlPageErrors = (
+      problems: Parameters<typeof optionalWebKitAccessControlPageErrors>[0],
+      engine: EngineName,
+    ) =>
+      optionalWebKitAccessControlPageErrors(problems, engine, "slot-revocation-reauthentication");
     const acceptedWebKitCancellation = {
       observedAt: 100,
       pathnameAndSearch:
@@ -4018,13 +4041,11 @@ describe("provider-neutral browser account acceptance", () => {
       observedAt: 150,
     };
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
-        acceptedWebKitCancellation,
-      ]),
+      correlateReauthenticationPageError(correlatedWebKitPageError, [acceptedWebKitCancellation]),
     ).toBe(0);
-    expect(correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [])).toBeNull();
+    expect(correlateReauthenticationPageError(correlatedWebKitPageError, [])).toBeNull();
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(
+      correlateReauthenticationPageError(
         {
           message:
             "[cross-slot-deep-link] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
@@ -4034,7 +4055,7 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(
+      correlateReauthenticationPageError(
         {
           message:
             "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog due to access control checks.",
@@ -4052,7 +4073,7 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toBe(0);
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+      correlateReauthenticationPageError(correlatedWebKitPageError, [
         {
           ...acceptedWebKitCancellation,
           observedAt: 151,
@@ -4061,7 +4082,7 @@ describe("provider-neutral browser account acceptance", () => {
       ]),
     ).toBe(0);
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+      correlateReauthenticationPageError(correlatedWebKitPageError, [
         {
           ...acceptedWebKitCancellation,
           observedAt: 150 + WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS + 1,
@@ -4069,7 +4090,7 @@ describe("provider-neutral browser account acceptance", () => {
       ]),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+      correlateReauthenticationPageError(correlatedWebKitPageError, [
         {
           ...acceptedWebKitCancellation,
           observedAt: 150 - WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS - 1,
@@ -4077,13 +4098,13 @@ describe("provider-neutral browser account acceptance", () => {
       ]),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+      correlateReauthenticationPageError(correlatedWebKitPageError, [
         { ...acceptedWebKitCancellation, observedAt: 100 },
         { ...acceptedWebKitCancellation, observedAt: 200, terminal: "finished" },
       ]),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+      correlateReauthenticationPageError(correlatedWebKitPageError, [
         acceptedWebKitCancellation,
         {
           ...acceptedWebKitCancellation,
@@ -4094,7 +4115,7 @@ describe("provider-neutral browser account acceptance", () => {
     ).toBe(1);
     const consumableWebKitFailures = [acceptedWebKitCancellation];
     expect(
-      optionalWebKitReauthenticationAccessControlPageError(
+      reauthenticationAccessControlPageErrors(
         {
           acceptedRequestTerminals: consumableWebKitFailures,
           pageErrorEvidence: [correlatedWebKitPageError],
@@ -4104,7 +4125,7 @@ describe("provider-neutral browser account acceptance", () => {
     ).toEqual([correlatedWebKitPageError.message]);
     expect(consumableWebKitFailures).toEqual([]);
     expect(
-      optionalWebKitReauthenticationAccessControlPageError(
+      reauthenticationAccessControlPageErrors(
         {
           acceptedRequestTerminals: [acceptedWebKitCancellation],
           pageErrorEvidence: [correlatedWebKitPageError, correlatedWebKitPageError],
@@ -4124,7 +4145,7 @@ describe("provider-neutral browser account acceptance", () => {
     };
     const bijectiveWebKitFailures = [acceptedWebKitCancellation, secondAcceptedWebKitCancellation];
     expect(
-      optionalWebKitReauthenticationAccessControlPageError(
+      reauthenticationAccessControlPageErrors(
         {
           acceptedRequestTerminals: bijectiveWebKitFailures,
           pageErrorEvidence: [correlatedWebKitPageError, secondCorrelatedWebKitPageError],
@@ -4133,6 +4154,55 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toEqual([correlatedWebKitPageError.message, secondCorrelatedWebKitPageError.message]);
     expect(bijectiveWebKitFailures).toEqual([]);
+    // The independent set's own reload after the other set's logout-all can
+    // cancel its pinned-session read the same way. Its evidence authorizes
+    // only that phase's error, never the re-authentication phase's.
+    const independentReloadCancellation = {
+      observedAt: 300,
+      pathnameAndSearch:
+        "/v1/workspaces/b5b5cb8f-1c47-4729-bdce-45a70fe50775/sessions?view=page&limit=1&projection=summary&pinsOnly=true&siteConversations=include",
+      responsePhase: "independent-set-after-other-logout-all",
+      terminal: "failed" as const,
+    };
+    const independentReloadPageError = {
+      message:
+        "[independent-set-after-other-logout-all] /127.0.0.1:26894/v1/workspaces/b5b5cb8f-1c47-4729-bdce-45a70fe50775/sessions?view=page&limit=1&projection=summary&pinsOnly=true&siteConversations=include due to access control checks.",
+      observedAt: 320,
+    };
+    expect(
+      correlateReauthenticationPageError(independentReloadPageError, [
+        { ...independentReloadCancellation, responsePhase: "slot-revocation-reauthentication" },
+      ]),
+    ).toBeNull();
+    expect(
+      correlatedWebKitAccessControlTerminalIndex(
+        independentReloadPageError,
+        [{ ...independentReloadCancellation, responsePhase: "slot-revocation-reauthentication" }],
+        "independent-set-after-other-logout-all",
+      ),
+    ).toBeNull();
+    const independentReloadFailures = [independentReloadCancellation];
+    expect(
+      optionalWebKitAccessControlPageErrors(
+        {
+          acceptedRequestTerminals: independentReloadFailures,
+          pageErrorEvidence: [independentReloadPageError],
+        },
+        "webkit",
+        "independent-set-after-other-logout-all",
+      ),
+    ).toEqual([independentReloadPageError.message]);
+    expect(independentReloadFailures).toEqual([]);
+    expect(
+      optionalWebKitAccessControlPageErrors(
+        {
+          acceptedRequestTerminals: [independentReloadCancellation],
+          pageErrorEvidence: [independentReloadPageError],
+        },
+        "chromium",
+        "independent-set-after-other-logout-all",
+      ),
+    ).toEqual([]);
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
@@ -5861,7 +5931,12 @@ describe("provider-neutral browser account acceptance", () => {
       await expectAndConsumePageErrors(
         page,
         pageProblems,
-        () => optionalWebKitReauthenticationAccessControlPageError(pageProblems, engine),
+        () =>
+          optionalWebKitAccessControlPageErrors(
+            pageProblems,
+            engine,
+            "slot-revocation-reauthentication",
+          ),
         [],
       );
 
@@ -6120,6 +6195,20 @@ describe("provider-neutral browser account acceptance", () => {
       for (const problems of [pageProblems, secondTabProblems, otherProblems]) {
         expect(problems.boundedHttp1StreamDispatches).toBeGreaterThan(0);
       }
+      // Reloading the independent set can cancel a read its outgoing document
+      // had just started; WebKit may report that accepted cancellation again
+      // as a page error. Consume only exact, one-to-one correlated ones.
+      await expectAndConsumePageErrors(
+        otherPage,
+        otherProblems,
+        () =>
+          optionalWebKitAccessControlPageErrors(
+            otherProblems,
+            engine,
+            "independent-set-after-other-logout-all",
+          ),
+        [],
+      );
       await expectNoBrowserProblems(pageProblems);
       await expectNoBrowserProblems(secondTabProblems);
       await expectNoBrowserProblems(otherProblems);
