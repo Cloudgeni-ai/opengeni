@@ -198,14 +198,6 @@ export function MeetingDefaultsView({
       disabledReason: entry.available ? undefined : transcriptionModelUnavailableReason(entry, msg),
     })),
   ];
-  const effective = current.transcription ?? fallback;
-  const effectiveModel = models.models.find(
-    (entry) => entry.providerId === effective?.providerId && entry.model === effective?.model,
-  );
-  const textOnlyNote =
-    effectiveModel && !effectiveModel.capabilities.wordTimestamps
-      ? msg("meetings.settings.valueHearsWordsButNot", { value: effectiveModel.name })
-      : null;
   const chooseModel = (value: string) => {
     if (value === chosen) return;
     const { transcription: _previous, ...rest } = current;
@@ -387,9 +379,7 @@ export function MeetingDefaultsView({
             ) : (
               msg("meetings.settings.anOrganizationAdminNeedsTo")
             )
-          ) : (
-            (textOnlyNote ?? undefined)
-          )
+          ) : undefined
         }
         control={
           <NativeSelect

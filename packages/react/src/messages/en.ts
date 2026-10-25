@@ -2678,8 +2678,6 @@ export const englishMessages = {
   "meetings.settings.turnsAMeetingSAudioPinned":
     "Turns a meeting's audio into a transcript with speakers.",
   "meetings.settings.untilSomeoneDeletesThem": "Until someone deletes them",
-  "meetings.settings.valueHearsWordsButNot":
-    "{value} hears words but not who says them or when, so speakers come from each microphone and Opengeni's speaker detection, and the transcript's timings are approximate.",
   "meetings.settings.valuePerHour": "${value} per hour",
   "meetings.settings.voicesForgottenPeopleArenT":
     "Voices forgotten. People aren't recognized by voice anymore",

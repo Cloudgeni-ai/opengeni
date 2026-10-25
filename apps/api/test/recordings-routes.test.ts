@@ -608,14 +608,20 @@ describe("recording routes", () => {
       available: false,
       funding: "workspace_key",
     });
-    // The deployment's voice input models serve meetings too, as text.
+    // The deployment's voice input models return only text, so they serve
+    // dictation and are not offered for meetings.
     expect(
       models.body.models.find((model: { providerId: string }) => model.providerId === "openai"),
-    ).toMatchObject({
-      funding: "deployment",
-      available: true,
-      capabilities: { batch: true, wordTimestamps: false, diarization: false },
-    });
+    ).toBeUndefined();
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+          transcription: { providerId: "openai", model: "gpt-transcribe" },
+        })
+      ).status,
+    ).toBe(400);
     expect(models.body).toMatchObject({ dictationDefault: null, pinned: false });
     expect(
       models.body.models.find((model: { model: string }) => model.model === "scribe_v2_realtime")

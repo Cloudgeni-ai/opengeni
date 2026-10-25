@@ -460,7 +460,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(version).toMatchObject({ state: "failed", errorCode: "missing_provider_key" });
   });
 
-  test("a model that returns only text hears each of our diarizer's speakers on their own", async () => {
+  test("a meeting can't use a model that returns only text, and sends it no audio", async () => {
     if (!client) return;
     const storage = memoryStorage();
     const recording = await capturedRecording(storage, {
@@ -468,18 +468,12 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       model: "chatgpt-dictation",
       options: {},
     });
-    const heard: Array<{ fileName: string; scope: unknown }> = [];
-    let signedIn = true;
-    const texts: Record<string, string> = {
-      "track-0.webm": "Hello team.",
-      "track-1-0.webm": "Hi there.",
-      "track-1-1.webm": "Yes.",
-    };
+    let heard = 0;
     const subscription: RecordingTranscriptionProvider = {
       id: "codex-subscription",
       name: "ChatGPT subscription",
       funding: "workspace_subscription",
-      available: () => signedIn,
+      available: () => true,
       models: [
         {
           model: "chatgpt-dictation",
@@ -488,75 +482,17 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
           capabilities: textModelCapabilities({ maxDurationSeconds: 600, maxFileBytes: null }),
         },
       ],
-      transcribe: async (request, credentials) => {
-        expect(credentials).toBeNull();
-        heard.push({ fileName: request.audio.fileName, scope: request.scope });
-        return {
-          languages: ["en"],
-          audioMilliseconds: null,
-          diarized: false,
-          words: [],
-          text: texts[request.audio.fileName] ?? "",
-        };
+      transcribe: async () => {
+        heard += 1;
+        return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "" };
       },
     };
-    const ours: RecordingDiarizer = {
-      id: "test",
-      diarize: async () => ({
-        turns: [
-          { startMilliseconds: 0, endMilliseconds: 900, speaker: "S0" },
-          { startMilliseconds: 1_000, endMilliseconds: 2_000, speaker: "S1" },
-        ],
-        voices: [],
-        voiceModel: "test-voices",
-      }),
-    };
-    const version = async () => {
-      const versionId = crypto.randomUUID();
-      await createRecordingTranscriptVersion(client!.db, {
-        ...recording.actor,
-        recordingId: recording.input.recordingId,
-        versionId,
-        transcription: {
-          providerId: "codex-subscription",
-          model: "chatgpt-dictation",
-          options: {},
-        },
-      });
-      return { ...recording.input, versionId, processingOwner: versionId };
-    };
-    const run = activities(storage, subscription, null, ours).activities;
-    const first = recording.input;
-    expect(await run.transcribeRecordingVersion(first)).toEqual({ outcome: "complete" });
-    expect(heard.map((call) => call.fileName).sort()).toEqual([
-      "track-0.webm",
-      "track-1-0.webm",
-      "track-1-1.webm",
-    ]);
-    expect(heard[0]!.scope).toMatchObject({
-      accountId: recording.input.accountId,
-      workspaceId: recording.input.workspaceId,
-      subjectId: recording.input.ownerSubjectId,
-    });
-    const page = await getRecordingTranscriptPage(client.db, {
-      ...recording.actor,
-      recordingId: recording.input.recordingId,
-      versionId: first.versionId,
-    });
-    expect(page.version.diarization).toBe("ours");
-    expect(page.segments.map((segment) => [segment.speakerLabel, segment.text]).sort()).toEqual([
-      ["speaker_0", "Hi there."],
-      ["speaker_1", "Yes."],
-      ["track-0", "Hello team."],
-    ]);
-    // Signed out of the subscription: the version fails without sending audio.
-    signedIn = false;
-    const second = await version();
-    expect(await run.transcribeRecordingVersion(second)).toEqual({
+    const run = activities(storage, subscription, null).activities;
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({
       outcome: "failed",
-      errorCode: "missing_provider_key",
+      errorCode: "model_unavailable",
     });
-    expect(heard).toHaveLength(3);
+    expect(heard).toBe(0);
   });
 
   test("deletion removes every object of the recording, then its rows", async () => {

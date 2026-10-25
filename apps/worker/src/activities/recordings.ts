@@ -7,17 +7,14 @@ import {
   labelWordsFromTurns,
   mergeRecordingTranscriptionPieces,
   planRecordingTracks,
-  planRecordingTextSpans,
   planRecordingTranscriptionPieces,
   recordingDiarizationKind,
   recordingSpeakerLabels,
-  recordingWordsFromText,
   RecordingTranscriptionError,
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
   type RecordingDiarizerResult,
   type RecordingDiarizer,
-  type RecordingTextSpan,
   type RecordingTranscribedWord,
   type RecordingTranscriptionAudio,
   type RecordingTranscriptionCredentials,
@@ -27,7 +24,6 @@ import {
   type RecordingTranscriptionRequest,
   type RecordingTranscriptionResult,
   type RecordingTrackWords,
-  type SpeakerTurn,
   type TranscriptionBilling,
   type TranscriptionSegmenter,
   type TranscriptionService,
@@ -38,7 +34,6 @@ import {
   createSpeechToTextDeployment,
   createTranscriptionService,
   dictationProviders,
-  transcriptText,
   type SpeechToTextDeployment,
   TranscriptionSegmenterError,
   wavDurationSeconds,
@@ -293,9 +288,6 @@ function pieceShape(
   };
 }
 
-/** Text-only models hear this many spans of a track at once. */
-const TEXT_SPAN_CONCURRENCY = 4;
-
 /**
  * How a meeting's transcript is paid for. A deployment-funded model with a
  * credit price is charged in Opengeni credits where credit billing is on;
@@ -310,98 +302,6 @@ function meetingCharge(
 ): { pricing: VoiceInputPricing } | null {
   if (provider.funding !== "deployment" || !voiceInputCreditBillingActive(settings)) return null;
   return spec.creditPricing ? { pricing: spec.creditPricing } : null;
-}
-
-/**
- * Transcribe one track with a model that returns only text, such as a
- * subscription's dictation model. With our diarizer's turns each span sent
- * is one speaker, who then owns its words; without them the track is cut
- * only to the model's limits. Each span's text is spread over its time as
- * estimated word timings.
- */
-export async function transcribeTextTrack(input: {
-  provider: RecordingTranscriptionProvider;
-  spec: RecordingTranscriptionModelSpec;
-  audio: RecordingTranscriptionAudio & { extension: string };
-  durationMilliseconds: number;
-  ffmpegPath: string;
-  credentials: RecordingTranscriptionCredentials | null;
-  request: Omit<RecordingTranscriptionRequest, "audio">;
-  turns: readonly SpeakerTurn[] | null;
-  onPiece?: (index: number) => void;
-  tempRoot?: string;
-}): Promise<RecordingTranscriptionResult> {
-  const { source, format, maxPieceMilliseconds } = pieceShape(input.spec, input.audio.extension);
-  const spans = planRecordingTextSpans(
-    input.durationMilliseconds,
-    input.turns,
-    maxPieceMilliseconds,
-  );
-  const results: Array<{ span: RecordingTextSpan; result: RecordingTranscriptionResult } | null> =
-    spans.map(() => null);
-  let next = 0;
-  const worker = async () => {
-    while (next < spans.length) {
-      const index = next;
-      next += 1;
-      const span = spans[index]!;
-      input.onPiece?.(index);
-      const whole =
-        spans.length === 1 &&
-        span.startMilliseconds === 0 &&
-        span.endMilliseconds >= Math.floor(input.durationMilliseconds);
-      const audio =
-        whole && !format
-          ? input.audio
-          : await renderRecordingAudioPiece({
-              audio: input.audio,
-              startMilliseconds: span.startMilliseconds,
-              endMilliseconds: span.endMilliseconds,
-              whole,
-              format: format ?? source,
-              ffmpegPath: input.ffmpegPath,
-              tempRoot: input.tempRoot,
-              signal: input.request.signal,
-            }).then((rendered) => ({
-              bytes: rendered.bytes,
-              mimeType: rendered.mimeType,
-              fileName: `${input.audio.fileName.replace(/\.[^.]+$/u, "")}-${index}.${rendered.extension}`,
-            }));
-      const result = await input.provider
-        .transcribe(
-          {
-            ...input.request,
-            audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
-            ...(input.request.scope
-              ? {
-                  scope: {
-                    ...input.request.scope,
-                    requestId: `${input.request.scope.requestId}:${index}`,
-                  },
-                }
-              : {}),
-          },
-          input.credentials,
-        )
-        .catch((error: unknown) => {
-          throw asRecordingTranscriptionError(error);
-        });
-      results[index] = { span, result };
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(TEXT_SPAN_CONCURRENCY, spans.length) }, () => worker()),
-  );
-  const languages = new Set<string>();
-  const words: RecordingTranscribedWord[] = [];
-  let audioMilliseconds = 0;
-  for (const entry of results) {
-    if (!entry) continue;
-    for (const language of entry.result.languages) languages.add(language);
-    audioMilliseconds += entry.span.endMilliseconds - entry.span.startMilliseconds;
-    words.push(...recordingWordsFromText(transcriptText(entry.result), entry.span));
-  }
-  return { languages: [...languages], audioMilliseconds, diarized: false, words };
 }
 
 export function createRecordingActivities(
@@ -538,6 +438,11 @@ export function createRecordingActivities(
       ) {
         throw new PermanentRecordingFailure("model_unavailable");
       }
+      // A meeting transcript places every word in time, to tell speakers
+      // apart and to play from; a model that returns only text can't yet.
+      if (!found.spec.capabilities.wordTimestamps) {
+        throw new PermanentRecordingFailure("model_unavailable");
+      }
       const resolved = await deployment.credentials(job.version.providerId, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -558,9 +463,6 @@ export function createRecordingActivities(
       const charge = meetingCharge(settings, found.provider, found.spec);
       const plans = planRecordingTracks(job.recording.tracks);
       const capabilities = found.spec.capabilities;
-      // Models that return only text: speakers come from the tracks and our
-      // diarizer, and word timings are estimated within each span.
-      const textOnly = !capabilities.wordTimestamps;
       const requested = job.version.options;
       const signal = cancellation();
       const trackWords: RecordingTrackWords[] = [];
@@ -601,14 +503,11 @@ export function createRecordingActivities(
         heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber });
         // The model's own diarization is still requested when it has one, so
         // a failure of ours falls back to it.
-        const diarize = plan.diarize && capabilities.diarization && !textOnly;
+        const diarize = plan.diarize && capabilities.diarization;
         const useOurs =
           plan.diarize &&
           ourDiarizer !== null &&
-          (requested.diarizer === "ours" ||
-            !capabilities.diarization ||
-            recognizeVoices ||
-            textOnly);
+          (requested.diarizer === "ours" || !capabilities.diarization || recognizeVoices);
         const trackAudio = {
           bytes: audio.bytes,
           mimeType: audio.mimeType,
@@ -636,38 +535,17 @@ export function createRecordingActivities(
                 .diarize(trackAudio, { maxSpeakers: requested.maxSpeakers, signal })
                 .catch((error: unknown) => {
                   if (signal?.aborted) throw error;
-                  observability.warn(
-                    textOnly
-                      ? "our diarizer failed; this track has no speakers"
-                      : "our diarizer failed; using the model's speakers",
-                    {
-                      workspaceId: input.workspaceId,
-                      recordingId: input.recordingId,
-                      versionId: input.versionId,
-                      trackNumber: plan.trackNumber,
-                      error: error instanceof Error ? error.message : String(error),
-                    },
-                  );
+                  observability.warn("our diarizer failed; using the model's speakers", {
+                    workspaceId: input.workspaceId,
+                    recordingId: input.recordingId,
+                    versionId: input.versionId,
+                    trackNumber: plan.trackNumber,
+                    error: error instanceof Error ? error.message : String(error),
+                  });
                   return null;
                 })
             : Promise.resolve(null);
         const [result, ours] = await withHeartbeat(async () => {
-          if (textOnly) {
-            // The turns decide where the track is cut, so they come first.
-            const turns = await runOurs();
-            const text = await transcribeTextTrack({
-              provider: found.provider,
-              spec: found.spec,
-              audio: { ...trackAudio, extension: audio.extension },
-              durationMilliseconds: audio.durationMilliseconds,
-              ffmpegPath: settings.voiceInputFfmpegPath,
-              credentials,
-              onPiece,
-              request,
-              turns: turns?.turns ?? null,
-            });
-            return [text, turns] as const;
-          }
           return await Promise.all([
             transcribeTrack({
               provider: found.provider,

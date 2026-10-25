@@ -8,8 +8,6 @@ import {
   transcriptText,
 } from "../src/transcription-service";
 import {
-  planRecordingTextSpans,
-  recordingWordsFromText,
   RecordingTranscriptionError,
   type RecordingTranscriptionProvider,
 } from "../src/recording-transcription";
@@ -302,70 +300,7 @@ describe("dictation over the shared providers", () => {
   });
 });
 
-describe("text spans for models without timings", () => {
-  test("without turns, a track is cut into equal spans the model can take", () => {
-    expect(planRecordingTextSpans(25_000, null, 10_000)).toEqual([
-      { startMilliseconds: 0, endMilliseconds: 8_333, speaker: null },
-      { startMilliseconds: 8_333, endMilliseconds: 16_667, speaker: null },
-      { startMilliseconds: 16_667, endMilliseconds: 25_000, speaker: null },
-    ]);
-    expect(planRecordingTextSpans(0, null, null)).toEqual([]);
-  });
-
-  test("turns become one span per speaker, joined, padded and never overlapping", () => {
-    const spans = planRecordingTextSpans(
-      60_000,
-      [
-        { startMilliseconds: 1_000, endMilliseconds: 5_000, speaker: "A" },
-        { startMilliseconds: 5_800, endMilliseconds: 9_000, speaker: "A" },
-        { startMilliseconds: 9_500, endMilliseconds: 9_900, speaker: "B" },
-        { startMilliseconds: 20_000, endMilliseconds: 30_000, speaker: "B" },
-        { startMilliseconds: 29_000, endMilliseconds: 31_000, speaker: "A" },
-        { startMilliseconds: 40_000, endMilliseconds: 40_500, speaker: "A" },
-      ],
-      null,
-    );
-    expect(spans).toEqual([
-      // A's two turns join; B's short reply folds into A's span.
-      { startMilliseconds: 750, endMilliseconds: 10_150, speaker: "A" },
-      // Overlapping speech is heard once, in the span already playing.
-      { startMilliseconds: 19_750, endMilliseconds: 31_250, speaker: "B" },
-      // A short turn far from any other is still heard.
-      { startMilliseconds: 39_750, endMilliseconds: 40_750, speaker: "A" },
-    ]);
-    // Close turns of different speakers split the gap between them.
-    expect(
-      planRecordingTextSpans(
-        2_000,
-        [
-          { startMilliseconds: 0, endMilliseconds: 900, speaker: "A" },
-          { startMilliseconds: 1_000, endMilliseconds: 2_000, speaker: "B" },
-        ],
-        null,
-      ),
-    ).toEqual([
-      { startMilliseconds: 0, endMilliseconds: 950, speaker: "A" },
-      { startMilliseconds: 950, endMilliseconds: 2_000, speaker: "B" },
-    ]);
-  });
-
-  test("a span's text becomes words spread over it", () => {
-    const words = recordingWordsFromText("Hei  Ola, ja", {
-      startMilliseconds: 1_000,
-      endMilliseconds: 2_000,
-      speaker: "A",
-    });
-    expect(words.map((word) => [word.text, word.startMilliseconds, word.endMilliseconds])).toEqual([
-      ["Hei", 1_000, 1_333],
-      ["Ola,", 1_333, 1_750],
-      ["ja", 1_750, 2_000],
-    ]);
-    expect(words.every((word) => word.speaker === "A")).toBe(true);
-    expect(
-      recordingWordsFromText("  ", { startMilliseconds: 0, endMilliseconds: 1, speaker: null }),
-    ).toEqual([]);
-  });
-
+describe("transcript text", () => {
   test("a result's text is the model's own, else its words joined", () => {
     expect(
       transcriptText({

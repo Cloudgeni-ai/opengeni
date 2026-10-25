@@ -213,13 +213,12 @@ and who pays for it, its `funding`:
 - `deployment`: an account the deployment runs (Azure Speech, OpenAI, Azure
   OpenAI). Charged as credits when credit billing is on.
 
-Any model can transcribe a meeting. A model that returns only text (the
-subscription models, OpenAI and Azure OpenAI) still gives a transcript with
-speakers: Opengeni's diarizer finds who speaks when on each track, the worker
-sends each speaker's stretch of speech to the model on its own, and spreads
-the words it returns over that stretch. Speakers are as good as with any
-model; word timings are approximate. Any model can also serve dictation;
-each provider uses one model for it.
+A meeting needs a model that places every word in time (Scribe and
+MAI-Transcribe-2), because speakers, playback and the transcript's turns are
+built from word timings. Models that return only text (the subscription
+models, OpenAI and Azure OpenAI) serve dictation; `GET …/recording-models`
+does not offer them for meetings and a meeting that names one is refused.
+Any model can serve dictation; each provider uses one model for it.
 
 `OPENGENI_SPEECH_TO_TEXT_PINNED` (`provider/model`, such as
 `azure-speech/MAI-Transcribe-2`) makes one model the only one for every use.
@@ -249,7 +248,8 @@ The recording providers:
   longer than about a quarter of an hour during its preview.
 
 The dictation providers in `docs/transcription.md` (OpenAI, Azure OpenAI and
-the two subscriptions) are offered for meetings as well.
+the two subscriptions) share the same registry, credentials and billing, and
+serve dictation only.
 
 Meetings use Azure Speech when its account is configured, else ElevenLabs.
 `OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT` (`provider/model`, such as
