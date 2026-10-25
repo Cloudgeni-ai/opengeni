@@ -83,6 +83,25 @@ describe("browser model text", () => {
     expect(browserObservationText(observation)).toContain('- generic "Menu" [e00000010]');
   });
 
+  test("a scrolling panel shows its ref and the directions it can scroll", () => {
+    const observation = formObservation();
+    observation.agentView = {
+      sourceKind: "snapshot",
+      nodes: [
+        {
+          ref: "e00000011",
+          role: "generic",
+          depth: 0,
+          states: ["focusable", "scrollable=up,down"],
+          actions: ["scroll"],
+        },
+      ],
+    };
+    expect(browserObservationText(observation)).toContain(
+      "- generic [e00000011] scrollable=up,down",
+    );
+  });
+
   test("reports dialogs, diagnostics, diffs, redaction and removals", () => {
     const text = browserObservationText({
       target: { ...target, kind: "popup" },

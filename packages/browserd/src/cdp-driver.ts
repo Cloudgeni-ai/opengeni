@@ -4083,12 +4083,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<BrowserObservationValue> {
     if (!state.dialog) await this.refreshFrame(state);
     const viewport = state.dialog ? null : await this.viewport(state);
-    const accessibility =
+    let accessibility =
       state.dialog && state.accessibility
         ? state.accessibility
         : state.dialog
           ? emptyAccessibilitySnapshot()
           : await this.refreshAccessibility(state, "outline");
+    if (!state.dialog) {
+      const panels = await this.scrollPanels(state);
+      if (panels.size > 0) accessibility = withScrollPanels(accessibility, state.frame.id, panels);
+    }
     const focused = accessibility.focusedRef
       ? accessibility.entriesByRef.get(accessibility.focusedRef)
       : null;
@@ -4184,6 +4188,77 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       { timeoutMs: 500 },
     );
     return result.result?.value === true;
+  }
+
+  /** The main frame's visible scrolling panels, by backend node, with the
+   * directions each can still scroll ("down", "up,down"). The outline marks
+   * them so an agent can scroll the panel that holds the content, not the
+   * fixed layout around it. Optional: a page that cannot be read this way
+   * gets no marks. */
+  private async scrollPanels(state: TargetState): Promise<Map<number, string>> {
+    const panels = new Map<number, string>();
+    if (this.engine === "lightpanda") return panels;
+    const objectGroup = "opengeni-scroll-panels";
+    try {
+      const world = await this.sendTarget<{ executionContextId?: unknown }>(
+        state,
+        "Page.createIsolatedWorld",
+        { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) return panels;
+      const evaluated = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+        state,
+        "Runtime.evaluate",
+        {
+          contextId: world.executionContextId,
+          expression: SCROLL_PANELS_EXPRESSION,
+          objectGroup,
+          returnByValue: false,
+        },
+      );
+      if (
+        evaluated.exceptionDetails ||
+        !isRecord(evaluated.result) ||
+        typeof evaluated.result.objectId !== "string"
+      )
+        return panels;
+      const properties = await this.sendTarget<{ result?: unknown }>(
+        state,
+        "Runtime.getProperties",
+        { objectId: evaluated.result.objectId, ownProperties: true },
+      );
+      if (!Array.isArray(properties.result)) return panels;
+      const byIndex = new Map<number, Record<string, unknown>>();
+      for (const property of properties.result) {
+        if (!isRecord(property) || !isRecord(property.value)) continue;
+        const index = Number(property.name);
+        if (Number.isSafeInteger(index) && index >= 0) byIndex.set(index, property.value);
+      }
+      const directions = byIndex.get(0)?.value;
+      if (typeof directions !== "string" || directions === "") return panels;
+      const described = await Promise.all(
+        directions.split("|").map(async (direction, index) => {
+          const objectId = byIndex.get(index + 1)?.objectId;
+          if (typeof objectId !== "string") return null;
+          const node = await this.sendTarget<{ node?: unknown }>(state, "DOM.describeNode", {
+            objectId,
+          });
+          return isRecord(node.node) && typeof node.node.backendNodeId === "number"
+            ? ([node.node.backendNodeId, direction] as const)
+            : null;
+        }),
+      );
+      for (const entry of described) if (entry) panels.set(entry[0], entry[1]);
+      return panels;
+    } catch (error) {
+      // The page navigated or the node went away while it was read.
+      if (error instanceof CdpProtocolError) return new Map();
+      throw error;
+    } finally {
+      await this.sendTarget(state, "Runtime.releaseObjectGroup", { objectGroup }).catch(
+        () => undefined,
+      );
+    }
   }
 
   /**
@@ -8584,6 +8659,42 @@ function emptyAccessibilitySnapshot(): CdpAccessibilitySnapshot {
   };
 }
 
+/** The outline's copy of a snapshot with scrolling panels marked: a
+ * "scrollable=<directions>" state and the scroll action, which also lists the
+ * panel's ref. The snapshot that resolves locators is left as it was. */
+function withScrollPanels(
+  snapshot: CdpAccessibilitySnapshot,
+  frameId: string,
+  panels: ReadonlyMap<number, string>,
+): CdpAccessibilitySnapshot {
+  const marked = new Map<string, string>();
+  for (const entry of snapshot.entries) {
+    if (entry.frameId !== frameId || entry.backendDOMNodeId === null) continue;
+    const directions = panels.get(entry.backendDOMNodeId);
+    if (directions) marked.set(entry.ref, directions);
+  }
+  if (marked.size === 0) return snapshot;
+  const mark = (nodes: InteractionSemanticNodeValue[]): InteractionSemanticNodeValue[] => {
+    const next = nodes.map((node) => {
+      const directions = marked.get(node.ref);
+      const children = node.children ? mark(node.children) : undefined;
+      if (!directions && children === node.children) return node;
+      return {
+        ...node,
+        ...(directions
+          ? {
+              states: [...node.states, `scrollable=${directions}`],
+              actions: node.actions.includes("scroll") ? node.actions : [...node.actions, "scroll"],
+            }
+          : {}),
+        ...(children ? { children } : {}),
+      };
+    });
+    return next.every((node, index) => node === nodes[index]) ? nodes : next;
+  };
+  return { ...snapshot, roots: mark(snapshot.roots) };
+}
+
 function isFormControlRole(role: string): boolean {
   return [
     "button",
@@ -9237,13 +9348,16 @@ function optionList(labels: readonly string[]): string {
   return labels.length > 25 ? `${shown} and ${labels.length - 25} more` : shown;
 }
 
-/** Scroll the nearest box around the element that can move in each requested
- * direction, crossing shadow roots and slots like a wheel event would. Only
- * boxes a user can scroll count: overflow auto, scroll or overlay, or the
- * viewport unless it hides overflow. Returns whether anything moved. */
-const SCROLL_FUNCTION = `function(deltaX, deltaY) {
-  const start = this && this.nodeType === 1 ? this : this?.parentElement;
-  if (!start || !start.isConnected) return false;
+/** Scroll from a starting element the way a wheel over it would, crossing
+ * shadow roots and slots. Only boxes a user can scroll count: overflow auto,
+ * scroll or overlay, or the viewport unless it hides overflow. Each axis tries,
+ * in order: the element itself (or the viewport for a page scroll), the
+ * scrolling panels inside it under its centre, its own ancestors, and then the
+ * largest visible scrolling panel inside it. Panels inside count because fixed
+ * layouts (side sheets, drawers, dialogs, split views) put the content that
+ * moves in an inner box the agent may not have targeted. Form fields are not
+ * panels: their content is their value. Returns whether anything moved. */
+const SCROLL_FROM_FUNCTION = `function(start, page, deltaX, deltaY) {
   const doc = start.ownerDocument;
   const view = doc.defaultView;
   const root = doc.scrollingElement || doc.documentElement;
@@ -9259,21 +9373,87 @@ const SCROLL_FUNCTION = `function(deltaX, deltaY) {
     const viewport = html === "visible" && doc.body ? overflow(doc.body, axis) : html;
     return viewport !== "hidden" && viewport !== "clip";
   };
+  const fields = new Set(["INPUT", "TEXTAREA", "SELECT"]);
+  const panel = (element, axis) =>
+    element !== root &&
+    !fields.has(element.tagName) &&
+    (axis === "x"
+      ? element.scrollWidth - element.clientWidth
+      : element.scrollHeight - element.clientHeight) > 1 &&
+    scrollable(element, axis);
+  const visibleArea = (element) => {
+    const box = element.getBoundingClientRect();
+    const width = Math.min(box.right, view.innerWidth) - Math.max(box.left, 0);
+    const height = Math.min(box.bottom, view.innerHeight) - Math.max(box.top, 0);
+    return width > 0 && height > 0 ? width * height : 0;
+  };
+  // Panels under the centre of the start's visible box, innermost first.
+  const underCentre = () => {
+    const box = page
+      ? { left: 0, top: 0, right: view.innerWidth, bottom: view.innerHeight }
+      : start.getBoundingClientRect();
+    const left = Math.max(box.left, 0);
+    const right = Math.min(box.right, view.innerWidth);
+    const top = Math.max(box.top, 0);
+    const bottom = Math.min(box.bottom, view.innerHeight);
+    if (right <= left || bottom <= top) return [];
+    const x = (left + right) / 2;
+    const y = (top + bottom) / 2;
+    let hit = doc.elementFromPoint(x, y);
+    for (let depth = 0; depth < 32 && hit && hit.shadowRoot; depth++) {
+      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    const chain = [];
+    let element = hit;
+    for (; element && element !== start; element = parentOf(element)) chain.push(element);
+    return element === start ? chain : [];
+  };
+  let inside = null;
+  const insidePanels = () => {
+    if (inside) return inside;
+    inside = [];
+    let visited = 0;
+    const walk = (scope) => {
+      const walker = doc.createTreeWalker(scope, 1);
+      for (let element = walker.nextNode(); element && visited < 20000; element = walker.nextNode()) {
+        visited++;
+        if (element.shadowRoot) walk(element.shadowRoot);
+        inside.push(element);
+      }
+    };
+    walk(start);
+    return inside;
+  };
   const scrollAxis = (axis, delta) => {
     if (!delta) return false;
     const read = (element) => (axis === "x" ? element.scrollLeft : element.scrollTop);
-    const candidates = [];
-    for (let element = start; element; element = element === root ? null : parentOf(element))
-      candidates.push(element);
-    if (!candidates.includes(root)) candidates.push(root);
-    for (const element of candidates) {
-      if (!scrollable(element, axis)) continue;
+    const tried = new Set();
+    const tryScroll = (element) => {
+      if (tried.has(element)) return false;
+      tried.add(element);
       const before = read(element);
       element.scrollBy(
         axis === "x" ? { left: delta, behavior: "instant" } : { top: delta, behavior: "instant" },
       );
-      if (read(element) !== before) return true;
+      return read(element) !== before;
+    };
+    const first = page ? root : start;
+    if (scrollable(first, axis) && tryScroll(first)) return true;
+    for (const element of underCentre())
+      if (panel(element, axis) && tryScroll(element)) return true;
+    if (!page) {
+      for (let element = parentOf(start); element; element = element === root ? null : parentOf(element))
+        if (scrollable(element, axis) && tryScroll(element)) return true;
+      if (scrollable(root, axis) && tryScroll(root)) return true;
     }
+    const panels = insidePanels()
+      .filter((element) => panel(element, axis))
+      .map((element) => [visibleArea(element), element])
+      .filter((entry) => entry[0] > 0)
+      .sort((a, b) => b[0] - a[0]);
+    for (const [, element] of panels) if (tryScroll(element)) return true;
     return false;
   };
   const movedX = scrollAxis("x", deltaX);
@@ -9281,12 +9461,74 @@ const SCROLL_FUNCTION = `function(deltaX, deltaY) {
   return movedX || movedY;
 }`;
 
-const PAGE_SCROLL_FUNCTION = `function(deltaX, deltaY) {
-  const root = document.scrollingElement || document.documentElement;
-  const before = [root.scrollLeft, root.scrollTop];
-  window.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" });
-  return root.scrollLeft !== before[0] || root.scrollTop !== before[1];
+const SCROLL_FUNCTION = `function(deltaX, deltaY) {
+  const start = this && this.nodeType === 1 ? this : this?.parentElement;
+  if (!start || !start.isConnected) return false;
+  return (${SCROLL_FROM_FUNCTION})(start, false, deltaX, deltaY);
 }`;
+
+const PAGE_SCROLL_FUNCTION = `function(deltaX, deltaY) {
+  return (${SCROLL_FROM_FUNCTION})(document.documentElement, true, deltaX, deltaY);
+}`;
+
+/** Elements one outline reads looking for scrolling panels, and panels it marks. */
+const SCROLL_PANELS_MAX_ELEMENTS = 50_000;
+const SCROLL_PANELS_MAX = 16;
+
+/** The visible scrolling panels of a document and the directions each can
+ * still scroll, for the outline. Returns ["dirs|dirs|…", element, …], largest
+ * first. Only boxes that overflow and that a user can scroll are read, so a
+ * page without inner scrolling adds nothing; form fields and the viewport are
+ * left out. Open shadow roots are included. */
+const SCROLL_PANELS_EXPRESSION = `(() => {
+  const view = window;
+  const root = document.scrollingElement || document.documentElement;
+  const fields = new Set(["INPUT", "TEXTAREA", "SELECT"]);
+  const scrolls = (value) => value === "auto" || value === "scroll" || value === "overlay";
+  const found = [];
+  let visited = 0;
+  const walk = (scope) => {
+    const walker = document.createTreeWalker(scope, 1);
+    for (let element = walker.nextNode(); element && visited < ${SCROLL_PANELS_MAX_ELEMENTS}; element = walker.nextNode()) {
+      visited++;
+      if (element.shadowRoot) walk(element.shadowRoot);
+      if (element === root || fields.has(element.tagName)) continue;
+      // Style first: it is cached, while each layout read costs more and
+      // few elements on any page can scroll.
+      const style = view.getComputedStyle(element);
+      const styleY = scrolls(style.overflowY);
+      const styleX = scrolls(style.overflowX);
+      if (!styleY && !styleX) continue;
+      const canY = styleY && element.scrollHeight - element.clientHeight > 1;
+      const canX = styleX && element.scrollWidth - element.clientWidth > 1;
+      if (!canY && !canX) continue;
+      const box = element.getBoundingClientRect();
+      const width = Math.min(box.right, view.innerWidth) - Math.max(box.left, 0);
+      const height = Math.min(box.bottom, view.innerHeight) - Math.max(box.top, 0);
+      if (width <= 0 || height <= 0) continue;
+      const directions = [];
+      if (canY) {
+        const top = element.scrollTop;
+        const max = element.scrollHeight - element.clientHeight;
+        if (top > 1) directions.push("up");
+        if (top < max - 1) directions.push("down");
+      }
+      if (canX) {
+        // Right-to-left boxes count scrollLeft from 0 down to -max.
+        const max = element.scrollWidth - element.clientWidth;
+        const offset = Math.abs(element.scrollLeft);
+        const rtl = style.direction === "rtl";
+        if (rtl ? offset < max - 1 : offset > 1) directions.push("left");
+        if (rtl ? offset > 1 : offset < max - 1) directions.push("right");
+      }
+      if (directions.length) found.push([width * height, element, directions.join(",")]);
+    }
+  };
+  walk(document);
+  found.sort((a, b) => b[0] - a[0]);
+  const kept = found.slice(0, ${SCROLL_PANELS_MAX});
+  return [kept.map((entry) => entry[2]).join("|"), ...kept.map((entry) => entry[1])];
+})()`;
 
 /** Why an element's text or value must not leave the page: it is, sits in, or
  * (as a container) holds a password, one-time code, payment, hidden or
