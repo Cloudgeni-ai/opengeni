@@ -302,3 +302,32 @@ describe("a command that never started inside a tool call", () => {
     expect(String(settled.events[0]!.payload.error)).not.toContain("will retry");
   });
 });
+
+describe("a command waiting for its sandbox when the turn fails", () => {
+  test("is settled as not started, so Retry stays available", async () => {
+    coreRuntime();
+    toolProgress(0);
+    const { deps: input, settle } = deps(
+      new Error("The sandbox did not start"),
+      "Codex",
+      await answeredLane([]),
+    );
+    let settledByFence = 0;
+    (input.eventing as Record<string, unknown>).toolCancellationFenceRef = {
+      current: {
+        settleCommandCallsNotStarted: () => {
+          settledByFence += 1;
+          return ["call-waiting"];
+        },
+      },
+    };
+    expect(await settleTurnFailure(input as never)).toMatchObject({ status: "failed" });
+    expect(settledByFence).toBe(1);
+    const settled = settle.mock.calls[0]![0] as {
+      events: Array<{ type: string }>;
+      notStartedToolCallIds?: string[];
+    };
+    expect(settled.events[0]!.type).toBe("turn.failed");
+    expect(settled.notStartedToolCallIds).toEqual(["call-waiting"]);
+  });
+});

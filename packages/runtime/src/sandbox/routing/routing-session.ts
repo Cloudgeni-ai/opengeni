@@ -28,7 +28,7 @@
 // `@opengeni/db`.
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { noteRoutedCallRouteResolved } from "./routed-call-scope";
+import { noteRoutedCallRouteResolved, resolveRoutedCallRoute } from "./routed-call-scope";
 import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
 import { SandboxFilesystemNotFoundError } from "modal";
 import type { ExposedPortEndpoint } from "../stream-port";
@@ -1070,7 +1070,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private async resolve(
     remainingFenceRetries = this.maxFenceRetries,
   ): Promise<ResolvedActiveBackend> {
-    const resolved = await this.resolveRoute(remainingFenceRetries);
+    const resolved = await resolveRoutedCallRoute(() => this.resolveRoute(remainingFenceRetries));
     noteRoutedCallRouteResolved();
     return resolved;
   }
