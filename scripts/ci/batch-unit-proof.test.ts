@@ -305,7 +305,7 @@ test.each(["running", "new attempt", "different head"])("final read rejects %s",
               : { head_sha: "a".repeat(40) }),
         }
       : original(path);
-  expect(findBatchUnitProof(reads, context)).rejects.toThrow("attempt changed");
+    await expect(findBatchUnitProof(reads, context)).rejects.toThrow("attempt changed");
 });
 test("partial selected inventory is never reused even on an identical tree", async () => {
   const { proof, context } = fixture();
