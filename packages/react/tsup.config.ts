@@ -52,6 +52,7 @@ export default defineConfig({
     "src/new-session-draft.ts",
     "src/scrollbars.ts",
     "src/session-list-model.ts",
+    "src/session-admin-access-model.ts",
     "src/session-feedback-model.ts",
     "src/session-attention-model.ts",
     "src/testing/session-scenarios.ts",

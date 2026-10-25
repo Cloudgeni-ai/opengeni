@@ -37880,6 +37880,14 @@
       "WorkerCompletionItem": "type",
       "WorkerItem": "type"
     },
+    "@opengeni/react/session-admin-access-model": {
+      "ADMIN_ACCESS_DURATIONS": "value",
+      "ADMIN_ACCESS_GRANT_DESCRIPTION": "value",
+      "AdminAccessDuration": "type",
+      "adminAccessDurationHours": "value",
+      "adminAccessGrantedByText": "value",
+      "endsText": "value"
+    },
     "@opengeni/react/session-agents-model": {
       "formatWaitingSince": "value",
       "sessionAgentAttention": "value",
