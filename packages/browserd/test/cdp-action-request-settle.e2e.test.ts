@@ -37,10 +37,14 @@ e2e(
           await Bun.sleep(300);
           return Response.json({ ok: true });
         }
+        if (path === "/slow") {
+          await Bun.sleep(900);
+          return Response.json({ ok: true });
+        }
         // Never answers: an open stream or a stalled server.
         if (path === "/stalled") return new Response(new ReadableStream({ start() {} }));
         return new Response(
-          '<!doctype html><title>Request settle</title><button id="save">Save</button><button id="stall">Stall</button><button id="late">Import</button><div role="status" id="result"></div><script>save.onclick=async()=>{const r=await fetch("/submit",{method:"POST"});result.textContent=(await r.json()).ok?"Submitted. Thank you!":"Failed"};stall.onclick=()=>{fetch("/stalled");result.textContent="Waiting for partner"};late.onclick=async()=>{await crypto.subtle.digest("SHA-256",new TextEncoder().encode("contacts"));await new Promise((r)=>setTimeout(r,0));const r=await fetch("/submit",{method:"POST"});result.textContent=(await r.json()).ok?"Imported 3 contacts":"Failed"}</script>',
+          '<!doctype html><title>Request settle</title><button id="save">Save</button><button id="stall">Stall</button><button id="late">Import</button><button id="ripple">Send</button><div role="status" id="result"></div><script>save.onclick=async()=>{const r=await fetch("/submit",{method:"POST"});result.textContent=(await r.json()).ok?"Submitted. Thank you!":"Failed"};stall.onclick=()=>{fetch("/stalled");result.textContent="Waiting for partner"};late.onclick=async()=>{await crypto.subtle.digest("SHA-256",new TextEncoder().encode("contacts"));await new Promise((r)=>setTimeout(r,0));const r=await fetch("/submit",{method:"POST"});result.textContent=(await r.json()).ok?"Imported 3 contacts":"Failed"};ripple.onclick=async()=>{ripple.animate([{opacity:1},{opacity:0.5}],{duration:400});await crypto.subtle.digest("SHA-256",new TextEncoder().encode("message"));await new Promise((r)=>setTimeout(r,0));const r=await fetch("/slow",{method:"POST"});result.textContent=(await r.json()).ok?"Message sent":"Failed"}</script>',
           { headers: { "content-type": "text/html" } },
         );
       },
@@ -94,6 +98,11 @@ e2e(
       const imported = await controller.run(command(stalled.observation!, "Import"));
       expect(imported.state).toBe("completed");
       expect(texts(imported.observation)).toContain("Imported 3 contacts");
+
+      // The same while a click animation runs as the request starts.
+      const sent = await controller.run(command(imported.observation!, "Send"));
+      expect(sent.state).toBe("completed");
+      expect(texts(sent.observation)).toContain("Message sent");
     } finally {
       await driver.close();
       server.stop(true);
