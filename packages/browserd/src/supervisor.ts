@@ -2471,7 +2471,9 @@ export class BrowserSupervisor {
           runtime.lastTargets = await driver.listTargets();
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
         } else {
-          const observation = await driver.start(options.initialUrl);
+          // The browser opens even when its first page fails to load: the tab
+          // shows the browser's error page, which names the failure.
+          const observation = await driver.start(options.initialUrl, { keepTabOnLoadError: true });
           runtime.creationObservation = observation;
           runtime.lastTargets = [observation.target];
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);

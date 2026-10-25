@@ -146,10 +146,27 @@ e2e(
       await idleAt("/slow-page", 15_000);
       expect(await output()).toContain("loaded");
 
-      // A loaded page whose long poll never ends has settled as far as it
-      // will: the wait runs its full time and then completes, not fails.
-      const pollWait = await idleAt("/long-poll", 2_000);
-      expect(pollWait).toBeGreaterThanOrEqual(1_900);
+      // A loaded page whose long poll never ends never goes idle. The wait
+      // runs its full time and then says so instead of reporting idle.
+      const navigated = await controller.run(
+        command(await driver.observe(initial.target.id), {
+          type: "navigate",
+          url: `${origin}/long-poll`,
+        }),
+      );
+      expect(navigated.state).toBe("completed");
+      const started = Date.now();
+      const pollWait = await controller.run(
+        command(await driver.observe(initial.target.id), {
+          type: "wait",
+          condition: "network_idle",
+          timeoutMs: 2_000,
+        }),
+      );
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
+      expect(pollWait.state).toBe("failed");
+      expect(pollWait.error?.code).toBe("timeout");
+      expect(pollWait.error?.message).toContain("network did not go idle within 2 s");
       expect(await output()).toContain("ready");
     } finally {
       await driver.close();
