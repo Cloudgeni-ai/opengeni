@@ -8,6 +8,7 @@ import type { Readable } from "node:stream";
 import { InteractionControllerError } from "@opengeni/interaction";
 import { readWindowsSeat } from "./cua/windows-seat";
 import { UnsettledCleanupError } from "./cleanup-error";
+import type { LinuxDesktopSessionFinder } from "./linux-desktop-session";
 
 const START_TIMEOUT_MS = 10_000;
 const STOP_TIMEOUT_MS = 3_000;
@@ -394,10 +395,16 @@ async function findExecutable(program: string, searchPath: string | undefined): 
 
 /** Existing physical/login seat used by connected machines and macOS. */
 export class ExistingComputerEnvironmentAllocator implements ComputerEnvironmentAllocator {
-  constructor(private readonly options: { allowWindows?: boolean } = {}) {}
+  constructor(
+    private readonly options: {
+      allowWindows?: boolean;
+      /** Finds the person's Linux desktop when this controller inherited none. */
+      findLinuxDesktop?: LinuxDesktopSessionFinder;
+    } = {},
+  ) {}
 
   async allocate(context: ComputerEnvironmentContext): Promise<ComputerEnvironmentLease> {
-    const environment = nativeComputerEnvironment(context.baseEnvironment);
+    let environment = nativeComputerEnvironment(context.baseEnvironment);
     const platform = process.platform;
     if (platform === "win32" && this.options.allowWindows) {
       const seat = await readWindowsSeat();
@@ -411,8 +418,25 @@ export class ExistingComputerEnvironmentAllocator implements ComputerEnvironment
     }
     // A Wayland session without Xwayland still has a seat: the native adapter
     // drives GNOME through Mutter and explains other compositors itself.
-    const displayId =
+    let displayId =
       platform === "darwin" ? "aqua" : environment.DISPLAY || environment.WAYLAND_DISPLAY;
+    const waylandOnly = Boolean(environment.WAYLAND_DISPLAY) && !environment.DISPLAY;
+    if (platform === "linux" && !waylandOnly && this.options.findLinuxDesktop) {
+      // This controller may have started before anyone signed in, or inherited
+      // a DISPLAY an earlier login left behind: join the desktop there now.
+      const session = await this.options.findLinuxDesktop().catch(() => null);
+      if (session && "unavailable" in session) {
+        throw new InteractionControllerError("resource_unavailable", session.unavailable, true);
+      }
+      if (session) {
+        environment = {
+          ...environment,
+          DISPLAY: session.display,
+          ...(session.xauthority ? { XAUTHORITY: session.xauthority } : {}),
+        };
+        displayId = session.display;
+      }
+    }
     if (!displayId) {
       throw new InteractionControllerError(
         "resource_unavailable",
@@ -501,6 +525,8 @@ export function nativeComputerEnvironment(input: NodeJS.ProcessEnv): NodeJS.Proc
     "DISPLAY",
     "WAYLAND_DISPLAY",
     "XAUTHORITY",
+    // The agent's own virtual desktop, which the helper must not fall back from.
+    "OPENGENI_VIRTUAL_DISPLAY",
     "XDG_RUNTIME_DIR",
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",

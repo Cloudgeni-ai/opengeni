@@ -16,6 +16,7 @@ import {
 } from "./computer-environment";
 import { ComputerSupervisor } from "./computer-supervisor";
 import { createCuaComputerDriver } from "./cua/factory";
+import { nativeLinuxDesktopSession } from "./linux-desktop-session";
 import { BrowserControlServer, type ControllerFailureContext } from "./server";
 import { BrowserSupervisor } from "./supervisor";
 import { retainControllerDiagnostic } from "./controller-diagnostics";
@@ -73,6 +74,9 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
               })
             : new ExistingComputerEnvironmentAllocator({
                 allowWindows: config.computerBackend === "cua",
+                ...(computerNativeBinaryPath && process.platform === "linux"
+                  ? { findLinuxDesktop: nativeLinuxDesktopSession(computerNativeBinaryPath) }
+                  : {}),
               }),
       });
     }

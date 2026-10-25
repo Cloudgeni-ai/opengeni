@@ -28,6 +28,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use x11rb::connection::{Connection as _, RequestConnection as _};
+
+pub use crate::linux_session::X11Display;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
     EventMask, ImageFormat, InputFocus, MapState, PropMode, Screen, StackMode, Window, WindowClass,
@@ -79,8 +81,8 @@ pub(crate) fn shell_command(parts: &[String]) -> tokio::process::Command {
 /// screen, well within the framebuffer pump's frame budget.
 #[derive(Debug, Clone)]
 pub struct LinuxDesktop {
-    /// The `$DISPLAY` value to connect to (e.g. `":0"`, `":99"`).
-    display_name: String,
+    /// The display to connect to (e.g. `":0"`, `":99"`) and its authority.
+    display: X11Display,
     composite: Option<Arc<Mutex<CompositeState>>>,
 }
 
@@ -266,28 +268,85 @@ fn focus_descends_from(
     false
 }
 
+/// XTEST is required for computer-use input; capture works without it, but a
+/// desktop the agent cannot drive is not the desktop capability it advertises.
+fn require_xtest(conn: &impl x11rb::connection::RequestConnection) -> Result<(), String> {
+    conn.extension_information(x11rb::protocol::xtest::X11_EXTENSION_NAME)
+        .map_err(|e| format!("XTEST query failed: {e}"))?
+        .map(|_| ())
+        .ok_or_else(|| "it has no XTEST extension, which the agent needs to control it".to_string())
+}
+
 impl LinuxDesktop {
-    /// Opens the backend against `$DISPLAY` (or `:0` if unset), verifying a
-    /// connection can actually be established and the `XTEST` extension is present.
+    /// Opens the desktop of the user this agent runs as: `$DISPLAY` when it is
+    /// set, otherwise the display and authority file of that user's graphical
+    /// login session (see [`crate::linux_session`]), otherwise `:0`. Verifies a
+    /// connection can actually be established and the `XTEST` extension is
+    /// present.
     ///
     /// # Errors
     ///
-    /// Returns a human-readable reason string when no display is reachable (the
-    /// caller maps this to `display_unavailable` — a value, never a crash).
+    /// Returns a plain reason when no desktop is reachable, saying why (no one
+    /// signed in, another user's screen, Wayland, the display refused the
+    /// connection). The caller maps this to `display_unavailable`: a value,
+    /// never a crash.
     pub fn open_default() -> Result<Self, String> {
-        let display_name = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string());
-        if display_name.is_empty() {
-            return Err("$DISPLAY is empty".to_string());
+        Self::first_display(|display| Self::open_display(display.clone()))
+    }
+
+    /// The display [`Self::open_default`] would open, checked the same way
+    /// (it connects and has `XTEST`) but without opening a desktop on it. A
+    /// helper started without `DISPLAY` uses it to join the person's session.
+    ///
+    /// # Errors
+    ///
+    /// The same plain reason as [`Self::open_default`].
+    pub fn find_default_display() -> Result<X11Display, String> {
+        Self::first_display(|display| {
+            let (conn, _screen) = display.connect().map_err(|error| error.to_string())?;
+            require_xtest(&conn)?;
+            Ok(display.clone())
+        })
+    }
+
+    /// The first candidate display `open` accepts, or why none did.
+    fn first_display<T>(open: impl Fn(&X11Display) -> Result<T, String>) -> Result<T, String> {
+        let candidates = crate::linux_session::display_candidates(
+            &crate::linux_session::AgentIdentity::current(),
+            &crate::linux_session::SessionRoots::default(),
+        );
+        let mut last = None;
+        for display in &candidates.displays {
+            match open(display) {
+                Ok(opened) => return Ok(opened),
+                Err(error) => last = Some((display.name.clone(), error)),
+            }
         }
+        let (display, error) = last.unwrap_or_else(|| (":0".into(), "no display to try".into()));
+        Err(crate::linux_session::unavailable_reason(
+            &candidates,
+            &display,
+            &error,
+        ))
+    }
+
+    /// The display this desktop is open on.
+    #[must_use]
+    pub fn display(&self) -> &X11Display {
+        &self.display
+    }
+
+    /// Opens the backend against one exact display.
+    ///
+    /// # Errors
+    ///
+    /// Why the display did not open, such as a refused cookie or a missing
+    /// `XTEST` extension.
+    pub fn open_display(display: X11Display) -> Result<Self, String> {
         // Probe a real connection so a stale/dead $DISPLAY does not falsely report
         // a desktop. Drop it immediately; subsequent ops reconnect.
-        let (conn, _screen) = x11rb::connect(Some(&display_name))
-            .map_err(|e| format!("cannot connect to X display {display_name}: {e}"))?;
-        // XTEST is required for computer-use input; capture works without it, but a
-        // desktop we cannot drive is not the desktop capability we advertise.
-        conn.extension_information(x11rb::protocol::xtest::X11_EXTENSION_NAME)
-            .map_err(|e| format!("XTEST query failed: {e}"))?
-            .ok_or_else(|| "XTEST extension is not available on this display".to_string())?;
+        let (conn, _screen) = display.connect().map_err(|error| error.to_string())?;
+        require_xtest(&conn)?;
         let composite = conn
             .extension_information(x11rb::protocol::composite::X11_EXTENSION_NAME)
             .map_err(|error| format!("XComposite query failed: {error}"))?
@@ -297,10 +356,7 @@ impl LinuxDesktop {
                     redirected: BTreeSet::new(),
                 }))
             });
-        let desktop = Self {
-            display_name,
-            composite,
-        };
+        let desktop = Self { display, composite };
         // Establish backing storage for already-mapped windows before anything
         // can occlude them. Enumeration remains best-effort here; AT-SPI/screen
         // control still works when a hostile window races startup.
@@ -440,7 +496,7 @@ impl LinuxDesktop {
     ) -> PlatformResult<()> {
         let this = self.clone();
         crate::spawn_blocking_reserved(move || {
-            if this.display_name != activation.display_name {
+            if this.display.name != activation.display_name {
                 return Err(PlatformError::NotFound(
                     "window activation belongs to another display".into(),
                 ));
@@ -469,7 +525,7 @@ impl LinuxDesktop {
             let route = read_activation_route(&conn, &screen)?;
             verify_activation_state(&conn, &screen, &expected, route)?;
             Ok(LinuxWindowActivation {
-                display_name: this.display_name.clone(),
+                display_name: this.display.name.clone(),
                 window: expected,
                 route,
             })
@@ -493,7 +549,7 @@ impl LinuxDesktop {
     ) -> Result<(), LinuxWindowActivationError> {
         let this = self.clone();
         crate::spawn_blocking_reserved(move || {
-            if this.display_name != activation.display_name {
+            if this.display.name != activation.display_name {
                 return Err(LinuxWindowActivationError::before(PlatformError::NotFound(
                     "window input belongs to another display".into(),
                 )));
@@ -518,7 +574,7 @@ impl LinuxDesktop {
                 .map_err(LinuxWindowActivationError::before)?;
             verify_window_input_owners(&conn, screen.root, activation.window.id, &prepared)
                 .map_err(LinuxWindowActivationError::before)?;
-            remap = KeymapRemap::apply(&conn, &this.display_name, &plan)
+            remap = KeymapRemap::apply(&conn, &this.display, &plan)
                 .map_err(LinuxWindowActivationError::before)?;
             // The route proof below binds the temporary bindings, so the
             // remapped glyphs are verified like every other key.
@@ -568,8 +624,8 @@ impl LinuxDesktop {
 
     /// Establishes a fresh X11 connection plus the default screen for one op.
     fn connect(&self) -> PlatformResult<(x11rb::rust_connection::RustConnection, Screen)> {
-        let (conn, screen_num) = x11rb::connect(Some(&self.display_name)).map_err(|e| {
-            PlatformError::os(format!("connect X display {}: {e}", self.display_name))
+        let (conn, screen_num) = self.display.connect().map_err(|e| {
+            PlatformError::os(format!("connect X display {}: {e}", self.display.name))
         })?;
         let screen = conn.setup().roots[screen_num].clone();
         Ok((conn, screen))
@@ -591,9 +647,9 @@ impl DesktopBackend for LinuxDesktop {
     fn probe(&self) -> Option<v1::Display> {
         let (conn, screen) = self.connect().ok()?;
         let (width, height) = screen_geometry(&conn, &screen);
-        let virtual_fb = is_virtual_display(&self.display_name);
+        let virtual_fb = is_virtual_display(&self.display.name);
         Some(v1::Display {
-            id: self.display_name.clone(),
+            id: self.display.name.clone(),
             width,
             height,
             r#virtual: virtual_fb,
@@ -752,7 +808,7 @@ impl LinuxDesktop {
     /// Synthesizes one input event via the `XTEST` `FakeInput` request.
     fn inject_blocking(&self, inputs: &[v1::DesktopInput]) -> PlatformResult<()> {
         let (conn, screen) = self.connect()?;
-        inject_inputs(&conn, screen.root, &self.display_name, inputs)
+        inject_inputs(&conn, screen.root, &self.display, inputs)
     }
 
     fn inject_window_blocking(
@@ -793,7 +849,7 @@ impl LinuxDesktop {
             .map_err(|error| {
                 PlatformError::os(format!("focus X11 window {window_id:#x}: {error}"))
             })?;
-        inject_inputs(&conn, screen.root, &self.display_name, inputs)
+        inject_inputs(&conn, screen.root, &self.display, inputs)
     }
 
     fn focus_window_blocking(
@@ -910,7 +966,7 @@ impl LinuxDesktop {
                 consecutive += 1;
                 if consecutive == 2 {
                     return Ok(LinuxWindowActivation {
-                        display_name: self.display_name.clone(),
+                        display_name: self.display.name.clone(),
                         window: expected,
                         route,
                     });
@@ -1455,7 +1511,7 @@ fn validate_x11_point(x: i32, y: i32) -> PlatformResult<()> {
 fn inject_inputs(
     conn: &x11rb::rust_connection::RustConnection,
     root: Window,
-    display: &str,
+    display: &X11Display,
     inputs: &[v1::DesktopInput],
 ) -> PlatformResult<()> {
     let (prepared, plan) = prepare_inputs(conn, inputs)?;
@@ -1840,7 +1896,7 @@ const KEYMAP_REMAP_SETTLE: std::time::Duration = std::time::Duration::from_milli
 /// another client changed in the meantime is left untouched.
 struct KeymapRemap<'a> {
     conn: &'a x11rb::rust_connection::RustConnection,
-    display: String,
+    display: X11Display,
     /// (keycode, original row, row as read back after binding).
     applied: Vec<(u8, Vec<u32>, Vec<u32>)>,
 }
@@ -1851,7 +1907,7 @@ impl<'a> KeymapRemap<'a> {
     /// for the server to apply it. A failure restores what was bound.
     fn apply(
         conn: &'a x11rb::rust_connection::RustConnection,
-        display: &str,
+        display: &X11Display,
         plan: &KeymapRemapPlan,
     ) -> PlatformResult<Option<Self>> {
         if plan.bindings.is_empty() {
@@ -1859,7 +1915,7 @@ impl<'a> KeymapRemap<'a> {
         }
         let mut remap = Self {
             conn,
-            display: display.to_owned(),
+            display: display.clone(),
             applied: Vec::with_capacity(plan.bindings.len()),
         };
         for (keycode, keysym, original) in &plan.bindings {
@@ -1903,7 +1959,7 @@ impl<'a> KeymapRemap<'a> {
         // The delivery connection may already be shut down (deadline or guard
         // failure); its server-side cleanup releases the grab first.
         let restored = self.restore_on(self.conn).or_else(|first| {
-            let (conn, _) = x11rb::connect(Some(&self.display)).map_err(|error| {
+            let (conn, _) = self.display.connect().map_err(|error| {
                 PlatformError::os(format!("X11 keymap restore reconnect: {error} ({first})"))
             })?;
             self.restore_on(&conn)

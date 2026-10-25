@@ -2,7 +2,12 @@ import { expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LinuxVirtualComputerEnvironmentAllocator, nativeComputerEnvironment } from "../src";
+import {
+  ExistingComputerEnvironmentAllocator,
+  LinuxVirtualComputerEnvironmentAllocator,
+  nativeComputerEnvironment,
+} from "../src";
+import { nativeLinuxDesktopSession } from "../src/linux-desktop-session";
 
 test.skipIf(process.platform !== "linux")(
   "cleans started display processes when the window manager fails to start",
@@ -107,3 +112,102 @@ test("native Computer helpers receive GUI state without cloud credentials", () =
     LC_MESSAGES: "en_US.UTF-8",
   });
 });
+
+const sessionContext = (baseEnvironment: NodeJS.ProcessEnv) => ({
+  computerSessionId: "00000000-0000-4000-8000-000000000001",
+  controllerGeneration: "g1",
+  sessionDirectory: "/tmp/unused",
+  baseEnvironment,
+});
+
+test.skipIf(process.platform !== "linux")(
+  "a controller started before anyone signed in joins the desktop found when a session opens",
+  async () => {
+    let lookups = 0;
+    const allocator = new ExistingComputerEnvironmentAllocator({
+      findLinuxDesktop: async () => {
+        lookups += 1;
+        return { display: ":0", xauthority: "/home/user/.Xauthority" };
+      },
+    });
+    const lease = await allocator.allocate(
+      sessionContext({ PATH: "/usr/bin", HOME: "/home/user" }),
+    );
+    expect(lease.seatId).toBe("host-seat::0");
+    expect(lease.displayId).toBe(":0");
+    expect(lease.environment.DISPLAY).toBe(":0");
+    expect(lease.environment.XAUTHORITY).toBe("/home/user/.Xauthority");
+    expect(lookups).toBe(1);
+
+    // An inherited DISPLAY may be one an earlier login left behind: the
+    // helper checks it (it tries it first) and its answer is used.
+    const inherited = await allocator.allocate(
+      sessionContext({ PATH: "/usr/bin", DISPLAY: ":1", XAUTHORITY: "/tmp/stale-auth" }),
+    );
+    expect(inherited.displayId).toBe(":0");
+    expect(inherited.environment.XAUTHORITY).toBe("/home/user/.Xauthority");
+    expect(lookups).toBe(2);
+
+    // A Wayland session without Xwayland keeps its own path.
+    const wayland = await allocator.allocate(
+      sessionContext({ PATH: "/usr/bin", WAYLAND_DISPLAY: "wayland-0" }),
+    );
+    expect(wayland.displayId).toBe("wayland-0");
+    expect(lookups).toBe(2);
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "no desktop to join says why, and a failed lookup keeps the plain refusal",
+  async () => {
+    const reason =
+      "No one is signed in to a desktop on this machine as the user the agent runs as. " +
+      "It works once that user signs in to an X11 desktop session on the machine's screen.";
+    const refused = new ExistingComputerEnvironmentAllocator({
+      findLinuxDesktop: async () => ({ unavailable: reason }),
+    });
+    await expect(refused.allocate(sessionContext({ PATH: "/usr/bin" }))).rejects.toMatchObject({
+      code: "resource_unavailable",
+      message: reason,
+    });
+    const broken = new ExistingComputerEnvironmentAllocator({
+      findLinuxDesktop: async () => {
+        throw new Error("helper missing");
+      },
+    });
+    await expect(broken.allocate(sessionContext({ PATH: "/usr/bin" }))).rejects.toMatchObject({
+      code: "resource_unavailable",
+      message: "connected Linux ComputerSession has no active graphical display",
+    });
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "the native helper's desktop-session answer is read and checked",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "og-desktop-session-"));
+    try {
+      const helper = async (name: string, body: string) => {
+        const path = join(root, name);
+        await writeFile(path, `#!/bin/sh\n${body}\n`);
+        await chmod(path, 0o700);
+        return path;
+      };
+      const found = await helper(
+        "found",
+        `[ "$1" = desktop-session ] && printf '%s\\n' '{"display":":0","xauthority":null}'`,
+      );
+      expect(await nativeLinuxDesktopSession(found)()).toEqual({ display: ":0", xauthority: null });
+      const none = await helper("none", `printf '%s\\n' '{"unavailable":"Nobody is signed in."}'`);
+      expect(await nativeLinuxDesktopSession(none)()).toEqual({
+        unavailable: "Nobody is signed in.",
+      });
+      const garbage = await helper("garbage", `printf '%s\\n' '{"display":""}'`);
+      await expect(nativeLinuxDesktopSession(garbage)()).rejects.toThrow();
+      const hung = await helper("hung", "exec sleep 30");
+      await expect(nativeLinuxDesktopSession(hung, 200)()).rejects.toThrow("timed out");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

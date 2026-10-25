@@ -47,6 +47,8 @@ mod work_scope;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_session;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
@@ -72,12 +74,12 @@ pub use work_scope::{
 pub use cgroup::{establish_oom_isolation, OpCgroupConfig, OpCgroupConfigError, OpCgroups};
 pub use desktop::{
     fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
-    TurnedOffDesktop,
+    ReopeningDesktop, TurnedOffDesktop,
 };
 #[cfg(target_os = "linux")]
 pub use desktop::{
     linux_layout_text_keysyms, linux_named_key_chord_keysyms, validate_linux_named_key_chord,
-    LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+    LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect, X11Display,
 };
 pub use error::{PlatformError, PlatformResult};
 #[cfg(unix)]
