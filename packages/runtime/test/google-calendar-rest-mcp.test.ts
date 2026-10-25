@@ -319,8 +319,9 @@ describe("Google Calendar REST bridge", () => {
   });
 
   test("free/busy merges calendars and returns the gaps when everyone is free", async () => {
+    const privateCalendar = { errors: [{ domain: "global", reason: "notFound" }] };
     const { instance, requests } = server({
-      fetchImpl: () =>
+      fetchImpl: ({ body }) =>
         Response.json({
           calendars: {
             primary: {
@@ -332,14 +333,18 @@ describe("Google Calendar REST bridge", () => {
             "anna@example.test": {
               busy: [{ start: "2026-03-19T12:30:00Z", end: "2026-03-19T14:00:00Z" }],
             },
-            "private@example.test": { errors: [{ domain: "global", reason: "notFound" }] },
+            ...((body as { items: Array<{ id: string }> }).items.some(
+              (item) => item.id === "private@example.test",
+            )
+              ? { "private@example.test": privateCalendar }
+              : {}),
           },
         }),
     });
     const result = await instance.callToolResult("find_free_busy", {
       timeMin: "2026-03-19T12:00",
       timeMax: "2026-03-19T17:00",
-      calendarIds: ["primary", "anna@example.test", "private@example.test"],
+      calendarIds: ["primary", "anna@example.test"],
     });
     const query = requests.find((request) => request.url.pathname.endsWith("/freeBusy"))!;
     expect(query.method).toBe("POST");
@@ -347,7 +352,7 @@ describe("Google Calendar REST bridge", () => {
       timeMin: "2026-03-19T11:00:00.000Z",
       timeMax: "2026-03-19T16:00:00.000Z",
       timeZone: "Europe/Oslo",
-      items: [{ id: "primary" }, { id: "anna@example.test" }, { id: "private@example.test" }],
+      items: [{ id: "primary" }, { id: "anna@example.test" }],
     });
     expect(result.structuredContent).toEqual({
       timeZone: "Europe/Oslo",
@@ -364,13 +369,54 @@ describe("Google Calendar REST bridge", () => {
           calendarId: "anna@example.test",
           busy: [{ start: "2026-03-19T13:30:00+01:00", end: "2026-03-19T15:00:00+01:00" }],
         },
-        { calendarId: "private@example.test", error: "notFound" },
       ],
       free: [
         { start: "2026-03-19T12:30:00+01:00", end: "2026-03-19T13:00:00+01:00", day: "Thu" },
         { start: "2026-03-19T15:00:00+01:00", end: "2026-03-19T17:00:00+01:00", day: "Thu" },
       ],
     });
+
+    // A calendar that could not be checked means no time is known to be free
+    // for everyone, so no gaps are offered.
+    const partial = await instance.callToolResult("find_free_busy", {
+      timeMin: "2026-03-19T12:00",
+      timeMax: "2026-03-19T17:00",
+      calendarIds: ["primary", "anna@example.test", "private@example.test"],
+    });
+    expect(partial.structuredContent.calendars.at(-1)).toEqual({
+      calendarId: "private@example.test",
+      error: "notFound",
+    });
+    expect(partial.structuredContent.calendars[0].busy).toHaveLength(2);
+    expect(partial.structuredContent).not.toHaveProperty("free");
+  });
+
+  test("free gaps account for every busy block even when the listed blocks are cut short", async () => {
+    const hour = 3_600_000;
+    const first = Date.parse("2026-04-06T00:00:00Z");
+    // 300 one-hour meetings with a 30-minute break after every tenth one.
+    const busy = Array.from({ length: 300 }, (_, index) => {
+      const start = first + index * hour + Math.floor(index / 10) * 30 * 60_000;
+      return { start: new Date(start).toISOString(), end: new Date(start + hour).toISOString() };
+    });
+    const { instance } = server({
+      zone: "UTC",
+      fetchImpl: () => Response.json({ calendars: { primary: { busy } } }),
+    });
+    const result = await instance.callToolResult("find_free_busy", {
+      timeMin: "2026-04-06",
+      timeMax: "2026-05-01",
+    });
+    const content = result.structuredContent;
+    expect(content.calendars[0].busy).toHaveLength(200);
+    expect(content.calendars[0].busyTruncated).toBe(true);
+    // 29 breaks between the 30 groups, then the time after the last meeting.
+    expect(content.free).toHaveLength(30);
+    expect(content).not.toHaveProperty("freeTruncated");
+    const lastMeetingEnd = Date.parse(busy.at(-1)!.end);
+    expect(Date.parse(content.free.at(-1).start)).toBe(lastMeetingEnd);
+    for (const gap of content.free.slice(0, -1))
+      expect(Date.parse(gap.end) - Date.parse(gap.start)).toBe(30 * 60_000);
   });
 
   test("creates an event in local time with a default hour and no guest emails", async () => {
@@ -460,6 +506,34 @@ describe("Google Calendar REST bridge", () => {
       ],
     });
     expect(result.structuredContent.updated).toBe(true);
+  });
+
+  test("moving an event keeps its own time zone and reads the new time in the shown zone", async () => {
+    const series = {
+      id: "evt_ny",
+      etag: '"etag-ny"',
+      status: "confirmed",
+      summary: "Weekly sync",
+      recurrence: ["RRULE:FREQ=WEEKLY"],
+      start: { dateTime: "2026-03-16T15:00:00+01:00", timeZone: "America/New_York" },
+      end: { dateTime: "2026-03-16T15:30:00+01:00", timeZone: "America/New_York" },
+    };
+    const { instance, requests } = server({
+      fetchImpl: ({ method, body }) =>
+        Response.json(method === "PATCH" ? { ...series, ...(body as object) } : series),
+    });
+    const result = await instance.callToolResult("update_event", {
+      eventId: "evt_ny",
+      start: "2026-03-17T16:00",
+    });
+    expect(result.isError).toBeUndefined();
+    const patch = requests.find((request) => request.method === "PATCH")!;
+    // 16:00 in Oslo (the zone shown to the user) is 11:00 in New York.
+    expect(patch.body).toEqual({
+      start: { dateTime: "2026-03-17T11:00:00-04:00", timeZone: "America/New_York", date: null },
+      end: { dateTime: "2026-03-17T11:30:00-04:00", timeZone: "America/New_York", date: null },
+    });
+    expect(result.structuredContent.event.start).toBe("2026-03-17T16:00:00+01:00");
   });
 
   test("an update with nothing to change is refused without a provider call", async () => {

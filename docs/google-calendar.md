@@ -34,6 +34,13 @@ left out. Pages default to 25 events (at most 100); follow `nextPageToken`.
 `get_event` returns descriptions up to 8,000 characters and up to 100 guests,
 marking truncation explicitly.
 
+`find_free_busy` computes free gaps from every busy block Google returns. Each
+calendar lists at most 200 busy blocks (`busyTruncated: true` when more exist)
+and the free list is bounded the same way (`freeTruncated: true`). When any
+requested calendar cannot be checked, for example because it is not shared with
+the account, that calendar reports its error and no `free` list is returned,
+since no time is known to be free for everyone.
+
 ## Time zones
 
 Every tool accepts a date (`2026-03-14`), a local date and time
@@ -53,7 +60,9 @@ time; repeated times resolve to the later instant.
 exclusive, defaulting to the next day); otherwise `end` defaults to one hour.
 `update_event` that moves only the start keeps the event's length, including
 across daylight-saving changes, and switching between all-day and timed is
-supported.
+supported. New times are read in the zone shown to the user, but a timed event
+keeps its own stored time zone, so moving a series created in another zone
+does not change how its later occurrences repeat.
 
 ## Changes, review and notifications
 

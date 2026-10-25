@@ -663,29 +663,33 @@ export class GoogleCalendarRestMcpServer implements LocalMcpBridgeServer {
         .filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && end > start)
         .map(([start, end]) => [Math.max(start, range.start), Math.min(end, range.end)] as const)
         .filter(([start, end]) => end > start)
-        .sort((a, b) => a[0] - b[0])
-        .slice(0, MAX_BUSY_BLOCKS);
+        .sort((a, b) => a[0] - b[0]);
+      // Free gaps come from every block; only the listed blocks are bounded.
       allBusy.push(...busy.map(([start, end]) => [start, end] as [number, number]));
       return {
         calendarId,
-        busy: busy.map(([start, end]) => ({
+        busy: busy.slice(0, MAX_BUSY_BLOCKS).map(([start, end]) => ({
           start: formatInstant(start, zone),
           end: formatInstant(end, zone),
         })),
+        ...(busy.length > MAX_BUSY_BLOCKS ? { busyTruncated: true } : {}),
       };
     });
-    const checked = calendars.some((calendar) => !("error" in calendar));
+    // Gaps are only meaningful when every requested calendar answered.
+    const everyChecked = calendars.every((calendar) => !("error" in calendar));
+    const free = everyChecked ? freeGaps(range.start, range.end, allBusy) : [];
     return {
       timeZone: zone,
       range: { start: formatInstant(range.start, zone), end: formatInstant(range.end, zone) },
       calendars,
-      ...(checked
+      ...(everyChecked
         ? {
-            free: freeGaps(range.start, range.end, allBusy).map(([start, end]) => ({
+            free: free.slice(0, MAX_BUSY_BLOCKS).map(([start, end]) => ({
               start: formatInstant(start, zone),
               end: formatInstant(end, zone),
               day: weekdayOf(start, zone),
             })),
+            ...(free.length > MAX_BUSY_BLOCKS ? { freeTruncated: true } : {}),
           }
         : {}),
     };
@@ -764,7 +768,15 @@ export class GoogleCalendarRestMcpServer implements LocalMcpBridgeServer {
         args.end !== undefined && args.end !== ""
           ? parseTime(args.end, "end", zone)
           : defaultEnd(start, { start: oldStart, end: oldEnd });
-      const times = eventTimes(start, end, zone);
+      // Inputs are read in the zone the user sees; a timed event keeps its own
+      // zone so moving it (or its series) never silently changes that zone.
+      const startZone = validZone(current.start?.timeZone) ?? zone;
+      const times = eventTimes(
+        start,
+        end,
+        startZone,
+        validZone(current.end?.timeZone) ?? startZone,
+      );
       // PATCH merges nested objects, so switching between all-day and timed
       // must clear the other representation explicitly.
       patch.start =
@@ -1258,7 +1270,7 @@ function defaultEnd(
     : { kind: "instant", ms: start.ms + DEFAULT_EVENT_MINUTES * 60_000 };
 }
 
-function eventTimes(start: TimeInput, end: TimeInput, zone: string) {
+function eventTimes(start: TimeInput, end: TimeInput, zone: string, endZone = zone) {
   if (start.kind !== end.kind)
     throw new CalendarInputError("start and end must both be dates (all-day) or both be times");
   if (start.kind === "date" && end.kind === "date") {
@@ -1273,7 +1285,7 @@ function eventTimes(start: TimeInput, end: TimeInput, zone: string) {
   if (endMs <= startMs) throw new CalendarInputError("end must be after start");
   return {
     start: { dateTime: formatInstant(startMs, zone), timeZone: zone },
-    end: { dateTime: formatInstant(endMs, zone), timeZone: zone },
+    end: { dateTime: formatInstant(endMs, endZone), timeZone: endZone },
   };
 }
 
