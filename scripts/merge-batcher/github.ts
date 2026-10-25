@@ -934,6 +934,42 @@ export class GitHubReader {
       };
     }
   }
+  private async baseJobs(id: number, attempt: number): Promise<Json[]> {
+    const jobs: Json[] = [];
+    const ids = new Set<number>();
+    let total: number | undefined;
+    for (let page = 1; page <= 1000; page++) {
+      const data = (await this.get(
+        `actions/runs/${id}/attempts/${attempt}/jobs?per_page=100&page=${page}`,
+      )) as Json;
+      if (
+        !Number.isSafeInteger(data.total_count) ||
+        data.total_count < 0 ||
+        !Array.isArray(data.jobs) ||
+        (total !== undefined && data.total_count !== total)
+      )
+        throw Error("Inconsistent exact-base jobs page");
+      total = data.total_count;
+      for (const job of data.jobs) {
+        if (
+          !Number.isSafeInteger(job?.id) ||
+          job.id < 1 ||
+          ids.has(job.id) ||
+          job.run_id !== id ||
+          (job.run_attempt !== undefined && job.run_attempt !== attempt)
+        )
+          throw Error("Exact-base job identity mismatch");
+        ids.add(job.id);
+        jobs.push(job);
+      }
+      if (jobs.length > total!) throw Error("Exact-base jobs exceed reported total");
+      if (data.jobs.length < 100) {
+        if (jobs.length !== total) throw Error("Incomplete exact-base jobs");
+        return jobs;
+      }
+    }
+    throw Error("Exact-base jobs pagination incomplete");
+  }
   private async readBaseCI(sha: string): Promise<BaseCiEvidence> {
     const evidence: BaseCiEvidence = {
       sha,
@@ -960,25 +996,25 @@ export class GitHubReader {
     evidence.runId = id;
     evidence.attempt = attempt;
     const details = (await this.get(`actions/runs/${id}/attempts/${attempt}`)) as Json;
+    if (!exact(details) || Number(details.id) !== id || Number(details.run_attempt) !== attempt)
+      return { ...evidence, reason: "Exact-base CI attempt identity unavailable" };
+    const pending = ["queued", "in_progress", "waiting", "pending", "requested"].includes(
+      details.status,
+    );
     if (
-      !exact(details) ||
-      Number(details.id) !== id ||
-      Number(details.run_attempt) !== attempt ||
-      details.status !== "completed"
+      (!pending && details.status !== "completed") ||
+      (pending ? details.conclusion !== null : !["success", "failure"].includes(details.conclusion))
     )
-      return { ...evidence, reason: "Exact-base CI attempt is running or identity unavailable" };
-    if (!["success", "failure"].includes(details.conclusion))
       return {
         ...evidence,
         reason: "Exact-base CI cancelled/skipped/unknown is not policy evidence",
       };
-    if (details.conclusion === "failure") {
-      evidence.status = "red";
-      evidence.reason = "Exact-base main CI failed; no member attribution";
-      evidence.classes = baseJobClasses(
-        await this.pages(`actions/runs/${id}/attempts/${attempt}/jobs`, "jobs"),
-        id,
-      );
+    if (pending || details.conclusion === "failure") {
+      evidence.status = pending ? "classes" : "red";
+      evidence.reason = pending
+        ? "Exact-base job classes observed; whole workflow still pending"
+        : "Exact-base main CI failed; no member attribution";
+      evidence.classes = baseJobClasses(await this.baseJobs(id, attempt), id);
     } else {
       const artifacts = await this.pages(`actions/runs/${id}/artifacts`, "artifacts");
       const matches = artifacts.filter(
@@ -1062,7 +1098,7 @@ export class GitHubReader {
       !latest ||
       Number(latest.id) !== id ||
       Number(latest.run_attempt) !== attempt ||
-      latest.status !== "completed" ||
+      latest.status !== details.status ||
       latest.conclusion !== details.conclusion
     )
       return { ...evidence, status: "unknown", reason: "Main CI changed during evidence read" };

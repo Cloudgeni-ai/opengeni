@@ -1087,6 +1087,7 @@ describe("wire adapters and CLI", () => {
       if (url.endsWith("/attempts/2")) return Response.json(row);
       if (url.includes("/attempts/2/jobs"))
         return Response.json({
+          total_count: 1,
           jobs: [
             {
               id: 501,
@@ -1361,6 +1362,19 @@ describe("integration boundaries and queue-only shadow CI", () => {
       expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
     },
   );
+  test("completed relevant base classes permit only the existing one retry with safety holds intact", () => {
+    const c = candidate();
+    c.runs = [{ ...run(c, "code_failure"), failedClasses: ["units"] }];
+    const o = observation(c.manifest.pulls, [c]);
+    o.baseCI = { ...o.baseCI!, status: "classes", classes: { source: "unknown", units: "green" } };
+    expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("retry");
+    expect(plan({ ...o, mainBusy: true }, { ...cfg, mode: "active" }).kind).toBe("wait");
+    o.ledger.retries[c.manifest.batchId] = { runId: 100, fromAttempt: 1, requestedAt: NOW };
+    expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+    delete o.ledger.retries[c.manifest.batchId];
+    o.baseCI.classes!.units = "unknown";
+    expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+  });
   test("exact red base holds failed cohorts before retry or split, never a green landing", () => {
     const c = candidate([pull(5436), pull(5439)]);
     const o = observation(c.manifest.pulls, [c]);

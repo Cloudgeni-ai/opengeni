@@ -23,6 +23,7 @@ import {
   runnerJobDemand,
   scanRunnerDemand,
   type Ledger,
+  type BaseCiEvidence,
   type Manifest,
   type Pull,
   type Run,
@@ -202,7 +203,7 @@ async function fixture() {
   let clock = Date.parse(NOW);
   class MockGitHub extends GitHubReader {
     baseStatus: "green" | "red" | "unknown" = "green";
-    override async baseCI(sha: string) {
+    override async baseCI(sha: string): Promise<BaseCiEvidence> {
       return {
         sha,
         status: this.baseStatus,
@@ -1375,6 +1376,29 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(f.api.calls.every((call) => call.endsWith("/comments"))).toBe(true);
     },
   );
+  test("relevant green classes on a pending base drive one durable retry through the real executor", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    const failed = f.verdict(m, "code_failure");
+    failed.failedClasses = ["units"];
+    f.api.baseCI = async (sha) => ({
+      sha,
+      status: "classes",
+      runId: 50,
+      attempt: 1,
+      reason: "relevant tests complete; release image waiting",
+      classes: { source: "green", units: "green" },
+    });
+    f.advance(61);
+    expect((await f.controller().step()).action.kind).toBe("retry");
+    expect((await f.state()).ledger.retries[m.batchId]?.fromAttempt).toBe(1);
+    await f.executor().maintain();
+    expect(f.api.calls.filter((call) => call.endsWith("/rerun"))).toHaveLength(1);
+    f.advance();
+    await f.executor().maintain();
+    expect(f.api.calls.filter((call) => call.endsWith("/rerun"))).toHaveLength(1);
+    expect((await f.state()).ledger.parked ?? []).toEqual([]);
+  });
   test("real reader observes exact red base before retrying or parking a failed batch", async () => {
     const f = await fixture();
     const m = await f.publish();

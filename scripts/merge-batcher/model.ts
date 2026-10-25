@@ -831,7 +831,7 @@ export interface Observation {
 }
 export interface BaseCiEvidence {
   sha: string;
-  status: "green" | "red" | "unknown";
+  status: "green" | "red" | "classes" | "unknown";
   runId: number | null;
   attempt: number | null;
   reason: string;
