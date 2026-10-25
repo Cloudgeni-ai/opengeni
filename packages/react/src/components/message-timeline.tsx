@@ -3595,6 +3595,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               )}
               outcome={group.outcome}
               failureText={group.failureText}
+              failureDetail={group.failureDetail}
               foldKey={group.id}
               defaultOpen={readableWorkDefaultOpen(group)}
               unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
@@ -3750,6 +3751,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={group.items}
           outcome={group.outcome}
           failureText={group.failureText}
+          failureDetail={group.failureDetail}
           defaultOpen={
             group.outcome === "failed" ||
             containsPresentedImage ||
@@ -3824,6 +3826,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={activityItems}
           outcome={group.outcome}
           failureText={insideTurn ? undefined : group.failureText}
+          failureDetail={insideTurn ? undefined : group.failureDetail}
           durationMs={durationMs}
           defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}
