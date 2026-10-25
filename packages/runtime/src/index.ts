@@ -10679,6 +10679,7 @@ export async function runOwnedSandboxSetup(
     codemodeTokenSeedOverride?: string;
     codemodeClientDownloadOverride?: ManagedCodemodeClientDownload;
     commandRunner?: SandboxLifecycleCommandRunner;
+    measureSetup?: SandboxLifecycleHookContext["measureSetup"];
     /** Durable host coordinator for immutable rig setup on one exact managed
      * sandbox. Turn-private hooks always run after this callback returns. */
     coordinateSharedRigSetup?: (input: {
@@ -10726,6 +10727,7 @@ export async function runOwnedSandboxSetup(
   ];
   const ownedHookContext: SandboxLifecycleHookContext = {
     environment,
+    ...(opts.measureSetup ? { measureSetup: opts.measureSetup } : {}),
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
     ...(runAs ? { runAs } : {}),
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
@@ -11539,6 +11541,11 @@ export type SandboxLifecycleCommandRunner = (
 
 export type SandboxLifecycleHookContext = {
   environment: Record<string, string>;
+  /** Host-only startup observation; never projected into model context. */
+  measureSetup?: (
+    phase: "client_readiness" | "credential_seed" | "credential_hooks" | "artifact_runtime",
+    work: () => Promise<void>,
+  ) => Promise<void>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
   runAs?: string;
   // TOKEN-BROKER (B1): back-compat GitHub alias for gitTokenSeeds.github.
@@ -11666,10 +11673,23 @@ async function runApplicableBeforeAgentStartHooks(
   hooks: SandboxLifecycleHook[],
   context: SandboxLifecycleHookContext,
 ): Promise<void> {
-  const runHook = (hook: SandboxLifecycleHook): Promise<void> =>
-    withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
-      hook.run(session, context),
-    );
+  const runHook = (hook: SandboxLifecycleHook): Promise<void> => {
+    const run = () =>
+      withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
+        hook.run(session, context),
+      );
+    const phase =
+      hook.id === "codemode-client"
+        ? "client_readiness"
+        : hook.id === "codemode-token"
+          ? "credential_seed"
+          : hook.id === "azure-cli-login"
+            ? "credential_hooks"
+            : hook.id === "artifact-runtime-doctor"
+              ? "artifact_runtime"
+              : null;
+    return phase && context.measureSetup ? context.measureSetup(phase, run) : run();
+  };
   if (!hooks.some((hook) => hook.independent)) {
     for (const hook of hooks) await runHook(hook);
     return;

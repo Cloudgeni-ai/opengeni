@@ -127,6 +127,66 @@ test("historical startup is quiet but recorded timings remain inspectable", asyn
   expect(table.container.textContent).toContain("not additive");
   await table.unmount();
 });
+test("post-provision timings use readable labels in the table and expanded activity", async () => {
+  const names = [
+    "credential_resolution",
+    "credential_mint",
+    "credential_materialization",
+    "client_publication",
+    "client_readiness",
+    "credential_seed",
+    "credential_hooks",
+    "artifact_runtime",
+  ] as const;
+  const items = names.map((name) =>
+    phase({ id: name, phase: name, status: "complete", durationMs: 135 }),
+  );
+  const table = await renderComponent(<StartupTimings phases={items} />);
+  expect(table.container.querySelectorAll("tbody tr")).toHaveLength(8);
+  for (const label of [
+    "Run credential resolution",
+    "Credential minting",
+    "Credential materialization",
+    "Client publication",
+    "Sandbox client readiness",
+    "Client credential seeding",
+    "Credential setup hooks",
+    "Artifact runtime readiness",
+  ]) {
+    expect(table.container.textContent).toContain(label);
+  }
+  expect(table.container.textContent).toContain("not additive");
+  await table.unmount();
+  setStartupDetails(true);
+  const rail = await renderComponent(<ActivityRail items={items} />);
+  expect(rail.container.textContent).toContain("Sandbox client readiness complete");
+  expect(rail.container.textContent).not.toContain("client_readiness");
+  await rail.unmount();
+});
+test("batched completion receipts are ordered by actual start in startup details", async () => {
+  const table = await renderComponent(
+    <StartupTimings
+      phases={[
+        phase({
+          id: "later",
+          phase: "client_readiness",
+          status: "complete",
+          startedAt: "2026-01-01T00:00:02Z",
+        }),
+        phase({
+          id: "earlier",
+          phase: "credential_mint",
+          status: "complete",
+          startedAt: "2026-01-01T00:00:01Z",
+        }),
+      ]}
+    />,
+  );
+  expect([...table.container.querySelectorAll("tbody th")].map((cell) => cell.textContent)).toEqual(
+    ["Credential minting", "Sandbox client readiness"],
+  );
+  await table.unmount();
+});
 test("long waits replace playful text with an honest status", async () => {
   const r = await renderComponent(
     <ActivityRail items={[phase({ startedAt: new Date(Date.now() - 61_000).toISOString() })]} />,

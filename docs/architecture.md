@@ -26,6 +26,11 @@ Legacy positive receipts remain eligible and retain their balances; no backfill.
 
 Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.
 
+Turn post-provision timing uses the existing startup events/metrics through
+`apps/worker/src/activities/agent-turn/sandbox-startup-phase.ts`. Lazy credential
+mint/join, client publication and credential materialization settle concurrently
+before owned setup; see [run lifecycle](run-lifecycle.md#agent-loop-request-lifecycle-observability).
+
 ---
 
 ## 2. Opengeni
