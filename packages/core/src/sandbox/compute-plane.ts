@@ -10,6 +10,7 @@ import {
   getLiveEnrollmentConnection,
   revokeSandboxEnrollment,
   type Database,
+  type EnrollmentRecord,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import {
@@ -34,11 +35,15 @@ export class ComputeAgentIncompatibleError extends Error {
   }
 }
 
-/** Whether a sandbox enrollment's agent reported capabilities that lack
- * `OpRelease`. Before its Hello is recorded nothing is known, and nothing is
- * refused. */
-export function computeAgentLacksOutputRelease(capabilities: Record<string, boolean>): boolean {
-  return Object.keys(capabilities).length > 0 && capabilities.opRelease !== true;
+/** Whether a sandbox enrollment's agent is known to lack `OpRelease`. Only the
+ * agent's Hello records what it serves, together with its version, so the
+ * version says whether a Hello has been recorded. Before that nothing is known,
+ * and nothing is refused: a heartbeat can record the agent's desktop state among
+ * its capabilities first, and that alone says nothing about `OpRelease`. */
+export function computeAgentLacksOutputRelease(
+  enrollment: Pick<EnrollmentRecord, "agentVersion" | "agentCapabilities">,
+): boolean {
+  return enrollment.agentVersion !== null && enrollment.agentCapabilities.opRelease !== true;
 }
 
 /**
@@ -89,7 +94,7 @@ export function createComputeAgentPlane(deps: {
       // host holds the session open, asleep or not: a live claim is reachable.
       const enrollment = await getLiveEnrollmentConnection(db, workspaceId, enrollmentId);
       if (!enrollment?.connectionInstanceId || enrollment.kind !== "sandbox") return null;
-      if (computeAgentLacksOutputRelease(enrollment.agentCapabilities))
+      if (computeAgentLacksOutputRelease(enrollment))
         throw new ComputeAgentIncompatibleError(enrollmentId);
       return {
         workspaceId: enrollment.workspaceId,
