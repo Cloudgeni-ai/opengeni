@@ -8514,6 +8514,67 @@ export const UpdateSessionToolPolicyRequest = /* @__PURE__ */ defineSchema(() =>
 export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPolicyRequest>;
 
 /**
+ * The person finished setup from a capability card the agent posted in this
+ * chat (OAuth return, popup, API-key form, "use in this conversation"). The
+ * server finds the latest card for this capability, checks the capability is
+ * now usable in the chat and that the person has not written since, and then
+ * wakes the agent once so it continues the request that needed it.
+ */
+export const ContinueAfterCapabilitySetupRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().trim().min(1).max(512),
+    })
+    .strict(),
+);
+export type ContinueAfterCapabilitySetupRequest = z.infer<
+  typeof ContinueAfterCapabilitySetupRequest
+>;
+
+/** Why no continuation was sent. Each is a normal outcome, not an error. */
+export const CapabilitySetupContinuationSkipReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    // No card for this capability was posted in this chat.
+    "no_card",
+    // The person already wrote after the card; their message carries on.
+    "later_message",
+    // The capability is not yet usable in this chat.
+    "not_ready",
+    // This card completes through its own flow (it sends a message itself).
+    "not_applicable",
+    // The request that posted the card belongs to someone else, or the chat
+    // has no request to continue.
+    "not_requester",
+    // The chat is closed or archived.
+    "session_closed",
+  ]),
+);
+export type CapabilitySetupContinuationSkipReason = z.infer<
+  typeof CapabilitySetupContinuationSkipReason
+>;
+
+export const ContinueAfterCapabilitySetupResponse = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("outcome", [
+    z
+      .object({
+        // `queued` the first time; `already_queued` for every repeat of the same card.
+        outcome: z.enum(["queued", "already_queued"]),
+        updateId: primitives.uuid,
+      })
+      .strict(),
+    z
+      .object({
+        outcome: z.literal("not_needed"),
+        reason: CapabilitySetupContinuationSkipReason,
+      })
+      .strict(),
+  ]),
+);
+export type ContinueAfterCapabilitySetupResponse = z.infer<
+  typeof ContinueAfterCapabilitySetupResponse
+>;
+
+/**
  * A member's personal pin preference for a session. `expectedVersion` is
  * optional: ordinary pin/unpin actions are idempotent last-write-wins, while a
  * client that has a known version can fail closed rather than overwrite a newer
@@ -10279,6 +10340,7 @@ export const SessionSystemUpdateKind = /* @__PURE__ */ defineSchema(() =>
     "child_waiting_capacity",
     "child_progress",
     "secret_use_approval_decided",
+    "capability_setup_completed",
   ]),
 );
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
@@ -10310,6 +10372,7 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
   child_waiting_capacity: "deferred",
   child_progress: "deferred",
   secret_use_approval_decided: "immediate",
+  capability_setup_completed: "immediate",
 };
 
 /**
@@ -10489,6 +10552,37 @@ export const ChildProgressPayload = /* @__PURE__ */ defineSchema(() =>
     .passthrough(),
 );
 export type ChildProgressPayload = z.infer<typeof ChildProgressPayload>;
+
+/** Bound on the capability name copied into a setup-completed update. */
+export const CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS = 256;
+
+/**
+ * The person finished setup from the capability card `cardEventId` that the
+ * agent posted. One per card: the producer's dedupe key is the card event.
+ */
+export const CapabilitySetupCompletedPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("capability_setup_completed"),
+      capabilityId: z.string().min(1).max(512),
+      name: z.string().min(1).max(CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS),
+      cardEventId: primitives.uuid,
+    })
+    .passthrough(),
+);
+export type CapabilitySetupCompletedPayload = z.infer<typeof CapabilitySetupCompletedPayload>;
+
+/**
+ * The one fact the agent receives when a person finishes setup from its card.
+ * Written once into the durable update row and replayed verbatim afterwards.
+ * Tools are claimed available only when the server verified them in the chat;
+ * when the chat's tool list is too long to check, the fact leaves that out.
+ */
+export function capabilitySetupCompletedSummary(name: string, toolsVerified: boolean): string {
+  return toolsVerified
+    ? `The person finished setting up ${name} from your request. Its tools are now available, so continue the request that needed it.`
+    : `The person finished setting up ${name} from your request, so continue the request that needed it.`;
+}
 
 /**
  * Bound, in UTF-8 bytes including the truncation marker, on the child's final
@@ -10777,6 +10871,7 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
         destination: boundedUtf8String(500).nullable(),
       })
       .passthrough(),
+    CapabilitySetupCompletedPayload,
   ]),
 );
 export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
@@ -11219,6 +11314,7 @@ const TRANSIENT_SESSION_SYSTEM_UPDATE_KINDS: ReadonlySet<string> = new Set<Sessi
     "child_progress",
     "child_waiting_capacity",
     "child_requires_action_resolved",
+    "capability_setup_completed",
   ],
 );
 

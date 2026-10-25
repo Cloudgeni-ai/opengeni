@@ -24,6 +24,7 @@ export default defineConfig({
     "src/client-error-report.ts",
     "src/analytics-consent-report.ts",
     "src/connection-account-label.ts",
+    "src/personal-integration-setup.ts",
     "src/connection-authority.ts",
     "src/connector-attachments.ts",
     "src/connector-destinations.ts",

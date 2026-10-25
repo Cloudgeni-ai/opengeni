@@ -22,6 +22,7 @@ import {
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import {
   startSlackBotInstall,
   requireOpenGeniSlackOAuthSettings,
@@ -213,17 +214,24 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId);
+    const reach = connectionReadReach(grant);
+    const connections = await listConnectionsMetadata(db, workspaceId, grant.subjectId);
     return c.json(
       ListConnectionsResponse.parse({
-        connections: await listConnectionsMetadata(db, workspaceId, grant.subjectId),
+        // The personal setup permission sees only the caller's own accounts.
+        connections:
+          reach === "all"
+            ? connections
+            : connections.filter((connection) => connection.subjectId === grant.subjectId),
       }),
     );
   });
 
   app.get("/v1/workspaces/:workspaceId/connections/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId);
+    const reach = connectionReadReach(grant);
     const includeInactive = c.req.query("includeInactive");
     if (
       includeInactive !== undefined &&
@@ -234,9 +242,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(
       ListConnectionsResponse.parse({
-        connections: await listOwnConnectionAccountsForGrant(db, grant, {
-          includeInactive: includeInactive === "true",
-        }),
+        connections: (
+          await listOwnConnectionAccountsForGrant(db, grant, {
+            includeInactive: includeInactive === "true",
+          })
+        ).filter((connection) => reach === "all" || connection.subjectId === grant.subjectId),
       }),
     );
   });
@@ -1378,11 +1388,21 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const connectionId = c.req.param("connectionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const grant = await requireAccessGrant(c, deps, workspaceId);
+    if (
+      !hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode)
+    )
+      throw new HTTPException(403, { message: "missing permission: connections:write" });
     const existing = await getConnectionMetadata(db, workspaceId, connectionId, grant.subjectId);
     if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
     }
+    // The personal setup permission removes only the caller's own accounts.
+    if (
+      existing.subjectId !== grant.subjectId &&
+      !hasPermission(grant.permissions, "connections:write", grant.permissionMode)
+    )
+      throw new HTTPException(403, { message: "missing permission: connections:write" });
     assertNotReservedExternalVaultMetadata(existing.metadata);
     if (
       existing.subjectId === null &&
@@ -2067,6 +2087,21 @@ export function requireWorkspaceIntegrationAdministration(grant: {
 }): void {
   if (!hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode))
     throw new HTTPException(403, { message: "missing permission: capabilities:manage" });
+}
+
+/**
+ * Who may list connections: `connections:read` sees the workspace's shared
+ * connections and the caller's own; the personal setup permission sees only
+ * the caller's own accounts.
+ */
+function connectionReadReach(grant: {
+  permissions: Parameters<typeof hasPermission>[0];
+  permissionMode?: Parameters<typeof hasPermission>[2];
+}): "all" | "own" {
+  if (hasPermission(grant.permissions, "connections:read", grant.permissionMode)) return "all";
+  if (hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode))
+    return "own";
+  throw new HTTPException(403, { message: "missing permission: connections:read" });
 }
 
 function writableSubjectId(

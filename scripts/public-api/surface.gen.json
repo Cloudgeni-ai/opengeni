@@ -7865,6 +7865,19 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations",
+      "sdk": [
+        "OpenGeniClient.continueAfterCapabilitySetup"
+      ],
+      "request": [
+        "ContinueAfterCapabilitySetupRequest"
+      ],
+      "response": [
+        "ContinueAfterCapabilitySetupResponse"
+      ]
+    },
+    {
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/channel",
       "sdk": [
@@ -13041,6 +13054,14 @@
         "$": "enum=[\"\\\"attention\\\"\",\"\\\"ready\\\"\",\"\\\"setup_required\\\"\",\"\\\"unavailable\\\"\"]"
       }
     },
+    "CapabilitySetupContinuationSkipReason": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"later_message\\\"\",\"\\\"no_card\\\"\",\"\\\"not_applicable\\\"\",\"\\\"not_ready\\\"\",\"\\\"not_requester\\\"\",\"\\\"session_closed\\\"\"]"
+      }
+    },
     "CapabilitySource": {
       "io": [
         "output"
@@ -14732,6 +14753,29 @@
         "$.serverId": "string!",
         "$.tools": "array!",
         "$.tools[]": "ref(ConnectorToolPermissionEntry)"
+      }
+    },
+    "ContinueAfterCapabilitySetupRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.capabilityId": "string!"
+      }
+    },
+    "ContinueAfterCapabilitySetupResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"outcome=not_needed\"]",
+        "$|0": "object",
+        "$|0.outcome": "enum!=[\"\\\"already_queued\\\"\",\"\\\"queued\\\"\"]",
+        "$|0.updateId": "string!",
+        "$|outcome=not_needed": "object",
+        "$|outcome=not_needed.outcome": "const!=[\"\\\"not_needed\\\"\"]",
+        "$|outcome=not_needed.reason": "ref(CapabilitySetupContinuationSkipReason)!"
       }
     },
     "ContinueSessionWaitingWorkResponse": {
@@ -21979,6 +22023,7 @@
         "$.allowedIntegrationKeys": "array!",
         "$.allowedIntegrationKeys[]": "string",
         "$.mode": "enum!=[\"\\\"restricted\\\"\",\"\\\"unrestricted\\\"\"]",
+        "$.personalIntegrationSetup": "enum!=[\"\\\"admins\\\"\",\"\\\"members\\\"\"]",
         "$.revision": "integer!"
       }
     },
@@ -22710,7 +22755,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"account:admin\\\"\",\"\\\"account:read\\\"\",\"\\\"api_keys:manage\\\"\",\"\\\"artifacts:publish\\\"\",\"\\\"artifacts:read\\\"\",\"\\\"billing:manage\\\"\",\"\\\"billing:read\\\"\",\"\\\"capabilities:manage\\\"\",\"\\\"codemode:call\\\"\",\"\\\"connections:read\\\"\",\"\\\"connections:write\\\"\",\"\\\"documents:manage\\\"\",\"\\\"documents:search\\\"\",\"\\\"enrollments:manage\\\"\",\"\\\"enrollments:read\\\"\",\"\\\"environments:manage\\\"\",\"\\\"environments:use\\\"\",\"\\\"files:read\\\"\",\"\\\"files:upload\\\"\",\"\\\"files:write\\\"\",\"\\\"github:manage\\\"\",\"\\\"github:use\\\"\",\"\\\"goals:manage\\\"\",\"\\\"mcp_servers:attach\\\"\",\"\\\"members:manage\\\"\",\"\\\"rigs:manage\\\"\",\"\\\"rigs:use\\\"\",\"\\\"scheduled_tasks:manage\\\"\",\"\\\"scheduled_tasks:run\\\"\",\"\\\"secrets:list\\\"\",\"\\\"secrets:read\\\"\",\"\\\"secrets:use\\\"\",\"\\\"secrets:write\\\"\",\"\\\"sessions:control\\\"\",\"\\\"sessions:create\\\"\",\"\\\"sessions:read\\\"\",\"\\\"stream:acknowledge\\\"\",\"\\\"stream:control\\\"\",\"\\\"stream:view\\\"\",\"\\\"terminal:attach\\\"\",\"\\\"usage_allowances:manage\\\"\",\"\\\"variable-sets:attach\\\"\",\"\\\"variable-sets:list\\\"\",\"\\\"variable-sets:manage\\\"\",\"\\\"variable-sets:read\\\"\",\"\\\"variable-sets:use\\\"\",\"\\\"variable-sets:write\\\"\",\"\\\"workspace:admin\\\"\",\"\\\"workspace:create\\\"\",\"\\\"workspace:read\\\"\"]"
+        "$": "enum=[\"\\\"account:admin\\\"\",\"\\\"account:read\\\"\",\"\\\"api_keys:manage\\\"\",\"\\\"artifacts:publish\\\"\",\"\\\"artifacts:read\\\"\",\"\\\"billing:manage\\\"\",\"\\\"billing:read\\\"\",\"\\\"capabilities:manage\\\"\",\"\\\"codemode:call\\\"\",\"\\\"connections:personal\\\"\",\"\\\"connections:read\\\"\",\"\\\"connections:write\\\"\",\"\\\"documents:manage\\\"\",\"\\\"documents:search\\\"\",\"\\\"enrollments:manage\\\"\",\"\\\"enrollments:read\\\"\",\"\\\"environments:manage\\\"\",\"\\\"environments:use\\\"\",\"\\\"files:read\\\"\",\"\\\"files:upload\\\"\",\"\\\"files:write\\\"\",\"\\\"github:manage\\\"\",\"\\\"github:use\\\"\",\"\\\"goals:manage\\\"\",\"\\\"mcp_servers:attach\\\"\",\"\\\"members:manage\\\"\",\"\\\"rigs:manage\\\"\",\"\\\"rigs:use\\\"\",\"\\\"scheduled_tasks:manage\\\"\",\"\\\"scheduled_tasks:run\\\"\",\"\\\"secrets:list\\\"\",\"\\\"secrets:read\\\"\",\"\\\"secrets:use\\\"\",\"\\\"secrets:write\\\"\",\"\\\"sessions:control\\\"\",\"\\\"sessions:create\\\"\",\"\\\"sessions:read\\\"\",\"\\\"stream:acknowledge\\\"\",\"\\\"stream:control\\\"\",\"\\\"stream:view\\\"\",\"\\\"terminal:attach\\\"\",\"\\\"usage_allowances:manage\\\"\",\"\\\"variable-sets:attach\\\"\",\"\\\"variable-sets:list\\\"\",\"\\\"variable-sets:manage\\\"\",\"\\\"variable-sets:read\\\"\",\"\\\"variable-sets:use\\\"\",\"\\\"variable-sets:write\\\"\",\"\\\"workspace:admin\\\"\",\"\\\"workspace:create\\\"\",\"\\\"workspace:read\\\"\"]"
       }
     },
     "PersonalApiKey": {
@@ -22857,6 +22902,14 @@
         "$.selectedAt": "string!",
         "$.selectionGeneration": "integer!",
         "$.visibility": "ref(PersonalGitHubRepositoryVisibility)!"
+      }
+    },
+    "PersonalIntegrationSetupPolicy": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"admins\\\"\",\"\\\"members\\\"\"]"
       }
     },
     "PersonalResourceAttachmentIntent": {
@@ -26913,7 +26966,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent_message\\\"\",\"\\\"agent_steer_instruction\\\"\",\"\\\"background_command_result\\\"\",\"\\\"child_paused\\\"\",\"\\\"child_progress\\\"\",\"\\\"child_requires_action\\\"\",\"\\\"child_requires_action_resolved\\\"\",\"\\\"child_terminal_result\\\"\",\"\\\"child_waiting_capacity\\\"\",\"\\\"goal_continuation\\\"\",\"\\\"media_generation_result\\\"\",\"\\\"scheduled_occurrence\\\"\",\"\\\"secret_use_approval_decided\\\"\",\"\\\"session_wait_timeout\\\"\"]"
+        "$": "enum=[\"\\\"agent_message\\\"\",\"\\\"agent_steer_instruction\\\"\",\"\\\"background_command_result\\\"\",\"\\\"capability_setup_completed\\\"\",\"\\\"child_paused\\\"\",\"\\\"child_progress\\\"\",\"\\\"child_requires_action\\\"\",\"\\\"child_requires_action_resolved\\\"\",\"\\\"child_terminal_result\\\"\",\"\\\"child_waiting_capacity\\\"\",\"\\\"goal_continuation\\\"\",\"\\\"media_generation_result\\\"\",\"\\\"scheduled_occurrence\\\"\",\"\\\"secret_use_approval_decided\\\"\",\"\\\"session_wait_timeout\\\"\"]"
       }
     },
     "SessionTenancyBlocker": {
@@ -29674,7 +29727,8 @@
         "$.allowedIntegrationKeys[]": "string",
         "$.expectedRevision": "integer!",
         "$.mode": "enum!=[\"\\\"restricted\\\"\",\"\\\"unrestricted\\\"\"]",
-        "$.operationId": "string!"
+        "$.operationId": "string!",
+        "$.personalIntegrationSetup": "ref(PersonalIntegrationSetupPolicy)?"
       }
     },
     "UpdateOrganizationMcpConnectionRequest": {
@@ -32903,6 +32957,7 @@
       "CapabilityLifecycleStatus": "type",
       "CapabilityReadiness": "type",
       "CapabilityRuntime": "type",
+      "CapabilitySetupContinuationSkipReason": "type",
       "CapabilitySource": "type",
       "CapabilityUnavailableReason": "type",
       "ChangeBillingSubscriptionRequest": "type",
@@ -33055,6 +33110,8 @@
       "ConnectorToolPermissionEntry": "type",
       "ConnectorToolPermissionsResponse": "type",
       "contextAppendChunks": "value",
+      "ContinueAfterCapabilitySetupRequest": "type",
+      "ContinueAfterCapabilitySetupResponse": "type",
       "CorrectPreferenceRegistryRequest": "type",
       "CreateApiKeyRequest": "type",
       "CreateApiKeyResponse": "type",
@@ -35780,6 +35837,7 @@
     },
     "@opengeni/sdk/tenant-workspaces": {
       "createWorkspaceIdResolver": "value",
+      "SessionIdentities": "type",
       "WorkspaceIdOptions": "type",
       "WorkspaceIdResolverOptions": "type",
       "WorkspaceIdTarget": "type"
@@ -39329,6 +39387,7 @@
       "connectClaudeSubscriptionSetupToken",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
+      "continueAfterCapabilitySetup",
       "continueSessionWaitingWork",
       "controlSession",
       "correctPreferenceRegistry",
@@ -40074,6 +40133,7 @@
       "connectClaudeSubscriptionSetupToken",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
+      "continueAfterCapabilitySetup",
       "continueSessionWaitingWork",
       "controlSession",
       "correctPreferenceRegistry",
@@ -40819,6 +40879,7 @@
       "connectClaudeSubscriptionSetupToken",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
+      "continueAfterCapabilitySetup",
       "continueSessionWaitingWork",
       "controlSession",
       "correctPreferenceRegistry",
@@ -42266,6 +42327,9 @@
       ],
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
+      ],
+      "continueAfterCapabilitySetup": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueAfterCapabilitySetupRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueAfterCapabilitySetupResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "continueSessionWaitingWork": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -44787,6 +44851,9 @@
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
       ],
+      "continueAfterCapabilitySetup": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueAfterCapabilitySetupRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueAfterCapabilitySetupResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "continueSessionWaitingWork": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -47118,6 +47185,9 @@
       ],
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
+      ],
+      "continueAfterCapabilitySetup": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueAfterCapabilitySetupRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueAfterCapabilitySetupResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "continueSessionWaitingWork": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -49581,6 +49651,9 @@
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
       ],
+      "continueAfterCapabilitySetup": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueAfterCapabilitySetupRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueAfterCapabilitySetupResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "continueSessionWaitingWork": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -51866,6 +51939,9 @@
       ],
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
+      ],
+      "continueAfterCapabilitySetup": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueAfterCapabilitySetupRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueAfterCapabilitySetupResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "continueSessionWaitingWork": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

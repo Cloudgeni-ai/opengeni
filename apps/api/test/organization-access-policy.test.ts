@@ -368,6 +368,64 @@ describe("organization key policy API and canonical access", () => {
     ).toBe(403);
     expect((await request(app, path, "POST", { name: "Legacy", access: "full" })).status).toBe(403);
   });
+  test("a key policy stored before connections:personal existed still delegates it through connections:write", async () => {
+    // Stored as saved before the narrow permission existed: not normalized, so
+    // `connections:personal` is only implied by `connections:write`.
+    const { app } = fixture({
+      preset: "custom",
+      permissions: ["account:read", "workspace:read", "api_keys:manage", "connections:write"],
+      workspaceScope: { kind: "all" },
+    });
+    track(
+      spyOn(db, "createOrganizationApiKey").mockImplementation(async (_db, input) =>
+        key(input.policy),
+      ),
+    );
+    for (const permissions of [
+      ["connections:write"],
+      ["connections:personal"],
+    ] satisfies Permission[][]) {
+      expect(
+        (await request(app, path, "POST", { name: "Connect", policy: policy(permissions) })).status,
+      ).toBe(201);
+    }
+    expect(
+      (
+        await request(app, path, "POST", {
+          name: "Wider",
+          policy: policy(["capabilities:manage"]),
+        })
+      ).status,
+    ).toBe(403);
+  });
+  test("a holder of connections:write can give a workspace key connections:personal", async () => {
+    const { app } = fixture({
+      preset: "custom",
+      permissions: ["workspace:read", "api_keys:manage", "connections:write"],
+      workspaceScope: { kind: "all" },
+    });
+    const create = track(
+      spyOn(db, "createApiKey").mockImplementation(async (_db, input) => ({
+        ...key(),
+        workspaceId: first,
+        permissions: input.permissions,
+      })),
+    );
+    const response = await request(app, `/v1/workspaces/${first}/api-keys`, "POST", {
+      name: "Connect",
+      permissions: ["connections:personal"],
+    });
+    expect(response.status).toBe(201);
+    expect(create.mock.calls[0]?.[1].permissions).toEqual(["connections:personal"]);
+    expect(
+      (
+        await request(app, `/v1/workspaces/${first}/api-keys`, "POST", {
+          name: "Wider",
+          permissions: ["capabilities:manage"],
+        })
+      ).status,
+    ).toBe(403);
+  });
   test("selected workspace administration cannot delete another workspace", async () => {
     const { app } = fixture(policy(["workspace:read", "workspace:admin"], [first]));
     expect(

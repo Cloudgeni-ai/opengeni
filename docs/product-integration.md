@@ -312,7 +312,12 @@ rather than falling back to the per-user workspace.
 Without `memberPermissions`, automatically added users (and anonymous
 visitors) receive workspace read, session create/read/control (including
 Send), file upload/read, and `mcp_servers:attach` for the host's per-session
-servers, never admin permissions. The organization key remains a
+servers, never admin permissions. Per-user workspaces also get
+`connections:personal`, so each person can connect their own accounts from
+the chat (see [Capability connection offers](./embedding.md#capability-connection-offers)).
+Set `identities: "per_user"` on the facade when each `user` you resolve is one
+real person, to give tenant users the same, or `identities: "shared"` when one
+`user` stands for many people, to keep it off everywhere. The organization key remains a
 permission ceiling on every request. Change an existing member's permissions
 with `updateExternalWorkspaceMember`; Opengeni never overwrites them. Supply
 MCP URLs and credentials only in the server's `createSession` hook, not

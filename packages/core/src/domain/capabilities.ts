@@ -22,6 +22,7 @@ import {
   type ConnectionMetadata,
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
+  type OrganizationIntegrationPolicy,
   type McpServerConnectionRef,
   type McpPersonalConnectionDelegation,
   assertOrganizationIntegrationAllowed,
@@ -67,6 +68,7 @@ import {
   type InstalledSkillSummary,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/personal-integration-setup";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
@@ -363,6 +365,12 @@ type EnableCapabilityInput = {
   workspaceId: string;
   settings: Settings;
   capabilityId: string;
+  /**
+   * The caller holds only the personal setup permission: turn a reviewed
+   * OAuth integration on for personal accounts if it is not on yet, and
+   * change nothing else. See {@link assertPersonalIntegrationSetupRequest}.
+   */
+  personalSetup?: boolean;
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
   /** Server-owned receipt from a just-verified native Connect credential.
@@ -379,7 +387,51 @@ export async function enableCapability(
   input: EnableCapabilityInput,
 ): Promise<CapabilityInstallation> {
   const prepared = await prepareCapabilityEnable(input);
-  return prepared.commit(input.db);
+  const installation = await prepared.commit(input.db);
+  // Personal setup never turns back on what an admin turned off.
+  if (input.personalSetup && installation.status !== "active")
+    throw new HTTPException(409, {
+      message: "An admin turned this integration off; ask them to turn it back on",
+    });
+  return installation;
+}
+
+/**
+ * What the personal setup permission may enable: a reviewed catalog OAuth
+ * integration (never a custom MCP server or an API-key integration), for
+ * personal accounts only (each person signs in to their own account: no
+ * shared connection, credential headers, config or metadata).
+ */
+function assertPersonalIntegrationSetupRequest(
+  item: CapabilityCatalogItem,
+  payload: EnableCapabilityRequest,
+): void {
+  if (!isPersonalIntegrationSetupCandidate(item))
+    throw new HTTPException(403, { message: "Only an admin can turn on this integration" });
+  const ref = payload.connectionRef;
+  if (
+    !ref ||
+    ref.subjectScope !== "subject" ||
+    ref.kind !== "oauth2" ||
+    ref.connectionId ||
+    ref.authoritySource === "host" ||
+    ref.accountSelection ||
+    ref.selectedResources ||
+    Object.keys(payload.headers ?? {}).length > 0 ||
+    Object.keys(payload.config ?? {}).length > 0 ||
+    Object.keys(payload.metadata ?? {}).length > 0
+  )
+    throw new HTTPException(403, {
+      message:
+        "Without integration admin rights, an integration can only be turned on for personal accounts",
+    });
+}
+
+function assertPersonalIntegrationSetupAllowed(policy: OrganizationIntegrationPolicy): void {
+  if (policy.personalIntegrationSetup !== "members")
+    throw new HTTPException(403, {
+      message: "Your organization lets only admins turn on integrations",
+    });
 }
 
 /** Probe outside a durable Connect commit; persist the exact prepared settings
@@ -417,6 +469,11 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
     });
   }
+  if (input.personalSetup) {
+    assertPersonalIntegrationSetupRequest(item, input.payload);
+    // Create-only: an existing installation is returned unchanged.
+    input.payload.onlyIfUninstalled = true;
+  }
   let installationMetadata = input.payload.metadata;
   // Credential-header storage is written exclusively by this flow; strip the
   // reserved keys from caller-provided config so the stored shape stays
@@ -446,6 +503,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       input.db,
       input,
       async (tx, policy) => {
+        if (input.personalSetup) assertPersonalIntegrationSetupAllowed(policy);
         const existing = await unchangedMcpInstallation(
           { ...input, db: tx },
           item,
@@ -516,13 +574,19 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   };
   return {
     commit: (db: Database) =>
-      item.kind === "mcp"
-        ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
-            if (input.verifiedConnection)
-              await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+      item.kind === "mcp" && input.personalSetup
+        ? withOrganizationIntegrationPolicyFence(db, installation, async (tx, policy) => {
+            assertPersonalIntegrationSetupAllowed(policy);
+            assertOrganizationIntegrationAllowed(policy, "custom:mcp");
             return enableCapabilityInstallation(tx, installation);
           })
-        : enableCapabilityInstallation(db, installation),
+        : item.kind === "mcp"
+          ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
+              if (input.verifiedConnection)
+                await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+              return enableCapabilityInstallation(tx, installation);
+            })
+          : enableCapabilityInstallation(db, installation),
   };
 }
 

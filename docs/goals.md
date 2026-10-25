@@ -322,7 +322,8 @@ The locked decision applies these rules:
    pacing, not user intent: every external input producer resumes the goal
    automatically in the same commit as that input: child results
    (`child_terminal_result`), scheduled occurrences (`scheduled_occurrence`),
-   media results (`media_generation_result`), Agent messages
+   media results (`media_generation_result`), finished capability setups
+   (`capability_setup_completed`), Agent messages
    (`agent_message`), Agent Steer (`agent_steer_instruction`), and human/API
    Send/Steer. Each emits `goal.resumed` (`actor: "system"`,
    `reason: "external_input"`, and the causing update or turn) at its next

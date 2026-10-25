@@ -51,6 +51,20 @@ does not delegate account access. No separate conversation consent is required.
 Completion derives from live credentials and tool selection, never a browser
 success flag.
 
+Once a chat card's setup is verified (in-card connect or API key, an existing
+connection used here, a personal account allowed here, or the OAuth return
+handled by `finishMcpCapabilityOAuthReturn` and
+`completeSessionCapabilityOAuth`), the client calls
+`continueAfterCapabilitySetup`. The API checks that the agent's latest card for
+that capability is in this chat, that the capability is now usable here, that
+nobody has written since the card, and that the caller is the person whose
+request it was. It then records one `capability_setup_completed` internal
+update, deduplicated on the card event, which wakes the agent to continue
+without the person having to say they are done. Failed or cancelled setup
+never calls it, and its result never affects the setup the person finished.
+Hosts with their own card flows call `client.continueAfterCapabilitySetup` after
+verified setup; older servers answer 404, which the shared helper ignores.
+
 Tool selection lives in `packages/react/src/session-capability-policy.ts`.
 `sessionAuthRecommendation` matches recovery notices by exact native server or
 connection identity; `SessionConnectionRequest` exposes it to embeds. Missing or

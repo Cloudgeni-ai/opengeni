@@ -19,6 +19,20 @@ const CONVERSATION_PERMISSIONS = [
   "mcp_servers:attach",
 ] as const;
 
+/**
+ * Conversation permissions plus `connections:personal`: connect one's own
+ * accounts (for example Gmail) from the chat, turn on a reviewed OAuth
+ * integration for personal accounts, and use it in one's own chats.
+ */
+const PERSONAL_SETUP_PERMISSIONS = [...CONVERSATION_PERMISSIONS, "connections:personal"] as const;
+
+/**
+ * Whether each product user acts as their own Opengeni user (`per_user`:
+ * `resolve` returns a distinct `user` per person) or many product users share
+ * one (`shared`: for example one `user` per team or per tenant).
+ */
+export type SessionIdentities = "per_user" | "shared";
+
 export type WorkspaceIdTarget = {
   /**
    * Your tenant id. With user isolation and no tenant, the user gets one
@@ -50,9 +64,10 @@ export type WorkspaceIdResolverOptions = {
    *
    * A per-user workspace (user isolation) always gets its one owner from this
    * resolver, with these permissions or the defaults: workspace read, session
-   * create/read/control (including sending messages), file upload/read, and
-   * attaching the host's per-session MCP servers. No admin permissions are
-   * granted by default.
+   * create/read/control (including sending messages), file upload/read,
+   * attaching the host's per-session MCP servers, and connecting their own
+   * accounts from the chat (`connections:personal`, unless `identities` is
+   * `shared`). No admin permissions are granted by default.
    *
    * A tenant workspace's users are added here only when this is set: a tenant
    * resolution that names a user adds that user with exactly these
@@ -65,6 +80,22 @@ export type WorkspaceIdResolverOptions = {
    * the selected permissions.
    */
   memberPermissions?: readonly Permission[] | undefined;
+  /**
+   * Whether each product user is their own Opengeni user. It decides whether
+   * people may connect their own accounts from the chat (`connections:personal`),
+   * because a personal connection belongs to the Opengeni user: with a shared
+   * identity, one person's Gmail would be usable by everyone behind it.
+   *
+   * - Unset: per-user workspaces (`{ user }` alone, `chats: "isolated"`) get
+   *   it; tenant workspaces do not.
+   * - `per_user`: per-user and tenant workspaces get it. Tenant users are
+   *   then added by this resolver, like with `memberPermissions`.
+   * - `shared`: nobody gets it by default.
+   *
+   * `memberPermissions` overrides this either way. Existing memberships are
+   * never changed.
+   */
+  identities?: SessionIdentities | undefined;
 };
 
 /**
@@ -81,8 +112,18 @@ export function createWorkspaceIdResolver(
   client: Pick<OpenGeniEmbeddingClient, "ensureWorkspace" | "addExternalWorkspaceMember">,
   options: WorkspaceIdResolverOptions,
 ): (target: WorkspaceIdTarget, resolution: WorkspaceIdOptions) => Promise<string> {
-  const memberPermissions = [...(options.memberPermissions ?? CONVERSATION_PERMISSIONS)];
-  const tenantMembers = options.memberPermissions !== undefined;
+  // A personal connection belongs to the Opengeni user, so only distinct
+  // users get personal setup by default (see `identities`).
+  const isolatedPermissions = [
+    ...(options.memberPermissions ??
+      (options.identities === "shared" ? CONVERSATION_PERMISSIONS : PERSONAL_SETUP_PERMISSIONS)),
+  ];
+  const tenantPermissions = [
+    ...(options.memberPermissions ??
+      (options.identities === "per_user" ? PERSONAL_SETUP_PERMISSIONS : CONVERSATION_PERMISSIONS)),
+  ];
+  const tenantMembers =
+    options.memberPermissions !== undefined || options.identities === "per_user";
   const cache = new Map<string, Promise<string>>();
   const members = new Map<string, Promise<void>>();
   const organizationId = async () =>
@@ -97,16 +138,35 @@ export function createWorkspaceIdResolver(
     map.set(key, pending);
     return pending;
   };
-  const addMember = async (workspaceId: string, source: string, user: string) => {
-    try {
+  // Defaulted personal setup must not break a host whose organization key
+  // policy predates it (a custom policy without `connections:personal` or
+  // `connections:write`): then the member gets the conversation defaults.
+  const defaulted = options.memberPermissions === undefined && options.identities === undefined;
+  const addMember = async (
+    workspaceId: string,
+    source: string,
+    user: string,
+    permissions: readonly Permission[],
+  ) => {
+    const add = async (granted: readonly Permission[], operation: unknown[]) =>
       await client.addExternalWorkspaceMember(workspaceId, {
         identity: { source, externalId: user },
-        permissions: [...memberPermissions],
-        operationId: await uuidV5(
-          JSON.stringify(["member", workspaceId, source, user]),
-          ISOLATION_NAMESPACE,
-        ),
+        permissions: [...granted],
+        operationId: await uuidV5(JSON.stringify(operation), ISOLATION_NAMESPACE),
       });
+    try {
+      try {
+        await add(permissions, ["member", workspaceId, source, user]);
+      } catch (error) {
+        if (
+          !defaulted ||
+          !permissions.includes("connections:personal") ||
+          !(error instanceof OpenGeniApiError) ||
+          error.status !== 403
+        )
+          throw error;
+        await add(CONVERSATION_PERMISSIONS, ["member", workspaceId, source, user, "conversation"]);
+      }
     } catch (error) {
       // The member may exist already (added by the API on an earlier first
       // request, or by this key with other permissions), or the grant may have
@@ -158,14 +218,18 @@ export function createWorkspaceIdResolver(
             externalId: isolated ? await uuidV5(key, ISOLATION_NAMESPACE) : target.tenant!,
             name: options.workspaceName?.(label) ?? label,
           });
-          if (isolated) await addMember(workspace.id, source, target.user!);
+          if (isolated) await addMember(workspace.id, source, target.user!, isolatedPermissions);
           return workspace.id;
         })(),
       ));
     if (!isolated && tenantMembers && target.user) {
       const memberKey = JSON.stringify([workspaceId, source, target.user]);
       await (members.get(memberKey) ??
-        remember(members, memberKey, addMember(workspaceId, source, target.user)));
+        remember(
+          members,
+          memberKey,
+          addMember(workspaceId, source, target.user, tenantPermissions),
+        ));
     }
     return workspaceId;
   };

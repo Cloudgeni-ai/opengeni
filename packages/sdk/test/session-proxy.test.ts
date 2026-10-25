@@ -1221,6 +1221,15 @@ describe("createSessionProxyHandler", () => {
     expect(configRequest.url.searchParams.get("workspaceId")).toBe(WORKSPACE_ID);
   });
 
+  test("client config offers in-chat connections unless the server owns chat setup", async () => {
+    const open = await setup().browser.getClientConfig();
+    expect(open.chatConnections).toBe(true);
+    const owned = await setup({
+      createSession: ({ initialMessage }) => ({ initialMessage }),
+    }).browser.getClientConfig();
+    expect(owned.chatConnections).toBe(false);
+  });
+
   test("beforeForwardMessage adds server context and MCP credential rotation to every message", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({

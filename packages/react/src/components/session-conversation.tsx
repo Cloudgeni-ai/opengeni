@@ -42,7 +42,15 @@ import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import type { ComposerTranscriptionControlProps } from "./composer-transcription-control";
 import { SessionChrome, type SessionChromeProps } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
-import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
+import { AuthNeededRow, MessageTimeline, type MessageTimelineProps } from "./message-timeline";
+import {
+  inChatConnectDecision,
+  isAgentCapabilityRequest,
+  useInChatConnectSupport,
+  type InChatConnectSource,
+} from "./conversation-capability-connect";
+import type { SessionMcpCapabilityCardProps } from "./session-mcp-capability-card";
+import type { AuthNeededItem } from "../timeline";
 import { ProviderRecoveryNotice } from "./provider-recovery-notice";
 import { currentProviderRecovery } from "../lib/provider-recovery";
 import {
@@ -534,6 +542,44 @@ function ConversationView({
     [resolveLink, viewerLinks, inheritedLinks, defaultLinks],
   );
   const labels = { ...DEFAULT_CONVERSATION_LABELS(t), ...labelOverrides };
+  // The agent's capability cards get the shared connect card, so a person
+  // can connect from the chat with no host code; the agent then continues.
+  const showsCapabilityRequest = useMemo(
+    () =>
+      conversation.timeline.some(
+        (item) => item.kind === "auth-needed" && isAgentCapabilityRequest(item),
+      ),
+    [conversation.timeline],
+  );
+  const connectSupport = useInChatConnectSupport(
+    // Custom session clients may not read grants or the catalog; the stock
+    // card then stays off.
+    context.client as Partial<InChatConnectSource>,
+    context.workspaceId,
+    showsCapabilityRequest && config.chatConnections && !importedArchive,
+  );
+  const renderStockAuthNeeded = (item: AuthNeededItem) => {
+    if (!sessionId || importedArchive) return undefined;
+    const decision = inChatConnectDecision(item, connectSupport, config.chatConnections);
+    if (decision.kind === "unavailable") return <AuthNeededRow item={item} setupUnavailable />;
+    if (decision.kind !== "card") return undefined;
+    return (
+      <Suspense fallback={<AuthNeededRow item={item} />}>
+        <LazySessionMcpCapabilityCard
+          client={context.client as unknown as SessionMcpCapabilityCardProps["client"]}
+          workspaceId={context.workspaceId}
+          sessionId={sessionId}
+          capabilityId={decision.item.id}
+          name={decision.item.name}
+          personalOnly={decision.personalOnly}
+          rationale={item.capability?.rationale ?? ""}
+          // OAuth returns to this exact host page; the card follows the
+          // attempt's durable state, so the page needs no return handler.
+          returnUrl={typeof window === "undefined" ? "" : window.location.href}
+        />
+      </Suspense>
+    );
+  };
   const retryInPlace = () => void conversation.retry();
   const realtimeVoiceRequested = realtimeVoiceProp ?? config.realtimeVoiceOffered;
   const loadingOptions = useMemo(() => embeddedGenieLoading(t, genieLoading), [genieLoading, t]);
@@ -659,7 +705,9 @@ function ConversationView({
               timelineProps?.renderAuthNeeded?.(item) ??
               (item.capability?.id === "api:connected-machine" && computerConnection ? (
                 <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
-              ) : undefined)
+              ) : (
+                renderStockAuthNeeded(item)
+              ))
             }
             emptyState={timelineProps?.emptyState}
             renderMessageSender={timelineProps?.renderMessageSender}
@@ -879,6 +927,12 @@ function GoalChrome({
   return <SessionChrome {...chrome} goal={goal} />;
 }
 const LazyEmbeddedRealtimeVoice = lazy(() => import("../realtime/embedded-voice"));
+
+const LazySessionMcpCapabilityCard = lazy(() =>
+  import("./session-mcp-capability-card").then((module) => ({
+    default: module.SessionMcpCapabilityCard,
+  })),
+);
 
 const LazyChatInteractiveBlock = lazy(() =>
   import("./artifacts/chat-interactive-block").then((module) => ({

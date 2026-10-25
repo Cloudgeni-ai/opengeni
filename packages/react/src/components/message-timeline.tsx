@@ -5438,14 +5438,17 @@ function withSlot(text: string, node: ReactNode): ReactNode {
  * without it, a pre-minted authorization link is offered, or the card stays
  * informative. Recovery never claims to resume/replay the failed tool call.
  */
-function AuthNeededRow({
+export function AuthNeededRow({
   item,
   onReconnect,
   resolveProviderLogo,
+  setupUnavailable = false,
 }: {
   item: AuthNeededItem;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  /** This person cannot set the capability up from here; say so instead of offering a review. */
+  setupUnavailable?: boolean | undefined;
 }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
@@ -5578,13 +5581,15 @@ function AuthNeededRow({
       </div>
       {!unavailable ? (
         <p className="px-1 text-og-xs text-og-fg-subtle">
-          {recommendation
-            ? t("messageTimeline.noAccessHasBeenGranted")
-            : t(
-                missing
-                  ? "messageTimeline.toolCallNotReplayedAfterConnecting"
-                  : "messageTimeline.toolCallNotReplayedAfterReconnecting",
-              )}
+          {recommendation && setupUnavailable
+            ? t("messageTimeline.setupUnavailableHere", { provider })
+            : recommendation
+              ? t("messageTimeline.noAccessHasBeenGranted")
+              : t(
+                  missing
+                    ? "messageTimeline.toolCallNotReplayedAfterConnecting"
+                    : "messageTimeline.toolCallNotReplayedAfterReconnecting",
+                )}
         </p>
       ) : null}
       {failed ? (
