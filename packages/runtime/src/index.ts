@@ -177,6 +177,7 @@ import {
   integrationToolFamily,
   type ToolFamily,
   isSecretReferenceError,
+  SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
@@ -2893,6 +2894,20 @@ const HUMAN_INPUT_SECRET_DESCRIPTION =
   'For a password, API key, token or one-time setup key, ask with a question of kind "secret" and a secret spec (item, field, saveTo); never use a text question or chat for secrets. The answer is saved to a vault and you receive a reference such as {{secret:GitHub/password}} plus the plain username, never the value; use the reference right away.';
 
 /**
+ * Secret approval cards are Opengeni's own: when a secret use is blocked, the
+ * person is already asked in the chat and by notification. An agent cannot
+ * ask with one. Returns a model-facing reason, or null.
+ */
+export function secretApprovalQuestionRejection(input: RequestHumanInputToolInput): string | null {
+  if (
+    !input.questions.some((question) => question.id.startsWith(SECRET_USE_APPROVAL_QUESTION_PREFIX))
+  ) {
+    return null;
+  }
+  return "Nothing was asked. Opengeni already asked the person, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.";
+}
+
+/**
  * Secret-question rules the schema cannot express (AC-1): the capability is
  * on, Only-me saves have an acting human, and a named vault can take the answer.
  * Returns a model-facing reason, or null when the request may proceed.
@@ -3207,6 +3222,10 @@ export function buildOpenGeniAgent(
                 return ToolGuardrailFunctionOutputFactory.rejectContent(
                   "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
                 );
+              }
+              const approvalRejection = secretApprovalQuestionRejection(parsed.data);
+              if (approvalRejection) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(approvalRejection);
               }
               const secretRejection = await secretQuestionRejection(parsed.data, {
                 enabled: toolFamilies.secrets,

@@ -14,6 +14,7 @@ export const MACHINE_INPUT_META = (
   agent_steer_instruction: t("machineInputDisplay.agentDirection"),
   child_terminal_result: t("machineInputDisplay.agentResultReceived"),
   media_generation_result: t("machineInputDisplay.videoUpdate"),
+  secret_use_approval_decided: t("machineInputDisplay.secretUseAnswered"),
   child_requires_action: t("machineInputDisplay.agentNeedsInput"),
   child_requires_action_resolved: t("machineInputDisplay.agentUnblocked"),
   child_paused: t("machineInputDisplay.agentPaused"),
@@ -75,6 +76,10 @@ export function machineInputBatchLabel(
         return n === 1
           ? t("machineInputDisplay.videoReady")
           : t("machineInputDisplay.videoUpdatesCount", { count: n });
+      case "secret_use_approval_decided":
+        return n === 1
+          ? t("machineInputDisplay.secretUseAnswered")
+          : t("machineInputDisplay.secretUsesAnsweredCount", { count: n });
       case "child_requires_action":
         return n === 1
           ? t("machineInputDisplay.agentNeedsInput")

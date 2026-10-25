@@ -2520,6 +2520,12 @@ export type SessionHumanInputRequest = {
   creationAttemptId: string;
   toolCallId: string;
   status: "pending" | "answered" | "skipped" | "expired" | "cancelled";
+  /**
+   * `secret_use_approval`: Opengeni's own approval card for a blocked secret
+   * use, answerable after its turn ends. Absent from older servers, meaning
+   * `tool_call`.
+   */
+  origin?: "tool_call" | "secret_use_approval" | undefined;
   questions: HumanInputQuestion[];
   allowSkip: boolean;
   response: HumanInputResponse | null;
@@ -7222,7 +7228,8 @@ export type SessionSystemUpdateKind =
   | "child_requires_action_resolved"
   | "child_paused"
   | "child_waiting_capacity"
-  | "child_progress";
+  | "child_progress"
+  | "secret_use_approval_decided";
 
 export type SessionSystemUpdateState =
   | "pending"

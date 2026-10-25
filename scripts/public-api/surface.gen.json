@@ -25961,6 +25961,7 @@
         "$.creationAttemptId": "string!",
         "$.expiresAt": "string! null",
         "$.id": "string!",
+        "$.origin": "enum?=[\"\\\"secret_use_approval\\\"\",\"\\\"tool_call\\\"\"]",
         "$.questions": "array!",
         "$.questions[]": "ref(HumanInputQuestion)",
         "$.respondedAt": "string! null",
@@ -26712,7 +26713,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent_message\\\"\",\"\\\"agent_steer_instruction\\\"\",\"\\\"background_command_result\\\"\",\"\\\"child_paused\\\"\",\"\\\"child_progress\\\"\",\"\\\"child_requires_action\\\"\",\"\\\"child_requires_action_resolved\\\"\",\"\\\"child_terminal_result\\\"\",\"\\\"child_waiting_capacity\\\"\",\"\\\"goal_continuation\\\"\",\"\\\"media_generation_result\\\"\",\"\\\"scheduled_occurrence\\\"\",\"\\\"session_wait_timeout\\\"\"]"
+        "$": "enum=[\"\\\"agent_message\\\"\",\"\\\"agent_steer_instruction\\\"\",\"\\\"background_command_result\\\"\",\"\\\"child_paused\\\"\",\"\\\"child_progress\\\"\",\"\\\"child_requires_action\\\"\",\"\\\"child_requires_action_resolved\\\"\",\"\\\"child_terminal_result\\\"\",\"\\\"child_waiting_capacity\\\"\",\"\\\"goal_continuation\\\"\",\"\\\"media_generation_result\\\"\",\"\\\"scheduled_occurrence\\\"\",\"\\\"secret_use_approval_decided\\\"\",\"\\\"session_wait_timeout\\\"\"]"
       }
     },
     "SessionTenancyBlocker": {

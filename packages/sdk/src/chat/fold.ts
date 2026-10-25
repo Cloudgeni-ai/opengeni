@@ -56,6 +56,9 @@ export class ChatPendingFold {
       this.requests.delete(`human_input:${payload.requestId}`);
     } else if (["turn.completed", "turn.failed", "turn.cancelled"].includes(event.type)) {
       for (const [key, request] of this.requests) {
+        // Opengeni's own secret-use approval card belongs to the blocked use,
+        // not to the turn, and stays answerable after it.
+        if (isHostApprovalCard(request.pending)) continue;
         if (request.turnId === null || event.turnId == null || request.turnId === event.turnId) {
           this.requests.delete(key);
         }
@@ -229,6 +232,11 @@ export class ChatTurnFold {
       case "session.humanInput.requested": {
         const pending = humanInputPending(payload);
         if (!pending) return { chunks: [], terminal: null };
+        // The agent keeps working after Opengeni posts a secret-use approval
+        // card; the turn is not waiting on it.
+        if (isHostApprovalCard(pending)) {
+          return { chunks: [{ type: "pending", pending }], terminal: null };
+        }
         this.pending = pending;
         return {
           chunks: [...this.settleSegments(), { type: "pending", pending }],
@@ -410,6 +418,13 @@ export function humanInputPending(payload: Record<string, unknown>): ChatPending
   const requestId = stringValue(request.id);
   if (!requestId || !Array.isArray(request.questions)) return null;
   return { kind: "human_input", requestId, name: null, payload: payload.request };
+}
+
+/** Opengeni's own approval card for a blocked secret use (not an agent question). */
+function isHostApprovalCard(pending: ChatPending): boolean {
+  return (
+    pending.kind === "human_input" && asRecord(pending.payload).origin === "secret_use_approval"
+  );
 }
 
 export function asRecord(value: unknown): Record<string, unknown> {

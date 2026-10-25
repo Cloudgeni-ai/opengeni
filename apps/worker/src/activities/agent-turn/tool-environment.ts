@@ -997,6 +997,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         subjectId: "worker:first-party-mcp",
         secretResolver: attemptSecretResolver({
           db,
+          bus,
           settings: githubRestMcp.settings,
           agentConfig: session.agent,
           vaultAccess: deps.vaultAccess,
