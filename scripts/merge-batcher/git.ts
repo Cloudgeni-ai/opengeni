@@ -131,20 +131,32 @@ export class GitStore {
     );
     if (Number.isFinite(retained)) this.lastMaintenance = Math.max(this.lastMaintenance, retained);
     if (!Number.isFinite(at) || at - this.lastMaintenance < 3600_000) return;
-    // Unknown effects and recovery keep every local root, including blocked
-    // effects whose provider outcome may still be unknown. No pruning guesses.
-    if (
-      Object.values(ledger.effects).some((effect) => effect.status !== "done") ||
-      Object.values(ledger.missingRuns).some((run) => run.status !== "released") ||
-      ledger.recovery.length ||
-      Object.values(ledger.landings).some(
-        (landing) =>
-          !["native-merged", "already-contained", "closed-unmerged", "closed-newer-head"].includes(
-            landing.status,
-          ),
-      )
-    )
-      return;
+    // Protect unresolved batches, not unrelated terminal history. Effects whose
+    // batch cannot be identified still hold all maintenance conservatively.
+    const protectedBatches = new Set([
+      ...Object.entries(ledger.missingRuns)
+        .filter(([, run]) => run.status !== "released")
+        .map(([id]) => id),
+      ...ledger.recovery.map((item) => item.batchId),
+      ...Object.values(ledger.landings)
+        .filter(
+          (item) =>
+            ![
+              "native-merged",
+              "already-contained",
+              "closed-unmerged",
+              "closed-newer-head",
+            ].includes(item.status),
+        )
+        .map((item) => item.batchId),
+    ]);
+    for (const effect of Object.values(ledger.effects)) {
+      if (effect.status === "done") continue;
+      if (effect.kind !== "rerun") return;
+      const id = effect.run.branch.split("/").at(-1);
+      if (!id || !/^[a-f0-9]{64}$/.test(id)) return;
+      protectedBatches.add(id);
+    }
     // Persist the attempt before work: a local GC timeout must not be repeated
     // every cycle or after every short-lived controller process restart.
     this.lastMaintenance = at;
@@ -158,7 +170,7 @@ export class GitStore {
     for (const row of refs.split("\n").filter(Boolean)) {
       const [ref, sha] = row.split(" ");
       const id = ref?.slice("refs/batcher-local/".length);
-      if (id && /^[a-f0-9]{64}$/.test(id) && terminal.has(id))
+      if (id && /^[a-f0-9]{64}$/.test(id) && terminal.has(id) && !protectedBatches.has(id))
         await this.exec(["update-ref", "-d", ref!, assertSha(sha!)]);
     }
     // Foreground, bounded by exec's timeout; preserve Git's normal grace period.

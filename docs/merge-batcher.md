@@ -914,8 +914,11 @@ Successful fetches retire surplus numbered local negotiation slots only; an
 empty complete readiness result clears the candidate slots. Failed fetches keep
 the old slots. Serialized active maintenance, at most once per hour including
 process restarts, retires only local constructed pins for landed or parked
-batches. Any unfinished/blocked effect, unreleased missing-run evidence, recovery
-cohort or unresolved native landing keeps all constructed pins. Other local refs,
+batches. Unreleased missing-run evidence (including abandoned runs), recovery
+cohorts, unresolved native landings and unfinished/blocked rerun effects retain
+their batch's constructed pins; unrelated terminal pins may retire. Rerun batch
+identity comes from its retained run branch. Effects without a provable batch
+identity still hold all maintenance rather than guessing. Other local refs,
 remote refs, durable ledger, manifest JSON and operator/failure evidence are never
 deleted. Foreground GC keeps Git's two-week grace period, disables partial-pack
 bitmaps, and uses the ordinary subprocess timeout. Local maintenance failure is

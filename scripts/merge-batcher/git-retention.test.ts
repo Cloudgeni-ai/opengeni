@@ -51,15 +51,15 @@ test("maintenance only retires proven terminal local pins and holds unknown outc
   await f.local.exec(["update-ref", `refs/batcher-local/${active}`, f.right.sha]);
   const ledger = emptyLedger();
   ledger.landed.push(done);
-  ledger.missingRuns[active] = {
+  ledger.missingRuns[done] = {
     firstSeenAt: "2026-10-24T00:00:00Z",
     updatedAt: "2026-10-24T00:00:00Z",
     status: "holding",
   };
   await f.local.maintainLocal(ledger, "2026-10-24T01:00:00Z");
   expect(await f.local.exec(["rev-parse", `refs/batcher-local/${done}`])).toBe(f.left.sha);
-  ledger.missingRuns[active]!.status = "released";
-  await f.local.maintainLocal(ledger, "2026-10-24T01:00:00Z");
+  ledger.missingRuns[done]!.status = "released";
+  await f.local.maintainLocal(ledger, "2026-10-24T02:00:00Z");
   expect(await f.local.exec(["for-each-ref", "--format=%(refname)", "refs/batcher-local/"])).toBe(
     `refs/batcher-local/${active}`,
   );
@@ -110,10 +110,61 @@ test("recovery preserves terminal pins and maintenance does not remove unrelated
   await f.local.maintainLocal(ledger, "2026-10-24T01:00:00Z");
   expect(await f.local.exec(["rev-parse", terminalRef])).toBe(f.left.sha);
   ledger.recovery = [];
-  await f.local.maintainLocal(ledger, "2026-10-24T01:00:00Z");
+  await f.local.maintainLocal(ledger, "2026-10-24T02:00:00Z");
   expect(await f.local.exec(["for-each-ref", "--format=%(refname)", terminalRef])).toBe("");
   expect(await f.local.exec(["rev-parse", "refs/batcher-local/not-an-owned-id"])).toBe(f.left.sha);
   expect(await f.local.exec(["rev-parse", "refs/heads/operator-evidence"])).toBe(f.left.sha);
+});
+
+test("unrelated terminal pins retire while abandoned runs and blocked retry pins remain reachable", async () => {
+  const f = await setup();
+  await f.local.fetch(f.url, [f.left.sha, f.right.sha]);
+  const done = "1".repeat(64),
+    missing = "2".repeat(64),
+    retry = "3".repeat(64);
+  const ledger = emptyLedger();
+  ledger.landed.push(done, missing, retry);
+  for (const [id, sha] of [
+    [done, f.base.sha],
+    [missing, f.left.sha],
+    [retry, f.right.sha],
+  ])
+    await f.local.exec(["update-ref", `refs/batcher-local/${id}`, sha!]);
+  ledger.missingRuns[missing] = {
+    firstSeenAt: "2026-10-24T00:00:00Z",
+    updatedAt: "2026-10-24T00:00:00Z",
+    status: "abandoned",
+  };
+  ledger.effects[retry] = {
+    id: retry,
+    status: "blocked",
+    attempts: 1,
+    checks: 1,
+    nextAt: "2026-10-24T00:00:00Z",
+    lastError: "outcome retained",
+    kind: "rerun",
+    run: {
+      id: 1,
+      attempt: 1,
+      branch: `queue/live/${retry}`,
+      headSha: f.right.sha,
+      workflow: "batch-ci.yml",
+      status: "completed",
+      outcome: "infrastructure",
+      trusted: true,
+      retryable: true,
+      completedAt: "2026-10-24T00:00:00Z",
+    },
+  };
+  await f.local.maintainLocal(ledger, "2026-10-24T01:00:00Z");
+  expect(
+    await f.local.exec(["for-each-ref", "--format=%(refname)", `refs/batcher-local/${done}`]),
+  ).toBe("");
+  expect(await f.local.exec(["rev-parse", `refs/batcher-local/${missing}`])).toBe(f.left.sha);
+  expect(await f.local.exec(["rev-parse", `refs/batcher-local/${retry}`])).toBe(f.right.sha);
+  expect(await f.local.mergeTree(f.left.sha, f.right.sha)).toBe(
+    await f.remote.mergeTree(f.left.sha, f.right.sha),
+  );
 });
 
 test("cache slots shrink only after a successful fetch and never remove foreign refs", async () => {
