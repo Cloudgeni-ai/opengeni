@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::time::{Instant, MissedTickBehavior, timeout_at};
+use tokio::time::{Instant, timeout_at};
 
 use crate::cgroup::Cgroup;
 
@@ -39,8 +39,9 @@ const CONTROL_LIMIT: Duration = Duration::from_secs(10);
 /// disk, which can take minutes when many VMs save at once.
 const SNAPSHOT_LIMIT: Duration = Duration::from_secs(600);
 
-/// How often a request still waiting looks at whether its VMM is frozen;
-/// each look that finds it so moves the deadline on by as much.
+/// How often a request still waiting looks at whether its VMM is frozen:
+/// the time since the last look counts toward its deadline only if
+/// neither look found it so.
 const FROZEN_LOOK: Duration = Duration::from_millis(100);
 
 #[derive(Debug, thiserror::Error)]
@@ -139,7 +140,9 @@ impl Api {
         body: Option<&serde_json::Value>,
     ) -> Result<Vec<u8>, ApiError> {
         let limit = self.limit(path);
-        let mut deadline = Instant::now() + limit;
+        // The time the VMM may run before the request fails, over both
+        // the connect and the exchange.
+        let mut left = limit;
         let body = body.map(serde_json::Value::to_string).unwrap_or_default();
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n\
@@ -148,7 +151,7 @@ impl Api {
         );
         let connect = pin!(crate::confined::connect(&self.socket));
         let mut stream = self
-            .until(&mut deadline, connect)
+            .until(&mut left, connect)
             .await
             .ok_or_else(|| ApiError::Connect(io::ErrorKind::TimedOut.into()))?
             .map_err(ApiError::Connect)?;
@@ -165,7 +168,7 @@ impl Api {
             read_response(&mut stream).await
         });
         let (status, response) = self
-            .until(&mut deadline, exchange)
+            .until(&mut left, exchange)
             .await
             .ok_or(ApiError::Timeout(limit))??;
         if (200..300).contains(&status) {
@@ -180,31 +183,41 @@ impl Api {
         }
     }
 
-    /// Runs `work` until `deadline`, which moves on by the time the VMM's
-    /// group is found held frozen meanwhile; `None` if it passes first.
+    /// Runs `work` for at most `left` of the time the VMM can run, taking
+    /// what it uses off `left`; `None` once that is spent first. Time
+    /// counts unless the VMM's group is found held frozen at either end of
+    /// it, however late a look comes (the executor may be busy), and the
+    /// time is only found spent by a look that finds the group not held.
     /// The caller pins `work`, so it is held once, not again in here.
     async fn until<T>(
         &self,
-        deadline: &mut Instant,
+        left: &mut Duration,
         mut work: Pin<&mut impl Future<Output = T>>,
     ) -> Option<T> {
+        // A freezer it cannot read is not known to hold the VMM.
+        let held = |group: &Cgroup| group.is_held_frozen().unwrap_or(false);
         let Some(group) = &self.group else {
-            return timeout_at(*deadline, work).await.ok();
+            let started = Instant::now();
+            let done = timeout_at(started + *left, work).await.ok();
+            *left = left.saturating_sub(started.elapsed());
+            return done;
         };
-        let mut look = tokio::time::interval_at(Instant::now() + FROZEN_LOOK, FROZEN_LOOK);
-        look.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let (mut looked, mut was_held) = (Instant::now(), held(group));
         loop {
+            let next = looked + (*left).min(FROZEN_LOOK);
             tokio::select! {
                 biased;
                 done = work.as_mut() => return Some(done),
-                () = tokio::time::sleep_until(*deadline) => return None,
-                _ = look.tick() => {
-                    // A freezer it cannot read is not known to hold the VMM.
-                    if group.is_held_frozen().unwrap_or(false) {
-                        *deadline += FROZEN_LOOK;
-                    }
+                () = tokio::time::sleep_until(next) => {}
+            }
+            let (now, is_held) = (Instant::now(), held(group));
+            if !(was_held || is_held) {
+                *left = left.saturating_sub(now - looked);
+                if left.is_zero() {
+                    return None;
                 }
             }
+            (looked, was_held) = (now, is_held);
         }
     }
 }

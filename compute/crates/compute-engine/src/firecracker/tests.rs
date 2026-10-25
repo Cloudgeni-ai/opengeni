@@ -316,6 +316,60 @@ async fn time_a_vmm_spends_frozen_does_not_count_toward_its_deadline() {
     assert!(started.elapsed() < Duration::from_millis(600));
 }
 
+/// A VM's group under one that holds every VM, with nothing frozen yet:
+/// the outer group, whose `cgroup.freeze` the test writes, and the VM's.
+fn vms_group(dir: &Path) -> (PathBuf, Cgroup) {
+    let (vms, own) = (dir.join("vms"), dir.join("vms/vm"));
+    fs::create_dir_all(&own).unwrap();
+    fs::write(vms.join("cgroup.freeze"), "0").unwrap();
+    fs::write(own.join("cgroup.freeze"), "0").unwrap();
+    fs::write(own.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+    (vms, Cgroup::at(own))
+}
+
+/// A freeze that comes just before a request's deadline holds it too: the
+/// deadline is only found passed by a look that finds the VMM running.
+#[tokio::test]
+async fn a_freeze_just_before_the_deadline_holds_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vms, own) = vms_group(dir.path());
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(own);
+    let started = std::time::Instant::now();
+    let call = tokio::spawn(async move { api.call("GET", "/", None).await });
+    // 150 ms of its 200 ms, then frozen for longer than all of it.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    fs::write(vms.join("cgroup.freeze"), "1").unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(!call.is_finished(), "the request waited out the freeze");
+    fs::write(vms.join("cgroup.freeze"), "0").unwrap();
+    let error = call.await.unwrap().unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    assert!(started.elapsed() >= Duration::from_millis(750));
+}
+
+/// Time a frozen VMM's request goes unlooked at, because the host's
+/// executor is busy, is frozen time all the same.
+#[tokio::test]
+async fn a_busy_executor_does_not_spend_a_frozen_vmms_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vms, own) = vms_group(dir.path());
+    fs::write(vms.join("cgroup.freeze"), "1").unwrap();
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(own);
+    let call = tokio::spawn(async move { api.call("GET", "/", None).await });
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    // Nothing else runs on this test's one thread meanwhile, twice.
+    std::thread::sleep(Duration::from_millis(350));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    std::thread::sleep(Duration::from_millis(350));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!call.is_finished(), "the frozen VMM's request kept waiting");
+    fs::write(vms.join("cgroup.freeze"), "0").unwrap();
+    let error = call.await.unwrap().unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+}
+
 #[test]
 fn boot_pins_the_clock_source_restore_can_correct() {
     assert_eq!(
