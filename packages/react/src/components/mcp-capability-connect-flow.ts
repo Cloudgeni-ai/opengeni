@@ -14,7 +14,7 @@ import type { CapabilityCatalogItem } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
 import { attemptHint, type ConnectWindowHost } from "../connect-window-host";
-import { useConnect } from "../hooks/use-connect";
+import { useConnect, type ConnectView } from "../hooks/use-connect";
 import { matchingActiveMcpConnections } from "../mcp-connection-status";
 import { useOpenGeniText } from "../messages/runtime";
 import {
@@ -25,6 +25,35 @@ import {
 
 const GOOGLE_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
 const RESTART_STATES = ["failed", "expired", "cancelled"];
+
+/** The OAuth MCP connect card, as a renderer draws it. */
+export type McpCapabilityConnect = {
+  controller: ConnectController;
+  view: ConnectView;
+  /** The live catalog entry, once read. */
+  item: CapabilityCatalogItem | null;
+  personalOnly: boolean;
+  expanded: boolean;
+  complete: boolean;
+  /** An account is connected; the capability still has to be added here. */
+  connected: boolean;
+  waiting: boolean;
+  reconciling: boolean;
+  busy: boolean;
+  /** A plain line for the person when a step failed, or null. Never a raw server message. */
+  error: string | null;
+  /** "Sign-in window closed…" or "Sign-in was cancelled…", or null. */
+  notice: string | null;
+  ownership: ConnectOwnership;
+  setOwnership: (ownership: ConnectOwnership) => void;
+  /** The sign-in button says "Try signing in again" rather than continuing. */
+  retrySignIn: boolean;
+  open: () => void;
+  signIn: () => void;
+  addHere: () => void;
+  close: () => void;
+  stopWaiting: () => void;
+};
 
 export type McpCapabilityConnectInput = {
   client: OpenGeniClient;
@@ -63,7 +92,7 @@ export function useMcpCapabilityConnect({
   dialogOnly = false,
   onClose,
   personalOnly: configuredPersonalOnly = false,
-}: McpCapabilityConnectInput) {
+}: McpCapabilityConnectInput): McpCapabilityConnect {
   const t = useOpenGeniText();
   const [controller] = useState(
     () => new ConnectController(client.connectTransport(), workspaceId),
@@ -93,6 +122,7 @@ export function useMcpCapabilityConnect({
   const startInput = useRef<string | null>(null);
   const windowHost = useRef(windows);
   windowHost.current = windows;
+  const hints = windows.hints ?? attemptHint;
   const storageKey = sessionId
     ? `opengeni:session-connect:${workspaceId}:${sessionId}:${capabilityId}`
     : `opengeni:workspace-connect:${workspaceId}:${capabilityId}`;
@@ -202,10 +232,13 @@ export function useMcpCapabilityConnect({
       await action(active);
     } catch (failure) {
       if (active()) {
-        if (failure instanceof ConnectPopupClosedError) setNotice(failure.message);
+        if (failure instanceof ConnectPopupClosedError)
+          setNotice(t("connectSetup.signInWindowClosed"));
         else
           setError(
-            failure instanceof Error
+            // This flow's own steps explain themselves; a server or network
+            // failure gets the card's plain line instead of its raw text.
+            failure instanceof Error && failure.constructor === Error
               ? failure.message
               : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
           );
@@ -272,7 +305,7 @@ export function useMcpCapabilityConnect({
       await finishConnection(enabled, active);
     }
     if (!active()) return;
-    attemptHint.forget(storageKey);
+    hints.forget(storageKey);
   }
 
   async function open() {
@@ -285,7 +318,7 @@ export function useMcpCapabilityConnect({
   }
 
   async function recoverSavedAttempt(active: () => boolean = current) {
-    const saved = attemptHint.read(storageKey);
+    const saved = hints.read(storageKey);
     if (saved) {
       const attempt = await controller.recover(saved);
       if (!active()) return;
@@ -350,7 +383,7 @@ export function useMcpCapabilityConnect({
           ...(reconnectAccountId ? { reconnectAccountId } : {}),
         });
         if (!active()) return;
-        attemptHint.remember(storageKey, attempt.id);
+        hints.remember(storageKey, attempt.id);
         if (attempt.state === "credential_input")
           attempt = await controller.advance(
             {
@@ -507,5 +540,3 @@ export function useMcpCapabilityConnect({
     stopWaiting: () => authorization.current?.abort(new ConnectPopupClosedError()),
   };
 }
-
-export type McpCapabilityConnect = ReturnType<typeof useMcpCapabilityConnect>;

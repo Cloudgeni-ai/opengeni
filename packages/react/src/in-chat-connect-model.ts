@@ -7,7 +7,11 @@ import type { Permission } from "@opengeni/sdk";
 import type { InChatConnectSupport } from "./components/conversation-capability-connect";
 import { isAgentCapabilityRequest } from "./components/conversation-capability-connect";
 import { isPreparedMcpSetup } from "./components/prepared-mcp-setup-flow";
-import type { AuthNeededItem } from "./timeline";
+import {
+  useClientConfigFlags,
+  type ClientConfigFlagsSource,
+} from "./hooks/use-client-config-flags";
+import type { AuthNeededItem } from "./timeline/types";
 
 export {
   inChatConnectDecision,
@@ -40,7 +44,8 @@ export {
   type ConnectSetupFlow,
   type ConnectSetupFlowOptions,
 } from "./connect-setup-model";
-export { attemptHint, type ConnectWindowHost } from "./connect-window-host";
+export type { ConnectAttemptHints, ConnectWindowHost } from "./connect-window-host";
+export type { ConnectView } from "./hooks/use-connect";
 export type { ConnectAttempt, ConnectController, ConnectNavigation } from "@opengeni/connect";
 export { useConnect } from "./hooks/use-connect";
 export {
@@ -52,6 +57,15 @@ export {
 /** Whether the chat shows a request this person might finish in the chat. */
 export function isInChatConnectRequest(item: AuthNeededItem): boolean {
   return isAgentCapabilityRequest(item) || isPreparedMcpSetup(item);
+}
+
+/**
+ * Whether agents' connect requests may be finished in this chat, as the web
+ * conversation reads it: `false` until the deployment's client config loads,
+ * and when a session proxy owns chat setup.
+ */
+export function useChatConnectionsAllowed(client: Partial<ClientConfigFlagsSource>): boolean {
+  return useClientConfigFlags(client).chatConnections;
 }
 
 /**

@@ -147,6 +147,7 @@ function ScopedSetup({
         </div>
       )}
       {flow.errorText && <p role="alert">{flow.errorText}</p>}
+      {flow.notice && <p role="status">{flow.notice}</p>}
       {flow.interactive && (
         <form key={`${attempt.id}:${attempt.revision}`} onSubmit={submit} autoComplete="off">
           <fieldset disabled={view.busy || navigating}>
@@ -257,7 +258,11 @@ function ScopedSetup({
             )}
             {action.type === "authorize" && (
               <button type="button" className="og-connect-setup-primary" onClick={flow.authorize}>
-                {navigating ? t("connectSetup.waitingForAuthorization") : authorizeLabel}
+                {navigating
+                  ? t("connectSetup.waitingForAuthorization")
+                  : flow.signInClosed
+                    ? t("connectSetup.trySigningInAgain")
+                    : authorizeLabel}
               </button>
             )}
             {action.type === "wait" && (

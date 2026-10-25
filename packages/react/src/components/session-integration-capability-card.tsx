@@ -81,11 +81,16 @@ function ScopedCard({
     availability.kind === "ready" && (attempt || busy || error) ? (
       <>
         {error ? <p role="alert">{error}</p> : null}
+        {flow.notice ? <p role="status">{flow.notice}</p> : null}
         {attempt ? (
           <ConnectSetup
             className="og-connect"
             controller={flow.controller}
-            authorizeLabel={t("sessionIntegrationCapabilityCard.signIn")}
+            authorizeLabel={
+              flow.signInClosed
+                ? t("connectSetup.trySigningInAgain")
+                : t("sessionIntegrationCapabilityCard.signIn")
+            }
             onAuthorize={flow.authorizeAttempt}
           />
         ) : busy ? (

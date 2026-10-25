@@ -2,7 +2,7 @@
 // can do and what happens afterwards. Renderer-neutral, so the web row and the
 // React Native row say the same thing; no DOM here.
 import type { OpenGeniText } from "./messages/runtime";
-import type { AuthNeededItem } from "./timeline";
+import type { AuthNeededItem } from "./timeline/types";
 
 export type AuthNeededPresentation = {
   /** A calm human name: the agent's capability name or the provider's. */

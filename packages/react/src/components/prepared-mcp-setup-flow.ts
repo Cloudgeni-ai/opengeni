@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useConnect } from "../hooks/use-connect";
 import type { OpenGeniText } from "../messages/runtime";
 import { attachSessionCapability } from "../session-capability-policy";
-import type { AuthNeededItem } from "../timeline";
+import type { AuthNeededItem } from "../timeline/types";
 
 /** Whether an auth notice is an agent's prepared key setup for a custom MCP server. */
 export function isPreparedMcpSetup(item: AuthNeededItem): boolean {

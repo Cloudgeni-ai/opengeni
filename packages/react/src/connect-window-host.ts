@@ -19,6 +19,22 @@ export type ConnectWindowHost = {
   reserve(): { navigation: ConnectNavigation; close(): void };
   /** A sign-in window for an attempt that already waits for authorization. */
   open(): ConnectNavigation;
+  /**
+   * Where a card remembers its unfinished attempt, so it can pick the attempt
+   * up again after the page reloads or the app restarts. Defaults to the
+   * browser's session storage.
+   */
+  hints?: ConnectAttemptHints | undefined;
+};
+
+/**
+ * An opaque recovery hint per card: the attempt ID only, never a credential.
+ * The server rechecks the signed-in owner when the attempt is recovered.
+ */
+export type ConnectAttemptHints = {
+  read(key: string): string | null;
+  remember(key: string, attemptId: string): void;
+  forget(key: string): void;
 };
 
 /** The browser's popup windows (`window` from the host page). */
@@ -31,7 +47,7 @@ export function browserConnectWindowHost(browser: ConnectBrowserWindow): Connect
 
 /** An opaque recovery hint after a reload or full-page redirect; the server
  * rechecks the authenticated owner on recover. Storage may be disabled. */
-export const attemptHint = {
+export const attemptHint: ConnectAttemptHints = {
   read(key: string): string | null {
     try {
       return sessionStorage.getItem(key);

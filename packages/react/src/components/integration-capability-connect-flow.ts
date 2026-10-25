@@ -42,6 +42,34 @@ type ListedIntegration = Awaited<
 
 const RESTARTABLE = new Set<ConnectAttempt["state"]>(["failed", "cancelled", "expired"]);
 
+/** The in-chat Connect card for a reviewed integration, as a renderer draws it. */
+export type IntegrationCapabilityConnect = {
+  controller: ConnectController;
+  attempt: ConnectAttempt | null;
+  availability: IntegrationCapabilityAvailability;
+  busy: boolean;
+  /** The sign-in window is open and the card waits for it. */
+  waiting: boolean;
+  /** A plain line when starting failed, or null. Never a raw server message. */
+  error: string | null;
+  /**
+   * The person closed the sign-in window before finishing. Not an error: the
+   * card says so and its sign-in button offers to try again.
+   */
+  signInClosed: boolean;
+  /** "Sign-in window closed…" while {@link signInClosed}, else null. */
+  notice: string | null;
+  chatAccessFailed: boolean;
+  notRequester: boolean;
+  /** The last attempt ended (failed, cancelled, expired) and a new one can start. */
+  restartable: boolean;
+  start: () => void;
+  /** Sign in for an attempt that already waits for authorization. */
+  authorizeAttempt: (next: ConnectAttempt) => Promise<void>;
+  stopWaiting: () => void;
+  reload: () => void;
+};
+
 /** The viewer's own accounts of this definition; workspace accounts are not this card's. */
 function ownInstances(integrations: readonly ListedIntegration[], definitionId: string) {
   return integrations.filter(
@@ -84,7 +112,7 @@ export function useIntegrationCapabilityConnect({
   returnUrl,
   windows,
   onConfigured,
-}: IntegrationCapabilityConnectInput) {
+}: IntegrationCapabilityConnectInput): IntegrationCapabilityConnect {
   const t = useOpenGeniText();
   const definitionId = integrationDefinitionIdFromCapabilityId(capabilityId) ?? capabilityId;
   const [controller] = useState(
@@ -99,6 +127,7 @@ export function useIntegrationCapabilityConnect({
   const [busy, setBusy] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [signInClosed, setSignInClosed] = useState(false);
   const [chatAccessFailed, setChatAccessFailed] = useState(false);
   const [notRequester, setNotRequester] = useState(false);
   const lifetime = useRef<AbortController | null>(null);
@@ -108,6 +137,7 @@ export function useIntegrationCapabilityConnect({
   configured.current = onConfigured;
   const windowHost = useRef(windows);
   windowHost.current = windows;
+  const hints = windows.hints ?? attemptHint;
   const storageKey = `opengeni:session-integration-connect:${workspaceId}:${sessionId}:${capabilityId}`;
 
   useEffect(() => {
@@ -123,9 +153,20 @@ export function useIntegrationCapabilityConnect({
       if (!live()) return;
       // Connected means signed in now; an expired or revoked account
       // reconnects from this card.
-      if (
-        ownInstances(installed.integrations, definitionId).some((instance) => instance.connected)
-      ) {
+      const connectedNow = ownInstances(installed.integrations, definitionId).some(
+        (instance) => instance.connected,
+      );
+      // An attempt this card started and never saw finish (the page reloaded
+      // or the app restarted while the person signed in) is picked up first,
+      // so a finished one still adds the tools here and lets the agent continue.
+      const saved = hints.read(storageKey);
+      if (saved) {
+        const recovered = await controller.recover(saved).catch(() => null);
+        if (!live()) return;
+        if (recovered?.state === "complete" && recovered.integrationInstalled) return;
+        if (!recovered || connectedNow) hints.forget(storageKey);
+      }
+      if (connectedNow) {
         setAvailability({ kind: "connected" });
         return;
       }
@@ -150,8 +191,6 @@ export function useIntegrationCapabilityConnect({
         return;
       }
       setAvailability({ kind: "ready" });
-      const saved = attemptHint.read(storageKey);
-      if (saved) await controller.recover(saved).catch(() => attemptHint.forget(storageKey));
     })().catch(() => {
       if (live()) setAvailability({ kind: "error" });
     });
@@ -173,7 +212,7 @@ export function useIntegrationCapabilityConnect({
     finished.current = attempt.id;
     const live = () => !lifetime.current?.signal.aborted;
     void (async () => {
-      attemptHint.forget(storageKey);
+      hints.forget(storageKey);
       const instances = ownInstances(
         (await client.listApiIntegrations(workspaceId)).integrations,
         definitionId,
@@ -211,11 +250,12 @@ export function useIntegrationCapabilityConnect({
         setAvailability({ kind: "connected" });
         void Promise.resolve(configured.current?.()).catch(() => {});
       });
-  }, [attempt, client, workspaceId, sessionId, capabilityId, definitionId, storageKey, t]);
+  }, [attempt, client, workspaceId, sessionId, capabilityId, definitionId, storageKey, hints, t]);
 
   async function authorize(next: ConnectAttempt, navigation: ConnectNavigation) {
     const pending = new AbortController();
     authorization.current = pending;
+    setSignInClosed(false);
     setWaiting(true);
     try {
       const result = await authorizeConnectAttempt(controller.transport, next, navigation, {
@@ -233,15 +273,12 @@ export function useIntegrationCapabilityConnect({
   function start() {
     if (busy || availability.kind !== "ready") return;
     setError(null);
+    setSignInClosed(false);
     let reserved: ReturnType<ConnectWindowHost["reserve"]>;
     try {
       reserved = windowHost.current.reserve();
-    } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : t("sessionIntegrationCapabilityCard.couldNotStart"),
-      );
+    } catch {
+      setError(t("sessionIntegrationCapabilityCard.couldNotStart"));
       return;
     }
     setBusy(true);
@@ -270,16 +307,15 @@ export function useIntegrationCapabilityConnect({
             }
           : {}),
       });
-      attemptHint.remember(storageKey, begun.id);
+      hints.remember(storageKey, begun.id);
       if (begun.nextAction.type === "authorize") await authorize(begun, reserved.navigation);
     })()
       .catch((failure) => {
-        if (failure instanceof ConnectPopupClosedError) return;
-        setError(
-          failure instanceof Error
-            ? failure.message
-            : t("sessionIntegrationCapabilityCard.couldNotStart"),
-        );
+        // Closing the sign-in window is the person's choice: say so and offer
+        // to try again. Server messages are not for the person; the card
+        // shows its own plain line.
+        if (failure instanceof ConnectPopupClosedError) setSignInClosed(true);
+        else setError(t("sessionIntegrationCapabilityCard.couldNotStart"));
       })
       .finally(() => {
         reserved.close();
@@ -294,16 +330,14 @@ export function useIntegrationCapabilityConnect({
     busy,
     waiting,
     error,
+    signInClosed,
+    notice: signInClosed ? t("connectSetup.signInWindowClosed") : null,
     chatAccessFailed,
     notRequester,
-    /** The last attempt ended (failed, cancelled, expired) and a new one can start. */
     restartable: !!attempt && RESTARTABLE.has(attempt.state),
     start,
-    /** Sign in for an attempt that already waits for authorization. */
     authorizeAttempt: (next: ConnectAttempt) => authorize(next, windowHost.current.open()),
     stopWaiting: () => authorization.current?.abort(new ConnectPopupClosedError()),
     reload: () => setReloads((value) => value + 1),
   };
 }
-
-export type IntegrationCapabilityConnect = ReturnType<typeof useIntegrationCapabilityConnect>;

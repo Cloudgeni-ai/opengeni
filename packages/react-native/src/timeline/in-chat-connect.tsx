@@ -11,7 +11,10 @@ import {
   useMcpCapabilityConnect,
   usePreparedMcpSetupAccess,
   usePreparedMcpSetupAttempt,
+  useChatConnectionsAllowed,
+  useConnect,
   type ConnectAttempt,
+  type ConnectAttemptHints,
   type ConnectController,
   type ConnectNavigation,
   type ConnectWindowHost,
@@ -32,6 +35,7 @@ import {
 import { Linking, Pressable, Text, TextInput, View } from "react-native";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
+import { useInlineInputFocus } from "./inline-input-focus";
 import { withAlpha } from "./primitives";
 import { SecureValueInput } from "./secret-field";
 import { defaultSecretFieldMessages, secretInputTraits } from "./secret-field-model";
@@ -68,6 +72,11 @@ export interface NativeInChatConnectOptions {
   returnUrl: string;
   /** Open an ordinary link (an approval link to pass on, a verification page). */
   openUrl?: ((url: string) => void) | undefined;
+  /**
+   * Where cards remember an unfinished attempt (for example the app's secure
+   * storage), so setup picks up again after the app was closed mid-sign-in.
+   */
+  attemptHints?: ConnectAttemptHints | undefined;
 }
 
 function requireHttps(url: string): void {
@@ -80,7 +89,10 @@ function requireHttps(url: string): void {
  * `closed` turns true once the browser returns, so the card rechecks the
  * attempt's durable state at once instead of waiting out its poll.
  */
-export function nativeConnectWindowHost(browser: NativeConnectBrowser): ConnectWindowHost {
+export function nativeConnectWindowHost(
+  browser: NativeConnectBrowser,
+  hints?: ConnectAttemptHints | undefined,
+): ConnectWindowHost {
   const window = () => {
     let opened = false;
     let closed = false;
@@ -117,7 +129,7 @@ export function nativeConnectWindowHost(browser: NativeConnectBrowser): ConnectW
     };
     return { navigation, close };
   };
-  return { reserve: window, open: () => window().navigation };
+  return { reserve: window, open: () => window().navigation, ...(hints ? { hints } : {}) };
 }
 
 /**
@@ -144,14 +156,25 @@ export function useNativeInChatConnect({
   );
   const enabled = Boolean(client && options);
   const source = (client ?? {}) as Partial<InChatConnectSource>;
-  const support = useInChatConnectSupport(source, workspaceId, needed && enabled);
+  const chatConnections = useChatConnectionsAllowed(
+    (client ?? {}) as Parameters<typeof useChatConnectionsAllowed>[0],
+  );
+  const support = useInChatConnectSupport(
+    source,
+    workspaceId,
+    needed && enabled && chatConnections,
+  );
   const latest = useRef(options);
   latest.current = options;
   return useCallback(
     (item: AuthNeededItem) => {
       const host = latest.current;
-      if (!client || !host) return <NativeAuthNeededRow item={item} />;
+      if (!client || !host || !chatConnections) return <NativeAuthNeededRow item={item} />;
       const key = `${workspaceId}:${sessionId}:${item.id}`;
+      // A failed read says nothing about this person's access: offer to try
+      // again rather than a card that claims they cannot connect.
+      if (support.status === "failed" && isInChatConnectRequest(item))
+        return <NativeConnectLoadFailed item={item} onRetry={support.retry} />;
       if (isPreparedMcpSetup(item)) {
         if (support.status === "idle" || support.status === "loading")
           return <NativeAuthNeededRow item={item} />;
@@ -167,9 +190,8 @@ export function useNativeInChatConnect({
           />
         );
       }
-      // A native conversation always lets people connect in the chat; the
-      // grant and catalog decide which card, exactly as on the web.
-      const decision = inChatConnectDecision(item, support, true);
+      // The grant and catalog decide which card, exactly as on the web.
+      const decision = inChatConnectDecision(item, support, chatConnections);
       if (decision.kind === "unavailable")
         return <NativeAuthNeededRow item={item} setupUnavailable />;
       if (decision.kind === "integration")
@@ -201,7 +223,45 @@ export function useNativeInChatConnect({
         );
       return <NativeAuthNeededRow item={item} />;
     },
-    [client, workspaceId, sessionId, support],
+    [client, workspaceId, sessionId, support, chatConnections],
+  );
+}
+
+/** The grant or catalog could not be read: say so plainly and offer a retry. */
+function NativeConnectLoadFailed({ item, onRetry }: { item: AuthNeededItem; onRetry: () => void }) {
+  const t = useOpenGeniText();
+  const { theme, c } = useText();
+  const name = authNeededPresentation(t, item).provider;
+  return (
+    <View
+      style={{
+        borderRadius: theme.radius.lg,
+        borderWidth: 1,
+        borderColor: c.border,
+        backgroundColor: c["surface-1"],
+        padding: 14,
+        gap: 10,
+      }}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+        <Mark name={name} />
+        <Text
+          numberOfLines={2}
+          style={{ ...fontStyle(theme, 600), fontSize: theme.size.md, color: c.fg, flex: 1 }}
+        >
+          {name}
+        </Text>
+      </View>
+      <Line icon="circle-alert" role="status">
+        {t("native.timeline.inChatConnect.couldNotLoad")}
+      </Line>
+      <Button
+        icon="rotate-ccw"
+        label={t("sessionIntegrationCapabilityCard.retry")}
+        onPress={onRetry}
+        style={{ alignSelf: "flex-start" }}
+      />
+    </View>
   );
 }
 
@@ -265,7 +325,11 @@ function Line({
   children: ReactNode;
   tone?: "body" | "muted" | "small" | "error" | "waiting";
   icon?: NativeIconName | undefined;
-  role?: "alert" | undefined;
+  /**
+   * `status` is announced politely (progress, outcomes); `alert` only for a
+   * step that failed.
+   */
+  role?: "status" | "alert" | undefined;
 }) {
   const text = useText();
   const color =
@@ -277,8 +341,8 @@ function Line({
   const base = tone === "body" ? text.body : tone === "small" ? text.small : text.muted;
   const line = (
     <Text
-      accessibilityRole={role}
-      accessibilityLiveRegion={role ? "polite" : undefined}
+      accessibilityRole={role === "alert" ? "alert" : undefined}
+      accessibilityLiveRegion={role === "alert" ? "assertive" : role ? "polite" : undefined}
       style={{ ...base, ...(color ? { color } : {}), flexShrink: 1 }}
     >
       {children}
@@ -364,7 +428,7 @@ function CapabilityFrame({
           )}
         </View>
         {complete ? (
-          <Line tone="body" role="alert">
+          <Line tone="body" role="status">
             {completeLabel ?? t("sessionCapabilityFrame.connectedAvailableInThisConversation")}
           </Line>
         ) : description ? (
@@ -532,7 +596,7 @@ function CredentialInput({
           accessibilityLabel={field.label}
           editable={!disabled}
           traits={KEY_TRAITS}
-          placeholder={secretText.placeholder.off}
+          placeholder={field.label}
           onChangeText={onValue}
           revealed={revealed}
           onRevealedChange={setRevealed}
@@ -576,11 +640,14 @@ function PlainInput({
   style: object;
 }) {
   const { c } = useText();
+  const focus = useInlineInputFocus(() => inputRef.current);
   return (
     <TextInput
       ref={inputRef}
       accessibilityLabel={label}
       editable={!disabled}
+      onFocus={focus.onFocus}
+      onBlur={focus.onBlur}
       autoCorrect={false}
       autoCapitalize="none"
       autoComplete="off"
@@ -592,18 +659,41 @@ function PlainInput({
   );
 }
 
-/** The step after the first tap: the same steps as the web setup view. */
-export function NativeConnectSetup({
-  controller,
-  authorizeLabel,
-  onAuthorize,
-  options,
-}: {
+/** Counts controller swaps, so a view keyed by it never outlives its controller. */
+function useControllerGeneration(controller: ConnectController | null): number {
+  const [scope, setScope] = useState(controller);
+  const [generation, setGeneration] = useState(0);
+  if (scope !== controller) {
+    setScope(controller);
+    setGeneration(generation + 1);
+  }
+  return generation;
+}
+
+type NativeConnectSetupProps = {
   controller: ConnectController;
   authorizeLabel?: string | undefined;
   onAuthorize: (attempt: ConnectAttempt) => void | Promise<unknown>;
   options?: NativeInChatConnectOptions | undefined;
-}) {
+};
+
+/**
+ * The step after the first tap: the same steps as the web setup view. Like
+ * the web form it starts fresh for each controller and each attempt, so a
+ * key typed into an attempt that was cancelled can never reach a new one.
+ */
+export function NativeConnectSetup(props: NativeConnectSetupProps) {
+  const generation = useControllerGeneration(props.controller);
+  const attemptId = useConnect(props.controller).attempt?.id ?? "";
+  return <ScopedConnectSetup key={`${generation}:${attemptId}`} {...props} />;
+}
+
+function ScopedConnectSetup({
+  controller,
+  authorizeLabel,
+  onAuthorize,
+  options,
+}: NativeConnectSetupProps) {
   const t = useOpenGeniText();
   const text = useText();
   const flow = useConnectSetupFlow(controller, { onAuthorize });
@@ -617,11 +707,14 @@ export function NativeConnectSetup({
   const step = attempt ? `${attempt.id}:${attempt.revision}` : "";
   const [shownStep, setShownStep] = useState(step);
   if (shownStep !== step) {
+    // A new step asks afresh: nothing typed or chosen for the last one stays.
     setShownStep(step);
     setChoice(null);
     setPicked(new Set());
+    setFilled(new Set());
+    values.current.clear();
   }
-  if (!attempt) return <Line role="alert">{flow.status}</Line>;
+  if (!attempt) return <Line role="status">{flow.status}</Line>;
   const action = attempt.nextAction;
   const disabled = flow.busy;
   const toggle = (id: string) =>
@@ -662,7 +755,7 @@ export function NativeConnectSetup({
     >
       <View style={{ gap: 2 }}>
         <Text style={{ ...text.small, color: text.c["fg-muted"] }}>{flow.scopeLabel}</Text>
-        <Line tone="body" role="alert">
+        <Line tone="body" role="status">
           {flow.status}
         </Line>
         <Line tone="small">{flow.scopeDescription}</Line>
@@ -680,7 +773,7 @@ export function NativeConnectSetup({
       ) : null}
       {flow.adminApproval ? (
         <View style={{ gap: 4 }}>
-          <Line tone="waiting" role="alert" icon="circle-alert">
+          <Line tone="waiting" role="status" icon="circle-alert">
             {flow.adminApproval.required
               ? t("connectSetup.microsoftAdminApprovalRequired")
               : t("connectSetup.microsoftAdminApprovalMaybe")}
@@ -698,6 +791,11 @@ export function NativeConnectSetup({
       {flow.errorText ? (
         <Line tone="error" role="alert" icon="circle-alert">
           {flow.errorText}
+        </Line>
+      ) : null}
+      {flow.notice ? (
+        <Line role="status" icon="circle-alert">
+          {flow.notice}
         </Line>
       ) : null}
       {flow.interactive ? (
@@ -813,7 +911,9 @@ export function NativeConnectSetup({
               label={
                 flow.navigating
                   ? t("connectSetup.waitingForAuthorization")
-                  : (authorizeLabel ?? t("connectSetup.authorizeConnection"))
+                  : flow.signInClosed
+                    ? t("connectSetup.trySigningInAgain")
+                    : (authorizeLabel ?? t("connectSetup.authorizeConnection"))
               }
               onPress={flow.authorize}
             />
@@ -839,7 +939,7 @@ export function NativeConnectSetup({
           ) : null}
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
             <Button
-              variant="ghost"
+              variant="secondary"
               label={t("connectSetup.checkStatus")}
               disabled={disabled}
               onPress={flow.refresh}
@@ -880,7 +980,7 @@ export function NativeIntegrationCapabilityCard({
   options,
 }: CardProps) {
   const t = useOpenGeniText();
-  const [windows] = useState(() => nativeConnectWindowHost(options.browser));
+  const [windows] = useState(() => nativeConnectWindowHost(options.browser, options.attemptHints));
   const flow = useIntegrationCapabilityConnect({
     client,
     workspaceId,
@@ -892,7 +992,8 @@ export function NativeIntegrationCapabilityCard({
   });
   const { availability, attempt, busy, waiting, error } = flow;
   const connected = availability.kind === "connected";
-  const settingUp = availability.kind === "ready" && Boolean(attempt || busy || error);
+  const settingUp =
+    availability.kind === "ready" && Boolean(attempt || busy || error || flow.signInClosed);
   return (
     <CapabilityFrame
       name={name}
@@ -905,10 +1006,10 @@ export function NativeIntegrationCapabilityCard({
       {connected ? (
         <>
           {flow.chatAccessFailed ? (
-            <Line role="alert">{t("sessionIntegrationCapabilityCard.chatAccessFailed")}</Line>
+            <Line role="status">{t("sessionIntegrationCapabilityCard.chatAccessFailed")}</Line>
           ) : null}
           {flow.notRequester ? (
-            <Line role="alert">{t("sessionIntegrationCapabilityCard.notRequester")}</Line>
+            <Line role="status">{t("sessionIntegrationCapabilityCard.notRequester")}</Line>
           ) : null}
         </>
       ) : availability.kind === "unavailable" ? (
@@ -930,15 +1031,24 @@ export function NativeIntegrationCapabilityCard({
               {error}
             </Line>
           ) : null}
+          {flow.notice ? (
+            <Line role="status" icon="circle-alert">
+              {flow.notice}
+            </Line>
+          ) : null}
           {attempt ? (
             <NativeConnectSetup
               controller={flow.controller}
-              authorizeLabel={t("sessionIntegrationCapabilityCard.signIn")}
+              authorizeLabel={
+                flow.signInClosed
+                  ? t("connectSetup.trySigningInAgain")
+                  : t("sessionIntegrationCapabilityCard.signIn")
+              }
               onAuthorize={flow.authorizeAttempt}
               options={options}
             />
           ) : busy ? (
-            <Line role="alert">{t("sessionIntegrationCapabilityCard.preparing")}</Line>
+            <Line role="status">{t("sessionIntegrationCapabilityCard.preparing")}</Line>
           ) : null}
           {waiting ? (
             <WaitingForSignIn
@@ -947,7 +1057,7 @@ export function NativeIntegrationCapabilityCard({
               onStop={flow.stopWaiting}
             />
           ) : null}
-          {!busy && !waiting && (flow.restartable || error) ? (
+          {!busy && !waiting && (flow.restartable || error || (flow.signInClosed && !attempt)) ? (
             <Button
               icon="rotate-ccw"
               variant="primary"
@@ -983,7 +1093,7 @@ function WaitingForSignIn({
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Icon name="loader-circle" size={14} color={c["status-running"]} />
         <View style={{ flex: 1 }}>
-          <Line tone="body" role="alert">
+          <Line tone="body" role="status">
             {text}
           </Line>
         </View>
@@ -1013,7 +1123,7 @@ export function NativeMcpCapabilityCard({
 }: CardProps & { personalOnly: boolean }) {
   const t = useOpenGeniText();
   const text = useText();
-  const [windows] = useState(() => nativeConnectWindowHost(options.browser));
+  const [windows] = useState(() => nativeConnectWindowHost(options.browser, options.attemptHints));
   const flow = useMcpCapabilityConnect({
     client,
     workspaceId,
@@ -1051,10 +1161,10 @@ export function NativeMcpCapabilityCard({
               {flow.error}
             </Line>
           ) : null}
-          {flow.notice ? <Line role="alert">{flow.notice}</Line> : null}
+          {flow.notice ? <Line role="status">{flow.notice}</Line> : null}
           {!item ? (
             <View style={{ gap: 8 }}>
-              <Line role="alert">
+              <Line role="status">
                 {busy
                   ? t("sessionMcpCapabilityCard.loadingConnectionDetails")
                   : t("sessionMcpCapabilityCard.connectionDetailsAreUnavailable")}
@@ -1075,7 +1185,7 @@ export function NativeMcpCapabilityCard({
                 onStop={flow.stopWaiting}
               />
             ) : (
-              <Line role="alert">
+              <Line role="status">
                 {reconciling
                   ? t("sessionMcpCapabilityCard.finishingYourConnection")
                   : t("sessionMcpCapabilityCard.preparingYourConnection")}
@@ -1181,6 +1291,7 @@ export function NativePreparedMcpSetupCard({
     returnUrl: options.returnUrl,
   });
   const { proposal, controller, failed } = setup;
+  const generation = useControllerGeneration(controller);
   return (
     <CapabilityFrame
       name={proposal.name}
@@ -1206,6 +1317,7 @@ export function NativePreparedMcpSetupCard({
         </View>
       ) : controller ? (
         <PreparedSetup
+          key={generation}
           controller={controller}
           client={client}
           workspaceId={workspaceId}
@@ -1214,7 +1326,7 @@ export function NativePreparedMcpSetupCard({
           options={options}
         />
       ) : (
-        <Line role="alert">{t("preparedMcpSetup.preparing")}</Line>
+        <Line role="status">{t("preparedMcpSetup.preparing")}</Line>
       )}
     </CapabilityFrame>
   );
@@ -1259,12 +1371,12 @@ function PreparedSetup({
       ) : null}
       {access.connectedCapabilityId ? (
         access.access === "ready" ? (
-          <Line tone="body" role="alert" icon="check">
+          <Line tone="body" role="status" icon="check">
             {t("preparedMcpSetup.connected")}
           </Line>
         ) : access.access === "failed" ? (
           <View style={{ gap: 8 }}>
-            <Line role="alert" icon="circle-alert">
+            <Line role="status" icon="circle-alert">
               {t("preparedMcpSetup.chatAccessFailed")}
             </Line>
             <Button
@@ -1275,7 +1387,7 @@ function PreparedSetup({
             />
           </View>
         ) : (
-          <Line role="alert">{t("preparedMcpSetup.checkingChatAccess")}</Line>
+          <Line role="status">{t("preparedMcpSetup.checkingChatAccess")}</Line>
         )
       ) : null}
     </View>

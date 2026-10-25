@@ -14,6 +14,7 @@ import {
   type SecretFieldMessages,
   type SecretInputTraits,
 } from "./secret-field-model";
+import { useInlineInputFocus } from "./inline-input-focus";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 /* ----------------------------------------------------------------------------
@@ -259,8 +260,12 @@ export function SecureValueInput({
 }: SecureValueInputProps) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  // In a timeline card the conversation keeps this field above the keyboard.
+  const frame = useRef<ComponentRef<typeof View>>(null);
+  const focus = useInlineInputFocus(() => frame.current);
   return (
     <View
+      ref={frame}
       style={{
         minHeight: 44,
         borderRadius: theme.radius.sm,
@@ -291,6 +296,8 @@ export function SecureValueInput({
         returnKeyType={returnKeyType}
         onSubmitEditing={onSubmitEditing}
         onChangeText={onChangeText}
+        onFocus={focus.onFocus}
+        onBlur={focus.onBlur}
         placeholder={placeholder}
         placeholderTextColor={c["fg-subtle"]}
         style={{

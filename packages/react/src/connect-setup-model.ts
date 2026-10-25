@@ -2,8 +2,13 @@
 // does for a Connect attempt. The web form and the React Native card both
 // draw from this, so they make the same decisions. No DOM.
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ConnectAdvance, ConnectAttempt, ConnectController } from "@opengeni/connect";
-import { useConnect } from "./hooks/use-connect";
+import {
+  ConnectPopupClosedError,
+  type ConnectAdvance,
+  type ConnectAttempt,
+  type ConnectController,
+} from "@opengeni/connect";
+import { useConnect, type ConnectView } from "./hooks/use-connect";
 import { useOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
 export const connectSetupStatus = (t: OpenGeniText): Record<ConnectAttempt["state"], string> => ({
@@ -103,6 +108,49 @@ export type ConnectSetupFlowOptions = {
   onSelectAccount?: ((accountId: string) => void | Promise<unknown>) | undefined;
 };
 
+/** What a Connect setup step shows and the steps a person can take from it. */
+export type ConnectSetupFlow = {
+  view: ConnectView;
+  attempt: ConnectAttempt | null;
+  action: ConnectAttempt["nextAction"] | null;
+  /** A step is running, or the person is being sent to sign in. */
+  busy: boolean;
+  navigating: boolean;
+  awaitingOwner: boolean;
+  autoFinishing: boolean;
+  adminApproval: { url: string; required: boolean } | null;
+  terminal: boolean;
+  /** The manual controls (form, sign-in, status and cancel) are shown. */
+  interactive: boolean;
+  /** The step's controls submit as one form. */
+  formStep: boolean;
+  verificationUrl: string | null;
+  offersGitHubRequest: boolean;
+  scopeLabel: string;
+  scopeDescription: string;
+  status: string;
+  /** A plain line when the step could not continue, or null. */
+  errorText: string | null;
+  /**
+   * The person closed the sign-in window before finishing. Not an error: the
+   * attempt still waits, and the sign-in button offers to try again.
+   */
+  signInClosed: boolean;
+  /** "Sign-in window closed…" while {@link signInClosed}, else null. */
+  notice: string | null;
+  submitLabel: string;
+  invoke: (operation: () => unknown | Promise<unknown>) => void;
+  /** Values go straight to the controller; nothing here keeps them. */
+  submitCredentials: (values: Record<string, string>) => void;
+  selectAccount: (accountId: string) => void;
+  selectResources: (resourceIds: string[]) => void;
+  install: (operationIds: string[]) => void;
+  chooseTools: () => void;
+  authorize: () => void;
+  refresh: () => void;
+  cancel: () => void;
+};
+
 /**
  * What a Connect setup step shows and the steps a person can take from it.
  * Values a person types are passed straight to the controller and never kept
@@ -111,10 +159,11 @@ export type ConnectSetupFlowOptions = {
 export function useConnectSetupFlow(
   controller: ConnectController,
   options: ConnectSetupFlowOptions,
-) {
+): ConnectSetupFlow {
   const t = useOpenGeniText();
   const view = useConnect(controller);
   const [localError, setLocalError] = useState(false);
+  const [signInClosed, setSignInClosed] = useState(false);
   const [navigating, setNavigating] = useState(false);
   const latest = useRef(options);
   latest.current = options;
@@ -123,10 +172,14 @@ export function useConnectSetupFlow(
   const autoStep = useRef<string | null>(null);
   const invoke = useCallback((operation: () => unknown | Promise<unknown>) => {
     setLocalError(false);
+    setSignInClosed(false);
+    // Closing the sign-in window is the person's choice, not a failed step.
+    const failed = (failure: unknown) =>
+      failure instanceof ConnectPopupClosedError ? setSignInClosed(true) : setLocalError(true);
     try {
-      void Promise.resolve(operation()).catch(() => setLocalError(true));
-    } catch {
-      setLocalError(true);
+      void Promise.resolve(operation()).catch(failed);
+    } catch (failure) {
+      failed(failure);
     }
   }, []);
   const attempt = view.attempt;
@@ -198,7 +251,6 @@ export function useConnectSetupFlow(
           : autoFinishing
             ? t("connectSetup.finishingSetup")
             : connectSetupStatus(t)[attempt.state],
-    /** A plain line when the step could not continue, or null. */
     errorText:
       attempt && (localError || view.error || (attempt.error && !awaitingOwner && !adminApproval))
         ? attempt.error?.code === "source_changed"
@@ -207,6 +259,8 @@ export function useConnectSetupFlow(
             ? t("connectSetup.couldNotVerifyThisConnection")
             : t("connectSetup.connectionSetupCouldNotContinue")
         : null,
+    signInClosed,
+    notice: signInClosed ? t("connectSetup.signInWindowClosed") : null,
     submitLabel:
       action?.type === "preview"
         ? t("connectSetup.addSelectedTools")
@@ -216,7 +270,6 @@ export function useConnectSetupFlow(
             : t("connectSetup.connect")
           : t("connectSetup.continue"),
     invoke,
-    /** Values go straight to the controller; nothing here keeps them. */
     submitCredentials(values: Record<string, string>) {
       if (action?.type !== "credentials") return;
       run({ type: "credentials", values });
@@ -270,5 +323,3 @@ export function useConnectSetupFlow(
     },
   };
 }
-
-export type ConnectSetupFlow = ReturnType<typeof useConnectSetupFlow>;

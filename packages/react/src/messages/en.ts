@@ -1472,8 +1472,10 @@ export const englishMessages = {
   "connectSetup.setupCouldNotFinish": "Setup could not finish",
   "connectSetup.setupExpired": "Setup expired",
   "connectSetup.setupOutcomeNeedsChecking": "Setup outcome needs checking",
+  "connectSetup.signInWindowClosed": "Sign-in window closed. You can try connecting again.",
   "connectSetup.theIntegrationSourceChangedReview":
     "The integration source changed. Review the updated tools before adding them.",
+  "connectSetup.trySigningInAgain": "Try signing in again",
   "connectSetup.verificationCode": "Verification code:",
   "connectSetup.verifyingConnection": "Verifying connection…",
   "connectSetup.waitingForAnOrganizationOwner": "Waiting for an organization owner",
@@ -3136,6 +3138,7 @@ export const englishMessages = {
   "native.timeline.imageViewer.doubleTapToZoom": "Double-tap to zoom",
   "native.timeline.imageViewer.share": "Share",
   "native.timeline.inChatConnect.close": "Close",
+  "native.timeline.inChatConnect.couldNotLoad": "Couldn't load this connection. Try again.",
   "native.timeline.inbox.alreadyAnswered": "Already answered",
   "native.timeline.inbox.answer": "Answer",
   "native.timeline.inbox.answeredLabel": "Answered: {label}",

@@ -1,5 +1,19 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { act, createElement, forwardRef, type ComponentType, type ReactNode } from "react";
+import {
+  act,
+  createElement,
+  forwardRef,
+  useImperativeHandle,
+  useRef,
+  type ComponentType,
+  type ReactNode,
+} from "react";
+import {
+  ConnectController,
+  ConnectPopupClosedError,
+  type ConnectAttempt,
+  type ConnectTransport,
+} from "@opengeni/connect";
 import type { AuthNeededItem, PendingApproval } from "@opengeni/react/session";
 import { registerDom, renderComponent, type RenderedComponent } from "../../react/test/render-hook";
 
@@ -29,7 +43,21 @@ function hostElement(tag: string) {
 
 mock.module("react-native", () => {
   const TextInput = forwardRef(function TextInput(props: Record<string, unknown>, ref) {
-    return createElement("input", { ref, "aria-label": props.accessibilityLabel });
+    const node = useRef<HTMLInputElement>(null);
+    useImperativeHandle(ref, () => ({
+      clear: () => {
+        if (node.current) node.current.value = "";
+      },
+      measureInWindow: () => undefined,
+    }));
+    return createElement("input", {
+      ref: node,
+      "aria-label": props.accessibilityLabel,
+      placeholder: props.placeholder,
+      disabled: props.editable === false,
+      onChange: (event: { target: { value: string } }) =>
+        (props.onChangeText as ((value: string) => void) | undefined)?.(event.target.value),
+    });
   });
   function Pressable(props: {
     children?: ReactNode | ((state: { pressed: boolean }) => ReactNode);
@@ -117,7 +145,13 @@ mock.module("react-native-reanimated", () => ({
 
 registerDom();
 
-const { NativeAuthNeededRow, nativeConnectWindowHost } =
+const {
+  NativeAuthNeededRow,
+  NativeConnectSetup,
+  NativeIntegrationCapabilityCard,
+  nativeConnectWindowHost,
+  useNativeInChatConnect,
+} =
   (await import("../src/timeline/in-chat-connect")) as typeof import("../src/timeline/in-chat-connect");
 const { ApprovalStrip } = (await import("../src/timeline/decisions")) as {
   ApprovalStrip: ComponentType<{
@@ -271,5 +305,287 @@ describe("native approval card", () => {
         .click();
     });
     expect(decided).toEqual(["call-invite:approve"]);
+  });
+});
+
+/* ------------------------------------------------------- connect flows -- */
+
+function attempt(overrides: Partial<ConnectAttempt> = {}): ConnectAttempt {
+  return {
+    id: "attempt-1",
+    workspaceId: "workspace",
+    providerId: "example-keys",
+    ownership: "personal",
+    revision: 1,
+    state: "credential_input",
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection",
+    nextAction: {
+      type: "credentials",
+      fields: [{ name: "apiKey", label: "API key", secret: true, required: true }],
+    },
+    expiresAt: "2030-01-01T00:00:00Z",
+    ...overrides,
+  } as ConnectAttempt;
+}
+
+/** A transport that answers from a script and records what it was sent. */
+function fakeTransport(script: {
+  begin?: () => ConnectAttempt;
+  get?: (id: string) => ConnectAttempt;
+  cancel?: (id: string) => ConnectAttempt;
+}) {
+  const advanced: unknown[] = [];
+  const transport = {
+    catalog: async () => [],
+    accounts: async () => [],
+    pending: async () => [],
+    begin: async () => script.begin!(),
+    get: async (_workspace: string, id: string) => script.get!(id),
+    advance: async (_workspace: string, id: string, input: unknown) => {
+      advanced.push(input);
+      return attempt({ id, revision: 9, state: "provider_wait", nextAction: { type: "none" } });
+    },
+    cancel: async (_workspace: string, id: string) => script.cancel!(id),
+    disconnect: async () => undefined,
+  } as unknown as ConnectTransport;
+  return { transport, advanced };
+}
+
+const flush = () => act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+function typeInto(input: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+  const props = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+  (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[props]!.onChange({
+    target: input,
+  });
+}
+
+function buttonNamed(label: string): HTMLButtonElement | undefined {
+  return [...mounted!.container.querySelectorAll("button")].find(
+    (entry) => (entry.getAttribute("aria-label") ?? entry.textContent?.trim()) === label,
+  );
+}
+
+describe("native connect setup", () => {
+  test("a key typed for a cancelled setup never reaches the next one", async () => {
+    let next = 0;
+    const { transport, advanced } = fakeTransport({
+      begin: () => attempt({ id: `attempt-${++next}` }),
+      cancel: (id) =>
+        attempt({ id, revision: 2, state: "cancelled", nextAction: { type: "none" } }),
+    });
+    const controller = new ConnectController(transport, "workspace");
+    await controller.begin({
+      providerId: "example-keys",
+      ownership: "personal",
+      returnUrl: "https://console.example/return",
+      idempotencyKey: "one",
+    });
+    mounted = await renderComponent(
+      <NativeConnectSetup controller={controller} onAuthorize={() => undefined} />,
+    );
+    const field = () => mounted!.container.querySelector("input") as HTMLInputElement;
+    // The field's placeholder names the key it wants.
+    expect(field().getAttribute("placeholder")).toBe("API key");
+    await act(async () => typeInto(field(), "old-secret"));
+    expect(buttonNamed("Continue")?.disabled).toBe(false);
+    await act(async () => {
+      await controller.cancel(crypto.randomUUID());
+    });
+    await act(async () => {
+      await controller.begin({
+        providerId: "example-keys",
+        ownership: "personal",
+        returnUrl: "https://console.example/return",
+        idempotencyKey: "two",
+      });
+    });
+    await flush();
+    expect(field().value).toBe("");
+    expect(buttonNamed("Continue")?.disabled).toBe(true);
+    await act(async () => buttonNamed("Continue")?.click());
+    expect(advanced).toEqual([]);
+    await act(async () => typeInto(field(), "new-secret"));
+    await act(async () => buttonNamed("Continue")!.click());
+    await flush();
+    expect(advanced).toHaveLength(1);
+    expect(JSON.stringify(advanced[0])).toContain('"apiKey":"new-secret"');
+    expect(JSON.stringify(advanced[0])).not.toContain("old-secret");
+  });
+
+  test("closing the sign-in browser says so and offers to sign in again", async () => {
+    const authorize = attempt({
+      state: "requires_user_action",
+      nextAction: { type: "authorize", url: "https://provider.example/authorize" },
+    } as Partial<ConnectAttempt>);
+    const { transport } = fakeTransport({ begin: () => authorize });
+    const controller = new ConnectController(transport, "workspace");
+    await controller.begin({
+      providerId: "example-oauth",
+      ownership: "personal",
+      returnUrl: "https://console.example/return",
+      idempotencyKey: "one",
+    });
+    mounted = await renderComponent(
+      <NativeConnectSetup
+        controller={controller}
+        authorizeLabel="Sign in"
+        onAuthorize={() => Promise.reject(new ConnectPopupClosedError())}
+      />,
+    );
+    await act(async () => buttonNamed("Sign in")!.click());
+    await flush();
+    const text = mounted.container.textContent ?? "";
+    expect(text).toContain("Sign-in window closed. You can try connecting again.");
+    expect(text).not.toContain("could not continue");
+    expect(buttonNamed("Try signing in again")).toBeDefined();
+  });
+});
+
+function connectRequest(): AuthNeededItem {
+  return authItem({
+    source: "capability",
+    reason: "missing_connection",
+    providerDomain: "calendar.example.com",
+    capability: {
+      id: "api:integration:example-calendar",
+      name: "Example Calendar",
+      kind: "api",
+      source: "library",
+      action: "connect",
+      rationale: "To read your calendar.",
+      requiredVariables: [],
+    },
+  } as Partial<AuthNeededItem>);
+}
+
+function ConnectHarness({ client, item }: { client: unknown; item: AuthNeededItem }) {
+  const render = useNativeInChatConnect({
+    client: client as never,
+    workspaceId: "workspace",
+    sessionId: "session",
+    items: [item],
+    options: {
+      browser: { openAuthSession: async () => undefined },
+      returnUrl: "https://console.example/return",
+    },
+  });
+  return <>{render?.(item)}</>;
+}
+
+describe("native in-chat connect requests", () => {
+  test("a failed read of the person's access offers a retry, not a dead end", async () => {
+    let reads = 0;
+    const client = {
+      getClientConfig: async () => ({ chatConnections: true }),
+      getAccessContext: async () => {
+        reads += 1;
+        throw new Error("network down");
+      },
+      listCapabilities: async () => ({ items: [] }),
+    };
+    mounted = await renderComponent(<ConnectHarness client={client} item={connectRequest()} />);
+    await flush();
+    await flush();
+    const text = mounted.container.textContent ?? "";
+    expect(text).toContain("Couldn't load this connection. Try again.");
+    expect(text).not.toMatch(/management access|reconnect/i);
+    expect(reads).toBe(1);
+    await act(async () => buttonNamed("Retry")!.click());
+    await flush();
+    expect(reads).toBe(2);
+  });
+
+  test("a session proxy that owns chat setup keeps the plain row", async () => {
+    const client = {
+      getClientConfig: async () => ({ chatConnections: false }),
+      getAccessContext: async () => {
+        throw new Error("must not be read");
+      },
+      listCapabilities: async () => ({ items: [] }),
+    };
+    mounted = await renderComponent(<ConnectHarness client={client} item={connectRequest()} />);
+    await flush();
+    await flush();
+    expect(mounted.container.textContent).toContain("Example Calendar");
+    expect(mounted.container.textContent).not.toContain("Couldn't load this connection");
+    expect(buttonNamed("Retry")).toBeUndefined();
+  });
+
+  test("a sign-in finished while the app was closed still lets the agent continue", async () => {
+    const stored = new Map([
+      [
+        "opengeni:session-integration-connect:workspace:session:api:integration:example-calendar",
+        "attempt-done",
+      ],
+    ]);
+    const continued: unknown[] = [];
+    const complete = attempt({
+      id: "attempt-done",
+      revision: 5,
+      state: "complete",
+      credentialsCommitted: true,
+      integrationInstalled: true,
+      completionRequirement: "integration",
+      nextAction: { type: "none" },
+    });
+    const { transport } = fakeTransport({ get: () => complete });
+    const client = {
+      connectTransport: () => transport,
+      listApiIntegrations: async () => ({ integrations: [] }),
+      continueAfterCapabilitySetup: async (...args: unknown[]) => {
+        continued.push(args);
+        return { outcome: "continued" };
+      },
+    };
+    mounted = await renderComponent(
+      <NativeIntegrationCapabilityCard
+        client={client as never}
+        workspaceId="workspace"
+        sessionId="session"
+        capabilityId="api:integration:example-calendar"
+        name="Example Calendar"
+        rationale="To read your calendar."
+        options={{
+          browser: { openAuthSession: async () => undefined },
+          returnUrl: "https://console.example/return",
+          attemptHints: {
+            read: (key) => stored.get(key) ?? null,
+            remember: (key, id) => void stored.set(key, id),
+            forget: (key) => void stored.delete(key),
+          },
+        }}
+      />,
+    );
+    for (let pass = 0; pass < 4; pass += 1) await flush();
+    expect(continued).toEqual([
+      ["workspace", "session", { capabilityId: "api:integration:example-calendar" }],
+    ]);
+    expect(stored.size).toBe(0);
+    expect(mounted.container.textContent).toContain("Your account is connected");
+  });
+});
+
+describe("native approval without recorded arguments", () => {
+  test("keeps Approve, as before", async () => {
+    const decided: string[] = [];
+    mounted = await renderComponent(
+      <ApprovalStrip
+        approvals={[{ id: "call-old", name: "example_tool" } as PendingApproval]}
+        onDecide={async (id, decision) => {
+          decided.push(`${id}:${decision}`);
+        }}
+      />,
+    );
+    expect(mounted.container.textContent).not.toContain("can't be approved");
+    const approve = [...mounted.container.querySelectorAll("button")].find(
+      (entry) => entry.textContent?.trim() === "Approve",
+    );
+    expect(approve).toBeDefined();
+    await act(async () => approve!.click());
+    expect(decided).toEqual(["call-old:approve"]);
   });
 });

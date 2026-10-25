@@ -5,7 +5,7 @@ import {
 } from "@opengeni/contracts/personal-integration-setup";
 import type { AccessContext, CapabilityCatalogItem, Permission } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
-import type { AuthNeededItem } from "../timeline";
+import type { AuthNeededItem } from "../timeline/types";
 
 /** What the conversation reads to decide whether this person can connect in the chat. */
 export type InChatConnectSource = {
@@ -14,7 +14,9 @@ export type InChatConnectSource = {
 };
 
 export type InChatConnectSupport =
-  | { status: "idle" | "loading" | "failed" }
+  | { status: "idle" | "loading" }
+  /** The grant or the catalog could not be read; `retry` reads them again. */
+  | { status: "failed"; retry: () => void }
   | {
       status: "ready";
       permissions: ReadonlySet<Permission>;
@@ -134,6 +136,7 @@ export function useInChatConnectSupport(
   const requested = useRef<{ client: Partial<InChatConnectSource>; workspaceId: string } | null>(
     null,
   );
+  const [reads, setReads] = useState(0);
   useEffect(() => {
     if (!needed) return;
     if (
@@ -162,14 +165,20 @@ export function useInChatConnectSupport(
         });
       },
       () => {
-        if (live) setLoaded({ client, workspaceId, support: { status: "failed" } });
+        if (!live) return;
+        const retry = () => {
+          if (requested.current === request) requested.current = null;
+          setLoaded(null);
+          setReads((count) => count + 1);
+        };
+        setLoaded({ client, workspaceId, support: { status: "failed", retry } });
       },
     );
     return () => {
       live = false;
       if (requested.current === request) requested.current = null;
     };
-  }, [client, workspaceId, needed]);
+  }, [client, workspaceId, needed, reads]);
   if (loaded?.client === client && loaded.workspaceId === workspaceId) return loaded.support;
   return { status: needed ? "loading" : "idle" };
 }

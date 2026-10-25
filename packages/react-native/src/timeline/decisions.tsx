@@ -115,6 +115,10 @@ function QuestionText({
   suffix?: ReactNode;
 }) {
   const render = useContext(QuestionMarkdownContext);
+  // Callers build the style inline; keep it stable for the Markdown renderer.
+  const styleKey = JSON.stringify(style);
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- keyed on the style's content
+  const textStyle = useMemo(() => style, [styleKey]);
   if (!render || !MARKDOWN_SYNTAX.test(text))
     return (
       <Text style={style}>
@@ -126,7 +130,7 @@ function QuestionText({
   return (
     <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
       {prefix ? <Text style={style}>{prefix}</Text> : null}
-      <View style={{ flexShrink: 1, minWidth: 0 }}>{render(text, { tone, textStyle: style })}</View>
+      <View style={{ flexShrink: 1, minWidth: 0 }}>{render(text, { tone, textStyle })}</View>
       {suffix ? <Text style={style}>{suffix}</Text> : null}
     </View>
   );
@@ -755,7 +759,10 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
         });
         const facts = reviewFacts(review);
         const note = review.consequence;
-        const canApprove = review.availableActions.includes("approve");
+        // A request without recorded arguments keeps its Approve, as it
+        // always had here; only the readable summary is unavailable.
+        const canApprove =
+          review.availableActions.includes("approve") || approval.arguments === undefined;
         const showDetails = details[approval.id] === true;
         const payload = showDetails ? approvalArgumentsText(approval) : "";
         const approveLabel = answer?.approve ?? messages.approve;

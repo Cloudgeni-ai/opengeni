@@ -23,7 +23,9 @@ import {
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
 import type { OpenGeniLinkTarget } from "@opengeni/sdk";
+import { desktopAppReturnUrl } from "@opengeni/contracts";
 import * as Haptics from "expo-haptics";
+import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
 import { Stack, router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -144,6 +146,36 @@ export default function SessionScreen() {
 const CONNECT_RETURN_PREFIX = "opengeni://open";
 
 /**
+ * Where a connect card remembers the attempt it is waiting on, so setup picks
+ * up again when the app was closed mid-sign-in. Only the attempt id is kept;
+ * the server checks who may recover it.
+ */
+const connectAttemptHints = {
+  read(key: string): string | null {
+    try {
+      return SecureStore.getItem(attemptHintKey(key));
+    } catch {
+      return null;
+    }
+  },
+  remember(key: string, attemptId: string): void {
+    try {
+      SecureStore.setItem(attemptHintKey(key), attemptId);
+    } catch {
+      /* Recovery hint only. */
+    }
+  },
+  forget(key: string): void {
+    void SecureStore.deleteItemAsync(attemptHintKey(key)).catch(() => undefined);
+  },
+};
+
+/** Secure storage keys allow letters, digits, ".", "-" and "_" only. */
+function attemptHintKey(key: string): string {
+  return key.replace(/[^A-Za-z0-9._-]/gu, "_");
+}
+
+/**
  * Connect requests in this conversation sign in through the system sign-in
  * browser. The provider returns to the deployment's hand-back page, which
  * opens this conversation in the app again.
@@ -155,14 +187,15 @@ function inChatConnectOptions(
 ): NativeInChatConnectOptions | undefined {
   if (!baseUrl) return undefined;
   const origin = baseUrl.replace(/\/+$/u, "");
-  const conversation = `${origin}/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`;
+  const conversation = `${origin}${webPaths.session(workspaceId, sessionId)}`;
   return {
     browser: {
       openAuthSession: (url) => WebBrowser.openAuthSessionAsync(url, CONNECT_RETURN_PREFIX),
       dismiss: () => WebBrowser.dismissAuthSession(),
     },
-    returnUrl: `${origin}/desktop-return?url=${encodeURIComponent(conversation)}`,
+    returnUrl: desktopAppReturnUrl(conversation, origin),
     openUrl: (url) => void Linking.openURL(url),
+    attemptHints: connectAttemptHints,
   };
 }
 
