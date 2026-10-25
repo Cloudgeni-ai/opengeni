@@ -200,7 +200,34 @@ prints the averaged voice vector of each labelled set of segments.
 `cargo run --release --example der -- REF.rttm REF.uem HYP.json` scores
 output against a reference.
 
-Two providers transcribe recordings:
+### One speech-to-text system
+
+Meetings and dictation share one set of speech-to-text providers. Each model
+says what it can do (word timings, speakers, live, languages, audio formats)
+and who pays for it, its `funding`:
+
+- `workspace_key`: the workspace's own provider key, or its organization's
+  (ElevenLabs Scribe).
+- `workspace_subscription`: a subscription the workspace connected (ChatGPT
+  dictation through Codex, Grok speech to text through Grok). Never debited.
+- `deployment`: an account the deployment runs (Azure Speech, OpenAI, Azure
+  OpenAI). Charged as credits when credit billing is on.
+
+A meeting needs a model that places every word in time (Scribe and
+MAI-Transcribe-2), because speakers, playback and the transcript's turns are
+built from word timings. Models that return only text (the subscription
+models, OpenAI and Azure OpenAI) serve dictation; `GET …/recording-models`
+does not offer them for meetings and a meeting that names one is refused.
+Any model can serve dictation; each provider uses one model for it.
+
+`OPENGENI_SPEECH_TO_TEXT_PINNED` (`provider/model`, such as
+`azure-speech/MAI-Transcribe-2`) makes one model the only one for every use.
+Workspaces cannot pick another, dictation does not fall back to another
+provider and the live preview is offered only if that provider has one. Use
+it when a deployment must guarantee where audio goes. Boot fails if the
+pinned model is not configured.
+
+The recording providers:
 
 - **ElevenLabs Scribe v2** ($0.22 an hour) uses the workspace's own
   ElevenLabs key, or its organization's.
@@ -220,12 +247,22 @@ Two providers transcribe recordings:
   Opengeni's diarizer, since the model's own diarization fails on recordings
   longer than about a quarter of an hour during its preview.
 
-Recordings use Azure Speech when its account is configured, else ElevenLabs.
+The dictation providers in `docs/transcription.md` (OpenAI, Azure OpenAI and
+the two subscriptions) share the same registry, credentials and billing, and
+serve dictation only.
+
+Meetings use Azure Speech when its account is configured, else ElevenLabs.
 `OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT` (`provider/model`, such as
 `elevenlabs/scribe_v2`) picks another default for the deployment, and a
 workspace can set its own in `settings.recordings.transcription`.
-`GET …/recording-models` lists the models, their capabilities and whether
-each is available here.
+`GET …/recording-models` lists the models, their capabilities, funding and
+whether each is available to this workspace, plus `dictationDefault` and
+`pinned`.
+
+A deployment-funded meeting transcript is charged in credits once it
+completes, at the model's price per hour of audio; workspace keys and
+subscriptions are not. Transcripts that are not charged in credits count
+toward the usage allowance instead.
 
 ## Transcripts, speakers and edits
 

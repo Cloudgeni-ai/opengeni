@@ -26,6 +26,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
+import { textModelCapabilities } from "@opengeni/core/transcription-service";
 import { createHash } from "node:crypto";
 import { createRecordingActivities } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -68,6 +70,7 @@ function fakeProvider(
   return {
     id: "elevenlabs",
     name: "Fake",
+    funding: "workspace_key",
     models: [
       {
         model: "scribe_v2",
@@ -94,7 +97,14 @@ function fakeProvider(
   };
 }
 
-async function capturedRecording(storage: ReturnType<typeof memoryStorage>) {
+async function capturedRecording(
+  storage: ReturnType<typeof memoryStorage>,
+  transcription: { providerId: string; model: string; options: Record<string, unknown> } = {
+    providerId: "elevenlabs",
+    model: "scribe_v2",
+    options: { language: "en" },
+  },
+) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
@@ -159,7 +169,7 @@ async function capturedRecording(storage: ReturnType<typeof memoryStorage>) {
       { trackNumber: 0, chunkCount: 2 },
       { trackNumber: 1, chunkCount: 2 },
     ],
-    transcription: { providerId: "elevenlabs", model: "scribe_v2", options: { language: "en" } },
+    transcription,
   });
   return {
     actor,
@@ -185,7 +195,7 @@ function activities(
     ({
       db: client!.db,
       objectStorage: storage.storage,
-      settings: { voiceInputFfmpegPath: ffmpegPath },
+      settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
       observability: { warn: (message: string) => warnings.push(message), info: () => undefined },
       startRecordingWorkflow: null,
     }) as unknown as ControlActivityServices;
@@ -450,6 +460,41 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(version).toMatchObject({ state: "failed", errorCode: "missing_provider_key" });
   });
 
+  test("a meeting can't use a model that returns only text, and sends it no audio", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "codex-subscription",
+      model: "chatgpt-dictation",
+      options: {},
+    });
+    let heard = 0;
+    const subscription: RecordingTranscriptionProvider = {
+      id: "codex-subscription",
+      name: "ChatGPT subscription",
+      funding: "workspace_subscription",
+      available: () => true,
+      models: [
+        {
+          model: "chatgpt-dictation",
+          name: "ChatGPT dictation",
+          usdPerHour: 0,
+          capabilities: textModelCapabilities({ maxDurationSeconds: 600, maxFileBytes: null }),
+        },
+      ],
+      transcribe: async () => {
+        heard += 1;
+        return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "" };
+      },
+    };
+    const run = activities(storage, subscription, null).activities;
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({
+      outcome: "failed",
+      errorCode: "model_unavailable",
+    });
+    expect(heard).toBe(0);
+  });
+
   test("deletion removes every object of the recording, then its rows", async () => {
     if (!client) return;
     const storage = memoryStorage();
@@ -556,7 +601,7 @@ function dictationActivities(
     ({
       db: client!.db,
       objectStorage: storage.storage,
-      settings: { voiceInputFfmpegPath: ffmpegPath },
+      settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
       observability: { warn: () => undefined, info: () => undefined },
       startRecordingWorkflow: null,
     }) as unknown as ControlActivityServices;

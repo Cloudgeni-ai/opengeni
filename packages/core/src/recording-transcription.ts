@@ -3,13 +3,16 @@ import type {
   RecordingLiveProtocol,
   RecordingTrackSource,
   RecordingTranscriptionCapabilities,
+  RecordingTranscriptionFunding,
 } from "@opengeni/contracts";
+import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 
 /**
- * Recording transcription: one interface for every speech-to-text provider
- * a recording can use, plus the pure pieces that turn per-track words into
- * a transcript. Providers declare what each model can do; callers only ask
- * for what the chosen model supports.
+ * Speech to text: one interface for every provider any transcription uses
+ * (meetings, dictation and whatever comes later), plus the pure pieces that
+ * turn per-track words into a transcript. Providers declare what each model
+ * can do and who pays for it; callers only ask for what the chosen model
+ * supports.
  */
 
 export type RecordingTranscriptionModelSpec = {
@@ -25,6 +28,12 @@ export type RecordingTranscriptionModelSpec = {
    * first one; absent means any format a recording is prepared in.
    */
   audioFormats?: readonly RecordingProviderAudioFormat[];
+  /**
+   * The Opengeni credit price of a deployment-funded model, from the
+   * deployment's voice pricing. Calls are charged in credits when credit
+   * billing is on; without a price such a call is refused.
+   */
+  creditPricing?: VoiceInputPricing | null;
 };
 
 /** Audio containers a transcription model can be sent. */
@@ -34,6 +43,17 @@ export type RecordingTranscriptionAudio = {
   bytes: Uint8Array;
   mimeType: string;
   fileName: string;
+};
+
+/**
+ * Who a call is for. Providers that sign in as the workspace (a connected
+ * subscription) use it to find that sign-in; the request id is for logs.
+ */
+export type RecordingTranscriptionScope = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  requestId: string;
 };
 
 export type RecordingTranscriptionRequest = {
@@ -47,6 +67,8 @@ export type RecordingTranscriptionRequest = {
   maxSpeakers?: number | undefined;
   keyterms?: readonly string[] | undefined;
   signal?: AbortSignal | undefined;
+  /** Required by providers funded by a workspace subscription. */
+  scope?: RecordingTranscriptionScope | undefined;
 };
 
 export type RecordingTranscribedWord = {
@@ -65,7 +87,12 @@ export type RecordingTranscriptionResult = {
   /** Audio length the provider measured, when it says. */
   audioMilliseconds: number | null;
   diarized: boolean;
+  /** Empty for models without word timestamps, which return `text` instead. */
   words: RecordingTranscribedWord[];
+  /** The whole text, from models that give no word timings. */
+  text?: string | undefined;
+  /** What the provider reports it billed, for credit settlement. */
+  usage?: VoiceInputUsage | null | undefined;
 };
 
 /** A provider key, or a short-lived token for providers that take one (Microsoft Entra ID). */
@@ -90,11 +117,31 @@ export type RecordingLiveSessionRequest = {
 export type RecordingTranscriptionProvider = {
   id: string;
   name: string;
+  /**
+   * Who pays: the workspace's own key from its model connections, a
+   * subscription the workspace signed in to (never charged by Opengeni), or
+   * an account the deployment holds.
+   */
+  funding: RecordingTranscriptionFunding;
   models: readonly RecordingTranscriptionModelSpec[];
-  /** Transcribe a whole file. Only called for models with `capabilities.batch`. */
+  /**
+   * Whether the provider can serve this workspace now, for providers whose
+   * credential is not a key (a subscription sign-in). Key and deployment
+   * providers are available when their credential resolves. Without a
+   * scope it answers whether the deployment offers the provider at all.
+   */
+  available?(scope?: {
+    accountId?: string;
+    workspaceId: string;
+    subjectId?: string;
+  }): boolean | Promise<boolean>;
+  /**
+   * Transcribe a whole file. Only called for models with `capabilities.batch`.
+   * `credentials` is null for subscription providers, which use `scope`.
+   */
   transcribe(
     request: RecordingTranscriptionRequest,
-    credentials: RecordingTranscriptionCredentials,
+    credentials: RecordingTranscriptionCredentials | null,
   ): Promise<RecordingTranscriptionResult>;
   /**
    * Grant a client one live session. Present when some model has
@@ -645,8 +692,8 @@ function elevenLabsError(
 }
 
 /** ElevenLabs takes only its own API key. */
-function elevenLabsApiKey(credentials: RecordingTranscriptionCredentials): string {
-  if ("apiKey" in credentials && credentials.apiKey) return credentials.apiKey;
+function elevenLabsApiKey(credentials: RecordingTranscriptionCredentials | null): string {
+  if (credentials && "apiKey" in credentials && credentials.apiKey) return credentials.apiKey;
   throw new RecordingTranscriptionError("ElevenLabs needs an API key", "unauthorized", false);
 }
 
@@ -673,6 +720,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
   return {
     id: "elevenlabs",
     name: "ElevenLabs",
+    funding: "workspace_key",
     models: [
       {
         model: "scribe_v2",

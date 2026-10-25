@@ -1,7 +1,7 @@
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import {
   buildRecordingSegments,
-  createRecordingTranscriptionDeployment,
+  createVoiceInputBilling,
   estimateRecordingTranscriptionCostMicros,
   findRecordingTranscriptionModel,
   labelWordsFromTurns,
@@ -18,19 +18,23 @@ import {
   type RecordingTranscribedWord,
   type RecordingTranscriptionAudio,
   type RecordingTranscriptionCredentials,
-  type RecordingTranscriptionDeployment,
   type RecordingTranscriptionModelSpec,
   type RecordingTranscriptionProvider,
   type RecordingTranscriptionProviderRegistry,
   type RecordingTranscriptionRequest,
   type RecordingTranscriptionResult,
   type RecordingTrackWords,
+  type TranscriptionBilling,
   type TranscriptionSegmenter,
   type TranscriptionService,
 } from "@opengeni/core";
 import {
+  asRecordingTranscriptionError,
   createFfmpegTranscriptionSegmenter,
+  createSpeechToTextDeployment,
   createTranscriptionService,
+  dictationProviders,
+  type SpeechToTextDeployment,
   TranscriptionSegmenterError,
   wavDurationSeconds,
 } from "@opengeni/core/transcription-service";
@@ -65,7 +69,11 @@ import {
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   WorkspaceVoiceInputSettings,
 } from "@opengeni/contracts";
-import type { Settings } from "@opengeni/config";
+import {
+  voiceInputCreditBillingActive,
+  type Settings,
+  type VoiceInputPricing,
+} from "@opengeni/config";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import {
@@ -129,6 +137,8 @@ export type RecordingActivityOptions = {
   dictationTranscription?: (settings: Settings, db: Database) => TranscriptionService;
   /** Cuts a dictation into provider-sized WAV pieces; defaults to ffmpeg. */
   dictationSegmenter?: (settings: Settings) => TranscriptionSegmenter;
+  /** Credit charges for meetings on deployment-funded models; defaults to voice input billing. */
+  billing?: (settings: Settings, db: Database) => TranscriptionBilling;
 };
 
 /** The workspace's own key for the provider, else its organization's. */
@@ -196,31 +206,13 @@ export async function transcribeTrack(input: {
   audio: RecordingTranscriptionAudio & { extension: string };
   durationMilliseconds: number;
   ffmpegPath: string;
-  credentials: RecordingTranscriptionCredentials;
+  credentials: RecordingTranscriptionCredentials | null;
   request: Omit<RecordingTranscriptionRequest, "audio">;
   onPiece?: (index: number) => void;
   tempRoot?: string;
 }): Promise<RecordingTranscriptionResult> {
-  const source = preparedPieceFormat(input.audio.extension);
-  const accepted = input.spec.audioFormats;
-  let format: RecordingPieceFormat | null = null;
-  if (accepted && !accepted.includes(source)) {
-    format = WRITABLE_PIECE_FORMATS.find((candidate) => accepted.includes(candidate)) ?? null;
-    if (!format) throw new PermanentRecordingFailure("model_unavailable");
-  }
-  const { maxDurationSeconds, maxFileBytes } = input.spec.capabilities;
-  const bytesPerSecond = format ? RECORDING_PIECE_BYTES_PER_SECOND[format] : undefined;
-  const limits = [
-    maxDurationSeconds === null ? null : maxDurationSeconds * 1_000,
-    // Converted audio has a known rate; keep a tenth spare under the file limit.
-    maxFileBytes !== null && bytesPerSecond
-      ? Math.floor(((maxFileBytes * 0.9) / bytesPerSecond) * 1_000)
-      : null,
-  ].filter((limit): limit is number => limit !== null);
-  const pieces = planRecordingTranscriptionPieces(
-    input.durationMilliseconds,
-    limits.length > 0 ? Math.min(...limits) : null,
-  );
+  const { source, format, maxPieceMilliseconds } = pieceShape(input.spec, input.audio.extension);
+  const pieces = planRecordingTranscriptionPieces(input.durationMilliseconds, maxPieceMilliseconds);
   const parts: Array<{
     piece: (typeof pieces)[number];
     result: RecordingTranscriptionResult;
@@ -245,16 +237,71 @@ export async function transcribeTrack(input: {
             mimeType: rendered.mimeType,
             fileName: `${input.audio.fileName.replace(/\.[^.]+$/u, "")}-${index}.${rendered.extension}`,
           }));
-    const result = await input.provider.transcribe(
-      {
-        ...input.request,
-        audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
-      },
-      input.credentials,
-    );
+    const result = await input.provider
+      .transcribe(
+        {
+          ...input.request,
+          audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
+        },
+        input.credentials,
+      )
+      .catch((error: unknown) => {
+        throw asRecordingTranscriptionError(error);
+      });
     parts.push({ piece, result });
   }
   return mergeRecordingTranscriptionPieces(parts);
+}
+
+/**
+ * The format a model is sent a track in (null keeps the prepared one) and
+ * the longest piece it takes in one request.
+ */
+function pieceShape(
+  spec: RecordingTranscriptionModelSpec,
+  extension: string,
+): {
+  source: RecordingPieceFormat;
+  format: RecordingPieceFormat | null;
+  maxPieceMilliseconds: number | null;
+} {
+  const source = preparedPieceFormat(extension);
+  const accepted = spec.audioFormats;
+  let format: RecordingPieceFormat | null = null;
+  if (accepted && !accepted.includes(source)) {
+    format = WRITABLE_PIECE_FORMATS.find((candidate) => accepted.includes(candidate)) ?? null;
+    if (!format) throw new PermanentRecordingFailure("model_unavailable");
+  }
+  const { maxDurationSeconds, maxFileBytes } = spec.capabilities;
+  const bytesPerSecond = format ? RECORDING_PIECE_BYTES_PER_SECOND[format] : undefined;
+  const limits = [
+    maxDurationSeconds === null ? null : maxDurationSeconds * 1_000,
+    // Converted audio has a known rate; keep a tenth spare under the file limit.
+    maxFileBytes !== null && bytesPerSecond
+      ? Math.floor(((maxFileBytes * 0.9) / bytesPerSecond) * 1_000)
+      : null,
+  ].filter((limit): limit is number => limit !== null);
+  return {
+    source,
+    format,
+    maxPieceMilliseconds: limits.length > 0 ? Math.min(...limits) : null,
+  };
+}
+
+/**
+ * How a meeting's transcript is paid for. A deployment-funded model with a
+ * credit price is charged in Opengeni credits where credit billing is on;
+ * everything else (the workspace's own key or subscription, or a
+ * deployment that does not charge credits) counts toward the workspace's
+ * allowance at its list price.
+ */
+function meetingCharge(
+  settings: Settings,
+  provider: RecordingTranscriptionProvider,
+  spec: RecordingTranscriptionModelSpec,
+): { pricing: VoiceInputPricing } | null {
+  if (provider.funding !== "deployment" || !voiceInputCreditBillingActive(settings)) return null;
+  return spec.creditPricing ? { pricing: spec.creditPricing } : null;
 }
 
 export function createRecordingActivities(
@@ -262,30 +309,31 @@ export function createRecordingActivities(
   options: RecordingActivityOptions = {},
 ) {
   const loadApiKey = options.loadApiKey ?? loadRecordingProviderApiKey;
-  let deploymentMemo: { settings: Settings; deployment: RecordingTranscriptionDeployment } | null =
-    null;
-  const deploymentFor = (settings: Settings): RecordingTranscriptionDeployment => {
+  let deploymentMemo: { settings: Settings; deployment: SpeechToTextDeployment } | null = null;
+  /** The deployment's speech-to-text providers, the same ones the API offers. */
+  const deploymentFor = (settings: Settings, db: Database): SpeechToTextDeployment => {
     if (deploymentMemo?.settings !== settings) {
       deploymentMemo = {
         settings,
-        deployment: createRecordingTranscriptionDeployment(
-          settings,
-          options.registry ? { providers: [...options.registry.values()] } : {},
+        deployment: createSpeechToTextDeployment(
+          { settings, db },
+          {
+            ...(options.registry ? { providers: [...options.registry.values()] } : {}),
+            loadWorkspaceKey: (providerId, scope) =>
+              loadApiKey(db, settings, { ...scope, providerId }),
+          },
         ),
       };
     }
     return deploymentMemo.deployment;
   };
-  /** The deployment's own credential for providers it manages, else the workspace's key. */
-  const credentialsFor = async (
-    db: Database,
-    settings: Settings,
-    scope: { accountId: string; workspaceId: string; providerId: string },
-  ): Promise<RecordingTranscriptionCredentials | null> => {
-    const managed = deploymentFor(settings).deploymentCredentials(scope.providerId);
-    if (managed) return await managed;
-    const apiKey = await loadApiKey(db, settings, scope);
-    return apiKey ? { apiKey } : null;
+  let defaultBilling: { settings: Settings; billing: TranscriptionBilling } | null = null;
+  const billingFor = (settings: Settings, db: Database): TranscriptionBilling => {
+    if (options.billing) return options.billing(settings, db);
+    if (defaultBilling?.settings !== settings) {
+      defaultBilling = { settings, billing: createVoiceInputBilling({ db, settings }) };
+    }
+    return defaultBilling.billing;
   };
   let defaultDiarizer: { settings: Settings; diarizer: RecordingDiarizer | null } | null = null;
   const diarizerFor = (settings: Settings): RecordingDiarizer | null => {
@@ -307,7 +355,7 @@ export function createRecordingActivities(
         settings,
         service: options.dictationTranscription
           ? options.dictationTranscription(settings, db)
-          : createTranscriptionService({ settings, db }),
+          : createTranscriptionService({ settings, db, deployment: deploymentFor(settings, db) }),
         segmenter: options.dictationSegmenter
           ? options.dictationSegmenter(settings)
           : createFfmpegTranscriptionSegmenter({ ffmpegPath: settings.voiceInputFfmpegPath }),
@@ -374,18 +422,45 @@ export function createRecordingActivities(
       if (job.recording.purpose === "dictation") {
         return await transcribeDictation(objectStorage, job);
       }
+      const deployment = deploymentFor(settings, db);
       const found = findRecordingTranscriptionModel(
-        deploymentFor(settings).registry,
+        deployment.registry,
         job.version.providerId,
         job.version.model,
       );
       if (!found) throw new PermanentRecordingFailure("model_unavailable");
-      const credentials = await credentialsFor(db, settings, {
+      // A pinned deployment sends audio to no other model, even for an
+      // older version that named one.
+      if (
+        deployment.pinned &&
+        (deployment.pinned.providerId !== found.provider.id ||
+          deployment.pinned.model !== found.spec.model)
+      ) {
+        throw new PermanentRecordingFailure("model_unavailable");
+      }
+      // A meeting transcript places every word in time, to tell speakers
+      // apart and to play from; a model that returns only text can't yet.
+      if (!found.spec.capabilities.wordTimestamps) {
+        throw new PermanentRecordingFailure("model_unavailable");
+      }
+      const resolved = await deployment.credentials(job.version.providerId, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        providerId: job.version.providerId,
       });
-      if (!credentials) throw new PermanentRecordingFailure("missing_provider_key");
+      if (resolved === "missing") throw new PermanentRecordingFailure("missing_provider_key");
+      const credentials = resolved.credentials;
+      if (
+        found.provider.available &&
+        !(await deployment.available(found.provider.id, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.ownerSubjectId,
+        }))
+      ) {
+        // A subscription the workspace is no longer signed in to.
+        throw new PermanentRecordingFailure("missing_provider_key");
+      }
+      const charge = meetingCharge(settings, found.provider, found.spec);
       const plans = planRecordingTracks(job.recording.tracks);
       const capabilities = found.spec.capabilities;
       const requested = job.version.options;
@@ -438,8 +513,40 @@ export function createRecordingActivities(
           mimeType: audio.mimeType,
           fileName: `track-${plan.trackNumber}.${audio.extension}`,
         };
-        const [result, ours] = await withHeartbeat(() =>
-          Promise.all([
+        const request = {
+          model: found.spec.model,
+          language: requested.language,
+          diarize,
+          maxSpeakers: requested.maxSpeakers,
+          keyterms: capabilities.keyterms ? requested.keyterms : undefined,
+          signal,
+          scope: {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.ownerSubjectId,
+            requestId: `${input.versionId}:${plan.trackNumber}`,
+          },
+        };
+        const onPiece = (piece: number) =>
+          heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber, piece });
+        const runOurs = () =>
+          useOurs
+            ? ourDiarizer
+                .diarize(trackAudio, { maxSpeakers: requested.maxSpeakers, signal })
+                .catch((error: unknown) => {
+                  if (signal?.aborted) throw error;
+                  observability.warn("our diarizer failed; using the model's speakers", {
+                    workspaceId: input.workspaceId,
+                    recordingId: input.recordingId,
+                    versionId: input.versionId,
+                    trackNumber: plan.trackNumber,
+                    error: error instanceof Error ? error.message : String(error),
+                  });
+                  return null;
+                })
+            : Promise.resolve(null);
+        const [result, ours] = await withHeartbeat(async () => {
+          return await Promise.all([
             transcribeTrack({
               provider: found.provider,
               spec: found.spec,
@@ -447,34 +554,12 @@ export function createRecordingActivities(
               durationMilliseconds: audio.durationMilliseconds,
               ffmpegPath: settings.voiceInputFfmpegPath,
               credentials,
-              onPiece: (piece) =>
-                heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber, piece }),
-              request: {
-                model: found.spec.model,
-                language: requested.language,
-                diarize,
-                maxSpeakers: requested.maxSpeakers,
-                keyterms: capabilities.keyterms ? requested.keyterms : undefined,
-                signal,
-              },
+              onPiece,
+              request,
             }),
-            useOurs
-              ? ourDiarizer
-                  .diarize(trackAudio, { maxSpeakers: requested.maxSpeakers, signal })
-                  .catch((error: unknown) => {
-                    if (signal?.aborted) throw error;
-                    observability.warn("our diarizer failed; using the model's speakers", {
-                      workspaceId: input.workspaceId,
-                      recordingId: input.recordingId,
-                      versionId: input.versionId,
-                      trackNumber: plan.trackNumber,
-                      error: error instanceof Error ? error.message : String(error),
-                    });
-                    return null;
-                  })
-              : Promise.resolve(null),
-          ]),
-        );
+            runOurs(),
+          ]);
+        });
         let words = result.words;
         if (ours) {
           words = labelWordsFromTurns(result.words, ours.turns);
@@ -521,6 +606,16 @@ export function createRecordingActivities(
           keyterms: capabilities.keyterms && (requested.keyterms?.length ?? 0) > 0,
         },
       );
+      const creditCostMicros = charge
+        ? await settleMeetingCredits({
+            billing: billingFor(settings, db),
+            pricing: charge.pricing,
+            providerId: found.provider.id,
+            model: found.spec.model,
+            audioMilliseconds,
+            attribution: job.creditAttribution ?? { kind: "unknown" },
+          })
+        : null;
       const completed = await completeRecordingTranscriptVersion(db, {
         ...actor,
         versionId: input.versionId,
@@ -529,6 +624,7 @@ export function createRecordingActivities(
         diarized: diarization === "provider" || diarization === "ours",
         diarization,
         costUsdMicros,
+        creditCostMicros,
         audioMilliseconds,
         segments: segments.map((segment) => ({
           startMilliseconds: segment.startMilliseconds,
@@ -597,6 +693,9 @@ export function createRecordingActivities(
       const languages = new Set<string>();
       let audioMilliseconds = 0;
       let creditCostMicros = 0;
+      let charged = false;
+      let listCostMicros: number | null = null;
+      const offered = dictationProviders(deploymentFor(settings, db));
       if (track && chunks.length > 0) {
         const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
         const audio = await preparedTrackAudio({
@@ -653,6 +752,14 @@ export function createRecordingActivities(
             }),
           );
           creditCostMicros += result.creditCostMicros ?? 0;
+          const heard = offered.find((provider) => provider.id === result.providerId);
+          if (heard?.provider.funding === "deployment" && voiceInputCreditBillingActive(settings)) {
+            charged = true;
+          }
+          const pieceCost = heard
+            ? estimateRecordingTranscriptionCostMicros(heard.model, piece.durationMilliseconds)
+            : null;
+          if (pieceCost !== null) listCostMicros = (listCostMicros ?? 0) + pieceCost;
           for (const language of result.languages ?? []) languages.add(language);
           audioMilliseconds += piece.durationMilliseconds;
           const text = result.text.trim();
@@ -675,11 +782,60 @@ export function createRecordingActivities(
         languages: [...languages],
         diarized: false,
         diarization: "none",
-        costUsdMicros: creditCostMicros > 0 ? creditCostMicros : null,
+        // The list price, like a meeting's; a version charged in credits
+        // also records the credits, and its ledger debit is what counts.
+        costUsdMicros: listCostMicros,
+        creditCostMicros: charged ? creditCostMicros : null,
         audioMilliseconds,
         segments,
       });
       return completed ? { outcome: "complete", ...expiry } : { outcome: "skipped" };
+    }
+
+    /**
+     * Charge a meeting on a deployment-funded model in credits, once per
+     * version however many attempts it takes. The transcript is already
+     * made, so a failed charge is logged and reconciled by the next voice
+     * admission rather than failing the version.
+     */
+    async function settleMeetingCredits(charge: {
+      billing: TranscriptionBilling;
+      pricing: VoiceInputPricing;
+      providerId: string;
+      model: string;
+      audioMilliseconds: number;
+      attribution: NonNullable<NonNullable<typeof job>["creditAttribution"]>;
+    }): Promise<number> {
+      const seconds = charge.audioMilliseconds / 1_000;
+      try {
+        return (
+          await charge.billing.settle({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerId: charge.providerId,
+            model: charge.model,
+            pricing: charge.pricing,
+            usage: null,
+            billing: {
+              sourceId: `${input.recordingId}:${input.versionId}`,
+              attribution: charge.attribution,
+              trustedDurationSeconds: seconds,
+            },
+          })
+        ).creditCostMicros;
+      } catch (error) {
+        observability.error(
+          "meeting transcript charge is unsettled after the transcript was made",
+          {
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            versionId: input.versionId,
+            providerId: charge.providerId,
+            error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+          },
+        );
+        return 0;
+      }
     }
 
     async function withHeartbeat<T>(work: () => Promise<T>): Promise<T> {

@@ -84,7 +84,6 @@ export * from "./transcription";
 export * from "./recording-transcription";
 export * from "./xai-operation-availability";
 export * from "./recording-transcription-azure";
-export * from "./recording-transcription-deployment";
 export * from "./model-catalog";
 export * from "./model-provider-credentials";
 export * from "./goal-admission";

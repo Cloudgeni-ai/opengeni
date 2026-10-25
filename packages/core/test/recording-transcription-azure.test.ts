@@ -4,7 +4,6 @@ import {
   createAzureSpeechRecordingTranscriptionProvider,
   parseAzureSpeechTranscript,
 } from "../src/recording-transcription-azure";
-import { createRecordingTranscriptionDeployment } from "../src/recording-transcription-deployment";
 import {
   mergeRecordingTranscriptionPieces,
   planRecordingTranscriptionPieces,
@@ -158,81 +157,6 @@ describe("Azure Speech recordings", () => {
     expect((await attempt(400, '{"error":{"code":"AudioLengthLimitExceeded"}}')).code).toBe(
       "too_large",
     );
-  });
-});
-
-describe("recording transcription deployment", () => {
-  test("offers ElevenLabs with workspace keys by default", () => {
-    const deployment = createRecordingTranscriptionDeployment({});
-    expect([...deployment.registry.keys()]).toEqual(["elevenlabs"]);
-    expect(deployment.defaultTranscription).toEqual({
-      providerId: "elevenlabs",
-      model: "scribe_v2",
-    });
-    expect(deployment.deploymentManaged("elevenlabs")).toBe(false);
-    expect(deployment.deploymentCredentials("elevenlabs")).toBeNull();
-  });
-
-  test("adds the deployment's Azure Speech account and makes it the default", async () => {
-    const withKey = createRecordingTranscriptionDeployment({
-      recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
-      recordingAzureSpeechApiKey: "key",
-    });
-    expect([...withKey.registry.keys()]).toEqual(["elevenlabs", "azure-speech"]);
-    expect(withKey.defaultTranscription).toEqual({
-      providerId: "azure-speech",
-      model: "MAI-Transcribe-2",
-    });
-    expect(await withKey.deploymentCredentials("azure-speech")).toEqual({ apiKey: "key" });
-
-    const withIdentity = createRecordingTranscriptionDeployment(
-      {
-        recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
-        recordingTranscriptionDefault: "elevenlabs/scribe_v2",
-        azureTenantId: "tenant",
-        azureClientId: "client",
-        azureFederatedTokenFile: "/var/token",
-      },
-      {
-        readTokenFile: async () => "assertion",
-        fetch: (async () =>
-          Response.json({ access_token: "entra", expires_in: 3_600 })) as unknown as typeof fetch,
-      },
-    );
-    expect(withIdentity.defaultTranscription).toEqual({
-      providerId: "elevenlabs",
-      model: "scribe_v2",
-    });
-    expect(withIdentity.deploymentManaged("azure-speech")).toBe(true);
-    expect(await withIdentity.deploymentCredentials("azure-speech")).toEqual({
-      accessToken: "entra",
-    });
-
-    const noCredential = createRecordingTranscriptionDeployment({
-      recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
-    });
-    expect(noCredential.deploymentManaged("azure-speech")).toBe(false);
-    expect(noCredential.deploymentCredentials("azure-speech")).toBeNull();
-  });
-
-  test("reports a refused identity as a transcription error", async () => {
-    const refused = createRecordingTranscriptionDeployment(
-      {
-        recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
-        azureTenantId: "tenant",
-        azureClientId: "client",
-        azureClientSecret: "secret",
-      },
-      {
-        fetch: (async () =>
-          Response.json({ error: "invalid_client" }, { status: 401 })) as unknown as typeof fetch,
-      },
-    );
-    const error = (await refused
-      .deploymentCredentials("azure-speech")!
-      .catch((caught: unknown) => caught)) as RecordingTranscriptionError;
-    expect(error).toBeInstanceOf(RecordingTranscriptionError);
-    expect([error.code, error.retryable]).toEqual(["unauthorized", false]);
   });
 });
 

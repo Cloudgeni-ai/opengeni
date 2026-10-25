@@ -1020,10 +1020,25 @@ const SettingsSchema = z.object({
     .trim()
     .regex(/^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u, "Use provider/model, such as elevenlabs/scribe_v2")
     .optional(),
+  /**
+   * One speech-to-text model for every use (meetings, dictation), as
+   * `provider/model`. Workspaces then cannot pick another, and nothing else
+   * hears the audio. Unset lets each workspace choose.
+   */
+  speechToTextPinned: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u,
+      "Use provider/model, such as azure-speech/MAI-Transcribe-2",
+    )
+    .optional(),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Connected subscription STT is preferred by default; operators can put
   // openai/azure-openai first explicitly.
-  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai.
+  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai,
+  // azure-speech (also azure-mai) and elevenlabs. Speech-to-text providers
+  // not named here follow in the deployment's own order.
   voiceInputProviderOrder: z
     .string()
     .default("supergrok-subscription,codex-subscription,openai,azure-openai"),
@@ -2403,6 +2418,16 @@ export type VoiceInputProviderId =
   | "codex-subscription"
   | "supergrok-subscription";
 
+/** Every speech-to-text provider a deployment can offer, for any use. */
+export const SPEECH_TO_TEXT_PROVIDER_IDS: readonly string[] = [
+  "openai",
+  "azure-openai",
+  "azure-speech",
+  "codex-subscription",
+  "supergrok-subscription",
+  "elevenlabs",
+];
+
 export type VoiceInputProviderConfig =
   | {
       id: "azure-mai";
@@ -2608,6 +2633,8 @@ function voiceInputProviderRegistryWithIssues(settings: Settings): {
   const order = settings.voiceInputProviderOrder
     .split(",")
     .map((part) => part.trim())
+    // azure-speech is the shared name of the MAI provider.
+    .map((part) => (part === "azure-speech" ? "azure-mai" : part))
     .filter(
       (part): part is VoiceInputProviderId =>
         part === "openai" ||
@@ -5452,6 +5479,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     recordingAzureSpeechEndpoint: optional("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT"),
     recordingAzureSpeechApiKey: optional("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY"),
     recordingTranscriptionDefault: optional("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT"),
+    speechToTextPinned: optional("OPENGENI_SPEECH_TO_TEXT_PINNED"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
     voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),
@@ -11120,16 +11148,24 @@ function validateRecordingTranscriptionSettings(settings: Settings): void {
       "OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT needs OPENGENI_RECORDING_AZURE_SPEECH_API_KEY, or AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET",
     );
   }
-  const defaultProvider = settings.recordingTranscriptionDefault?.split("/")[0];
-  if (defaultProvider === "azure-speech" && !settings.recordingAzureSpeechEndpoint) {
-    throw new Error(
-      "OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT names azure-speech but OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT is not set",
-    );
-  }
-  if (defaultProvider && defaultProvider !== "azure-speech" && defaultProvider !== "elevenlabs") {
-    throw new Error(
-      "OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT must name elevenlabs or azure-speech",
-    );
+  for (const [env, value] of [
+    ["OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT", settings.recordingTranscriptionDefault],
+    ["OPENGENI_SPEECH_TO_TEXT_PINNED", settings.speechToTextPinned],
+  ] as const) {
+    const provider = value?.split("/")[0];
+    if (!provider) continue;
+    if (!SPEECH_TO_TEXT_PROVIDER_IDS.includes(provider)) {
+      throw new Error(`${env} must name one of ${SPEECH_TO_TEXT_PROVIDER_IDS.join(", ")}`);
+    }
+    if (
+      provider === "azure-speech" &&
+      !settings.recordingAzureSpeechEndpoint &&
+      !settings.voiceInputMaiEndpoint
+    ) {
+      throw new Error(
+        `${env} names azure-speech but OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT is not set`,
+      );
+    }
   }
 }
 

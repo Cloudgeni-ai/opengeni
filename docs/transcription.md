@@ -308,20 +308,29 @@ Deprecated host-adapter types remain exported from
 ## Deployment transcription and credit billing
 
 `OPENGENI_VOICE_INPUT_PROVIDER_ORDER` selects the default before audio is sent.
-For example, `codex-subscription,supergrok-subscription,azure-mai,azure-openai`
+For example, `codex-subscription,supergrok-subscription,azure-speech,azure-openai`
 uses a workspace subscription when available, otherwise MAI. Swap the last two
 entries to make GPT Transcribe the deployment default. A recording already
 pinned to a provider keeps that provider. Workspace preferences still apply.
+
+Dictation uses the same providers as meeting recordings (see
+`docs/recordings.md`): after the providers in this order, it can use Azure
+Speech and ElevenLabs Scribe, each with one dictation model. A workspace picks
+one with `voiceInput.preferredProvider`. `OPENGENI_SPEECH_TO_TEXT_PINNED`
+restricts dictation to the pinned model, with no fallback.
 
 - `azure-openai` uses the versioned Azure OpenAI audio transcription API.
   Configure `OPENGENI_VOICE_INPUT_AZURE_ENDPOINT`, `DEPLOYMENT`, `API_VERSION`,
   and `API_KEY` (or `AD_TOKEN`), all with the same prefix. `MODEL` identifies
   the underlying model for pricing when the deployment has a custom name.
-- `azure-mai` uses Azure Speech's file transcription API. Configure
-  `OPENGENI_VOICE_INPUT_MAI_ENDPOINT` and `API_KEY`; `MODEL` defaults to
-  `MAI-Transcribe-2`, and `API_VERSION` to `2025-10-15`. Browser recordings
-  are decoded with the existing ffmpeg segmenter (bounded to 600 s) when needed. This is file
-  dictation, separate from realtime voice.
+- `azure-speech` (formerly `azure-mai`, which is still accepted) uses Azure
+  Speech's fast transcription API with MAI-Transcribe-2. It is the same
+  provider meetings use: with `OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT` set
+  it uses that account and its Entra ID or key. Otherwise
+  `OPENGENI_VOICE_INPUT_MAI_ENDPOINT` and `API_KEY` configure it for
+  dictation; `API_VERSION` defaults to `2025-10-15`. Audio the model does not
+  accept is converted with ffmpeg first. This is file dictation, separate
+  from realtime voice.
 - `OPENGENI_VOICE_INPUT_{OPENAI,AZURE,MAI}_PRICING_JSON` accepts
   `microsPerMinute`, optional paired `inputMicrosPerMillionTokens` /
   `outputMicrosPerMillionTokens`, optional `audioInputMicrosPerMillionTokens`,

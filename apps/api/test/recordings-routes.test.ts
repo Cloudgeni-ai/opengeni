@@ -490,7 +490,7 @@ describe("recording routes", () => {
     expect(finalized.status).toBe(200);
     expect(finalized.body.transcript).toMatchObject({
       providerId: "openai",
-      model: "voice-input",
+      model: "gpt-transcribe",
       state: "queued",
     });
     expect(selected.at(-1)).toMatchObject({ preferredProvider: "openai", fallbackEnabled: false });
@@ -600,11 +600,29 @@ describe("recording routes", () => {
     ).toHaveLength(1);
     const models = await scope.owner.call("GET", "/recording-models");
     expect(models.body.default).toEqual({ providerId: "elevenlabs", model: "scribe_v2" });
-    expect(models.body.models[0]).toMatchObject({
+    expect(
+      models.body.models.find((model: { model: string }) => model.model === "scribe_v2"),
+    ).toMatchObject({
       providerId: "elevenlabs",
       model: "scribe_v2",
       available: false,
+      funding: "workspace_key",
     });
+    // The deployment's voice input models return only text, so they serve
+    // dictation and are not offered for meetings.
+    expect(
+      models.body.models.find((model: { providerId: string }) => model.providerId === "openai"),
+    ).toBeUndefined();
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+          transcription: { providerId: "openai", model: "gpt-transcribe" },
+        })
+      ).status,
+    ).toBe(400);
+    expect(models.body).toMatchObject({ dictationDefault: null, pinned: false });
     expect(
       models.body.models.find((model: { model: string }) => model.model === "scribe_v2_realtime")
         .capabilities,
@@ -645,6 +663,35 @@ describe("recording routes", () => {
     expect(
       models.body.models.find((model: { model: string }) => model.model === "scribe_v2").available,
     ).toBe(false);
+  });
+
+  test("a pinned deployment offers its one model for everything and refuses any other", async () => {
+    const scope = await fixture({
+      settings: {
+        recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+        recordingAzureSpeechApiKey: "deployment-key",
+        speechToTextPinned: "azure-speech/MAI-Transcribe-2",
+      },
+    });
+    const pin = { providerId: "azure-speech", model: "MAI-Transcribe-2" };
+    const models = await scope.owner.call("GET", "/recording-models");
+    expect(models.body).toMatchObject({ default: pin, dictationDefault: pin, pinned: true });
+    expect(
+      models.body.models.map((model: { providerId: string; model: string }) => ({
+        providerId: model.providerId,
+        model: model.model,
+      })),
+    ).toEqual([pin]);
+    const create = async (transcription: { providerId: string; model: string }) =>
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+          transcription,
+        })
+      ).status;
+    expect(await create({ providerId: "elevenlabs", model: "scribe_v2" })).toBe(400);
+    expect(await create(pin)).toBe(201);
   });
 
   test("the live preview: a single-use grant for the recorder, text for everyone who can see it", async () => {

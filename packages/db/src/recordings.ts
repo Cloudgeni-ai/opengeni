@@ -1913,6 +1913,12 @@ export async function completeRecordingTranscriptVersion(
     diarized: boolean;
     diarization: RecordingDiarization;
     costUsdMicros?: number | null | undefined;
+    /**
+     * The Opengeni credits the version was charged, for a deployment-funded
+     * model where credit billing is on. Such a version's cost does not count
+     * toward allowances again (0960).
+     */
+    creditCostMicros?: number | null | undefined;
     audioMilliseconds: number;
     segments: readonly CompletedRecordingSegment[];
     /** Speakers the capture itself identifies, such as the microphone's owner. */
@@ -1997,6 +2003,10 @@ export async function completeRecordingTranscriptVersion(
           input.costUsdMicros === null || input.costUsdMicros === undefined
             ? null
             : Math.max(0, Math.round(input.costUsdMicros)),
+        creditCostMicros:
+          input.creditCostMicros === null || input.creditCostMicros === undefined
+            ? null
+            : Math.max(0, Math.round(input.creditCostMicros)),
         audioMilliseconds: Math.max(0, Math.round(input.audioMilliseconds)),
         segmentCount: ordered.length,
         processingOwner: null,

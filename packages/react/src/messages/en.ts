@@ -2579,6 +2579,7 @@ export const englishMessages = {
   "meetings.settings.connectProvidernameFirst": "Connect {providerName} first",
   "meetings.settings.connectProvidernameToShowA":
     "Connect {providerName} to show a live transcript",
+  "meetings.settings.connectYourProvidernameFirst": "Connect your {providerName} first",
   "meetings.settings.couldnTForgetThisVoice": "Couldn't forget this voice",
   "meetings.settings.couldnTForgetYourVoice": "Couldn't forget your voice",
   "meetings.settings.couldnTRememberYourVoice": "Couldn't remember your voice",
@@ -2646,6 +2647,8 @@ export const englishMessages = {
     "People whose voices suggest names in meetings. Members decide for themselves; anyone here can forget someone from outside the workspace.",
   "meetings.settings.providernameChargesAboutValuePer":
     " {providerName} charges about ${value} per hour of audio for it, on top of the transcript.",
+  "meetings.settings.providernameIsnTAvailableHere":
+    "{providerName} isn't available here right now",
   "meetings.settings.recognizePeopleByVoice": "Recognize people by voice",
   "meetings.settings.rememberedMeetingsSuggestYourName":
     "Remembered. Meetings suggest your name when you speak. Forgetting it removes your voice right away.",
@@ -2666,10 +2669,14 @@ export const englishMessages = {
     "The audio of every transcribed meeting is deleted within a few minutes, and from now on as soon as its transcript is ready. Transcripts stay, but meetings can't be played or transcribed again. This can't be undone.",
   "meetings.settings.theAudioOfMeetingsRecorded":
     "The audio of meetings recorded more than {retentionPeriodName} ago is deleted within a few minutes. Transcripts stay, but those meetings can't be played or transcribed again. This can't be undone.",
+  "meetings.settings.thisDeploymentUsesOneModel":
+    "This deployment uses one model for all transcription.",
   "meetings.settings.transcriptionModel": "Transcription model",
   "meetings.settings.turnOffAndForgetVoices": "Turn off and forget voices",
   "meetings.settings.turnsAMeetingSAudio":
     "Turns a meeting's audio into a transcript with speakers. A meeting can still be transcribed again with another model.",
+  "meetings.settings.turnsAMeetingSAudioPinned":
+    "Turns a meeting's audio into a transcript with speakers.",
   "meetings.settings.untilSomeoneDeletesThem": "Until someone deletes them",
   "meetings.settings.valuePerHour": "${value} per hour",
   "meetings.settings.voicesForgottenPeopleArenT":
@@ -2678,6 +2685,7 @@ export const englishMessages = {
   "meetings.settings.workspace": "Workspace",
   "meetings.settings.youAgreedOpengeniLearnsYour":
     "You agreed. Opengeni learns your voice the next time you're named as a speaker in a meeting.",
+  "meetings.settings.yourSubscription": "Your subscription",
   "meetings.settings.yourVoice": "Your voice",
   "meetings.settings.yourVoiceIsForgotten": "Your voice is forgotten",
   "meetings.settings.yourVoiceWillBeRemembered": "Your voice will be remembered",
