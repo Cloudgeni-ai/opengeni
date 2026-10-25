@@ -247,12 +247,26 @@ impl DesktopBackend for MacosDesktop {
             Ok(true) => {
                 return Some("This Mac is locked. Unlock it to use desktop capture.".into())
             }
-            Err(_) => return Some("The macOS login session is unavailable.".into()),
+            Err(_) => {
+                return Some(
+                    "No one is signed in to this Mac's desktop. Sign in at the Mac to use desktop \
+                     capture."
+                        .into(),
+                )
+            }
             Ok(false) => {}
         }
-        macffi::list_displays().err().map(|_| {
-            "No active macOS display is available. Wake the displays to use desktop capture.".into()
-        })
+        // `probe` offers the main display. With every display asleep the active
+        // list is empty rather than an error; without this the machine would
+        // report no desktop and no reason, which reads as a headless machine.
+        match macffi::list_displays() {
+            Ok(displays) if displays.iter().any(|display| display.is_main) => None,
+            _ => Some(
+                "This Mac's displays are asleep or off. Wake them (or keep them awake) to use \
+                 desktop capture."
+                    .into(),
+            ),
+        }
     }
 }
 

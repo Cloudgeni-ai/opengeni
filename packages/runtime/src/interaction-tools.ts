@@ -897,13 +897,37 @@ const ComputerObserveInput = z
     targetId: CurrentComputerTargetId.describe(
       "Omit to use the window you used last, or at first the focused window (the screen when none is).",
     ),
+    region: z
+      .object({
+        x: z.number().finite().nonnegative(),
+        y: z.number().finite().nonnegative(),
+        width: z.number().finite().positive(),
+        height: z.number().finite().positive(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "Zoom: return only this rectangle of the target's regular screenshot (in that screenshot's pixels) at up to full resolution, to read small text and controls. It is its own frame: pointer x,y on it use the zoomed screenshot's pixels.",
+      ),
+  })
+  .strict();
+const CapturedComputerFrame = z
+  .object({
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    region: z
+      .object({
+        x: z.number().finite().nonnegative(),
+        y: z.number().finite().nonnegative(),
+        width: z.number().finite().positive(),
+        height: z.number().finite().positive(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 const ComputerObserveOutput = ComputerObservation.extend({
-  capturedFrame: z
-    .object({ width: z.number().int().positive(), height: z.number().int().positive() })
-    .strict()
-    .optional(),
+  capturedFrame: CapturedComputerFrame.optional(),
 }).strict();
 const ComputerClipboardInput = z.object({ computerSessionId: CurrentComputerSessionId }).strict();
 /** Action types a computer_act batch runs. Each acts on the state the one
@@ -2564,10 +2588,17 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     modelText: (output, context) => {
+      // A zoom is about pixels: its elements are shown as what changed since
+      // the last reading, like an action's receipt.
+      const base =
+        context.caller.kind === "model" && output.capturedFrame?.region
+          ? computerSeen.get(seenComputerKey(output))
+          : undefined;
       if (context.caller.kind === "model") rememberComputerReading(output);
+      const shown = (base && computerObservationDiff(base, output)) || output;
       return output.capturedFrame
-        ? computerObservationText(output)
-        : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`;
+        ? computerObservationText(shown)
+        : `${computerObservationText(shown)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`;
     },
     execute: async (requested) =>
       await onComputerWindow(
@@ -2578,7 +2609,13 @@ export function createInteractionAttemptToolDefinitions(
           // spans several windows, so most adapters cannot photograph it; its
           // tree is then the whole observation instead of a failed read.
           const capture = input.transport
-            .captureComputerTarget(input.workspaceId, value.computerSessionId, value.targetId)
+            .captureComputerTarget(
+              input.workspaceId,
+              value.computerSessionId,
+              value.targetId,
+              {},
+              requested.region ? { region: requested.region } : {},
+            )
             .then(
               (frame) => ({ frame, error: null as unknown }),
               (error: unknown) => ({ frame: null, error }),
@@ -2608,7 +2645,11 @@ export function createInteractionAttemptToolDefinitions(
             {
               ...observation,
               frameId: frame.frameId,
-              capturedFrame: { width: frame.width, height: frame.height },
+              capturedFrame: {
+                width: frame.width,
+                height: frame.height,
+                ...(frame.region ? { region: frame.region } : {}),
+              },
             },
             [
               {

@@ -113,6 +113,11 @@ import {
 } from "../former-placement-retirement";
 import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
 import {
+  captureZoomedComputerFrame,
+  parseComputerFrameRegionQuery,
+  translateZoomedComputerAction,
+} from "../computer-frame-zoom";
+import {
   controllerCacheAllowsHostFetch,
   controllerCachedUrlIsUsable,
   controllerHasCacheableDataPlane,
@@ -619,6 +624,7 @@ export function registerComputerSessionRoutes(
         "sessions:read",
       );
       const targetId = requireOpaqueParam(context, "targetId");
+      const region = parseComputerFrameRegionQuery(context.req.query("region"));
       const frame = await withActiveComputerController(
         context,
         grant,
@@ -627,12 +633,21 @@ export function registerComputerSessionRoutes(
         "session.read",
         "computer.read",
         async ({ sessionClient, binding }) => {
+          const expected = {
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId,
+          };
           try {
-            return await captureModelComputerFrame(sessionClient, {
-              computerSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              targetId,
-            });
+            return region
+              ? await captureZoomedComputerFrame(
+                  sessionClient,
+                  targetId,
+                  region,
+                  MODEL_COMPUTER_FRAME_MAX_BYTES,
+                  (captured) => validateComputerFrameForApi(captured, expected),
+                )
+              : await captureModelComputerFrame(sessionClient, expected);
           } catch (error) {
             if (error instanceof ComputerFrameEvidenceMismatchError) {
               observeComputerFrameEvidenceMismatch(deps.observability, error.reason);
@@ -756,6 +771,12 @@ export function registerComputerSessionRoutes(
               ) {
                 throw new HTTPException(403, { message: "Human desktop input is disabled" });
               }
+              // A pointer action on a zoomed frame acts on the native frame
+              // the zoom was cut from, in that frame's pixels.
+              const translated = translateZoomedComputerAction({
+                expectedFrameId: request.expectedFrameId,
+                action: request.action,
+              });
               const commandFields = {
                 protocolVersion: INTERACTION_PROTOCOL_VERSION,
                 operationId: request.operationId,
@@ -764,9 +785,9 @@ export function registerComputerSessionRoutes(
                 targetId: request.targetId,
                 expectedTargetGeneration: request.expectedTargetGeneration,
                 expectedObservationId: request.expectedObservationId,
-                expectedFrameId: request.expectedFrameId,
+                expectedFrameId: translated.expectedFrameId,
                 actor: interactionActorForGrant(grant),
-                action: request.action,
+                action: translated.action,
               };
               ComputerActionCommand.parse(commandFields);
               const secretValues = await resolveInteractionSecretValues({
@@ -1345,7 +1366,7 @@ export function registerComputerSessionRoutes(
         );
       }
       if (operation !== "computer.end") {
-        assertConnectedMachineComputerAccess(enrollment, operation);
+        await assertConnectedMachineComputerAccess(enrollment, operation);
       }
       const placementInstanceId = attachedEndPlacementInstanceId(
         operation,
@@ -1479,7 +1500,19 @@ export function registerComputerSessionRoutes(
             if (!enrollment?.connectionInstanceId) {
               throw new ComputerSessionStateError("Connected Machine is unavailable");
             }
-            assertConnectedMachineComputerAccess(enrollment, operation);
+            await assertConnectedMachineComputerAccess(enrollment, operation, async () => {
+              const sandbox = await getChannelAMachineSandbox(
+                deps.db,
+                {
+                  accountId: grant.accountId,
+                  workspaceId: sourceSession.workspaceId,
+                  sessionId: sourceSession.id,
+                },
+                await handle.machineAuthority(),
+                resolved.sandboxId!,
+              );
+              return sandbox?.name ?? null;
+            });
             screenControlAllowed = enrollment.allowScreenControl === true;
           }
           if (expectedPlacement?.kind === "connected_machine") {
@@ -2306,18 +2339,21 @@ function attachedEndPlacementInstanceId(
   return liveGeneration;
 }
 
-function assertConnectedMachineComputerAccess(
+async function assertConnectedMachineComputerAccess(
   enrollment: {
     hasDisplay: boolean;
     desktopUnavailableReason: string | null;
     allowScreenControl: boolean;
+    os?: string | null;
   },
   operation: ChannelAOperation,
-): void {
-  const error = connectedMachineComputerAccessError(
-    enrollment,
-    operation === "computer.action" || operation === "computer.control",
-  );
+  /** The checked machine's name, read only when access fails. */
+  machineName: () => Promise<string | null> = async () => null,
+): Promise<void> {
+  const requiresControl = operation === "computer.action" || operation === "computer.control";
+  if (!connectedMachineComputerAccessError(enrollment, requiresControl)) return;
+  const name = await machineName().catch(() => null);
+  const error = connectedMachineComputerAccessError(enrollment, requiresControl, name);
   if (!error) return;
   if (error.status === 403) {
     throw new HTTPException(403, { message: error.message });

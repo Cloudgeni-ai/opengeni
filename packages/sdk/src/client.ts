@@ -265,6 +265,7 @@ import {
   type ComputerClipboard,
   type ComputerFrame,
   type ComputerObservation,
+  type ComputerScreenshotOptions,
   type ComputerSession,
   type ComputerSessionAttachment,
   type ComputerSessionAttachmentRequest,
@@ -5452,10 +5453,27 @@ export class OpenGeniClient {
     computerSessionId: string,
     targetId: string,
     options: OpenGeniRequestOptions = {},
+    captureOptions: ComputerScreenshotOptions = {},
   ): Promise<ComputerFrame> {
+    const query = new URLSearchParams();
+    if (captureOptions.region !== undefined) {
+      const { x, y, width, height } = captureOptions.region;
+      if (
+        ![x, y, width, height].every((value) => typeof value === "number" && Number.isFinite(value))
+      ) {
+        throw new TypeError("computer screenshot region must be four finite numbers");
+      }
+      if (x < 0 || y < 0 || width <= 0 || height <= 0) {
+        throw new RangeError(
+          "computer screenshot region needs a non-negative x and y and a positive width and height",
+        );
+      }
+      query.set("region", [x, y, width, height].join(","));
+    }
+    const suffix = query.size > 0 ? `?${query}` : "";
     const response = await this.requestResponse(
       "GET",
-      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot`,
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot${suffix}`,
       {},
       options,
     );

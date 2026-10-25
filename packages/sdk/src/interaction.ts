@@ -1781,6 +1781,7 @@ export interface InteractionTransport {
     computerSessionId: string,
     targetId: string,
     options?: OpenGeniRequestOptions,
+    captureOptions?: ComputerScreenshotOptions,
   ): Promise<ComputerFrame>;
   callNativeComputerTool?(
     workspaceId: string,
@@ -2676,8 +2677,18 @@ export class ComputerSessionResource {
     return await this.transport.observeComputerTarget(this.workspaceId, this.id, targetId, options);
   }
 
-  async capture(targetId: string, options: OpenGeniRequestOptions = {}): Promise<ComputerFrame> {
-    return await this.transport.captureComputerTarget(this.workspaceId, this.id, targetId, options);
+  async capture(
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+    captureOptions: ComputerScreenshotOptions = {},
+  ): Promise<ComputerFrame> {
+    return await this.transport.captureComputerTarget(
+      this.workspaceId,
+      this.id,
+      targetId,
+      options,
+      captureOptions,
+    );
   }
 
   async callNativeTool(
@@ -2823,9 +2834,22 @@ export type ComputerFrameMetadata = {
   height: number;
   capturedAt: string;
   sha256: string;
+  /** On a zoomed frame: the rectangle of the target's regular screenshot it
+   *  shows, in that screenshot's pixels. Its own pixels are `width`x`height`. */
+  region?: ComputerFrameRegion;
 };
 
 export type ComputerFrame = ComputerFrameMetadata & { data: Uint8Array };
+
+/** A rectangle in the pixels of a target's regular screenshot. */
+export type ComputerFrameRegion = { x: number; y: number; width: number; height: number };
+
+export type ComputerScreenshotOptions = {
+  /** Zoom: capture only this rectangle of the target's regular screenshot, at
+   *  up to the target's full resolution. The result is its own frame; pointer
+   *  actions on it use its pixels. */
+  region?: ComputerFrameRegion;
+};
 
 export type BrowserFrameStreamOptions = InteractionFrameStreamOptions;
 
@@ -3058,6 +3082,7 @@ export function parseComputerFrameMetadata(value: unknown): ComputerFrameMetadat
     "height",
     "capturedAt",
     "sha256",
+    "region",
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) {
     throw new Error("computer frame metadata contains unknown fields");
@@ -3104,7 +3129,21 @@ export function parseComputerFrameMetadata(value: unknown): ComputerFrameMetadat
   if (!/^[0-9a-f]{64}$/u.test(metadata.sha256)) {
     throw new Error("computer frame digest is invalid");
   }
+  if (metadata.region !== undefined && !isComputerFrameRegion(metadata.region)) {
+    throw new Error("computer frame region is invalid");
+  }
   return metadata;
+}
+
+function isComputerFrameRegion(value: unknown): value is ComputerFrameRegion {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  return (
+    keys.length === 4 &&
+    (["x", "y", "width", "height"] as const).every(
+      (key) => typeof value[key] === "number" && Number.isFinite(value[key]) && value[key] >= 0,
+    )
+  );
 }
 
 export function decodeComputerFrameMetadataHeader(value: string): ComputerFrameMetadata {

@@ -39,7 +39,14 @@ export type ComputerTextObservation = {
   observationId: string;
   target: ComputerTextTarget & { targetGeneration: string };
   frameId: string | null;
-  capturedFrame?: { width: number; height: number } | undefined;
+  capturedFrame?:
+    | {
+        width: number;
+        height: number;
+        /** A zoomed frame: the rectangle of the regular screenshot it shows. */
+        region?: { x: number; y: number; width: number; height: number } | undefined;
+      }
+    | undefined;
   semantic:
     | {
         kind: "snapshot";
@@ -382,6 +389,16 @@ function boundsText(bounds: ComputerTextTarget["bounds"]): string | null {
   return `at ${bounds.x},${bounds.y} size ${bounds.width}x${bounds.height}`;
 }
 
+/** A screenshot coordinate as given, to at most one decimal. */
+function pixels(value: number): string {
+  return String(Math.round(value * 10) / 10);
+}
+
+/** How many zoomed pixels show one regular-screenshot pixel. */
+function zoomFactor(zoomedWidth: number, regionWidth: number): string {
+  return String(Math.round((zoomedWidth / regionWidth) * 10) / 10);
+}
+
 export function computerTargetLine(target: ComputerTextTarget): string {
   const parts = [`${target.kind} ${target.id} ${quoted(target.title)}`];
   if (target.processId !== null) parts.push(`pid ${target.processId}`);
@@ -401,8 +418,11 @@ export function computerObservationText(observation: ComputerTextObservation): s
   if (observation.frameId) fence.push(`frame ${observation.frameId}`);
   lines.push(fence.join(", "));
   if (observation.capturedFrame) {
+    const { width, height, region } = observation.capturedFrame;
     lines.push(
-      `Screenshot ${observation.capturedFrame.width}x${observation.capturedFrame.height} pixels; pointer x,y use these pixels.`,
+      region
+        ? `Zoomed screenshot ${width}x${height} pixels of the regular screenshot's region at ${pixels(region.x)},${pixels(region.y)} size ${pixels(region.width)}x${pixels(region.height)} (${zoomFactor(width, region.width)}x); pointer x,y on frame ${observation.frameId} use these zoomed pixels.`
+        : `Screenshot ${width}x${height} pixels; pointer x,y use these pixels.`,
     );
   }
   if (observation.changedRegions.length > 0) {
