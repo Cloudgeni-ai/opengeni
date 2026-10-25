@@ -19,6 +19,7 @@ import {
   AuthRunMutationResponse,
   BrowserAction,
   BrowserLocator,
+  INTERACTION_ACTION_DEADLINE_MAX_MS,
   INTERACTION_MAX_ACTIONS_PER_BATCH,
   INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND,
   BrowserActionBatch,
@@ -2976,6 +2977,14 @@ export type CreateFirstPartyInteractionAttemptToolsInput = Omit<
 };
 
 /**
+ * The API answers an action request only once the action or batch finished,
+ * which may take up to its own deadline (at most
+ * INTERACTION_ACTION_DEADLINE_MAX_MS). Bun's fetch otherwise ends a request
+ * whose connection stays silent for five minutes, so allow that whole bound.
+ */
+const FIRST_PARTY_INTERACTION_IDLE_TIMEOUT_MS = INTERACTION_ACTION_DEADLINE_MAX_MS + 60_000;
+
+/**
  * Construct the canonical Browser/Computer attempt definitions against the
  * ordinary Opengeni control plane. MCP/Codemode never receive controller keys,
  * raw CDP, or provider credentials; every call re-signs exact attempt authority.
@@ -2988,7 +2997,13 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
   const selectedTools = input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS;
   const permissions = input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   const baseUrl = firstPartyApiBaseUrl(input.settings, input.scope.workspaceId);
-  const rawFetch = input.fetch ?? globalThis.fetch.bind(globalThis);
+  const rawFetch =
+    input.fetch ??
+    (async (request: string | URL | Request, init?: RequestInit) =>
+      await globalThis.fetch(request, {
+        ...init,
+        timeout: FIRST_PARTY_INTERACTION_IDLE_TIMEOUT_MS,
+      } as RequestInit));
   const guarded = guardedMcpFetch(
     { ...input.settings, integrationsAllowPrivateNetworkTargets: true },
     rawFetch,

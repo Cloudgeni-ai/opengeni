@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { ErrorCode as AgentErrorCode } from "@opengeni/agent-proto";
-import { BrowserControlRequestError, SelfhostedControlError } from "@opengeni/runtime/sandbox";
+import {
+  BrowserControlActionDeadlineError,
+  BrowserControlRequestError,
+  BrowserControlTransportError,
+  SelfhostedControlError,
+} from "@opengeni/runtime/sandbox";
 import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 import { createApp } from "../src/app";
 import {
+  INTERACTION_ACTION_DEADLINE_ERROR_DETAIL_CODE,
+  interactionActionDeadlineApiError,
   interactionControlApiError,
   legacyInteractionCapacityError,
   legacyInteractionCapacityFailure,
@@ -129,6 +136,65 @@ describe("connected-machine interaction control errors", () => {
       "browser",
     );
     expect(projected?.details).not.toHaveProperty("controlRequestId");
+  });
+});
+
+describe("action deadline errors", () => {
+  const deadline = (surface: "browser" | "computer") =>
+    new BrowserControlActionDeadlineError(surface, 182_000, {
+      cause: new BrowserControlTransportError("browser controller request transport failed"),
+    });
+
+  test("says the action may still be running instead of reporting an outage", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    app.post("/v1/test/action-deadline", () => {
+      // Route helpers may wrap the controller failure as an HTTPException cause.
+      throw interactionActionDeadlineApiError(
+        new HTTPException(503, {
+          message: "browser controller is unavailable",
+          cause: deadline("browser"),
+        }),
+      )!;
+    });
+    const response = await app.request("http://localhost/v1/test/action-deadline", {
+      method: "POST",
+      headers: { "x-opengeni-correlation-id": "outer-api-request" },
+    });
+    expect(response.status).toBe(504);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 504,
+        code: "action_timeout",
+        message:
+          "The browser action did not finish within its 182-second limit and may still be running in the browser. Check the page before doing anything again; do not repeat the action automatically.",
+        retryable: false,
+        outcomeUnknown: true,
+        requestId: "outer-api-request",
+        details: { code: INTERACTION_ACTION_DEADLINE_ERROR_DETAIL_CODE, deadlineMs: 182_000 },
+      },
+    });
+  });
+
+  test("names the window for a computer action", () => {
+    const projected = interactionActionDeadlineApiError(deadline("computer"));
+    expect(projected?.status).toBe(504);
+    expect(projected?.message).toBe(
+      "The computer action did not finish within its 182-second limit and may still be running on the computer. Check the window before doing anything again; do not repeat the action automatically.",
+    );
+  });
+
+  test("leaves ordinary transport failures to the existing mapping", () => {
+    const transport = new BrowserControlTransportError("browser controller is not running");
+    expect(interactionActionDeadlineApiError(transport)).toBeNull();
+    expect(
+      interactionActionDeadlineApiError(new HTTPException(503, { cause: transport })),
+    ).toBeNull();
   });
 });
 

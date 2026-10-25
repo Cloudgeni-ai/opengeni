@@ -146,6 +146,7 @@ export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
+export * from "./interaction-action-deadline";
 export * from "./interaction-driver-diagnostic";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
@@ -882,6 +883,8 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "codex_compaction_v2_provider_locked",
     "provider_verification_failed",
     "upstream_unavailable",
+    /** A browser or computer action request outlived the deadline derived from its declared waits; it may still be running. */
+    "action_timeout",
     "tab_not_responding",
     "tab_crashed",
     "internal_error",
