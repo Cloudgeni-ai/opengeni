@@ -100,6 +100,7 @@ describe("worker accepted-turn credential restriction installation", () => {
         metadata: options.sessionMetadata ?? {},
       } as Awaited<ReturnType<typeof db.requireSession>>),
       spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(false),
+      spyOn(db, "getSessionEvent").mockResolvedValue(null),
       spyOn(capabilities, "settingsWithEnabledCapabilityMcpServers").mockResolvedValue(settings),
       spyOn(core, "settingsWithModelProviderCredentials").mockResolvedValue(settings),
       spyOn(db, "installOrReadTurnExecutionPolicyForAttempt").mockImplementation(

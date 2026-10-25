@@ -31279,7 +31279,14 @@ export async function getSession(
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!row) return null;
-    const [session] = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, [row]);
+    // mapSessionWithControl applies the effective policy after loading control.
+    // Do not perform the same policy projection twice in this scoped read.
+    const [session] = await canonicalSessionRowsFromEventCursors(
+      scopedDb,
+      workspaceId,
+      [row],
+      false,
+    );
     if (!session) throw new Error(`Session event cursor missing for session ${row.id}`);
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
@@ -72747,7 +72754,22 @@ export type ClaimSessionWorkForAttemptInput = {
    */
   resolveContinuedConnectionAccounts?: (
     tx: Database,
-    input: { sessionId: string; intent: ConnectionAccountIntent },
+    input: {
+      sessionId: string;
+      intent: ConnectionAccountIntent;
+      /** Connector configuration from the session row this claim already locks.
+       * No UI/control/model projection or mutable account authority is reused. */
+      session: Pick<
+        Session,
+        | "tools"
+        | "toolPolicy"
+        | "resources"
+        | "mcpServers"
+        | "firstPartyMcpTools"
+        | "firstPartyMcpPermissions"
+        | "agent"
+      >;
+    },
   ) => Promise<{
     mcpAccountBindings: McpConnectionAccountBinding[] | null;
     personalConnectionDelegations: McpPersonalConnectionDelegation[];
@@ -76137,10 +76159,20 @@ export async function claimSessionWorkForAttempt(
             // (for example a private session's owner) never lends its personal
             // accounts: the turn resolves shared accounts only.
             const principal = continuedConnectionAccountIntent.principal;
+            const connectorMetadata = await sessionMcpServerMetadataForSessions(
+              tx as unknown as Database,
+              workspaceId,
+              [sessionId],
+            );
             const resolved = await input.resolveContinuedConnectionAccounts(
               tx as unknown as Database,
               {
                 sessionId,
+                session: mapSession(
+                  session,
+                  serializeEffectiveSessionControl(effectiveControl),
+                  connectorMetadata.get(sessionId) ?? [],
+                ),
                 intent:
                   principal.kind === "subject" && principal.subjectId !== initiatingHumanSubjectId
                     ? { ...continuedConnectionAccountIntent, principal: { kind: "none" } }

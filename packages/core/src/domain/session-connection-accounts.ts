@@ -10,7 +10,12 @@ import type {
 import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import { resolveSessionFirstPartyMcpTools, type Settings } from "@opengeni/config";
-import { requireSession, requireWorkspace, type Database } from "@opengeni/db";
+import {
+  requireSession,
+  requireWorkspace,
+  type Database,
+  type ClaimSessionWorkForAttemptInput,
+} from "@opengeni/db";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   ConnectionAccountSelectionError,
@@ -109,6 +114,10 @@ export async function resolveContinuedConnectionAccounts(input: {
   workspaceId: string;
   sessionId: string;
   intent: ConnectionAccountIntent;
+  /** Only the owning claim supplies this, from its still-locked session row. */
+  claimedSession?: Parameters<
+    NonNullable<ClaimSessionWorkForAttemptInput["resolveContinuedConnectionAccounts"]>
+  >[1]["session"];
 }): Promise<{
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
@@ -118,7 +127,7 @@ export async function resolveContinuedConnectionAccounts(input: {
   const { db, settings, accountId, workspaceId, sessionId, intent } = input;
   const principalSubjectId =
     intent.principal.kind === "subject" ? intent.principal.subjectId : null;
-  const session = await requireSession(db, workspaceId, sessionId);
+  const session = input.claimedSession ?? (await requireSession(db, workspaceId, sessionId));
   const workspace = await requireWorkspace(db, workspaceId);
   const capabilitySettings = await settingsWithEnabledCapabilityMcpServers(
     db,
