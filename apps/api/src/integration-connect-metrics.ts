@@ -28,6 +28,7 @@ const FIXED_CONNECT_PROVIDERS = [
   "gmail",
   // The Drive MCP connection (its native API integration retired).
   "google-drive",
+  "google-calendar",
   "slack-personal",
   "github-personal",
   "github-app",

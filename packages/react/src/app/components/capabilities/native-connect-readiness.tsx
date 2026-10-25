@@ -35,6 +35,7 @@ export function nativeCatalogProviderId(
   const url = item.mcpUrl ?? item.endpointUrl;
   if (url === "https://gmailmcp.googleapis.com/mcp/v1") return "gmail";
   if (url === "https://drivemcp.googleapis.com/mcp/v1") return "google-drive";
+  if (url === "https://calendarmcp.googleapis.com/mcp/v1") return "google-calendar";
   if (url === "https://mcp.slack.com/mcp") return "slack-personal";
   return null;
 }

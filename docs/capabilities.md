@@ -926,6 +926,39 @@ See Google's [OAuth web-server guide](https://developers.google.com/identity/pro
 [Gmail REST reference](https://developers.google.com/workspace/gmail/api/reference/rest),
 and [restricted-scope verification requirements](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification).
 
+## Google Calendar bridge
+
+Google Calendar uses the same reviewed REST-bridge design as Gmail. The catalog
+row's `https://calendarmcp.googleapis.com/mcp/v1` resource (Google's hosted
+Calendar MCP URL) is the connection and consent identity, but setup, tool
+discovery and execution run against Opengeni's bridge over the Calendar v3 REST
+API (`packages/runtime/src/google-calendar-rest-mcp.ts`); the hosted server is
+never contacted. OAuth discovery uses Google's pinned OpenID metadata, the
+deployment's existing Google client, offline consent and no RFC 8707
+`resource` parameter, exactly as for Gmail.
+
+Opengeni requests three scopes and requires all of them to be granted:
+
+- `https://www.googleapis.com/auth/calendar.calendarlist.readonly`
+- `https://www.googleapis.com/auth/calendar.events`
+- `https://www.googleapis.com/auth/calendar.freebusy`
+
+Connections are personal-only; every member connects their own calendar, and
+another participant cannot borrow the selected account. Setup requires a fresh
+refresh token and a successful read of the primary calendar, whose email becomes
+the account label. The broker binding permits only the calendar list, events
+and free/busy paths under `https://www.googleapis.com/calendar/v3/`.
+
+The catalog pins seven tools: `list_calendars`, `list_events`, `get_event` and
+`find_free_busy` are allowed by default; `create_event`, `update_event` and
+`delete_event` ask first. Writes are never replayed after an ambiguous provider
+response, and updates are guarded by the event's ETag. Setup is off by default
+behind `OPENGENI_GOOGLE_CALENDAR_ENABLED` and also respects
+`OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED`. Calendar scopes are sensitive rather
+than restricted, so production use needs Google's sensitive-scope verification
+but no security assessment. See [Google Calendar](google-calendar.md) for the
+tool behavior, time-zone handling and operator setup.
+
 ## integrations.sh Snapshot Imports
 
 The integrations catalog import pipeline is offline and reviewable. It never
