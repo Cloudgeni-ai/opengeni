@@ -48,6 +48,9 @@ const MAX_ATTACHED_PROFILES: usize = 1_000;
 const MAX_TABS_PER_PROFILE: usize = 100_000;
 const MAX_PENDING_COMMANDS: usize = 4_096;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long past the caller's timeout an unanswered command still counts as
+/// work the extension is doing.
+const LATE_RESULT_GRACE: Duration = Duration::from_secs(10 * 60);
 /// Ended extension connections a bridge remembers and reports.
 const MAX_RECORDED_CONNECTION_ENDS: usize = 32;
 const MAX_CONNECTION_END_DETAIL_BYTES: usize = 512;
@@ -1053,7 +1056,10 @@ struct PendingCommand {
     device_id: String,
     connection_generation: String,
     settle: Option<oneshot::Sender<Result<ExtensionCommandResult, BrowserBridgeRequestFailure>>>,
-    _reservation: Option<WorkReservation>,
+    /// Physical work the extension may still be doing. Released when the
+    /// result arrives, the port ends, or the extension has had
+    /// `LATE_RESULT_GRACE` past the caller's timeout to answer.
+    reservation: Option<WorkReservation>,
 }
 
 struct ControllerReply {
@@ -1249,7 +1255,7 @@ impl BrowserBridgeInventory {
                     device_id: device_id.to_string(),
                     connection_generation: transport_generation.clone(),
                     settle: Some(settle),
-                    _reservation: opengeni_agent_platform::current_work_reservation(),
+                    reservation: opengeni_agent_platform::current_work_reservation(),
                 },
             );
             (outbound, bytes, receiver, transport_generation)
@@ -1272,9 +1278,33 @@ impl BrowserBridgeInventory {
             Err(_) => {
                 // Timeout ends only the caller's wait. The extension may still
                 // execute; a matching late result is the physical settlement.
+                // A command that never answers (a CDP call that never returns)
+                // must not hold self-updates while its port stays open, so its
+                // work stops counting after a further grace period. A result
+                // that still arrives later is matched and ignored as before.
+                let inventory = self.clone();
+                let request_id = request_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(LATE_RESULT_GRACE).await;
+                    inventory.stop_counting_late_command(&request_id, &transport_generation);
+                });
                 Err(BrowserBridgeError::Timeout)
             }
         }
+    }
+
+    /// Keep an unanswered command matchable for its late result, but stop it
+    /// holding self-updates.
+    fn stop_counting_late_command(&self, request_id: &str, connection_generation: &str) {
+        let released = {
+            let mut state = self.state.write().expect("browser bridge inventory lock");
+            state
+                .pending
+                .get_mut(request_id)
+                .filter(|pending| pending.connection_generation == connection_generation)
+                .and_then(|pending| pending.reservation.take())
+        };
+        drop(released);
     }
 
     fn register(
@@ -3317,6 +3347,50 @@ mod tests {
         assert!(drain.seal_update("update"));
         drain.release_update("update");
 
+        // A command the extension never answers on a live port stops holding
+        // updates after its grace period, and its late result is still taken.
+        let mut third = connect_extension(directory.path(), device_id, "connection-3", None).await;
+        let late_id = "44444444-4444-4444-8444-444444444444";
+        let waiter = sent(late_id, "connection-3");
+        assert_eq!(read_json(&mut third).await["type"], "command");
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        inventory.stop_counting_late_command(late_id, "connection-2");
+        assert_eq!(
+            drain.snapshot().unwrap().routed,
+            1,
+            "only the exact port's command"
+        );
+        inventory.stop_counting_late_command(late_id, "connection-3");
+        assert_eq!(drain.snapshot().unwrap().routed, 0);
+        write_native_frame(
+            &mut third,
+            &serde_json::to_vec(&json!({
+                "type":"command_result", "requestId":late_id, "deviceId":device_id,
+                "connectionGeneration":"connection-3", "ok":true, "payload":{"pong":true},
+                "error":null
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while inventory
+                .state
+                .read()
+                .unwrap()
+                .pending
+                .contains_key(late_id)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the late result settles the command");
+        assert_eq!(server.inventory().snapshot().devices.len(), 1);
+
+        drop(third);
         drop(first);
         server.shutdown().await.expect("shutdown");
     }

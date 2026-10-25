@@ -1,4 +1,4 @@
 ---
 ---
 
-Agent only: a machine whose attached Chrome reconnected, or closed its connection, while a browser command was still waiting for an answer can update itself again. That command's answer can never arrive once its connection is gone, but the agent kept it as unfinished work, so the self-update waited for it forever.
+Agent only: attached Chrome can no longer keep a machine from updating itself. A browser command still waiting for an answer when Chrome reconnected or closed its connection used to count as unfinished work forever, because its answer could never arrive. A command Chrome never answers now also stops counting ten minutes after its caller gave up.
