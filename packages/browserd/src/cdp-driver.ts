@@ -9352,8 +9352,11 @@ function optionList(labels: readonly string[]): string {
  * shadow roots and slots. Only boxes a user can scroll count: overflow auto,
  * scroll or overlay, or the viewport unless it hides overflow. Each axis tries,
  * in order: the element itself (or the viewport for a page scroll), the
- * scrolling panels inside it under its centre, its own ancestors, and then the
- * largest visible scrolling panel inside it. Panels inside count because fixed
+ * scrolling panels inside it under its centre when it cannot scroll at all on
+ * that axis (the wheel's order), its own ancestors, and then, only when none
+ * of those can scroll at all on that axis, the largest visible scrolling panel
+ * inside it. A box at its end is not a fallback case: the scroll is refused, so
+ * a scroll-until-it-stops loop stops. Panels inside count because fixed
  * layouts (side sheets, drawers, dialogs, split views) put the content that
  * moves in an inner box the agent may not have targeted. Form fields are not
  * panels: their content is their value. Returns whether anything moved. */
@@ -9373,14 +9376,17 @@ const SCROLL_FROM_FUNCTION = `function(start, page, deltaX, deltaY) {
     const viewport = html === "visible" && doc.body ? overflow(doc.body, axis) : html;
     return viewport !== "hidden" && viewport !== "clip";
   };
+  const range = (element, axis) =>
+    axis === "x"
+      ? element.scrollWidth - element.clientWidth
+      : element.scrollHeight - element.clientHeight;
+  // Whether a box can scroll on an axis at all, wherever it is now.
+  const canScroll = (element, axis) => scrollable(element, axis) && range(element, axis) > 1;
   const fields = new Set(["INPUT", "TEXTAREA", "SELECT"]);
   const panel = (element, axis) =>
     element !== root &&
     !fields.has(element.tagName) &&
-    (axis === "x"
-      ? element.scrollWidth - element.clientWidth
-      : element.scrollHeight - element.clientHeight) > 1 &&
-    scrollable(element, axis);
+    canScroll(element, axis);
   const visibleArea = (element) => {
     const box = element.getBoundingClientRect();
     const width = Math.min(box.right, view.innerWidth) - Math.max(box.left, 0);
@@ -9441,13 +9447,23 @@ const SCROLL_FROM_FUNCTION = `function(start, page, deltaX, deltaY) {
     };
     const first = page ? root : start;
     if (scrollable(first, axis) && tryScroll(first)) return true;
-    for (const element of underCentre())
-      if (panel(element, axis) && tryScroll(element)) return true;
+    // Panels are a fallback for boxes that cannot scroll at all on this axis,
+    // never for one that is at its end: that refusal is how an agent knows
+    // it reached the end.
+    if (!canScroll(first, axis))
+      for (const element of underCentre())
+        if (panel(element, axis) && tryScroll(element)) return true;
+    let chainCanScroll = canScroll(first, axis);
     if (!page) {
-      for (let element = parentOf(start); element; element = element === root ? null : parentOf(element))
-        if (scrollable(element, axis) && tryScroll(element)) return true;
+      for (let element = parentOf(start); element; element = element === root ? null : parentOf(element)) {
+        if (!scrollable(element, axis)) continue;
+        chainCanScroll ||= canScroll(element, axis);
+        if (tryScroll(element)) return true;
+      }
+      chainCanScroll ||= canScroll(root, axis);
       if (scrollable(root, axis) && tryScroll(root)) return true;
     }
+    if (chainCanScroll) return false;
     const panels = insidePanels()
       .filter((element) => panel(element, axis))
       .map((element) => [visibleArea(element), element])

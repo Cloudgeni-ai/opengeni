@@ -222,3 +222,123 @@ e2e(
   },
   60_000,
 );
+
+// A documentation page: the page scrolls, beside a sticky sidebar that
+// scrolls on its own, and the article holds one short code panel near its top.
+const DOCS_FIXTURE = `<!doctype html><title>Docs</title>
+<style>
+  body { margin: 0; display: flex; font: 14px sans-serif; }
+  #sidebar { position: sticky; top: 0; width: 220px; height: 100vh; overflow-y: auto; flex: none; }
+  #sidebar a { display: block; padding: 8px; }
+  main { flex: 1; padding: 0 16px; }
+  main p { margin: 0 0 16px; }
+  pre { max-height: 120px; overflow: auto; }
+</style>
+<nav id="sidebar" aria-label="Contents"></nav>
+<main><h1>Guide</h1><pre id="code"></pre><div id="article"></div></main>
+<script>
+  for (let i = 1; i <= 80; i++) {
+    const a = document.createElement("a");
+    a.href = "#" + i;
+    a.textContent = "Section " + i;
+    sidebar.append(a);
+  }
+  code.textContent = "line\\n".repeat(60);
+  for (let i = 1; i <= 120; i++) {
+    const p = document.createElement("p");
+    p.textContent = "Paragraph " + i + " of the guide.";
+    article.append(p);
+  }
+</script>`;
+
+e2e(
+  "a page that can scroll but is at its end refuses, and never moves a panel instead",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-nested-scroll-");
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    let cdp: CdpConnection | null = null;
+    const command = (
+      observation: BrowserObservation,
+      action: BrowserActionCommand["action"],
+    ): BrowserActionCommand => ({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId,
+      controllerGeneration,
+      targetId: observation.target.id,
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration!,
+      expectedFrameId: observation.frameId!,
+      actor: { kind: "human", subjectId: "nested-scroll-fixture" },
+      observationMode: "none",
+      action,
+    });
+    try {
+      const initial = await driver.start(`data:text/html,${encodeURIComponent(DOCS_FIXTURE)}`);
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: initial.target.id,
+        flatten: true,
+      });
+      const evaluate = async (expression: string) =>
+        (
+          await cdp!.send<{ result: { value: unknown } }>(
+            "Runtime.evaluate",
+            { expression, returnByValue: true, awaitPromise: true },
+            { sessionId: attached.sessionId },
+          )
+        ).result.value;
+      const positions = () => evaluate("[scrollY, sidebar.scrollTop, code.scrollTop]");
+      const end = Number(await evaluate("document.scrollingElement.scrollHeight - innerHeight"));
+      expect(end).toBeGreaterThan(400);
+
+      // Away from its end the page scrolls, and nothing else moves.
+      const moved = await controller.run(
+        command(initial, { type: "scroll", deltaX: 0, deltaY: 300 }),
+      );
+      expect(moved.state).toBe("completed");
+      expect(await positions()).toEqual([300, 0, 0]);
+
+      // At its end a page scroll refuses, again and again, with nothing moved.
+      await evaluate(`scrollTo(0, ${end})`);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const atEnd = await controller.run(
+          command(initial, { type: "scroll", deltaX: 0, deltaY: 400 }),
+        );
+        expect(atEnd.state).toBe("failed");
+        expect(atEnd.error?.code).toBe("invalid_action");
+        expect(await positions()).toEqual([end, 0, 0]);
+      }
+
+      // A located scroll on the article refuses too: its page is at its end,
+      // and the code panel is not under it on screen.
+      const main = { kind: "role", role: "main" } as const;
+      const located = await controller.run(
+        command(initial, { type: "scroll", locator: main, deltaX: 0, deltaY: 400 }),
+      );
+      expect(located.state).toBe("failed");
+      expect(located.error?.code).toBe("invalid_action");
+      expect(await positions()).toEqual([end, 0, 0]);
+    } finally {
+      await cdp?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
