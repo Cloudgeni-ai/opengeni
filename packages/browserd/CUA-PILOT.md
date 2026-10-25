@@ -70,18 +70,22 @@ read's `timeout_ms`, so a slow app costs a few requests per element instead of
 about fifteen and cannot hold a read past its budget. An element whose request
 fails for another reason is read one attribute at a time, as before; the
 reading is the same. The first `get_window_state` of a process after an action
-on it (outside a `run_steps` batch) waits until the app's accessibility
-notifications for the read window (layout changes, created elements, value,
-title, focus and selection changes, new windows) have stopped for 300 ms: an
-action returns when the app has taken it, not when its result is on screen, and
-a read at once showed the screen before it or one half way. A read with no
-notification within 300 ms of the action's end goes ahead, and one whose window
-keeps changing goes ahead 2 s after the action. A window whose notifications
-show it changed while it was read (an app can pause for half a second in the
-middle of a change) is read again once quiet, at most three reads in all and
-not past those 2 s. Notifications of the process's other windows do not count
-(the iOS Simulator shows every booted device in one process). The read reports
-what it waited for as `settle`, with the number of reads.
+on it (outside a `run_steps` batch) waits only while the read window is
+changing: an action returns when the app has taken it, not when its result is
+on screen, and a read at once showed the screen before it or one half way. With
+no accessibility notification for the read window within 100 ms of the action's
+end, the read goes ahead at once. Otherwise it waits until the window's
+notifications (layout
+changes, created elements, focus and selection changes, row counts, new windows
+and sheets, opened menus) have stopped for 200 ms, counted from the last one,
+and goes ahead 1 s after the action at the latest. Value and title changes do
+not count, so a window that keeps updating numbers or text (a clock, a progress
+bar, a terminal, a process monitor) does not hold the read. A window whose
+notifications show it changed while it was read (an app can pause in the middle
+of a change) is read again once quiet, at most three reads in all and not past
+that 1 s. Notifications of the process's other windows do not count (the iOS
+Simulator shows every booted device in one process). The read reports what it
+waited for as `settle`, with the number of reads.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
