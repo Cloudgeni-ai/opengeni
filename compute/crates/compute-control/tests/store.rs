@@ -828,3 +828,114 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap();
 }
+
+/// A replica of an older build, still running during a rollout, refuses
+/// only a sandbox write naming an owner listed as lost, so a host it does
+/// not find passes its check. The database itself refuses a write naming a
+/// host since forgotten: no build can leave a sandbox owned by a host that
+/// nothing can give up on.
+#[tokio::test]
+async fn the_database_refuses_an_older_builds_write_naming_a_forgotten_host() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let store = PostgresStore::connect(&url, None, 2).await.unwrap();
+    let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let (live, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let row = sandbox(live);
+    assert_eq!(store.insert(&row).await.unwrap(), Write::Done);
+    // Given up on before any other check's give-ups, then forgotten.
+    let count = renewals(&store, host).await.unwrap();
+    assert_eq!(store.give_up(host, count, 5).await.unwrap(), Some(0));
+    store.prune_hosts(6).await.unwrap();
+    assert!(!listed(&store, host).await, "forgotten");
+
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let forgotten = i64::try_from(host.0).unwrap();
+    let older = "with owner as (select state = 'lost' as lost from compute_hosts \
+                 where id = $1 for share) \
+                 update compute_sandboxes set owner = $1, epoch = epoch + 1, \
+                 version = version + 1 \
+                 where id = $2 and not exists (select 1 from owner where lost)";
+    let refused = client
+        .execute(older, &[&forgotten, &row.id.to_string()])
+        .await
+        .expect_err("refused by the database");
+    assert_eq!(
+        refused.code(),
+        Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION),
+        "{refused}"
+    );
+    let kept = store.sandbox(row.id).await.unwrap().unwrap();
+    assert_eq!(kept.ownership, row.ownership, "the sandbox is unchanged");
+}
+
+/// A database whose sandbox names a host it does not have (none should)
+/// still migrates: that sandbox is given up on, as giving up on its host
+/// would, before the owner must be a host the store has.
+#[tokio::test]
+async fn migrating_gives_up_on_a_sandbox_naming_a_host_the_store_lacks() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let schema = format!("compute_dangling_{:x}", random());
+    client
+        .batch_execute(&format!("create schema {schema}"))
+        .await
+        .unwrap();
+    let scoped = format!("{url} options='-c search_path={schema}'");
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let (live, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let dangling = sandbox(host);
+    let kept = sandbox(live);
+    for row in [&dangling, &kept] {
+        assert_eq!(store.insert(row).await.unwrap(), Write::Done);
+    }
+    drop(store);
+    // As the database was before this version: no constraint, and here a
+    // host row gone that a sandbox still names.
+    client
+        .batch_execute(&format!(
+            "alter table {schema}.compute_sandboxes drop constraint compute_sandboxes_owner_host; \
+             delete from {schema}.compute_hosts where id = {}; \
+             update {schema}.compute_schema set version = 2",
+            host.0
+        ))
+        .await
+        .unwrap();
+
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let given_up = store.sandbox(dangling.id).await.unwrap().unwrap();
+    assert_eq!(given_up.ownership.owner, None);
+    assert_eq!(given_up.ownership.epoch.0, dangling.ownership.epoch.0 + 1);
+    assert_eq!(
+        store.sandbox(kept.id).await.unwrap().unwrap().ownership,
+        kept.ownership,
+        "a sandbox naming a host the store has is unchanged"
+    );
+    let refused = client
+        .execute(
+            &format!("update {schema}.compute_sandboxes set owner = $1 where id = $2"),
+            &[&i64::try_from(host.0).unwrap(), &kept.id.to_string()],
+        )
+        .await
+        .expect_err("the owner must be a host the store has");
+    assert_eq!(
+        refused.code(),
+        Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION),
+        "{refused}"
+    );
+    drop(store);
+    client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await
+        .unwrap();
+}

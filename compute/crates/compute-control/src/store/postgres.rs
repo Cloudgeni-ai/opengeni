@@ -627,14 +627,19 @@ impl Store for PostgresStore {
     async fn prune_hosts(&self, before_ms: u64) -> Result<u64> {
         // A host given up on with no date (before the column, or by an
         // older build during a rollout) is dated now, by the database's
-        // clock, and forgotten a whole retention later.
+        // clock, and forgotten a whole retention later. Giving up cleared
+        // every owner naming it, and no write names a host given up on, so
+        // none should still name it; one that did would be kept rather than
+        // stop the others from being forgotten.
         self.client()
             .await?
             .execute(
                 "with dated as (update compute_hosts \
                  set gone_ms = (extract(epoch from now()) * 1000)::bigint \
                  where state = 'lost' and gone_ms is null) \
-                 delete from compute_hosts where state = 'lost' and gone_ms < $1",
+                 delete from compute_hosts where state = 'lost' and gone_ms < $1 \
+                 and not exists (select 1 from compute_sandboxes \
+                 where owner = compute_hosts.id)",
                 &[&big(before_ms)?],
             )
             .await

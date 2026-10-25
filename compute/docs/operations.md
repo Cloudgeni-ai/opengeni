@@ -403,7 +403,10 @@ authority alone for agent links.
   running any sandbox that moved (ADR 18). A host given up on stays in
   `GET /v1/hosts` as `lost` for a day, then the service forgets it, so
   machines replaced over months do not pile up there or in the metrics;
-  if it comes back after that, it registers as a new host. A host whose
+  if it comes back after that, it registers as a new host. The database
+  refuses any write naming a forgotten host, including one from an older
+  replica during a rollout (that request gets an error instead), so the
+  control service can be rolled forward or back across this. A host whose
   fence keeps failing is not given up on and stays `live` with a growing
   `compute_fleet_host_renewal_age_seconds`: alert on that, or on
   `compute_control_give_up_failures_total`, and fence it by hand (stop

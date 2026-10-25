@@ -266,6 +266,10 @@ can be built and tested.
   forgotten a day later (its row deleted; replicas' views drop it at
   their next full read) without anything coming to name it again; a
   machine that comes back under a forgotten name registers as a new host.
+  The database enforces the same (a sandbox's owner is a foreign key to
+  its host), so a replica of an older build still running during a
+  rollout, whose check lets a missing host pass, has such a write refused
+  too, and rolling back keeps working: older builds never forget hosts.
 - **Recovery.** When the leader marks a host lost (so a late renewal fails
   and the host must register again), it raises the owner epoch of each of
   its sandboxes and clears their owner. Each comes back on its next wake,

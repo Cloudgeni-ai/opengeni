@@ -242,9 +242,12 @@ impl<L: Leases> Leading<L> {
             }
         };
         let now = self.clock.now();
-        for (host, count) in renewals {
-            self.expiry.observe(host, count, now);
-        }
+        // The read lists every host not given up on: one it lacks was
+        // given up on (perhaps without this leadership seeing the outcome)
+        // and perhaps since forgotten, so nothing is left to watch or try
+        // again for it.
+        self.expiry.observe_all(renewals, now);
+        self.again_at.retain(|host, _| self.expiry.watches(*host));
         let lapsed: Vec<_> = self.expiry.expired(now).collect();
         for (host, renewals) in lapsed {
             let draining = view.draining(host);
@@ -698,6 +701,60 @@ mod tests {
     }
 
     const GIB: u64 = 1024;
+
+    /// One host that stops renewing, and a give-up that takes but whose
+    /// answer is lost: the leader hears an error.
+    #[derive(Default)]
+    struct AnswerLost {
+        given_up: std::sync::atomic::AtomicBool,
+        give_ups: AtomicU64,
+    }
+
+    impl Leases for AnswerLost {
+        fn renewals(&self) -> impl Future<Output = store::Result<Vec<(HostId, u64)>>> + Send {
+            std::future::ready(Ok(if self.given_up.load(Ordering::SeqCst) {
+                Vec::new()
+            } else {
+                vec![(HOST, 1)]
+            }))
+        }
+
+        fn give_up(
+            &self,
+            _host: HostId,
+            _renewals: u64,
+        ) -> impl Future<Output = store::Result<Option<usize>>> + Send {
+            self.give_ups.fetch_add(1, Ordering::SeqCst);
+            self.given_up.store(true, Ordering::SeqCst);
+            std::future::ready(Err(store::StoreError::Database(
+                "the connection closed".into(),
+            )))
+        }
+    }
+
+    /// A host given up on without the leader hearing it worked, and then
+    /// forgotten, leaves nothing behind in the leader: the next read lacks
+    /// it, so it is neither watched nor tried again.
+    #[tokio::test(start_paused = true)]
+    async fn a_host_the_reads_no_longer_list_is_neither_watched_nor_tried_again() {
+        let terms = terms();
+        let leases = Arc::new(AnswerLost::default());
+        let view = View::new(1);
+        let mut leading = Leading::new(Arc::clone(&leases), terms, None);
+        while leases.give_ups.load(Ordering::SeqCst) == 0 {
+            leading.tick(&view).await;
+            tokio::time::sleep(EVERY).await;
+        }
+        leading.tick(&view).await;
+        assert_eq!(leading.still().count(), 0, "no longer watched");
+        // Long past the wait before a failed give-up is tried again.
+        for _ in 0..100 {
+            tokio::time::sleep(FENCE_AGAIN).await;
+            leading.tick(&view).await;
+        }
+        assert_eq!(leases.give_ups.load(Ordering::SeqCst), 1, "not tried again");
+        assert!(leading.again_at.is_empty(), "nor waiting to be");
+    }
 
     /// Rooms for sandboxes of up to 4 GiB and 2 processors, two kept.
     const POLICY: ScalePolicy = ScalePolicy {

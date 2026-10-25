@@ -86,9 +86,18 @@ alter table compute_sandboxes add column if not exists whole_epoch bigint;
 /// Version 3: when a host was given up on (`gone_ms`), so hosts given up on
 /// are forgotten after a while (`Store::prune_hosts`, which also dates the
 /// hosts given up on before this, or by an older build, from when it first
-/// sees them).
+/// sees them); and a sandbox's owner must be a host the store has, so no
+/// write, from this build or an older one still running during a rollout,
+/// can name a host since forgotten. A sandbox naming a host the store does
+/// not have (none should) is first given up on, as giving up on its host
+/// would.
 const MIGRATION_3: &str = "
 alter table compute_hosts add column if not exists gone_ms bigint;
+update compute_sandboxes set owner = null, epoch = epoch + 1, version = version + 1
+    where owner is not null
+    and not exists (select 1 from compute_hosts where id = compute_sandboxes.owner);
+alter table compute_sandboxes add constraint compute_sandboxes_owner_host
+    foreign key (owner) references compute_hosts (id);
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take
