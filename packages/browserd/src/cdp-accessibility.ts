@@ -88,7 +88,7 @@ export function normalizeCdpAccessibilityTree(options: {
     if (node.ignored === true || roleValue(node) === "InlineTextBox") continue;
     const role = normalizedRole(roleValue(node));
     const name = accessibleStringValue(node.name) || null;
-    const states = propertyStates(node.properties);
+    const states = propertyStates(node.properties, node.value?.value);
     const backendDOMNodeId = finitePositiveInteger(node.backendDOMNodeId);
     const ref = semanticRef(
       {
@@ -256,7 +256,10 @@ function safeValue(
   node: CdpAxNode,
   role: string,
 ): { value?: string | { redacted: true; reason: "password" } } {
-  const value = stringValue(node.value);
+  // Sliders, progress bars and meters report a number.
+  const raw = node.value?.value;
+  const value =
+    typeof raw === "number" && Number.isFinite(raw) ? String(raw) : stringValue(node.value);
   if (!value) return {};
   // Chromium exposes a password field's value as one mask character per
   // character typed. Report it as redacted rather than as dots. Other form
@@ -341,7 +344,7 @@ export function semanticRef(
   return usedRefs.has(short) ? `${kind}${digest}` : short;
 }
 
-function propertyStates(properties: unknown): string[] {
+function propertyStates(properties: unknown, numericValue: unknown = undefined): string[] {
   if (!Array.isArray(properties)) return [];
   const states: string[] = [];
   for (const property of properties) {
@@ -349,6 +352,15 @@ function propertyStates(properties: unknown): string[] {
       continue;
     }
     const value = property.value.value;
+    // An empty property (the value text of a slider without one) says nothing.
+    if (value === "") continue;
+    // A slider's value text that repeats its value adds nothing to the value.
+    if (
+      property.name === "valuetext" &&
+      typeof numericValue === "number" &&
+      String(value) === String(numericValue)
+    )
+      continue;
     if (value === true || value === "true") states.push(property.name.slice(0, 128));
     else if (value !== false && value !== undefined && value !== null && value !== "false") {
       states.push(`${property.name}=${String(value)}`.slice(0, 128));
@@ -381,6 +393,7 @@ function actionsForRole(
     return ["focus", "fill", "type", "press"];
   }
   if (NATIVE_DATE_TIME_ROLES.has(role)) return ["focus", "fill"];
+  if (role === "slider") return ["focus", "fill", "press"];
   if (["checkbox", "radio", "switch"].includes(role)) return ["click", "check"];
   if (["combobox", "listbox"].includes(role)) return ["click", "select"];
   return [];

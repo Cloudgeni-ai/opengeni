@@ -4226,6 +4226,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "fill": {
         const node = await this.resolveActionLocator(state, action.locator);
         if (await this.fillNativeDateTimeInput(state, node.backendDOMNodeId, action.value)) return;
+        if (await this.fillSlider(state, node.backendDOMNodeId, action.value)) return;
         await this.assertFillableTarget(state, node.backendDOMNodeId);
         await this.focusNode(state, node.backendDOMNodeId);
         await this.selectAllAndDelete(state, node.backendDOMNodeId);
@@ -5828,6 +5829,118 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "outcome_unknown",
         `browser set the ${type} input's value but the page did not keep it; check the current page before continuing`,
       );
+    }
+    return true;
+  }
+
+  /**
+   * Sets a slider to a number. A native range input takes the value
+   * directly, the way dragging its handle commits one. A custom slider
+   * (role slider) only moves the way its page lets a person move it, so press
+   * the arrow keys toward the value, reading its aria-valuenow after each
+   * press. Returns false for every other element.
+   */
+  private async fillSlider(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    value: string,
+  ): Promise<boolean> {
+    if (backendDOMNodeId === null) return false;
+    const target = value.trim() === "" ? Number.NaN : Number(value.trim());
+    const read = async (): Promise<SliderState | null> =>
+      sliderState(
+        await this.callOnNode(state, backendDOMNodeId, SLIDER_STATE_FUNCTION, [
+          { value: Number.isFinite(target) ? target : null },
+        ]),
+      );
+    const initial = await read();
+    if (initial === null) return false;
+    if (initial.disabled) {
+      throw new InteractionDefiniteDriverError("invalid_action", "this slider is disabled");
+    }
+    const range = `${initial.min ?? "its minimum"} to ${initial.max ?? "its maximum"}`;
+    if (
+      !Number.isFinite(target) ||
+      (initial.min !== null && target < initial.min) ||
+      (initial.max !== null && target > initial.max)
+    ) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `this slider takes a number from ${range}; it is at ${initial.value ?? "an unknown value"}`,
+      );
+    }
+    if (initial.kind === "range") {
+      if (initial.nearest !== null && initial.nearest !== target) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          `this slider moves in steps; the nearest value it takes is ${initial.nearest}`,
+        );
+      }
+      const result = await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        SET_RANGE_VALUE_FUNCTION,
+        [{ value: target }],
+        { potentialEffect: true },
+      );
+      if (!isRecord(result) || result.kind !== "set") {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "browser set the slider's value but the page did not keep it; check the current page before continuing",
+        );
+      }
+      return true;
+    }
+    if (initial.value === null) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "this slider does not report its value; drag its handle or press its keys and check the page",
+      );
+    }
+    if (initial.value === target) return true;
+    await this.focusNode(state, backendDOMNodeId);
+    let current = initial.value;
+    // Some sliders run the other way (right to left, or larger values at
+    // the bottom); the first press shows which arrow raises the value.
+    let reversed = false;
+    for (let presses = 0; current !== target; presses++) {
+      if (presses >= SLIDER_MAX_KEY_PRESSES) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `the slider moved from ${initial.value} to ${current} in ${presses} arrow key presses without reaching ${target}; drag its handle the rest of the way`,
+        );
+      }
+      const up = current < target;
+      await this.pressKey(state, this.parseActionKey(up !== reversed ? "ArrowRight" : "ArrowLeft"));
+      let next = (await read())?.value ?? null;
+      if (next === current) {
+        await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
+        next = (await read())?.value ?? null;
+      }
+      if (next === null || next === current) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `this slider did not move when its arrow key was pressed (it is at ${current}); drag its handle or click its track instead`,
+        );
+      }
+      if (up ? next < current : next > current) {
+        if (reversed || presses > 0) {
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `this slider moved away from ${target} when its arrow keys were pressed; it is now at ${next}`,
+          );
+        }
+        reversed = true;
+        current = next;
+        continue;
+      }
+      if (up ? next > target : next < target) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `this slider moves in steps of ${Math.abs(next - current)} and cannot be set to ${target}; it is now at ${next}`,
+        );
+      }
+      current = next;
     }
     return true;
   }
@@ -8148,6 +8261,84 @@ const FILL_TARGET_FUNCTION = `function() {
     return { kind: "popup", role: role || "button" };
   }
   return { kind: "other", role: role || tag || "element" };
+}`;
+
+// Enough arrow presses for a 0 to 100 slider end to end, twice over.
+const SLIDER_MAX_KEY_PRESSES = 250;
+
+type SliderState = {
+  kind: "range" | "aria";
+  value: number | null;
+  min: number | null;
+  max: number | null;
+  /** For a range input, the value it would take for the requested one. */
+  nearest: number | null;
+  disabled: boolean;
+};
+
+function sliderState(value: unknown): SliderState | null {
+  if (!isRecord(value) || (value.kind !== "range" && value.kind !== "aria")) return null;
+  const number = (field: unknown): number | null =>
+    typeof field === "number" && Number.isFinite(field) ? field : null;
+  return {
+    kind: value.kind,
+    value: number(value.value),
+    min: number(value.min),
+    max: number(value.max),
+    nearest: number(value.nearest),
+    disabled: value.disabled === true,
+  };
+}
+
+// A native range input, or an element with role slider and its ARIA value.
+const SLIDER_STATE_FUNCTION = `function(expected) {
+  if (!(this instanceof Element) || !this.isConnected) return { kind: "other" };
+  const number = (text) => {
+    if (text === null || text === undefined || String(text).trim() === "") return null;
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  if (String(this.tagName || "").toLowerCase() === "input" && String(this.type).toLowerCase() === "range") {
+    let nearest = null;
+    if (typeof expected === "number") {
+      const probe = this.ownerDocument.createElement("input");
+      probe.type = "range";
+      for (const name of ["min", "max", "step"]) if (this.hasAttribute(name)) probe.setAttribute(name, this.getAttribute(name));
+      probe.value = String(expected);
+      nearest = Number(probe.value);
+    }
+    return {
+      kind: "range",
+      value: number(this.value),
+      min: number(this.min) ?? 0,
+      max: number(this.max) ?? 100,
+      nearest,
+      disabled: this.disabled === true,
+    };
+  }
+  if (String(this.getAttribute("role") || "").toLowerCase() !== "slider") return { kind: "other" };
+  return {
+    kind: "aria",
+    value: number(this.getAttribute("aria-valuenow")),
+    min: number(this.getAttribute("aria-valuemin")),
+    max: number(this.getAttribute("aria-valuemax")),
+    disabled: String(this.getAttribute("aria-disabled") || "").toLowerCase() === "true",
+  };
+}`;
+
+// Sets a native range input through the prototype setter, which bypasses the
+// per-instance value trackers frameworks install, then notifies listeners as
+// a drag does.
+const SET_RANGE_VALUE_FUNCTION = `async function(expected) {
+  if (!(this instanceof HTMLInputElement) || !this.isConnected) return { kind: "gone" };
+  const view = this.ownerDocument.defaultView;
+  const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value").set;
+  this.focus();
+  setter.call(this, String(expected));
+  this.dispatchEvent(new view.Event("input", { bubbles: true, composed: true }));
+  this.dispatchEvent(new view.Event("change", { bubbles: true }));
+  await Promise.resolve();
+  return this.isConnected && Number(this.value) === Number(expected) ? { kind: "set" } : { kind: "lost" };
 }`;
 
 const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
