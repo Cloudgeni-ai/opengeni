@@ -453,6 +453,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxLazyProvisionEnabled: false,
     sandboxSelfhostedEnabled: false,
     agentOpStreamEnabled: true,
+    delegatedSignInAppActionChangesEnabled: false,
     // Mirror production: command duration is unbounded; control probes remain short.
     sandboxSelfhostedExecTimeoutMs: 0,
     sandboxSelfhostedControlTimeoutMs: 30_000,

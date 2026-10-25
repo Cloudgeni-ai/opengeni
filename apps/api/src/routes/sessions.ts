@@ -7,7 +7,11 @@ import {
 } from "../http/variable-sets-removed";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
-import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
+import {
+  assertGoalResumeAllowed,
+  GoalResumeBlockedError,
+  turnAppActionGrant,
+} from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listWorkspaceBackgroundCommandsForSubject } from "@opengeni/db";
@@ -4222,6 +4226,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           subjectId: grant.subjectId,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
+          // The same rule that decides whether a message may confirm app-action
+          // changes: the app's own sign-in, or an embed the deployment opted in.
+          // A key, chat integration or other token with this identity can't.
+          decidedBySignedInPerson:
+            turnAppActionGrant({
+              grant,
+              authorization,
+              delegatedSignInChangesEnabled:
+                settings.delegatedSignInAppActionChangesEnabled === true,
+            })?.changes === "confirm",
           payload,
           mcpCredentialUpdates,
           clientEventId: event.clientEventId ?? null,

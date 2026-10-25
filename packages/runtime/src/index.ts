@@ -3897,6 +3897,15 @@ function installMcpApprovalPolicy(
       if (!policy.connectorBacked && !legacyApproval && !connectorActionPolicy) {
         return tool;
       }
+      // Opengeni's own servers have no workspace connector policy: only a tool
+      // they ask approval for goes through the ledger, as on the gateway path.
+      if (
+        !policy.connectorBacked &&
+        !legacyApproval &&
+        attemptToolSource(policy.serverId) !== "mcp"
+      ) {
+        return tool;
+      }
       const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
         const connectionId = policy.connectionId();
         if (!connectionId) {

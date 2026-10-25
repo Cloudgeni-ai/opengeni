@@ -421,12 +421,16 @@ export type McpServerOptions = {
   /** @deprecated Ignored compatibility input; Knowledge resolves scope at execution. */
   sessionMemory?: MemoryAgentScope | null | undefined;
   /**
-   * Set by the route only when the bound session has admin access right now
-   * (allowed by the organization, given by an owner or admin who still is
-   * one). It adds the admin tools whatever the session's tool selection;
-   * each call checks the access again.
+   * Set by the route for a bound session: how app actions reach the API, and
+   * the facts that list the app-action tools. A session a person started lists
+   * them when selected (fixed for the session's life); one with full access
+   * lists them whatever its selection, as before. Each call checks, live, as
+   * whom it runs and whether a change was confirmed.
    */
-  sessionAdminAccess?: SessionAdminAccessDispatch | null | undefined;
+  appActions?:
+    | { access: SessionAdminAccessDispatch; startedByPerson: boolean; fullAccess: boolean }
+    | null
+    | undefined;
 };
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
@@ -858,19 +862,19 @@ class PolicyMcpServer extends McpServer {
     private readonly grant: AccessGrant,
     private readonly sessionId: string | null,
     private readonly selectedTools: ReadonlySet<FirstPartyMcpToolName> | null,
-    private readonly sessionAdminAccess: boolean = false,
+    private readonly appActions: { startedByPerson: boolean; fullAccess: boolean } | null = null,
   ) {
     super({ name: "opengeni", version: "1.0.0" });
   }
 
   /**
    * Whether a selection-governed tool is both selected and authorized for this
-   * grant. Admin-access tools are never selection-governed, so a child
-   * selection can never carry them.
+   * grant. App-action tools act as a person, so a child selection can never
+   * carry them.
    */
   holdsSelectableTool(toolName: FirstPartyMcpToolName): boolean {
     const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
-    if (policy.adminAccessRequired) return false;
+    if (policy.personSessionRequired) return false;
     const authorized =
       (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
         true) &&
@@ -899,10 +903,15 @@ class PolicyMcpServer extends McpServer {
     if (catalogued) {
       const toolName = name as FirstPartyMcpToolName;
       const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
-      if (policy.adminAccessRequired) {
-        // Admin access, not the tool selection or the agent's own
-        // permissions, decides: the tools act as the person who gave it.
-        admitted = this.sessionId !== null && this.sessionAdminAccess;
+      if (policy.personSessionRequired) {
+        // The tools act as a person, not with the agent's own permissions:
+        // listed in a session a person started when selected, or whenever the
+        // session has full access.
+        admitted =
+          this.sessionId !== null &&
+          this.appActions !== null &&
+          (this.appActions.fullAccess ||
+            (this.appActions.startedByPerson && this.selectedTools?.has(toolName) === true));
       } else {
         admitted =
           (!policy.sessionRequired || this.sessionId !== null) &&
@@ -1095,18 +1104,25 @@ export function buildOpenGeniMcpServer(
     typeof nestedAgentDepth !== "number" ||
     typeof effectiveMaxNestedAgentDepth !== "number" ||
     nestedAgentDepth < effectiveMaxNestedAgentDepth;
-  const sessionAdminAccess =
-    sessionId !== null && exactAgentAttemptClaims(grant) !== null
-      ? (options.sessionAdminAccess ?? null)
-      : null;
-  const server = new PolicyMcpServer(grant, sessionId, selectedTools, sessionAdminAccess !== null);
-  if (sessionId !== null && sessionAdminAccess !== null) {
+  const attemptClaims = sessionId !== null ? exactAgentAttemptClaims(grant) : null;
+  const appActions = attemptClaims !== null ? (options.appActions ?? null) : null;
+  const server = new PolicyMcpServer(
+    grant,
+    sessionId,
+    selectedTools,
+    appActions && {
+      startedByPerson: appActions.startedByPerson,
+      fullAccess: appActions.fullAccess,
+    },
+  );
+  if (sessionId !== null && attemptClaims !== null && appActions !== null) {
     registerSessionAdminAccessTools({
       server,
       db: deps.db,
       grant,
       sessionId,
-      access: sessionAdminAccess,
+      attempt: { turnId: attemptClaims.turnId, attemptId: attemptClaims.attemptId },
+      access: appActions.access,
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
@@ -6634,15 +6650,26 @@ function registerWorkspaceOrchestrationTools(
       "session_set_model",
       {
         description:
-          "Set an existing session's model and reasoning defaults for future turns. Use a model from list_models and specify the intended reasoning effort. Does not send a message, resume a paused session, wake an idle session, change latency mode, or rewrite already accepted turns/scheduled occurrences. Older queued turns keep their settings but cannot undo this choice when they start. Reuse the exact idempotencyKey for retries; session_get detail=full reads current effective defaults. Requires sessions:control and ordinary target-session authorization.",
+          "Switch a session's model and reasoning effort for its future turns. Omit sessionId to switch this chat, for example when the person asks for a faster or smarter model: pick a sensible model from list_models, then tell them which model the chat uses now, that it applies from their next message, and that they can switch back by asking you or with the model chooser. Does not send a message, resume a paused session, wake an idle session, change latency mode, or rewrite already accepted turns/scheduled occurrences. Older queued turns keep their settings but cannot undo this choice when they start. Reuse the exact idempotencyKey for retries; session_get detail=full reads current effective defaults.",
         inputSchema: {
-          sessionId: z4.string().uuid(),
+          sessionId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe("The session to change; omit it for this chat."),
           model: z4.string().min(1).max(512),
           reasoningEffort: z4.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
           idempotencyKey: z4.string().uuid(),
         },
       },
-      async ({ sessionId, ...request }) => {
+      async ({ sessionId: requestedSessionId, ...request }) => {
+        const sessionId = requestedSessionId ?? callerSessionId;
+        if (!sessionId) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "Pass the sessionId of the session to change." }],
+          };
+        }
         const result = await setSessionModel(deps, grant, sessionId, request, "first_party_mcp");
         return json(
           mcpMutationReceipt({

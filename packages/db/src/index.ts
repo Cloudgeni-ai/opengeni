@@ -88018,6 +88018,13 @@ export async function acceptSessionApprovalDecision(
     mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
     /** Bounded decider kind for the parent's resolution notice; `human` when omitted. */
     respondedByKind?: ChildRequiresActionRespondedByKind;
+    /**
+     * The decider is signed in where an app-action change may be confirmed:
+     * the app itself, or an embed the deployment opted in; never a key, chat
+     * integration or other token carrying their identity. Only such a
+     * decision confirms an app-action change.
+     */
+    decidedBySignedInPerson?: boolean;
     clientEventId?: string | null;
     interactionIntervention?: {
       interventionId: string;
@@ -88271,6 +88278,8 @@ export async function acceptSessionApprovalDecision(
                 "approval actor",
                 1024,
               ),
+              decisionByKind: input.respondedByKind ?? "human",
+              decisionBySignedInPerson: input.decidedBySignedInPerson === true,
               decisionEventId: event.id,
               decidedAt: event.occurredAt,
               updatedAt: new Date(),

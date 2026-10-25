@@ -194,6 +194,7 @@ export {
   type HostSessionUsageLimit,
 } from "./host-session-usage-limit";
 export { resolveTurnSurface } from "./turn-surface";
+export { turnAppActionGrant } from "./app-action-turn-grant";
 
 export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
 

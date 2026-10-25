@@ -37,6 +37,7 @@ export default defineConfig({
     "src/model-display.ts",
     "src/secret-use-approval-question.ts",
     "src/tool-review-presentation.ts",
+    "src/app-actions.ts",
     "src/code-search.ts",
     "src/workspace-integration-wire.ts",
     "src/workspace-control-event.ts",

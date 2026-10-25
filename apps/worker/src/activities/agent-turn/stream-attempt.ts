@@ -32,6 +32,7 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { handOverWaitToSteer } from "./waiting-steer";
+import { withAppActionApprovalTitle } from "./app-action-confirmation";
 import { startSteerWatch, type SteerWatch } from "./steer-watch";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
@@ -2203,9 +2204,12 @@ export async function runTurnStreamAttempt(
                     payload: {
                       approvals: approvals.map((approval) =>
                         withPublicApprovalFields(
-                          withMcpToolDisplayMetadata(
-                            eventing.preparedTools?.mcpServers ?? [],
-                            approval,
+                          withAppActionApprovalTitle(
+                            withMcpToolDisplayMetadata(
+                              eventing.preparedTools?.mcpServers ?? [],
+                              approval,
+                            ),
+                            { workspaceId: input.workspaceId, sessionId: input.sessionId },
                           ),
                         ),
                       ),

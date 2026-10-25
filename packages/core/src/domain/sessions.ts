@@ -23,6 +23,8 @@ import type {
   SessionTurnSurface,
 } from "@opengeni/contracts";
 import { resolveTurnSurface } from "../turn-surface";
+import { turnAppActionGrant } from "../app-action-turn-grant";
+import { recordTurnAppActionGrant } from "@opengeni/db";
 import {
   recordSessionCreated,
   recordUserMessageAccepted,
@@ -2609,6 +2611,13 @@ async function createSessionForRequestInFileScope(
     authorization,
     requested: requestOptions.surface,
   });
+  // What the first message may do through app actions, frozen with its turn.
+  const initialAppActionGrant = turnAppActionGrant({
+    grant,
+    authorization,
+    delegatedSignInChangesEnabled:
+      unresolvedDeps.settings.delegatedSignInAppActionChangesEnabled === true,
+  });
   payload.metadata = sessionCreationMetadata(payload.metadata);
   const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
   const externalCommitAuthorizer = externalContinuationCommitAuthorizer(authorization);
@@ -4103,6 +4112,13 @@ async function createSessionForRequestInFileScope(
               turnId: string,
             ) => {
               await captureLinkedAuthority?.(tx, sessionId, turnId);
+              if (initialAppActionGrant)
+                await recordTurnAppActionGrant(tx, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  turnId,
+                  grant: initialAppActionGrant,
+                });
               if (model.startsWith("codex/")) {
                 await requireLimit(
                   { ...deps, db: tx },
@@ -4700,6 +4716,12 @@ async function acceptSessionUserMessageInFileScope(
       authorization: input.authorization,
       requested: input.surface,
     });
+    // What this message may do through app actions, frozen with its turn.
+    const appActionGrant = turnAppActionGrant({
+      grant,
+      authorization: input.authorization,
+      delegatedSignInChangesEnabled: deps.settings.delegatedSignInAppActionChangesEnabled === true,
+    });
     const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
       await postUserMessageTurn({
         db,
@@ -4728,6 +4750,13 @@ async function acceptSessionUserMessageInFileScope(
         captureTurnAuthority: async (tx: Database, turnId: string) => {
           await teamsCommitAuthorizer?.(tx);
           await captureLinkedAuthority?.(tx, sessionId, turnId);
+          if (appActionGrant)
+            await recordTurnAppActionGrant(tx, {
+              accountId: grant.accountId,
+              workspaceId,
+              turnId,
+              grant: appActionGrant,
+            });
           // The prompt transaction has frozen the exact authority at this
           // point. A refusal rolls back both prompt and receipt atomically.
           if (effectiveModel.startsWith("codex/"))

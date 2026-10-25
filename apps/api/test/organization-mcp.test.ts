@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
@@ -17,11 +18,20 @@ import {
   registeredApiRoutes,
   type ActionCatalogEntry,
 } from "../../../scripts/public-api/action-catalog";
-import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
+import * as primitives from "../../../packages/contracts/src/primitives";
+import { secretValue, secretValues } from "@opengeni/contracts";
+import {
+  ACTION_PLAIN_STRING_MAPS,
+  ACTION_SECRET_FIELD_EXCEPTIONS,
+  actionFieldPaths as allFieldPaths,
+  actionSecretFields,
+  schemaSecretFields,
+  unclassifiedStringMaps,
+} from "../../../scripts/public-api/action-secrets";
+import { ACTION_CATALOG, READ_ONLY_POST_ACTIONS } from "@opengeni/contracts/app-actions";
 import {
   buildOrganizationMcpServer,
   organizationMcpIcons,
-  READ_ONLY_POST_ACTIONS,
   type OrganizationMcpCaller,
   searchActions,
 } from "../src/organization-mcp";
@@ -145,6 +155,80 @@ describe("organization MCP action catalog", () => {
       expect(listed.has(key)).toBe(true);
     expect(listed.has("POST /v1/identity/login-bindings/:bindingId/recovery")).toBe(false);
     expect(listed.has("POST /v1/integrations/teams/messages")).toBe(false);
+  });
+
+  test("marks every action that carries a secret, from its schemas, unless an exception says why not", () => {
+    // The catalog's marks are exactly what the schemas say: a new action with
+    // a secret field is marked when the catalog is regenerated, and this fails
+    // until it is (or until an exception in action-secrets.ts gives a reason).
+    for (const entry of ACTION_CATALOG) {
+      expect([entry.id, entry.secretFields ?? []]).toEqual([entry.id, actionSecretFields(entry)]);
+    }
+    // The rule itself, on a schema no route uses.
+    const sample = z.object({
+      apiKey: z.string(),
+      credentialVersion: z.number(),
+      hasWebhookSecret: z.boolean(),
+      credential: z.object({ connectionId: z.string() }),
+      bundle: z.object({ credentials: z.record(z.string(), z.string()) }),
+      nested: z.array(z.object({ clientSecret: z.string().optional() })),
+      references: z.object({ otp: z.string() }),
+      previewToken: z.string(),
+      code: z.string(),
+      status: z.object({ errorCode: z.string(), code: z.string() }),
+      kind: z.enum(["token", "secret"]),
+    });
+    expect(schemaSecretFields(sample, "request")).toEqual([
+      "request.apiKey",
+      "request.bundle.credentials",
+      "request.code",
+      "request.nested[].clientSecret",
+    ]);
+    expect(schemaSecretFields(sample, "response")).toEqual([
+      "response.apiKey",
+      "response.bundle.credentials",
+      "response.nested[].clientSecret",
+    ]);
+    // A field marked secret in its contract counts whatever it is called; an
+    // unmarked bundle with a plain name doesn't.
+    const marked = z.object({
+      headers: secretValue(z.record(z.string(), z.string())).optional(),
+      values: z.record(z.string(), z.string()),
+      items: z.array(z.object({ blob: secretValue(z.string()) })),
+    });
+    expect(schemaSecretFields(marked, "request")).toEqual([
+      "request.headers",
+      "request.items[].blob",
+    ]);
+    // Marks belong to one field's schema, never a shared primitive.
+    for (const [name, value] of Object.entries(primitives))
+      if (value instanceof z.ZodType)
+        expect([name, secretValues.has(value)]).toEqual([name, false]);
+    // Every open map of strings (the shape of a header or credential bundle)
+    // is either marked secret or listed as plain with its reason.
+    for (const entry of ACTION_CATALOG)
+      for (const [side, names] of [
+        ["request", entry.request],
+        ["response", entry.response],
+      ] as const)
+        for (const name of names)
+          expect([entry.id, name, unclassifiedStringMaps(name, side)]).toEqual([
+            entry.id,
+            name,
+            [],
+          ]);
+    // Every exception still matches something, so none outlives its reason.
+    const everyPath = ACTION_CATALOG.flatMap((entry) =>
+      [
+        ...entry.request.map((name) => ["request", name] as const),
+        ...entry.response.map((name) => ["response", name] as const),
+      ].flatMap(([side, name]) => allFieldPaths(name, side)),
+    );
+    for (const exception of [...ACTION_SECRET_FIELD_EXCEPTIONS, ...ACTION_PLAIN_STRING_MAPS])
+      expect([exception.reason, everyPath.some((path) => exception.path.test(path))]).toEqual([
+        exception.reason,
+        true,
+      ]);
   });
 
   test("marks exactly the actions no agent can do as the person", () => {

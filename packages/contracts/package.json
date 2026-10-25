@@ -218,6 +218,10 @@
       "types": "./src/tool-review-presentation.ts",
       "default": "./src/tool-review-presentation.ts"
     },
+    "./app-actions": {
+      "types": "./src/app-actions.ts",
+      "default": "./src/app-actions.ts"
+    },
     "./workspace-integration-wire": {
       "types": "./src/workspace-integration-wire.ts",
       "default": "./src/workspace-integration-wire.ts"

@@ -21927,6 +21927,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.chatActionsAllowed": "boolean!",
         "$.sessionAdminAccessAllowed": "boolean!",
         "$.updatedAt": "string! null"
       }
@@ -29648,7 +29649,8 @@
       ],
       "shape": {
         "$": "object",
-        "$.sessionAdminAccessAllowed": "boolean!"
+        "$.chatActionsAllowed": "boolean?",
+        "$.sessionAdminAccessAllowed": "boolean?"
       }
     },
     "UpdateOrganizationApiKeyRequest": {

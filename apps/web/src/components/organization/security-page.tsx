@@ -411,7 +411,9 @@ export function PrivateChatsRow({
   );
 }
 
-/* -------------------------------------------------- Full access for agents */
+/* -------------------------------------------------- What agents may do */
+
+type AgentAccessChoice = "sessionAdminAccessAllowed" | "chatActionsAllowed";
 
 export function AgentAdminAccessRow({
   client,
@@ -421,17 +423,21 @@ export function AgentAdminAccessRow({
   identity: OrganizationAdminIdentity;
 }) {
   const { claim, owns } = useOwnedOperations(identity, "agent-admin-access");
-  const [allowed, setAllowed] = useState<boolean | null>(null);
+  const [value, setValue] = useState<Record<AgentAccessChoice, boolean> | null>(null);
   const [error, setError] = useState<Error | null>(null);
-  const [pending, setPending] = useState<boolean | null>(null);
+  const [pending, setPending] = useState<{ choice: AgentAccessChoice; next: boolean } | null>(null);
   const [confirmOff, setConfirmOff] = useState(false);
 
   const load = useCallback(async () => {
     const operation = claim("read");
     setError(null);
     try {
-      const value = await client.getOrganizationAgentAdminAccess(identity.organizationId);
-      if (owns(operation)) setAllowed(value.sessionAdminAccessAllowed);
+      const next = await client.getOrganizationAgentAdminAccess(identity.organizationId);
+      if (owns(operation))
+        setValue({
+          sessionAdminAccessAllowed: next.sessionAdminAccessAllowed,
+          chatActionsAllowed: next.chatActionsAllowed,
+        });
     } catch (loadError) {
       if (owns(operation))
         setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
@@ -443,25 +449,35 @@ export function AgentAdminAccessRow({
   }, [load]);
 
   const save = useCallback(
-    async (next: boolean) => {
+    async (choice: AgentAccessChoice, next: boolean) => {
       const operation = claim("mutation");
-      setPending(next);
+      setPending({ choice, next });
       try {
-        const value = await client.updateOrganizationAgentAdminAccess(identity.organizationId, {
-          sessionAdminAccessAllowed: next,
+        const saved = await client.updateOrganizationAgentAdminAccess(identity.organizationId, {
+          [choice]: next,
         });
         if (!owns(operation)) return;
-        setAllowed(value.sessionAdminAccessAllowed);
+        setValue({
+          sessionAdminAccessAllowed: saved.sessionAdminAccessAllowed,
+          chatActionsAllowed: saved.chatActionsAllowed,
+        });
         toast.success(
-          next
-            ? "Members can give their own sessions full access"
-            : "Full access is off for every session",
+          choice === "chatActionsAllowed"
+            ? next
+              ? "Agents can do things in the app for people, asking before each change"
+              : "Agents no longer do things in the app from a chat"
+            : next
+              ? "Members can give their own sessions full access"
+              : "Full access is off for every session",
         );
       } catch (saveError) {
         if (!owns(operation)) return;
-        toast.error("Couldn't change full access for agents", {
-          description: userErrorText(saveError),
-        });
+        toast.error(
+          choice === "chatActionsAllowed"
+            ? "Couldn't change actions in chat"
+            : "Couldn't change full access for agents",
+          { description: userErrorText(saveError) },
+        );
       } finally {
         if (owns(operation)) setPending(null);
       }
@@ -469,29 +485,43 @@ export function AgentAdminAccessRow({
     [claim, client, identity.organizationId, owns],
   );
 
-  if (error && allowed === null) {
+  if (error && value === null) {
     return (
       <RowLoadFailure
-        title="Couldn't load the full access setting."
+        title="Couldn't load what agents may do."
         error={error}
         onRetry={() => void load()}
       />
     );
   }
-  if (allowed === null) return <SettingRowSkeleton />;
+  if (value === null) return <SettingRowSkeleton />;
+  const shown = (choice: AgentAccessChoice) =>
+    pending?.choice === choice ? pending.next : value[choice];
 
   return (
     <SettingRowGroup>
       <SettingRow
+        label="Actions in chat"
+        description="In a chat someone started, the agent can do what that person could do in the app's pages and settings, such as inviting people, sharing the chat or checking usage. It asks them in the chat before each change and never does more than they can."
+        control={
+          <Switch
+            aria-label="Actions in chat"
+            checked={shown("chatActionsAllowed")}
+            pending={pending?.choice === "chatActionsAllowed"}
+            onCheckedChange={(next) => void save("chatActionsAllowed", next)}
+          />
+        }
+      />
+      <SettingRow
         label="Full access for agent sessions"
-        description="Lets each member give a session they started their own access. Its agent can then do what that person can in the app, and never more: a member's workspaces and settings, or everything an owner or admin manages."
+        description="Lets each member give a session they started their own access. Its agent can then do what that person can in the app without asking first, and never more: a member's workspaces and settings, or everything an owner or admin manages."
         control={
           <Switch
             aria-label="Full access for agent sessions"
-            checked={pending ?? allowed}
-            pending={pending !== null}
+            checked={shown("sessionAdminAccessAllowed")}
+            pending={pending?.choice === "sessionAdminAccessAllowed"}
             onCheckedChange={(next) => {
-              if (next) void save(true);
+              if (next) void save("sessionAdminAccessAllowed", true);
               else setConfirmOff(true);
             }}
           />
@@ -508,7 +538,7 @@ export function AgentAdminAccessRow({
         tone="destructive"
         initialFocus="cancel"
         onSubmit={async () => {
-          await save(false);
+          await save("sessionAdminAccessAllowed", false);
         }}
         onSubmitted={() => setConfirmOff(false)}
       />
