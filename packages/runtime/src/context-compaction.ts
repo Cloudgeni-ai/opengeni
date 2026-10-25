@@ -29,7 +29,9 @@ import {
   formatModelContextTimestamp,
   isTransientSessionSystemUpdateBatch,
   latestSkillCatalogContext,
+  latestWorkspaceGovernanceContext,
   readSkillCatalogContext,
+  readWorkspaceGovernanceContext,
   resourceMountPath,
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
@@ -1743,10 +1745,12 @@ export function buildCompactionReplacementHistory(
     remaining -= textTokens + nonTextTokens;
   }
   const currentCatalog = latestSkillCatalogContext(items);
+  const currentGovernance = latestWorkspaceGovernanceContext(items);
   const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
   const attachmentCatalog = buildAttachmentCatalogItem(items, retained, attachmentUploadTimes);
   const history = [
     ...(currentCatalog ? [currentCatalog] : []),
+    ...(currentGovernance ? [currentGovernance] : []),
     ...(attachmentCatalog ? [attachmentCatalog] : []),
     ...retained,
   ];
@@ -1801,11 +1805,11 @@ export function buildRemoteV2ReplacementHistory(
   let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
   const prepared = prepareRetainedInputs(
     withOnlyNewestAttachmentsInline(items),
-    (item) => readSkillCatalogContext(item) === null && isRetainedRemoteV2Message(item),
+    (item) => !isSessionContextSnapshot(item) && isRetainedRemoteV2Message(item),
   );
   for (let index = prepared.charged.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const item = prepared.charged[index]!;
-    if (readSkillCatalogContext(item) !== null) continue;
+    if (isSessionContextSnapshot(item)) continue;
     if (!isRetainedRemoteV2Message(item)) continue;
     if (prepared.skip(index)) continue;
     const textTokens = estimateTextTokens(messageText(item));
@@ -1824,10 +1828,12 @@ export function buildRemoteV2ReplacementHistory(
     break;
   }
   const currentCatalog = latestSkillCatalogContext(items);
+  const currentGovernance = latestWorkspaceGovernanceContext(items);
   const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
   const attachmentCatalog = buildAttachmentCatalogItem(items, retained, attachmentUploadTimes);
   const history = [
     ...(currentCatalog ? [currentCatalog] : []),
+    ...(currentGovernance ? [currentGovernance] : []),
     ...(attachmentCatalog ? [attachmentCatalog] : []),
     ...retained,
   ];
@@ -1839,6 +1845,11 @@ export function buildRemoteV2ReplacementHistory(
   const reasoning = latestReasoningConfiguration(items);
   if (reasoning) history.push(reasoningConfigurationItem(reasoning));
   return history;
+}
+
+/** Skill catalog and workspace governance snapshots are re-added as the latest copy only. */
+function isSessionContextSnapshot(item: CompactionItem): boolean {
+  return readSkillCatalogContext(item) !== null || readWorkspaceGovernanceContext(item) !== null;
 }
 
 function isAttachmentCatalog(item: unknown): boolean {

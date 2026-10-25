@@ -234,7 +234,11 @@ The compaction model receives:
    Claude checkpoint keeps the prepared tools, instructions, thinking, effort
    and tool choice unchanged, changes only `max_tokens`, and appends a
    text-only instruction after the checkpoint prompt in the same user turn.
-   Its history is the same projected prefix, so the call reads the warm cache.
+   Its history is the exact input of the ordinary request that the prepared
+   compaction boundary withheld (see "Prompt-cache stability" below), so the
+   checkpoint extends the previous ordinary request byte for byte and reads
+   its warm cache. Only when that request is unavailable does it project
+   durable history again, which is an expected miss.
    If the model still calls a tool, one retry sets `tool_choice:none` (tools
    and instructions stay cached); a reply with a tool call never becomes the
    checkpoint.
@@ -250,13 +254,89 @@ not `stop` cannot replace active history, even if it contains partial text.
 Provider-specific output ceilings are not in the model catalog; a provider
 that rejects this cap fails compaction with the existing active history intact.
 
-Explicit compaction is a new accepted logical turn and therefore composes the
+Explicit compaction is a new accepted logical turn and therefore records the
 same deterministic workspace instruction-policy and preference-descriptor
-governance as an ordinary agent turn. Its service initiator may inherit the
+governance as an ordinary agent turn (as a history item, see below). Its
+service initiator may inherit the
 causal human's immutable preference authority from the latest started turn;
 pure service compaction has no personal preference authority. The exact
 snapshot is attempt-fenced, recovery reuses it, and Documents/RAG evidence are
 never promoted into governance.
+
+## Prompt-cache stability
+
+Providers cache a request by its exact byte prefix: tools, then system, then
+history. Each request may only append to what the previous request sent;
+changing any earlier byte makes everything after it a cache write. With
+prefix-bound thinking and `drop_block`, Claude also drops every signed
+thinking block after the first changed byte, which shrinks the prompt and
+loses that reasoning.
+
+**The checkpoint request.** The ordinary request is assembled by the full
+request projection: durable items, lazy tool-search results, tool-family
+disclosure messages, image rendering, provider-artifact projection. When
+compaction becomes due at a model boundary, the prepared-compaction boundary
+stops that request before inference and keeps its exact input. Claude portable
+compaction and Codex remote v2 send that input (plus the checkpoint prompt or
+`compaction_trigger`), so they extend what the provider already cached.
+Re-projecting durable items instead used to drop request-local items such as
+tool disclosures, so the checkpoint diverged at the first one; in production
+most Claude checkpoint calls after an earlier compaction wrote most of their
+history again, and lost the signed thinking after that point.
+
+The withheld input is consumed once. It stands in for durable history only if
+it covers every durable tool result and user message the checkpoint marks as
+summarized; otherwise (for example input that arrived after the request was
+prepared) the worker projects durable history as before. Size recovery after a
+413 and histories that exceed the summary budget also cut a fitting prefix
+from durable history. Both fallbacks are deliberate cache misses. Portable
+compaction on Responses providers (including portable-locked Codex sessions)
+still omits opaque encrypted reasoning and compaction blobs so any provider
+can summarize the history, so it never reads the warm cache.
+
+**What stays out of the system prompt.** Text that can change between turns
+of one session must not be in the system prompt, because changing it rewrites
+the start of every later request:
+
+- Workspace governance (instruction policies, learning settings, organization
+  profile) differs by who starts a turn and changes when an administrator edits
+  a policy. It is a durable developer history item, written before the turn
+  that first sees a new value, exactly like the Skill catalog. Recovery
+  attempts of the same logical turn reuse its frozen snapshot. A change
+  appends a new item that replaces the old one; withdrawn governance appends an
+  explicit "no workspace governance" item. Compaction re-adds only the latest
+  governance item after the Skill catalog.
+- Files attached to one turn are described in that turn's own input, never in
+  the system prompt.
+- Per-request billing metadata in the first system block does not affect the
+  cache.
+
+Codex prompt-cache affinity is keyed by the session's scope subject, not by
+the human who started the turn, so turns started by different people in one
+session share one cache.
+
+Known remaining system-prompt changes are deliberate and rare: a machine swap
+or SDK filesystem manifest change (`workspace_root_changed_this_turn`) changes
+the system prompt or tools, and the next request is a full write.
+
+**Diagnostics.** The worker fingerprints every provider request after dispatch
+(tools, system without billing metadata, and chained history digests at item
+counts 1, 2, 4, … and the full count). `model_call_facts.prompt_cache_diagnostics`
+stores that fingerprint, Claude's dropped signed-thinking counts by reason,
+and, when a call reads much less cache than the previous call of the same model
+in the session, a warm-miss class: `context_replaced`, `tools_changed`,
+`system_changed`, `history_rewritten` (with the first diverging checkpoint),
+`thinking_dropped`, `account_changed`, `idle_gap` or `unexplained`. The worker
+also exports `opengeni_model_prompt_cache_warm_misses_total{class}`,
+`opengeni_model_prompt_cache_missed_tokens_total` and
+`opengeni_model_thinking_blocks_dropped_total{reason}`. `context_replaced`,
+`idle_gap` and `account_changed` are expected; a steady rate of any other class
+points to a prompt-cache bug.
+
+`packages/runtime/test/prompt-cache-prefix-stability.test.ts` asserts the
+byte-prefix contract across consecutive requests: new turn, steer and
+recovery, a checkpoint after a tool disclosure, a lazy tool load, a resized
+image, a goal or governance update, and a file attachment.
 
 Responses providers use the Agents SDK's structured Responses conversion, so
 tool calls/results remain real protocol items on the wire. Chat providers use a

@@ -198,7 +198,7 @@ import { createEagerOwnedSandboxSetup, type EagerOwnedSandboxSetup } from "./own
 import { finalReplyNudge, needsFinalReply } from "./final-reply";
 
 import type { CompactionSummarizer } from "../context-compaction";
-import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import type { PromptCacheRequestFingerprint, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
 import type {
@@ -892,6 +892,10 @@ export async function runTurnStreamAttempt(
     const streamTiming = new StreamTimingMetrics(observability, {
       provider: streamProvider,
     });
+    // Wire fingerprint of the latest main request. The next model entry waits
+    // for the previous response's settlement, so the response being settled
+    // always belongs to the latest dispatched request (as for streamTiming).
+    let latestPromptCacheRequest: Promise<PromptCacheRequestFingerprint | null> | null = null;
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
@@ -1139,6 +1143,10 @@ export async function runTurnStreamAttempt(
               clock,
             );
           },
+          onPromptCacheFingerprint: (fingerprint) => {
+            if (isAuxiliaryProviderDispatch()) return;
+            latestPromptCacheRequest = fingerprint;
+          },
           ...(eventing.toolCancellationFenceRef.current
             ? {
                 turnToolCancellationFence: eventing.toolCancellationFenceRef.current,
@@ -1315,6 +1323,11 @@ export async function runTurnStreamAttempt(
           setLastInputTokens: setLastInputTokensFenced,
           contextContributions: eventing.companyBrainContextContributions,
           responseTiming: () => streamTiming.completeResponse(),
+          promptCacheRequest: () => {
+            const request = latestPromptCacheRequest;
+            latestPromptCacheRequest = null;
+            return request;
+          },
         });
         assertModelResponseLatencyMode({
           event: next.value,

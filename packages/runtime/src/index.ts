@@ -9,7 +9,11 @@ import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
 } from "./prepared-compaction-request";
-export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
+export {
+  preparedCompactionRequest,
+  queuePreparedCompaction,
+  takeWithheldCompactionInput,
+} from "./prepared-compaction-request";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { anthropicCompactionRequest } from "./anthropic-compaction";
 export {
@@ -591,6 +595,7 @@ import {
   type ModelPreparationPhase,
   type ModelTransportDispatchClock,
 } from "./model-preparation-diagnostics";
+import { withPromptCacheFingerprintObserver } from "./prompt-cache-fingerprint";
 import {
   HUMAN_INPUT_TOOL_NAME,
   modelResponseUsageFromResponse,
@@ -654,6 +659,10 @@ export type {
   ModelTransportDispatchClock,
 } from "./model-preparation-diagnostics";
 export { withModelTransportStartedObserver } from "./model-preparation-diagnostics";
+export {
+  promptCacheRequestFingerprint,
+  withPromptCacheFingerprintObserver,
+} from "./prompt-cache-fingerprint";
 export {
   markModelPreparationFirstSandboxOperation,
   recordModelPreparationMeasurement,
@@ -9573,6 +9582,13 @@ export type RunAgentStreamOptions = {
   onModelTransportStarted?: () => Promise<void> | void;
   /** Synchronous diagnostic after admission/audit, immediately before fetch. */
   onModelTransportDispatched?: (clock: ModelTransportDispatchClock) => void;
+  /**
+   * Wire fingerprint of every provider request this run sends, for
+   * prompt-cache diagnostics. Resolves after dispatch; never delays it.
+   */
+  onPromptCacheFingerprint?: (
+    fingerprint: Promise<import("@opengeni/contracts").PromptCacheRequestFingerprint | null>,
+  ) => void;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -10073,24 +10089,26 @@ async function runAgentStreamInternal(
     } as SandboxRunConfig;
     return await withModelRequestCapture(modelRequestCapture, () =>
       withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-        withModelTransportStartedObserver(
-          overrides.onModelTransportStarted,
-          () => {
-            recordModelPreparationManifestInventory(
-              "sandbox_agent_manifest_inventory",
-              (agent as { defaultManifest?: Manifest }).defaultManifest,
-            );
-            recordModelPreparationManifestInventory(
-              "sandbox_session_manifest_inventory",
-              (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
-            );
-            return runScopedRunner(settings, agent, inputWaitYield).run(
-              agent,
-              prepared.input,
-              ownedRunOptions,
-            );
-          },
-          overrides.onModelTransportDispatched,
+        withPromptCacheFingerprintObserver(overrides.onPromptCacheFingerprint, () =>
+          withModelTransportStartedObserver(
+            overrides.onModelTransportStarted,
+            () => {
+              recordModelPreparationManifestInventory(
+                "sandbox_agent_manifest_inventory",
+                (agent as { defaultManifest?: Manifest }).defaultManifest,
+              );
+              recordModelPreparationManifestInventory(
+                "sandbox_session_manifest_inventory",
+                (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
+              );
+              return runScopedRunner(settings, agent, inputWaitYield).run(
+                agent,
+                prepared.input,
+                ownedRunOptions,
+              );
+            },
+            overrides.onModelTransportDispatched,
+          ),
         ),
       ),
     );
@@ -10240,20 +10258,22 @@ async function runAgentStreamInternal(
   }
   return await withModelRequestCapture(modelRequestCapture, () =>
     withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-      withModelTransportStartedObserver(
-        overrides.onModelTransportStarted,
-        () => {
-          recordModelPreparationManifestInventory(
-            "sandbox_agent_manifest_inventory",
-            (agent as { defaultManifest?: Manifest }).defaultManifest,
-          );
-          return runScopedRunner(settings, agent, inputWaitYield).run(
-            agent,
-            prepared.input,
-            runOptions,
-          );
-        },
-        overrides.onModelTransportDispatched,
+      withPromptCacheFingerprintObserver(overrides.onPromptCacheFingerprint, () =>
+        withModelTransportStartedObserver(
+          overrides.onModelTransportStarted,
+          () => {
+            recordModelPreparationManifestInventory(
+              "sandbox_agent_manifest_inventory",
+              (agent as { defaultManifest?: Manifest }).defaultManifest,
+            );
+            return runScopedRunner(settings, agent, inputWaitYield).run(
+              agent,
+              prepared.input,
+              runOptions,
+            );
+          },
+          overrides.onModelTransportDispatched,
+        ),
       ),
     ),
   );

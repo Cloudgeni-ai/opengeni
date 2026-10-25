@@ -5,6 +5,7 @@ import {
   getSessionTurnForAttempt,
   ensureSessionReasoningConfiguration,
   ensureSessionSkillCatalog,
+  ensureSessionWorkspaceGovernance,
   sessionHasToolRouterHistory,
   readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
@@ -602,6 +603,19 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     catalog: formatSkillCatalog(deps.skillCatalog),
   });
+  // Governance changes between turns and with who starts a turn. It reaches
+  // the model as a durable history item before the first turn that sees a new
+  // value, never in the system prompt, so a change does not rewrite text that
+  // earlier requests sent (which invalidated the whole cached history).
+  await ensureSessionWorkspaceGovernance(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    expectedExecutionGeneration: turn.executionGeneration,
+    expectedAttemptId: input.attemptId,
+    governance: workspaceGovernance ?? null,
+  });
   eventing.modelVisibleSkillIds = skillCatalogEntryIds(modelVisibleSkillCatalogText);
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
@@ -887,7 +901,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),
-        ...(workspaceGovernance ? { workspaceGovernance } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for

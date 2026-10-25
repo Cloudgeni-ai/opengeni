@@ -949,15 +949,20 @@ artifact API requests instead authorize from their ordinary authenticated access
 grant. Within governance, service-initiated goal continuations and compactions
 use the frozen causal human as the personal-preference subject while retaining
 their service initiator; pure service work has no personal-preference scope.
-Runtime composition is deterministic: core safety,
-organization/workspace/user preference descriptors plus organization/global,
-workspace, and role policy, then durable session instructions, tool/repository/
-skill substrate, and memory. Optional application `modelContext` is not part of
+Runtime composition is deterministic: core safety, durable session
+instructions, tool/repository/skill substrate, and memory form the system
+prompt. The rendered governance (organization/workspace/user preference
+descriptors plus organization/global, workspace, and role policy) is not part
+of the system prompt: it differs by initiator and changes between turns, so it
+is a durable developer history item written before the first turn that sees a
+new value, frozen for every attempt of that turn, and replaced by appending a
+newer item (see `docs/context-compaction.md`, "Prompt-cache stability").
+Optional application `modelContext` is not part of
 that prefix: claim stores it as a separate leading `input_text` part of the
 exact chronological user message. Standard timeline rendering omits it, while
 full audit data retains it. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
-governance applies, the legacy prompt bytes remain unchanged.
+governance applies, no governance item is written.
 
 Turn acceptance freezes Agent learning policy in `agent_learning_snapshots`:
 the owner layer, effective Knowledge/instruction/Skill modes, and the accepted
