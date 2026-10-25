@@ -281,7 +281,10 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
     let mut ready = None;
     let mut waiting = false;
     // Whether the guard has seen systemd keep the watchdog.
-    let mut keeping = Keeping::default();
+    let mut keeping = Keeping {
+        taken_over: watchdog.is_some(),
+        ..Keeping::default()
+    };
     let mut kept_open = false;
     let socket = std::env::var("NOTIFY_SOCKET").ok();
     tracing::info!(cgroup = %config.cgroup.display(), "guard running");
@@ -334,6 +337,8 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
 /// The guard's asking systemd to keep its watchdog open.
 #[derive(Debug, Default)]
 struct Keeping {
+    /// The guard took the watchdog over from the store.
+    taken_over: bool,
     /// When it last asked.
     asked: Option<Instant>,
     /// The barrier sent after it asked, until systemd deals with it.
@@ -349,7 +354,9 @@ impl Keeping {
     /// and once the barrier has passed, sees whether systemd holds the
     /// device (`held`), which then only the store can, since the device
     /// opens once at a time. Until then it asks again every [`KEEP_AGAIN`]
-    /// (systemd keeps one file once).
+    /// (systemd keeps one file once). A watchdog taken over from the store
+    /// is kept there already, so the first time it sends the barrier
+    /// alone: asked to keep it again, systemd would refuse the copy.
     fn kept(
         &mut self,
         fd: BorrowedFd<'_>,
@@ -388,12 +395,17 @@ impl Keeping {
         if self.asked.is_some_and(|at| at.elapsed() < KEEP_AGAIN) {
             return false;
         }
-        self.asked = Some(Instant::now());
+        let first = self.asked.replace(Instant::now()).is_none();
         let Some(socket) = socket else {
             self.tell("not run by systemd, which would keep the watchdog");
             return false;
         };
-        match kept::keep(socket, kept::WATCHDOG, fd).and_then(|()| kept::Barrier::send(socket)) {
+        let asking = if first && self.taken_over {
+            Ok(())
+        } else {
+            kept::keep(socket, kept::WATCHDOG, fd)
+        };
+        match asking.and_then(|()| kept::Barrier::send(socket)) {
             Ok(barrier) => self.barrier = Some(barrier),
             Err(error) => self.tell(&format!(
                 "asking systemd to keep the watchdog failed: {error}"
@@ -856,6 +868,35 @@ mod tests {
         }
         assert!(kept, "systemd keeps it");
         assert!(!keeping.told);
+        done.store(true, Ordering::Relaxed);
+
+        // Taken over from the store, it is kept there already: the guard
+        // sends the barrier alone, not a second copy systemd would refuse.
+        let socket = dir.path().join("taken-over");
+        let (table, done) = systemd(&socket, true, Duration::from_millis(50));
+        table
+            .lock()
+            .unwrap()
+            .push(device.try_clone().unwrap().into());
+        let held = |fd: BorrowedFd<'_>| -> io::Result<bool> {
+            Ok(table
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|kept| same(kept.as_fd(), fd)))
+        };
+        let mut keeping = Keeping {
+            taken_over: true,
+            ..Keeping::default()
+        };
+        let until = Instant::now() + Duration::from_secs(2);
+        let mut kept = false;
+        while !kept && Instant::now() < until {
+            kept = keeping.kept(device.as_fd(), socket.to_str(), held);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(kept, "systemd keeps it");
+        assert_eq!(table.lock().unwrap().len(), 1, "not sent to keep again");
         done.store(true, Ordering::Relaxed);
 
         // Not run by systemd.
