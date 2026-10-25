@@ -796,6 +796,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "recording_notes",
       // 0959 automation templates are also withheld.
       "automation_templates",
+      // 0971 per-turn app action grants are also withheld.
+      "session_turn_app_action_grants",
     ].sort();
     // 0823 machine-consent tables are protected but not runtime-privileged.
     const protectedTables = [
