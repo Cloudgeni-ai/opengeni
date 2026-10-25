@@ -159,6 +159,13 @@ import {
   turnHuman,
   inboxOrigin,
 } from "./inbox-execution-context";
+import {
+  notWaitingForMachineOwnerSql,
+  runnableQueuedTurnExists,
+  sessionMachineOwnerSubject,
+  WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT,
+  waitsForMachineOwnerSql,
+} from "./machine-owner-wait";
 import { parentOutboxAuthorityTx } from "./child-outbox-authority";
 import {
   compactionFailureHoldSequenceTx,
@@ -1231,6 +1238,7 @@ export const { importArchivedSession, appendArchivedSessionEvents } =
   });
 export * from "./session-model-settings";
 export * from "./session-queue-commands";
+export { WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT } from "./machine-owner-wait";
 export * from "./session-realtime";
 export * from "./session-realtime-context";
 export * from "./session-realtime-ledger";
@@ -25384,20 +25392,14 @@ export async function armSubscriptionCoreCapacityWait(
             retryNotBefore,
           },
         };
-        const [waitingPrompt] = stopped
-          ? await tx
-              .select({ id: schema.sessionTurns.id })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                  eq(schema.sessionTurns.sessionId, input.sessionId),
-                  eq(schema.sessionTurns.status, "queued"),
-                  inArray(schema.sessionTurns.source, ["user", "api"]),
-                ),
-              )
-              .limit(1)
-          : [];
+        const waitingPrompt = stopped
+          ? await runnableQueuedTurnExists(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sources: ["user", "api"],
+            })
+          : false;
         const sessionStatus = stopped ? (waitingPrompt ? "queued" : "failed") : "waiting_capacity";
         await closeSessionTurnAttemptInTransaction(tx, {
           id: input.attemptId,
@@ -26109,19 +26111,13 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       );
     }
   }
-  const [queued] = turnWasCurrent
-    ? await tx
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
-            eq(schema.sessionTurns.sessionId, input.session.id),
-            eq(schema.sessionTurns.status, "queued"),
-          ),
-        )
-        .limit(1)
-    : [];
+  const queued = turnWasCurrent
+    ? await runnableQueuedTurnExists(tx, {
+        accountId: input.session.accountId,
+        workspaceId: input.session.workspaceId,
+        sessionId: input.session.id,
+      })
+    : false;
   const nextSessionStatus =
     input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
   const eventValues: SessionEventInsertWithPayload[] = [
@@ -43144,7 +43140,31 @@ async function pendingSteerExists(
       ),
     )
     .limit(1);
-  if (steerPrompt) return true;
+  if (steerPrompt) {
+    // A queued Steer that waits for the personal machine's owner cannot run,
+    // so it must not hand the owner's running turn over to it.
+    const owner = await sessionMachineOwnerSubject(db, {
+      accountId: null,
+      workspaceId,
+      sessionId,
+    });
+    if (owner === null) return true;
+    const [runnableSteer] = await db
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          eq(schema.sessionTurns.status, "queued"),
+          ne(schema.sessionTurns.id, turnId),
+          sql`${schema.sessionTurns.metadata} ->> 'delivery' = 'steer'`,
+          notWaitingForMachineOwnerSql(owner),
+        ),
+      )
+      .limit(1);
+    if (runnableSteer) return true;
+  }
   const [agentSteer] = await db
     .select({ id: schema.sessionSystemUpdates.id })
     .from(schema.sessionSystemUpdates)
@@ -70693,6 +70713,13 @@ export async function evaluateGoalContinuation(
         if (!row || row.status !== "active") {
           return { decision: "none" } as const;
         }
+        // A message waiting for the personal machine's owner is not queued
+        // work: the owner's goal keeps going beside it.
+        const machineOwner = await sessionMachineOwnerSubject(tx, {
+          accountId: null,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
         const [pendingTurn] = await tx
           .select({
             id: schema.sessionTurns.id,
@@ -70704,6 +70731,7 @@ export async function evaluateGoalContinuation(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
               eq(schema.sessionTurns.sessionId, input.sessionId),
               inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+              notWaitingForMachineOwnerSql(machineOwner),
             ),
           )
           .limit(1);
@@ -71045,6 +71073,11 @@ export async function materializeGoalContinuation(
             ),
           );
 
+        const machineOwner = await sessionMachineOwnerSubject(tx, {
+          accountId: null,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
         const [pendingTurn] = await tx
           .select({
             id: schema.sessionTurns.id,
@@ -71063,6 +71096,8 @@ export async function materializeGoalContinuation(
                 "recovering",
                 "waiting_capacity",
               ]),
+              // Waiting messages never hold back the owner's goal.
+              notWaitingForMachineOwnerSql(machineOwner),
             ),
           )
           .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
@@ -74354,31 +74389,62 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
 }
 
 /** The session lock must already be held. Shared with pre-claim failure settlement
- * so a failed batch claim is attributed to the same logical turn. */
+ * so a failed batch claim is attributed to the same logical turn.
+ *
+ * On a personal machine, messages from anyone but its owner wait
+ * (`machine-owner-wait.ts`): they are never the head. `waiting` returns the
+ * ones sent before the owner's claimed head (queued ahead of it, or sent
+ * before an owner's Steer that jumped them), oldest first, which that turn
+ * takes in as context ahead of its own prompt. */
 async function selectQueuedSessionClaimBatch(
   tx: Database,
   session: typeof schema.sessions.$inferSelect,
   pendingAgentSteer: boolean,
-): Promise<Array<typeof schema.sessionTurns.$inferSelect>> {
+): Promise<{
+  batch: Array<typeof schema.sessionTurns.$inferSelect>;
+  waiting: Array<typeof schema.sessionTurns.$inferSelect>;
+}> {
+  const machineOwner = await sessionMachineOwnerSubject(tx, {
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+  });
+  const waits =
+    machineOwner === null
+      ? sql`false`
+      : sql`coalesce(${waitsForMachineOwnerSql(machineOwner)}, false)`;
   // Only fetch full prompt/authority rows for the leading Steer run (or the
   // ordinary head). A long queue of later Sends must not inflate claim memory.
-  const previews = await rawRows<{ id: string; version: number }>(
+  // Waiting messages break that run, and only those sent before the head are
+  // taken in with it.
+  const previews = await rawRows<{ id: string; version: number; waits: boolean }>(
     tx,
     sql`
-    with ordered as (
-      select id, version, position, created_at,
-        row_number() over (order by position, created_at, id) as ordinal,
-        count(*) filter (where metadata->>'delivery' is distinct from 'steer')
-          over (order by position, created_at, id rows unbounded preceding) as sends
+    with candidates as (
+      select id, version, position, created_at, ${waits} as waits,
+        metadata->>'delivery' is distinct from 'steer' as send
       from session_turns
       where workspace_id = ${session.workspaceId} and session_id = ${session.id}
         and status = 'queued' and source in ('user', 'api')
         and (${pendingAgentSteer} = false or metadata->>'delivery' = 'steer')
+    ), ordered as (
+      select id, version, position, created_at, waits,
+        count(*) filter (where not waits) over run as runnable,
+        count(*) filter (where not waits and send) over run as sends,
+        count(*) filter (where waits) over run as waited
+      from candidates
+      window run as (order by position, created_at, id rows unbounded preceding)
+    ), head as (
+      select waited, created_at from ordered where not waits and runnable = 1
     )
-    select id, version from ordered where ordinal = 1 or sends = 0
+    select id, version, waits from ordered
+    where exists (select 1 from head) and (
+      (waits and (runnable = 0 or created_at < (select created_at from head)))
+      or (not waits and runnable = 1)
+      or (not waits and sends = 0 and waited = (select waited from head)))
     order by position, created_at, id`,
   );
-  if (previews.length === 0) return [];
+  if (previews.length === 0) return { batch: [], waiting: [] };
   const locked = await lockSessionEventWriteRows(tx, {
     workspaceId: session.workspaceId,
     controlLock: "already_locked",
@@ -74386,7 +74452,7 @@ async function selectQueuedSessionClaimBatch(
     turnIds: previews.map((turn) => turn.id),
   });
   const lockedById = new Map(locked.turns.map((turn) => [turn.id, turn]));
-  const queued = previews.map((preview) => {
+  const rows = previews.map((preview) => {
     const turn = lockedById.get(preview.id);
     if (
       !turn ||
@@ -74399,10 +74465,11 @@ async function selectQueuedSessionClaimBatch(
         "Queued claim selection changed under the session lock",
       );
     }
-    return turn;
+    return { turn, waits: preview.waits === true };
   });
+  const queued = rows.filter((row) => !row.waits).map((row) => row.turn);
   const first = queued[0];
-  if (!first) return [];
+  if (!first) return { batch: [], waiting: [] };
   const plainSteer = (turn: typeof first) =>
     turn.metadata?.delivery === "steer" &&
     turn.executionGeneration === 0 &&
@@ -74442,7 +74509,16 @@ async function selectQueuedSessionClaimBatch(
       break;
     batch.push(next);
   }
-  return batch;
+  // A waiting message whose history cannot be rendered stays queued rather
+  // than failing the owner's claim.
+  const waiting = rows
+    .filter((row) => row.waits && validHistory(row.turn))
+    .map((row) => row.turn)
+    .sort(
+      (left, right) =>
+        left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+    );
+  return { batch, waiting };
 }
 
 /**
@@ -75791,11 +75867,12 @@ export async function claimSessionWorkForAttempt(
         // internal instruction is delivered as context on that same human turn
         // instead of manufacturing another system inference ahead of it.
         // Ordinary queued sends retain the established Agent-Steer priority.
-        const queuedBatch = await selectQueuedSessionClaimBatch(
-          tx as unknown as Database,
-          session,
-          Boolean(pendingAgentSteer),
-        );
+        const { batch: queuedBatch, waiting: waitingMessages } =
+          await selectQueuedSessionClaimBatch(
+            tx as unknown as Database,
+            session,
+            Boolean(pendingAgentSteer),
+          );
         const queuedTurnRow = queuedBatch.at(-1);
         for (const member of queuedBatch) {
           await goalSnapshotForAcceptedTurnInTransaction(tx as unknown as Database, member);
@@ -76941,9 +77018,25 @@ export async function claimSessionWorkForAttempt(
               eq(schema.sessionHistoryItems.sessionId, sessionId),
             ),
           );
-        const historyTurns = [...queuedBatch.slice(0, -1), row];
+        // Messages that waited for this machine's owner come first, in the
+        // order they were sent, marked as such; then the claimed batch.
+        const waitingHistory = waitingMessages.map((waitingTurn) => ({
+          historyTurn: waitingTurn,
+          modelContext: [WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT, waitingTurn.modelContext?.trim()]
+            .filter(Boolean)
+            .join("\n\n"),
+          goalSnapshot: undefined,
+        }));
+        const historyTurns = [
+          ...waitingHistory,
+          ...[...queuedBatch.slice(0, -1), row].map((historyTurn) => ({
+            historyTurn,
+            modelContext: historyTurn.modelContext,
+            goalSnapshot: SessionGoalSnapshot.parse(historyTurn.goalSnapshot),
+          })),
+        ];
         await tx.insert(schema.sessionHistoryItems).values(
-          historyTurns.map((historyTurn, index) =>
+          historyTurns.map(({ historyTurn, modelContext, goalSnapshot }, index) =>
             withLosslessContentWriteVersion(
               {
                 accountId: session.accountId,
@@ -76958,8 +77051,8 @@ export async function claimSessionWorkForAttempt(
                       ? (historyTurn.resources as ResourceRef[])
                       : [],
                     TimelineAnnotations.parse(historyTurn.annotations),
-                    historyTurn.modelContext,
-                    SessionGoalSnapshot.parse(historyTurn.goalSnapshot),
+                    modelContext,
+                    goalSnapshot,
                     // Acceptance time, not claim time: a queued message keeps the
                     // moment the user sent it.
                     historyTurn.createdAt,
@@ -76974,7 +77067,9 @@ export async function claimSessionWorkForAttempt(
             ),
           ),
         );
-        const consumed = queuedBatch.slice(0, -1);
+        // Both the waiting messages and the batch's earlier members are
+        // delivered with this turn and never run on their own.
+        const consumed = [...waitingMessages, ...queuedBatch.slice(0, -1)];
         const consumedEvents: SessionEventInsertWithPayload[] = consumed.map((member, index) => ({
           accountId: session.accountId,
           workspaceId,
@@ -79007,18 +79102,13 @@ export async function peekSessionWork(
       throw new Error(`Session ${sessionId} has terminal active turn ${turn.id} (${turn.status})`);
     }
 
-    const [queued] = await scopedDb
-      .select({ id: schema.sessionTurns.id })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.status, "queued"),
-          inArray(schema.sessionTurns.source, ["user", "api"]),
-        ),
-      )
-      .limit(1);
+    // A message waiting for the personal machine's owner is not work yet.
+    const queued = await runnableQueuedTurnExists(scopedDb, {
+      accountId: session.accountId,
+      workspaceId,
+      sessionId,
+      sources: ["user", "api"],
+    });
     if (queued || session.compactRequested) return runnable;
     const waitState = await sessionInputWaitStateTx(scopedDb, workspaceId, sessionId, session);
     const inputWaitPeek =
@@ -79876,7 +79966,7 @@ async function settleSessionWorkBeforeAttemptClaim(
               desc(schema.sessionSystemUpdates.id),
             )
             .limit(1);
-          const queuedBatch = await selectQueuedSessionClaimBatch(
+          const { batch: queuedBatch } = await selectQueuedSessionClaimBatch(
             tx as unknown as Database,
             session,
             Boolean(pendingAgentSteer),
@@ -80952,17 +81042,13 @@ export async function settleSessionIdleWithParentOutbox(
       ) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
-      const [queued] = await tx
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, sessionId),
-            eq(schema.sessionTurns.status, "queued"),
-          ),
-        )
-        .limit(1);
+      // A message waiting for the personal machine's owner does not keep the
+      // chat busy: it is not work until the owner writes or the chat moves.
+      const queued = await runnableQueuedTurnExists(tx as unknown as Database, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId,
+      });
       if (queued || !["queued", "running", "idle"].includes(session.status)) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
@@ -82733,18 +82819,13 @@ export async function applySessionTurnSettlement(
 
       let effectiveSessionStatus = input.sessionStatus;
       if (input.sessionStatus === "idle" && input.activeTurnId === null) {
-        const [waitingPrompt] = await tx
-          .select({ id: schema.sessionTurns.id })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              eq(schema.sessionTurns.status, "queued"),
-              inArray(schema.sessionTurns.source, ["user", "api"]),
-            ),
-          )
-          .limit(1);
+        // Messages waiting for the personal machine's owner leave it idle.
+        const waitingPrompt = await runnableQueuedTurnExists(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          sources: ["user", "api"],
+        });
         if (waitingPrompt) effectiveSessionStatus = "queued";
       }
       const now = new Date();
@@ -86173,18 +86254,14 @@ export async function markSessionWorkflowWakeDelivered(
                 return { action: "pending_admission", blocker: "pending_input_wait" } as const;
               }
             }
-            const [pendingPromptTurn] = await tx
-              .select({ id: schema.sessionTurns.id })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                  eq(schema.sessionTurns.sessionId, input.sessionId),
-                  eq(schema.sessionTurns.status, "queued"),
-                  inArray(schema.sessionTurns.source, ["user", "api"]),
-                ),
-              )
-              .limit(1);
+            // A message waiting for the personal machine's owner is not
+            // undelivered work, so it must not keep the wake pending.
+            const pendingPromptTurn = await runnableQueuedTurnExists(tx as unknown as Database, {
+              accountId: null,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sources: ["user", "api"],
+            });
             if (pendingPromptTurn) {
               return {
                 action: "pending_admission",

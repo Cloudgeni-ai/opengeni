@@ -935,6 +935,14 @@ Known owner mismatches disable futile rechecks until the pointer or access chang
 changing machines never clears an explicit pause. Claim diagnostics classify the
 reviewed owner rejection without logging SQL, parameters or raw exception text.
 
+A queued message whose causal person is not the personal machine's owner is
+not runnable work there: claim, peek, idle, goal, wake and steer delivery skip
+it (`packages/db/src/machine-owner-wait.ts`), so it can neither block nor
+interrupt the owner's turns. The owner's next claimed turn writes it once into
+history ahead of its own prompt and supersedes it; a machine move wakes the chat
+so it can run elsewhere. Agent steers for anyone but the owner are refused up
+front. See [Connected Machines](connected-machines.md).
+
 Modal recovery: singleton human consent (`packages/core/src/application/sandbox-recovery.ts`)
 or proved provider loss (`packages/db/src/index.ts`): the quiescent group restores a
 verified checkpoint, else continues empty, warning every member; never replays.

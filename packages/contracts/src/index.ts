@@ -20571,6 +20571,13 @@ export const SteerSessionMessageResponse = /* @__PURE__ */ defineSchema(() =>
     receipt: SessionCommandReceipt,
     routing: SessionPromptRouting,
     interruptionCount: primitives.nonnegativeInteger,
+    /**
+     * The chat runs on another person's personal machine, so the message
+     * waits for its owner instead of steering: the owner's next message
+     * brings it to the agent, or it runs once the chat moves to a machine
+     * the sender may use. Older servers omit it.
+     */
+    waitsForMachineOwner: primitives.boolean.optional(),
     replay: primitives.boolean,
   }),
 );
@@ -20584,6 +20591,8 @@ export const SubmitComposerDraftResponse = /* @__PURE__ */ defineSchema(() =>
     receipt: SessionCommandReceipt,
     routing: SessionPromptRouting,
     interruptionCount: primitives.nonnegativeInteger,
+    /** As on `SteerSessionMessageResponse`. Older servers omit it. */
+    waitsForMachineOwner: primitives.boolean.optional(),
     replay: primitives.boolean,
   }),
 );
@@ -21851,6 +21860,23 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
           /** The waiting results come from the caller's own work. */
           isYou: z.boolean(),
           results: z.number().int().positive(),
+        }),
+      )
+      .optional(),
+    /**
+     * Messages other people sent here that wait because only the machine's
+     * owner may start work on it, grouped by sender. The owner's next message
+     * brings them to the agent; moving the chat to a machine the sender may
+     * use runs them. Older servers omit it.
+     */
+    waitingMessages: z
+      .array(
+        z.object({
+          /** The sender's display name, when known. */
+          name: z.string().nullable(),
+          /** The caller sent them. */
+          isYou: z.boolean(),
+          messages: z.number().int().positive(),
         }),
       )
       .optional(),

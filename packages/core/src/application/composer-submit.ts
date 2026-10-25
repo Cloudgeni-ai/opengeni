@@ -73,6 +73,7 @@ export async function submitComposerDraftForRequest(
     receipt: result.receipt,
     routing: result.routing,
     interruptionCount: result.interruptionCount,
+    waitsForMachineOwner: result.waitsForMachineOwner,
     replay: result.replay,
   };
 }
