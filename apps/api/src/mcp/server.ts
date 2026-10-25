@@ -598,16 +598,21 @@ export function orchestrationFailureEnvelope(tool: OrchestrationToolName, error:
         ? ["caller_interrupted", "The calling session was interrupted before delivery."]
         : typedCode === "TARGET_NOT_VERTICAL"
           ? ["target_not_vertical", "The calling agent cannot act on that session."]
-          : typedCode === "CONTROL_CHANGED"
-            ? ["conflict", "The target session control state changed; refresh and retry."]
-            : typedCode === "IDEMPOTENCY_KEY_REUSED"
-              ? ["idempotency_key_reused", "The idempotency key was reused with different input."]
-              : typedCode === "WORKSPACE_CONTROL_BUSY"
-                ? [
-                    "workspace_busy",
-                    "The workspace is busy applying other session commands; nothing was applied. Retry the same call shortly.",
-                  ]
-                : null;
+          : typedCode === "PERSONAL_MACHINE_OWNER_REQUIRED"
+            ? [
+                "personal_machine_owner_required",
+                "That session runs on another person's personal machine, so only its owner can steer it. Nothing was applied.",
+              ]
+            : typedCode === "CONTROL_CHANGED"
+              ? ["conflict", "The target session control state changed; refresh and retry."]
+              : typedCode === "IDEMPOTENCY_KEY_REUSED"
+                ? ["idempotency_key_reused", "The idempotency key was reused with different input."]
+                : typedCode === "WORKSPACE_CONTROL_BUSY"
+                  ? [
+                      "workspace_busy",
+                      "The workspace is busy applying other session commands; nothing was applied. Retry the same call shortly.",
+                    ]
+                  : null;
   if (knownFailure) {
     return {
       error: {
@@ -6218,21 +6223,22 @@ function registerWorkspaceOrchestrationTools(
               }),
             );
           }
-          const { accepted, turn, replay } = await acceptSessionUserMessageWithOutcome(
-            deps,
-            grant,
-            grant.workspaceId,
-            targetSessionId,
-            {
-              text,
-              delivery: "send",
-              origin: "operator",
-              clientEventId: idempotencyKey,
-              mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
-                SessionMcpCredentialUpdateInput.parse(update),
-              ),
-            },
-          );
+          const { accepted, turn, replay, waitsForMachineOwner } =
+            await acceptSessionUserMessageWithOutcome(
+              deps,
+              grant,
+              grant.workspaceId,
+              targetSessionId,
+              {
+                text,
+                delivery: "send",
+                origin: "operator",
+                clientEventId: idempotencyKey,
+                mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
+                  SessionMcpCredentialUpdateInput.parse(update),
+                ),
+              },
+            );
           return json(
             mcpMutationReceipt({
               operation: "session_send_message",
@@ -6255,6 +6261,13 @@ function registerWorkspaceOrchestrationTools(
               ],
               timestamp: accepted.occurredAt,
               idempotency: { status: replay ? "replayed" : "applied" },
+              ...(waitsForMachineOwner
+                ? {
+                    warnings: [
+                      "The session runs on another person's personal machine, so this message waits for its owner instead of running. Their next message brings it to their agent, or it runs once the session moves to a machine you may use.",
+                    ],
+                  }
+                : {}),
               nextAction: {
                 tool: "session_get",
                 arguments: { sessionId: targetSessionId },

@@ -1934,6 +1934,8 @@ type PostUserMessageTurnResult = {
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  /** It waits for the owner of the personal machine the chat runs on. */
+  waitsForMachineOwner: boolean;
   replay: boolean;
 };
 
@@ -2089,6 +2091,7 @@ function finalizePostUserMessageTurn(
         }
       : null,
     interruptionCount: result.interruptionCount,
+    waitsForMachineOwner: result.waitsForMachineOwner,
     replay: result.replay,
   };
 }
@@ -4402,6 +4405,7 @@ async function acceptSessionUserMessageInFileScope(
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  waitsForMachineOwner: boolean;
   replay: boolean;
 }> {
   const { db, bus, workflowClient, objectStorage } = deps;
@@ -4723,77 +4727,85 @@ async function acceptSessionUserMessageInFileScope(
       authorization: input.authorization,
       delegatedSignInChangesEnabled: deps.settings.delegatedSignInAppActionChangesEnabled === true,
     });
-    const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
-      await postUserMessageTurn({
-        db,
-        bus,
-        workflowClient,
-        settings,
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        text: input.text,
-        annotations,
-        modelContext: input.modelContext ?? null,
-        resources: requestedResources,
-        ...(composerDraftResources ? { composerDraftResources } : {}),
-        model: input.model ?? null,
-        reasoningEffort: input.reasoningEffort ?? null,
-        latencyMode: input.latencyMode ?? null,
-        reasoningEffortFallback: sessionReasoningEffort,
-        turnExecutionPolicy,
-        mcpCredentialUpdates,
-        personalConnectionDelegations,
-        mcpAccountBindings,
-        connectionAccountIntent,
-        ...(timeZone ? { timeZone } : {}),
+    const {
+      accepted,
+      turn,
+      draft,
+      receipt,
+      routing,
+      interruptionCount,
+      waitsForMachineOwner,
+      replay,
+    } = await postUserMessageTurn({
+      db,
+      bus,
+      workflowClient,
+      settings,
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+      text: input.text,
+      annotations,
+      modelContext: input.modelContext ?? null,
+      resources: requestedResources,
+      ...(composerDraftResources ? { composerDraftResources } : {}),
+      model: input.model ?? null,
+      reasoningEffort: input.reasoningEffort ?? null,
+      latencyMode: input.latencyMode ?? null,
+      reasoningEffortFallback: sessionReasoningEffort,
+      turnExecutionPolicy,
+      mcpCredentialUpdates,
+      personalConnectionDelegations,
+      mcpAccountBindings,
+      connectionAccountIntent,
+      ...(timeZone ? { timeZone } : {}),
 
-        captureTurnAuthority: async (tx: Database, turnId: string) => {
-          await teamsCommitAuthorizer?.(tx);
-          await captureLinkedAuthority?.(tx, sessionId, turnId);
-          if (appActionGrant)
-            await recordTurnAppActionGrant(tx, {
+      captureTurnAuthority: async (tx: Database, turnId: string) => {
+        await teamsCommitAuthorizer?.(tx);
+        await captureLinkedAuthority?.(tx, sessionId, turnId);
+        if (appActionGrant)
+          await recordTurnAppActionGrant(tx, {
+            accountId: grant.accountId,
+            workspaceId,
+            turnId,
+            grant: appActionGrant,
+          });
+        // The prompt transaction has frozen the exact authority at this
+        // point. A refusal rolls back both prompt and receipt atomically.
+        if (effectiveModel.startsWith("codex/"))
+          await requireLimit(
+            { ...deps, db: tx },
+            {
               accountId: grant.accountId,
               workspaceId,
-              turnId,
-              grant: appActionGrant,
-            });
-          // The prompt transaction has frozen the exact authority at this
-          // point. A refusal rolls back both prompt and receipt atomically.
-          if (effectiveModel.startsWith("codex/"))
-            await requireLimit(
-              { ...deps, db: tx },
-              {
-                accountId: grant.accountId,
-                workspaceId,
-                initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
-                action: "agent_run:create",
-                quantity: 1,
-                model: effectiveModel,
-                acceptedTurn: { sessionId, turnId },
-              },
-            );
-        },
-        ...(input.personalResourceAttachment
-          ? { personalResourceAttachment: input.personalResourceAttachment }
-          : {}),
-        delivery,
-        origin: source === "api" ? "operator" : "human",
-        surface,
-        actor: grant.subjectId,
-        ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
-        commandActor,
-        ...(boundaryRequestHash ? { boundaryRequestHash } : {}),
-        ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
-        ...(input.expectedDraftRevision !== undefined
-          ? { expectedDraftRevision: input.expectedDraftRevision }
-          : {}),
-        ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-        recordAgentRunUsage: true,
-        ...(deps.schedulePromptPostCommit
-          ? { schedulePostCommit: deps.schedulePromptPostCommit }
-          : {}),
-      });
+              initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
+              action: "agent_run:create",
+              quantity: 1,
+              model: effectiveModel,
+              acceptedTurn: { sessionId, turnId },
+            },
+          );
+      },
+      ...(input.personalResourceAttachment
+        ? { personalResourceAttachment: input.personalResourceAttachment }
+        : {}),
+      delivery,
+      origin: source === "api" ? "operator" : "human",
+      surface,
+      actor: grant.subjectId,
+      ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
+      commandActor,
+      ...(boundaryRequestHash ? { boundaryRequestHash } : {}),
+      ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
+      ...(input.expectedDraftRevision !== undefined
+        ? { expectedDraftRevision: input.expectedDraftRevision }
+        : {}),
+      ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
+      recordAgentRunUsage: true,
+      ...(deps.schedulePromptPostCommit
+        ? { schedulePostCommit: deps.schedulePromptPostCommit }
+        : {}),
+    });
     if (!replay) recordUserMessageAccepted(deps.observability, { surface });
     return {
       accepted,
@@ -4802,6 +4814,7 @@ async function acceptSessionUserMessageInFileScope(
       receipt,
       routing,
       interruptionCount,
+      waitsForMachineOwner,
       replay,
     };
   } catch (error) {
@@ -4858,11 +4871,12 @@ export async function acceptSessionUserMessage(
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  waitsForMachineOwner: boolean;
   replay: boolean;
 }> {
-  const { accepted, turn, receipt, routing, interruptionCount, replay } =
+  const { accepted, turn, receipt, routing, interruptionCount, waitsForMachineOwner, replay } =
     await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, input);
-  return { accepted, turn, receipt, routing, interruptionCount, replay };
+  return { accepted, turn, receipt, routing, interruptionCount, waitsForMachineOwner, replay };
 }
 
 /**

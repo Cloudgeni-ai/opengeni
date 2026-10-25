@@ -487,3 +487,68 @@ describe("waiting updates from other people's work", () => {
     expect(container.textContent).toContain("Workspace access needed");
   });
 });
+
+describe("messages other people sent to a chat on a personal machine", () => {
+  const access = (
+    isOwner: boolean,
+    waitingMessages: { name: string | null; isYou: boolean; messages: number }[],
+  ) => ({
+    sandboxId: "machine",
+    machineName: "Alex Mac",
+    ownerName: "Alex",
+    isOwner,
+    queuedTurnBlocked: true,
+    waitingMessages,
+  });
+  const running = session("database_claim_rejected", "running");
+  const unblocked = { ...running, admissionBlock: null } as unknown as Session;
+
+  test("the owner learns whose messages wait and that their next message brings them", async () => {
+    const onRecheck = await render({
+      session: unblocked,
+      machineAccess: access(true, [{ name: "Sam", isYou: false, messages: 2 }]),
+    });
+    expect(container.textContent).toContain("2 messages from Sam are waiting for you");
+    expect(container.textContent).toContain("your personal machine “Alex Mac”");
+    expect(container.textContent).toContain("Your next message brings them to the agent");
+    expect(container.textContent).not.toContain("Permission needed");
+    // Nothing is blocked, so there is nothing to recheck or retry.
+    expect(container.querySelectorAll("button")).toHaveLength(0);
+    expect(container.querySelectorAll("[role=alert]")).toHaveLength(0);
+    expect(onRecheck).not.toHaveBeenCalled();
+  });
+
+  test("the sender sees their message waits for the owner, and how to run it themselves", async () => {
+    await render({
+      session: unblocked,
+      machineAccess: access(false, [{ name: "Sam", isYou: true, messages: 1 }]),
+    });
+    expect(container.textContent).toContain("Your message is waiting for Alex");
+    expect(container.textContent).toContain("Only Alex can start work there");
+    expect(container.textContent).toContain("move the chat to a machine you can use");
+    expect(container.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  test("someone else sees whose messages wait for the owner", async () => {
+    await render({
+      session: unblocked,
+      machineAccess: access(false, [
+        { name: "Sam", isYou: false, messages: 1 },
+        { name: null, isYou: false, messages: 1 },
+      ]),
+    });
+    expect(container.textContent).toContain(
+      "2 messages from Sam and another member are waiting for Alex",
+    );
+    expect(container.textContent).toContain("Alex’s next message brings them to the agent");
+  });
+
+  test("they sit beside another notice instead of replacing it", async () => {
+    await render({
+      session: session("initiator_membership_required"),
+      machineAccess: access(true, [{ name: "Sam", isYou: false, messages: 1 }]),
+    });
+    expect(container.textContent).toContain("Workspace access needed");
+    expect(container.textContent).toContain("A message from Sam is waiting for you");
+  });
+});

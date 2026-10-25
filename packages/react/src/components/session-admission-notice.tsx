@@ -10,6 +10,7 @@ import {
   sessionAdmissionNeedsDifferentMachine,
   sessionAdmissionReason,
   sessionWaitingWorkExplainsBlock,
+  waitingMessagesCopy,
   waitingWorkCopy,
 } from "../session-admission-model";
 import { Button } from "../ui/button";
@@ -163,6 +164,26 @@ export function SessionWaitingWorkNotice({
 }
 
 /**
+ * Messages other people sent wait because this chat runs on somebody's
+ * personal machine, where only its owner can start work. One calm notice for
+ * all of them: whose messages wait, and what brings them to the agent. They
+ * never block the chat, so it offers no action. Renders nothing when none wait.
+ */
+export function SessionWaitingMessagesNotice({ access }: { access: SessionMachineAccess }) {
+  const t = useOpenGeniText();
+  const copy = waitingMessagesCopy(t, access);
+  if (!copy) return null;
+  return (
+    <Notice tone="waiting" title={copy.title}>
+      <div role="status" aria-live="polite">
+        <p>{copy.explanation}</p>
+        <p className="mt-1">{copy.next}</p>
+      </div>
+    </Notice>
+  );
+}
+
+/**
  * Before sending: the chat runs on somebody else's personal machine, so a new
  * message from this person could not start there. Renders nothing for the
  * machine's owner or when the chat is not on a personal machine.
@@ -246,6 +267,11 @@ export function SessionAdmissionNotice({
       );
     }
   }, [machineBlocked, machineSandboxId, blockedAt]);
+  // Other people's messages waiting for the machine's owner never block the
+  // chat; they are explained beside whatever else the chat shows.
+  const waitingMessages = machineAccess?.waitingMessages?.length ? (
+    <SessionWaitingMessagesNotice access={machineAccess} />
+  ) : null;
   // Other people's updates waiting on a personal machine: one calm notice
   // that says whose and why, instead of a generic permission failure.
   if (
@@ -254,14 +280,17 @@ export function SessionAdmissionNotice({
     sessionWaitingWorkExplainsBlock(reason)
   ) {
     return (
-      <SessionWaitingWorkNotice
-        access={machineAccess}
-        busy={busy || (paused && reason !== null)}
-        onContinue={canControl ? onContinueWaitingWork : undefined}
-      />
+      <>
+        <SessionWaitingWorkNotice
+          access={machineAccess}
+          busy={busy || (paused && reason !== null)}
+          onContinue={canControl ? onContinueWaitingWork : undefined}
+        />
+        {waitingMessages}
+      </>
     );
   }
-  if (!reason) return null;
+  if (!reason) return waitingMessages;
   const machineChanged =
     reason.reason === "database_claim_rejected" &&
     reason.permissionDenied &&
@@ -290,51 +319,56 @@ export function SessionAdmissionNotice({
   }
 
   return (
-    <Notice
-      tone={machineChanged ? "waiting" : "failed"}
-      title={machineBlocked ? t("sessionAdmission.needsDifferentMachineTitle") : copy.title}
-    >
-      <div id={descriptionId} role="status" aria-live="polite">
-        {machineBlocked && machineAccess ? (
-          <PersonalMachineExplanation access={machineAccess} queued action={machineAction} />
+    <>
+      <Notice
+        tone={machineChanged ? "waiting" : "failed"}
+        title={machineBlocked ? t("sessionAdmission.needsDifferentMachineTitle") : copy.title}
+      >
+        <div id={descriptionId} role="status" aria-live="polite">
+          {machineBlocked && machineAccess ? (
+            <PersonalMachineExplanation access={machineAccess} queued action={machineAction} />
+          ) : (
+            <>
+              <p>{copy.body}</p>
+              <p className="mt-1">{copy.next}</p>
+            </>
+          )}
+        </div>
+        {refreshRequired ? (
+          <p className="mt-2">{t("sessionAdmission.refreshRequiredNote")}</p>
+        ) : null}
+        {paused && !refreshRequired ? (
+          <p className="mt-2">{t("sessionAdmission.pausedNote")}</p>
+        ) : canControl ? (
+          <Button
+            type="button"
+            className="mt-2 min-h-11"
+            disabled={busy || checking || (machineBlocked && !refreshRequired)}
+            aria-busy={checking}
+            aria-describedby={descriptionId}
+            onClick={() => void recheck()}
+          >
+            {checking
+              ? refreshRequired
+                ? t("sessionAdmission.refreshing")
+                : t("sessionAdmission.rechecking")
+              : refreshRequired
+                ? t("sessionAdmission.refreshSessionStatus")
+                : copy.action}
+          </Button>
         ) : (
-          <>
-            <p>{copy.body}</p>
-            <p className="mt-1">{copy.next}</p>
-          </>
+          <p className="mt-2">{t("sessionAdmission.cantRecheckNote")}</p>
         )}
-      </div>
-      {refreshRequired ? <p className="mt-2">{t("sessionAdmission.refreshRequiredNote")}</p> : null}
-      {paused && !refreshRequired ? (
-        <p className="mt-2">{t("sessionAdmission.pausedNote")}</p>
-      ) : canControl ? (
-        <Button
-          type="button"
-          className="mt-2 min-h-11"
-          disabled={busy || checking || (machineBlocked && !refreshRequired)}
-          aria-busy={checking}
-          aria-describedby={descriptionId}
-          onClick={() => void recheck()}
-        >
-          {checking
-            ? refreshRequired
-              ? t("sessionAdmission.refreshing")
-              : t("sessionAdmission.rechecking")
-            : refreshRequired
-              ? t("sessionAdmission.refreshSessionStatus")
-              : copy.action}
-        </Button>
-      ) : (
-        <p className="mt-2">{t("sessionAdmission.cantRecheckNote")}</p>
-      )}
-      {failed ? (
-        <p role="alert" className="mt-2">
-          {refreshRequired
-            ? t("sessionAdmission.refreshFailed")
-            : t("sessionAdmission.recheckFailed")}
-        </p>
-      ) : null}
-    </Notice>
+        {failed ? (
+          <p role="alert" className="mt-2">
+            {refreshRequired
+              ? t("sessionAdmission.refreshFailed")
+              : t("sessionAdmission.recheckFailed")}
+          </p>
+        ) : null}
+      </Notice>
+      {waitingMessages}
+    </>
   );
 }
 
@@ -463,7 +497,9 @@ export function SessionStartNotice({
       failureDetail={start.machineChoiceError}
     />
   ) : undefined;
-  const waiting = (start.machineAccess?.waitingWork?.length ?? 0) > 0;
+  const waiting =
+    (start.machineAccess?.waitingWork?.length ?? 0) > 0 ||
+    (start.machineAccess?.waitingMessages?.length ?? 0) > 0;
   return (
     <>
       {start.reason || waiting ? (

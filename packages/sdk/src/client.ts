@@ -1214,6 +1214,13 @@ export type SteerMessageResult = {
   routing: SessionPromptRouting;
   /** Number of live attempts durably asked to stop by this atomic Steer. */
   interruptionCount: number;
+  /**
+   * The chat runs on another person's personal machine, so the message waits
+   * for its owner instead of steering: the owner's next message brings it to
+   * the agent, or it runs once the chat moves to a machine you may use. Older
+   * servers omit it.
+   */
+  waitsForMachineOwner?: boolean | undefined;
   /** True when this response came from the command's immutable idempotency receipt. */
   replay: boolean;
 };

@@ -26508,6 +26508,11 @@
         "$.ownerName": "string! null",
         "$.queuedTurnBlocked": "boolean!",
         "$.sandboxId": "string!",
+        "$.waitingMessages": "array?",
+        "$.waitingMessages[]": "object",
+        "$.waitingMessages[].isYou": "boolean!",
+        "$.waitingMessages[].messages": "integer!",
+        "$.waitingMessages[].name": "string! null",
         "$.waitingWork": "array?",
         "$.waitingWork[]": "object",
         "$.waitingWork[].isYou": "boolean!",
@@ -28319,7 +28324,8 @@
         "$.receipt": "ref(SessionCommandReceipt)!",
         "$.replay": "boolean!",
         "$.routing": "ref(SessionPromptRouting)!",
-        "$.turn": "ref(SessionTurn)!"
+        "$.turn": "ref(SessionTurn)!",
+        "$.waitsForMachineOwner": "boolean?"
       }
     },
     "SubscriptionAccountReach": {

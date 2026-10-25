@@ -3835,6 +3835,17 @@ export const englishMessages = {
   "sessionAdmission.membershipNext":
     "Ask a workspace admin to restore their access, then recheck to continue. It will not retry automatically.",
   "sessionAdmission.membershipTitle": "Workspace access needed",
+  "sessionAdmission.messagesWaitingExplanation":
+    "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start work there, so messages from other people wait for {owner}.",
+  "sessionAdmission.messagesWaitingForYouExplanation":
+    "This chat runs on your personal machine “{machine}”, so only your messages can start work there.",
+  "sessionAdmission.messagesWaitingForYouNext_one":
+    "Your next message brings it to the agent. Say what you want done with it.",
+  "sessionAdmission.messagesWaitingForYouNext_other":
+    "Your next message brings them to the agent. Say what you want done with them.",
+  "sessionAdmission.messagesWaitingForYouTitle_one": "A message from {people} is waiting for you",
+  "sessionAdmission.messagesWaitingForYouTitle_other":
+    "{count} messages from {people} are waiting for you",
   "sessionAdmission.moving": "Moving…",
   "sessionAdmission.needsDifferentMachineTitle": "This message needs a different machine",
   "sessionAdmission.noMachineChoices":
@@ -3847,6 +3858,14 @@ export const englishMessages = {
     "The queued message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. After changing machines or access, recheck to run the saved message.",
   "sessionAdmission.otherMachineWorkNote":
     "Updates from agents you start here also wait for {owner}.",
+  "sessionAdmission.othersMessagesWaitingNext_one":
+    "{owner}’s next message brings it to the agent.",
+  "sessionAdmission.othersMessagesWaitingNext_other":
+    "{owner}’s next message brings them to the agent.",
+  "sessionAdmission.othersMessagesWaitingTitle_one":
+    "A message from {people} is waiting for {owner}",
+  "sessionAdmission.othersMessagesWaitingTitle_other":
+    "{count} messages from {people} are waiting for {owner}",
   "sessionAdmission.othersUpdatesWaitingNext": "Only {owner} can let the agent continue with them.",
   "sessionAdmission.othersUpdatesWaitingTitle_one":
     "An update from {people}’s agents is waiting for {owner}",
@@ -3893,6 +3912,13 @@ export const englishMessages = {
   "sessionAdmission.waitingForYouTitle_one": "An update from {people}’s agents is waiting for you",
   "sessionAdmission.waitingForYouTitle_other":
     "{count} updates from {people}’s agents are waiting for you",
+  "sessionAdmission.yourMessagesWaitingNext_one":
+    "{owner}’s next message brings it to their agent. To run it yourself, move the chat to a machine you can use.",
+  "sessionAdmission.yourMessagesWaitingNext_other":
+    "{owner}’s next message brings them to their agent. To run them yourself, move the chat to a machine you can use.",
+  "sessionAdmission.yourMessagesWaitingTitle_one": "Your message is waiting for {owner}",
+  "sessionAdmission.yourMessagesWaitingTitle_other":
+    "{count} of your messages are waiting for {owner}",
   "sessionAdmission.yourUpdatesWaitingNext":
     "{owner} can continue with them from this chat. To run your own work now, move the chat to a machine you can use.",
   "sessionAdmission.yourUpdatesWaitingTitle_one":

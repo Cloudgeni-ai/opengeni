@@ -243,7 +243,12 @@ export class SessionCommandIdempotencyError extends Error {
 
 export class AgentCommandAuthorityError extends Error {
   constructor(
-    readonly code: "CALLER_STALE" | "CALLER_INTERRUPTED" | "TARGET_NOT_VERTICAL" | "SELF_STEER",
+    readonly code:
+      | "CALLER_STALE"
+      | "CALLER_INTERRUPTED"
+      | "TARGET_NOT_VERTICAL"
+      | "SELF_STEER"
+      | "PERSONAL_MACHINE_OWNER_REQUIRED",
     message: string,
   ) {
     super(message);

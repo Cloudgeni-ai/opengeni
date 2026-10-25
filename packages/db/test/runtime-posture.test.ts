@@ -3806,7 +3806,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 grants what 0937 withheld, 0946's stays deferred", () => {
+describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's stays deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -3843,6 +3843,8 @@ describe("runtime definers: 0947 grants what 0937 withheld, 0946's stays deferre
     "recordings",
     "mcp_event_subscriptions",
     "event_source_feeds",
+    "sandboxes",
+    "enrollments",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -3886,13 +3888,17 @@ describe("runtime definers: 0947 grants what 0937 withheld, 0946's stays deferre
       "list_due_mcp_event_subscriptions_v1(integer)",
       "list_due_event_source_feeds_v1(integer)",
       "list_due_recording_retention_v1(integer)",
+      "session_machine_owner_subject_v1(uuid, uuid, uuid)",
     ]);
-    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([]);
+    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
+      "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+    ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
-      runtimePosture.RUNTIME_DEFINER_ROUTINES.map(
-        (name) => `runtime role lacks EXECUTE on private routine ${name}`,
-      ),
+      runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(
+        (name) =>
+          !(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES as readonly string[]).includes(name),
+      ).map((name) => `runtime role lacks EXECUTE on private routine ${name}`),
     );
   });
 
@@ -3934,6 +3940,7 @@ describe("runtime definers: 0947 grants what 0937 withheld, 0946's stays deferre
       "prune_event_intake_v1(integer, integer, integer)",
       "list_stalled_recording_work_v1(integer)",
       "list_due_recording_retention_v1(integer)",
+      "session_machine_owner_subject_v1(uuid, uuid, uuid)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
