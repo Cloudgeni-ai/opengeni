@@ -19991,7 +19991,9 @@ export const HumanInputSecretSpec = /* @__PURE__ */ defineSchema(() =>
       item: VaultName,
       field: VaultFieldName.default("password"),
       fieldKind: z.enum(["concealed", "totp", "text"]).default("concealed"),
-      itemType: z.enum(["login", "api_key", "note"]).default("login"),
+      itemType: z
+        .enum(["login", "api_key", "note", "card", "identity", "ssh_key"])
+        .default("login"),
       username: z
         .object({ prompt: z.string().max(200), value: z.string().max(512).nullable().optional() })
         .strict()

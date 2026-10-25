@@ -31,6 +31,7 @@ import {
   parseTotpInput,
   referenceKey,
   secretNameKey,
+  vaultFieldNameAlternatives,
   SecretReferenceError,
   VAULT_LIMITS,
   type ResolvedSecretValue,
@@ -93,6 +94,111 @@ export type SecretResolverOptions = {
 };
 
 type Chosen = { reference: SecretReference; candidate: SecretReferenceCandidate };
+
+/**
+ * Names password managers give an item's main secret: a login's `password`,
+ * a 1Password API credential's `credential`, an Opengeni API key's `value`.
+ * Moving an item between them renames that field (1Password's `credential`
+ * becomes Bitwarden's `password`), which would break every reference to it.
+ */
+const MAIN_SECRET_FIELD_NAMES = ["password", "credential", "value"] as const;
+
+/**
+ * The other names of the field a reference ends in (never for OTP
+ * references): the main-secret names, which must match a concealed field, or
+ * the other names of a type's standard field (`VAULT_FIELD_NAME_SYNONYMS`),
+ * such as a card's "cvv" for its "security code".
+ */
+function fieldAlternativesOf(
+  reference: SecretReference,
+): { names: string[]; concealedOnly: boolean } | null {
+  if (reference.otp) return null;
+  const field =
+    reference.target.form === "id"
+      ? reference.target.field
+      : reference.target.segments.length > 1
+        ? reference.target.segments.at(-1)
+        : null;
+  if (!field) return null;
+  const key = secretNameKey(field);
+  if (MAIN_SECRET_FIELD_NAMES.some((name) => name === key)) {
+    return { names: MAIN_SECRET_FIELD_NAMES.filter((name) => name !== key), concealedOnly: true };
+  }
+  const names = vaultFieldNameAlternatives(field);
+  return names.length > 0 ? { names, concealedOnly: false } : null;
+}
+
+/** The same reference naming another field. */
+function withFieldName(reference: SecretReference, field: string): SecretReference {
+  const target = reference.target;
+  if (target.form === "id") return { ...reference, target: { ...target, field } };
+  // Only references with a field segment (two or three segments) get here.
+  const segments: [string, string] | [string, string, string] =
+    target.segments.length === 3
+      ? [target.segments[0], target.segments[1], field]
+      : [target.segments[0], field];
+  return { ...reference, target: { form: "path", segments } };
+}
+
+/**
+ * Keeps references working across password managers. When a reference names
+ * `password`, `credential` or `value` and finds nothing, it is looked up
+ * again with each of the other two names, and if exactly one of them resolves
+ * to a concealed field, the reference uses that field. A reference to another
+ * name of a type's standard field (a card's "cvv", "verification number" or
+ * "security code") is looked up the same way under its other names.
+ * An exact name always wins, and two matches resolve nothing, so no value is
+ * ever guessed. Costs one more lookup, and only for such a miss.
+ */
+export async function withMainSecretFieldFallback(
+  db: VaultServiceDeps["db"],
+  context: Parameters<typeof resolveSecretReferenceCandidates>[1],
+  references: readonly SecretReference[],
+  meta: SecretResolutionMeta,
+  candidates: readonly SecretReferenceCandidate[],
+): Promise<SecretReferenceCandidate[]> {
+  const alternatives: Array<{
+    refIndex: number;
+    reference: SecretReference;
+    concealedOnly: boolean;
+  }> = [];
+  references.forEach((reference, refIndex) => {
+    const requested = fieldAlternativesOf(reference);
+    if (!requested) return;
+    const own = candidates.filter((candidate) => candidate.refIndex === refIndex);
+    const outcome = chooseSecretCandidate(reference, own, meta);
+    if (!("failure" in outcome) || outcome.failure.code !== "not_found") return;
+    for (const name of requested.names) {
+      alternatives.push({
+        refIndex,
+        reference: withFieldName(reference, name),
+        concealedOnly: requested.concealedOnly,
+      });
+    }
+  });
+  if (alternatives.length === 0) return [...candidates];
+  const found = await resolveSecretReferenceCandidates(db, context, {
+    refs: alternatives.map((alternative, index) => lookupFor(alternative.reference, index)),
+  });
+  const matches = new Map<number, SecretReferenceCandidate[]>();
+  alternatives.forEach((alternative, index) => {
+    const own = found.candidates.filter((candidate) => candidate.refIndex === index);
+    const outcome = chooseSecretCandidate(alternative.reference, own, found.meta);
+    if ("failure" in outcome) return;
+    if (alternative.concealedOnly && outcome.candidate.fieldKind !== "concealed") return;
+    matches.set(alternative.refIndex, [
+      ...(matches.get(alternative.refIndex) ?? []),
+      { ...outcome.candidate, refIndex: alternative.refIndex },
+    ]);
+  });
+  const result: SecretReferenceCandidate[] = [];
+  references.forEach((_, refIndex) => {
+    const match = matches.get(refIndex);
+    if (match?.length === 1) result.push(match[0]!);
+    else result.push(...candidates.filter((candidate) => candidate.refIndex === refIndex));
+  });
+  return result;
+}
 
 function lookupFor(reference: SecretReference, index: number): SecretReferenceLookup {
   return reference.target.form === "id"
@@ -556,9 +662,17 @@ export function createSecretResolver(
     }
 
     const choose = async () => {
-      const { meta, candidates } = await resolveSecretReferenceCandidates(deps.db, context, {
+      const found = await resolveSecretReferenceCandidates(deps.db, context, {
         refs: references.map((reference, index) => lookupFor(reference, index)),
       });
+      const meta = found.meta;
+      const candidates = await withMainSecretFieldFallback(
+        deps.db,
+        context,
+        references,
+        meta,
+        found.candidates,
+      );
       const outcomes = references.map((reference, index) => {
         const own = candidates.filter((candidate) => candidate.refIndex === index);
         return { reference, candidates: own, outcome: chooseSecretCandidate(reference, own, meta) };

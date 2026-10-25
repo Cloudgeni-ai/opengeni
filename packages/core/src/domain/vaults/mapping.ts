@@ -6,6 +6,7 @@
 import {
   formatSecretReference,
   secretNameKey,
+  weakerArchiveKind,
   VaultProviderOperations,
   type VaultItem,
   type VaultItemField,
@@ -51,16 +52,13 @@ export function withoutProviderWrites(
   };
 }
 
-/** Operations both sides allow (an archive needs both to agree on its kind). */
+/** Operations both sides allow; an archive takes the weaker of the two kinds. */
 export function intersectProviderOperations(
   left: VaultProviderOperations,
   right: VaultProviderOperations,
 ): VaultProviderOperations {
-  const archiveItem =
-    left.archiveItem &&
-    right.archiveItem &&
-    left.archiveKind === right.archiveKind &&
-    left.archiveKind !== "none";
+  const archiveKind = weakerArchiveKind(left.archiveKind, right.archiveKind);
+  const archiveItem = left.archiveItem && right.archiveItem && archiveKind !== "none";
   return {
     createItemTypes: left.createItemTypes.filter(
       (type) => type !== "passkey" && right.createItemTypes.includes(type),
@@ -68,7 +66,7 @@ export function intersectProviderOperations(
     updateItem: left.updateItem && right.updateItem,
     removeField: left.removeField && right.removeField,
     archiveItem,
-    archiveKind: archiveItem ? left.archiveKind : "none",
+    archiveKind: archiveItem ? archiveKind : "none",
     deleteItem: false,
     restoreItem: left.restoreItem && right.restoreItem,
     readFiles: left.readFiles && right.readFiles,
@@ -226,6 +224,7 @@ export function toVaultItemSummary(row: VaultItemRow, key: Uint8Array | null): V
     id: row.id,
     vaultId: row.vaultId,
     type: row.type,
+    category: row.category ?? null,
     name: row.name,
     websites: row.websites ?? [],
     username: usernameOf(row, key),

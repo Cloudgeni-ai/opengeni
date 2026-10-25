@@ -208,6 +208,8 @@ export type VaultItemRow = {
   vaultSource: VaultSource;
   vaultMode: VaultMode;
   type: VaultItemType;
+  /** Provider-specific kind of item (0956); null for the plain type. */
+  category: string | null;
   name: string;
   nameKey: string;
   websites: string[];
@@ -344,6 +346,8 @@ export type VaultFieldWrite = {
 export type VaultItemWrite = {
   name?: string;
   type?: VaultItemType;
+  /** A category token, or null to clear it (0956). */
+  category?: string | null;
   websites?: string[];
   expiresAt?: string | null;
   primaryFieldName?: string;
@@ -776,9 +780,13 @@ export type ProviderVaultItemMirror = {
   usernameHintEncrypted?: string | null;
   providerVersion?: string | null;
   type: Exclude<VaultItemType, "passkey">;
+  /** Provider-specific kind of item (0956); null or absent for the plain type. */
+  category?: string | null;
   name: string;
   websites?: string[];
   primaryFieldRef?: string | null;
+  /** Archived upstream by the connected account (0956); null or absent when active. */
+  archivedAt?: string | null;
   fields: Array<{ providerFieldRef: string; name: string; kind: VaultFieldKind }>;
 };
 

@@ -264,13 +264,29 @@ export async function loadExternalVaultConnection(
   };
 }
 
+/**
+ * The setup-time operations a connection stays narrowed to. Only a remote
+ * bridge (`external`) is: it declares its own abilities, verified at setup.
+ * A built-in adapter's operations are its code's, so a connection set up on
+ * an older release gains what its adapter learned since (Bitwarden files and
+ * API-key items, for example). Writes stay gated by the link mode and by the
+ * operations each vault last reported (a read-only collection stays
+ * read-only), so this only removes a stale copy of the adapter's own list.
+ */
+export function frozenConnectionOperations(
+  details: Pick<ExternalVaultConnectionDetails, "provider" | "operations">,
+): VaultProviderOperations | undefined {
+  return details.provider === "external" ? details.operations : undefined;
+}
+
 /** A bound adapter never accepts model-supplied identity, even via a copied context. */
 export function bindVaultProviderAuthority(
   provider: VaultProvider,
   input: {
     connectionId: string;
     authority: VaultProviderAuthority;
-    operations: VaultProviderOperations;
+    /** Narrows the adapter's own operations; absent keeps them. */
+    operations?: VaultProviderOperations | undefined;
     revalidate: () => Promise<void>;
   },
 ): VaultProvider {
@@ -284,7 +300,10 @@ export function bindVaultProviderAuthority(
     id: provider.id,
     capabilities: () => ({
       ...provider.capabilities(),
-      operations: providerOperations(provider.capabilities(), { operations: input.operations }),
+      operations: providerOperations(
+        provider.capabilities(),
+        input.operations ? { operations: input.operations } : undefined,
+      ),
     }),
     validate: async (ctx) => provider.validate(await context(ctx)),
     listVaults: async (ctx) => provider.listVaults(await context(ctx)),
@@ -321,11 +340,12 @@ export async function externalVaultProviderForConnection(input: {
 }): Promise<VaultProvider> {
   const loaded = await loadExternalVaultConnection(input.db, input.settings, input);
   let connection = loaded.connection;
+  const frozen = frozenConnectionOperations(loaded.details);
   const prepared = await input.factory({
     credentials: loaded.credentials,
     connectionId: connection.id,
     signal: AbortSignal.timeout(30_000),
-    operations: loaded.details.operations,
+    ...(frozen ? { operations: frozen } : {}),
     persistCredentials: async (next) => {
       const parsed = StoredVaultProviderCredentials.safeParse(next);
       if (!parsed.success || parsed.data.provider !== loaded.details.provider) throw unavailable();
@@ -385,7 +405,7 @@ export async function externalVaultProviderForConnection(input: {
       subjectId: input.subjectId,
       ...input.executionContext,
     },
-    operations: loaded.details.operations,
+    operations: frozen,
     revalidate: async () => {
       // Revalidate cross-workspace reach as well as the exact connection generation.
       if (connection.workspaceId !== input.workspaceId) {

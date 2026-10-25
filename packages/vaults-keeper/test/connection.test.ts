@@ -137,7 +137,7 @@ describe("restrictToOperations", () => {
     const { provider, calls } = stub();
     const verified = {
       ...KEEPER_OPERATIONS,
-      createItemTypes: ["login" as const, "api_key" as const],
+      createItemTypes: ["login" as const, "file" as const],
       updateItem: true,
       removeField: false,
       updateTotp: false,
@@ -148,7 +148,7 @@ describe("restrictToOperations", () => {
     };
     const narrowed = restrictToOperations(provider, verified, "@file:");
     const operations = narrowed.capabilities().operations!;
-    // api_key is not a Keeper create type, and archive is not a Keeper operation.
+    // file is not a Keeper create type, and archive is not a Keeper operation.
     expect(operations.createItemTypes).toEqual(["login"]);
     expect(operations.archiveItem).toBe(false);
     expect(operations.deleteItem).toBe(false);

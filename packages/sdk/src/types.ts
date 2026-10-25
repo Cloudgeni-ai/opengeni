@@ -2423,7 +2423,7 @@ export type HumanInputSecretSpec = {
   item: string;
   field?: string | undefined;
   fieldKind?: "concealed" | "totp" | "text" | undefined;
-  itemType?: "login" | "api_key" | "note" | undefined;
+  itemType?: "login" | "api_key" | "note" | "card" | "identity" | "ssh_key" | undefined;
   username?: { prompt: string; value?: string | null | undefined } | null | undefined;
   website?: string | null | undefined;
   looksLike?: string | null | undefined;

@@ -1455,7 +1455,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "DELETE /v1/workspaces/:workspaceId/vaults/:vaultId",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
-    "request": [],
+    "request": [
+      "DeleteVaultRequest"
+    ],
     "response": [
       "DisconnectOnePasswordResponse",
       "DisconnectVaultProviderResponse",
@@ -2574,7 +2576,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId/items",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items",
-    "request": [],
+    "request": [
+      "ListVaultItemsQuery"
+    ],
     "response": []
   },
   {
@@ -5563,7 +5567,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
-    "request": [],
+    "request": [
+      "UpdateVaultRequest"
+    ],
     "response": [
       "DisconnectOnePasswordResponse",
       "DisconnectVaultProviderResponse",
@@ -5586,7 +5592,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
-    "request": [],
+    "request": [
+      "UpdateVaultItemRequest"
+    ],
     "response": []
   },
   {
@@ -5701,7 +5709,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/:workspaceId/connections/:connectionId/managed-vaults",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connections/:connectionId/managed-vaults",
-    "request": [],
+    "request": [
+      "CreateManagedProviderVaultRequest"
+    ],
     "response": [
       "DisconnectOnePasswordResponse",
       "DisconnectVaultProviderResponse",
@@ -6051,7 +6061,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/:workspaceId/vaults",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/vaults",
-    "request": [],
+    "request": [
+      "CreateVaultRequest"
+    ],
     "response": [
       "DisconnectOnePasswordResponse",
       "DisconnectVaultProviderResponse",
@@ -6074,7 +6086,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items",
-    "request": [],
+    "request": [
+      "CreateVaultItemRequest"
+    ],
     "response": []
   },
   {
@@ -6088,21 +6102,27 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/restore",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/restore",
-    "request": [],
+    "request": [
+      "RestoreVaultFieldVersionRequest"
+    ],
     "response": []
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/reveal",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/reveal",
-    "request": [],
+    "request": [
+      "RevealVaultFieldRequest"
+    ],
     "response": []
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/move",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/move",
-    "request": [],
+    "request": [
+      "MoveVaultItemRequest"
+    ],
     "response": []
   },
   {
@@ -6123,7 +6143,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/:workspaceId/vaults/link",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/vaults/link",
-    "request": [],
+    "request": [
+      "LinkProviderVaultRequest"
+    ],
     "response": [
       "DisconnectOnePasswordResponse",
       "DisconnectVaultProviderResponse",

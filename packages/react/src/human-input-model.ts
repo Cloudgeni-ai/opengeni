@@ -250,6 +250,9 @@ export type SecretAutocomplete = "current-password" | "new-password" | "one-time
 export function secretAutocomplete(spec: HumanInputSecretSpec): SecretAutocomplete {
   if (spec.autocomplete && spec.autocomplete !== "current-password") return spec.autocomplete;
   if (spec.fieldKind === "totp") return "one-time-code";
+  // Card numbers, ID numbers and private keys are no website password.
+  if (spec.itemType === "card" || spec.itemType === "identity" || spec.itemType === "ssh_key")
+    return "off";
   if (spec.allowGenerate || spec.generate) return "new-password";
   return "current-password";
 }
@@ -264,9 +267,19 @@ export function secretConcealed(spec: HumanInputSecretSpec): boolean {
   return spec.fieldKind !== "text";
 }
 
-/** Generate is offered for concealed values the agent allows to be generated. */
+/**
+ * Generate is offered for concealed values the agent allows to be generated:
+ * passwords and keys, never a card, an identity or an SSH private key (whose
+ * key pairs come from secret_save).
+ */
 export function secretCanGenerate(spec: HumanInputSecretSpec): boolean {
-  return Boolean(spec.allowGenerate || spec.generate) && spec.fieldKind !== "totp";
+  return (
+    Boolean(spec.allowGenerate || spec.generate) &&
+    spec.fieldKind !== "totp" &&
+    spec.itemType !== "card" &&
+    spec.itemType !== "identity" &&
+    spec.itemType !== "ssh_key"
+  );
 }
 
 /** The input's label: "Password", "API key", "One-time code", or the field name. */

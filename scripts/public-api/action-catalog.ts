@@ -131,6 +131,49 @@ export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: s
     pattern: /^PUT \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/approval$/,
     request: "SetVaultItemApprovalRequest",
   },
+  { pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults$/, request: "CreateVaultRequest" },
+  {
+    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId$/,
+    request: "UpdateVaultRequest",
+  },
+  {
+    pattern: /^DELETE \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId$/,
+    request: "DeleteVaultRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults\/link$/,
+    request: "LinkProviderVaultRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/connections\/:connectionId\/managed-vaults$/,
+    request: "CreateManagedProviderVaultRequest",
+  },
+  {
+    pattern: /^GET \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items$/,
+    request: "ListVaultItemsQuery",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items$/,
+    request: "CreateVaultItemRequest",
+  },
+  {
+    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId$/,
+    request: "UpdateVaultItemRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/move$/,
+    request: "MoveVaultItemRequest",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/fields\/:fieldId\/reveal$/,
+    request: "RevealVaultFieldRequest",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/fields\/:fieldId\/restore$/,
+    request: "RestoreVaultFieldVersionRequest",
+  },
   {
     pattern:
       /^PUT \/v1\/(organizations|workspaces)\/:scopeId\/model-connections\/:kind\/:connectionId\/access$/,
