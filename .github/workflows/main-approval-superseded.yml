@@ -3,9 +3,9 @@ name: Cancel superseded main CI
 #    image. Only the SHA a release chooses is approved; cancel older parked
 #    runs. Keeps the newest five, anything under three hours old and the
 #    current main SHA; never touches running jobs or other environments.
-# 2. Main CI runs that have not started any job are superseded by a newer main
-#    run, which tests a superset of their commits. Started runs and re-runs are
-#    never cancelled.
+# 2. Main CI runs none of whose jobs has started are superseded by a newer main
+#    run, which tests a superset of their commits. Started runs always finish;
+#    the main SHA and Version merges are kept; re-runs wait six hours first.
 on:
   push:
     branches: [main]

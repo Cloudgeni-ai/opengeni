@@ -50,22 +50,41 @@ export function supersededParkedRuns(
 
 export type QueuedRun = {
   id: number;
+  headSha: string;
   createdAt: string;
   runAttempt: number;
   /** When this attempt was requested; later than createdAt for a re-run. */
   runStartedAt: string;
+  /** Jobs past queued/waiting; Infinity when the job page is incomplete. */
+  startedJobs: number;
+  /** A Version PR merge: releases may need its exact-SHA receipt. */
+  versionMerge: boolean;
 };
 
 export const KEEP_RERUN_YOUNGER_THAN_MS = 6 * 60 * 60 * 1000;
+const NOT_STARTED = new Set(["queued", "waiting", "pending", "requested"]);
+
+export function startedJobCount(jobs: {
+  total_count: number;
+  jobs: { status: string }[];
+}): number {
+  if (jobs.total_count > jobs.jobs.length) return Infinity;
+  return jobs.jobs.filter((j) => !NOT_STARTED.has(j.status)).length;
+}
+
+export const isVersionMerge = (message: string | undefined) =>
+  /^chore: version packages\b/i.test(message ?? "");
 
 /**
- * Main CI runs that have not started any job and are older than the newest
- * main-push CI run: the newer run tests a superset of their commits. Never
- * touches started runs; a re-run is kept until it has waited six hours.
+ * Main CI runs whose jobs have not started and that are older than the newest
+ * main-push CI run: the newer run tests a superset of their commits. Started
+ * runs always finish, so main keeps producing complete receipts. Never touches
+ * the current main SHA or a Version merge; a re-run waits six hours first.
  */
 export function supersededQueuedRuns(
   queued: QueuedRun[],
   newestCreatedAt: string,
+  mainSha: string,
   now: number,
 ): number[] {
   const newest = Date.parse(newestCreatedAt);
@@ -75,6 +94,9 @@ export function supersededQueuedRuns(
       (r) =>
         Number.isSafeInteger(r.id) &&
         r.id > 0 &&
+        r.startedJobs === 0 &&
+        !r.versionMerge &&
+        r.headSha !== mainSha &&
         (r.runAttempt === 1 ||
           now - Date.parse(r.runStartedAt) > KEEP_RERUN_YOUNGER_THAN_MS) &&
         Number.isFinite(Date.parse(r.createdAt)) &&
@@ -109,6 +131,7 @@ async function main() {
     created_at: string;
     run_attempt: number;
     run_started_at: string;
+    head_commit?: { message?: string } | null;
   };
   const ciRuns = (query: string) =>
     api(
@@ -162,21 +185,36 @@ async function main() {
   );
 
   const newest = (await ciRuns("per_page=1")).workflow_runs[0];
-  const queued: QueuedRun[] = [];
+  const listed: CiRun[] = [];
   for (let page = 1; page <= 5; page++) {
     const data = await ciRuns(`status=queued&per_page=100&page=${page}`);
-    queued.push(
-      ...data.workflow_runs.map((r) => ({
-        id: r.id,
-        createdAt: r.created_at,
-        runAttempt: r.run_attempt,
-        runStartedAt: r.run_started_at,
-      })),
-    );
+    listed.push(...data.workflow_runs);
     if (data.workflow_runs.length < 100) break;
   }
+  // A run can report `queued` while some of its jobs already run.
+  const queued: QueuedRun[] = [];
+  for (let i = 0; i < listed.length; i += 8) {
+    const chunk = listed.slice(i, i + 8);
+    queued.push(
+      ...(await Promise.all(
+        chunk.map(async (r) => ({
+          id: r.id,
+          headSha: r.head_sha,
+          createdAt: r.created_at,
+          runAttempt: r.run_attempt,
+          runStartedAt: r.run_started_at,
+          startedJobs: startedJobCount(
+            (await api(
+              `actions/runs/${r.id}/jobs?filter=latest&per_page=100`,
+            )) as { total_count: number; jobs: { status: string }[] },
+          ),
+          versionMerge: isVersionMerge(r.head_commit?.message),
+        })),
+      )),
+    );
+  }
   const notStarted = newest
-    ? supersededQueuedRuns(queued, newest.created_at, Date.now())
+    ? supersededQueuedRuns(queued, newest.created_at, mainSha, Date.now())
     : [];
   console.log(
     `${queued.length} queued main CI runs; ${notStarted.length} superseded`,
