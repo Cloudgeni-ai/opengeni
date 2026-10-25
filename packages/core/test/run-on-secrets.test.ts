@@ -7,8 +7,8 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   SecretReferenceError,
-  secretUseApprovalHumanInput,
   type SecretResolver,
+  type SecretUseApprovalAsk,
 } from "@opengeni/contracts";
 import { type ControlRequest, type ControlResponse, type ExecRequest } from "@opengeni/agent-proto";
 import {
@@ -271,29 +271,17 @@ describe("run_on secret delivery (DL-9)", () => {
 
   for (const fieldName of ["", "password"]) {
     for (const kind of ["exec", "write"] as const) {
-      test(`${kind}: ${fieldName || "whole-item"} approval failure preserves the card and dispatches nothing`, async () => {
+      test(`${kind}: ${fieldName || "whole-item"} approval failure preserves the approval and dispatches nothing`, async () => {
         const machine = new CapturingMachine("/home/user/project");
-        const card = secretUseApprovalHumanInput({
-          id: "33333333-3333-4333-8333-333333333333",
-          targets: [
-            {
-              vaultId: WORKSPACE,
-              itemId: AGENT,
-              fieldKey: fieldName,
-              fieldName,
-              vaultName: "Private",
-              itemName: "Canary",
-            },
-          ],
-          surface: kind === "exec" ? "run_on" : "file_write",
-          toolName: "run_on",
-          destination: "target",
-        });
+        const approval: SecretUseApprovalAsk = {
+          approvalId: "33333333-3333-4333-8333-333333333333",
+          asked: true,
+        };
         const reference = fieldName ? "{{secret:Canary/password}}" : "{{secret:Canary}}";
         const failure = new SecretReferenceError(
           [{ raw: reference, code: "approval_required", message: "This use needs approval" }],
           null,
-          card,
+          approval,
         );
         const resolver: SecretResolver = {
           ...createStaticSecretResolver({}),
@@ -312,9 +300,9 @@ describe("run_on secret delivery (DL-9)", () => {
           resolver,
         ).catch((caught) => caught);
         // The API boundary, rather than a fleet result envelope, must render
-        // this same error with its complete host-owned approval card intact.
+        // this same error with the approval Opengeni already asked for intact.
         expect(error).toBe(failure);
-        expect(error.approvalCard).toEqual(card);
+        expect(error.approval).toEqual(approval);
         expect(machine.execs).toHaveLength(0);
         expect(machine.writes).toHaveLength(0);
       });
