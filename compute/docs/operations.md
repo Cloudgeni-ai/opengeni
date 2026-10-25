@@ -868,8 +868,12 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   moment it ended, so it is not handed over: it runs on until the host
   starts again from a template naming a release with the store (see
   below) or is replaced by a host made from one.
-  Without that, a fix to the guard would reach a host only at its next
-  boot. Old releases stay under `/opt/compute/releases`;
+  Installing such an earlier release over a later one (a rollback)
+  installs its unit, which keeps no descriptors, so systemd drops the
+  stored one; the running guard then keeps the watchdog itself, like an
+  earlier release's guard, until the host starts again.
+  Without the hand-over, a fix to the guard would reach a host only at
+  its next boot. Old releases stay under `/opt/compute/releases`;
   remove one once no pager runs from it (`fuser
   /opt/compute/releases/<version>/compute-host`). On GCP, set the new
   bundle in Terraform and apply it, so hosts created from then on install
