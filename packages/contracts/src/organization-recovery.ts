@@ -1,8 +1,9 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
-const Uuid = /* @__PURE__ */ defineSchema(() => z.string().uuid());
-const Timestamp = /* @__PURE__ */ defineSchema(() => z.string().datetime({ offset: true }));
+const Uuid = /* @__PURE__ */ defineSchema(() => primitives.uuid);
+const Timestamp = /* @__PURE__ */ defineSchema(() => primitives.string.datetime({ offset: true }));
 
 export const OrganizationRecoveryPolicyState = /* @__PURE__ */ defineSchema(() =>
   z.enum(["pending_acceptance", "active", "degraded", "superseded", "disabled"]),
@@ -25,7 +26,7 @@ export const OrganizationRecoveryMemberSummary = /* @__PURE__ */ defineSchema(()
   z
     .object({
       membershipId: Uuid,
-      name: z.string().trim().min(1).max(1024).nullable(),
+      name: primitives.string.trim().min(1).max(1024).nullable(),
       email: z.string().email().max(320).nullable(),
     })
     .strict(),
@@ -46,7 +47,7 @@ export const OrganizationRecoveryPolicy = /* @__PURE__ */ defineSchema(() =>
     .object({
       id: Uuid,
       organizationId: Uuid,
-      revision: z.number().int().positive(),
+      revision: primitives.positiveInteger,
       state: OrganizationRecoveryPolicyState,
       custodians: z.array(OrganizationRecoveryCustodian).length(3),
       createdAt: Timestamp,
@@ -69,8 +70,8 @@ export const OrganizationRecoveryOperation = /* @__PURE__ */ defineSchema(() =>
       id: Uuid,
       organizationId: Uuid,
       policyId: Uuid,
-      policyRevision: z.number().int().positive(),
-      revision: z.number().int().positive(),
+      policyRevision: primitives.positiveInteger,
+      revision: primitives.positiveInteger,
       state: OrganizationRecoveryOperationState,
       target: OrganizationRecoveryMemberSummary,
       approvals: z.array(OrganizationRecoveryApproval).max(3),
@@ -80,7 +81,7 @@ export const OrganizationRecoveryOperation = /* @__PURE__ */ defineSchema(() =>
       expiresAt: Timestamp,
       executedAt: Timestamp.nullable(),
       cancelledAt: Timestamp.nullable(),
-      notificationJournaled: z.boolean(),
+      notificationJournaled: primitives.boolean,
       createdAt: Timestamp,
       updatedAt: Timestamp,
     })
@@ -91,13 +92,13 @@ export type OrganizationRecoveryOperation = z.infer<typeof OrganizationRecoveryO
 export const OrganizationRecoveryCapabilities = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      configure: z.boolean(),
-      accept: z.boolean(),
-      disable: z.boolean(),
-      start: z.boolean(),
-      approve: z.boolean(),
-      cancel: z.boolean(),
-      execute: z.boolean(),
+      configure: primitives.boolean,
+      accept: primitives.boolean,
+      disable: primitives.boolean,
+      start: primitives.boolean,
+      approve: primitives.boolean,
+      cancel: primitives.boolean,
+      execute: primitives.boolean,
     })
     .strict(),
 );
@@ -119,8 +120,8 @@ export const OrganizationRecoveryOverview = /* @__PURE__ */ defineSchema(() =>
 );
 export type OrganizationRecoveryOverview = z.infer<typeof OrganizationRecoveryOverview>;
 
-const ExpectedPolicyRevision = /* @__PURE__ */ defineSchema(() => z.number().int().nonnegative());
-const ExpectedOperationRevision = /* @__PURE__ */ defineSchema(() => z.number().int().positive());
+const ExpectedPolicyRevision = /* @__PURE__ */ defineSchema(() => primitives.nonnegativeInteger);
+const ExpectedOperationRevision = /* @__PURE__ */ defineSchema(() => primitives.positiveInteger);
 const CommandOperationId = Uuid;
 
 export const ConfigureOrganizationRecoveryPolicyRequest = /* @__PURE__ */ defineSchema(() =>
@@ -164,7 +165,7 @@ export const StartOrganizationRecoveryOperationRequest = /* @__PURE__ */ defineS
   z
     .object({
       targetMembershipId: Uuid,
-      expectedPolicyRevision: z.number().int().positive(),
+      expectedPolicyRevision: primitives.positiveInteger,
       operationId: CommandOperationId,
     })
     .strict(),
@@ -188,7 +189,7 @@ export type OrganizationRecoveryOperationCommandRequest = z.infer<
 export const OrganizationRecoveryMutationResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      replay: z.boolean(),
+      replay: primitives.boolean,
       overview: OrganizationRecoveryOverview,
     })
     .strict(),

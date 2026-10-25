@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 /**
  * Agent configuration: one `agent` object that describes what an Opengeni
@@ -63,20 +64,20 @@ export type AgentCapabilityStartingPoint = z.infer<typeof AgentCapabilityStartin
 export const AgentCapabilityToggles = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      webSearch: z.boolean().optional(),
-      humanInput: z.boolean().optional(),
+      webSearch: primitives.optionalBoolean,
+      humanInput: primitives.optionalBoolean,
       skills: AgentSkillsCapability.optional(),
-      goals: z.boolean().optional(),
-      subagents: z.boolean().optional(),
-      knowledge: z.boolean().optional(),
-      schedules: z.boolean().optional(),
-      artifacts: z.boolean().optional(),
-      browser: z.boolean().optional(),
-      secrets: z.boolean().optional(),
-      media: z.boolean().optional(),
-      workspaceFiles: z.boolean().optional(),
-      workspaceConnectors: z.boolean().optional(),
-      workspaceAdmin: z.boolean().optional(),
+      goals: primitives.optionalBoolean,
+      subagents: primitives.optionalBoolean,
+      knowledge: primitives.optionalBoolean,
+      schedules: primitives.optionalBoolean,
+      artifacts: primitives.optionalBoolean,
+      browser: primitives.optionalBoolean,
+      secrets: primitives.optionalBoolean,
+      media: primitives.optionalBoolean,
+      workspaceFiles: primitives.optionalBoolean,
+      workspaceConnectors: primitives.optionalBoolean,
+      workspaceAdmin: primitives.optionalBoolean,
     })
     .strict(),
 );
@@ -105,7 +106,7 @@ export const AGENT_IDENTITY_MAX_CHARACTERS = 8_000;
 export const AGENT_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
 
 export const AgentIdentity = /* @__PURE__ */ defineSchema(() =>
-  z.string().trim().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS),
+  primitives.string.trim().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS),
 );
 
 /** The request-side agent object. Every field is optional. */
@@ -116,7 +117,11 @@ export const AgentConfigRequest = /* @__PURE__ */ defineSchema(() =>
       /** Replaces only Opengeni's identity lines; null selects the default identity. */
       identity: AgentIdentity.nullable().optional(),
       /** Alias of the session `instructions` field (same column, same bound). */
-      instructions: z.string().trim().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),
+      instructions: primitives.string
+        .trim()
+        .min(1)
+        .max(AGENT_INSTRUCTIONS_MAX_CHARACTERS)
+        .optional(),
       renderer: AgentRenderer.optional(),
       /**
        * Vaults this session may use (input only, Q-08). Intersected with the
@@ -143,20 +148,20 @@ export type WorkspaceAgentDefaults = z.infer<typeof WorkspaceAgentDefaults>;
 export const ResolvedAgentCapabilities = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      webSearch: z.boolean(),
-      humanInput: z.boolean(),
+      webSearch: primitives.boolean,
+      humanInput: primitives.boolean,
       skills: AgentSkillsCapability,
-      goals: z.boolean(),
-      subagents: z.boolean(),
-      knowledge: z.boolean(),
-      schedules: z.boolean(),
-      artifacts: z.boolean(),
-      browser: z.boolean(),
-      secrets: z.boolean(),
-      media: z.boolean(),
-      workspaceFiles: z.boolean(),
-      workspaceConnectors: z.boolean(),
-      workspaceAdmin: z.boolean(),
+      goals: primitives.boolean,
+      subagents: primitives.boolean,
+      knowledge: primitives.boolean,
+      schedules: primitives.boolean,
+      artifacts: primitives.boolean,
+      browser: primitives.boolean,
+      secrets: primitives.boolean,
+      media: primitives.boolean,
+      workspaceFiles: primitives.boolean,
+      workspaceConnectors: primitives.boolean,
+      workspaceAdmin: primitives.boolean,
     })
     .strict(),
 );
@@ -205,7 +210,7 @@ export const ResolvedAgentConfig = /* @__PURE__ */ defineSchema(() =>
          * Why each `unavailable` capability is off, keyed by capability. Present
          * whenever `unavailable` is non-empty; absent on historical configurations.
          */
-        unavailableReasons: z.partialRecord(AgentCapabilityId, z.string()).optional(),
+        unavailableReasons: z.partialRecord(AgentCapabilityId, primitives.string).optional(),
         identity: AgentIdentity.nullable(),
         renderer: AgentRenderer,
         source: ResolvedAgentConfigSource,
@@ -220,7 +225,7 @@ export const UpdateSessionAgentRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       agent: AgentConfigRequest,
-      expectedVersion: z.number().int().positive(),
+      expectedVersion: primitives.positiveInteger,
     })
     .strict(),
 );
@@ -231,14 +236,14 @@ export const ClientAgentConfig = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       /** @deprecated Agent configuration is always on; servers always report `true`. */
-      enabled: z.boolean(),
+      enabled: primitives.boolean,
       /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
-      defaultForNewSessions: z.boolean(),
+      defaultForNewSessions: primitives.boolean,
       capabilities: z.array(
         z
           .object({
             id: AgentCapabilityId,
-            available: z.boolean(),
+            available: primitives.boolean,
             reason: z.string().max(200).optional(),
           })
           .strict(),
@@ -1561,7 +1566,7 @@ export const AgentEffectiveTools = /* @__PURE__ */ defineSchema(() =>
       capabilities: ResolvedAgentCapabilities,
       unavailable: z.array(AgentCapabilityId),
       /** False means media adapters await exact turn/credential attachment; tools does not guess them. */
-      mediaToolsKnown: z.boolean().optional(),
+      mediaToolsKnown: primitives.optionalBoolean,
       tools: z
         .array(
           z
@@ -1585,7 +1590,7 @@ export const AgentEffectiveTools = /* @__PURE__ */ defineSchema(() =>
             .object({
               id: z.string().min(1).max(200),
               capability: z.union([AgentCapabilityId, z.literal("runtime"), z.literal("product")]),
-              toolsKnown: z.boolean(),
+              toolsKnown: primitives.boolean,
             })
             .strict(),
         )

@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -27,8 +28,7 @@ export const SIGNUP_ATTRIBUTION_VALUE_MAX_LENGTH = 100;
 export const SIGNUP_ATTRIBUTION_VALUE_PATTERN = /^[A-Za-z0-9._~+-]+$/;
 
 const SignupAttributionValue = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
+  primitives.string
     .trim()
     .min(1)
     .max(SIGNUP_ATTRIBUTION_VALUE_MAX_LENGTH)

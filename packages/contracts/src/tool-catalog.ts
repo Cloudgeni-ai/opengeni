@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { Permission } from "./permissions";
@@ -16,7 +17,7 @@ export const CODEMODE_CLAIM_LEASE_MS = 30_000;
 export const CODEMODE_CLAIM_HEARTBEAT_MS = 10_000;
 export const CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT = 16;
 
-const sha256 = /* @__PURE__ */ defineSchema(() => z.string().regex(/^[0-9a-f]{64}$/u));
+const sha256 = /* @__PURE__ */ defineSchema(() => primitives.string.regex(/^[0-9a-f]{64}$/u));
 const serverIdentifier = /* @__PURE__ */ defineSchema(() =>
   z
     .string()
@@ -75,10 +76,10 @@ export const AttemptToolAnnotations = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       title: z.string().max(512).optional(),
-      readOnlyHint: z.boolean().optional(),
-      destructiveHint: z.boolean().optional(),
-      idempotentHint: z.boolean().optional(),
-      openWorldHint: z.boolean().optional(),
+      readOnlyHint: primitives.optionalBoolean,
+      destructiveHint: primitives.optionalBoolean,
+      idempotentHint: primitives.optionalBoolean,
+      openWorldHint: primitives.optionalBoolean,
     })
     .loose(),
 );
@@ -153,11 +154,11 @@ export const ToolGatewayCatalog = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(TOOL_GATEWAY_CATALOG_VERSION),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      generation: z.number().int().positive(),
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      generation: primitives.positiveInteger,
       digest: sha256,
-      createdAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
       entries: z.array(ToolGatewayCatalogEntry).max(ATTEMPT_TOOL_CATALOG_MAX_ENTRIES),
     })
     .strict()
@@ -220,15 +221,15 @@ export const AttemptToolCatalog = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(ATTEMPT_TOOL_CATALOG_VERSION),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      sessionId: z.string().uuid(),
-      turnId: z.string().uuid(),
-      attemptId: z.string().uuid(),
-      executionGeneration: z.number().int().positive(),
-      generation: z.number().int().positive(),
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      sessionId: primitives.uuid,
+      turnId: primitives.uuid,
+      attemptId: primitives.uuid,
+      executionGeneration: primitives.positiveInteger,
+      generation: primitives.positiveInteger,
       digest: sha256,
-      createdAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
       /** Native permission ceiling frozen by the worker with this catalog.
        * Absence is legacy/unknown, not permission to derive a larger live set. */
       firstPartyMcpPermissions: z.array(Permission).max(128).optional(),
@@ -284,7 +285,7 @@ export type AttemptToolCaller = z.infer<typeof AttemptToolCaller>;
 export const AttemptToolCall = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       catalogDigest: sha256,
       identity: AttemptToolIdentity,
       arguments: jsonObject,
@@ -305,7 +306,7 @@ export const AttemptToolTextContent = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       type: z.literal("text"),
-      text: z.string(),
+      text: primitives.string,
       annotations: McpAnnotations,
       _meta: McpMeta,
     })
@@ -316,7 +317,7 @@ export const AttemptToolImageContent = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       type: z.literal("image"),
-      data: z.string(),
+      data: primitives.string,
       mimeType: z.string().min(1).max(128),
       annotations: McpAnnotations,
       _meta: McpMeta,
@@ -328,7 +329,7 @@ export const AttemptToolAudioContent = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       type: z.literal("audio"),
-      data: z.string(),
+      data: primitives.string,
       mimeType: z.string().min(1).max(128),
       annotations: McpAnnotations,
       _meta: McpMeta,
@@ -358,7 +359,7 @@ const AttemptToolTextResource = /* @__PURE__ */ defineSchema(() =>
     .object({
       uri: z.string().min(1).max(16_384),
       mimeType: z.string().max(128).optional(),
-      text: z.string(),
+      text: primitives.string,
       _meta: McpMeta,
     })
     .loose(),
@@ -369,7 +370,7 @@ const AttemptToolBlobResource = /* @__PURE__ */ defineSchema(() =>
     .object({
       uri: z.string().min(1).max(16_384),
       mimeType: z.string().max(128).optional(),
-      blob: z.string(),
+      blob: primitives.string,
       _meta: McpMeta,
     })
     .loose(),
@@ -403,7 +404,7 @@ export const AttemptToolResult = /* @__PURE__ */ defineSchema(() =>
     .object({
       content: z.array(AttemptToolContent).max(ATTEMPT_TOOL_CATALOG_MAX_CONTENT_BLOCKS),
       structuredContent: jsonObject.optional(),
-      isError: z.boolean().optional(),
+      isError: primitives.optionalBoolean,
       _meta: McpMeta,
     })
     .loose(),
@@ -416,18 +417,15 @@ export type ToolGatewayResult = AttemptToolResult;
 export const ToolGatewayCallRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid().optional(),
+      operationId: primitives.optionalUuid,
       catalogDigest: sha256,
       identity: ToolGatewayIdentity,
       arguments: jsonObject,
       /** Host-owned Site context. Publisher-controlled iframe code cannot set it. */
-      siteArtifactId: z.string().uuid().optional(),
-      siteVersionId: z.string().uuid().optional(),
+      siteArtifactId: primitives.optionalUuid,
+      siteVersionId: primitives.optionalUuid,
       /** Opaque, server-issued, single-use capability for an approval-required call. */
-      approvalToken: z
-        .string()
-        .regex(/^ogta_[A-Za-z0-9_-]{43}$/u)
-        .optional(),
+      approvalToken: primitives.string.regex(/^ogta_[A-Za-z0-9_-]{43}$/u).optional(),
     })
     .strict()
     .superRefine(requireCompleteSiteToolContext),
@@ -437,7 +435,7 @@ export type ToolGatewayCallRequest = z.infer<typeof ToolGatewayCallRequest>;
 export const ToolGatewayApprovalRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       catalogDigest: sha256,
       identity: ToolGatewayIdentity,
       arguments: jsonObject,
@@ -449,11 +447,11 @@ export type ToolGatewayApprovalRequest = z.infer<typeof ToolGatewayApprovalReque
 export const ToolGatewayApprovalResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       catalogDigest: sha256,
       identity: ToolGatewayIdentity,
-      approvalToken: z.string().regex(/^ogta_[A-Za-z0-9_-]{43}$/u),
-      expiresAt: z.string().datetime({ offset: true }),
+      approvalToken: primitives.string.regex(/^ogta_[A-Za-z0-9_-]{43}$/u),
+      expiresAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -462,7 +460,7 @@ export type ToolGatewayApprovalResponse = z.infer<typeof ToolGatewayApprovalResp
 export const ToolGatewayCallResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       catalogDigest: sha256,
       result: ToolGatewayResult,
     })
@@ -480,8 +478,8 @@ export const ToolGatewayTarget = /* @__PURE__ */ defineSchema(() =>
 export type ToolGatewayTarget = z.infer<typeof ToolGatewayTarget>;
 
 const targetContext = {
-  siteArtifactId: z.string().uuid().optional(),
-  siteVersionId: z.string().uuid().optional(),
+  siteArtifactId: primitives.optionalUuid,
+  siteVersionId: primitives.optionalUuid,
 };
 export const ToolGatewayResolveRequest = /* @__PURE__ */ defineSchema(() =>
   z
@@ -509,14 +507,11 @@ export const ToolGatewayInvokeRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       target: ToolGatewayTarget,
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       arguments: jsonObject,
       /** Omission explicitly selects the current authorized definition. */
       expectedDefinitionDigest: sha256.optional(),
-      approvalToken: z
-        .string()
-        .regex(/^ogta_[A-Za-z0-9_-]{43}$/u)
-        .optional(),
+      approvalToken: primitives.string.regex(/^ogta_[A-Za-z0-9_-]{43}$/u).optional(),
       ...targetContext,
     })
     .strict()
@@ -527,7 +522,7 @@ export type ToolGatewayInvokeRequest = z.infer<typeof ToolGatewayInvokeRequest>;
 export const ToolGatewayInvokeResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       tool: ToolGatewayResolvedTool,
       result: ToolGatewayResult,
     })
@@ -539,7 +534,7 @@ export const ToolGatewayTargetApprovalRequest = /* @__PURE__ */ defineSchema(() 
   z
     .object({
       identity: ToolGatewayIdentity,
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       arguments: jsonObject,
       expectedDefinitionDigest: sha256,
       ...targetContext,
@@ -552,10 +547,10 @@ export const ToolGatewayTargetApprovalResponse = /* @__PURE__ */ defineSchema(()
   z
     .object({
       bindingVersion: z.literal(2),
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       tool: ToolGatewayResolvedTool,
-      approvalToken: z.string().regex(/^ogta_[A-Za-z0-9_-]{43}$/u),
-      expiresAt: z.string().datetime({ offset: true }),
+      approvalToken: primitives.string.regex(/^ogta_[A-Za-z0-9_-]{43}$/u),
+      expiresAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -588,7 +583,7 @@ export const ToolGatewayDeclarationsResponse = /* @__PURE__ */ defineSchema(() =
     .object({
       catalogDigest: sha256,
       moduleSpecifier: z.string().min(1).max(512),
-      source: z.string().max(16 * 1024 * 1024),
+      source: primitives.string.max(16 * 1024 * 1024),
     })
     .strict(),
 );
@@ -628,13 +623,13 @@ export const CodemodeOperation = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(CODEMODE_OPERATION_VERSION),
-      operationId: z.string().uuid(),
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      sessionId: z.string().uuid(),
-      turnId: z.string().uuid(),
-      attemptId: z.string().uuid(),
-      executionGeneration: z.number().int().positive(),
+      operationId: primitives.uuid,
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      sessionId: primitives.uuid,
+      turnId: primitives.uuid,
+      attemptId: primitives.uuid,
+      executionGeneration: primitives.positiveInteger,
       catalogDigest: sha256,
       requestDigest: sha256,
       identity: AttemptToolIdentity,
@@ -645,15 +640,15 @@ export const CodemodeOperation = /* @__PURE__ */ defineSchema(() =>
       state: CodemodeOperationState,
       /** Present only for clients that acknowledged durable approval continuation. */
       durableApproval: z.literal(true).optional(),
-      approvalRequestId: z.string().uuid().optional(),
+      approvalRequestId: primitives.optionalUuid,
       result: AttemptToolResult.nullable(),
       errorCode: z.string().min(1).max(128).nullable(),
       errorMessage: z.string().min(1).max(4_096).nullable(),
-      createdAt: z.string().datetime({ offset: true }),
-      claimedAt: z.string().datetime({ offset: true }).nullable(),
-      executionStartedAt: z.string().datetime({ offset: true }).nullable(),
-      completedAt: z.string().datetime({ offset: true }).nullable(),
-      updatedAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
+      claimedAt: primitives.string.datetime({ offset: true }).nullable(),
+      executionStartedAt: primitives.string.datetime({ offset: true }).nullable(),
+      completedAt: primitives.string.datetime({ offset: true }).nullable(),
+      updatedAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -664,7 +659,7 @@ export const CodemodeCallRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       /** Opt-in transport capability, never permission to execute. */
       durableApproval: z.literal(true).optional(),
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       catalogDigest: sha256,
       identity: AttemptToolIdentity,
       arguments: jsonObject,
@@ -688,7 +683,7 @@ export const CodemodeDispatchRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(CODEMODE_OPERATION_VERSION),
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       catalogDigest: sha256,
     })
     .strict(),
@@ -699,7 +694,7 @@ export const CodemodeDispatchAck = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(CODEMODE_OPERATION_VERSION),
-      operationId: z.string().uuid(),
+      operationId: primitives.uuid,
       status: z.enum(["accepted", "already_running", "terminal", "unavailable", "rejected"]),
     })
     .strict(),

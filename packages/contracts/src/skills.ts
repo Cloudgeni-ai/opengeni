@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 export { parseSkillFrontmatter, readSkillMetadata } from "./skill-metadata";
@@ -5,19 +6,19 @@ export * from "./skill-files";
 
 /** Files are UTF-8 text, relative to the Skill root. No executable authority. */
 export const SkillFile = /* @__PURE__ */ defineSchema(() =>
-  z.object({ path: z.string().min(1).max(512), content: z.string() }),
+  z.object({ path: z.string().min(1).max(512), content: primitives.string }),
 );
 export type SkillFile = z.infer<typeof SkillFile>;
 export const SkillActor = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
     z.object({
       kind: z.literal("service"),
-      subjectId: z.string().min(1),
+      subjectId: primitives.nonEmptyString,
       principalKind: z.enum(["service", "api_key", "configured_key"]),
     }),
     z.object({
       kind: z.literal("human"),
-      subjectId: z.string().min(1),
+      subjectId: primitives.nonEmptyString,
       principalKind: z.literal("human_session"),
     }),
     z.object({
@@ -25,7 +26,7 @@ export const SkillActor = /* @__PURE__ */ defineSchema(() =>
       sessionId: z.uuid(),
       turnId: z.uuid(),
       attemptId: z.uuid(),
-      executionGeneration: z.number().int().positive(),
+      executionGeneration: primitives.positiveInteger,
     }),
   ]),
 );
@@ -70,7 +71,7 @@ export const SkillReviewReference = /* @__PURE__ */ defineSchema(() =>
     skillId: z.uuid(),
     revisionId: z.uuid(),
     expectedRevisionId: z.uuid().nullable(),
-    expectedScopeVersion: z.number().int().positive(),
+    expectedScopeVersion: primitives.positiveInteger,
   }),
 );
 export type SkillReviewReference = z.infer<typeof SkillReviewReference>;
@@ -101,7 +102,7 @@ export function skillReviewHumanInput(skillReview: SkillReviewReference) {
 }
 export const SkillWriteReceipt = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    removed: z.boolean().optional(),
+    removed: primitives.optionalBoolean,
     operationId: z.uuid(),
     skillId: z.uuid(),
     revisionId: z.uuid(),
@@ -109,7 +110,7 @@ export const SkillWriteReceipt = /* @__PURE__ */ defineSchema(() =>
     decision: z.literal("rejected").optional(),
     pendingReason: z.enum(["approval", "source_finalization"]).optional(),
     skillReview: SkillReviewReference.optional(),
-    replayed: z.boolean(),
+    replayed: primitives.boolean,
   }),
 );
 export type SkillWriteReceipt = z.infer<typeof SkillWriteReceipt>;
@@ -126,7 +127,7 @@ export const SkillSourceReleaseReceipt = /* @__PURE__ */ defineSchema(() =>
     revisionId: z.uuid().nullable(),
     disposition: z.enum(["deactivated", "preserved", "inactive"]),
     eventId: z.uuid().nullable(),
-    warning: z.string().nullable(),
+    warning: primitives.nullableString,
   }),
 );
 export type SkillSourceReleaseReceipt = z.infer<typeof SkillSourceReleaseReceipt>;

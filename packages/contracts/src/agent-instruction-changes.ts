@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS } from "./agent-authored-durable-text";
@@ -15,15 +16,17 @@ export const AgentInstructionSaveRequest = /* @__PURE__ */ defineSchema(() =>
       operationId: z.uuid(),
       target: WorkspaceInstructionPolicyTarget,
       editMode: AgentInstructionEditMode,
-      content: z.string().max(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS).optional(),
-      oldText: z
-        .string()
-        .min(1)
+      content: primitives.string
         .max(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS)
         .optional(),
-      newText: z.string().max(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS).optional(),
+      oldText: primitives.nonEmptyString
+        .max(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS)
+        .optional(),
+      newText: primitives.string
+        .max(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS)
+        .optional(),
       expectedCurrentRevisionId: z.uuid().nullable(),
-      expectedActivationVersion: z.number().int().nonnegative(),
+      expectedActivationVersion: primitives.nonnegativeInteger,
       evidence: z.array(KnowledgeEntryEvidence).max(32).default([]),
       reason: z.string().min(1).max(4096),
     })
@@ -89,7 +92,7 @@ export const AgentInstructionReceipt = /* @__PURE__ */ defineSchema(() =>
     revisionId: z.uuid(),
     outcome: z.enum(["published", "pending", "rejected"]),
     reviewBatchId: z.uuid().nullable(),
-    replayed: z.boolean(),
+    replayed: primitives.boolean,
   }),
 );
 export type AgentInstructionReceipt = z.infer<typeof AgentInstructionReceipt>;
@@ -97,19 +100,19 @@ export type AgentInstructionReceipt = z.infer<typeof AgentInstructionReceipt>;
 export const AgentInstructionReviewItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
     revisionId: z.uuid(),
-    content: z.string(),
+    content: primitives.string,
     target: WorkspaceInstructionPolicyTarget,
     reviewBatchId: z.uuid().nullable(),
     sessionId: z.uuid().nullable(),
-    reason: z.string(),
-    createdAt: z.string(),
+    reason: primitives.string,
+    createdAt: primitives.string,
   }),
 );
 export type AgentInstructionReviewItem = z.infer<typeof AgentInstructionReviewItem>;
 export const AgentInstructionReviewListResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     entries: z.array(AgentInstructionReviewItem),
-    nextCursor: z.string().nullable(),
+    nextCursor: primitives.nullableString,
   }),
 );
 export type AgentInstructionReviewListResponse = z.infer<typeof AgentInstructionReviewListResponse>;

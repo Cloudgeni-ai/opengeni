@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { Permission } from "./permissions";
@@ -14,12 +15,7 @@ export const OrganizationWorkspaceScope = /* @__PURE__ */ defineSchema(() =>
       .object({
         kind: z.literal("selected"),
         workspaceIds: z
-          .array(
-            z
-              .string()
-              .uuid()
-              .transform((id) => id.toLowerCase()),
-          )
+          .array(primitives.uuid.transform((id) => id.toLowerCase()))
           .max(500)
           .refine((ids) => new Set(ids).size === ids.length, "Workspace IDs must be unique"),
       })
@@ -130,7 +126,7 @@ export const McpConnectionDecision = /* @__PURE__ */ defineSchema(() =>
     z
       .object({
         decision: z.literal("approve"),
-        organizationId: z.string().uuid(),
+        organizationId: primitives.uuid,
         access: OrganizationAccessPolicy,
       })
       .strict(),
@@ -167,15 +163,15 @@ export function serviceAccountAllowsPermission(
 
 export const OrganizationServiceAccount = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    organizationId: z.string().uuid(),
+    id: primitives.uuid,
+    organizationId: primitives.uuid,
     name: z.string().min(1).max(200),
-    description: z.string().nullable(),
+    description: primitives.nullableString,
     role: OrganizationServiceAccountRole,
     /** Keys that are not revoked, including expired ones. */
-    activeKeyCount: z.number().int().nonnegative(),
-    createdAt: z.string(),
-    updatedAt: z.string(),
+    activeKeyCount: primitives.nonnegativeInteger,
+    createdAt: primitives.string,
+    updatedAt: primitives.string,
   }),
 );
 export type OrganizationServiceAccount = z.infer<typeof OrganizationServiceAccount>;
@@ -192,8 +188,8 @@ export type ListOrganizationServiceAccountsResponse = z.infer<
 export const CreateOrganizationServiceAccountRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      name: z.string().trim().min(1).max(200),
-      description: z.string().trim().min(1).max(500).optional(),
+      name: primitives.string.trim().min(1).max(200),
+      description: primitives.string.trim().min(1).max(500).optional(),
       role: OrganizationServiceAccountRole.default("member"),
     })
     .strict(),
@@ -205,8 +201,8 @@ export type CreateOrganizationServiceAccountRequest = z.infer<
 export const UpdateOrganizationServiceAccountRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      name: z.string().trim().min(1).max(200).optional(),
-      description: z.string().trim().min(1).max(500).nullable().optional(),
+      name: primitives.string.trim().min(1).max(200).optional(),
+      description: primitives.string.trim().min(1).max(500).nullable().optional(),
       role: OrganizationServiceAccountRole.optional(),
     })
     .strict()

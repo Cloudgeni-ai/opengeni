@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { AGENT_PROMPT_MODULE_IDS, AgentPromptModuleId } from "./agent-config";
@@ -36,7 +37,7 @@ export const ModelContextInstructionModule = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       id: AgentPromptModuleId,
-      chars: z.number().int().nonnegative(),
+      chars: primitives.nonnegativeInteger,
     })
     .strict(),
 );
@@ -47,9 +48,9 @@ export const ModelContextInstructionLayer = /* @__PURE__ */ defineSchema(() =>
     .object({
       id: ModelContextInstructionLayerId,
       title: z.string().min(1).max(120),
-      content: z.string(),
-      utf8Bytes: z.number().int().nonnegative(),
-      estimatedTokens: z.number().int().nonnegative(),
+      content: primitives.string,
+      utf8Bytes: primitives.nonnegativeInteger,
+      estimatedTokens: primitives.nonnegativeInteger,
       // Composition-order prompt modules of a modular operational contract.
       modules: z
         .array(ModelContextInstructionModule)
@@ -74,8 +75,8 @@ export const ModelContextTool = /* @__PURE__ */ defineSchema(() =>
       description: z.string().max(16_384).optional(),
       namespace: z.string().max(256).optional(),
       schema: z.unknown().optional(),
-      utf8Bytes: z.number().int().nonnegative(),
-      estimatedTokens: z.number().int().nonnegative(),
+      utf8Bytes: primitives.nonnegativeInteger,
+      estimatedTokens: primitives.nonnegativeInteger,
     })
     .strict(),
 );
@@ -102,9 +103,9 @@ export type ModelContextSkill = z.infer<typeof ModelContextSkill>;
 export const ModelContextTokenCounts = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      instructions: z.number().int().nonnegative(),
-      tools: z.number().int().nonnegative(),
-      prefix: z.number().int().nonnegative(),
+      instructions: primitives.nonnegativeInteger,
+      tools: primitives.nonnegativeInteger,
+      prefix: primitives.nonnegativeInteger,
     })
     .strict(),
 );
@@ -114,22 +115,22 @@ export const ModelContextSnapshot = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(MODEL_CONTEXT_SNAPSHOT_VERSION),
-      capturedAt: z.string().datetime(),
+      capturedAt: primitives.dateTime,
       source: z.literal("model_request"),
-      requestIndex: z.number().int().nonnegative(),
-      instructions: z.string(),
+      requestIndex: primitives.nonnegativeInteger,
+      instructions: primitives.string,
       // Absent on historical SDK-prefix captures. Never infer a wire payload.
       providerRequest: z
         .object({
-          provider: z.string(),
-          body: z.string().nullable(),
+          provider: primitives.string,
+          body: primitives.nullableString,
           unavailableReason: z.string().optional(),
           parts: z.array(
             z
               .object({
-                key: z.string(),
+                key: primitives.string,
                 estimatedTokens: z.number().int().nonnegative().nullable(),
-                utf8Bytes: z.number().int().nonnegative(),
+                utf8Bytes: primitives.nonnegativeInteger,
                 itemEstimatedTokens: z.array(z.number().int().nonnegative().nullable()).optional(),
               })
               .strict(),
@@ -149,9 +150,9 @@ export type ModelContextSnapshot = z.infer<typeof ModelContextSnapshot>;
 export const SessionModelContextResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      sessionId: z.string().uuid(),
-      attemptId: z.string().uuid().nullable(),
-      turnId: z.string().uuid().nullable(),
+      sessionId: primitives.uuid,
+      attemptId: primitives.nullableUuid,
+      turnId: primitives.nullableUuid,
       snapshot: ModelContextSnapshot.nullable(),
     })
     .strict(),

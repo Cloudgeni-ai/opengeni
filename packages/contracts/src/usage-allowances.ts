@@ -1,12 +1,13 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /** Credit amounts are integer USD micros (1 USD = 1,000,000), never floating-point dollars. */
 export const AllowanceCredits = /* @__PURE__ */ defineSchema(() =>
-  z.number().int().nonnegative().safe(),
+  primitives.nonnegativeInteger.safe(),
 );
-const Version = /* @__PURE__ */ defineSchema(() => z.number().int().nonnegative().safe());
-const Timestamp = /* @__PURE__ */ defineSchema(() => z.string().datetime({ offset: true }));
+const Version = /* @__PURE__ */ defineSchema(() => primitives.nonnegativeInteger.safe());
+const Timestamp = /* @__PURE__ */ defineSchema(() => primitives.string.datetime({ offset: true }));
 const OperationId = /* @__PURE__ */ defineSchema(() =>
   z
     .string()
@@ -163,7 +164,7 @@ export const MemberAllowance = /* @__PURE__ */ defineSchema(() =>
 export type MemberAllowance = z.infer<typeof MemberAllowance>;
 
 export const UsageAllowancePeriod = /* @__PURE__ */ defineSchema(() =>
-  z.union([z.literal("current"), z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/)]),
+  z.union([z.literal("current"), primitives.string.regex(/^\d{4}-(0[1-9]|1[0-2])$/)]),
 );
 export type UsageAllowancePeriod = z.infer<typeof UsageAllowancePeriod>;
 export const GetUsageRequest = /* @__PURE__ */ defineSchema(() =>
@@ -215,7 +216,10 @@ export type WorkspaceAllowanceUsage = z.infer<typeof WorkspaceAllowanceUsage>;
 export const MemberAllowanceUsage = /* @__PURE__ */ defineSchema(() =>
   Usage.extend({
     subjectId: SubjectId,
-    externalIdentity: z.object({ source: z.string(), externalId: z.string() }).strict().nullable(),
+    externalIdentity: z
+      .object({ source: primitives.string, externalId: primitives.string })
+      .strict()
+      .nullable(),
     rule: MemberAllowanceRule,
     version: Version,
   }).strict(),
@@ -228,7 +232,7 @@ export const WorkspaceUsageResponse = /* @__PURE__ */ defineSchema(() =>
       period: UsageAllowanceWindow,
       workspace: WorkspaceAllowanceUsage,
       members: z.array(MemberAllowanceUsage),
-      nextCursor: z.string().nullable(),
+      nextCursor: primitives.nullableString,
     })
     .strict(),
 );
@@ -241,7 +245,7 @@ export const AllowanceExhaustedRefusal = /* @__PURE__ */ defineSchema(() =>
       scope: z.enum(["workspace", "member"]),
       resetsAt: Timestamp.nullable(),
       subjectId: SubjectId.optional(),
-      message: z.string(),
+      message: primitives.string,
     })
     .strict(),
 );
