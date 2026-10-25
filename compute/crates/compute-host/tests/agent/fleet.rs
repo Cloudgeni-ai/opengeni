@@ -13,7 +13,7 @@ use compute_core::{DiskPolicy, DiskSpace, HostPolicy, Level, Priority};
 use compute_engine::{CancellationToken, EngineError};
 use compute_host::fleet::{Admission, LeaseGate, boot_now};
 use compute_host::protocol::{
-    DiskStatus, ErrorCode, Id, LevelName, Reply, Request, SandboxConfig, SleepConfig,
+    DiskStatus, ErrorCode, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
 };
 use compute_host::{
     Archive, Claimed, Directory, DiskGauge, FetchInto, FetchedMemory, HostError, Owned, OwnerEpoch,
@@ -163,7 +163,7 @@ async fn a_sandbox_held_awake_is_handed_off_with_its_programs_when_asked_to_go_a
         generation: None,
         hold: "watched".into(),
         ttl_ms: None,
-        priority: Default::default(),
+        priority: PriorityName::default(),
     };
     assert_eq!(one.client.call(&hold).await.unwrap(), Reply::Done);
     // A stream carrying traffic holds it too, under a lease of its own.
