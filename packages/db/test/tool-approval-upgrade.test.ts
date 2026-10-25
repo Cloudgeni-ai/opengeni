@@ -293,8 +293,12 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
       preinstalledVector: true,
     });
     const afterRequests = [
-      ...(await owned.admin`select to_jsonb(r) - 'review_arguments' - 'review_context' as row from connector_action_requests r order by id`),
+      ...(await owned.admin`select to_jsonb(r) - 'review_arguments' - 'review_context' - 'decision_by_kind' - 'decision_by_signed_in_person' as row from connector_action_requests r order by id`),
     ];
+    // 0971 adds who decided a request; upgraded rows keep its defaults.
+    expect([
+      ...(await owned.admin`select distinct decision_by_kind, decision_by_signed_in_person from connector_action_requests`),
+    ]).toEqual([{ decision_by_kind: null, decision_by_signed_in_person: false }]);
     expect([
       ...(await owner`select data_type from information_schema.columns
       where table_schema=current_schema() and table_name='session_events'
