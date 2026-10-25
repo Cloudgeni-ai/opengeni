@@ -796,6 +796,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createAutomationTemplate",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/automation-templates",
+    "request": [
+      "CreateAutomationTemplateRequest"
+    ],
+    "response": [
+      "AutomationTemplateResponse",
+      "WorkspaceAutomationTemplate"
+    ]
+  },
+  {
     "id": "createBillingCheckout",
     "method": "POST",
     "path": "/v1/billing/checkout",
@@ -1491,6 +1503,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteAppRegistration",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/pr-review/registrations/:registrationId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteAutomationTemplate",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/automation-templates/:templateId",
     "request": [],
     "response": []
   },
@@ -4260,6 +4279,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AuthRunListResponse"
+    ]
+  },
+  {
+    "id": "listAutomationTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/automation-templates",
+    "request": [],
+    "response": [
+      "ListAutomationTemplatesResponse",
+      "WorkspaceAutomationTemplate"
     ]
   },
   {
@@ -7944,6 +7973,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ArtifactPinResponse"
+    ]
+  },
+  {
+    "id": "updateAutomationTemplate",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/automation-templates/:templateId",
+    "request": [
+      "UpdateAutomationTemplateRequest"
+    ],
+    "response": [
+      "AutomationTemplateResponse",
+      "WorkspaceAutomationTemplate"
     ]
   },
   {

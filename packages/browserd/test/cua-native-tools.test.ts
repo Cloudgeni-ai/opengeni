@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import {
+  CUA_DESKTOP_TOOL_VERSIONS,
   CUA_DESKTOP_TOOLS,
   CUA_LINUX_DESKTOP_TOOLS,
   CUA_WINDOWS_DESKTOP_TOOLS,
@@ -15,6 +16,20 @@ import { CuaNativeTools } from "../src/cua/native-tools";
 import type { CuaDesktopRuntime } from "../src/cua/wire";
 
 const computerSessionId = randomUUID();
+
+test("every platform catalog comes from the CUA release browserd pins", async () => {
+  // Each catalog is generated on its own platform after a CUA pin change. A
+  // catalog left on an older release refuses every call whose schema changed,
+  // so each names the release it came from and must name the pinned one.
+  const { dependencies } = (await Bun.file(new URL("../package.json", import.meta.url)).json()) as {
+    dependencies: Record<string, string>;
+  };
+  expect(CUA_DESKTOP_TOOL_VERSIONS).toEqual({
+    macos: dependencies["@trycua/cua-driver"]!,
+    linux: dependencies["@trycua/cua-driver"]!,
+    windows: dependencies["@trycua/cua-driver"]!,
+  });
+});
 
 test("Linux native admission uses the Linux release schema without accepting a Mac worker", async () => {
   const runtime: CuaDesktopRuntime = {

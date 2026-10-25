@@ -25,8 +25,9 @@ export type RigInstructionsContext = {
 
 /**
  * What the session is attached to, as far as its instructions care. Every flag
- * must be derived from session-level facts (or the exact turn's resources for
- * attachments) so the composed prefix only changes when they change.
+ * must be derived from session-level facts so the composed prefix only changes
+ * when they change. Per-turn resources (file attachments) must never appear
+ * here: they are described by the turn's own notice at the end of the input.
  */
 export type AgentPromptResources = {
   /** A managed (provisioned) sandbox is the active compute. */
@@ -37,8 +38,6 @@ export type AgentPromptResources = {
   repositories: boolean;
   /** Git provider credentials were delivered to the sandbox. */
   gitCredentials: boolean;
-  /** Files are attached (mounted) for this turn. */
-  attachments: boolean;
   /**
    * The runtime resolves `{{secret:…}}` references for this attempt. Gates
    * the secrets prompt module; omitted keeps prompts unchanged.

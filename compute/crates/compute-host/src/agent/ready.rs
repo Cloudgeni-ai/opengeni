@@ -621,9 +621,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 if cleaned {
                     self.ordinals.remove(&ordinal);
                 }
-                self.ready.retry.insert(shape, Instant::now() + FILL_RETRY);
                 if let Some(template) = stale {
+                    // Not a failed fill: the image changed under its
+                    // template. The rebuild starts now, and the shape fills
+                    // from the new template as soon as it is ready, as
+                    // after any rebuild, rather than a failed fill's wait
+                    // later.
                     self.template_stale(&template);
+                } else {
+                    self.ready.retry.insert(shape, Instant::now() + FILL_RETRY);
                 }
             }
             Filled::Failed { vm } => {

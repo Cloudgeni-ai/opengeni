@@ -28,6 +28,9 @@ const ALLOWED_RUNTIME_SUBPATHS = new Set([
   // Bounded first-party Gmail transport adapter. Its only Agents dependency is
   // an erased MCPServer type import; it does not import or execute the loop.
   "@opengeni/runtime/gmail-rest-mcp",
+  // Bounded first-party Google Calendar transport adapter, shaped like Gmail's:
+  // only an erased MCPServer type import from the Agents SDK.
+  "@opengeni/runtime/google-calendar-rest-mcp",
   "@opengeni/runtime/mcp-network",
   // Stateless single model calls (the Chat Completions endpoint). Exposes one
   // bounded model request, provider binding resolution and usage

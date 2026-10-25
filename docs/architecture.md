@@ -427,6 +427,10 @@ Exact tool-name pages merge two disjoint ordered index branches in one statement
 bounded non-null name projections and legacy/oversized-name fallbacks. Each
 branch retains its keyset and limit; names keep the database collation and no
 input-length restriction is introduced. See [tool-name paging](tool-name-paging.md).
+Exact call-ID pages use the same disjoint projected/fallback structure when the
+explicit type selection contains only created/output tool events. Other event
+types and losslessly encoded IDs retain their original reader. Both ID indexes
+are scoped by workspace/session; no call-ID uniqueness across sessions is assumed.
 Legacy rows retain their payload fallback (and its read cost); these projections
 do not authorize access or replace the retained payload. Full-history Find
 (`packages/db/src/session-message-search.ts`) coalesces authorized scalar windows

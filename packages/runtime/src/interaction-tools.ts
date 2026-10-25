@@ -19,6 +19,7 @@ import {
   AuthRunMutationResponse,
   BrowserAction,
   BrowserLocator,
+  INTERACTION_ACTION_DEADLINE_MAX_MS,
   INTERACTION_MAX_ACTIONS_PER_BATCH,
   INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND,
   BrowserActionBatch,
@@ -856,6 +857,7 @@ const ComputerOpenInput = z
     mode: z.enum(["reuse_or_create", "new"]).optional(),
     name: z.string().trim().min(1).max(200).optional(),
     placement: InteractionPlacement.optional(),
+    includeScreenshot: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -2468,13 +2470,13 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "open"],
     title: "Open or reuse computer",
     description:
-      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
+      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. Set includeScreenshot=true to also get a still image of the screen in the same call when its visual state matters. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
     input: ComputerOpenInput,
     output: ComputerOpenOutput,
     readOnly: false,
     idempotent: true,
     modelText: computerOpenText,
-    execute: async (value, context) => {
+    execute: async ({ includeScreenshot, ...value }, context) => {
       const opened = await openComputer(
         input.transport,
         input.workspaceId,
@@ -2483,7 +2485,52 @@ export function createInteractionAttemptToolDefinitions(
         context,
       );
       currentComputer.use(opened.session.id);
-      return opened;
+      if (!includeScreenshot) return opened;
+      // The computer is already open. A failed capture must not turn its result
+      // into an error the model could answer by opening another computer.
+      const target = openedScreenshotTarget(opened.targets);
+      if (!target)
+        return new InteractionExecutionResult(opened, [
+          {
+            type: "text" as const,
+            text: "The computer opened, but it has no screen or window to capture a screenshot of.",
+          },
+        ]);
+      try {
+        const frame = await input.transport.captureComputerTarget(
+          input.workspaceId,
+          opened.session.id,
+          target.id,
+        );
+        // As in computer_observe: pixels of a target that changed since the
+        // computer listed it would not match the targets the result names.
+        if (frame.targetGeneration !== target.targetGeneration)
+          return new InteractionExecutionResult(opened, [
+            {
+              type: "text" as const,
+              text: "The computer opened, but its screen changed while it was captured; observe it for a current screenshot.",
+            },
+          ]);
+        const image = await compactComputerImage(frame.data, frame.mediaType);
+        return new InteractionExecutionResult(opened, [
+          {
+            type: "text" as const,
+            text: `Screenshot of ${target.id}: frameId ${frame.frameId}, ${frame.width}x${frame.height} pixels; use these pixels for pointer coordinates.`,
+          },
+          {
+            type: "image" as const,
+            data: Buffer.from(image.data).toString("base64"),
+            mimeType: image.mimeType,
+          },
+        ]);
+      } catch (error) {
+        return new InteractionExecutionResult(opened, [
+          {
+            type: "text" as const,
+            text: `The computer opened, but its screenshot could not be captured: ${screenshotFailureReason(error)}`,
+          },
+        ]);
+      }
     },
   });
 
@@ -2976,6 +3023,14 @@ export type CreateFirstPartyInteractionAttemptToolsInput = Omit<
 };
 
 /**
+ * The API answers an action request only once the action or batch finished,
+ * which may take up to its own deadline (at most
+ * INTERACTION_ACTION_DEADLINE_MAX_MS). Bun's fetch otherwise ends a request
+ * whose connection stays silent for five minutes, so allow that whole bound.
+ */
+const FIRST_PARTY_INTERACTION_IDLE_TIMEOUT_MS = INTERACTION_ACTION_DEADLINE_MAX_MS + 60_000;
+
+/**
  * Construct the canonical Browser/Computer attempt definitions against the
  * ordinary Opengeni control plane. MCP/Codemode never receive controller keys,
  * raw CDP, or provider credentials; every call re-signs exact attempt authority.
@@ -2988,7 +3043,13 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
   const selectedTools = input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS;
   const permissions = input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   const baseUrl = firstPartyApiBaseUrl(input.settings, input.scope.workspaceId);
-  const rawFetch = input.fetch ?? globalThis.fetch.bind(globalThis);
+  const rawFetch =
+    input.fetch ??
+    (async (request: string | URL | Request, init?: RequestInit) =>
+      await globalThis.fetch(request, {
+        ...init,
+        timeout: FIRST_PARTY_INTERACTION_IDLE_TIMEOUT_MS,
+      } as RequestInit));
   const guarded = guardedMcpFetch(
     { ...input.settings, integrationsAllowPrivateNetworkTargets: true },
     rawFetch,
@@ -4676,6 +4737,36 @@ export function interactionToolErrorOutput(error: unknown): InteractionToolError
   } catch {
     return null;
   }
+}
+
+/** The screen computer_open includes a screenshot of: the one this computer
+ * works in, else the focused one, else the one showing the focused window;
+ * with no screen, the window it works in, else the focused one. */
+function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTarget | undefined {
+  const screens = targets.filter((target) => target.kind === "screen");
+  const windows = targets.filter((target) => target.kind === "window");
+  const focusedWindow = windows.find((target) => target.focused)?.bounds;
+  const centre = focusedWindow && {
+    x: focusedWindow.x + focusedWindow.width / 2,
+    y: focusedWindow.y + focusedWindow.height / 2,
+  };
+  return (
+    screens.find((screen) => screen.current) ??
+    screens.find((screen) => screen.focused) ??
+    (centre &&
+      screens.find(
+        ({ bounds }) =>
+          bounds !== null &&
+          centre.x >= bounds.x &&
+          centre.x < bounds.x + bounds.width &&
+          centre.y >= bounds.y &&
+          centre.y < bounds.y + bounds.height,
+      )) ??
+    screens[0] ??
+    windows.find((window) => window.current) ??
+    windows.find((window) => window.focused) ??
+    windows[0]
+  );
 }
 
 function screenshotFailureReason(error: unknown): string {

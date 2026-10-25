@@ -81,6 +81,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Scoped knowledge provenance | `docs/scoped-knowledge.md` | Source/document bridges, future connectors, claim retrieval, and policy/preference materialization should link here instead of weakening fixed authority, ACL intersection, tombstone, legacy non-widening, or proposal-only invariants. |
 | MCP surface selection | `docs/mcp-surfaces.md` | `docs/architecture.md`, `docs/capabilities.md`, `docs/session-mcp-servers.md` should link. |
 | Gmail tools and original file delivery | `docs/gmail.md` | `docs/capabilities.md` owns connection setup; runtime owns provider operations and worker owns transactional filesystem delivery. |
+| Google Calendar tools, time zones and setup | `docs/google-calendar.md` | `docs/capabilities.md` summarizes the connection; runtime owns provider operations and time-zone handling. |
 | Tool permissions, durable approval and portable review | `docs/tool-approvals.md` | `docs/mcp-surfaces.md`, `docs/run-lifecycle.md`, SDK, React and Codemode READMEs link or summarize their boundaries. |
 | First-party MCP response contracts | `docs/mcp-response-contracts.md` | Mutation handlers, consumer migration notes, and release notes should link instead of restating the receipt schema and tool classification. |
 | Codemode programmatic tool access | `docs/mcp-surfaces.md`, `docs/architecture.md`; record design in `docs/design/codemode.md` | Runtime/API/worker comments should link instead of restating security invariants. |

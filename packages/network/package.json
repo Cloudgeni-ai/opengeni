@@ -19,6 +19,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./azure-entra": {
+      "types": "./src/azure-entra.ts",
+      "default": "./src/azure-entra.ts"
+    },
     "./responses-websocket": {
       "types": "./src/responses-websocket.ts",
       "default": "./src/responses-websocket.ts"

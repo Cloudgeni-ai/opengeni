@@ -1,9 +1,10 @@
 // Automations: the list, each automation's own page, the New / Edit /
-// Duplicate form pages, and the event sources their triggers listen to. The
-// pages live in components/schedules; these route components own the scroll
-// frame and the legacy deep links.
+// Duplicate form pages, the templates they can start from, and the event
+// sources their triggers listen to. The pages live in components/schedules;
+// these route components own the scroll frame and the legacy deep links.
 import { Navigate } from "@tanstack/react-router";
 
+import { AutomationTemplatesPage } from "@/components/schedules/automation-templates-page";
 import { EventSourceDetailPage } from "@/components/schedules/event-source-detail-page";
 import { EventSourceNewPage } from "@/components/schedules/event-source-new-page";
 import { EventSourcesPage } from "@/components/schedules/event-sources-page";
@@ -91,6 +92,14 @@ export function EventSourcesRoute({ workspaceId }: { workspaceId: string }) {
   return (
     <ContentPage width="standard" className={PAGE_FRAME}>
       <EventSourcesPage workspaceId={workspaceId} />
+    </ContentPage>
+  );
+}
+
+export function AutomationTemplatesRoute({ workspaceId }: { workspaceId: string }) {
+  return (
+    <ContentPage width="standard" className={PAGE_FRAME}>
+      <AutomationTemplatesPage workspaceId={workspaceId} />
     </ContentPage>
   );
 }

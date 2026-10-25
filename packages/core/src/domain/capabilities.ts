@@ -253,10 +253,13 @@ export function applyGoogleConnectorSetupAvailability(
   const url = item.mcpUrl ?? item.endpointUrl;
   const drive = url === "https://drivemcp.googleapis.com/mcp/v1";
   const gmail = url === "https://gmailmcp.googleapis.com/mcp/v1";
+  const calendar = url === "https://calendarmcp.googleapis.com/mcp/v1";
   if (
     item.kind !== "mcp" ||
-    (!drive && !gmail) ||
-    (settings.googleConnectorSetupEnabled && (!drive || settings.googleDriveMcpEnabled))
+    (!drive && !gmail && !calendar) ||
+    (settings.googleConnectorSetupEnabled &&
+      (!drive || settings.googleDriveMcpEnabled) &&
+      (!calendar || settings.googleCalendarEnabled))
   )
     return item;
   return {
@@ -425,9 +428,11 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   delete installationConfig.connectionRef;
   if (item.kind === "mcp") {
     if (
-      ["https://gmailmcp.googleapis.com/mcp/v1", "https://drivemcp.googleapis.com/mcp/v1"].includes(
-        item.endpointUrl?.replace(/\/+$/u, "") ?? "",
-      ) &&
+      [
+        "https://gmailmcp.googleapis.com/mcp/v1",
+        "https://drivemcp.googleapis.com/mcp/v1",
+        "https://calendarmcp.googleapis.com/mcp/v1",
+      ].includes(item.endpointUrl?.replace(/\/+$/u, "") ?? "") &&
       (input.payload.connectionRef?.subjectScope !== "subject" ||
         Object.keys(input.payload.headers ?? {}).length > 0)
     ) {

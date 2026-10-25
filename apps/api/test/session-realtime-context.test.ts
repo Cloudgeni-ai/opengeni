@@ -123,6 +123,32 @@ describe("ordinary-session realtime context projection", () => {
     ]);
   });
 
+  test("also drops a sent-at part that names the sender's time zone", () => {
+    const sentAt = renderMessageSentAtForModel(
+      "2026-10-24T23:30:00.000Z",
+      "voice.owner@example.com",
+      "Asia/Tokyo",
+    );
+    expect(sentAt).toBe(
+      "[Message sent Sunday 2026-10-25 08:30 Asia/Tokyo (Saturday 2026-10-24 23:30 UTC) by voice.owner@example.com]",
+    );
+    expect(
+      projectSessionRealtimeInitialItems([
+        {
+          position: 0,
+          item: {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: sentAt },
+              { type: "input_text", text: "What is on my calendar tomorrow?" },
+            ],
+          },
+        },
+      ]),
+    ).toEqual([{ role: "user", text: "What is on my calendar tomorrow?" }]);
+  });
+
   test("drops a user message that carries only metadata", () => {
     expect(
       projectSessionRealtimeInitialItems([

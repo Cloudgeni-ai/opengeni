@@ -1,0 +1,79 @@
+---
+title: "Meetings and dictation"
+description: "Record meetings and dictation on your users' own devices, read speaker-labelled transcripts, and react to them from your backend."
+icon: "microphone"
+---
+
+Record conversations on your users' own devices, with no bot joining the call. Opengeni uploads the audio as it is recorded, transcribes it in the background, tells the speakers apart, and keeps versioned transcripts your product reads through the API. Composer dictation uses the same recordings.
+
+## Record a meeting in React
+
+```tsx
+import { useRecorder } from "@opengeni/react/recordings";
+
+function RecordButton({ workspaceId }: { workspaceId: string }) {
+  const recorder = useRecorder({
+    workspaceId,
+    title: "Site walk",
+    externalRef: "project:42", // your own id, returned in events
+  });
+  return recorder.state === "recording" ? (
+    <button onClick={() => recorder.stop()}>Stop</button>
+  ) : (
+    <button onClick={() => recorder.start()}>Record</button>
+  );
+}
+```
+
+Each track is saved on the device every few seconds before it is uploaded straight to storage, so a reload, a crash or a lost connection loses nothing; the next `useRecorder` finishes uploading what was left. Pass `systemAudio: true` to also record a tab's or the computer's audio as its own track, and `liveTranscript: true` for a read-along preview while recording.
+
+`useRecordings`, `useRecording` and `useTranscript` list recordings, follow processing, and read and edit a transcript: name speakers, move a segment to another speaker, correct text, re-run with another model, or switch the shown version. `useRecordingPeople` reads the people directory speakers are named from.
+
+## On phones and other hosts
+
+In React Native, pass the phone's capture to the same hooks:
+
+```tsx
+import { useRecorder } from "@opengeni/react/recordings";
+import { useNativeRecorderPlatform } from "@opengeni/react-native/recordings";
+
+const platform = useNativeRecorderPlatform({ storeScope: accountId });
+const recorder = useRecorder({ workspaceId, platform });
+```
+
+It records AAC into the app's files and keeps recording in the background. Without React, `@opengeni/sdk/recordings` has the headless pieces: `OpenGeniRecordingsClient` for every route, `RecordingUploader` for local-first upload with retries, and `createBrowserRecorder` for capture.
+
+## Read the transcript
+
+```ts
+import { OpenGeniRecordingsClient } from "@opengeni/sdk/recordings";
+
+const recordings = new OpenGeniRecordingsClient(og);
+const { recordings: latest } = await recordings.listRecordings(workspaceId, {
+  externalRef: "project:42",
+});
+const page = await recordings.getRecordingTranscript(workspaceId, latest[0].id);
+for (const segment of page.segments) console.log(segment.speakerLabel, segment.text);
+```
+
+Pages carry `nextAfter` until the last one; each `segment.speakerLabel` points at one of `page.speakers`, which carries the name people gave that speaker. A recording is private to the person who recorded it unless they share it with the workspace.
+
+## React from your backend
+
+Recording events go out through your [workspace webhooks](/guides/webhooks-and-credentials): `recording.started`, `recording.finished`, `recording.transcript.ready`, `recording.transcript.failed`, `recording.transcript.current_changed`, `recording.speakers.updated` and `recording.deleted`. They carry ids, states and your `externalRef`, never titles, audio or transcript text, so your backend reads the recording through the API with its own authority.
+
+## Dictation
+
+The composer's microphone records each dictation as a recording with `purpose: "dictation"`: one microphone track, always private, transcribed with the workspace's voice input, billed as voice input, never listed with meetings and deleted a day after it is heard. Its text goes into the draft and the dictation is deleted; if the tab closes or transcription fails first, the next composer in the workspace offers the text.
+
+`ChatComposer` does this for you. For your own composer, use `useVoiceInput` from `@opengeni/react/recordings`, or `useNativeDictation` from `@opengeni/react-native/recordings` on phones.
+
+### Moving from transcription recordings
+
+The `/v1/workspaces/:workspaceId/transcription-recordings` routes and the SDK's `createTranscriptionRecording`, `uploadTranscriptionRecordingChunk`, `finalizeTranscriptionRecording`, `processNextTranscriptionRecordingSegment`, `getTranscriptionRecording`, `listTranscriptionRecordings` and `discardTranscriptionRecording` are deprecated and answer with `Deprecation` and `Sunset` headers. Record a dictation instead:
+
+1. `createRecording` with `purpose: "dictation"` and one `microphone` track, then upload and finalize it like any recording, or let `useVoiceInput` do it.
+2. Poll `listRecordingTranscriptVersions` until the version is `complete`, then read its text with `getRecordingTranscript`.
+3. `deleteRecording` once the text is in the draft.
+
+One-shot `transcribeAudio` is unchanged.

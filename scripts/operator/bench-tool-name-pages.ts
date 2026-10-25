@@ -7,6 +7,9 @@ import { listSessionEventSlices } from "../../packages/db/src/session-event-slic
 
 const base = process.argv[2];
 if (!base || !/^[a-f0-9]{7,40}$/.test(base)) throw Error("Pass an exact base commit SHA");
+const filter = process.argv[3] ?? "toolName";
+if (filter !== "toolName" && filter !== "callId") throw Error("Filter must be toolName or callId");
+const callIds = filter === "callId";
 const source = Bun.spawnSync(["git", "show", `${base}:packages/db/src/session-event-slices.ts`]);
 if (source.exitCode !== 0) throw Error("Cannot load exact base reader");
 // Same directory preserves the reader's real relative dependencies; this
@@ -53,13 +56,20 @@ try {
         sandboxBackend: "none",
       });
       await shared.admin`insert into session_events(account_id,workspace_id,session_id,sequence,type,payload)
-      select ${accountId},${workspaceId},${session.id},n,'agent.toolCall.created',
+      select ${accountId},${workspaceId},${session.id},n,
+      case when ${callIds} and n%2=0 then 'agent.toolCall.output' else 'agent.toolCall.created' end,
       jsonb_build_object('name',case when n > ${Math.max(0, count - 12)} then 'target' else 'other_'||(n%41) end,
-      'callId','call-'||n,'arguments',repeat('x',128)) from generate_series(1,${count}) n`;
-      if (legacy)
-        await shared.admin`update session_events set tool_name=null where session_id=${session.id} and sequence%20=0`;
+      'callId',case when ${callIds} and n > ${Math.max(0, count - 12)} then 'target' else 'call-'||n end,
+      'arguments',repeat('x',128)) || case when ${callIds} then jsonb_build_object('output',repeat('o',128)) else '{}'::jsonb end
+      from generate_series(1,${count}) n`;
+      if (legacy) {
+        if (callIds)
+          await shared.admin`update session_events set tool_call_id=null where session_id=${session.id} and sequence%20=0`;
+        else
+          await shared.admin`update session_events set tool_name=null where session_id=${session.id} and sequence%20=0`;
+      }
       await shared.admin`analyze session_events`;
-      for (const toolName of ["target", "absent"]) {
+      for (const value of ["target", "absent"]) {
         const times = { base: [] as number[], candidate: [] as number[] };
         const cpus = { base: [] as number[], candidate: [] as number[] };
         let expected: string | undefined;
@@ -73,14 +83,25 @@ try {
               client.db,
               workspaceId,
               session.id,
-              { view: "tools", toolName, includeArguments: true, limit: 8 },
+              {
+                view: "tools",
+                ...(callIds
+                  ? {
+                      callId: value,
+                      includeTypes: ["agent.toolCall.created", "agent.toolCall.output"] as const,
+                      includeOutput: true,
+                    }
+                  : { toolName: value }),
+                includeArguments: true,
+                limit: 8,
+              },
             );
             const elapsed = performance.now() - start,
               used = process.cpuUsage(cpu);
-            const value = JSON.stringify(page);
-            expected ??= value;
-            if (value !== expected)
-              throw Error(`Full-page difference: ${count}/${legacy}/${toolName}/${variant}`);
+            const serializedPage = JSON.stringify(page);
+            expected ??= serializedPage;
+            if (serializedPage !== expected)
+              throw Error(`Full-page difference: ${filter}/${count}/${legacy}/${value}/${variant}`);
             if (sample >= 0) {
               times[variant].push(elapsed);
               cpus[variant].push((used.user + used.system) / 1000);
@@ -89,9 +110,10 @@ try {
         console.log(
           JSON.stringify({
             base,
+            filter,
             count,
             legacy,
-            toolName,
+            [filter]: value,
             samples: 30,
             equalPages: true,
             medianMs: { base: median(times.base), candidate: median(times.candidate) },

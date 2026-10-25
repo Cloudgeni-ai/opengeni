@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { stableJson, type EventTypeDescriptor } from "@opengeni/contracts";
-import type { EventSourceRecord } from "@opengeni/db";
+import type { EventSourceRecord, EventStatusReason } from "@opengeni/db";
 import { inputSchemaArgumentIssues, formatToolGatewayInputIssues } from "@opengeni/tool-gateway";
 import type { McpStreamableHttpClient } from "../mcp-streamable-http-client";
 import {
@@ -10,6 +10,7 @@ import {
   type McpEventDeliveryMode,
   type McpEventType,
 } from "./mcp-events-protocol";
+import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
 import { inboundWebhookBaseUrl } from "./webhook-url";
 
 /**
@@ -21,9 +22,9 @@ import { inboundWebhookBaseUrl } from "./webhook-url";
 const TYPE_CACHE_MS = 10 * 60_000;
 const typeCache = new Map<string, { expiresAt: number; types: McpEventType[] }>();
 
-export class McpServerWithoutEventsError extends Error {
+export class McpServerWithoutEventsError extends EventSourceBlockedError {
   constructor(serverName: string) {
-    super(`${serverName} doesn't offer events`);
+    super(eventStatusReason("events_unsupported", `${serverName} doesn't offer events`));
     this.name = "McpServerWithoutEventsError";
   }
 }
@@ -83,15 +84,22 @@ export function mcpDeliveryModeFor(
   return offers("poll") ? "poll" : null;
 }
 
+/** Why Opengeni can't receive an event type it is offered; null when it can. */
 export function mcpEventTypeUnavailableReason(
   type: Pick<McpEventType, "delivery">,
   webhookAvailable: boolean,
-): string | null {
+): EventStatusReason | null {
   if (mcpDeliveryModeFor(type, { webhookAvailable, current: null }) !== null) return null;
   if (type.delivery.includes("webhook")) {
-    return "The server delivers this event only to a public https address, which this Opengeni deployment doesn't have";
+    return eventStatusReason(
+      "needs_public_address",
+      "The server delivers this event only to a public https address, which this Opengeni deployment doesn't have",
+    );
   }
-  return "The server delivers this event only over a held-open connection, which Opengeni doesn't support yet";
+  return eventStatusReason(
+    "push_only",
+    "The server delivers this event only over a held-open connection, which Opengeni doesn't support yet",
+  );
 }
 
 /** One subscription: an event type and its arguments. */
@@ -130,13 +138,15 @@ export function mcpEventTypeDescriptor(
   type: McpEventType,
   webhookAvailable: boolean,
 ): EventTypeDescriptor {
-  const unavailableReason = mcpEventTypeUnavailableReason(type, webhookAvailable);
+  const unavailable = mcpEventTypeUnavailableReason(type, webhookAvailable);
   return {
     type: type.name,
     description: type.description ?? "",
     fields: payloadFields(type.payloadSchema),
     argumentsSchema: type.inputSchema,
-    available: unavailableReason === null,
-    unavailableReason,
+    available: unavailable === null,
+    unavailableReason: unavailable?.text ?? null,
+    unavailableReasonCode: unavailable?.code ?? null,
+    unavailableReasonDetail: unavailable?.detail ?? null,
   };
 }

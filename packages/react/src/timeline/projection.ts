@@ -2402,9 +2402,10 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
   // Turns that handed over to a Steer instead of finishing.
   const handedOverTurns = new Set<string>();
   const messages = new Map<string, AgentMessageItem[]>();
-  // Capacity waits per turn: their spans are not work, and a live one is
-  // carried by the turn's work row instead of a separate warning.
-  const capacityPauses = new Map<string, Array<{ startedAt: string; endedAt?: string }>>();
+  // Spans per turn in which the agent was not working: capacity waits (a live
+  // one is carried by the turn's work row instead of a separate warning) and
+  // the time between a failed attempt and the Retry that reopened the turn.
+  const idleSpans = new Map<string, Array<{ startedAt: string; endedAt?: string }>>();
   const liveCapacityWaits = new Map<string, NoticeItem>();
   const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
   const itemOrder = new Map(items.map((item, index) => [item.id, index]));
@@ -2521,12 +2522,12 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         group.work!.details.push({ kind: "activity", id: `work-item-${item.id}`, items: [item] });
       delete group.work!.waiting;
     } else if (item.kind === "notice" && item.capacityWait) {
-      const pauses = capacityPauses.get(key) ?? [];
+      const pauses = idleSpans.get(key) ?? [];
       pauses.push({
         startedAt: item.occurredAt,
         ...(item.resolvedAt ? { endedAt: item.resolvedAt } : {}),
       });
-      capacityPauses.set(key, pauses);
+      idleSpans.set(key, pauses);
       if (!item.resolvedAt) {
         if (settlements.has(key)) groups.push({ kind: "item", item });
         else {
@@ -2536,7 +2537,12 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
       }
     } else if (item.kind === "turn-end") {
       if (item.handedOver) handedOverTurns.add(key);
-      if (!item.resumedAt) {
+      if (item.resumedAt) {
+        idleSpans.set(key, [
+          ...(idleSpans.get(key) ?? []),
+          { startedAt: item.occurredAt, endedAt: item.resumedAt },
+        ]);
+      } else {
         settlements.set(key, {
           endedAt: item.occurredAt,
           outcome: item.outcome,
@@ -2678,7 +2684,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         untimed: true,
       };
     }
-    const pausedMs = (capacityPauses.get(key) ?? []).reduce((total, pause) => {
+    const pausedMs = (idleSpans.get(key) ?? []).reduce((total, pause) => {
       if (!pause.endedAt) return total;
       const start = Math.max(Date.parse(work.startedAt), Date.parse(pause.startedAt));
       const end = Math.min(
@@ -3055,6 +3061,7 @@ const ROUTINE_MACHINE_INPUT_KINDS: ReadonlySet<MachineInputMember["kind"]> = new
   "agent_steer_instruction",
   "child_terminal_result",
   "child_requires_action_resolved",
+  "secret_use_approval_decided",
   "child_paused",
   "child_waiting_capacity",
   "child_progress",
@@ -3751,6 +3758,7 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
     "agent_steer_instruction",
     "child_terminal_result",
     "media_generation_result",
+    "secret_use_approval_decided",
     "child_requires_action",
     "child_requires_action_resolved",
     "child_paused",

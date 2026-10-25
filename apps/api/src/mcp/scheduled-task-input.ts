@@ -9,6 +9,25 @@ import {
 } from "@opengeni/contracts";
 import { z } from "zod/v4";
 
+const SCHEDULE_TIME_ZONE_DESCRIPTION =
+  "IANA time zone the schedule's clock times are in, for example Europe/Oslo. Omit it to use the time zone of the message that asked for the schedule (an edited schedule keeps its current zone); UTC when there is none.";
+
+/**
+ * The contract's schedule shapes for agent tools. The contract defaults an
+ * omitted zone to UTC; for an agent the server fills it from the message that
+ * asked for the schedule instead, so the tool schema describes that default.
+ */
+export function scheduledTaskScheduleToolInput() {
+  const [manual, once, interval, calendar] = ScheduledTaskScheduleSpec.options;
+  const timeZone = z.string().min(1).optional().describe(SCHEDULE_TIME_ZONE_DESCRIPTION);
+  return z.discriminatedUnion("type", [
+    manual,
+    once.extend({ timeZone }),
+    interval,
+    calendar.extend({ timeZone }),
+  ]);
+}
+
 /** An automation with event triggers and no schedule runs on events (and by hand) only. */
 function hasEventTriggers(input: Record<string, unknown>): boolean {
   const events = input.events;
@@ -123,12 +142,12 @@ export function scheduledTaskCreateToolInput(options: { events: boolean } = { ev
           ),
         ...(options.events
           ? {
-              schedule: ScheduledTaskScheduleSpec.optional().describe(
-                "When it runs on a clock. Omit when it runs only on events.",
-              ),
+              schedule: scheduledTaskScheduleToolInput()
+                .optional()
+                .describe("When it runs on a clock. Omit when it runs only on events."),
               events: scheduledTaskEventsToolInput(),
             }
-          : {}),
+          : { schedule: scheduledTaskScheduleToolInput() }),
       })
       // Only a person pins connector accounts; agents never do.
       // Variable Sets were removed (RM-1); agents choose vaults via vaultPolicy.

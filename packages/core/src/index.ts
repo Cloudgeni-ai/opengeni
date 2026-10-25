@@ -1,8 +1,10 @@
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export {
+  organizationAzureEntraSetupToken,
   verifyDirectModelAccess,
   verifyOrganizationAzureOpenAIDeployment,
   verifyOrganizationDirectModel,
+  type DirectModelAccessCredential,
 } from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
@@ -80,6 +82,7 @@ export {
 } from "./managed-session";
 export * from "./transcription";
 export * from "./recording-transcription";
+export * from "./xai-operation-availability";
 export * from "./model-catalog";
 export * from "./model-provider-credentials";
 export * from "./goal-admission";
@@ -141,6 +144,7 @@ export * from "./domain/scheduled-tasks";
 export * from "./domain/scheduled-task-access";
 export * from "./domain/scheduled-task-account-audit";
 export * from "./domain/scheduled-task-audience";
+export * from "./domain/automation-templates";
 export * from "./domain/site-audience";
 export * from "./domain/file-audience";
 export * from "./domain/sessions";

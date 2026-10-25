@@ -11,8 +11,13 @@ export type {
   ToolReviewStatus,
 } from "@opengeni/contracts";
 export type {
+  AutomationTemplateEventSource,
+  AutomationTemplateResponse,
+  AutomationTemplateSchedule,
+  AutomationTemplateTrigger,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
+  CreateAutomationTemplateRequest,
   EventActor,
   EventActorKind,
   EventCondition,
@@ -29,6 +34,7 @@ export type {
   EventTypeDescriptor,
   InboundEvent,
   InboundEventSummary,
+  ListAutomationTemplatesResponse,
   ListEventDeliveriesResponse,
   ListEventTypesResponse,
   ListEventSourcesResponse,
@@ -43,8 +49,10 @@ export type {
   SendTestEventRequest,
   SendTestEventResponse,
   SessionAutomationWaitSummary,
+  UpdateAutomationTemplateRequest,
   UpdateEventSourceRequest,
   WebhookEventAdapter,
+  WorkspaceAutomationTemplate,
 } from "@opengeni/contracts";
 export type {
   SiteDataAccessMode,
@@ -962,6 +970,8 @@ export type {
   ClaudeUsageWindow,
   ClaudeUsageRequestStatus,
   OrganizationModelProviderConnection,
+  OrganizationModelProviderAuthMethod,
+  OrganizationModelProviderEntraAuthentication,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
   OrganizationProviderCustomModel,

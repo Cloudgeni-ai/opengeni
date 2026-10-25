@@ -27,20 +27,30 @@ export type NativePushSender = (
   delivery: ClaimedNativePushDelivery,
 ) => Promise<NativePushSendResult>;
 
-/** A claimed payload, marked when its question asks for a secret. */
-export type NativePushPayload = ClaimedNativePushDelivery["payload"] & { secretQuestion?: boolean };
+/**
+ * A claimed payload, marked when its question asks for a secret or is
+ * Opengeni's own secret-use approval card.
+ */
+export type NativePushPayload = ClaimedNativePushDelivery["payload"] & {
+  secretQuestion?: boolean;
+  secretUseApproval?: boolean;
+};
 
 const SECRET_QUESTION_PUSH_BODY = "Open Opengeni to answer. The answer is saved to a vault.";
 
 /**
- * Mark question pushes whose pending request asks for a secret, so they carry
- * no inline answer action and point to the app instead.
+ * Mark question pushes whose pending request asks for a secret, or allows a
+ * secret's use, so they carry no inline answer action and point to the app
+ * instead: both are answered only in the signed-in app's card.
  */
 async function markSecretQuestionDeliveries(
   db: Database,
   deliveries: ClaimedNativePushDelivery[],
 ): Promise<ClaimedNativePushDelivery[]> {
-  const secretSessions = new Map<string, Promise<boolean>>();
+  const secretSessions = new Map<
+    string,
+    Promise<{ secretQuestion: boolean; secretUseApproval: boolean }>
+  >();
   return await Promise.all(
     deliveries.map(async (delivery) => {
       if (delivery.payload.eventType !== "session.humanInput.requested") return delivery;
@@ -53,16 +63,22 @@ async function markSecretQuestionDeliveries(
           delivery.payload.sessionId,
           { status: "pending", limit: 20 },
         )
-          .then((requests) =>
-            requests.some((request) =>
+          .then((requests) => ({
+            secretQuestion: requests.some((request) =>
               request.questions.some((question) => question.kind === "secret"),
             ),
-          )
-          .catch(() => false);
+            secretUseApproval: requests.some((request) => request.origin === "secret_use_approval"),
+          }))
+          .catch(() => ({ secretQuestion: false, secretUseApproval: false }));
         secretSessions.set(key, lookup);
       }
-      if (!(await lookup)) return delivery;
-      const payload: NativePushPayload = { ...delivery.payload, secretQuestion: true };
+      const marks = await lookup;
+      if (!marks.secretQuestion && !marks.secretUseApproval) return delivery;
+      const payload: NativePushPayload = {
+        ...delivery.payload,
+        ...(marks.secretQuestion ? { secretQuestion: true } : {}),
+        ...(marks.secretUseApproval ? { secretUseApproval: true } : {}),
+      };
       return { ...delivery, payload };
     }),
   );
@@ -161,7 +177,7 @@ export function nativePushData(payload: ClaimedNativePushDelivery["payload"]) {
 export function nativePushCategory(
   payload: NativePushPayload,
 ): "og.approval" | "og.question" | undefined {
-  if (payload.secretQuestion) return undefined;
+  if (payload.secretQuestion || payload.secretUseApproval) return undefined;
   if (payload.eventType === "session.requiresAction") return "og.approval";
   if (payload.eventType === "session.humanInput.requested") return "og.question";
   return undefined;

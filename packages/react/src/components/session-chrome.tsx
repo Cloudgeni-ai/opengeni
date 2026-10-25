@@ -517,6 +517,8 @@ function pendingKindLabel(t: OpenGeniText, kind: SessionPendingInputPreview["kin
       return t("sessionChrome.waitEnded");
     case "media_generation_result":
       return t("sessionChrome.videoResult");
+    case "secret_use_approval_decided":
+      return t("sessionChrome.secretUseAnswer");
     default:
       return t("sessionChrome.incoming");
   }

@@ -110,6 +110,10 @@ export function newEventSourcePath(workspaceId: string, kind?: string): string {
   return kind ? `${path}?kind=${encodeURIComponent(kind)}` : path;
 }
 
+export function newAutomationPath(workspaceId: string, template: string): string {
+  return `${schedulesPath(workspaceId)}/new?template=${encodeURIComponent(template)}`;
+}
+
 export type ScheduleNavigation = ReturnType<typeof useScheduleNavigation>;
 
 export function useScheduleNavigation(workspaceId: string) {
@@ -143,6 +147,11 @@ export function useScheduleNavigation(workspaceId: string) {
     sources: () =>
       void navigate({
         to: "/workspaces/$workspaceId/automations/sources",
+        params: { workspaceId },
+      }),
+    templates: () =>
+      void navigate({
+        to: "/workspaces/$workspaceId/automations/templates",
         params: { workspaceId },
       }),
     source: (sourceId: string, options: { replace?: boolean } = {}) =>

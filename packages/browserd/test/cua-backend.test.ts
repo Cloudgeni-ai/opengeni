@@ -866,6 +866,123 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("Windows brings the window to the front before foreground input, and sends nothing when Windows refuses", async () => {
+    const fixture = new WindowsFixture();
+    const fronted: number[] = [];
+    const givenBack: [number, number][] = [];
+    let refuse = false;
+    const backend = await CuaComputerBackend.open(fixture, "windows", {
+      frontWindow: {
+        front: async (windowId) => {
+          fronted.push(windowId);
+          fixture.calls.push({ name: "(front)", args: { windowId } });
+          return refuse
+            ? { front: false, inFront: '"Search" (SearchHost)' }
+            : { front: true, previous: 7 };
+        },
+        giveBack: async (windowId, previous) => {
+          givenBack.push([windowId, previous]);
+          fixture.calls.push({ name: "(give back)", args: { windowId, previous } });
+        },
+      },
+    });
+    try {
+      const target = (await backend.targets())[0]!;
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "type", value: "Hello" },
+      });
+      const names = fixture.calls.map((call) => call.name);
+      expect(names.indexOf("(front)")).toBeGreaterThan(-1);
+      expect(names.indexOf("(front)")).toBeLessThan(names.indexOf("type_text"));
+      // Typing gives the foreground back afterwards, as CUA does itself.
+      expect(names.indexOf("(give back)")).toBeGreaterThan(names.indexOf("type_text"));
+      expect(fronted).toEqual([1]);
+      expect(givenBack).toEqual([[1, 7]]);
+      // Accessibility actions stay in the background: nothing is fronted.
+      await backend.dispatch(command(await backend.observe(target.id)));
+      expect(fronted).toEqual([1]);
+      // A clicked window stays in front, as after CUA's own clicks.
+      const frame = await backend.capture(target.id);
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        expectedFrameId: frame.frameId,
+        action: { type: "pointer", action: "click", frameId: frame.frameId, x: 120, y: 80 },
+      });
+      expect(fronted).toEqual([1, 1]);
+      expect(givenBack).toEqual([[1, 7]]);
+      refuse = true;
+      const typed = fixture.calls.filter((call) => call.name === "type_text").length;
+      await expect(
+        backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "type", value: "Refused" },
+        }),
+      ).rejects.toMatchObject({
+        code: "unavailable",
+        dispatched: false,
+        message:
+          'Windows kept "Search" (SearchHost) in front and would not bring this window forward, so none of this action\'s input was sent. Close or dismiss that window first, then try again',
+      });
+      expect(fixture.calls.filter((call) => call.name === "type_text")).toHaveLength(typed);
+      expect(givenBack).toEqual([[1, 7]]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("Windows CUA's refusal to act on a window that is not in front is a plain definite failure", async () => {
+    const answering = (text: string): CuaDesktopRuntime => ({
+      callTool: async () => ({
+        text,
+        images: [],
+        isError: true,
+        degraded: false,
+        rawJson: "{}",
+      }),
+      shutdown: async () => undefined,
+    });
+    for (const [name, text] of [
+      [
+        "type_text",
+        "foreground_unavailable: Windows did not confirm exact target HWND 0x101ca for text delivery within 500 ms (actual foreground HWND 0x30130). Windows refused the foreground change, usually because another window holds the foreground lock; no input was sent.",
+      ],
+      [
+        "click",
+        "foreground_unavailable: Windows did not activate exact target HWND 0x101ca (actual foreground HWND 0x30130); no mouse input was sent",
+      ],
+      [
+        "click",
+        "foreground_unavailable: exact target HWND 0x101ca disappeared before mouse input could be sent",
+      ],
+    ] as const)
+      await expect(callDesktop(answering(text), name, {}, true)).rejects.toMatchObject({
+        code: "unavailable",
+        dispatched: false,
+        retryable: true,
+        message:
+          "Windows did not keep this window in front for the input, so none of it was sent; try again",
+      });
+    // After a click CUA already sent, the same prefix means the click landed
+    // but the window it expected was not in front afterwards.
+    await expect(
+      callDesktop(
+        answering(
+          "foreground_unavailable: exact target HWND 0x101ca or a verified same-process post-action window was not foreground after the click (actual foreground HWND 0x30130)",
+        ),
+        "click",
+        {},
+        true,
+      ),
+    ).rejects.toMatchObject({
+      code: "outcome_unknown",
+      dispatched: true,
+      retryable: false,
+      message:
+        "The input was sent, but Windows did not keep this window in front afterwards, so its effect is unknown; observe the window before acting again",
+    });
+  });
+
   test("Windows capture requires exact native publication, including failed-image envelopes", async () => {
     for (const change of [
       { capture_id: undefined },

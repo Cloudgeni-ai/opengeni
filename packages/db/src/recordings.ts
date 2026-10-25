@@ -18,6 +18,7 @@ import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, ne, or, sql } from
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
 import * as schema from "./schema";
 import type { RecordingWordTiming } from "./recordings-schema";
+import { CreditDebitAttribution } from "./credit-debit-attribution";
 import {
   consentedVoiceprints,
   forgetPersonVoice,
@@ -276,6 +277,8 @@ async function insertEvent(
   type: (typeof schema.recordingEventTypeValues)[number],
   data: Record<string, unknown>,
 ): Promise<void> {
+  // A dictation is private typing, not a meeting: nothing outside its owner hears of it.
+  if (recording.purpose === "dictation") return;
   await tx.insert(schema.recordingEvents).values({
     accountId: recording.accountId,
     workspaceId: recording.workspaceId,
@@ -299,6 +302,8 @@ async function insertEvent(
 export type CreateRecordingInput = RecordingActor & {
   accountId: string;
   recordingId: string;
+  /** meeting unless given; browser recordings have their own constructor. */
+  purpose?: "meeting" | "dictation" | undefined;
   title?: string | undefined;
   visibility?: RecordingVisibility | undefined;
   startedAt?: Date | undefined;
@@ -326,7 +331,11 @@ export async function createRecording(
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         ownerSubjectId: input.subjectId,
-        visibility: toVisibility(input.visibility ?? "private"),
+        purpose: input.purpose ?? "meeting",
+        // A dictation is only ever its owner's.
+        visibility: toVisibility(
+          input.purpose === "dictation" ? "private" : (input.visibility ?? "private"),
+        ),
         title: input.title ?? defaultTitle(startedAt),
         startedAt,
         externalRef: input.externalRef ?? null,
@@ -632,6 +641,9 @@ export async function updateRecording(
     const visibility = input.visibility === undefined ? undefined : toVisibility(input.visibility);
     if (visibility !== undefined && visibility !== row.visibility) {
       if (row.ownerSubjectId !== input.subjectId) throw new RecordingForbiddenError();
+      if (row.purpose === "dictation") {
+        throw new RecordingConflictError("A dictation can't be shared", "dictation_private");
+      }
     }
     const [updated] = await tx
       .update(schema.recordings)
@@ -1389,6 +1401,8 @@ export type RecordingTranscriptionChoice = {
   providerId: string;
   model: string;
   options: RecordingTranscriptionOptions;
+  /** Who a deployment-funded transcript is billed to, from the request that asked for it. */
+  creditAttribution?: CreditDebitAttribution | undefined;
 };
 
 export type FinalizeRecordingInput = RecordingActor & {
@@ -1544,6 +1558,7 @@ export async function finalizeRecording(
         model: input.transcription.model,
         options: input.transcription.options,
         requestedBySubjectId: input.subjectId,
+        creditAttribution: input.transcription.creditAttribution ?? null,
       })
       .returning();
     await insertEvent(tx, finalized!, "recording.finished", {
@@ -1566,8 +1581,11 @@ export async function createRecordingTranscriptVersion(
 ): Promise<RecordingTranscriptVersion> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const recording = await lockRecording(tx, input.workspaceId, input.recordingId);
-    if (recording.purpose !== "meeting") {
-      throw new RecordingConflictError("Only meetings have transcripts", "not_a_meeting");
+    if (recording.purpose === "browser") {
+      throw new RecordingConflictError(
+        "Only meetings and dictations have transcripts",
+        "not_a_meeting",
+      );
     }
     if (recording.state === "capturing") {
       throw new RecordingConflictError("This recording is still capturing", "still_capturing");
@@ -1618,6 +1636,7 @@ export async function createRecordingTranscriptVersion(
         model: input.transcription.model,
         options: input.transcription.options,
         requestedBySubjectId: input.subjectId,
+        creditAttribution: input.transcription.creditAttribution ?? null,
       })
       .returning();
     if (recording.state === "failed") {
@@ -1669,6 +1688,8 @@ export async function listRecordingTranscriptVersions(
 export type RecordingTranscriptionJob = {
   recording: Recording;
   version: RecordingTranscriptVersion;
+  /** Who a deployment-funded transcript is billed to; null for versions made before 0962. */
+  creditAttribution: CreditDebitAttribution | null;
   chunks: RecordingChunk[];
   processingOwner: string;
 };
@@ -1737,6 +1758,7 @@ export async function claimRecordingTranscriptVersion(
     return {
       recording: recording!,
       version: recordingTranscriptVersionView(claimed),
+      creditAttribution: CreditDebitAttribution.safeParse(claimed.creditAttribution).data ?? null,
       chunks,
       processingOwner: input.processingOwner,
     };

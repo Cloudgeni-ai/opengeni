@@ -54,6 +54,9 @@ const FAKE_MEMORY: usize = 64 << 10;
 /// with each image to whichever host restores it.
 const NOTICE_AT: usize = FAKE_MEMORY - 1024;
 
+/// The page size of fake guest memory: what a diff holds or leaves out.
+const FAKE_PAGE: usize = 4096;
+
 /// How long each fake operation takes.
 #[derive(Clone, Copy, Debug)]
 struct Delays {
@@ -131,6 +134,9 @@ struct World {
     compress_cancelled: AtomicUsize,
     /// Snapshots taken: full, then diff.
     snapshots: [AtomicUsize; 2],
+    /// While set, a snapshot is taken, then the VMM does not answer until
+    /// it is cleared.
+    stall_after_snapshots: AtomicBool,
     next_vm: AtomicU64,
     /// The latest VM process of every sandbox, by name, so a restarted
     /// agent can take it back and a test can crash it.
@@ -171,8 +177,15 @@ struct World {
 /// What a fake VM process is, independent of any agent's handle to it.
 #[derive(Clone, Debug)]
 struct Process {
+    /// Which VM process this is, as [`Engine::process_identity`] names it.
+    serial: u64,
     vsock: PathBuf,
     memory: Arc<Mutex<String>>,
+    /// The image as the guest's memory was when this process started or
+    /// last took a snapshot: a diff holds only the pages changed since, as
+    /// a real VMM's does, so a diff merged over the wrong base loses
+    /// memory.
+    snapped: Arc<Mutex<Vec<u8>>>,
     /// The latest restore notice the guest applied, which its memory images
     /// carry.
     applied: Arc<Mutex<Option<String>>>,
@@ -348,8 +361,10 @@ impl Fake {
             world.live.lock().unwrap().remove(&dead);
         });
         let process = Process {
+            serial: self.world.next_vm.fetch_add(1, Ordering::Relaxed),
             vsock,
             memory,
+            snapped: Arc::default(),
             applied,
             memory_len: spec.memory_bytes(),
             paused: Arc::default(),
@@ -363,7 +378,6 @@ impl Fake {
             .lock()
             .unwrap()
             .insert(name.clone(), process.clone());
-        self.world.next_vm.fetch_add(1, Ordering::Relaxed);
         FakeVm {
             name,
             sandbox_dir: spec.dir.parent().unwrap().to_owned(),
@@ -610,6 +624,11 @@ impl Engine for Fake {
         "fake"
     }
 
+    fn process_identity(&self, vm: &FakeVm) -> Result<String, EngineError> {
+        Self::alive(vm, "process_identity")?;
+        Ok(format!("fake-{}", vm.serial))
+    }
+
     async fn restore(&self, spec: &VmSpec, files: &RestoreFiles) -> Result<FakeVm, EngineError> {
         let now = self.world.restoring.fetch_add(1, Ordering::SeqCst) + 1;
         self.world.max_restoring.fetch_max(now, Ordering::SeqCst);
@@ -640,6 +659,7 @@ impl Engine for Fake {
                 )
             })
             .map_err(|error| EngineError::caused_by(ErrorKind::MemoryLost, "restore", error))?;
+        let loaded = memory.clone();
         let (value, applied) = memory.split_at(memory.len().min(NOTICE_AT));
         let applied = String::from_utf8_lossy(applied)
             .trim_end_matches('\0')
@@ -653,6 +673,8 @@ impl Engine for Fake {
             memory,
             Some(applied).filter(|notice| !notice.is_empty()),
         );
+        // The VMM's record of changed pages starts from what it loaded.
+        *vm.snapped.lock().unwrap() = loaded;
         *vm.paused.lock().unwrap() = true;
         Ok(vm)
     }
@@ -737,10 +759,25 @@ impl Engine for Fake {
         assert!(image.len() <= FAKE_MEMORY, "fake guest notice overflow");
         image.resize(FAKE_MEMORY, 0);
         let file = std::fs::File::create(&files.memory).unwrap();
-        std::io::Write::write_all(&mut &file, &image).unwrap();
+        {
+            let mut snapped = vm.snapped.lock().unwrap();
+            snapped.resize(FAKE_MEMORY, 0);
+            // A diff holds only the pages that changed since the last
+            // snapshot or start, and leaves holes for the rest.
+            for (index, page) in image.chunks(FAKE_PAGE).enumerate() {
+                let start = index * FAKE_PAGE;
+                if kind == SnapshotKind::Full || snapped[start..start + page.len()] != *page {
+                    std::os::unix::fs::FileExt::write_all_at(&file, page, start as u64).unwrap();
+                }
+            }
+            *snapped = image;
+        }
         file.set_len(vm.memory_len).unwrap();
         self.world.snapshots[usize::from(kind == SnapshotKind::Diff)]
             .fetch_add(1, Ordering::Relaxed);
+        while self.world.stall_after_snapshots.load(Ordering::SeqCst) {
+            sleep(Duration::from_millis(2)).await;
+        }
         Ok(())
     }
 
@@ -1115,11 +1152,13 @@ impl Lab {
 
     async fn wait_until(&self, what: &str, done: impl Fn(&HostStatus) -> bool) -> HostStatus {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last = None;
         loop {
-            // A status that never comes times out too.
-            let status = tokio::time::timeout_at(deadline, self.status())
-                .await
-                .unwrap_or_else(|_| panic!("timed out waiting for {what}: no status"));
+            // A status that never comes times out too, showing the last
+            // one that came.
+            let Ok(status) = tokio::time::timeout_at(deadline, self.status()).await else {
+                panic!("timed out waiting for {what}; the last status: {last:#?}");
+            };
             if done(&status) {
                 return status;
             }
@@ -1127,6 +1166,7 @@ impl Lab {
                 Instant::now() < deadline,
                 "timed out waiting for {what}: {status:#?}"
             );
+            last = Some(status);
             sleep(Duration::from_millis(5)).await;
         }
     }

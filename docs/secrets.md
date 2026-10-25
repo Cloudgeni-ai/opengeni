@@ -130,9 +130,8 @@ literally.
   only when the relevant provider inventory could be checked. A provider
   outage or incomplete inventory is not proof that a secret is missing.
 - A reference to an item or field marked "ask me each time" that no approval
-  covers fails with `approval_required` and an `approvalCard`: a ready
-  `request_human_input` call asking the person to allow that use (see
-  [Approval for each use](#approval-for-each-use)).
+  covers fails with `approval_required`, and Opengeni itself asks the person
+  to allow that use (see [Approval for each use](#approval-for-each-use)).
 - TOTP codes are computed at dispatch and never stored.
 - An item's main secret has different names in different password managers:
   `password` (logins, Bitwarden), `credential` (1Password API credentials)
@@ -155,10 +154,10 @@ implementation: `packages/contracts/src/secret-references.ts`,
 |---|---|
 | `exec_command` (every sandbox backend) | The command is spliced so each reference becomes a shell variable `OPENGENI_SECRET_n`, quoted correctly for its context. Values reach the process through native env where Opengeni owns the exec, or a 0600 env file that is sourced and deleted in the same command. Commands without references are untouched. |
 | Connected machines | POSIX hosts use `/bin/sh`, Windows uses PowerShell; values travel in `ExecRequest.env`. `cmd.exe`, fish and unknown shells return `unsupported_shell`. No run credentials or tokens are copied onto machines. |
-| `run_on` | Exec splices for the target's shell; file writes resolve content; reads resolve nothing. |
+| `run_on` | The gateway preserves references and escapes for the target delivery boundary. Exec uses the same shell splicing and per-command env/file delivery as `exec_command`, including `secretfile`; file writes resolve content once; reads resolve nothing. |
 | `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
 | `{{secretfile:…}}` | Written to a 0600 file under `/tmp/opengeni-private/secrets/` and replaced by its path; removed at attempt end. Use it for binary values and anything over 100 KiB. |
-| MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed here. |
+| MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed in ordinary tool arguments; Opengeni's `run_on` retains its exec delivery boundary through these callers. |
 | Opengeni's own tools (messages, sessions, schedules, goals, Knowledge, artifacts, admin actions) | Resolved like connectors: the executing call receives values, while the journal keeps the reference. To store or hand on a reference for later work, escape it (`\{{secret:Item}}`); the tool receives `{{secret:Item}}`. The `secret_*` tools take references as names and never resolve them. |
 | Sites | Tool calls from a Site resolve with the viewer's authority (no task vault) and audit the Site. |
 | Browser and desktop | `fill`, `type`, clipboard writes and key presses resolve for agent callers. Receipts keep the reference. `type` with `mode: "keys"` handles split one-time-code boxes. Resolved values are never pasted on the desktop. |
@@ -168,6 +167,14 @@ Exec caps: 256 KiB of env per command and 100 KiB per value. Larger or binary
 values return `too_large` or `binary_value` with a `secretfile` hint.
 OpenSandbox has no file writer, so commands with references fail there with an
 unsupported-routing error.
+
+For `run_on`, resolution is scoped to exec `op.cmd` and write `op.content`;
+`target`, `op.path` and `op.workdir` are literal routing/path inputs. Secret
+failures dispatch no command or file write and return the gateway's canonical
+`isError` tool result containing only the serialized secret failure, including
+a missing-secret `askCard` or per-use `approvalCard`. No ordinary `run_on`
+result fields are added to that failure. Approval cards describe the actual
+target command or file write rather than a generic connector call.
 
 Variable Sets used to inject every value into every sandbox as environment
 variables. That is gone: nothing is injected, and a value exists in a process
@@ -215,21 +222,25 @@ When an agent's call uses a marked value that no approval covers:
    (the chat, the item and field names, the surface, the tool and, where known,
    the destination: a page's host, a machine or a connector) and fails the call
    with `approval_required`.
-2. The error carries `approvalCard`, a `request_human_input` call whose single
-   question has the id `secret-approval:<request id>`. The agent passes it on
-   unchanged. An identical blocked use in the same chat within the hour reuses
-   the pending request instead of asking twice.
-3. When the card is stored, Opengeni replaces its text with its own description
-   of the stored request and makes it unskippable, so the person always sees
-   what is really being asked, whatever the agent submitted. It reaches them
-   like any other question: in the chat, the inbox and as a phone push.
+2. In the same step Opengeni posts its own approval card in the chat: a
+   human-input request with origin `secret_use_approval` whose single,
+   unskippable question (id `secret-approval:<request id>`) describes the
+   stored request in Opengeni's words. It reaches the person like any other
+   question: in the chat, the inbox, a phone push and the Slack thread. The
+   agent does not relay anything; its tool output only says the person was
+   asked and that the answer will arrive as an update. An identical blocked
+   use in the same chat while the request is pending reuses it and its card,
+   so the person is never notified twice.
+3. The card belongs to the blocked use, not to the turn: the agent keeps
+   working or ends its turn, and the card, its inbox item and its pending
+   entry stay answerable after the turn ends. An agent cannot post such a
+   card itself; `request_human_input` refuses a `secret-approval:` question.
 4. Only the person the run acts for can answer it, signed in to Opengeni
    themselves (web, desktop or phone app). Answers from other agents, parent
-   chats, API keys, personal keys or connected agents acting as the person are
-   refused, and child-session notices mark the question as for a person only.
-   When a scheduled run's approval timeout passes with no answer, the system
-   denies the card, as it rejects a pending tool approval; the system can never
-   allow one.
+   chats, API keys, personal keys, connected agents or the system acting as
+   the person are refused. A Slack thread reply, or a phone notification's
+   inline reply, never answers it: Slack and the push point to Opengeni, and
+   a thread reply while a card is pending is an ordinary message.
 5. The answer becomes a grant, recorded in the same transaction:
 
    | Choice | Covers | Ends |
@@ -239,8 +250,13 @@ When an agent's call uses a marked value that no approval covers:
    | Allow for 1 hour | Every use of those fields in any of the person's chats in the workspace | After an hour, or when revoked |
    | Deny | Nothing; the agent is told not to retry | |
 
-   The agent then retries the same call. A once grant is used up only after
-   every value of the call was read, so a failed call keeps it, and two calls
+   The same transaction gives the agent a `secret_use_approval_decided`
+   update (an immediate machine input, see
+   [durable agent inputs](durable-agent-inputs.md)) naming the decision and
+   the item and field names, never values. It wakes an idle chat, or starts
+   the next turn once a running one ends. When allowed, the agent retries the
+   same call; when denied, it does not. A once grant is used up only after every
+   value of the call was read, so a failed call keeps it, and two calls
    racing for one once grant cannot both use it.
 
 Who is asked and who can change the rules:

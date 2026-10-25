@@ -3,6 +3,7 @@ import {
   RequestHumanInputToolInput,
   SecretReferenceError,
   secretUseApprovalHumanInput,
+  secretUseApprovalDecisionSummary,
   secretUseApprovalIdFromQuestionId,
   secretUseApprovalQuestionId,
   type SecretUseApprovalRequestView,
@@ -85,7 +86,7 @@ describe("secret approval card", () => {
     expect(secretUseApprovalIdFromQuestionId("environment")).toBeNull();
   });
 
-  test("tool output gains approvalCard only when a use needs approval", () => {
+  test("tool output says the person was asked and never carries the card", () => {
     const failures = [
       {
         raw: RAW,
@@ -103,22 +104,46 @@ describe("secret approval card", () => {
       }),
     );
 
-    const card = secretUseApprovalHumanInput(view());
+    const blocked = [
+      {
+        raw: RAW,
+        code: "approval_required" as const,
+        message: "needs approval",
+      },
+    ];
     const output = JSON.parse(
-      new SecretReferenceError(
-        [
-          {
-            raw: RAW,
-            code: "approval_required",
-            message: "needs approval",
-          },
-        ],
-        null,
-        card,
-      ).toModelOutput(),
+      new SecretReferenceError(blocked, null, { approvalId: ID, asked: true }).toModelOutput(),
     );
-    expect(Object.keys(output)).toEqual(["error", "failures", "askCard", "approvalCard", "hint"]);
-    expect(output.approvalCard).toEqual(card);
-    expect(output.hint).toContain("call request_human_input with approvalCard exactly as given");
+    expect(Object.keys(output)).toEqual(["error", "failures", "askCard", "hint"]);
+    expect(output.askCard).toBeNull();
+    expect(output.hint).toBe(
+      "Nothing was run. Opengeni has asked the person, in this chat and by notification, to allow this use of the secret; do not ask them yourself. Their answer reaches you as an update in this chat after this turn: if they allow it, retry the same call then; if they deny it, do not retry. Until then, continue with other work or end your turn.",
+    );
+    expect(output.hint).not.toContain("request_human_input");
+    expect(JSON.stringify(output)).not.toContain(ID);
+
+    const unasked = JSON.parse(
+      new SecretReferenceError(blocked, null, { approvalId: ID, asked: false }).toModelOutput(),
+    );
+    expect(unasked.hint).toBe(
+      "Nothing was run. The person must allow each use of this secret, and this run could not ask them. Tell them the use is waiting for their approval.",
+    );
+  });
+
+  test("decision summaries tell the agent whether to retry, by name only", () => {
+    expect(secretUseApprovalDecisionSummary(view(), "once")).toBe(
+      "The person allowed using GitHub › password in the browser on github.com (browser_act) once. Nothing ran when it was blocked: retry that same call now, unless a retry already succeeded after they answered.",
+    );
+    expect(secretUseApprovalDecisionSummary(view(), "session")).toContain(
+      "for the rest of this chat. Nothing ran",
+    );
+    expect(secretUseApprovalDecisionSummary(view(), "window")).toContain(
+      "for 1 hour in their chats in this workspace.",
+    );
+    const denied = secretUseApprovalDecisionSummary(view(), "deny");
+    expect(denied).toBe(
+      "The person denied using GitHub › password in the browser on github.com (browser_act). Do not retry that call; continue without it or ask them what to do instead.",
+    );
+    expect(denied).not.toContain("16fd2706");
   });
 });

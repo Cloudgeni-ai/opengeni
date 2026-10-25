@@ -29,6 +29,14 @@ export type {
   UseTranscriptResult,
 } from "./hooks/use-recordings";
 export type { RecordingsClientLike, RecordingsClientOverride } from "./hooks/use-recordings";
+/** Dictation is a recording too: speech kept until its text is in the draft. */
+export { useVoiceInput } from "./hooks/use-voice-input";
+export type {
+  UseVoiceInputOptions,
+  UseVoiceInputResult,
+  VoiceInputRecordingsClient,
+  VoiceInputStatus,
+} from "./hooks/use-voice-input";
 export {
   activeSegmentIndex,
   defaultMeetingTitle,

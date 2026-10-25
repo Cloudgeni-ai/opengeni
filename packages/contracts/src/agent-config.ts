@@ -799,6 +799,8 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
  * `runtime_mechanics` are always present; every other module is included only
  * when its capability or resource is present. The model-context inspector
  * reports them as metadata on the `operational_contract` layer.
+ * `workspace_environment` and `attachments` are retired (never rendered) and
+ * stay listed only so stored model-context snapshots still parse.
  */
 export const AGENT_PROMPT_MODULE_IDS = [
   "base_behavior",
