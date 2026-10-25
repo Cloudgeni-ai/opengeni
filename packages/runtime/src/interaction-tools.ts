@@ -2076,16 +2076,21 @@ export function createInteractionAttemptToolDefinitions(
             targetId,
             request,
           );
+          // Text and value take the character budget first, so the text or
+          // value itself was cut only when they used (nearly) all of it; a
+          // page can end one character early to keep a character whole.
+          // Clipped attributes or options alone offer no next page.
+          const textChars = read.text?.length ?? 0;
+          const valueChars = read.value?.length ?? 0;
+          const textCut =
+            dom.kind === "element" &&
+            read.truncated &&
+            Math.max(textChars, valueChars) > 0 &&
+            textChars + valueChars >= (dom.maxChars ?? 4_096) - 1;
           return {
             ...read,
             source: "dom" as const,
-            ...(dom.kind === "element" && read.truncated
-              ? {
-                  nextOffset:
-                    (dom.offset ?? 0) +
-                    Math.max(read.text?.length ?? 0, read.value?.length ?? 0, 1),
-                }
-              : {}),
+            ...(textCut ? { nextOffset: (dom.offset ?? 0) + Math.max(textChars, valueChars) } : {}),
           };
         }
         return readBrowserObservation(

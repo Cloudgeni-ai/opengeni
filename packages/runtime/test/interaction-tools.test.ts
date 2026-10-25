@@ -6677,6 +6677,59 @@ describe("interaction attempt tools", () => {
     ]);
   });
 
+  test("browser_read dom offers no next page when only attributes were cut", async () => {
+    const target = browserTarget();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getBrowserTargetState: async () => ({
+          browserSessionId,
+          controllerGeneration: target.controllerGeneration,
+          targetId: target.id,
+          targetGeneration: target.targetGeneration,
+          documentGeneration: target.documentGeneration,
+          frameId: "frame-2",
+        }),
+        readBrowserDom: async () => ({
+          browserSessionId,
+          controllerGeneration: target.controllerGeneration,
+          targetId: target.id,
+          targetGeneration: target.targetGeneration,
+          documentGeneration: target.documentGeneration,
+          frameId: "frame-2",
+          kind: "element",
+          count: 1,
+          text: "Open the report",
+          value: null,
+          attributes: { href: "https://example.test/" + "a".repeat(60) },
+          redacted: null,
+          truncated: true,
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_read"],
+      permissions: ["sessions:read"],
+    });
+    const result = (
+      await definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: target.id,
+          mode: "dom",
+          dom: {
+            kind: "element",
+            locator: { kind: "ref", ref: "e0000000c" },
+            attributes: ["href"],
+            maxChars: 64,
+          },
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      )
+    ).structuredContent as { truncated: boolean; nextOffset?: number };
+    expect(result.truncated).toBe(true);
+    expect(result.nextOffset).toBeUndefined();
+  });
+
   test("captures screenshots without accessibility scans and returns image content", async () => {
     const target = browserTarget();
     const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);

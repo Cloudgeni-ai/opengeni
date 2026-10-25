@@ -8009,6 +8009,8 @@ export function clipboardCopyFailure(reason: string, fromElement: boolean): stri
         : "browser clipboard copy found nothing selected on the page; select text first, or pass a locator to copy an element's text or value";
     case "detached":
       return "browser clipboard copy lost its element, which is no longer on the page; observe the page and copy again";
+    case "too_large":
+      return "browser clipboard copy is larger than the 1 MiB clipboard limit; read the text in parts with browser_read mode=dom and offset";
     default:
       return "browser clipboard copy found no focused element to copy from; pass a locator to copy an element's text or value";
   }
@@ -8868,11 +8870,12 @@ const PAGE_SCROLL_FUNCTION = `function(deltaX, deltaY) {
   return root.scrollLeft !== before[0] || root.scrollTop !== before[1];
 }`;
 
-/** Fixed browser-side projection. Every field shares one character budget, so
- * a huge page cannot turn a focused query into an unbounded CDP payload. */
-const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect, offset) {
-  const element = this && this.nodeType === 1 ? this : this?.parentElement;
-  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
+/** Why an element's text or value must not leave the page: it is, sits in, or
+ * (as a container) holds a password, one-time code, payment, hidden or
+ * explicitly private field. With a range, only the descendants that range
+ * touches count, for a copy of selected text. Shared by DOM reads and
+ * clipboard copies, so neither can return what the other withholds. */
+const PROTECTED_CONTENT_FUNCTION = `function(element, range) {
   const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
   const sensitiveReason = (node) => {
     const nodeTag = String(node.tagName || "").toLowerCase();
@@ -8884,18 +8887,29 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect
     if (type === "hidden" || node.matches(privateSelector)) return "private";
     return null;
   };
-  const tag = String(element.tagName || "").toLowerCase();
-  let redacted = sensitiveReason(element);
-  for (let ancestor = element.parentElement; !redacted && ancestor; ancestor = ancestor.parentElement) {
-    redacted = sensitiveReason(ancestor);
+  let reason = sensitiveReason(element);
+  for (let ancestor = element.parentElement; !reason && ancestor; ancestor = ancestor.parentElement) {
+    reason = sensitiveReason(ancestor);
   }
-  if (redacted) return { ok: true, text: null, value: null, attributes: {}, redacted, truncated: false };
-  // A container's innerText includes sensitive descendants. Refuse the whole
+  if (reason) return reason;
+  // A container's text includes its sensitive descendants. Refuse the whole
   // container rather than returning their protected text through an ancestor.
   for (const node of element.querySelectorAll("[id], [name], [autocomplete], input, " + privateSelector)) {
-    const reason = sensitiveReason(node);
-    if (reason) return { ok: true, text: null, value: null, attributes: {}, redacted: reason, truncated: false };
+    if (range && !range.intersectsNode(node)) continue;
+    const found = sensitiveReason(node);
+    if (found) return found;
   }
+  return null;
+}`;
+
+/** Fixed browser-side projection. Every field shares one character budget, so
+ * a huge page cannot turn a focused query into an unbounded CDP payload. */
+const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect, offset) {
+  const element = this && this.nodeType === 1 ? this : this?.parentElement;
+  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
+  const tag = String(element.tagName || "").toLowerCase();
+  const redacted = (${PROTECTED_CONTENT_FUNCTION})(element, null);
+  if (redacted) return { ok: true, text: null, value: null, attributes: {}, redacted, truncated: false };
   const allowed = new Set(["href", "src", "alt", "title", "role", "aria-label", "aria-expanded",
     "aria-checked", "aria-selected", "placeholder", "type", "name", "data-testid"]);
   let remaining = maxChars;
@@ -8903,9 +8917,18 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect
   const bounded = (raw, skip = 0) => {
     if (raw === null || raw === undefined) return null;
     const value = String(raw).slice(skip);
-    const kept = value.slice(0, remaining);
+    let kept = value.slice(0, remaining);
+    // Never end a page between the two halves of a character outside the
+    // basic plane; the next page starts with the whole character instead.
+    if (kept.length > 1 && kept.length < value.length) {
+      const last = kept.charCodeAt(kept.length - 1);
+      if (last >= 0xd800 && last <= 0xdbff) kept = kept.slice(0, -1);
+    }
     remaining -= kept.length;
-    if (kept.length < value.length) truncated = true;
+    if (kept.length < value.length) {
+      truncated = true;
+      remaining = 0;
+    }
     return kept;
   };
   const skip = Number(offset) || 0;
@@ -8946,39 +8969,60 @@ function assertSafeDomReadSelector(selector: string): void {
 const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
   if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false, error: "detached" };
+  const protectedContent = ${PROTECTED_CONTENT_FUNCTION};
   const tag = String(element.tagName || "").toLowerCase();
-  if (tag === "input" && String(element.type).toLowerCase() === "password") {
-    return { ok: false, error: "protected" };
-  }
   const textField = tag === "input" || tag === "textarea";
   const shown = () => textField
     ? String(element.value ?? "")
     : String(element.innerText ?? element.textContent ?? "");
+  // Size is checked here, before the text crosses to the controller. Each
+  // UTF-16 unit is at most three UTF-8 bytes, so most text needs no encoding.
+  const copied = (text) => {
+    if (text.length > ${INTERACTION_MAX_CLIPBOARD_BYTES} || (text.length * 3 > ${INTERACTION_MAX_CLIPBOARD_BYTES}
+      && new TextEncoder().encode(text).length > ${INTERACTION_MAX_CLIPBOARD_BYTES})) {
+      return { ok: false, error: "too_large" };
+    }
+    return { ok: true, text };
+  };
+  // A protected text field is refused whatever is asked of it.
+  if (textField && protectedContent(element, null)) return { ok: false, error: "protected" };
+  const whole = () => protectedContent(element, null) ? { ok: false, error: "protected" } : copied(shown());
   if (content === "value") {
-    if (textField || tag === "select") return { ok: true, text: String(element.value ?? "") };
+    if (textField) return copied(String(element.value ?? ""));
+    if (tag === "select") {
+      return protectedContent(element, null) ? { ok: false, error: "protected" } : copied(String(element.value ?? ""));
+    }
     const role = String(element.getAttribute("role") || "").toLowerCase();
     if (element.isContentEditable === true || ["textbox", "searchbox", "combobox", "spinbutton"].includes(role)) {
-      return { ok: true, text: shown() };
+      return whole();
     }
     return { ok: false, error: "no_value" };
   }
-  if (content === "text") return { ok: true, text: shown() };
-  let selected = "";
+  if (content === "text") return whole();
   if (textField) {
     const start = element.selectionStart;
     const end = element.selectionEnd;
-    if (typeof start === "number" && typeof end === "number") selected = String(element.value).slice(start, end);
+    if (typeof start === "number" && typeof end === "number" && end > start) {
+      return copied(String(element.value).slice(start, end));
+    }
   } else {
     const selection = element.ownerDocument.defaultView?.getSelection();
     if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
       const range = selection.getRangeAt(0);
       if (element === range.commonAncestorContainer || element.contains(range.commonAncestorContainer)) {
-        selected = selection.toString();
+        const selected = selection.toString();
+        if (selected !== "") {
+          const common = range.commonAncestorContainer.nodeType === 1
+            ? range.commonAncestorContainer
+            : range.commonAncestorContainer.parentElement;
+          return common && protectedContent(common, range)
+            ? { ok: false, error: "protected" }
+            : copied(selected);
+        }
       }
     }
   }
-  if (selected !== "") return { ok: true, text: selected };
-  if (content === "whole") return { ok: true, text: shown() };
+  if (content === "whole") return whole();
   return { ok: false, error: "no_selection" };
 }`;
 
