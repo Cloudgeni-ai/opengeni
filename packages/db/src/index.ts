@@ -9363,6 +9363,13 @@ export async function completeFileUpload(
   db: Database,
   workspaceId: string,
   uploadId: string,
+  options: {
+    /**
+     * Digest the server computed from the stored bytes. Recorded only when the
+     * file has none: a client digest is never replaced.
+     */
+    computedSha256?: string | undefined;
+  } = {},
 ): Promise<FileAsset> {
   return await withWorkspaceRls(
     db,
@@ -9410,6 +9417,9 @@ export async function completeFileUpload(
           .update(schema.files)
           .set({
             status: "ready",
+            ...(options.computedSha256 && !fileRow.sha256
+              ? { sha256: options.computedSha256 }
+              : {}),
             updatedAt: now,
           })
           .where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileRow.id)))

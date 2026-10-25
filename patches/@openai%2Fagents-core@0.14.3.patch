@@ -2334,6 +2334,96 @@ index e4b43a344a81c50b1dce9b9e9adba292f711c7e0..20f71ccc6c7113ceea4db70cea1e7314
          rawResponses: state._modelResponses,
          lastAgent: agent,
          state,
+diff --git a/dist/sandbox/agent.d.ts b/dist/sandbox/agent.d.ts
+index 9edff38fd63c9f5e2e8074d3ec77753bebe42d8b..0e7c83d118ea068b0a210de03319ad85e8bdeadf 100644
+--- a/dist/sandbox/agent.d.ts
++++ b/dist/sandbox/agent.d.ts
+@@ -11,6 +11,13 @@ export type SandboxAgentOptions<TContext = UnknownContext, TOutput extends Agent
+     baseInstructions?: SandboxBaseInstructions<TContext, TOutput>;
+     capabilities?: Capability[];
+     runAs?: string | SandboxUser;
++    /**
++     * Projection of the runtime manifest used only to render the remote mount
++     * policy and filesystem layout instructions. The session still materializes
++     * the full manifest. Use it to keep per-turn entries out of the cached
++     * instruction prefix.
++     */
++    instructionManifest?: (manifest: Manifest) => Manifest;
+ };
+ export declare class SandboxAgent<TContext = UnknownContext, TOutput extends AgentOutputType = TextOutput> extends Agent<TContext, TOutput> {
+     readonly [SANDBOX_AGENT_BRAND] = true;
+@@ -19,6 +26,7 @@ export declare class SandboxAgent<TContext = UnknownContext, TOutput extends Age
+     capabilities: Capability[];
+     runAs?: string | SandboxUser;
+     runtimeManifest: Manifest;
++    instructionManifest?: (manifest: Manifest) => Manifest;
+     constructor(config: SandboxAgentOptions<TContext, TOutput>);
+     clone(config: Partial<SandboxAgentOptions<TContext, TOutput>>): SandboxAgent<TContext, TOutput>;
+ }
+diff --git a/dist/sandbox/agent.js b/dist/sandbox/agent.js
+index 165f9ae11e7fa1e7f2be06d04f1e51660987ecb5..7d8eec855abb66031a0d3cb98248a5e742218216 100644
+--- a/dist/sandbox/agent.js
++++ b/dist/sandbox/agent.js
+@@ -13,6 +13,7 @@ class SandboxAgent extends agent_1.Agent {
+     capabilities;
+     runAs;
+     runtimeManifest;
++    instructionManifest;
+     constructor(config) {
+         super(config);
+         if (config.baseInstructions !== undefined &&
+@@ -26,6 +27,11 @@ class SandboxAgent extends agent_1.Agent {
+         this.baseInstructions = config.baseInstructions;
+         this.capabilities = config.capabilities ?? capabilities_1.Capabilities.default();
+         this.runAs = normalizeRunAs(config.runAs);
++        if (config.instructionManifest !== undefined &&
++            typeof config.instructionManifest !== 'function') {
++            throw new TypeError('SandboxAgent instructionManifest must be a function.');
++        }
++        this.instructionManifest = config.instructionManifest;
+         this.runtimeManifest = this.defaultManifest ?? new manifest_1.Manifest();
+     }
+     clone(config) {
+@@ -49,6 +55,7 @@ class SandboxAgent extends agent_1.Agent {
+             baseInstructions: config.baseInstructions ?? this.baseInstructions,
+             capabilities: config.capabilities ?? this.capabilities,
+             runAs: config.runAs ?? this.runAs,
++            instructionManifest: config.instructionManifest ?? this.instructionManifest,
+         });
+     }
+ }
+diff --git a/dist/sandbox/agent.mjs b/dist/sandbox/agent.mjs
+index 9858b77ba8b20d6d12e0aa08256d3b57fb1a4044..a58bd1d8bd2efea18993b778d7a288d149acf7f0 100644
+--- a/dist/sandbox/agent.mjs
++++ b/dist/sandbox/agent.mjs
+@@ -10,6 +10,7 @@ export class SandboxAgent extends Agent {
+     capabilities;
+     runAs;
+     runtimeManifest;
++    instructionManifest;
+     constructor(config) {
+         super(config);
+         if (config.baseInstructions !== undefined &&
+@@ -23,6 +24,11 @@ export class SandboxAgent extends Agent {
+         this.baseInstructions = config.baseInstructions;
+         this.capabilities = config.capabilities ?? Capabilities.default();
+         this.runAs = normalizeRunAs(config.runAs);
++        if (config.instructionManifest !== undefined &&
++            typeof config.instructionManifest !== 'function') {
++            throw new TypeError('SandboxAgent instructionManifest must be a function.');
++        }
++        this.instructionManifest = config.instructionManifest;
+         this.runtimeManifest = this.defaultManifest ?? new Manifest();
+     }
+     clone(config) {
+@@ -46,6 +52,7 @@ export class SandboxAgent extends Agent {
+             baseInstructions: config.baseInstructions ?? this.baseInstructions,
+             capabilities: config.capabilities ?? this.capabilities,
+             runAs: config.runAs ?? this.runAs,
++            instructionManifest: config.instructionManifest ?? this.instructionManifest,
+         });
+     }
+ }
 diff --git a/dist/sandbox/capabilities/filesystem.js b/dist/sandbox/capabilities/filesystem.js
 index 54de1bee2ad8b7f0986d3ab9c8f67e4a7a8c2ea5..f68d5839453404f28394d9d9e9f85502bdeaf310 100644
 --- a/dist/sandbox/capabilities/filesystem.js
@@ -2497,6 +2587,54 @@ index 37b655b60d16747b5b2aa72b0f827e7b05604a92..4938c08c6239dee1ac6714fe919fddc5
  function joinAbsolutePath(root, relativePath) {
      const normalizedRoot = normalizeRoot(root);
      const normalizedRelativePath = normalizeRelativePath(relativePath);
+diff --git a/dist/sandbox/runtime/agentPreparation.js b/dist/sandbox/runtime/agentPreparation.js
+index 45655d50c827ddbe18f1f6ff9ab3bfebbc990612..c96f28d3343fe4a7d3d92893602f8ece706c186c 100644
+--- a/dist/sandbox/runtime/agentPreparation.js
++++ b/dist/sandbox/runtime/agentPreparation.js
+@@ -71,11 +71,17 @@ function prepareSandboxAgent({ agent, session, capabilities, runConfigModel, pro
+             if (capabilityFragments.length > 0) {
+                 segments.push((0, prompts_1.renderInstructionSection)('Sandbox capability instructions', capabilityFragments.join('\n\n')));
+             }
+-            const remoteMountPolicy = (0, prompts_1.renderRemoteMountPolicyInstructions)(runtimeManifest, canEditorAccessPath);
++            // Rendering may use a projection of the manifest (for example without
++            // per-turn entries) so the instructions stay stable across turns; the
++            // session still materializes the full runtime manifest.
++            const instructionManifest = agent.instructionManifest
++                ? agent.instructionManifest(runtimeManifest)
++                : runtimeManifest;
++            const remoteMountPolicy = (0, prompts_1.renderRemoteMountPolicyInstructions)(instructionManifest, canEditorAccessPath);
+             if (remoteMountPolicy) {
+                 segments.push((0, prompts_1.renderInstructionSection)('Sandbox remote mount policy', remoteMountPolicy));
+             }
+-            segments.push((0, prompts_1.renderFilesystemInstructions)(runtimeManifest));
++            segments.push((0, prompts_1.renderFilesystemInstructions)(instructionManifest));
+             return segments.join('\n\n');
+         },
+     });
+diff --git a/dist/sandbox/runtime/agentPreparation.mjs b/dist/sandbox/runtime/agentPreparation.mjs
+index 16e5f2880c65589ad4dc3e2455a333a42e35b073..ccbbab321285dfa5ffa00ac29538d1adb678e8bf 100644
+--- a/dist/sandbox/runtime/agentPreparation.mjs
++++ b/dist/sandbox/runtime/agentPreparation.mjs
+@@ -65,11 +65,17 @@ export function prepareSandboxAgent({ agent, session, capabilities, runConfigMod
+             if (capabilityFragments.length > 0) {
+                 segments.push(renderInstructionSection('Sandbox capability instructions', capabilityFragments.join('\n\n')));
+             }
+-            const remoteMountPolicy = renderRemoteMountPolicyInstructions(runtimeManifest, canEditorAccessPath);
++            // Rendering may use a projection of the manifest (for example without
++            // per-turn entries) so the instructions stay stable across turns; the
++            // session still materializes the full runtime manifest.
++            const instructionManifest = agent.instructionManifest
++                ? agent.instructionManifest(runtimeManifest)
++                : runtimeManifest;
++            const remoteMountPolicy = renderRemoteMountPolicyInstructions(instructionManifest, canEditorAccessPath);
+             if (remoteMountPolicy) {
+                 segments.push(renderInstructionSection('Sandbox remote mount policy', remoteMountPolicy));
+             }
+-            segments.push(renderFilesystemInstructions(runtimeManifest));
++            segments.push(renderFilesystemInstructions(instructionManifest));
+             return segments.join('\n\n');
+         },
+     });
 diff --git a/dist/sandbox/workspacePaths.js b/dist/sandbox/workspacePaths.js
 index 30fb71f0d5b40c0361d1bbbf0caa80bf3b3e2a34..711435ff36469ea29f71ccae93ab309b2989c680 100644
 --- a/dist/sandbox/workspacePaths.js
