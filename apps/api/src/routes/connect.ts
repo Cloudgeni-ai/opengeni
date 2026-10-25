@@ -33,6 +33,7 @@ import {
   installApiIntegration,
   listConnectionsMetadata,
   getConnectionMetadata,
+  listInstalledApiIntegrations,
   createConnection,
   updateConnection,
   encryptEnvironmentValue,
@@ -106,6 +107,54 @@ import {
 import { parseRequestJson } from "../http/request-body";
 import { connectRequestActor, assertAgentPreparedConnect } from "../prepared-mcp-actor";
 
+/**
+ * Installing a deployment-reviewed integration's tools for the caller's own
+ * personal account is connecting that account, so it needs only the right to
+ * connect your own accounts (connections:personal, included in
+ * connections:write), like connecting Gmail. The instance resolves
+ * credentials for that person alone. Anything else (a workspace account, a
+ * custom source, or an instance not already bound to this same account)
+ * stays integration management (capabilities:manage).
+ */
+async function isOwnAccountInstall(
+  deps: ApiRouteDeps,
+  scope: { workspaceId: string; subjectId: string },
+  attempt: {
+    id: string;
+    providerId: string;
+    ownership: string;
+    source?: unknown;
+    account?: { id: string } | undefined;
+    installationTarget?: { instanceKey: string } | undefined;
+  },
+): Promise<boolean> {
+  if (attempt.ownership !== "personal" || attempt.source !== undefined || !attempt.account)
+    return false;
+  if (
+    !CORE_INTEGRATION_DEFINITIONS.some((definition) => definition.id === attempt.providerId) ||
+    !integrationAvailable(deps.settings, scope.workspaceId, attempt.providerId)
+  )
+    return false;
+  const connection = await getConnectionMetadata(
+    deps.db,
+    scope.workspaceId,
+    attempt.account.id,
+    scope.subjectId,
+  );
+  if (!connection || connection.subjectId !== scope.subjectId) return false;
+  const instanceKey = attempt.installationTarget?.instanceKey;
+  // A fresh instance named after this attempt cannot replace anyone's.
+  if (!instanceKey || instanceKey === `account-${attempt.id}`) return true;
+  // Reconnecting reuses only an instance already bound to this same account.
+  const installed = await listInstalledApiIntegrations(deps.db, scope.workspaceId, scope.subjectId);
+  return installed.some(
+    (instance) =>
+      instance.instanceKey === instanceKey &&
+      instance.definitionId === attempt.providerId &&
+      instance.connectionRef?.connectionId === attempt.account!.id,
+  );
+}
+
 /** Shared durable setup entry. Provider completion is distinct from
  * subsequent preview/install; never report an OAuth token as a ready integration. */
 export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -139,6 +188,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       async (_tx, current) => current,
     );
     const canWrite = hasPermission(authorization.grant.permissions, "connections:write");
+    const personalSetup = hasPermission(authorization.grant.permissions, "connections:personal");
     const personal = isPersonalConnectionOwnerPrincipal(authorization);
     // Signing in to one's own account needs only what the attempt will check.
     const canSignInPersonally = (providerId: string) =>
@@ -202,24 +252,30 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         integrationAvailable(deps.settings, c.req.param("workspaceId"), definition.id),
       ).map((definition) => {
         const readiness = curatedOAuthReadiness(deps.settings, definition);
+        // Without connections:write, a person may still connect their own
+        // account (connections:personal), so only personal ownership is offered.
+        const ownership = readiness.ownership.filter(
+          (owner) => (owner !== "personal" || personal) && (owner === "personal" || canWrite),
+        );
+        const allowed = canWrite || (personalSetup && ownership.includes("personal"));
         return ConnectProvider.parse({
           id: definition.id,
           label: definition.name,
           family: definition.provider.id,
           readiness:
-            !external || !canWrite
+            !external || !allowed
               ? "unsupported"
               : readiness.configured
                 ? "available"
                 : "needs_configuration",
           ...(!external
             ? { reason: "A verified user is required by this Connect adapter" }
-            : !canWrite
+            : !allowed
               ? { reason: "connections:write permission required" }
               : !readiness.configured
                 ? { reason: "Deployment OAuth or encryption configuration is incomplete" }
                 : {}),
-          ownership: readiness.ownership.filter((owner) => owner !== "personal" || personal),
+          ownership,
           setup: ["oauth"],
         });
       }),
@@ -707,7 +763,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         ? "capabilities:manage"
         : action.type === "credentials"
           ? connectSetupPermission(before)
-          : permission;
+          : action.type === "install" && (await isOwnAccountInstall(deps, scope, before))
+            ? "connections:personal"
+            : permission;
     if (!hasPermission(authorization.grant.permissions, advancePermission))
       throw new HTTPException(403, { message: `${advancePermission} required` });
     if (before.mcpSetup && !hasPermission(authorization.grant.permissions, "capabilities:manage"))
@@ -1249,7 +1307,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         operationId: input.idempotencyKey,
         inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
         authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, scope, permission, origin),
+          requireConnectOwnerAuthority(tx, scope, advancePermission, origin),
         execute: async (attempt) => {
           if (
             (!attempt.source && (!attempt.credentialsCommitted || !attempt.account)) ||
@@ -2075,7 +2133,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               : {
                   installationTarget: input.installationTarget ?? {
                     instanceKey: `account-${id}`,
-                    displayName: input.providerId,
+                    displayName:
+                      CORE_INTEGRATION_DEFINITIONS.find(
+                        (definition) => definition.id === input.providerId,
+                      )?.name ?? input.providerId,
                   },
                 }),
             ...(reconnect

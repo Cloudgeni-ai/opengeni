@@ -1,9 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import {
   CapabilityCatalogItem,
   type CapabilityCatalogItem as CatalogItem,
 } from "@opengeni/contracts";
-import { searchCapabilityCatalogItems, suggestCapabilityCatalogItems } from "../src";
+import {
+  excelAddinCatalogItem,
+  integrationDefinitionIdFromCapabilityId,
+  nativeConnectionCapabilityRecommendations,
+  searchCapabilityCatalogItems,
+  suggestCapabilityCatalogItems,
+} from "../src";
 
 function item(input: Partial<CatalogItem> & Pick<CatalogItem, "id" | "name">): CatalogItem {
   return CapabilityCatalogItem.parse({
@@ -16,6 +23,152 @@ function item(input: Partial<CatalogItem> & Pick<CatalogItem, "id" | "name">): C
 }
 
 describe("agent capability catalog search", () => {
+  describe("reviewed integration definitions", () => {
+    const catalog = [
+      item({
+        id: "mcp:gmail",
+        name: "Gmail",
+        source: "built_in",
+        category: "communication",
+        description: "Search, read and draft email in the person's Gmail.",
+        tags: ["gmail", "email", "mail", "google"],
+        providerDomain: "google.com",
+        authKind: "oauth2",
+      }),
+      item({
+        id: "mcp:microsoft-learn",
+        name: "Microsoft Learn",
+        source: "registry",
+        category: "documentation",
+        description: "Search Microsoft documentation and code samples.",
+        tags: ["microsoft", "docs", "azure"],
+        providerDomain: "microsoft.com",
+        authKind: "none",
+        metadata: { mcpProbe: { status: "real" } },
+      }),
+      excelAddinCatalogItem({ name: "Example Assistant", installUrl: null }),
+      item({
+        id: "mcp:google-calendar",
+        name: "Google Calendar",
+        source: "built_in",
+        category: "productivity",
+        description:
+          "Read, schedule and update events and meetings in the person's Google Calendar.",
+        tags: ["calendar", "events", "meetings", "schedule", "google"],
+        providerDomain: "google.com",
+        authKind: "oauth2",
+      }),
+      item({
+        id: "mcp:google-drive",
+        name: "Google Drive",
+        source: "built_in",
+        category: "productivity",
+        description: "Find, read and share files and documents in the person's Google Drive.",
+        tags: ["drive", "files", "documents", "google"],
+        providerDomain: "google.com",
+        authKind: "oauth2",
+      }),
+      item({
+        id: "mcp:slack",
+        name: "Slack",
+        source: "registry",
+        category: "communication",
+        description: "Read channels and send chat messages in Slack.",
+        tags: ["slack", "chat", "messages", "channels"],
+        providerDomain: "slack.com",
+        authKind: "oauth2",
+        metadata: { mcpProbe: { status: "real" } },
+      }),
+      item({
+        id: "mcp:transcriber",
+        name: "Transcriber",
+        source: "registry",
+        category: "productivity",
+        description: "Live transcription and notes for calls.",
+        tags: ["transcription", "notes", "audio"],
+        providerDomain: "transcriber.example",
+        authKind: "oauth2",
+        metadata: { mcpProbe: { status: "real" } },
+      }),
+      ...nativeConnectionCapabilityRecommendations({
+        integrationDefinitions: CORE_INTEGRATION_DEFINITIONS,
+      }),
+    ];
+    const top = (query: string, count = 1) =>
+      searchCapabilityCatalogItems(catalog, query)
+        .slice(0, count)
+        .map((result) => integrationDefinitionIdFromCapabilityId(result.item.id) ?? result.item.id);
+
+    test("Outlook, Hotmail, Live and MSN mail requests find Outlook Mail first", () => {
+      for (const query of [
+        "Microsoft Outlook Hotmail email",
+        "Hotmail",
+        "read my newest hotmail emails",
+        "Outlook email",
+        "outlook.com inbox",
+        "live.com mail",
+        "MSN email",
+      ]) {
+        expect({ query, top: top(query) }).toEqual({ query, top: ["microsoft-outlook-mail"] });
+      }
+      expect(top("Outlook", 3)).toContain("microsoft-outlook-mail");
+    });
+
+    test("calendar, contacts, OneDrive and Teams requests find their own definition", () => {
+      expect(top("Outlook calendar")).toEqual(["microsoft-outlook-calendar"]);
+      expect(top("my hotmail calendar")).toEqual(["microsoft-outlook-calendar"]);
+      expect(top("outlook calendar meetings")).toEqual(["microsoft-outlook-calendar"]);
+      expect(top("Outlook contacts")).toEqual(["microsoft-outlook-contacts"]);
+      expect(top("OneDrive")).toEqual(["microsoft-onedrive"]);
+      expect(top("my onedrive files")).toEqual(["microsoft-onedrive"]);
+      expect(top("Teams")).toEqual(["microsoft-teams"]);
+      expect(top("Microsoft Teams chat")).toEqual(["microsoft-teams"]);
+    });
+
+    test("Gmail and Excel requests are unaffected", () => {
+      expect(top("Gmail")).toEqual(["mcp:gmail"]);
+      expect(top("my gmail inbox")).toEqual(["mcp:gmail"]);
+      expect(top("read my gmail emails")).toEqual(["mcp:gmail"]);
+      expect(top("Excel")).toEqual(["api:excel-addin"]);
+      expect(top("Microsoft Learn docs")).toEqual(["mcp:microsoft-learn"]);
+    });
+
+    test("generic requests that never mention Microsoft keep their usual match", () => {
+      expect(top("send an email")).toEqual(["mcp:gmail"]);
+      expect(top("check my email")).toEqual(["mcp:gmail"]);
+      expect(top("schedule a meeting")).toEqual(["mcp:google-calendar"]);
+      expect(top("calendar")).toEqual(["mcp:google-calendar"]);
+      expect(top("chat")).toEqual(["mcp:slack"]);
+      expect(top("send a message in a channel")).toEqual(["mcp:slack"]);
+      expect(top("my files")).toEqual(["mcp:google-drive"]);
+      expect(top("live transcription")).toEqual(["mcp:transcriber"]);
+      // A bare "mail" names "Outlook Mail" itself, so it is not a generic request here.
+      for (const query of ["inbox", "email", "messages", "events", "documents"]) {
+        expect({ query, top: top(query)[0]?.startsWith("microsoft-") }).toEqual({
+          query,
+          top: false,
+        });
+      }
+    });
+
+    test("entries are agent recommendations for the Connect card", () => {
+      const outlook = catalog.find(
+        (entry) => entry.id === "api:integration:microsoft-outlook-mail",
+      );
+      expect(outlook).toMatchObject({
+        name: "Outlook Mail",
+        kind: "api",
+        source: "built_in",
+        surfaceType: "integration_definition",
+        lifecycle: { readiness: "setup_required" },
+        metadata: { integrationDefinitionId: "microsoft-outlook-mail", recommendationOnly: true },
+      });
+      expect(nativeConnectionCapabilityRecommendations().map((entry) => entry.id)).toEqual([
+        "api:github-app",
+      ]);
+    });
+  });
+
   test("prefers the exact built-in GitHub adapter over incidental GitHub text", () => {
     const results = searchCapabilityCatalogItems(
       [

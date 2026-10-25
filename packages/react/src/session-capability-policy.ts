@@ -7,9 +7,16 @@ import type {
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { type OpenGeniText } from "./messages/runtime";
 
+/** What selecting a capability for a chat needs: its kind and tools. An
+ * installed API integration has no catalog row, only its runtime server. */
+export type SessionCapabilityToolSource = Pick<
+  CapabilityCatalogItem,
+  "kind" | "tools" | "runtime" | "metadata"
+>;
+
 /** Catalog tool discovery may be lazy; selecting the installed server does not
  * require its individual tool inventory to have been fetched. */
-export function sessionCapabilityTools(item: CapabilityCatalogItem) {
+export function sessionCapabilityTools(item: SessionCapabilityToolSource) {
   const serverId = item.kind === "mcp" ? item.runtime?.mcpServerId : undefined;
   return serverId && !item.tools.some((tool) => tool.kind === "mcp" && tool.id === serverId)
     ? [...item.tools, { kind: "mcp" as const, id: serverId }]
@@ -24,7 +31,7 @@ export async function attachSessionCapability(
   client: OpenGeniClient,
   workspaceId: string,
   sessionId: string,
-  item: CapabilityCatalogItem,
+  item: SessionCapabilityToolSource,
   stillCurrent: () => boolean = () => true,
 ): Promise<void> {
   const tools = sessionCapabilityTools(item);
@@ -39,7 +46,7 @@ export async function attachSessionCapability(
 function capabilityToolPolicyUpdate(
   t: OpenGeniText,
   session: Session,
-  item: CapabilityCatalogItem,
+  item: SessionCapabilityToolSource,
 ): UpdateSessionToolPolicyRequest | null {
   const tools = sessionCapabilityTools(item);
   if (item.kind === "skill" || tools.length === 0) return null;

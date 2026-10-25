@@ -3588,6 +3588,30 @@ export const englishMessages = {
   "sessionFeedbackModel.tellUsWhatCouldMake": "Tell us what could make {product} better.",
   "sessionFeedbackModel.thumbsDown": "Thumbs down",
   "sessionFeedbackModel.thumbsUp": "Thumbs up",
+  "sessionIntegrationCapabilityCard.chatAccessFailed":
+    "Connected, but it couldn't be added to this chat's tools. Choose it in this chat's tools.",
+  "sessionIntegrationCapabilityCard.connected": "Your account is connected",
+  "sessionIntegrationCapabilityCard.connectName": "Connect {name}",
+  "sessionIntegrationCapabilityCard.couldNotLoad": "Couldn't check this connection.",
+  "sessionIntegrationCapabilityCard.couldNotStart": "Couldn't start connecting. Try again.",
+  "sessionIntegrationCapabilityCard.finishSigningIn":
+    "Finish signing in to {name} in the window that opened.",
+  "sessionIntegrationCapabilityCard.integration": "Integration",
+  "sessionIntegrationCapabilityCard.noPermission":
+    "You can't connect {name} here. Ask a workspace admin for access.",
+  "sessionIntegrationCapabilityCard.note":
+    "You sign in with your own account in a new window. Only your chats use it.",
+  "sessionIntegrationCapabilityCard.notRequester":
+    "The agent continues once the person who asked connects their own account.",
+  "sessionIntegrationCapabilityCard.notSetUp":
+    "{name} isn't set up on this deployment yet. Ask its administrator to enable it.",
+  "sessionIntegrationCapabilityCard.personalUnavailable":
+    "{name} can only be connected to your own account, and this app can't do that here. Ask its administrator for help.",
+  "sessionIntegrationCapabilityCard.preparing": "Preparing sign-in…",
+  "sessionIntegrationCapabilityCard.retry": "Retry",
+  "sessionIntegrationCapabilityCard.signIn": "Sign in",
+  "sessionIntegrationCapabilityCard.stopWaiting": "Stop waiting",
+  "sessionIntegrationCapabilityCard.tryAgain": "Try again",
   "sessionList.archive": "Hide for me",
   "sessionList.cancel": "Cancel",
   "sessionList.chats": "Chats",

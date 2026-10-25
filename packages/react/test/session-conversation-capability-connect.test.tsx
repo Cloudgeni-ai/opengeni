@@ -75,7 +75,11 @@ const history = [
   event(3, "turn.completed", { output: "Connect Mail to continue." }),
 ];
 
-function conversationClient(permissions: Permission[], chatConnections?: boolean) {
+function conversationClient(
+  permissions: Permission[],
+  chatConnections?: boolean,
+  events: SessionEvent[] = history,
+) {
   const effectiveControl = {
     state: "running",
     directState: "running",
@@ -101,9 +105,9 @@ function conversationClient(permissions: Permission[], chatConnections?: boolean
       }) as never,
     getQueue: async () => ({ items: [], pendingInputs: [], effectiveControl }) as never,
     listHumanInputRequests: async () => [],
-    listEvents: async () => history,
+    listEvents: async () => events,
     streamEvents: async function* (_workspace, _session, options) {
-      yield* history;
+      yield* events;
       await new Promise<void>((resolve) =>
         options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
       );
@@ -116,7 +120,24 @@ function conversationClient(permissions: Permission[], chatConnections?: boolean
       listCapabilities: async () => ({ items: [mail] }),
       listConnections: async () => [],
       listOwnConnectionAccounts: async () => [],
-      connectTransport: () => ({}),
+      // The Connect catalog offers each reviewed integration for personal accounts.
+      connectTransport: () => ({
+        catalog: async () => [
+          {
+            id: "microsoft-outlook-mail",
+            label: "Outlook Mail",
+            family: "microsoft",
+            readiness: "available",
+            ownership: ["personal"],
+            setup: ["oauth"],
+          },
+        ],
+        get: async () => {
+          throw new Error("no saved attempt");
+        },
+      }),
+      listApiIntegrations: async () => ({ integrations: [] }),
+      updateSessionToolPolicy: async () => ({}),
     } as object),
   });
 }
@@ -208,5 +229,70 @@ test("a host renderAuthNeeded and server-owned chat setup keep the host in charg
     expect(document.body.textContent?.includes("can't be connected from here")).toBe(false);
   } finally {
     await owned.unmount();
+  }
+});
+
+test("an agent's reviewed-integration card offers a one-click Connect to people who can connect their own account", async () => {
+  const outlookHistory = [
+    event(1, "user.message", { text: "can you read my newest Hotmail emails?" }),
+    event(2, "tool.auth_needed", {
+      serverId: "opengeni",
+      toolName: "capability_authorization_request",
+      providerDomain: "graph.microsoft.com",
+      reason: "not_connected",
+      capability: {
+        id: "api:integration:microsoft-outlook-mail",
+        name: "Outlook Mail",
+        kind: "api",
+        source: "built_in",
+        action: "connect",
+        rationale: "Reading your newest emails needs your Hotmail inbox.",
+        requiredVariables: [],
+      },
+    }),
+    event(3, "turn.completed", { output: "Connect Outlook Mail to continue." }),
+  ];
+  const own: Permission[] = [
+    "sessions:read",
+    "sessions:control",
+    "connections:read",
+    "connections:write",
+  ];
+  const outlookButton = () =>
+    [...document.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Connect Outlook Mail"),
+    );
+  const view = await renderComponent(
+    <SessionConversation
+      client={conversationClient(own, undefined, outlookHistory)}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      modelPicker={false}
+    />,
+  );
+  try {
+    await waitFor(
+      () => outlookButton() !== undefined && !outlookButton()!.disabled,
+      "The Outlook Connect card did not render",
+    );
+  } finally {
+    await view.unmount();
+  }
+  const readOnly = await renderComponent(
+    <SessionConversation
+      client={conversationClient(["sessions:read", "sessions:control"], undefined, outlookHistory)}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      modelPicker={false}
+    />,
+  );
+  try {
+    await waitFor(
+      () => document.body.textContent?.includes("can't be connected from here") === true,
+      "The unavailable line did not render",
+    );
+    expect(outlookButton()).toBeUndefined();
+  } finally {
+    await readOnly.unmount();
   }
 });

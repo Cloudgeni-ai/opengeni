@@ -8,6 +8,9 @@ import {
 } from "./attach-session-capability";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionMcpCapabilityCard } from "../../../components/session-mcp-capability-card";
+import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
+import { SessionIntegrationCapabilityCard } from "../../../components/session-integration-capability-card";
+import "../../../../styles/connect.css";
 import type { AuthNeededItem } from "../../../timeline";
 import { CheckIcon, Loader2Icon } from "lucide-react";
 import { useAppContext } from "../../app-context";
@@ -131,6 +134,20 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         sessionId={props.sessionId}
         resources={props.resources}
         sendContext={props.sendContext}
+        onConfigured={props.onConfigured}
+      />
+    );
+  }
+  if (capability && integrationDefinitionIdFromCapabilityId(capability.id)) {
+    return (
+      <SessionIntegrationCapabilityCard
+        client={context.client}
+        workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        capabilityId={capability.id}
+        name={capability.name}
+        rationale={capability.rationale}
+        returnUrl={page.href()}
         onConfigured={props.onConfigured}
       />
     );

@@ -1,4 +1,4 @@
-import { isIntegrationDefinitionEnabled } from "@opengeni/capabilities";
+import { isIntegrationDefinitionEnabled, type IntegrationDefinition } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
 import {
@@ -26,6 +26,9 @@ import {
   type McpServerConnectionRef,
   type McpPersonalConnectionDelegation,
   assertOrganizationIntegrationAllowed,
+  INTEGRATION_DEFINITION_CAPABILITY_PREFIX,
+  integrationDefinitionCapabilityId,
+  integrationDefinitionIdFromCapabilityId,
   type SocialConnection,
   ToolAuthNeededPayload,
   type UserSetupBlocker,
@@ -1932,8 +1935,121 @@ export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
 
 export { OPENGENI_BROWSER_EXTENSION_URL };
 
+export {
+  INTEGRATION_DEFINITION_CAPABILITY_PREFIX,
+  integrationDefinitionCapabilityId,
+  integrationDefinitionIdFromCapabilityId,
+};
+
+/**
+ * What people call each reviewed definition when they ask for it. Someone asks
+ * for "my Hotmail" or "Outlook", not "Microsoft Graph mail", so the names of
+ * the consumer and work mail services are search tags here. Beyond each
+ * definition's own name, tags are only names that mean Microsoft: generic
+ * words (email, inbox, chat, meetings, files) would outrank Gmail, Google
+ * Calendar, Slack or Google Drive for requests that never mention Microsoft.
+ * Search splits "live.com" into the bare word "live", so Live addresses are
+ * named in the description only.
+ */
+const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
+  Record<string, { description: string; category: string; tags: readonly string[] }>
+> = {
+  "microsoft-outlook-mail": {
+    description:
+      "Read, search, send and organize email in the person's own Microsoft mailbox: an Outlook.com, Hotmail, Live.com or MSN address, or a work or school Microsoft 365 (Exchange) account.",
+    category: "communication",
+    tags: [
+      "outlook",
+      "hotmail",
+      "outlook.com",
+      "hotmail.com",
+      "msn.com",
+      "exchange",
+      "microsoft",
+      "microsoft-365",
+      "office-365",
+    ],
+  },
+  "microsoft-outlook-calendar": {
+    description:
+      "Read and manage events, meetings and availability in the person's own Outlook calendar (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
+    category: "productivity",
+    tags: ["outlook", "calendar", "exchange", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-outlook-contacts": {
+    description:
+      "Read and manage contacts and people in the person's own Outlook address book (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
+    category: "productivity",
+    tags: ["outlook", "contacts", "exchange", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-onedrive": {
+    description:
+      "Find, read, upload and share files in the person's own OneDrive (personal, or work or school Microsoft 365), including files shared with them.",
+    category: "productivity",
+    tags: ["onedrive", "sharepoint", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-teams": {
+    description:
+      "Read the person's teams, channels and chats, and send messages as them, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+    category: "communication",
+    tags: ["teams", "microsoft-teams", "microsoft", "microsoft-365", "office-365"],
+  },
+};
+
+/**
+ * Agent-facing entries for the reviewed API integration definitions this
+ * deployment can connect. Like the GitHub App and Connected Machine entries,
+ * these are recommendations for the native Connect flow, not rows in the
+ * Capabilities UI catalog (which shows these definitions as their own rows).
+ * Each person connects their own account; the card installs the definition's
+ * reviewed tools for that account.
+ */
+export function integrationDefinitionCapabilityRecommendations(
+  definitions: readonly IntegrationDefinition[],
+): CapabilityCatalogItem[] {
+  return definitions.map((definition) => {
+    const discovery = INTEGRATION_DEFINITION_DISCOVERY[definition.id];
+    const provider = definition.provider.id === "microsoft" ? "Microsoft" : "Google";
+    return CapabilityCatalogItem.parse({
+      id: integrationDefinitionCapabilityId(definition.id),
+      kind: "api",
+      source: "built_in",
+      name: definition.name,
+      description: discovery?.description ?? definition.summary,
+      category: discovery?.category ?? "productivity",
+      tags: [...(discovery?.tags ?? [definition.provider.id])],
+      homepageUrl: null,
+      providerDomain: definition.provider.id === "microsoft" ? "microsoft.com" : "google.com",
+      authModel: "oauth2_authorization_code",
+      authKind: "oauth2",
+      surfaceType: "integration_definition",
+      tools: [],
+      runtime: {
+        available: true,
+        notes: `Each person connects their own ${provider} account from the chat card.`,
+      },
+      lifecycle: {
+        status: "available",
+        readiness: "setup_required",
+        detail: "Connect an account from the chat card.",
+        managedBy: "platform",
+      },
+      actions: ["connect", "inspect"],
+      metadata: {
+        integrationDefinitionId: definition.id,
+        recommendationOnly: true,
+      },
+    });
+  });
+}
+
 export function nativeConnectionCapabilityRecommendations(
-  options: { connectedMachines?: boolean; browserExtension?: BrowserExtension } = {},
+  options: {
+    connectedMachines?: boolean;
+    browserExtension?: BrowserExtension;
+    /** Reviewed API integration definitions this deployment can connect here. */
+    integrationDefinitions?: readonly IntegrationDefinition[];
+  } = {},
 ): CapabilityCatalogItem[] {
   const extensionUrl = options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
   const items = [
@@ -2029,6 +2145,9 @@ export function nativeConnectionCapabilityRecommendations(
       }),
     );
   }
+  items.push(
+    ...integrationDefinitionCapabilityRecommendations(options.integrationDefinitions ?? []),
+  );
   return items;
 }
 
