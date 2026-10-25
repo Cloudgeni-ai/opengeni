@@ -38104,17 +38104,59 @@ export async function listSessionEventPage(
             truncatedBy = rows.length >= remainingCount ? "count" : "bytes";
           }
         } else {
-          // Plan the page from bounded metadata before selecting any canonical
-          // payload. row_to_json includes private storage columns omitted by the
-          // public event, so this conservatively bounds ordinary page transfer.
-          // One oversized event is selected alone and remains exact.
-          const metadataRows = await scopedDb
-            .select(sessionEventProjectionMetadataSelect(toolOutputPreview))
-            .from(schema.sessionEvents)
-            .where(and(...filters))
-            .orderBy(ordering)
-            .limit(queryLimit);
-          sourceRowCount = metadataRows.length;
+          // Discover the complete candidate frontier without payloads, then size
+          // only the prefix the byte/count budget can use (plus its overflow row).
+          // Indexing the ordered ID array avoids rescanning an ordered CTE at
+          // every recursion step. Keep the subsequent payload SELECT separate:
+          // this is still metadata planning, not a new page-wide snapshot.
+          const metadataRows = await rawRows<
+            SessionEventProjectionMetadataRow & { sourceRowCount: number }
+          >(
+            scopedDb,
+            sql`with recursive candidates as materialized (
+                select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence}
+                from ${schema.sessionEvents}
+                where ${and(...filters)} order by ${ordering} limit ${queryLimit}
+              ), ordered as materialized (
+                select array_agg(id order by ${
+                  options.authoritativeLatest || direction === "before"
+                    ? sql`sequence desc`
+                    : sql`sequence asc`
+                }) as ids from candidates
+              ), bounded as (
+                select sized.id, sized.sequence,
+                  1 as row_number, sized.bytes as transfer_bytes,
+                  ${bytes + (events.length === 0 ? 0 : 1)}::bigint + sized.bytes as cumulative_bytes
+                from ordered cross join lateral (
+                  select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
+                    (${transferBytesSql})::int as bytes
+                  from ${schema.sessionEvents}
+                  where ${schema.sessionEvents.id} = ordered.ids[1]
+                    and ${schema.sessionEvents.workspaceId} = ${workspaceId}
+                    and ${schema.sessionEvents.sessionId} = ${sessionId}
+                  offset 0
+                ) sized
+                union all
+                select sized.id, sized.sequence,
+                  bounded.row_number + 1, sized.bytes,
+                  bounded.cumulative_bytes + 1 + sized.bytes
+                from bounded cross join ordered
+                cross join lateral (
+                  select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
+                    (${transferBytesSql})::int as bytes
+                  from ${schema.sessionEvents}
+                  where ${schema.sessionEvents.id} = ordered.ids[bounded.row_number + 1]
+                    and ${schema.sessionEvents.workspaceId} = ${workspaceId}
+                    and ${schema.sessionEvents.sessionId} = ${sessionId}
+                  offset 0
+                ) sized
+                where bounded.cumulative_bytes <= ${maxBytes}
+                  and bounded.row_number <= ${requestedLimit - events.length}
+              ) select id, sequence, transfer_bytes as "transferBytes",
+                  (select cardinality(ids) from ordered) as "sourceRowCount"
+                from bounded order by row_number`,
+          );
+          sourceRowCount = Number(metadataRows[0]?.sourceRowCount ?? 0);
           if (metadataRows.length === 0) break;
 
           const exactIds: string[] = [];
@@ -38131,7 +38173,7 @@ export async function listSessionEventPage(
             if (estimatedBytes + separatorBytes + transferBytes > maxBytes) {
               if (events.length === 0 && exactIds.length === 0) {
                 exactIds.push(metadata.id);
-                if (metadataRows.length > 1) {
+                if (sourceRowCount > 1) {
                   hasMore = true;
                   truncatedBy = "bytes";
                 }
@@ -38144,7 +38186,7 @@ export async function listSessionEventPage(
             exactIds.push(metadata.id);
             estimatedBytes += separatorBytes + transferBytes;
           }
-          sourceRowsFullyConsumed = exactIds.length >= metadataRows.length;
+          sourceRowsFullyConsumed = exactIds.length >= sourceRowCount;
 
           if (exactIds.length > 0) {
             rows = await scopedDb
@@ -38372,14 +38414,6 @@ export async function listSessionEventConversationBookkeeping(
       .orderBy(asc(schema.sessionEvents.sequence));
     return rows.map(mapProjectedEvent);
   });
-}
-
-function sessionEventProjectionMetadataSelect(toolOutputPreview = false) {
-  return {
-    id: schema.sessionEvents.id,
-    sequence: schema.sessionEvents.sequence,
-    transferBytes: sql<number>`(${sessionEventTransferBytes(toolOutputPreview)})::int`,
-  } satisfies Record<keyof SessionEventProjectionMetadataRow, unknown>;
 }
 
 /**
