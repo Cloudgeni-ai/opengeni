@@ -9,6 +9,8 @@ test.each(["toString", "constructor", "__proto__", "hasOwnProperty", "valueOf"])
       "?view=page&limit=1&pinsOnly=true",
       "?view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includeTotals=true&includePinned=false",
       "?view=page&limit=4&parentSessionId=null&projection=summary&channelId=null&sortBy=updatedAt&archiveStatus=active&includePinned=false",
+      "?view=page&limit=1&projection=summary&pinsOnly=true&siteConversations=include",
+      "?view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includeTotals=true&includePinned=false&siteConversations=group",
     ]) {
       expect(exactLogoutAllSessionListSearch(search)).toBe(true);
       const params = new URLSearchParams(search);

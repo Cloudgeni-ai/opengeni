@@ -39,8 +39,13 @@ const LOGOUT_ALL_SESSION_LIST_READS: readonly ReadShape[] = [
   // The current global pin section also lists Site conversation pins as rows
   // (#5556).
   {
-    required: { view: ["page"], limit: ["1"], pinsOnly: ["true"], ...SUMMARY },
-    optional: { siteConversations: ["include"] },
+    required: {
+      view: ["page"],
+      limit: ["1"],
+      pinsOnly: ["true"],
+      ...SUMMARY,
+      siteConversations: ["include"],
+    },
   },
   // The current rail root page: totals for the hierarchy, pins read separately.
   // Since #5556 it nests Site conversations under their Site rows.
