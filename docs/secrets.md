@@ -18,7 +18,8 @@ each hosted field keeps encrypted **versions**.
 | Vault owner kind | `user` (shown as **Only me**), `workspace`, `organization`, `task` |
 | Vault source | `opengeni` (hosted), `onepassword`, `host` (in-process embedder), `external` (remote embedder), `protonpass`, `keeper`, `bitwarden` |
 | Vault mode | `read_write`, `read_only` (hosted vaults are always read-write) |
-| Item type | `login`, `api_key`, `note`, `file`, `passkey` |
+| Item type | `login`, `api_key`, `note`, `card`, `identity`, `ssh_key`, `file`, `passkey` |
+| Item category | optional lower-case token such as `database` or `bank_account` ([details](external-vaults.md#item-types)) |
 | Field kind | `text`, `concealed`, `totp`, `file` |
 
 - **Only me** vaults belong to one organization member. No admin can list or
@@ -133,6 +134,15 @@ literally.
   `request_human_input` call asking the person to allow that use (see
   [Approval for each use](#approval-for-each-use)).
 - TOTP codes are computed at dispatch and never stored.
+- An item's main secret has different names in different password managers:
+  `password` (logins, Bitwarden), `credential` (1Password API credentials)
+  and `value` (Opengeni API keys). A reference naming one of the three that
+  finds nothing is looked up again with the other two; if exactly one of
+  them resolves, to a concealed field, the reference uses it. So a reference
+  to `Payments API/credential` keeps working after the item moves to a
+  manager that calls the field `password`. An exact name always wins, an
+  item with two of the others resolves neither, and no other field name is
+  ever substituted.
 
 The grammar, resolver, splicer, generator and TOTP each have one
 implementation: `packages/contracts/src/secret-references.ts`,
@@ -176,6 +186,12 @@ vault name.
 
 - Only hosted vaults can be the target. Saving to Only me needs a signed-in
   human answering.
+- `itemType` may be `login`, `api_key`, `note`, `card`, `identity` or
+  `ssh_key`. An SSH key question takes a pasted private key and saves its
+  public key and fingerprint with it; it offers no Generate button (agents
+  make new key pairs with `secret_save`'s `generateKey`). Card, identity and
+  SSH key fields never offer a generator or password autofill. Files and
+  passkeys are not asked for in a card.
 - Slack, push and email show a link to the card instead of collecting values;
   a value pasted into a Slack thread is never saved as an answer or to a vault,
   though the message itself stays in Slack and in Opengeni's Slack inbox. Voice
@@ -245,6 +261,11 @@ Who is asked and who can change the rules:
   off "every field" or unmarking a field) needs the person signed in to
   Opengeni themselves; anyone else gets `human_auth_required`, so an agent can
   never lift its own approval.
+- The approval answer says what the caller may do: `canChange` (lift marks
+  and revoke freely: the signed-in person) and `canAddMarks` (add marks:
+  anyone with `secrets:write`). The answer to a `PUT` also carries `changed`,
+  whether the marks are now different from before; `false` means the request
+  matched the marks already in force.
 - The secret-use audit row of an approved use lists the approvals it relied on
   (`approvalIds`) and its `destination`.
 
@@ -267,7 +288,7 @@ With the `secrets` capability on, agents get:
 | Tool | Purpose | Needs |
 |---|---|---|
 | `secret_search` | Find or list items by name, website, type or vault, with ready references. The first page lists every reachable vault and its item count; `nextCursor` pages through the rest (up to 1,000 items examined per call). | `secrets:list` |
-| `secret_save` | Create or update an item; fields take a value, a generated password, another reference or a version to restore. | `secrets:write` |
+| `secret_save` | Create or update an item of any type it names (logins, API keys, notes, cards, identities, SSH keys), optionally with a `category`; fields take a value, a generated password, a new SSH key pair (`generateKey`, for an `ssh_key` item's `private key`), another reference or a version to restore. | `secrets:write` |
 | `secret_get` | Reveal a value to the model. Agents do not hold `secrets:read` by default. | `secrets:read` |
 | `secret_move` | Move or copy an item between vaults. | `secrets:write` |
 | `secret_delete` | Archive an item. | `secrets:write` |
@@ -354,10 +375,16 @@ read-write) or create a managed vault with
   own module.
 - Copying between hosted and linked vaults is supported when the destination
   can create the item type. Moving additionally requires recoverable removal
-  at the source. Provider field-history restoration and unsupported file
-  operations are not offered. Provider removal never means permanent deletion.
+  at the source. Provider field-history restoration is not offered, and file
+  fields are written only where the provider stores files. Provider removal
+  never means permanent deletion.
   Moves are not atomic across providers; see the [source-version check and
   recovery guidance](external-vaults.md#moving-and-copying).
+- A connected vault's archived items stay in its mirror, marked archived, and
+  are listed with `includeArchived=true` (`1` and `yes` work too). Which
+  items count as archived is the provider's: shared by everyone in 1Password,
+  per person in Bitwarden (see
+  [Bitwarden and Vaultwarden](external-vaults.md#bitwarden-and-vaultwarden)).
 
 **Host provider (embedders).** Products that embed Opengeni can supply a
 `vaultProvider` implementing `VaultProvider` from `@opengeni/vaults`; link its
@@ -411,6 +438,11 @@ All routes are under `/v1/workspaces/:workspaceId`.
 
 Errors use `{error, message, details?}` with the codes in `VaultErrorCode`
 (`packages/contracts/src/vaults.ts`).
+A writable connected vault that cannot do one particular thing (an item type,
+a file, a one-time password) answers `vault_operation_unsupported` (422) with
+the `operation` in `details`; `vault_read_only` (403) means it takes no writes
+at all. A query the item listing cannot read answers `validation_failed`
+naming each bad parameter in `details.issues`.
 
 ## Migrating from Variable Sets
 

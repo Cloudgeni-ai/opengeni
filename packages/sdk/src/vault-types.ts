@@ -16,7 +16,15 @@ export type VaultSource =
   | "bitwarden";
 export type VaultMode = "read_write" | "read_only";
 export type VaultSyncStatus = "ok" | "syncing" | "error" | "auth_expired" | "rate_limited";
-export type VaultItemType = "login" | "api_key" | "note" | "file" | "passkey";
+export type VaultItemType =
+  | "login"
+  | "api_key"
+  | "note"
+  | "file"
+  | "passkey"
+  | "card"
+  | "identity"
+  | "ssh_key";
 export type VaultFieldKind = "text" | "concealed" | "totp" | "file";
 
 export type VaultProviderOperations = {
@@ -88,6 +96,8 @@ export type VaultItemSummary = {
   id: string;
   vaultId: string;
   type: VaultItemType;
+  /** Provider-specific kind of item, such as "database" or "bank_account"; null for the plain type. */
+  category: string | null;
   name: string;
   websites: string[];
   username: string | null;
@@ -181,6 +191,8 @@ export type VaultFieldInput = {
   kind?: VaultFieldKind | undefined;
   value?: string | undefined;
   generate?: GeneratePasswordOptions | undefined;
+  /** An `ssh_key` item's "private key" only: generate a new key pair. */
+  generateKey?: { algorithm?: "ed25519" | "rsa4096" | undefined } | undefined;
   fromReference?: string | undefined;
   fileBase64?: string | undefined;
   fileName?: string | undefined;
@@ -190,6 +202,7 @@ export type VaultFieldInput = {
 
 export type CreateVaultItemRequest = {
   type: VaultItemType;
+  category?: string | null | undefined;
   name: string;
   websites?: string[] | undefined;
   expiresAt?: string | null | undefined;
@@ -240,8 +253,19 @@ export type VaultItemApproval = {
   /** Field names that need approval on their own. */
   fields: string[];
   grants: SecretUseGrant[];
-  /** The caller may change the marks and revoke approvals (a signed-in person with secrets:write). */
+  /**
+   * The caller may change the marks freely and revoke approvals: a signed-in
+   * person with secrets:write. Others with secrets:write (agents, API keys)
+   * may only add marks; see `canAddMarks`.
+   */
   canChange: boolean;
+  /** The caller may add marks (secrets:write); only `canChange` callers may lift them. */
+  canAddMarks: boolean;
+  /**
+   * Set on the answer to a change: whether the marks are now different from
+   * before it. False when the request matched the marks already in force.
+   */
+  changed?: boolean | undefined;
 };
 
 export type SetVaultItemApprovalRequest = {
@@ -346,6 +370,7 @@ export type VaultErrorCode =
   | "vault_item_name_conflict"
   | "vault_limit_reached"
   | "vault_read_only"
+  | "vault_operation_unsupported"
   | "vault_generation_conflict"
   | "vault_permission_denied"
   | "vault_reveal_requires_human"

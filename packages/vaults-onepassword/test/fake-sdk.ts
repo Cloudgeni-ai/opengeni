@@ -5,6 +5,24 @@ import type {
   SdkItemCreateParams,
   SdkVaultOverview,
 } from "../src/sdk";
+import { sshPublicKeyFromPrivateKey } from "@opengeni/vaults";
+
+/** 1Password derives an SSH key field's public key and fingerprint on save. */
+function withSshDetails(fields: SdkItem["fields"]): SdkItem["fields"] {
+  return fields.map((field) => {
+    if (field.fieldType !== "SshKey") return field;
+    const info = sshPublicKeyFromPrivateKey(field.value);
+    return {
+      ...field,
+      details: {
+        type: "SshKey",
+        content: info
+          ? { publicKey: info.publicKey, fingerprint: info.fingerprint, keyType: "ed25519" }
+          : null,
+      },
+    } as SdkItem["fields"][number];
+  });
+}
 
 // Error shapes as the real SDK throws them (sdk/dist/errors.js + WASM messages).
 export class RateLimitExceededError extends Error {
@@ -108,6 +126,21 @@ export function createFakeOnePasswordSdk(seed: {
     vault.contentVersion += 1;
     vault.activeItemCount = [...vault.items.keys()].filter((id) => !vault.archived.has(id)).length;
   }
+  /** File bytes by file id; seeded files without bytes read as `file:<name>`. */
+  const contents = new Map<string, Uint8Array>();
+  /** A file operation: version-checked like `put`, saved as a new version. */
+  function saveFiles(item: SdkItem, change: (next: SdkItem) => void): SdkItem {
+    const vault = vaultOf(item.vaultId);
+    const current = activeItem(vault, item.id);
+    if (!vault.writable) throw new Error(NO_PERMISSION);
+    if (current.version !== item.version) throw new Error(STALE_VERSION);
+    const next = clone(current);
+    change(next);
+    const saved: SdkItem = { ...next, version: current.version + 1, updatedAt: new Date() };
+    vault.items.set(item.id, saved);
+    bump(vault);
+    return clone(saved);
+  }
 
   const client: OnePasswordSdkClient = {
     vaults: {
@@ -146,11 +179,15 @@ export function createFakeOnePasswordSdk(seed: {
       },
     },
     items: {
-      async list(vaultId) {
+      async list(vaultId, ...filters) {
         record("items.list", vaultId);
         const vault = vaultOf(vaultId);
+        const state = filters.find((filter) => filter.type === "ByState")?.content ?? {
+          active: true,
+          archived: false,
+        };
         return [...vault.items.values()]
-          .filter((item) => !vault.archived.has(item.id))
+          .filter((item) => (vault.archived.has(item.id) ? state.archived : state.active))
           .map((item) => ({
             id: item.id,
             title: item.title,
@@ -158,7 +195,7 @@ export function createFakeOnePasswordSdk(seed: {
             vaultId,
             websites: clone(item.websites),
             updatedAt: item.updatedAt,
-            state: "active",
+            state: vault.archived.has(item.id) ? "archived" : "active",
           }));
       },
       async get(vaultId, itemId) {
@@ -171,9 +208,7 @@ export function createFakeOnePasswordSdk(seed: {
         return {
           individualResponses: itemIds.map((id) => {
             const item = vault.items.get(id);
-            return item && !vault.archived.has(id)
-              ? { content: clone(item) }
-              : { error: { type: "itemNotFound" } };
+            return item ? { content: clone(item) } : { error: { type: "itemNotFound" } };
           }),
         };
       },
@@ -191,16 +226,37 @@ export function createFakeOnePasswordSdk(seed: {
           title: params.title,
           category: params.category,
           vaultId: params.vaultId,
-          fields: clone(params.fields ?? []),
+          fields: withSshDetails(clone(params.fields ?? [])),
           sections: clone(params.sections ?? []),
           notes: params.notes ?? "",
           tags: params.tags ?? [],
           websites: clone(params.websites ?? []),
           version: 1,
-          files: [],
+          files: (params.files ?? []).map((file) => ({
+            attributes: { name: file.name, id: nextId(), size: file.content.byteLength },
+            sectionId: file.sectionId,
+            fieldId: file.fieldId,
+          })),
+          ...(params.document
+            ? {
+                document: {
+                  name: params.document.name,
+                  id: nextId(),
+                  size: params.document.content.byteLength,
+                },
+              }
+            : {}),
           createdAt: new Date(),
           updatedAt: new Date(),
         };
+        for (const file of params.files ?? []) {
+          contents.set(
+            item.files.find((f) => f.fieldId === file.fieldId)!.attributes.id,
+            file.content,
+          );
+        }
+        if (params.document && item.document)
+          contents.set(item.document.id, params.document.content);
         vault.items.set(item.id, item);
         bump(vault);
         return clone(item);
@@ -213,6 +269,7 @@ export function createFakeOnePasswordSdk(seed: {
         if (current.version !== item.version) throw new Error(STALE_VERSION);
         const saved: SdkItem = {
           ...clone(item),
+          fields: withSshDetails(clone(item.fields)),
           version: current.version + 1,
           updatedAt: new Date(),
         };
@@ -240,7 +297,43 @@ export function createFakeOnePasswordSdk(seed: {
         async read(vaultId, itemId, attributes) {
           record("items.files.read", vaultId, itemId);
           activeItem(vaultOf(vaultId), itemId);
-          return new TextEncoder().encode(`file:${attributes.name}`);
+          return contents.get(attributes.id) ?? new TextEncoder().encode(`file:${attributes.name}`);
+        },
+        async attach(item, file) {
+          record("items.files.attach", item.vaultId, item.id);
+          return saveFiles(item, (next) => {
+            if (!next.sections.some((section) => section.id === file.sectionId)) {
+              throw new Error("validation error: file references a missing section");
+            }
+            const id = nextId();
+            contents.set(id, file.content);
+            next.files.push({
+              attributes: { name: file.name, id, size: file.content.byteLength },
+              sectionId: file.sectionId,
+              fieldId: file.fieldId,
+            });
+          });
+        },
+        async delete(item, sectionId, fieldId) {
+          record("items.files.delete", item.vaultId, item.id);
+          return saveFiles(item, (next) => {
+            const before = next.files.length;
+            next.files = next.files.filter(
+              (file) => !(file.sectionId === sectionId && file.fieldId === fieldId),
+            );
+            if (next.files.length === before) throw new Error(NOT_FOUND);
+          });
+        },
+        async replaceDocument(item, document) {
+          record("items.files.replaceDocument", item.vaultId, item.id);
+          return saveFiles(item, (next) => {
+            if (next.category !== "Document") {
+              throw new Error("validation error: item is not a Document");
+            }
+            const id = nextId();
+            contents.set(id, document.content);
+            next.document = { name: document.name, id, size: document.content.byteLength };
+          });
         },
       },
     },

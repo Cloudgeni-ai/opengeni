@@ -112,8 +112,8 @@ part of their shared folder.
 | List vaults | yes | Shared folders; `writeAccess` is `"unknown"` because KSM does not report it. |
 | List items, read values | yes | Values read live, cached per attempt; `forceRefresh` bypasses the cache. |
 | Read files | yes | Size-checked, downloaded over HTTPS and decrypted in memory, at most 256 KiB. |
-| Create | login, note | In an existing shared folder. API key, file and passkey items are refused before any request. |
-| Update | yes | Field patch with the record revision as the version; a stale version is `provider_conflict`. Standard fields are emptied, custom fields removed. Structured fields (cards, bank accounts, key pairs, security questions) cannot be patched. |
+| Create | login, note, api_key, card, identity, ssh_key | In an existing shared folder, as the record types below. File and passkey items are refused before any request. |
+| Update | yes | Field patch with the record revision as the version; a stale version is `provider_conflict`. Standard fields are emptied, custom fields removed. Structured fields with one value are patched part by part. A record keeps its record type; a write that needs another one is `provider_conflict`. |
 | TOTP | create and update | `oneTimeCode` fields. |
 | Archive, delete | **no** | KSM can only delete permanently, which the adapter does not expose. |
 | Create vault, write files | no | |
@@ -131,8 +131,35 @@ website over 2,048 characters) make the listing
 `provider_inventory_incomplete` instead of being mirrored cut down.
 
 Field ids: `f:<type>` (standard fields), `c:<label or type>` (custom
-fields), `@notes` and `@file:<fileUid>`, with `#n` on repeated names.
+fields), `@notes` and `@file:<fileUid>`, with `#n` on repeated names and
+`.<property>` for one part of a structured field (`f:paymentCard.cardNumber`,
+`f:keyPair.privateKey`). A structured field with one value (payment card,
+key pair, name, address, host, bank account, phone, security question) is
+read as its parts under Opengeni's standard names ("number", "security
+code", "expiry month", "private key", "first name", "postal code"); one
+with several values stays one JSON value.
 Records report their revision as the version and no update time.
+
+### Record types
+
+| Keeper record type | Opengeni type / category |
+| --- | --- |
+| `login`, `general`, `pamUser` | login, login/general, login/pam_user |
+| `encryptedNotes` | note |
+| `bankCard` | card |
+| `contact`, `address` | identity, identity/address |
+| `sshKeys` | ssh_key |
+| `serverCredentials`, `databaseCredentials`, `softwareLicense`, `wifiCredentials`, `pam*` | api_key with that category |
+| `bankAccount`, `membership`, `passport`, `driverLicense`, `healthInsurance`, `birthCertificate`, `ssnCard` | note with that category |
+| `file`, `photo` | file, file/photo |
+| any other | note, with the record type as the category |
+
+Opengeni creates `login`, `encryptedNotes`, `bankCard`, `contact`,
+`address`, `sshKeys`, `serverCredentials` and `databaseCredentials`
+records. Any other type and category (an API key, a passport) is stored as
+its type's own record type (an API key as `encryptedNotes`) with a custom
+`opengeni.type` field naming the type and category, which Opengeni hides on
+read, so the item reads back as written.
 
 ## Testing
 

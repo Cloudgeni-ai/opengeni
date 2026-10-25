@@ -18010,7 +18010,7 @@
         "$.fieldKind": "enum?=[\"\\\"concealed\\\"\",\"\\\"text\\\"\",\"\\\"totp\\\"\"]",
         "$.generate": "ref(GeneratePasswordSpec)? null",
         "$.item": "string!",
-        "$.itemType": "enum?=[\"\\\"api_key\\\"\",\"\\\"login\\\"\",\"\\\"note\\\"\"]",
+        "$.itemType": "enum?=[\"\\\"api_key\\\"\",\"\\\"card\\\"\",\"\\\"identity\\\"\",\"\\\"login\\\"\",\"\\\"note\\\"\",\"\\\"ssh_key\\\"\"]",
         "$.looksLike": "string? null",
         "$.pattern": "string? null",
         "$.saveTo": "enum?=[\"\\\"task\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
@@ -30324,6 +30324,7 @@
         "$.aliases": "array!",
         "$.aliases[]": "string",
         "$.archivedAt": "string! null",
+        "$.category": "string! null",
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string! null",
         "$.expiresAt": "string! null",
@@ -30352,7 +30353,9 @@
       ],
       "shape": {
         "$": "object",
+        "$.canAddMarks": "boolean!",
         "$.canChange": "boolean!",
+        "$.changed": "boolean?",
         "$.fields": "array!",
         "$.fields[]": "string",
         "$.grants": "array!",
@@ -30397,6 +30400,7 @@
       "shape": {
         "$": "object",
         "$.archivedAt": "string! null",
+        "$.category": "string! null",
         "$.expiresAt": "string! null",
         "$.hasPasskey": "boolean!",
         "$.hasTotp": "boolean!",
@@ -30417,7 +30421,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"api_key\\\"\",\"\\\"file\\\"\",\"\\\"login\\\"\",\"\\\"note\\\"\",\"\\\"passkey\\\"\"]"
+        "$": "enum=[\"\\\"api_key\\\"\",\"\\\"card\\\"\",\"\\\"file\\\"\",\"\\\"identity\\\"\",\"\\\"login\\\"\",\"\\\"note\\\"\",\"\\\"passkey\\\"\",\"\\\"ssh_key\\\"\"]"
       }
     },
     "VaultMode": {

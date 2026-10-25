@@ -3,6 +3,7 @@ import {
   generatePassword,
   isValidTotpInput,
   secretNameKey,
+  VAULT_LIMITS,
   type VaultFieldInput,
   type VaultFieldKind,
   type VaultItemType,
@@ -34,6 +35,7 @@ import {
 } from "./mapping";
 import { vaultErrorCodeForProvider } from "./provider-registry";
 import { syncLinkedProviderVault, type ProviderVaultSyncResult } from "./provider-sync";
+import { prepareTypedFields, standardFieldKind } from "./typed-fields";
 
 /**
  * Edits of items in a read-write connected vault (OP-3, external vaults §10):
@@ -57,8 +59,10 @@ export interface ProviderFieldChange {
   kind?: VaultFieldKind | undefined;
   value?: string | undefined;
   generate?: VaultFieldInput["generate"] | undefined;
+  generateKey?: VaultFieldInput["generateKey"] | undefined;
   fromReference?: string | undefined;
   fileBase64?: string | undefined;
+  fileName?: string | undefined;
   restoreVersion?: number | undefined;
   remove?: true | undefined;
 }
@@ -66,6 +70,8 @@ export interface ProviderFieldChange {
 export interface ProviderItemChange {
   name?: string | undefined;
   type?: VaultItemType | undefined;
+  /** A category token; null clears it, undefined keeps the item's own. */
+  category?: string | null | undefined;
   websites?: string[] | undefined;
   fields?: readonly ProviderFieldChange[] | undefined;
 }
@@ -80,7 +86,11 @@ export interface ProviderWriteDeps {
   budget?: ProviderCallBudget;
 }
 
-/** An operation a connected vault may not allow; reported in `vault_read_only` details. */
+/**
+ * An operation a connected vault may not allow, reported in the refusal's
+ * `details.operation`: `vault_operation_unsupported` when the vault takes
+ * other writes, `vault_read_only` when it takes none.
+ */
 export type ProviderWriteOperation =
   | "createItem"
   | "updateItem"
@@ -109,8 +119,11 @@ export type ProviderWriteOutcome =
 
 const TEXT_FIELD_NAMES = ["username", "user", "email", "login", "account"];
 
-function defaultKind(name: string): VaultFieldKind {
-  return TEXT_FIELD_NAMES.includes(secretNameKey(name)) ? "text" : "concealed";
+function defaultKind(type: VaultItemType, name: string): VaultFieldKind {
+  return (
+    standardFieldKind(type, name) ??
+    (TEXT_FIELD_NAMES.includes(secretNameKey(name)) ? "text" : "concealed")
+  );
 }
 
 /** A connected vault the caller may change items in. */
@@ -159,13 +172,33 @@ export function effectiveProviderOperations(
   return operations ? providerOperationsForMode(operations, vault.mode) : NO_PROVIDER_OPERATIONS;
 }
 
+/** True when the vault takes at least one kind of write. */
+function allowsAnyWrite(operations: VaultProviderOperations): boolean {
+  return (
+    operations.createItemTypes.length > 0 ||
+    operations.updateItem ||
+    operations.removeField ||
+    operations.archiveItem
+  );
+}
+
+/**
+ * Refuses one operation. A vault that takes no writes at all is read-only;
+ * a writable vault that cannot do this one thing reports
+ * `vault_operation_unsupported`, so callers do not mistake it for read-only.
+ */
 function refuse(
   vault: VaultRow,
+  operations: VaultProviderOperations | null,
   operation: ProviderWriteOperation,
   message: string,
   details: Record<string, unknown> = {},
 ): never {
-  throw new VaultError("vault_read_only", message, { vaultId: vault.id, operation, ...details });
+  const code =
+    operations === null || allowsAnyWrite(operations)
+      ? "vault_operation_unsupported"
+      : "vault_read_only";
+  throw new VaultError(code, message, { vaultId: vault.id, operation, ...details });
 }
 
 /** Refuses a provider operation Opengeni never performs, with the reason. */
@@ -178,13 +211,14 @@ export function refuseProviderOperation(
     restoreItem: `Items archived in ${vault.name} are restored in the provider itself; the restored item appears after the next sync.`,
     restoreFieldHistory: `${vault.name} keeps field history in the provider; restore an earlier value there.`,
   } as const;
-  return refuse(vault, operation, messages[operation]);
+  return refuse(vault, null, operation, messages[operation]);
 }
 
 type PlannedField = {
   input: ProviderFieldChange;
   base: ProviderWriteField;
   kind: VaultFieldKind;
+  current: VaultFieldRow | undefined;
 };
 
 /** Checks every field change against the vault's operations, before any value exists. */
@@ -192,6 +226,7 @@ function planFieldWrites(
   vault: VaultRow,
   operations: VaultProviderOperations,
   creating: boolean,
+  type: VaultItemType,
   fields: readonly ProviderFieldChange[],
   existing: readonly VaultFieldRow[],
 ): PlannedField[] {
@@ -201,7 +236,7 @@ function planFieldWrites(
         (input.fieldId !== undefined && field.id === input.fieldId) ||
         secretNameKey(field.name) === secretNameKey(input.name),
     );
-    const kind: VaultFieldKind = input.kind ?? current?.kind ?? defaultKind(input.name);
+    const kind: VaultFieldKind = input.kind ?? current?.kind ?? defaultKind(type, input.name);
     const base: ProviderWriteField = {
       ...(current?.providerFieldRef ? { externalFieldId: current.providerFieldRef } : {}),
       name: input.name,
@@ -211,39 +246,86 @@ function planFieldWrites(
       return refuseProviderOperation(vault, "restoreFieldHistory");
     }
     if (input.fileBase64 !== undefined || kind === "file" || current?.kind === "file") {
-      throw new VaultError("provider_unavailable", "files in connected vaults are read-only here", {
-        field: input.name,
-        vaultId: vault.id,
-        operation: "writeFiles",
-      });
+      if (!operations.writeFiles) {
+        refuse(vault, operations, "writeFiles", `${vault.name} cannot store files here`, {
+          field: input.name,
+        });
+      }
+      if (input.remove) {
+        if (!operations.removeField) {
+          refuse(
+            vault,
+            operations,
+            "removeField",
+            `${vault.name} does not allow removing fields here`,
+            {
+              field: input.name,
+            },
+          );
+        }
+        return { input, base: { ...base, kind: "file" }, kind: "file", current };
+      }
+      if (input.fileBase64 === undefined || (input.kind !== undefined && input.kind !== "file")) {
+        throw new VaultError(
+          "invalid_secret_name",
+          `${input.name} is a file field in ${vault.name}; send its content as fileBase64 to change it`,
+          { field: input.name, vaultId: vault.id },
+        );
+      }
+      return { input, base: { ...base, kind: "file" }, kind: "file", current };
     }
     const totp = kind === "totp" || current?.kind === "totp";
     if (input.remove) {
       if (!operations.removeField) {
-        refuse(vault, "removeField", `${vault.name} does not allow removing fields here`, {
-          field: input.name,
-        });
+        refuse(
+          vault,
+          operations,
+          "removeField",
+          `${vault.name} does not allow removing fields here`,
+          {
+            field: input.name,
+          },
+        );
       }
       if (totp && !operations.updateTotp) {
-        refuse(vault, "updateTotp", `${vault.name} does not allow changing one-time passwords`, {
-          field: input.name,
-        });
+        refuse(
+          vault,
+          operations,
+          "updateTotp",
+          `${vault.name} does not allow changing one-time passwords`,
+          { field: input.name },
+        );
       }
-      return { input, base, kind };
+      return { input, base, kind, current };
     }
     if (totp) {
       const allowed = creating ? operations.createTotp : operations.updateTotp;
       if (!allowed) {
         refuse(
           vault,
+          operations,
           creating ? "createTotp" : "updateTotp",
           `${vault.name} does not allow ${creating ? "saving" : "changing"} one-time passwords`,
           { field: input.name },
         );
       }
     }
-    return { input, base, kind };
+    return { input, base, kind, current };
   });
+}
+
+/** Decodes a file field's content, within the file size limit. */
+function fileContent(input: ProviderFieldChange, current: VaultFieldRow | undefined) {
+  const bytes = new Uint8Array(Buffer.from(input.fileBase64 ?? "", "base64"));
+  const limit = VAULT_LIMITS.fileValueMaxBytes;
+  if (bytes.byteLength > limit) {
+    throw new VaultError("secret_value_too_large", `${input.name} is larger than ${limit} bytes`, {
+      field: input.name,
+      limit,
+    });
+  }
+  const name = input.fileName ?? current?.fileName ?? input.name;
+  return { name, bytes };
 }
 
 async function providerFieldValues(
@@ -252,9 +334,13 @@ async function providerFieldValues(
   generated: string[],
 ): Promise<ProviderWriteField[]> {
   const writes: ProviderWriteField[] = [];
-  for (const { input, base, kind } of planned) {
+  for (const { input, base, kind, current } of planned) {
     if (input.remove) {
       writes.push({ ...base, remove: true });
+      continue;
+    }
+    if (kind === "file") {
+      writes.push({ ...base, file: fileContent(input, current) });
       continue;
     }
     let value: string;
@@ -380,6 +466,7 @@ export async function writeProviderVaultItemOutcome(
       itemId: string;
       name: string;
       type: VaultItemType;
+      category?: string | null | undefined;
       websites: string[];
       fields: VaultFieldRow[];
       expectedGeneration?: number | undefined;
@@ -399,11 +486,12 @@ export async function writeProviderVaultItemOutcome(
   const operations = effectiveProviderOperations(vault, provider);
   if (existing) {
     if (!operations.updateItem) {
-      refuse(vault, "updateItem", `${vault.name} does not allow changing items here`);
+      refuse(vault, operations, "updateItem", `${vault.name} does not allow changing items here`);
     }
   } else if (!operations.createItemTypes.includes(type)) {
     refuse(
       vault,
+      operations,
       "createItem",
       operations.createItemTypes.length === 0
         ? `${vault.name} does not allow creating items here`
@@ -434,17 +522,25 @@ export async function writeProviderVaultItemOutcome(
     vault,
     operations,
     existing === null,
-    change.fields ?? [],
+    type,
+    await prepareTypedFields(
+      type,
+      change.fields ?? [],
+      deps.resolveReference,
+      input.generated ?? [],
+    ),
     existing?.fields ?? [],
   );
   const fields = await providerFieldValues(planned, deps.resolveReference, input.generated ?? []);
   const name = change.name ?? existing?.name ?? "";
+  const category = change.category !== undefined ? change.category : (existing?.category ?? null);
   let written;
   try {
     written = await provider.writeItem(mutationContext(deps, vault), vault.providerVaultRef ?? "", {
       ...(externalItemId ? { externalItemId, expectedVersion: expectedVersion ?? null } : {}),
       name,
       type,
+      ...(category ? { category } : {}),
       websites: change.websites ?? existing?.websites ?? [],
       fields,
     });
@@ -510,17 +606,11 @@ export async function assertProviderVaultAccepts(
   if (item.type === "passkey") {
     throw new VaultError("vault_permission_denied", "passkeys live only in workspace vaults");
   }
-  if (item.fields.some((field) => field.kind === "file")) {
-    throw new VaultError(
-      "provider_unavailable",
-      "files in connected vaults are read-only here; copy the item into a workspace vault instead",
-      { vaultId: vault.id, operation: "writeFiles" },
-    );
-  }
   const operations = effectiveProviderOperations(vault, await providerFor(deps, vault));
   if (!operations.createItemTypes.includes(item.type)) {
     refuse(
       vault,
+      operations,
       "createItem",
       operations.createItemTypes.length === 0
         ? `${vault.name} does not allow creating items here`
@@ -528,8 +618,21 @@ export async function assertProviderVaultAccepts(
       { itemType: item.type, allowedItemTypes: operations.createItemTypes },
     );
   }
+  if (item.fields.some((field) => field.kind === "file") && !operations.writeFiles) {
+    refuse(
+      vault,
+      operations,
+      "writeFiles",
+      `${vault.name} cannot store files here; copy the item into a workspace vault instead`,
+    );
+  }
   if (item.fields.some((field) => field.kind === "totp") && !operations.createTotp) {
-    refuse(vault, "createTotp", `${vault.name} does not allow saving one-time passwords`);
+    refuse(
+      vault,
+      operations,
+      "createTotp",
+      `${vault.name} does not allow saving one-time passwords`,
+    );
   }
 }
 
@@ -542,10 +645,12 @@ export async function assertProviderVaultReleases(
   vault: VaultRow,
 ): Promise<"archive" | "trash"> {
   assertProviderVaultWritable(vault);
-  const archiveKind = providerArchiveKind(vault, await providerFor(deps, vault));
+  const provider = await providerFor(deps, vault);
+  const archiveKind = providerArchiveKind(vault, provider);
   if (archiveKind === null) {
     refuse(
       vault,
+      effectiveProviderOperations(vault, provider),
       "archiveItem",
       `${vault.name} cannot archive the original recoverably, so the item cannot be moved out of it; copy it instead`,
     );
@@ -585,7 +690,8 @@ export async function observeProviderItemVersion(
       vault.providerVaultRef ?? "",
     );
     const item = inventory.items.find((meta) => meta.externalItemId === input.providerItemRef);
-    if (!item) return { listed: false, consistent: inventory.consistent };
+    // An item the connected account archived is not one a move may copy from.
+    if (!item || item.archivedAt) return { listed: false, consistent: inventory.consistent };
     return {
       listed: true,
       version: typeof item.version === "string" && item.version.length > 0 ? item.version : null,
@@ -618,7 +724,12 @@ export async function archiveProviderVaultItem(
   const provider = await providerFor(deps, vault);
   const archiveKind = providerArchiveKind(vault, provider);
   if (archiveKind === null) {
-    refuse(vault, "archiveItem", `${vault.name} does not allow archiving items here`);
+    refuse(
+      vault,
+      effectiveProviderOperations(vault, provider),
+      "archiveItem",
+      `${vault.name} does not allow archiving items here`,
+    );
   }
   try {
     await provider.archiveItem(

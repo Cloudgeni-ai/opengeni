@@ -51,6 +51,7 @@ import { ItemApprovalSection } from "./item-approval";
 import {
   hostOf,
   ITEM_TYPE_LABEL,
+  itemCategoryLabel,
   vaultErrorText,
 } from "@opengeni/react/app/components/secrets/vault-model";
 import { ExpiryBadge, ItemTile } from "./vault-parts";
@@ -544,6 +545,9 @@ export function ItemPage({
         }
         meta={[
           <span key="type">{ITEM_TYPE_LABEL[item.type]}</span>,
+          ...(item.category
+            ? [<span key="category">{itemCategoryLabel(item.category)}</span>]
+            : []),
           <span key="vault">in {vault.name}</span>,
           <span key="updated">
             updated <RelativeTime date={item.updatedAt} inSentence />

@@ -86,6 +86,11 @@ async function approvalOf(
     listSecretApprovalRules(deps.db, scope, [item.id]),
     listSecretUseGrantsForItem(deps.db, scope, { itemId: item.id }),
   ]);
+  const canWrite = hasPermission(
+    actor.grant.permissions,
+    "secrets:write",
+    actor.grant.permissionMode,
+  );
   return {
     item: rules.some((rule) => rule.fieldKey === ""),
     fields: rules
@@ -93,10 +98,14 @@ async function approvalOf(
       .map((rule) => fieldNameFor(item, rule.fieldKey))
       .sort((left, right) => left.localeCompare(right)),
     grants: grants.map((row) => grantView(row, item)),
-    canChange:
-      isPerson(actor) &&
-      hasPermission(actor.grant.permissions, "secrets:write", actor.grant.permissionMode),
+    canChange: isPerson(actor) && canWrite,
+    canAddMarks: canWrite,
   };
+}
+
+/** The marks as one comparable value: the item mark plus sorted field keys. */
+function markKey(rules: ReadonlyArray<{ fieldKey: string }>): string {
+  return JSON.stringify([...new Set(rules.map((rule) => rule.fieldKey))].sort());
 }
 
 export async function getVaultItemApproval(
@@ -125,10 +134,10 @@ export async function setVaultItemApproval(
       fields: unknown,
     });
   }
+  const scope = { accountId: actor.grant.accountId, workspaceId };
+  const current = await listSecretApprovalRules(deps.db, scope, [item.id]);
   if (!isPerson(actor)) {
     // Adding marks only makes use stricter; lifting one needs the person.
-    const scope = { accountId: actor.grant.accountId, workspaceId };
-    const current = await listSecretApprovalRules(deps.db, scope, [item.id]);
     const requested = new Set(fieldKeys);
     const lifts = current.some((rule) =>
       rule.fieldKey === "" ? !request.item : !requested.has(rule.fieldKey),
@@ -146,7 +155,12 @@ export async function setVaultItemApproval(
       subjectId: actor.grant.subjectId,
     },
   );
-  return await approvalOf(deps, actor, workspaceId, item);
+  const approval = await approvalOf(deps, actor, workspaceId, item);
+  const after = [...(approval.item ? [""] : []), ...fieldKeys];
+  return {
+    ...approval,
+    changed: markKey(current) !== markKey(after.map((fieldKey) => ({ fieldKey }))),
+  };
 }
 
 export async function revokeVaultItemGrant(

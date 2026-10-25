@@ -10,6 +10,7 @@ export {
   type ProviderFieldValue,
   type ProviderItemMeta,
   type ProviderVault,
+  type ProviderWriteField,
   type ProviderWriteItem,
   type VaultProvider,
   type VaultProviderCapabilities,

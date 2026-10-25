@@ -369,6 +369,28 @@ describe("organization MCP server", () => {
     expect(described.input[0]!.schema).toMatchObject({ type: "object" });
   });
 
+  test("vault actions describe their bodies and queries", async () => {
+    const { call } = await connect(person(full));
+    const describeAction = async (id: string) =>
+      (await call("opengeni_action_describe", { id })).value as {
+        input: Array<{ name: string; in: string; schema: Record<string, any> | null }>;
+      };
+    const update = await describeAction("PATCH /v1/workspaces/:workspaceId/vaults/:vaultId");
+    expect(update.input[0]).toMatchObject({ name: "UpdateVaultRequest", in: "body" });
+    expect(update.input[0]!.schema!.required).toContain("expectedGeneration");
+    const link = await describeAction("POST /v1/workspaces/:workspaceId/vaults/link");
+    expect(link.input[0]).toMatchObject({ name: "LinkProviderVaultRequest", in: "body" });
+    expect(link.input[0]!.schema).toMatchObject({ type: "object" });
+    const items = await describeAction("GET /v1/workspaces/:workspaceId/vaults/:vaultId/items");
+    expect(items.input[0]).toMatchObject({ name: "ListVaultItemsQuery", in: "query" });
+    expect(Object.keys(items.input[0]!.schema!.properties)).toContain("includeArchived");
+    const approval = await describeAction(
+      "PUT /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
+    );
+    expect(approval.input[0]).toMatchObject({ name: "SetVaultItemApprovalRequest", in: "body" });
+    expect(approval.input[0]!.schema).toMatchObject({ type: "object" });
+  });
+
   test("publication fixes describe both required bodies and invoke the route contract", async () => {
     const id = "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes";
     const { client, call, seen } = await connect(person(full), async (request) => {

@@ -11,6 +11,8 @@ function refused(what: string): never {
 
 function checkWrite(operations: VaultProviderOperations, item: ProviderWriteItem) {
   const totp = item.fields.some((field) => field.kind === "totp" && !field.remove);
+  if (item.fields.some((field) => field.kind === "file" || field.file) && !operations.writeFiles)
+    refused("Writing files");
   if (item.externalItemId !== undefined) {
     if (!operations.updateItem) refused("Updating items");
     if (totp && !operations.updateTotp) refused("Changing one-time password seeds");

@@ -51,7 +51,7 @@ export const KEEPER_VALUE_CACHE_MS = VAULT_LIMITS.providerValueCacheMs;
 
 /** What KSM 17.6.0 can do for an application (see README for the evidence). */
 export const KEEPER_OPERATIONS: VaultProviderOperations = {
-  createItemTypes: ["login", "note"],
+  createItemTypes: ["login", "note", "api_key", "card", "identity", "ssh_key"],
   updateItem: true,
   removeField: true,
   archiveItem: false,

@@ -235,3 +235,50 @@ test("an ordinary failure can be corrected and saved", async () => {
   expect(navigate).toHaveBeenCalledTimes(1);
   expect(host.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
 });
+
+test("a new SSH key can ask Opengeni to generate its key pair", async () => {
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () =>
+    root.render(
+      <SecretsRoute
+        workspaceId={state.workspaceId}
+        vaultId={vault.id}
+        view="new-item"
+        type="ssh_key"
+      />,
+    ),
+  );
+  const name = host.querySelector<HTMLInputElement>('input:not([type="hidden"])')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      name,
+      "Deploy key",
+    );
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const generate = [...host.querySelectorAll("button")].find(
+    (button) => button.textContent === "Generate key pair",
+  )!;
+  expect(generate).toBeDefined();
+  await act(async () => generate.click());
+  expect(generate.getAttribute("aria-pressed")).toBe("true");
+  await act(async () => {
+    host
+      .querySelector("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(createItem).toHaveBeenCalledTimes(1);
+  const request = (createItem.mock.calls[0] as unknown[])[1] as {
+    type: string;
+    fields: Array<Record<string, unknown>>;
+  };
+  expect(request.type).toBe("ssh_key");
+  const privateKey = request.fields.find((field) => field.name === "private key");
+  expect(privateKey).toMatchObject({ generateKey: { algorithm: "ed25519" } });
+  expect(privateKey!.value).toBeUndefined();
+  // The public key and fingerprint are derived, never sent from the form.
+  expect(request.fields.some((field) => field.name === "fingerprint" && field.value)).toBe(false);
+});
