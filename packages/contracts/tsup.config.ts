@@ -71,6 +71,7 @@ export default defineConfig({
     "src/video-generation.ts",
     "src/xai-provider-account-authority.ts",
     "src/event-triggers.ts",
+    "src/automation-templates.ts",
   ],
   format: ["esm"],
   target: "es2022",

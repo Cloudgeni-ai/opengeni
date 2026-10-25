@@ -158,6 +158,7 @@ export * from "./work-claims";
 export * from "./product-analytics";
 export * from "./desktop-app";
 export * from "./event-triggers";
+export * from "./automation-templates";
 import {
   ScheduledOccurrenceEvents,
   ScheduledTaskEvents,

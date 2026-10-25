@@ -134,10 +134,11 @@ export type CreateEventSourceInput = {
 };
 
 /**
- * Create a source. Webhook sources are always new and get a routed URL. App
- * and MCP sources are one per installation, mailbox or connection: creating
- * one that exists returns it unchanged (`created: false`), except that a
- * GitHub source's routes are recomputed either way, which repairs lost ones.
+ * Create a source. Webhook sources are always new and get a routed URL. App,
+ * MCP and "This workspace" sources are one per installation, mailbox,
+ * connection or person: creating one that exists returns it unchanged
+ * (`created: false`), except that a GitHub source's routes are recomputed
+ * either way, which repairs lost ones.
  */
 export async function createEventSource(
   db: Database,
@@ -183,7 +184,9 @@ export async function createEventSource(
                       ? eq(schema.eventSources.connectionId, input.connectionId)
                       : isNull(schema.eventSources.connectionId),
                   )
-                : eq(schema.eventSources.externalKey, input.externalKey ?? ""),
+                : input.kind === "workspace"
+                  ? eq(schema.eventSources.ownerSubjectId, input.ownerSubjectId ?? "")
+                  : eq(schema.eventSources.externalKey, input.externalKey ?? ""),
             ),
           )
           .limit(1);
@@ -195,9 +198,9 @@ export async function createEventSource(
       }
       // A generic webhook's URL names its own route, and a GitHub source is
       // routed by its workspace's installations. Slack callbacks arrive
-      // already resolved to their workspace, Gmail is read rather than
-      // delivered, and an MCP subscription adds its webhook route when it
-      // subscribes, so those get none here.
+      // already resolved to their workspace, Gmail and "This workspace" are
+      // read rather than delivered, and an MCP subscription adds its webhook
+      // route when it subscribes, so those get none here.
       let routeId: string | null = null;
       if (input.kind === "github") {
         await syncGitHubEventRoutes(tx, inserted.workspaceId, input.routeSecret ?? null);
@@ -228,9 +231,10 @@ export async function createEventSource(
 /**
  * Sources whose events Opengeni reads from the app's change history instead
  * of receiving them: each has a feed (migration 0935) the feed pump reads.
+ * "This workspace" reads Opengeni's own recording events the same way.
  */
 export function eventSourceKindHasFeed(kind: EventSourceKind): boolean {
-  return kind === "gmail";
+  return kind === "gmail" || kind === "workspace";
 }
 
 /** Have the feed pump read these sources' feeds now. */

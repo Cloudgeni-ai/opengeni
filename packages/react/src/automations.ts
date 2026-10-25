@@ -1,11 +1,12 @@
 // @opengeni/react/automations: automations for any host. `AutomationsPanel`
-// is the drop-in: a workspace's or a chat's automations, with create, edit,
-// on and off, Run now and recent runs, read and written through the host's
-// client. The parts it is built from stay available for a host's own pages:
-// the form and its "When" (schedule and event triggers), the trigger editor,
-// the event source tile and words, the delivery log and event rows, and the
-// pure models behind them. Apart from the panel nothing here fetches on its
-// own or assumes a router.
+// is the drop-in: a workspace's or a chat's automations, with create (from
+// scratch or a template), edit, on and off, Run now and recent runs, read and
+// written through the host's client. The parts it is built from stay
+// available for a host's own pages: the form and its "When" (schedule and
+// event triggers), the trigger editor, templates, the event source tile and
+// words, the delivery log and event rows, and the pure models behind them.
+// Apart from the panel and `useEventSourceStandIns` nothing here fetches on
+// its own or assumes a router.
 import type { EventDelivery } from "@opengeni/sdk";
 import { createOpenGeniText } from "./messages/runtime";
 import type { RowListColumn } from "./ui/list-row";
@@ -20,9 +21,37 @@ import { eventCommonFields as commonFields } from "./components/automations/even
 
 export {
   AutomationsPanel,
-  type AutomationEventServer,
   type AutomationsPanelProps,
 } from "./components/automations/automations-panel";
+export {
+  useEventSourceStandIns,
+  type AutomationEventServer,
+  type EventSourceStandIns,
+  type EventSourceStandInsOptions,
+} from "./components/automations/event-source-stand-ins";
+export {
+  automationDraftFromTemplate,
+  automationTemplateCadence,
+  automationTemplateFromTask,
+  automationTemplateOfSaved,
+  automationTemplateSchedule,
+  automationTemplateSourceChoice,
+  automationTemplateSourceId,
+  automationTemplatesFor,
+  automationTemplateWhenWords,
+  builtinAutomationTemplates,
+  eventSourceFitsTemplate,
+  withTemplateSources,
+  type AutomationTemplate,
+} from "./components/automations/automation-template-model";
+export {
+  AutomationTemplateDialog,
+  AutomationTemplateList,
+  AutomationTemplateTile,
+  type AutomationTemplateDialogProps,
+  type AutomationTemplateListProps,
+  type AutomationTemplateTileProps,
+} from "./components/automations/automation-template-parts";
 export { AutomationForm, type AutomationFormProps } from "./components/automations/automation-form";
 export {
   AUTOMATION_FREQUENCIES,

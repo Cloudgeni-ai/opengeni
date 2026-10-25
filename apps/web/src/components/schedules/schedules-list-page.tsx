@@ -6,17 +6,9 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import {
-  GitPullRequestIcon,
-  LockIcon,
-  MessageSquareCodeIcon,
-  PlusIcon,
-  RadioTowerIcon,
-  SunriseIcon,
-  TagsIcon,
-  TrendingUpIcon,
-  ZapIcon,
-} from "lucide-react";
+import { LayoutTemplateIcon, LockIcon, PlusIcon, RadioTowerIcon, ZapIcon } from "lucide-react";
+
+import type { AutomationTemplate } from "@opengeni/react/automations";
 
 import { Button } from "@opengeni/react/ui/button";
 import {
@@ -57,7 +49,6 @@ import {
   scheduleTemplates,
   sortSchedulesForList,
   templateCadenceLabel,
-  type ScheduleTemplate,
 } from "./schedule-model";
 import {
   LastRunValue,
@@ -79,6 +70,7 @@ import { scheduledTaskAttentionText } from "./schedule-access-notices";
 import { PrivateScheduleSummaries } from "./private-schedule-summaries";
 import { useScheduleActions } from "./use-schedule-actions";
 import { useEventSources, useEventTriggersEnabled } from "./use-event-sources";
+import { templateIcon } from "./use-automation-templates";
 import {
   CreateWithOpenGeniButton,
   useCanCreateScheduleWithAgent,
@@ -125,14 +117,6 @@ async function mapWithConcurrency<T, R>(
   await Promise.all(workers);
   return results;
 }
-
-const TEMPLATE_ICONS: Record<string, ReactNode> = {
-  "morning-brief": <SunriseIcon />,
-  "dependency-pr": <GitPullRequestIcon />,
-  "cost-check": <TrendingUpIcon />,
-  "pr-review": <MessageSquareCodeIcon />,
-  "issue-triage": <TagsIcon />,
-};
 
 /**
  * True on phone widths. The list drops its fact columns there, so the switch
@@ -365,8 +349,19 @@ export function SchedulesListPage({
             : "Recurring agent work in this workspace."
         }
         actions={
-          (canCreate && !empty && viewState !== "loading") || eventTriggers ? (
+          canCreate || eventTriggers ? (
             <>
+              {canCreate && !targetSessionId ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={go.templates}
+                  className="pointer-coarse:h-11"
+                >
+                  <LayoutTemplateIcon aria-hidden="true" />
+                  Templates
+                </Button>
+              ) : null}
               {eventTriggers && !targetSessionId ? (
                 <Button
                   type="button"
@@ -647,7 +642,7 @@ function SchedulesEmpty({
   canCreate: boolean;
   filtered: boolean;
   /** The templates this deployment can create. */
-  templates: readonly ScheduleTemplate[];
+  templates: readonly AutomationTemplate[];
   eventTriggers: boolean;
   now: Date;
   onNew: () => void;
@@ -705,7 +700,7 @@ function SchedulesEmpty({
             {templates.map((template) => (
               <EmptyStateTemplate
                 key={template.id}
-                icon={TEMPLATE_ICONS[template.id]}
+                icon={templateIcon(template)}
                 title={template.name}
                 description={template.description}
                 meta={templateCadenceLabel(template, now)}

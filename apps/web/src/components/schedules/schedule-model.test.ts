@@ -137,15 +137,23 @@ describe("schedule names", () => {
 
 describe("schedule templates", () => {
   test("event templates are offered only where event triggers run", () => {
-    expect(scheduleTemplates(false).some((template) => template.event)).toBe(false);
+    expect(scheduleTemplates(false).some((template) => template.triggers.length > 0)).toBe(false);
     expect(templateById("pr-review", false)).toBeUndefined();
-    expect(templateById("pr-review", true)?.event?.choice).toBe("github");
+    expect(templateById("pr-review", true)?.triggers[0]?.source).toEqual({ kind: "github" });
+    expect(templateById("meeting-notes", true)?.triggers[0]?.source).toEqual({
+      kind: "workspace",
+    });
   });
 
   test("the pull request review runs on events only and skips drafts until they are ready", () => {
     const template = templateById("pr-review")!;
-    const draft = draftFromTemplate(template, { includeOpenGeniTool: false }, "Europe/Oslo");
+    const draft = draftFromTemplate(
+      template,
+      { includeOpenGeniTool: false },
+      { timeZone: "Europe/Oslo" },
+    );
     expect(draft.cadence).toBeNull();
+    expect(draft.prompt).toBe(template.instructions);
     const sourceId = "00000000-0000-4000-8000-000000000001";
     const request = createRequestFromDraft(
       {
@@ -165,6 +173,26 @@ describe("schedule templates", () => {
         conditions: [{ field: "data.pull_request.draft", op: "equals", value: false }],
       }),
     ]);
+  });
+
+  test("a scheduled template runs at its time in the viewer's time zone", () => {
+    const draft = draftFromTemplate(
+      templateById("morning-brief")!,
+      { includeOpenGeniTool: false },
+      { timeZone: "Europe/Oslo" },
+    );
+    expect(draft.cadence?.timeZone).toBe("Europe/Oslo");
+    expect(draft.events.triggers).toEqual([]);
+    const request = createRequestFromDraft(draft, { now: NOW, learningScope: "personal" });
+    expect(request.schedule).toEqual(
+      expect.objectContaining({
+        type: "calendar",
+        hour: 8,
+        minute: 0,
+        timeZone: "Europe/Oslo",
+        daysOfWeek: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+      }),
+    );
   });
 });
 
