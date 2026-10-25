@@ -635,6 +635,13 @@
     --color-switch-thumb: var(--og-color-switch-thumb);
     --color-session-update: light-dark(#0f766e, #5ad4c5);
   }
+.og-root {
+    font-family: var(--og-font-sans);
+    font-feature-settings: var(--og-font-features);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    color: var(--og-color-fg);
+  }
 .og-root :where([hidden]:not([hidden="until-found"])) {
     display: none !important;
   }
@@ -689,11 +696,87 @@
 .og-root, .og-root :where(*, ::before, ::after) {
     box-sizing: border-box;
   }
+.og-root :where(*) {
+    scrollbar-width: thin;
+    scrollbar-color: var(--og-color-border-strong) transparent;
+  }
+@supports selector(::-webkit-scrollbar) {
+    :where(:root[data-og-scrollbars="classic"]) .og-root :where(*) {
+      scrollbar-width: auto;
+      scrollbar-color: auto;
+    }
+    :where(:root[data-og-scrollbars="classic"]) .og-root :where(*)::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+      background: transparent;
+    }
+    :where(:root[data-og-scrollbars="classic"]) .og-root :where(*)::-webkit-scrollbar-thumb {
+      border: 3px solid transparent;
+      border-radius: 999px;
+      background: var(--og-color-border-strong) padding-box;
+    }
+    :where(:root[data-og-scrollbars="classic"]) .og-root :where(*)::-webkit-scrollbar-thumb:hover {
+      border-width: 2px;
+      background-color: var(--og-color-fg-subtle);
+    }
+    :where(:root[data-og-scrollbars="classic"]) .og-root :where(*)::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+  }
 *:where(.og-root),:where(.og-root) * {
     border-color: var(--color-border);
   }
+:where(.og-root)::selection,:where(.og-root) ::selection {
+    background: var(--color-brand);
+    @supports (color: color-mix(in lab, red, red)) {
+      background: color-mix(in oklch, var(--color-brand) 45%, transparent);
+    }
+    color: var(--color-fg);
+  }
+*:where(.og-root),:where(.og-root) * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border-strong) transparent;
+  }
+@supports selector(::-webkit-scrollbar) {
+    :where(.og-root):where(:root[data-og-scrollbars="classic"]) *,:where(.og-root) :where(:root[data-og-scrollbars="classic"]) * {
+      scrollbar-width: auto;
+      scrollbar-color: auto;
+    }
+    :where(.og-root):where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar,:where(.og-root) :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+      background: transparent;
+    }
+    :where(.og-root):where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb,:where(.og-root) :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb {
+      border: 3px solid transparent;
+      border-radius: 999px;
+      background: var(--color-border-strong) padding-box;
+    }
+    :where(.og-root):where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb:hover,:where(.og-root) :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb:hover {
+      border-width: 2px;
+      background-color: var(--color-fg-subtle);
+    }
+    :where(.og-root):where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-corner,:where(.og-root) :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+  }
 :where(.og-root):where( button, a, input, textarea, [role="button"], [tabindex]:not([tabindex="-1"]) ):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control):not([role^="menuitem"]),:where(.og-root) :where( button, a, input, textarea, [role="button"], [tabindex]:not([tabindex="-1"]) ):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control):not([role^="menuitem"]) {
     border-radius: var(--radius-sm);
+  }
+:where(.og-root):where([aria-disabled="true"]),:where(.og-root) :where([aria-disabled="true"]) {
+    cursor: not-allowed;
+  }
+:where(.og-root):where(input, textarea),:where(.og-root) :where(input, textarea) {
+    cursor: text;
+  }
+:where(.og-root):where(.og-shimmer),:where(.og-root) :where(.og-shimmer) {
+    display: inline-block;
+  }
+:where(.og-root).og-rail-glow,:where(.og-root) .og-rail-glow {
+    background: radial-gradient(ellipse 130% 45% at 0 0, var(--og-glow-teal), transparent 85%), radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach), transparent 85%), var(--og-color-bg);
+  }
+:where(.og-root).og-page-glow,:where(.og-root) .og-page-glow {
+    background: radial-gradient(ellipse 42% 70% at 0 20%, var(--og-glow-teal), transparent 95%), radial-gradient(ellipse 42% 65% at 0 100%, var(--og-glow-peach), transparent 95%), var(--og-color-canvas);
   }
 :where(.og-root).\@container\/access,:where(.og-root) .\@container\/access {
     container-type: inline-size;
@@ -11717,12 +11800,6 @@
       min-width: calc(var(--spacing) * 11);
     }
   }
-:where(.og-root).og-rail-glow,:where(.og-root) .og-rail-glow {
-    background: radial-gradient(ellipse 130% 45% at 0 0, var(--og-glow-teal), transparent 85%), radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach), transparent 85%), var(--og-color-bg);
-  }
-:where(.og-root).og-page-glow,:where(.og-root) .og-page-glow {
-    background: radial-gradient(ellipse 42% 70% at 0 20%, var(--og-glow-teal), transparent 95%), radial-gradient(ellipse 42% 65% at 0 100%, var(--og-glow-peach), transparent 95%), var(--og-color-canvas);
-  }
 /*! tailwindcss v4.2.4 | MIT License | https://tailwindcss.com */
 :where(.og-root) {
   color-scheme: var(--_og-color-scheme, dark);
@@ -12314,43 +12391,9 @@
   color: transparent;
   animation: og-shimmer 2.2s linear infinite;
 }
-:where(.og-root) {
-  font-family: var(--og-font-sans);
-  font-feature-settings: var(--og-font-features);
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-  color: var(--og-color-fg);
-}
 :is(.og-root.og-root, .og-root .og-root) :where( .text-og-xs, .text-og-sm, .text-og-base, .text-og-md, .text-og-control, .text-og-menu, .text-og-composer, .text-og-composer-wide ), :is( .og-root.text-og-xs, .og-root.text-og-sm, .og-root.text-og-base, .og-root.text-og-md, .og-root.text-og-control, .og-root.text-og-menu, .og-root.text-og-composer, .og-root.text-og-composer-wide ) {
   font-size: var(--og-component-font-size);
   line-height: var(--tw-leading, var(--og-component-line-height));
-}
-:where(.og-root) :where(*) {
-  scrollbar-width: thin;
-  scrollbar-color: var(--og-color-border-strong) transparent;
-}
-@supports selector(::-webkit-scrollbar) {
-  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*) {
-    scrollbar-width: auto;
-    scrollbar-color: auto;
-  }
-  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-    background: transparent;
-  }
-  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-thumb {
-    border: 3px solid transparent;
-    border-radius: 999px;
-    background: var(--og-color-border-strong) padding-box;
-  }
-  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-thumb:hover {
-    border-width: 2px;
-    background-color: var(--og-color-fg-subtle);
-  }
-  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-corner {
-    background: transparent;
-  }
 }
 :where(.og-root)[data-radix-popper-content-wrapper]:has( > [data-machine-state-popover][data-state="closed"] ),:where(.og-root) [data-radix-popper-content-wrapper]:has( > [data-machine-state-popover][data-state="closed"] ) {
   visibility: hidden;
@@ -12633,9 +12676,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-:where(.og-root):where(.og-shimmer),:where(.og-root) :where(.og-shimmer) {
-  display: inline-block;
 }
 :where(.og-root).og-shimmer,:where(.og-root) .og-shimmer {
   --_og-shimmer-base: var(--og-color-fg-subtle);
@@ -12946,40 +12986,6 @@
     background: Canvas;
   }
 }
-:where(.og-root)::selection,:where(.og-root) ::selection {
-  background: var(--color-brand);
-  @supports (color: color-mix(in lab, red, red)) {
-    background: color-mix(in oklch, var(--color-brand) 45%, transparent);
-  }
-  color: var(--color-fg);
-}
-*:where(.og-root),:where(.og-root) * {
-  scrollbar-width: thin;
-  scrollbar-color: var(--color-border-strong) transparent;
-}
-@supports selector(::-webkit-scrollbar) {
-  :where(.og-root):where(:root[data-og-scrollbars="classic"]) *,:where(.og-root) :where(:root[data-og-scrollbars="classic"]) * {
-    scrollbar-width: auto;
-    scrollbar-color: auto;
-  }
-  :where(.og-root):where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar,:where(.og-root) :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-    background: transparent;
-  }
-  :where(.og-root):where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb,:where(.og-root) :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb {
-    border: 3px solid transparent;
-    border-radius: 999px;
-    background: var(--color-border-strong) padding-box;
-  }
-  :where(.og-root):where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb:hover,:where(.og-root) :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb:hover {
-    border-width: 2px;
-    background-color: var(--color-fg-subtle);
-  }
-  :where(.og-root):where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-corner,:where(.og-root) :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-corner {
-    background: transparent;
-  }
-}
 :where(.og-root):where( button, a, input, textarea, [role="button"], [tabindex]:not([tabindex="-1"]) ):focus-visible:not(:where(.og-root) textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control):not([role^="menuitem"]),:where(.og-root) :where( button, a, input, textarea, [role="button"], [tabindex]:not([tabindex="-1"]) ):focus-visible:not(:where(.og-root) textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control):not([role^="menuitem"]) {
   outline: 2px solid var(--color-ring);
   @supports (color: color-mix(in lab, red, red)) {
@@ -12997,11 +13003,8 @@
 :where(.og-root):where(button, a[href], [role="button"], [role="menuitem"], [role="option"], summary):not(:disabled, [aria-disabled="true"]),:where(.og-root) :where(button, a[href], [role="button"], [role="menuitem"], [role="option"], summary):not(:disabled, [aria-disabled="true"]) {
   cursor: pointer;
 }
-:where(.og-root):where(button, [role="button"], [role="menuitem"], [role="option"]):disabled,:where(.og-root) :where(button, [role="button"], [role="menuitem"], [role="option"]):disabled,:where(.og-root) :where([aria-disabled="true"]),:where(.og-root)  :where([aria-disabled="true"]) {
+:where(.og-root):where(button, [role="button"], [role="menuitem"], [role="option"]):disabled,:where(.og-root) :where(button, [role="button"], [role="menuitem"], [role="option"]):disabled {
   cursor: not-allowed;
-}
-:where(.og-root):where(input, textarea),:where(.og-root) :where(input, textarea) {
-  cursor: text;
 }
 :where(.og-root).toaster [data-sonner-toast] > *,:where(.og-root) .toaster [data-sonner-toast] > * {
   transition: none;

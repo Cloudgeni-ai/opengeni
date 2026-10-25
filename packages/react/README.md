@@ -551,21 +551,34 @@ follows the host's own `dark` variant (Tailwind's default is the operating
 system's color scheme), not `data-og-theme`.
 
 The original Tailwind v4 bridge remains available for hosts that intentionally
-want Opengeni utilities compiled into their own Tailwind entry:
+want Opengeni utilities compiled into their own Tailwind entry. It renders the
+components the same as `compiled.css` when the entry imports the same
+stylesheets:
 
 ```css
 @import "tailwindcss";
 @import "@opengeni/react/styles.css";
 @import "@opengeni/react/responsive.css";
+@import "@opengeni/react/app.css";
 @source "../node_modules/@opengeni/react/src";
 ```
 
 `@source` lets the host compiler discover utilities used inside the components.
+`styles.css` maps the `--og-*` tokens into Tailwind utility names and carries
+the scoped base for `.og-root` subtrees, layered so call-site utilities win.
 `responsive.css` is the small opt-in layout layer for
 `responsiveBasis="container"`; omit it when every composer keeps the historical
-viewport basis. `compiled.css` already contains that layer. Do not import both
-`compiled.css` and `styles.css`. Consuming only the tokens?
-Import `@opengeni/react/tokens.css` and use the `--og-*` variables directly.
+viewport basis. `app.css` is the session app's design system (its token bridge,
+base rules, glows, markdown and motion): `SessionApp` needs it, and without it
+the app renders without its design system. Unlike `compiled.css`, which scopes
+it to `.og-root`, the bridge applies its base rules to the whole page: subtle
+scrollbars, the selection colour, the keyboard focus ring, pointer cursors and
+reduced motion, plus a `dark` variant that follows a `.dark` class. `compiled.css`
+already contains both layers. Stylesheets the components import themselves
+(connect and setup cards, This computer) reach the page through the host's
+bundler in either path. Do not import both `compiled.css` and `styles.css`.
+Consuming only the tokens? Import `@opengeni/react/tokens.css` and use the
+`--og-*` variables directly.
 
 ### Product-compatible theming and density
 

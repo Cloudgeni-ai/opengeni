@@ -120,11 +120,14 @@ Tailwind v4 hosts may instead keep the additive source bridge:
 @import "tailwindcss";
 @import "@opengeni/react/styles.css";
 @import "@opengeni/react/responsive.css";
+@import "@opengeni/react/app.css";
 @source "../node_modules/@opengeni/react/src";
 ```
 
 The small `responsive.css` layer is needed only when the source-bridge host uses
-`responsiveBasis="container"`; `compiled.css` already contains it. Import one
+`responsiveBasis="container"`, and `app.css` is the session app's design system
+(`SessionApp` needs it; in this path its base rules apply to the whole page);
+`compiled.css` already contains both. Import one
 styling path, not both. Hosts consuming only
 `@opengeni/react/session` need no CSS; that headless subpath remains CSS-free.
 For token-only use, import `@opengeni/react/tokens.css` directly.
