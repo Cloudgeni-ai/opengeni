@@ -192,6 +192,62 @@ describe("normalizeCdpAccessibilityTree", () => {
       expect.arrayContaining(["frame-a", "frame-b"]),
     );
   });
+
+  test("keeps refs of nodes without a DOM node when Chromium rebuilds the tree", () => {
+    // A rebuilt tree gives CSS generated text a new negative id; DOM-backed
+    // nodes keep their DOM node ids.
+    const tree = (generated: [string, string]): CdpAxNode[] => [
+      {
+        nodeId: "1",
+        ignored: false,
+        role: { value: "RootWebArea" },
+        name: { value: "Files" },
+        backendDOMNodeId: 1,
+        childIds: ["4"],
+      },
+      {
+        nodeId: "4",
+        parentId: "1",
+        ignored: false,
+        role: { value: "paragraph" },
+        backendDOMNodeId: 4,
+        childIds: [generated[0], "5", generated[1]],
+      },
+      {
+        nodeId: generated[0],
+        parentId: "4",
+        ignored: false,
+        role: { value: "StaticText" },
+        name: { value: "Note: " },
+      },
+      {
+        nodeId: "5",
+        parentId: "4",
+        ignored: false,
+        role: { value: "StaticText" },
+        name: { value: "Body" },
+        backendDOMNodeId: 5,
+      },
+      {
+        nodeId: generated[1],
+        parentId: "4",
+        ignored: false,
+        role: { value: "StaticText" },
+        name: { value: " (required)" },
+      },
+    ];
+    const refs = (nodes: CdpAxNode[]) =>
+      normalizeCdpAccessibilityTree({
+        controllerGeneration: "controller-1",
+        targetId: "target-1",
+        documentGeneration: "document-1",
+        nodes: namespaceCdpAccessibilityFrame("frame-1", nodes),
+      }).entries.map((entry) => `${entry.name}=${entry.ref}`);
+    const first = refs(tree(["-1000000008", "-1000000009"]));
+    expect(refs(tree(["-1000000025", "-1000000026"]))).toEqual(first);
+    expect(new Set(first.map((entry) => entry.split("=")[1])).size).toBe(first.length);
+    expect(first.filter((entry) => /=a[0-9a-f]{8}$/.test(entry))).toHaveLength(2);
+  });
 });
 
 function fixtureNodes(): CdpAxNode[] {

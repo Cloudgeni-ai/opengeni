@@ -207,6 +207,48 @@ const NAVIGATION_COMMIT_TIMEOUT_MS = BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS;
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
+/** Pages whose last accessibility read had at most this many nodes count as
+ * cheap to rebuild (about 25 ms for a rebuilt read of 1,000 nodes). */
+export const ACCESSIBILITY_CHEAP_REBUILD_NODES = 1_000;
+/** How often a polling read on a cheap page rebuilds the tree. */
+export const ACCESSIBILITY_REBUILD_INTERVAL_MS = 1_000;
+
+/** Why the driver reads a tab's accessibility tree: for an outline the model
+ * sees, for a locator or wait ("read", which may be a poll), right after a
+ * locator or wait first missed in an action ("miss"), or for the last look
+ * before reporting that a locator found nothing. */
+export type AccessibilityRead = "outline" | "read" | "miss" | "final";
+
+/**
+ * Whether to rebuild Chromium's accessibility tree before a read (see
+ * rebuildAccessibility for the staleness it repairs). A rebuild makes Chromium
+ * build the whole tree again; on large pages (mail, consoles, long documents)
+ * that costs hundreds of milliseconds and renderer CPU per action, which every
+ * user would pay for a rare pattern. So only the look before a failure always
+ * rebuilds: a locator never reports
+ * "not found", and a wait never times out, from a stale tree. Routine reads
+ * rebuild only on cheap pages: every outline, the first read of each call or
+ * batch action, and polls about once a second. A tab not read yet rebuilds
+ * once. Larger pages also rebuild once when an action's locator or wait first
+ * misses, so a stale tree costs one rebuild there rather than the whole wait.
+ * The cost is judged by the node count of the tab's last read rather
+ * than by timing a rebuild: a count does not swing with host load, and every
+ * read refreshes it, so a page that grows or shrinks is re-judged at once.
+ */
+export function accessibilityRebuildWanted(input: {
+  read: AccessibilityRead;
+  lastNodeCount: number | null;
+  firstReadOfCall: boolean;
+  msSinceRebuild: number;
+}): boolean {
+  if (input.read === "final" || input.lastNodeCount === null) return true;
+  if (input.lastNodeCount > ACCESSIBILITY_CHEAP_REBUILD_NODES) return input.read === "miss";
+  return (
+    input.read === "outline" ||
+    input.firstReadOfCall ||
+    input.msSinceRebuild >= ACCESSIBILITY_REBUILD_INTERVAL_MS
+  );
+}
 type BrowserPermissionAction = Extract<BrowserAction, { type: "permission" }>;
 const CDP_PERMISSION_NAMES: Record<BrowserPermissionAction["permission"], string> = {
   geolocation: "geolocation",
@@ -400,6 +442,12 @@ type TargetState = {
   documentGeneration: string;
   frameGeneration: string;
   accessibility: CdpAccessibilitySnapshot | null;
+  /** When Chromium's accessibility tree for this tab was last rebuilt, how
+   * many nodes its last read had, and whether the next read is the first of a
+   * call or batch action (see accessibilityRebuildWanted). */
+  accessibilityRebuiltAt: number;
+  accessibilityNodeCount: number | null;
+  accessibilityRebuildDue: boolean;
   dialog: BrowserDialog | null;
   /** Hit-target guards a JavaScript dialog kept from being read back. Page
    * scripts are paused under the dialog, so they are removed once it closes. */
@@ -1998,6 +2046,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
         state.locatorFollowsNavigation =
           command.action.type === "batch" && !command.action.fenceEachAction && actionIndex > 0;
+        state.accessibilityRebuildDue = true;
         const effectsBeforeAction = state.actionEffectCount;
         try {
           if (action.type === "handle_dialog") {
@@ -2809,6 +2858,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const result = state.tail.then(async () => {
       this.assertCurrentTargetState(state);
       state.nodeRoute = null;
+      state.accessibilityRebuildDue = true;
       try {
         return await operation(state, info);
       } finally {
@@ -2945,6 +2995,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         frame.id,
       ),
       accessibility: null,
+      accessibilityRebuiltAt: 0,
+      accessibilityNodeCount: null,
+      accessibilityRebuildDue: true,
       dialog: null,
       diagnostics: {
         consoleErrorCount: 0,
@@ -3253,6 +3306,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     pageFrames: readonly MainFrame[],
     pageNodes: readonly CdpAxNode[],
+    rebuild: boolean,
   ): Promise<CdpAxNode[]> {
     const connection = await this.ensureConnection();
     const known = [...pageNodes];
@@ -3285,6 +3339,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               node.backendDOMNodeId === owner.backendNodeId,
           );
           if (!ownerNode || typeof ownerNode.nodeId !== "string") continue;
+          if (rebuild) await this.rebuildAccessibility(oopif.sessionId);
           const nodes = await this.collectAccessibilityFrames(oopif.sessionId, frames);
           const ids = new Set(nodes.map((node) => node.nodeId));
           const origin = frameOrigin(frames[0]?.url);
@@ -3701,7 +3756,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         ? state.accessibility
         : state.dialog
           ? emptyAccessibilitySnapshot()
-          : await this.refreshAccessibility(state);
+          : await this.refreshAccessibility(state, "outline");
     const focused = accessibility.focusedRef
       ? accessibility.entriesByRef.get(accessibility.focusedRef)
       : null;
@@ -3799,12 +3854,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return result.result?.value === true;
   }
 
-  private async refreshAccessibility(state: TargetState): Promise<CdpAccessibilitySnapshot> {
+  /**
+   * Read the tab's accessibility tree, first rebuilding Chromium's tree when
+   * accessibilityRebuildWanted says this read should.
+   */
+  private async refreshAccessibility(
+    state: TargetState,
+    read: AccessibilityRead = "read",
+  ): Promise<CdpAccessibilitySnapshot> {
+    const rebuilding =
+      this.engine !== "lightpanda" &&
+      accessibilityRebuildWanted({
+        read,
+        lastNodeCount: state.accessibilityNodeCount,
+        firstReadOfCall: state.accessibilityRebuildDue,
+        msSinceRebuild: Date.now() - state.accessibilityRebuiltAt,
+      });
     for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
       const before = flattenFrameTree(await this.frameTree(state.sessionId));
+      if (rebuilding) await this.rebuildAccessibility(state.sessionId);
+      state.accessibilityRebuildDue = false;
       const nodes = await this.collectAccessibilityFrames(state.sessionId, before);
       if (state.oopifs.size > 0)
-        nodes.push(...(await this.oopifAccessibility(state, before, nodes)));
+        nodes.push(...(await this.oopifAccessibility(state, before, nodes, rebuilding)));
       const after = flattenFrameTree(await this.frameTree(state.sessionId));
       if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
         continue;
@@ -3817,9 +3889,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       });
       this.assertCurrentTargetState(state);
       state.accessibility = accessibility;
+      state.accessibilityNodeCount = nodes.length;
+      if (rebuilding) state.accessibilityRebuiltAt = Date.now();
       return accessibility;
     }
     throw new Error("browser frame tree did not settle for a bounded accessibility observation");
+  }
+
+  /**
+   * Chromium updates its accessibility tree incrementally and can miss a
+   * change: content assigned to a shadow-root slot after that slot was laid
+   * out stays out of the tree (or is reported as not rendered) while it is
+   * on screen, so a custom context menu can be visible yet absent. Restarting
+   * the domain makes the next read build the tree from the current DOM and
+   * layout, at some cost on large pages, so refreshAccessibility rebuilds it
+   * only for the reads that matter. DOM-backed node ids are DOM node ids, so
+   * refs survive the rebuild (see normalizeCdpAccessibilityTree for the
+   * others).
+   */
+  private async rebuildAccessibility(sessionId: string): Promise<void> {
+    if (this.engine === "lightpanda") return;
+    const connection = await this.ensureConnection();
+    await connection.send("Accessibility.disable", {}, { sessionId });
+    await connection.send("Accessibility.enable", {}, { sessionId });
   }
 
   private async collectAccessibilityFrames(
@@ -5050,19 +5142,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       : { document: state.documentGeneration, frame: state.frameGeneration };
     let pause = 25;
     let entry: CdpAccessibilityEntry;
+    let finalAttempt = false;
+    let missed = false;
+    let read: AccessibilityRead = "read";
     for (;;) {
       let found: CdpAccessibilityEntry | null = null;
+      const purpose: AccessibilityRead = finalAttempt ? "final" : read;
+      read = "read";
       try {
-        found = await this.resolveLocator(state, locator);
+        found = await this.resolveLocator(state, locator, purpose);
       } catch (error) {
-        if (
-          locator.kind === "ref" ||
-          !(
-            error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found"
-          ) ||
-          Date.now() >= deadline
-        ) {
-          throw error;
+        const notFound =
+          error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found";
+        if (locator.kind === "ref" || !notFound || finalAttempt) throw error;
+        // Polls may reuse Chromium's tree; "not found" is only reported from
+        // a freshly built one, and the first miss looks again at once.
+        if (!missed) {
+          missed = true;
+          read = "miss";
+          continue;
+        }
+        if (Date.now() >= deadline) {
+          finalAttempt = true;
+          continue;
         }
       }
       if (
@@ -5178,11 +5280,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async resolveLocator(
     state: TargetState,
     locator: BrowserLocator,
+    read: AccessibilityRead = "read",
   ): Promise<CdpAccessibilityEntry> {
     // Each resolution decides where this node's DOM and runtime calls go:
     // the page session, or the session of the cross-origin frame holding it.
     state.nodeRoute = null;
-    const entry = await this.resolveLocatorInPage(state, locator);
+    const entry = await this.resolveLocatorInPage(state, locator, read);
     state.nodeRoute = this.oopifForFrame(state, entry.frameId);
     return entry;
   }
@@ -5190,6 +5293,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async resolveLocatorInPage(
     state: TargetState,
     locator: BrowserLocator,
+    read: AccessibilityRead = "read",
   ): Promise<CdpAccessibilityEntry> {
     await this.refreshFrame(state);
     if (locator.kind === "css" || locator.kind === "test_id" || locator.kind === "placeholder") {
@@ -5206,7 +5310,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (partial) return partial;
       }
     }
-    const accessibility = await this.refreshAccessibility(state);
+    const accessibility = await this.refreshAccessibility(state, read);
     if (locator.kind === "ref") {
       const entry = accessibility.entriesByRef.get(locator.ref);
       if (!entry || entry.backendDOMNodeId === null) {
@@ -5223,7 +5327,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // name is the requested text, that is the element the caller named.
     const unique =
       uniqueEntries(matches) ??
-      (needle !== undefined && !(locator.kind === "role" && locator.exact)
+      (needle !== undefined && !locator.exact
         ? uniqueEntries(matches.filter((entry) => sameAccessibleName(entry.name, needle)))
         : null);
     if (!unique) {
@@ -5272,13 +5376,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       targetId: state.targetId,
       documentGeneration: state.documentGeneration,
     }).entriesByRef.get(previous.ref);
-    if (!current || current.backendDOMNodeId !== previous.backendDOMNodeId) {
-      throw new InteractionDefiniteDriverError(
-        "locator_not_found",
-        "browser element reference is stale or unavailable",
-      );
-    }
-    return current;
+    // Chromium's incremental tree can report a visible node as not rendered.
+    // Without this proof, the rebuilt full tree decides whether the ref holds.
+    return current && current.backendDOMNodeId === previous.backendDOMNodeId ? current : null;
   }
 
   private async uniqueDomMatch(state: TargetState, selector: string): Promise<number> {
@@ -5344,8 +5444,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async locatorCandidates(
     state: TargetState,
     locator: BrowserLocator,
+    read: AccessibilityRead,
   ): Promise<CdpAccessibilityEntry[]> {
-    if (locator.kind === "ref") return [await this.resolveLocatorInPage(state, locator)];
+    if (locator.kind === "ref") return [await this.resolveLocatorInPage(state, locator, read)];
     await this.refreshFrame(state);
     if (locator.kind === "css" || locator.kind === "test_id" || locator.kind === "placeholder") {
       const nodeIds = await this.domMatchNodeIds(state, domLocatorSelector(locator));
@@ -5355,7 +5456,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       return entries;
     }
-    const accessibility = await this.refreshAccessibility(state);
+    const accessibility = await this.refreshAccessibility(state, read);
     const byBackend = new Map<number, CdpAccessibilityEntry>();
     for (const entry of accessibilityLocatorMatches(accessibility.entries, locator)) {
       if (entry.backendDOMNodeId !== null && !byBackend.has(entry.backendDOMNodeId)) {
@@ -6565,7 +6666,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     const timeoutMs = action.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS;
     const deadline = Date.now() + timeoutMs;
+    let pollMs = 0;
+    let lookedFinal = false;
+    let locatorPolls = 0;
     while (Date.now() < deadline) {
+      const pollStartedAt = Date.now();
       if (action.condition === "load") {
         // An explicit load wait means the load event: images and other
         // subresources finished, unlike navigation's own interactive wait.
@@ -6592,8 +6697,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           return;
         }
       } else if (action.locator) {
-        const visible = await this.locatorVisible(state, action.locator);
+        // Polls may reuse Chromium's tree; the one after the first miss and
+        // the one expected to be last before the deadline look at a freshly
+        // built one, once each.
+        const last: boolean = !lookedFinal && pollStartedAt + pollMs + 50 >= deadline;
+        const visible = await this.locatorVisible(
+          state,
+          action.locator,
+          last ? "final" : locatorPolls === 1 ? "miss" : "read",
+        );
         if (action.condition === "visible" ? visible : !visible) return;
+        lookedFinal ||= last;
+        locatorPolls += 1;
+        pollMs = Date.now() - pollStartedAt;
       } else {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -6601,6 +6717,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
       }
       await delay(50);
+    }
+    if (
+      action.locator &&
+      !lookedFinal &&
+      (action.condition === "visible" || action.condition === "hidden")
+    ) {
+      // A poll ran longer than expected and the deadline passed first: the
+      // timeout is still only reported from a freshly built tree.
+      const visible = await this.locatorVisible(state, action.locator, "final");
+      if (action.condition === "visible" ? visible : !visible) return;
     }
     // Some live pages never go quiet: a long poll or a request the page keeps
     // open is indistinguishable from a slow fetch until it ends. Network idle
@@ -6625,10 +6751,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return value === "interactive" || value === "complete";
   }
 
-  private async locatorVisible(state: TargetState, locator: BrowserLocator): Promise<boolean> {
+  private async locatorVisible(
+    state: TargetState,
+    locator: BrowserLocator,
+    read: AccessibilityRead = "read",
+  ): Promise<boolean> {
     let candidates: CdpAccessibilityEntry[];
     try {
-      candidates = await this.locatorCandidates(state, locator);
+      candidates = await this.locatorCandidates(state, locator, read);
     } catch (error) {
       if (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found") {
         return false;
@@ -7632,7 +7762,9 @@ function accessibilityLocatorMatches(
     (entry) =>
       entry.backendDOMNodeId !== null &&
       entry.role === "text" &&
-      (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase()),
+      (locator.exact
+        ? sameAccessibleName(entry.name, locator.text)
+        : (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase())),
   );
 }
 

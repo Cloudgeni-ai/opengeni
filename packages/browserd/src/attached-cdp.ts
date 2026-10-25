@@ -1427,6 +1427,7 @@ function nestedSessionId(sessionId: string): string | undefined {
 // fence. Unknown methods are conservative: a late queued command must never
 // run underneath a replacement attachment to the same tab.
 const READ_ONLY_TAB_METHODS = new Set([
+  "Accessibility.disable",
   "Accessibility.enable",
   "Accessibility.getFullAXTree",
   "Accessibility.getPartialAXTree",

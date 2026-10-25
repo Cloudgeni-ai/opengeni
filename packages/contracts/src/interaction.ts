@@ -2155,8 +2155,22 @@ export const BrowserLocator = /* @__PURE__ */ defineSchema(() =>
         exact: primitives.optionalBoolean,
       })
       .strict(),
-    z.object({ kind: z.literal("label"), text: z.string().min(1).max(8_192) }).strict(),
-    z.object({ kind: z.literal("text"), text: z.string().min(1).max(8_192) }).strict(),
+    // exact: the whole accessible name, ignoring case and spacing, as for
+    // role. A label is always matched on its whole name.
+    z
+      .object({
+        kind: z.literal("label"),
+        text: z.string().min(1).max(8_192),
+        exact: primitives.optionalBoolean,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("text"),
+        text: z.string().min(1).max(8_192),
+        exact: primitives.optionalBoolean,
+      })
+      .strict(),
     z
       .object({
         kind: z.literal("placeholder"),
