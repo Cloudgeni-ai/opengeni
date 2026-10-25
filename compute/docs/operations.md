@@ -312,9 +312,10 @@ installs three units:
   and fails only if still short), no transparent huge pages,
   the software watchdog (3 s, `nowayout`) where the machine has no
   hardware one, and no suspend;
-- `compute-guard.service`, started once and never restarted: it stops
-  every VM when the host's lease runs out, and the watchdog resets the
-  machine if the guard itself ends;
+- `compute-guard.service`, never restarted on failure: it stops every VM
+  when the host's lease runs out, and the watchdog resets the machine if
+  the guard itself ends. An upgrade hands it over to the new release's
+  guard (below);
 - `compute-host.service`, the agent, which checks before every start that
   the mounted state volume is the recorded one and that its certificate,
   Firecracker, kernel and base image are there (`check-host`), and runs
@@ -853,8 +854,13 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   `--config`, the installed
   configuration stays):
   it installs the release beside the old ones, points
-  `/opt/compute/current` at it and restarts the agent alone; the guard is
-  never restarted. Old releases stay under `/opt/compute/releases`;
+  `/opt/compute/current` at it and restarts the agent; VMs keep running.
+  A guard running from another release is handed over to this one's:
+  stopping it closes the watchdog, which stays armed, and the new guard
+  reopens it within milliseconds and goes on from what the lease file and
+  the freezer show (the watchdog resets the machine if it does not within
+  its 3 s). Without that, a fix to the guard would reach a host only at
+  its next boot. Old releases stay under `/opt/compute/releases`;
   remove one once no pager runs from it (`fuser
   /opt/compute/releases/<version>/compute-host`). On GCP, set the new
   bundle in Terraform and apply it, so hosts created from then on install

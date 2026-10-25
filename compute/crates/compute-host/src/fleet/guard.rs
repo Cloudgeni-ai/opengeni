@@ -50,15 +50,23 @@ pub struct GuardConfig {
 /// Takes the guard's lock: an exclusive lock on `path`, held while the
 /// file stays open.
 pub fn hold_lock(path: &Path) -> anyhow::Result<File> {
+    try_hold_lock(path)?.with_context(|| format!("another guard holds {}", path.display()))
+}
+
+/// Takes an exclusive lock on `path` if no one holds it; `None` if someone
+/// does.
+fn try_hold_lock(path: &Path) -> anyhow::Result<Option<File>> {
     let file = File::options()
         .create(true)
         .truncate(false)
         .write(true)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
-    flock(&file, FlockOperation::NonBlockingLockExclusive)
-        .with_context(|| format!("another guard holds {}", path.display()))?;
-    Ok(file)
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(Some(file)),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("locking {}", path.display())),
+    }
 }
 
 /// The lock a guard whose lock is `lock` holds once it guards the VMs.
@@ -245,8 +253,10 @@ pub fn run_guard(config: &GuardConfig) -> anyhow::Result<()> {
             watchdog.feed().context("feeding the watchdog")?;
         }
         if ready.is_none() {
-            // Armed and stepped once: the VMs are guarded from here on.
-            ready = Some(hold_lock(&ready_lock(&config.lock))?);
+            // Armed and stepped once: the VMs are guarded from here on. A
+            // look at whether a guard is ready (the agent's, at its start)
+            // holds the lock for a moment; then it is taken a step later.
+            ready = try_hold_lock(&ready_lock(&config.lock))?;
         }
         std::thread::sleep(STEP);
     }
@@ -484,5 +494,33 @@ mod tests {
         let later = Freezes::beside(&lock).read().unwrap();
         assert_eq!((later.guard, later.count), (first.guard, 1));
         assert!(later.at > first.at, "said again at its steps");
+    }
+
+    /// A look at whether a guard is ready (the agent's, as it starts with
+    /// the guard after an upgrade) holds the ready lock for a moment. A
+    /// guard taking the lock just then runs on and takes it a step later,
+    /// rather than ending, which the watchdog would answer with a reset.
+    #[test]
+    fn a_look_at_whether_the_guard_is_ready_does_not_end_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut working = config(dir.path(), None);
+        working.cgroup = dir.path().join("not-a-group");
+        std::fs::write(&working.cgroup, "").unwrap();
+        let lock = working.lock.clone();
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        // One look, held for longer than a moment.
+        let look = File::create(ready_lock(&lock)).unwrap();
+        flock(&look, FlockOperation::NonBlockingLockShared).unwrap();
+        let guard = std::thread::spawn(move || run_guard(&working));
+        std::thread::sleep(STEP * 3);
+        assert!(!guard.is_finished(), "the guard runs on");
+        assert!(!guard_ready(&lock).unwrap(), "not ready while looked at");
+        drop(look);
+        let started = std::time::Instant::now();
+        while !guard_ready(&lock).unwrap() {
+            assert!(started.elapsed() < Duration::from_secs(5), "never ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!guard.is_finished());
     }
 }

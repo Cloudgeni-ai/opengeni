@@ -1,9 +1,13 @@
 # The guard of a compute host in a fleet (ADR 18): it stops every VM when
 # the host's lease runs out, whatever happens to the agent, and feeds the
-# watchdog while it runs. It is never restarted and never stopped by an
-# upgrade: if it ends, the watchdog resets the machine, which is what
-# keeps a host that lost its lease from running sandboxes the fleet has
-# already given to another host. Installed by install.sh.
+# watchdog while it runs. If it ends, the watchdog resets the machine,
+# which is what keeps a host that lost its lease from running sandboxes
+# the fleet has already given to another host; so it is never restarted
+# on failure. An upgrade hands it over: install.sh restarts it when it
+# runs from another release. Stopping it closes the watchdog, which stays
+# armed (nowayout), and the new guard reopens it and goes on from what the
+# lease file and the freezer show, as any guard starting does, well inside
+# the watchdog's timeout. Installed by install.sh.
 [Unit]
 Description=Opengeni compute host guard: stops the VMs when the fleet lease ends
 Documentation=https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/operations.md
