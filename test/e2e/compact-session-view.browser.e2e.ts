@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type Page, type Request as BrowserRequest } from "playwright";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, waitFor, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
@@ -54,6 +54,17 @@ type FixtureRow = Omit<(typeof rows)[number], "parentSessionId"> & {
 // Marks the root browse read issued synchronously by a test invalidation, so
 // the rail's own poll or retry reads cannot consume its gate.
 const INVALIDATION_READ_HEADER = "x-opengeni-test-invalidation-read";
+const isRootBrowseRead = (rawUrl: string) => {
+  const url = new URL(rawUrl);
+  return (
+    url.pathname.endsWith("/sessions") &&
+    url.searchParams.get("parentSessionId") === "null" &&
+    !url.searchParams.get("search")
+  );
+};
+// Root browse reads the page has issued and not yet finished, as reported by
+// the browser itself. This includes reads issued before a test step starts.
+const rootBrowseReadsInFlight = new Set<BrowserRequest>();
 const pendingFixtureGateReleases = new Set<() => void>();
 const releaseFixtureGates = () => {
   for (const resolve of pendingFixtureGateReleases) resolve();
@@ -138,6 +149,11 @@ describe("compact session view on the live local workspace route (API fixture)",
       reducedMotion: "reduce",
     });
     page.on("pageerror", (error) => console.error("Browser page error:", error.message));
+    page.on("request", (request) => {
+      if (isRootBrowseRead(request.url())) rootBrowseReadsInFlight.add(request);
+    });
+    page.on("requestfinished", (request) => rootBrowseReadsInFlight.delete(request));
+    page.on("requestfailed", (request) => rootBrowseReadsInFlight.delete(request));
     page.on("console", async (message) => {
       if (message.type() === "error")
         for (const argument of message.args()) {
@@ -467,6 +483,7 @@ describe("compact session view on the live local workspace route (API fixture)",
     // Retire the old document before the next case installs another fixture;
     // released requests must not trigger follow-up reads against that fixture.
     if (page && !page.isClosed()) await page.goto("about:blank");
+    rootBrowseReadsInFlight.clear();
   });
   afterAll(async () => {
     releaseFixtureGates();
@@ -588,53 +605,48 @@ describe("compact session view on the live local workspace route (API fixture)",
   // reads finish, then invalidate again.
   const invalidateBrowseRead = async () => {
     const modulePath = `/@fs${new URL("../../packages/react/src/app/lib/session-list-invalidation.tsx", import.meta.url).pathname}`;
-    const startedByInvalidation = await page.evaluate(
-      async ({ targetWorkspaceId, moduleUrl, header }) => {
-        const { notifySessionListChanged } = await import(moduleUrl);
-        // This runs in the page. Bun's global fetch type adds members such as
-        // preconnect, so use the DOM's own fetch type for the page global.
-        const pageScope: WindowOrWorkerGlobalScope = window;
-        const originalFetch = pageScope.fetch;
-        const isRootBrowseRead = (input: RequestInfo | URL) => {
-          const url = new URL(input instanceof Request ? input.url : String(input), location.href);
-          return (
-            url.pathname.endsWith("/sessions") &&
-            url.searchParams.get("parentSessionId") === "null" &&
-            !url.searchParams.get("search")
-          );
-        };
-        let started = false;
-        const taggingFetch: WindowOrWorkerGlobalScope["fetch"] = function (
-          this: unknown,
-          input,
-          init,
-        ) {
-          if (!isRootBrowseRead(input)) return originalFetch.call(this, input, init);
-          started = true;
-          const headers = new Headers(input instanceof Request ? input.headers : undefined);
-          new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
-          headers.set(header, "1");
-          return originalFetch.call(this, input, { ...init, headers });
-        };
-        const pendingReads = new Set<Promise<unknown>>();
-        const watchingFetch: WindowOrWorkerGlobalScope["fetch"] = function (
-          this: unknown,
-          input,
-          init,
-        ) {
-          const response = originalFetch.call(this, input, init);
-          if (isRootBrowseRead(input)) {
-            const read: Promise<unknown> = response
-              .then((value) => value.clone().arrayBuffer())
-              .catch(() => undefined)
-              .finally(() => pendingReads.delete(read));
-            pendingReads.add(read);
-          }
-          return response;
-        };
-        const deadline = performance.now() + 5_000;
-        try {
-          for (;;) {
+    // The page itself cannot see reads it issued before this step, so the
+    // browser's request events decide when no root browse read is in flight.
+    // A read can still slip in between that check and the invalidation; the
+    // attempt then reports no tagged read and the next one waits again. The
+    // deadline bounds the whole retry, not how fast one invalidation reads:
+    // each queued read waits for a slower one on loaded CI runners.
+    let attempts = 0;
+    await waitFor(
+      async () => {
+        if (rootBrowseReadsInFlight.size > 0) return false;
+        attempts += 1;
+        return page.evaluate(
+          async ({ targetWorkspaceId, moduleUrl, header }) => {
+            const { notifySessionListChanged } = await import(moduleUrl);
+            // This runs in the page. Bun's global fetch type adds members such
+            // as preconnect, so use the DOM's own fetch type for the page global.
+            const pageScope: WindowOrWorkerGlobalScope = window;
+            const originalFetch = pageScope.fetch;
+            const isPageRootBrowseRead = (input: RequestInfo | URL) => {
+              const url = new URL(
+                input instanceof Request ? input.url : String(input),
+                location.href,
+              );
+              return (
+                url.pathname.endsWith("/sessions") &&
+                url.searchParams.get("parentSessionId") === "null" &&
+                !url.searchParams.get("search")
+              );
+            };
+            let started = false;
+            const taggingFetch: WindowOrWorkerGlobalScope["fetch"] = function (
+              this: unknown,
+              input,
+              init,
+            ) {
+              if (!isPageRootBrowseRead(input)) return originalFetch.call(this, input, init);
+              started = true;
+              const headers = new Headers(input instanceof Request ? input.headers : undefined);
+              new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+              headers.set(header, "1");
+              return originalFetch.call(this, input, { ...init, headers });
+            };
             pageScope.fetch = taggingFetch;
             try {
               notifySessionListChanged({
@@ -642,19 +654,24 @@ describe("compact session view on the live local workspace route (API fixture)",
                 sessionId: "remote-change",
               });
             } finally {
-              pageScope.fetch = watchingFetch;
+              pageScope.fetch = originalFetch;
             }
-            if (started || performance.now() > deadline) return started;
-            do await new Promise((resolve) => setTimeout(resolve, 50));
-            while (pendingReads.size > 0 && performance.now() <= deadline);
-          }
-        } finally {
-          pageScope.fetch = originalFetch;
-        }
+            return started;
+          },
+          {
+            targetWorkspaceId: workspaceId,
+            moduleUrl: modulePath,
+            header: INVALIDATION_READ_HEADER,
+          },
+        );
       },
-      { targetWorkspaceId: workspaceId, moduleUrl: modulePath, header: INVALIDATION_READ_HEADER },
+      {
+        timeoutMs: 30_000,
+        intervalMs: 25,
+        describe: () =>
+          `No invalidation started its own root browse read after ${attempts} attempts; ${rootBrowseReadsInFlight.size} root browse reads are still in flight.`,
+      },
     );
-    expect(startedByInvalidation).toBe(true);
     await waitFor(() => archiveFixture?.readStarted === true, {
       timeoutMs: 5_000,
       intervalMs: 10,
