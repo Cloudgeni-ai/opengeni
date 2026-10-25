@@ -46,7 +46,7 @@ const NOW = "2026-10-21T11:00:00.000Z";
 const SHA = "a".repeat(40);
 const cfg = config({});
 const roots: string[] = [];
-test("foreign provider slots prevent repeated builds but never a tested root landing", () => {
+test("foreign provider slots allow local builds but prevent publication, never a tested root landing", () => {
   const settings = { ...cfg, maxInflight: 2 };
   const o = observation([pull(1)], []);
   o.headroom = {
@@ -59,7 +59,7 @@ test("foreign provider slots prevent repeated builds but never a tested root lan
     occupiedBatchSlots: 2,
     publicationBlocked: true,
   };
-  expect(plan(o, settings).kind).toBe("wait");
+  expect(plan(o, settings)).toMatchObject({ kind: "build", publish: false });
   const green = candidate();
   green.runs = [run(green, "success")];
   o.candidates = [green];

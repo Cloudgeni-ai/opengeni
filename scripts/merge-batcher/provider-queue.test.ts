@@ -11,6 +11,8 @@ function reader(
     invalidCapacity?: boolean;
     maxInflight?: number;
     withMain?: boolean;
+    generousCapacity?: boolean;
+    noRuns?: boolean;
   } = {},
 ) {
   const cfg = config({
@@ -22,6 +24,10 @@ function reader(
   });
   if (options.invalidCapacity) cfg.otherRepositoryAllowance = 61;
   if (options.maxInflight !== undefined) cfg.maxInflight = options.maxInflight;
+  if (options.generousCapacity) {
+    cfg.runnerBudget = 120;
+    cfg.providerJobLimit = 150;
+  }
   const transport = (async (url: string | URL | Request) => {
     if (options.error) return new Response("unavailable", { status: 503 });
     const path = String(url);
@@ -32,7 +38,7 @@ function reader(
       });
     const status = new URL(path).searchParams.get("status");
     const runs =
-      status === "in_progress"
+      status === "in_progress" && !options.noRuns
         ? [
             {
               id: 1,
@@ -67,7 +73,11 @@ test("pre-fan-out main demand is retained but does not withhold one Batch", asyn
 });
 
 test("live reader honors two hosted slots and uses non-reserving complete observations for landing", async () => {
-  const pipeline = reader([{ status: "in_progress" }], { batch: true, maxInflight: 2 });
+  const pipeline = reader([{ status: "in_progress" }], {
+    batch: true,
+    maxInflight: 2,
+    generousCapacity: true,
+  });
   expect(await pipeline.mainBusy("publish")).toBe(false);
   expect(pipeline.lastHeadroom?.reason).toContain("1/2 active provider slots");
   const full = reader([{ status: "in_progress" }], { batch: true });
@@ -118,6 +128,23 @@ test("unseen reservation makes queued main capacity binding for slot two", async
     await live.mainBusy("publish", [{ branch: "queue/unseen", headSha: "a".repeat(40) }]),
   ).toBe(true);
   expect(live.lastHeadroom).toMatchObject({ occupiedBatchSlots: 1, publicationBlocked: true });
+});
+
+test("slot two reserves full Batch fanout even with one observed job or no visible run", async () => {
+  for (const visible of [true, false]) {
+    const live = reader([{ status: "in_progress" }], {
+      batch: true,
+      maxInflight: 2,
+      noRuns: !visible,
+    });
+    const reservations = visible ? [] : [{ branch: "queue/unseen", headSha: "a".repeat(40) }];
+    expect(await live.mainBusy("publish", reservations)).toBe(true);
+    expect(live.lastHeadroom?.capacity).toMatchObject({
+      providerRequired: 64,
+      hold: "repository-budget",
+    });
+    expect(await live.mainBusy("land", reservations)).toBe(false);
+  }
 });
 
 test("provider and repository demand are truthful observations, not a capacity promise", async () => {

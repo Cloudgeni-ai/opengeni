@@ -296,11 +296,6 @@ function planCandidate(o: Observation, c: Config): Action {
       ledger.recovery.shift();
       return record("discard obsolete or parked recovery bindings");
     }
-    if (o.headroom?.publicationBlocked || (o.headroom?.occupiedBatchSlots ?? 0) >= c.maxInflight)
-      return {
-        kind: "wait",
-        reason: "publication slots or speculative capacity occupied; recovery retained",
-      };
     return makeBuild(
       o.baseSha,
       null,
@@ -343,11 +338,6 @@ function planCandidate(o: Observation, c: Config): Action {
   );
   const pulls = fifo(queued, c.maxBatchSize);
   if (!pulls.length) return { kind: "wait", reason: "no eligible ready heads" };
-  if (o.headroom?.publicationBlocked || (o.headroom?.occupiedBatchSlots ?? 0) >= c.maxInflight)
-    return {
-      kind: "wait",
-      reason: "publication slots or speculative capacity occupied; no repeated build",
-    };
   if (live.length && (pulls[0]!.headRef === "changeset-release/main" || pulls[0]!.controlPlane))
     return { kind: "wait", reason: "Version waits for preceding batches" };
   const tail = live.find((x) => !live.some((y) => y.manifest.predecessor === x.manifest.batchId));

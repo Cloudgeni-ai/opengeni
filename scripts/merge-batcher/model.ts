@@ -355,6 +355,8 @@ export type RunnerScan =
       runnerRelevantRuns: number;
       activeBatchRuns: number;
       occupiedBatchSlots: number;
+      observedBatchDemand: number;
+      reservedBatchDemand: number;
       /** Newest active full-main push CI run (highest run ID), or null when none is active. */
       latestMain: LatestMainObservation | null;
       /** Jobs `queued` or `requested` for a runner across every active full-main run. */
@@ -635,6 +637,8 @@ export async function scanRunnerDemand(input: {
     }),
   );
   if (failed) throw failure;
+  let observedBatchDemand = 0;
+  let reservedBatchDemand = unseen.size * CANDIDATE_SLOTS;
   for (const [index, [id, run]] of entries.entries()) {
     if (now() - started > deadline) return hold("deadline");
     const page = pages[index]!;
@@ -644,6 +648,10 @@ export async function scanRunnerDemand(input: {
     const jobs = page.items;
     const demand = runnerJobDemand(jobs);
     if (demand === null) return hold("unknown-job-status");
+    if (run.path === input.batchWorkflow) {
+      observedBatchDemand += demand;
+      reservedBatchDemand += Math.max(demand, CANDIDATE_SLOTS);
+    }
     const approvalOnly = !listedNotWaiting.has(id) && approvalOnlyRun(run, jobs);
     if (approvalOnly) approvalOnlyRuns++;
     else runnerRelevantRuns++;
@@ -678,6 +686,8 @@ export async function scanRunnerDemand(input: {
     runnerRelevantRuns,
     activeBatchRuns,
     occupiedBatchSlots: activeBatchRuns + unseen.size,
+    observedBatchDemand,
+    reservedBatchDemand,
     latestMain: latestMain ? observeMainQueue(latestMain.id, latestMain.jobs, finished) : null,
     mainQueuedJobs,
     preFanoutMainRuns: preFanoutMainRuns.sort((a, b) => a - b),
@@ -776,8 +786,23 @@ export function capacityDecision(input: {
   mainReserve: number;
   providerJobLimit: number;
   otherRepositoryAllowance: number;
+  occupiedBatchSlots?: number;
+  observedBatchDemand?: number;
+  reservedBatchDemand?: number;
 }): { allowed: boolean; reservedMain: number; capacity: CapacityObservation } {
   const reservedMain = Math.max(input.mainReserve, input.mainDemand);
+  const occupied = input.occupiedBatchSlots ?? 0;
+  const observedBatch = input.observedBatchDemand ?? 0;
+  const reservedBatch = Math.max(
+    input.reservedBatchDemand ?? 0,
+    observedBatch,
+    occupied * CANDIDATE_SLOTS,
+  );
+  const validBatch =
+    [occupied, observedBatch, reservedBatch].every(
+      (value) => Number.isSafeInteger(value) && value >= 0,
+    ) && observedBatch <= input.otherDemand;
+  const effectiveOther = input.otherDemand - observedBatch + reservedBatch;
   const validLimit = Number.isSafeInteger(input.providerJobLimit) && input.providerJobLimit >= 1;
   const validAllowance =
     Number.isSafeInteger(input.otherRepositoryAllowance) &&
@@ -785,8 +810,8 @@ export function capacityDecision(input: {
     validLimit &&
     input.otherRepositoryAllowance <= input.providerJobLimit;
   const providerRequired =
-    validLimit && validAllowance
-      ? input.mainDemand + input.otherDemand + input.otherRepositoryAllowance + CANDIDATE_SLOTS
+    validLimit && validAllowance && validBatch
+      ? input.mainDemand + effectiveOther + input.otherRepositoryAllowance + CANDIDATE_SLOTS
       : null;
   const hold: CapacityHold | null =
     providerRequired === null
@@ -797,7 +822,7 @@ export function capacityDecision(input: {
             input.mainQueuedJobs !== 0 ||
             (input.latestMain?.queuedJobs ?? 0) > 0
           ? "main-queued"
-          : input.otherDemand + reservedMain + CANDIDATE_SLOTS > input.runnerBudget
+          : effectiveOther + reservedMain + CANDIDATE_SLOTS > input.runnerBudget
             ? "repository-budget"
             : providerRequired > input.providerJobLimit
               ? "provider-limit"

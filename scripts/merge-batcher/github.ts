@@ -383,6 +383,9 @@ export class GitHubReader {
       mainReserve: this.config.mainReserve,
       providerJobLimit: this.config.providerJobLimit,
       otherRepositoryAllowance: this.config.otherRepositoryAllowance,
+      occupiedBatchSlots: scan.occupiedBatchSlots,
+      observedBatchDemand: scan.observedBatchDemand,
+      reservedBatchDemand: scan.reservedBatchDemand,
     });
     result.reservedMain = decision.reservedMain;
     result.capacity = decision.capacity;

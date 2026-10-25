@@ -1,5 +1,50 @@
 import { expect, test } from "bun:test";
-import { scanRunnerDemand } from "./model";
+import { scanRunnerDemand, capacityDecision } from "./model";
+
+test("each visible Batch reserves its full fanout, preserving larger observed demand", async () => {
+  const source = inventory(2);
+  const result = await scanRunnerDemand({
+    get: async (path) =>
+      path.includes("/jobs?")
+        ? {
+            total_count: path.includes("runs/1/") ? 27 : 1,
+            jobs: Array.from({ length: path.includes("runs/1/") ? 27 : 1 }, (_, i) => ({
+              id: i + 1,
+              status: "in_progress",
+            })),
+          }
+        : source.get(path),
+    batchWorkflow: "batch.yml",
+    baseBranch: "main",
+    maxInflight: 3,
+    requireFreeBatchSlot: false,
+  });
+  expect(result).toMatchObject({
+    ok: true,
+    occupiedBatchSlots: 2,
+    observedBatchDemand: 28,
+    reservedBatchDemand: 45,
+  });
+  if (!result.ok) throw Error("Complete fixture required");
+  const decision = capacityDecision({
+    ...result,
+    runnerBudget: 100,
+    mainReserve: 30,
+    providerJobLimit: 100,
+    otherRepositoryAllowance: 28,
+  });
+  expect(decision.capacity.providerRequired).toBe(91);
+  expect(decision.allowed).toBe(true);
+  expect(
+    capacityDecision({
+      ...result,
+      runnerBudget: 100,
+      mainReserve: 30,
+      providerJobLimit: 90,
+      otherRepositoryAllowance: 28,
+    }).capacity.hold,
+  ).toBe("provider-limit");
+});
 
 test("provider runs and missing publication reservations share a single slot budget", async () => {
   const scan = (reservations: { branch: string; headSha: string; runId?: number }[]) =>

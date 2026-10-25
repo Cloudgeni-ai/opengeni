@@ -464,6 +464,14 @@ deadlock behind main demand. Additional speculative slots require a clear
 capacity decision, including no queued or pre-fan-out main work. Complete
 provider occupancy and unseen reservations reach the planner before building;
 landing and bookkeeping remain independent of that publication-only gate.
+Each occupied Batch reserves at least 18 jobs even before its fan-out is
+visible; larger observed demand is retained, and unseen reservations also
+reserve 18. Local speculative builds still run for early conflict detection,
+but publication waits for both slot and capacity headroom. With the documented
+52-job repository budget, 30-job main reserve and 60-job provider limit/28-job
+foreign allowance, a second slot cannot fit even when main is currently idle.
+Increasing cap to 8 with one slot is therefore the first deployment step;
+additional slots require a genuinely larger available runner allocation.
 Every landing starts a main workflow: the measured baseline is about 57 jobs
 and 370 job-minutes on main, in addition to 149 Batch job-minutes. With a
 60-job ceiling and 28-job foreign allowance, 1,920 available job-minutes/hour
