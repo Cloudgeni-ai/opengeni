@@ -101,6 +101,9 @@ export interface NativeTimelineMessages {
   transcribing: string;
   recording: (elapsed: string) => string;
   recordingSaved: string;
+  /** A dictation's text is ready but wasn't put in the draft. */
+  transcriptSaved: string;
+  insertTranscript: string;
   discard: string;
   followUpPlaceholder: string;
   /** The composer's call button: start a voice call with the agent. */
@@ -197,6 +200,8 @@ export const defaultNativeTimelineMessages = (t: OpenGeniText): NativeTimelineMe
   transcribing: t("native.timeline.messages.transcribing"),
   recording: (elapsed) => t("native.timeline.messages.recordingElapsed", { elapsed }),
   recordingSaved: t("native.timeline.messages.yourRecordingIsSaved"),
+  transcriptSaved: t("native.timeline.messages.yourDictationIsReady"),
+  insertTranscript: t("native.timeline.messages.insert"),
   discard: t("native.timeline.messages.discard"),
   followUpPlaceholder: t("native.timeline.messages.sendAFollowUp"),
   startCall: t("native.timeline.messages.startACall"),

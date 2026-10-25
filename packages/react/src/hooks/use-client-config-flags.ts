@@ -7,6 +7,7 @@ export type ClientConfigFlagsSource = {
   getClientConfig: () => Promise<{
     fileUploads?: { enabled?: boolean };
     modelSelection?: boolean | undefined;
+    chatConnections?: boolean | undefined;
     sandboxFiles?: boolean | undefined;
     defaultReasoningEffort?: ReasoningEffort | undefined;
     artifacts?: unknown;
@@ -27,6 +28,11 @@ export type ClientConfigFlags = {
   loaded: boolean;
   uploads: boolean;
   modelSelection: boolean;
+  /**
+   * Agent capability cards may be set up in the chat. `false` only when a
+   * session proxy owns chat setup (`createSession`).
+   */
+  chatConnections: boolean;
   sandboxFiles: boolean;
   defaultReasoningEffort: ReasoningEffort | null;
   /**
@@ -63,6 +69,7 @@ const INITIAL_FLAGS: ClientConfigFlags = {
   loaded: false,
   uploads: false,
   modelSelection: false,
+  chatConnections: false,
   sandboxFiles: false,
   defaultReasoningEffort: null,
   artifacts: true,
@@ -93,6 +100,7 @@ export function useClientConfigFlags(
             uploads: config.fileUploads?.enabled === true,
             // Only an explicit offer shows end users the picker.
             modelSelection: config.modelSelection === true,
+            chatConnections: config.chatConnections !== false,
             sandboxFiles: config.sandboxFiles !== false,
             defaultReasoningEffort: config.defaultReasoningEffort ?? null,
             artifacts: config.artifacts !== false,

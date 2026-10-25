@@ -11,9 +11,13 @@ after its instructions.
 
 ## Find the source and event type
 
-1. `event_sources_list` lists the sources you can use. If the app the user means
-   has none, tell them a person needs to add it for the workspace. Do not build a
-   workaround such as polling on a schedule unless they ask for one.
+1. `event_sources_list` lists the sources you can use, and under `readyToAdd`
+   the ones that need no setup: MCP servers the user is signed in to that offer
+   events, their Gmail, and This workspace for meetings. A `readyToAdd` id works
+   wherever a source id does; the user's source is added the first time it is
+   used. If the app the user means is in neither list, tell them: a person adds
+   webhook, GitHub and Slack sources in Automations. Do not build a workaround
+   such as polling on a schedule unless they ask for one.
 2. `event_sources_list` with a `sourceId` lists that source's event types and the
    fields conditions can match. Pick the narrowest type, for example
    `pull_request.opened` rather than every pull request event.
@@ -39,7 +43,8 @@ user asks.
 
 - `conditions` filter on event fields, for example
   `{ "field": "data.repository", "op": "equals", "value": "acme/api" }`. Every
-  condition must hold. Use the fields `event_sources_list` gives for the type.
+  condition must hold, and `contains` ignores case. Use the fields
+  `event_sources_list` gives for the type.
 - MCP sources filter at the server with `arguments` that match the event type's
   `argumentsSchema`; prefer them to conditions where they exist. An MCP trigger
   names exactly one event type.

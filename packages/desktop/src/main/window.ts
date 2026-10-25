@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
+  app,
   BaseWindow,
   clipboard,
   Menu,
@@ -355,6 +356,7 @@ export class MainWindow {
         additionalArguments: [
           `--opengeni-origin=${new URL(target.baseUrl).origin}`,
           `--opengeni-product=${this.config.productName}`,
+          `--opengeni-app-version=${app.getVersion()}`,
           ...(systemAudioUsable(this.config.systemAudioHelperPath)
             ? ["--opengeni-system-audio"]
             : []),

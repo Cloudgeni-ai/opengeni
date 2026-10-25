@@ -25,7 +25,7 @@ public final class OpenGeniAudioCaptureModule: Module {
   public func definition() -> ModuleDefinition {
     Name("OpenGeniAudioCapture")
 
-    Events("onChunk", "onState", "onError")
+    Events("onChunk", "onState", "onError", "onPcm")
 
     OnCreate {
       AudioCapture.shared.emit = { [weak self] name, body in
@@ -50,6 +50,8 @@ public final class OpenGeniAudioCaptureModule: Module {
     Function("level") { AudioCapture.shared.level }
 
     Function("activeRecordingId") { AudioCapture.shared.recordingId }
+
+    Function("setLivePcm") { (enabled: Bool) in AudioCapture.shared.setLivePcm(enabled) }
   }
 }
 
@@ -108,6 +110,15 @@ final class AudioCapture {
   private var chunkHandle: FileHandle?
   private var chunkPartURL: URL?
   private var chunkBytes = 0
+
+  // The live transcript's copy of the audio: 16 kHz 16-bit PCM in blocks of
+  // a tenth of a second, sent as `onPcm` while JavaScript asks for it.
+  private static let liveSampleRate = 16_000.0
+  private static let liveBlockBytes = 3_200
+  private var livePcm = false
+  private var liveCarry: [Float] = []
+  private var liveBlock = Data()
+  private var liveBlockStartMilliseconds = 0.0
 
   var recordingId: String? {
     lock.lock()
@@ -174,6 +185,15 @@ final class AudioCapture {
     }
   }
 
+  /// Start or stop sending the live transcript's copy of the audio.
+  func setLivePcm(_ enabled: Bool) {
+    queue.async {
+      self.livePcm = enabled
+      self.liveCarry.removeAll()
+      self.liveBlock.removeAll()
+    }
+  }
+
   func resume() throws {
     try queue.sync {
       guard active != nil else { throw AudioCaptureError.notCapturing }
@@ -201,6 +221,9 @@ final class AudioCapture {
       observers = []
       encoder = nil
       resampler = nil
+      livePcm = false
+      liveCarry.removeAll()
+      liveBlock.removeAll()
       try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
       let id = active
       setActive(nil)
@@ -368,9 +391,51 @@ final class AudioCapture {
       lock.unlock()
     }
     lock.lock()
+    let startSample = samplesFed
     samplesFed += Int64(pcm.frameLength)
     lock.unlock()
+    if livePcm { tapLive(pcm, startSample: startSample) }
     encode(pcm, endOfStream: false)
+  }
+
+  /// Average each three 48 kHz samples into one 16 kHz sample (enough of a
+  /// low-pass for speech) and send whole blocks with where they start in the
+  /// recording, excluding pauses.
+  private func tapLive(_ pcm: AVAudioPCMBuffer, startSample: Int64) {
+    guard let id = active, let samples = pcm.floatChannelData?[0] else { return }
+    let frames = Int(pcm.frameLength)
+    let ratio = Int(AudioCapture.sampleRate / AudioCapture.liveSampleRate)
+    if liveBlock.isEmpty {
+      liveBlockStartMilliseconds =
+        Double(startSample - Int64(liveCarry.count)) * 1_000 / AudioCapture.sampleRate
+    }
+    var all = liveCarry
+    all.reserveCapacity(all.count + frames)
+    for index in 0..<frames { all.append(samples[index]) }
+    var index = 0
+    while index + ratio <= all.count {
+      var sum: Float = 0
+      for offset in 0..<ratio { sum += all[index + offset] }
+      let value = max(-1, min(1, sum / Float(ratio)))
+      var sample = Int16(value * 32_767).littleEndian
+      withUnsafeBytes(of: &sample) { liveBlock.append(contentsOf: $0) }
+      index += ratio
+      if liveBlock.count >= AudioCapture.liveBlockBytes {
+        send(
+          "onPcm",
+          [
+            "recordingId": id,
+            "data": liveBlock.base64EncodedString(),
+            "sampleRate": AudioCapture.liveSampleRate,
+            "recordedMilliseconds": liveBlockStartMilliseconds,
+          ])
+        liveBlock = Data()
+        liveBlockStartMilliseconds =
+          Double(startSample - Int64(liveCarry.count) + Int64(index)) * 1_000
+          / AudioCapture.sampleRate
+      }
+    }
+    liveCarry = Array(all[index...])
   }
 
   private func toPcm(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {

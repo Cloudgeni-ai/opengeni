@@ -243,7 +243,12 @@ export class SessionCommandIdempotencyError extends Error {
 
 export class AgentCommandAuthorityError extends Error {
   constructor(
-    readonly code: "CALLER_STALE" | "CALLER_INTERRUPTED" | "TARGET_NOT_VERTICAL" | "SELF_STEER",
+    readonly code:
+      | "CALLER_STALE"
+      | "CALLER_INTERRUPTED"
+      | "TARGET_NOT_VERTICAL"
+      | "SELF_STEER"
+      | "PERSONAL_MACHINE_OWNER_REQUIRED",
     message: string,
   ) {
     super(message);
@@ -824,22 +829,22 @@ export async function lockSessionEventWriteRows(
 
   const eventOnly = input.rowProjection === "event";
   const sessionColumns = eventOnly ? eventSessionColumns : getTableColumns(schema.sessions);
-  let workspace: SessionEventWriteFenceLocks["workspace"] = null;
-  if ((input.workspaceLock ?? "key_share") === "key_share") {
-    const [lockedWorkspace] = await db
-      .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
-      .from(schema.workspaces)
-      .where(eq(schema.workspaces.id, input.workspaceId))
-      .for("key share")
-      .limit(1);
-    workspace = lockedWorkspace ?? null;
-  }
-
   const sessionIds = [...new Set(input.sessionIds ?? [])].sort();
   const sessionLock = input.sessionLock ?? "no_key_update";
-  let sessions =
+  // Submit in canonical lock order on the transaction-pinned connection. The
+  // server still executes separate statements with fresh READ COMMITTED
+  // snapshots; only the client waits overlap. Cursor-dependent work stays below.
+  const [workspaces, lockedSessions] = await Promise.all([
+    (input.workspaceLock ?? "key_share") === "key_share"
+      ? db
+          .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, input.workspaceId))
+          .for("key share")
+          .limit(1)
+      : [],
     sessionIds.length > 0
-      ? await db
+      ? db
           .select(sessionColumns)
           .from(schema.sessions)
           .where(
@@ -850,7 +855,10 @@ export async function lockSessionEventWriteRows(
           )
           .orderBy(schema.sessions.id)
           .for(sessionLock === "key_share" ? "key share" : "no key update")
-      : [];
+      : [],
+  ]);
+  const workspace = workspaces[0] ?? null;
+  let sessions = lockedSessions;
 
   const cursors =
     sessions.length > 0
@@ -917,9 +925,10 @@ export async function lockSessionEventWriteRows(
   });
 
   const turnIds = [...new Set(input.turnIds ?? [])].sort();
-  const turns =
+  const attemptIds = [...new Set(input.attemptIds ?? [])].sort();
+  const [turns, attempts] = await Promise.all([
     turnIds.length > 0
-      ? await db
+      ? db
           .select(eventOnly ? eventTurnColumns : getTableColumns(schema.sessionTurns))
           .from(schema.sessionTurns)
           .where(
@@ -930,12 +939,9 @@ export async function lockSessionEventWriteRows(
           )
           .orderBy(schema.sessionTurns.id)
           .for("update")
-      : [];
-
-  const attemptIds = [...new Set(input.attemptIds ?? [])].sort();
-  const attempts =
+      : [],
     attemptIds.length > 0
-      ? await db
+      ? db
           .select(eventOnly ? eventAttemptColumns : getTableColumns(schema.sessionTurnAttempts))
           .from(schema.sessionTurnAttempts)
           .where(
@@ -946,7 +952,8 @@ export async function lockSessionEventWriteRows(
           )
           .orderBy(schema.sessionTurnAttempts.id)
           .for("update")
-      : [];
+      : [],
+  ]);
 
   return { control, workspace, sessions: canonicalSessions, cursors, turns, attempts };
 }
@@ -3491,6 +3498,7 @@ async function cancelSessionSubtreeInTransaction(
           eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
           inArray(schema.sessionHumanInputRequests.turnId, immediatelyCancelledTurnIds),
           eq(schema.sessionHumanInputRequests.status, "pending"),
+          eq(schema.sessionHumanInputRequests.origin, "tool_call"),
         ),
       )
       .returning({

@@ -1916,7 +1916,7 @@ function baseAgentRunFailurePayload(
     // connectivity backoff and never continues without the image's pixels.
     return {
       error:
-        "An image attached earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
+        "An image from earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
       code: RETAINED_ATTACHMENT_UNAVAILABLE_CODE,
       retryable: true,
     };

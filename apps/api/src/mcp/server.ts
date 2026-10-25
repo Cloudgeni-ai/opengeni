@@ -17,6 +17,12 @@ import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
+import {
+  connectableIntegrationDefinitions,
+  integrationDefinitionCardPostedMessage,
+  integrationDefinitionSetupContext,
+  integrationDefinitionSetup,
+} from "./integration-definition-capabilities";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./user-setup-card";
 import {
@@ -26,6 +32,7 @@ import {
 } from "../site-uploads";
 import {
   sessionTargetContext,
+  isSecretReferenceError,
   SetSessionTargetRequest,
   CreateScheduledTaskRequest,
   ScheduledTaskAgentConfigInput,
@@ -187,6 +194,7 @@ import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools
 import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
+  scheduledTaskScheduleToolInput,
   scheduledTaskCreateToolValidation,
   scheduledTaskEventsToolInput,
 } from "./scheduled-task-input";
@@ -393,6 +401,7 @@ import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
+import { scheduleTimeZoneFacts, withAgentScheduleTimeZone } from "../scheduled-task-time-zone";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
@@ -418,12 +427,16 @@ export type McpServerOptions = {
   /** @deprecated Ignored compatibility input; Knowledge resolves scope at execution. */
   sessionMemory?: MemoryAgentScope | null | undefined;
   /**
-   * Set by the route only when the bound session has admin access right now
-   * (allowed by the organization, given by an owner or admin who still is
-   * one). It adds the admin tools whatever the session's tool selection;
-   * each call checks the access again.
+   * Set by the route for a bound session: how app actions reach the API, and
+   * the facts that list the app-action tools. A session a person started lists
+   * them when selected (fixed for the session's life); one with full access
+   * lists them whatever its selection, as before. Each call checks, live, as
+   * whom it runs and whether a change was confirmed.
    */
-  sessionAdminAccess?: SessionAdminAccessDispatch | null | undefined;
+  appActions?:
+    | { access: SessionAdminAccessDispatch; startedByPerson: boolean; fullAccess: boolean }
+    | null
+    | undefined;
 };
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
@@ -585,16 +598,21 @@ export function orchestrationFailureEnvelope(tool: OrchestrationToolName, error:
         ? ["caller_interrupted", "The calling session was interrupted before delivery."]
         : typedCode === "TARGET_NOT_VERTICAL"
           ? ["target_not_vertical", "The calling agent cannot act on that session."]
-          : typedCode === "CONTROL_CHANGED"
-            ? ["conflict", "The target session control state changed; refresh and retry."]
-            : typedCode === "IDEMPOTENCY_KEY_REUSED"
-              ? ["idempotency_key_reused", "The idempotency key was reused with different input."]
-              : typedCode === "WORKSPACE_CONTROL_BUSY"
-                ? [
-                    "workspace_busy",
-                    "The workspace is busy applying other session commands; nothing was applied. Retry the same call shortly.",
-                  ]
-                : null;
+          : typedCode === "PERSONAL_MACHINE_OWNER_REQUIRED"
+            ? [
+                "personal_machine_owner_required",
+                "That session runs on another person's personal machine, so only its owner can steer it. Nothing was applied.",
+              ]
+            : typedCode === "CONTROL_CHANGED"
+              ? ["conflict", "The target session control state changed; refresh and retry."]
+              : typedCode === "IDEMPOTENCY_KEY_REUSED"
+                ? ["idempotency_key_reused", "The idempotency key was reused with different input."]
+                : typedCode === "WORKSPACE_CONTROL_BUSY"
+                  ? [
+                      "workspace_busy",
+                      "The workspace is busy applying other session commands; nothing was applied. Retry the same call shortly.",
+                    ]
+                  : null;
   if (knownFailure) {
     return {
       error: {
@@ -668,6 +686,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
       .object({
         ...UpdateScheduledTaskRequest.out.shape,
         id: z4.string().uuid(),
+        schedule: scheduledTaskScheduleToolInput().optional(),
         action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
         agentConfig: z4
           .object(ScheduledTaskAgentConfigInput.shape)
@@ -854,19 +873,19 @@ class PolicyMcpServer extends McpServer {
     private readonly grant: AccessGrant,
     private readonly sessionId: string | null,
     private readonly selectedTools: ReadonlySet<FirstPartyMcpToolName> | null,
-    private readonly sessionAdminAccess: boolean = false,
+    private readonly appActions: { startedByPerson: boolean; fullAccess: boolean } | null = null,
   ) {
     super({ name: "opengeni", version: "1.0.0" });
   }
 
   /**
    * Whether a selection-governed tool is both selected and authorized for this
-   * grant. Admin-access tools are never selection-governed, so a child
-   * selection can never carry them.
+   * grant. App-action tools act as a person, so a child selection can never
+   * carry them.
    */
   holdsSelectableTool(toolName: FirstPartyMcpToolName): boolean {
     const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
-    if (policy.adminAccessRequired) return false;
+    if (policy.personSessionRequired) return false;
     const authorized =
       (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
         true) &&
@@ -895,10 +914,15 @@ class PolicyMcpServer extends McpServer {
     if (catalogued) {
       const toolName = name as FirstPartyMcpToolName;
       const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
-      if (policy.adminAccessRequired) {
-        // Admin access, not the tool selection or the agent's own
-        // permissions, decides: the tools act as the person who gave it.
-        admitted = this.sessionId !== null && this.sessionAdminAccess;
+      if (policy.personSessionRequired) {
+        // The tools act as a person, not with the agent's own permissions:
+        // listed in a session a person started when selected, or whenever the
+        // session has full access.
+        admitted =
+          this.sessionId !== null &&
+          this.appActions !== null &&
+          (this.appActions.fullAccess ||
+            (this.appActions.startedByPerson && this.selectedTools?.has(toolName) === true));
       } else {
         admitted =
           (!policy.sessionRequired || this.sessionId !== null) &&
@@ -1091,18 +1115,25 @@ export function buildOpenGeniMcpServer(
     typeof nestedAgentDepth !== "number" ||
     typeof effectiveMaxNestedAgentDepth !== "number" ||
     nestedAgentDepth < effectiveMaxNestedAgentDepth;
-  const sessionAdminAccess =
-    sessionId !== null && exactAgentAttemptClaims(grant) !== null
-      ? (options.sessionAdminAccess ?? null)
-      : null;
-  const server = new PolicyMcpServer(grant, sessionId, selectedTools, sessionAdminAccess !== null);
-  if (sessionId !== null && sessionAdminAccess !== null) {
+  const attemptClaims = sessionId !== null ? exactAgentAttemptClaims(grant) : null;
+  const appActions = attemptClaims !== null ? (options.appActions ?? null) : null;
+  const server = new PolicyMcpServer(
+    grant,
+    sessionId,
+    selectedTools,
+    appActions && {
+      startedByPerson: appActions.startedByPerson,
+      fullAccess: appActions.fullAccess,
+    },
+  );
+  if (sessionId !== null && attemptClaims !== null && appActions !== null) {
     registerSessionAdminAccessTools({
       server,
       db: deps.db,
       grant,
       sessionId,
-      access: sessionAdminAccess,
+      attempt: { turnId: attemptClaims.turnId, attemptId: attemptClaims.attemptId },
+      access: appActions.access,
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
@@ -1972,7 +2003,12 @@ export function buildOpenGeniMcpServer(
           scheduledTaskCreateToolValidation(sessionId),
         ),
       },
-      async (args) => {
+      async (rawArgs) => {
+        const { input: args, timeZoneDefault } = await withAgentScheduleTimeZone(
+          deps.db,
+          grant,
+          rawArgs,
+        );
         const payload = resolveScheduledTaskCreateInput(args, sessionId);
         await requireLimit(deps, {
           accountId: grant.accountId,
@@ -1989,6 +2025,7 @@ export function buildOpenGeniMcpServer(
           toolsProvided: scheduledTaskToolsProvided(args),
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
+          eventSourceFetch: deps.eventSourceFetch,
         });
         try {
           await syncCreatedScheduledTask({
@@ -2006,10 +2043,15 @@ export function buildOpenGeniMcpServer(
               warnings: [
                 "The task database record committed, but Temporal schedule synchronization failed.",
               ],
+              ...scheduleTimeZoneReceiptFacts(timeZoneDefault),
             }),
           );
         }
-        return json(scheduledTaskReceipt("scheduled_tasks_create", task, "created", true));
+        return json(
+          scheduledTaskReceipt("scheduled_tasks_create", task, "created", true, {
+            ...scheduleTimeZoneReceiptFacts(timeZoneDefault),
+          }),
+        );
       },
     );
 
@@ -2023,9 +2065,15 @@ export function buildOpenGeniMcpServer(
             : ""),
         inputSchema: scheduledTaskUpdateToolInput(eventTriggers),
       },
-      async ({ id, ...raw }) => {
+      async ({ id, ...requested }) => {
         const existing = await requireVisibleTask(id);
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
+        const { input: raw, timeZoneDefault } = await withAgentScheduleTimeZone(
+          deps.db,
+          grant,
+          requested,
+          existing.schedule,
+        );
         const payload = UpdateScheduledTaskRequest.parse(raw);
         const patchWarnings = (task: ScheduledTask) =>
           (payload.agentConfigPatch?.model !== undefined ||
@@ -2045,6 +2093,7 @@ export function buildOpenGeniMcpServer(
           toolsProvided: scheduledTaskToolsProvided(raw),
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
+          eventSourceFetch: deps.eventSourceFetch,
         }).catch((error: unknown) => {
           const conflict = scheduledTaskTargetAccessHttpError(error);
           if (conflict) return conflict;
@@ -2081,6 +2130,7 @@ export function buildOpenGeniMcpServer(
         return json(
           scheduledTaskReceipt("scheduled_tasks_update", task, "updated", true, {
             warnings: patchWarnings(task),
+            ...scheduleTimeZoneReceiptFacts(timeZoneDefault),
           }),
         );
       },
@@ -2343,7 +2393,14 @@ export function buildOpenGeniMcpServer(
       },
     );
 
-    registerEventTools(server, deps, grant, json, requireVisibleTask);
+    registerEventTools(
+      server,
+      deps,
+      grant,
+      json,
+      requireVisibleTask,
+      can("scheduled_tasks:manage"),
+    );
   }
 
   server.ensureToolsListHandler();
@@ -4223,6 +4280,14 @@ function registerPreferenceRegistryTools(
   );
 }
 
+/** Report the zone a schedule uses when the agent's call left it out. */
+function scheduleTimeZoneReceiptFacts(
+  timeZoneDefault: Parameters<typeof scheduleTimeZoneFacts>[0],
+): { facts?: Record<string, string> } {
+  const facts = scheduleTimeZoneFacts(timeZoneDefault);
+  return facts ? { facts } : {};
+}
+
 function scheduledTaskReceipt(
   operation: string,
   task: ScheduledTask,
@@ -4502,28 +4567,35 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
-      const typedOp = op as RunOnOp;
-      const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
-      // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
-      const claims = exactAgentAttemptClaims(grant);
-      const secretResolver =
-        claims && claims.sessionId === sessionId && typedOp.kind !== "read"
-          ? await createRunOnSecretResolver(
-              deps,
-              { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
-              (subjectId) =>
-                vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
-            )
-          : null;
-      return json(
-        await withUserSetupCard(
-          await runOnSandbox(services, await fleetContext(), target, typedOp, {
-            ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
-            ...(secretResolver ? { secretResolver } : {}),
-          }),
-          userSetupCard("run_on", target),
-        ),
-      );
+      try {
+        const typedOp = op as RunOnOp;
+        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+        // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
+        const claims = exactAgentAttemptClaims(grant);
+        const secretResolver =
+          claims && claims.sessionId === sessionId && typedOp.kind !== "read"
+            ? await createRunOnSecretResolver(
+                deps,
+                { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
+                (subjectId) =>
+                  vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
+              )
+            : null;
+        return json(
+          await withUserSetupCard(
+            await runOnSandbox(services, await fleetContext(), target, typedOp, {
+              ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+              ...(secretResolver ? { secretResolver } : {}),
+            }),
+            userSetupCard("run_on", target),
+          ),
+        );
+      } catch (error) {
+        if (isSecretReferenceError(error)) {
+          return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
+        }
+        throw error;
+      }
     },
   );
 
@@ -6151,21 +6223,22 @@ function registerWorkspaceOrchestrationTools(
               }),
             );
           }
-          const { accepted, turn, replay } = await acceptSessionUserMessageWithOutcome(
-            deps,
-            grant,
-            grant.workspaceId,
-            targetSessionId,
-            {
-              text,
-              delivery: "send",
-              origin: "operator",
-              clientEventId: idempotencyKey,
-              mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
-                SessionMcpCredentialUpdateInput.parse(update),
-              ),
-            },
-          );
+          const { accepted, turn, replay, waitsForMachineOwner } =
+            await acceptSessionUserMessageWithOutcome(
+              deps,
+              grant,
+              grant.workspaceId,
+              targetSessionId,
+              {
+                text,
+                delivery: "send",
+                origin: "operator",
+                clientEventId: idempotencyKey,
+                mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
+                  SessionMcpCredentialUpdateInput.parse(update),
+                ),
+              },
+            );
           return json(
             mcpMutationReceipt({
               operation: "session_send_message",
@@ -6188,6 +6261,13 @@ function registerWorkspaceOrchestrationTools(
               ],
               timestamp: accepted.occurredAt,
               idempotency: { status: replay ? "replayed" : "applied" },
+              ...(waitsForMachineOwner
+                ? {
+                    warnings: [
+                      "The session runs on another person's personal machine, so this message waits for its owner instead of running. Their next message brings it to their agent, or it runs once the session moves to a machine you may use.",
+                    ],
+                  }
+                : {}),
               nextAction: {
                 tool: "session_get",
                 arguments: { sessionId: targetSessionId },
@@ -6589,15 +6669,26 @@ function registerWorkspaceOrchestrationTools(
       "session_set_model",
       {
         description:
-          "Set an existing session's model and reasoning defaults for future turns. Use a model from list_models and specify the intended reasoning effort. Does not send a message, resume a paused session, wake an idle session, change latency mode, or rewrite already accepted turns/scheduled occurrences. Older queued turns keep their settings but cannot undo this choice when they start. Reuse the exact idempotencyKey for retries; session_get detail=full reads current effective defaults. Requires sessions:control and ordinary target-session authorization.",
+          "Switch a session's model and reasoning effort for its future turns. Omit sessionId to switch this chat, for example when the person asks for a faster or smarter model: pick a sensible model from list_models, then tell them which model the chat uses now, that it applies from their next message, and that they can switch back by asking you or with the model chooser. Does not send a message, resume a paused session, wake an idle session, change latency mode, or rewrite already accepted turns/scheduled occurrences. Older queued turns keep their settings but cannot undo this choice when they start. Reuse the exact idempotencyKey for retries; session_get detail=full reads current effective defaults.",
         inputSchema: {
-          sessionId: z4.string().uuid(),
+          sessionId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe("The session to change; omit it for this chat."),
           model: z4.string().min(1).max(512),
           reasoningEffort: z4.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
           idempotencyKey: z4.string().uuid(),
         },
       },
-      async ({ sessionId, ...request }) => {
+      async ({ sessionId: requestedSessionId, ...request }) => {
+        const sessionId = requestedSessionId ?? callerSessionId;
+        if (!sessionId) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "Pass the sessionId of the session to change." }],
+          };
+        }
         const result = await setSessionModel(deps, grant, sessionId, request, "first_party_mcp");
         return json(
           mcpMutationReceipt({
@@ -6778,6 +6869,14 @@ function registerCapabilityDiscoveryTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
+  // Agent-only setup entries next to the workspace catalog: GitHub, Connected
+  // Machine and the reviewed integration definitions this workspace can connect.
+  const recommendations = () =>
+    nativeConnectionCapabilityRecommendations({
+      connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+      browserExtension: browserExtension(deps.settings),
+      integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
+    });
 
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
@@ -6789,7 +6888,9 @@ function registerCapabilityDiscoveryTools(
     let accountSelectionKnown = false;
     if (
       items.some(
-        (item) => item.enabled && (item.connectionRef || item.surfaceType === "first_party_fiken"),
+        (item) =>
+          (item.enabled && (item.connectionRef || item.surfaceType === "first_party_fiken")) ||
+          item.surfaceType === "integration_definition",
       )
     ) {
       const claims = exactAgentCommandContext(grant, sessionId);
@@ -6820,20 +6921,27 @@ function registerCapabilityDiscoveryTools(
         for (const id of readiness.accepted) acceptedServerIds.add(id);
       }
     }
+    // One read of the person's integration accounts and this chat's tool
+    // selection for every definition item.
+    const integrationContext = items.some((item) => item.surfaceType === "integration_definition")
+      ? await integrationDefinitionSetupContext(deps, grant, sessionId)
+      : null;
     return await Promise.all(
       items.map((item) =>
         item.id === EXCEL_ADDIN_CAPABILITY_ID
           ? excelAddinSetup(deps, grant, sessionId)
-          : capabilitySetupProjection(
-              deps,
-              grant.workspaceId,
-              item,
-              availableServerIds,
-              acceptedServerIds,
-              accountSelectionKnown,
-              availableFirstPartyTools,
-              new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
-            ),
+          : item.surfaceType === "integration_definition"
+            ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
+            : capabilitySetupProjection(
+                deps,
+                grant.workspaceId,
+                item,
+                availableServerIds,
+                acceptedServerIds,
+                accountSelectionKnown,
+                availableFirstPartyTools,
+                new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+              ),
       ),
     );
   };
@@ -6851,13 +6959,7 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const current = await catalog();
-      const candidates = [
-        ...current.items,
-        ...nativeConnectionCapabilityRecommendations({
-          connectedMachines: deps.settings.sandboxSelfhostedEnabled,
-          browserExtension: browserExtension(deps.settings),
-        }),
-      ];
+      const candidates = [...current.items, ...recommendations()];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       const setups = await setupProjections(ranked.map(({ item }) => item));
       const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
@@ -6925,13 +7027,9 @@ function registerCapabilityDiscoveryTools(
     async ({ capabilityId, rationale }) => {
       await authorize();
       const current = await catalog();
-      const item = [
-        ...current.items,
-        ...nativeConnectionCapabilityRecommendations({
-          connectedMachines: deps.settings.sandboxSelfhostedEnabled,
-          browserExtension: browserExtension(deps.settings),
-        }),
-      ].find((candidate) => candidate.id === capabilityId);
+      const item = [...current.items, ...recommendations()].find(
+        (candidate) => candidate.id === capabilityId,
+      );
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
@@ -6990,7 +7088,9 @@ function registerCapabilityDiscoveryTools(
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
-              : "The recommendation was posted for human confirmation. No access has been granted yet.",
+              : item.surfaceType === "integration_definition"
+                ? integrationDefinitionCardPostedMessage(item)
+                : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
   );

@@ -19,6 +19,7 @@ import {
   type PreparedSecretValue,
   type VaultDbContext,
 } from "@opengeni/db";
+import { looksLikeSshPrivateKey, sshPublicKeyFromPrivateKey } from "@opengeni/vaults";
 
 export type SecretAnswerSource = "human" | "agent";
 
@@ -61,12 +62,26 @@ export function prepareSecretAnswers(
     const generated = answer.generate !== undefined;
     const plaintext = generated ? generatePassword(answer.generate) : (answer.value ?? "");
     const username = answer.username?.trim();
+    // An SSH private key brings its public key and fingerprint, which an
+    // `ssh_key` question saves next to it (see secretAnswerWrite).
+    const ssh =
+      !generated && looksLikeSshPrivateKey(plaintext)
+        ? sshPublicKeyFromPrivateKey(plaintext)
+        : null;
     return {
       questionId: answer.questionId,
       saveTo: answer.saveTo,
       ...(answer.vaultId ? { vaultId: answer.vaultId } : {}),
       value: encrypted(key, plaintext),
       ...(username ? { username: { plain: username, ...encrypted(key, username) } } : {}),
+      ...(ssh
+        ? {
+            sshPublicKey: {
+              publicKey: encrypted(key, ssh.publicKey),
+              fingerprint: encrypted(key, ssh.fingerprint),
+            },
+          }
+        : {}),
       generated,
     };
   });

@@ -295,7 +295,7 @@ export function SessionHeader({
               type="button"
               onClick={onOpenAutomations}
               data-automation-wait={automationWait?.kind ?? "none"}
-              className="inline-flex min-w-0 max-w-56 shrink items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
+              className="inline-flex min-w-0 max-w-80 shrink items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
               title={t("automations.wait.openPanel", {
                 wait: automationWait?.label ?? t("automations.wait.none"),
               })}

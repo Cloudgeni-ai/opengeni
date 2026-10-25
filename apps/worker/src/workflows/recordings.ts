@@ -1,4 +1,4 @@
-import { ActivityFailure, ApplicationFailure, proxyActivities } from "@temporalio/workflow";
+import { ActivityFailure, ApplicationFailure, proxyActivities, sleep } from "@temporalio/workflow";
 import type * as activities from "../activities";
 import type { BrowserRecordingVideoInput } from "../activities/browser-recordings";
 
@@ -52,7 +52,9 @@ const settleActivity = proxyActivities<Pick<typeof activities, "failRecordingTra
   retry: { initialInterval: "5 seconds", backoffCoefficient: 2, maximumInterval: "5 minutes" },
 });
 
-const deletionActivity = proxyActivities<Pick<typeof activities, "deleteRecordingMedia">>({
+const deletionActivity = proxyActivities<
+  Pick<typeof activities, "deleteRecordingMedia" | "expireDictation">
+>({
   startToCloseTimeout: "10 minutes",
   heartbeatTimeout: "2 minutes",
   retry: {
@@ -98,19 +100,35 @@ function failureMessage(error: unknown): string {
   return cause instanceof Error && cause.message ? cause.message : "processing failed";
 }
 
-/** Make one transcript version; all state lives in Postgres. */
+/**
+ * Make one transcript version; all state lives in Postgres. A dictation is
+ * then kept a day for its owner to take the text, and deleted.
+ */
 export async function recordingTranscriptWorkflow(
   input: RecordingTranscriptWorkflowInput,
 ): Promise<void> {
   // One workflow per version, so the version id names its lease.
   const job = { ...input, processingOwner: input.versionId };
+  let expireAfterMilliseconds: number | undefined;
   try {
-    await transcriptActivity.transcribeRecordingVersion(job);
+    // Histories from before dictations return no expiry, so they replay unchanged.
+    expireAfterMilliseconds = (await transcriptActivity.transcribeRecordingVersion(job))
+      ?.expireAfterMilliseconds;
   } catch (error) {
-    await settleActivity.failRecordingTranscript({
+    const settled = await settleActivity.failRecordingTranscript({
       ...job,
       errorCode: failureCode(error),
       errorMessage: failureMessage(error),
+    });
+    expireAfterMilliseconds = settled?.expireAfterMilliseconds;
+  }
+  if (expireAfterMilliseconds !== undefined) {
+    await sleep(expireAfterMilliseconds);
+    await deletionActivity.expireDictation({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      recordingId: input.recordingId,
+      ownerSubjectId: input.ownerSubjectId,
     });
   }
 }

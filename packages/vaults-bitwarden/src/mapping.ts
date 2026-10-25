@@ -4,14 +4,32 @@
  * type 1 login, 2 secure note, 3 card, 4 identity, 5 SSH key; custom field
  * type 0 text, 1 hidden, 2 boolean, 3 linked.
  *
- * Listing decrypts only names: the item name, website addresses, custom field
- * names and attachment file names. Values are decrypted only on read, for the
+ * Listing decrypts display metadata: the item name, website addresses, custom
+ * field names, attachment file names and the login username hint. Other values are decrypted only on read, for the
  * exact fields asked for. Writes re-encrypt only what changes and send every
  * other encrypted value back untouched, so passkeys, attachments, history and
  * anything this mapping does not know survive an update.
+ *
+ * Logins, secure notes, cards, identities and SSH keys are Bitwarden's own
+ * types, and their fields go into the type's own slots (named as Opengeni
+ * names a type's standard fields, also under their common other names, such
+ * as "cvv" for a card's security code). Bitwarden has no API-key or file item
+ * and no categories, so an Opengeni `api_key` or `file` item is written as a
+ * secure note, and the item's type and category, when its Bitwarden type
+ * does not say them, are kept in an `opengeni.type` custom field that reads
+ * back as that type and stays hidden from the item's fields. Any other field
+ * is a custom field (hidden when concealed) and files are attachments.
  */
 import { createHash } from "node:crypto";
-import { isValidTotpInput } from "@opengeni/contracts";
+import { isValidTotpInput, standardVaultFieldName, type VaultItemType } from "@opengeni/contracts";
+import {
+  VAULT_TYPE_MARKER_FIELD,
+  decodeItemTypeMarker,
+  encodeItemTypeMarker,
+  isItemTypeMarkerName,
+  parseCardExpiry,
+  providerUsernameHint,
+} from "@opengeni/vaults";
 import {
   VAULT_LIMITS,
   VaultProviderError,
@@ -207,6 +225,8 @@ export type MappedField =
 export interface MappedCipher {
   meta: ProviderItemMeta;
   fields: MappedField[];
+  /** Index in `cipher.fields` of the `opengeni.type` marker, or -1. */
+  markerIndex: number;
 }
 
 /** Custom fields with their decrypted names and stable ids, values untouched. */
@@ -244,7 +264,80 @@ export function revisionOf(cipher: Json): string | null {
 }
 
 /**
- * Metadata and field layout. Only names are decrypted; a field is listed when
+ * When the connected account archived the item. Bitwarden's archive is per
+ * person: the date is this account's own choice, not the item owner's.
+ */
+export function archivedDateOf(cipher: Json): string | null {
+  const value = cipher.archivedDate;
+  return typeof value === "string" && Number.isFinite(Date.parse(value))
+    ? new Date(value).toISOString()
+    : null;
+}
+
+/** The Bitwarden cipher type an Opengeni item type is stored as. */
+export function cipherTypeFor(type: ProviderWriteItem["type"]): number | null {
+  switch (type) {
+    case "login":
+      return CIPHER_LOGIN;
+    case "note":
+    case "api_key":
+    case "file":
+      return CIPHER_SECURE_NOTE;
+    case "card":
+      return CIPHER_CARD;
+    case "identity":
+      return CIPHER_IDENTITY;
+    case "ssh_key":
+      return CIPHER_SSH_KEY;
+    default:
+      return null;
+  }
+}
+
+/** The Opengeni type of a Bitwarden cipher type; null for a type this mapping does not know. */
+export function itemTypeOfCipher(cipherType: unknown): VaultItemType | null {
+  switch (cipherType) {
+    case CIPHER_LOGIN:
+      return "login";
+    case CIPHER_SECURE_NOTE:
+      return "note";
+    case CIPHER_CARD:
+      return "card";
+    case CIPHER_IDENTITY:
+      return "identity";
+    case CIPHER_SSH_KEY:
+      return "ssh_key";
+    default:
+      return null;
+  }
+}
+
+/**
+ * The `opengeni.type` marker a write needs: the type and category, unless
+ * the cipher type alone already says them.
+ */
+export function markerFor(write: Pick<ProviderWriteItem, "type" | "category">): string | null {
+  const native = itemTypeOfCipher(cipherTypeFor(write.type));
+  if (native === write.type && !write.category) return null;
+  return encodeItemTypeMarker({ type: write.type, category: write.category ?? null });
+}
+
+/** A marker counts when it fits the cipher: a secure note holds notes, API keys and files. */
+function markedType(
+  cipherType: unknown,
+  marker: ReturnType<typeof decodeItemTypeMarker>,
+): { type: VaultItemType; category: string | null } | null {
+  const native = itemTypeOfCipher(cipherType);
+  if (!marker || !native) return null;
+  const fits =
+    native === "note"
+      ? marker.type === "note" || marker.type === "api_key" || marker.type === "file"
+      : marker.type === native;
+  return fits ? marker : null;
+}
+
+/**
+ * Metadata and field layout. Only display metadata is decrypted; a field is listed when
  * it holds a value. Fails with `BitwardenCryptoError` when a name cannot be
  * opened.
  */
@@ -269,7 +362,15 @@ export function mapCipher(cipher: Json, ownerKey: SymmetricKey): MappedCipher {
       source: { type: "notes" },
     });
   }
+  let markerIndex = -1;
+  let marker: ReturnType<typeof decodeItemTypeMarker> = null;
   for (const field of customFields(cipher, key)) {
+    if (markerIndex < 0 && field.fieldType === FIELD_TEXT && isItemTypeMarkerName(field.name)) {
+      // Opengeni's own record of the item's type; never one of its fields.
+      markerIndex = field.index;
+      marker = decodeItemTypeMarker(decryptOptional(list(cipher.fields)[field.index]?.value, key));
+      continue;
+    }
     if (!field.hasValue) continue; // Linked fields and empty values hold nothing to read.
     if (
       field.fieldType !== FIELD_TEXT &&
@@ -295,18 +396,28 @@ export function mapCipher(cipher: Json, ownerKey: SymmetricKey): MappedCipher {
     });
   }
   const revision = revisionOf(cipher);
+  const typed = markedType(cipher.type, marker) ?? {
+    type: itemTypeOfCipher(cipher.type) ?? "note",
+    category: null,
+  };
   const meta: ProviderItemMeta = {
     externalItemId: String(cipher.id).toLowerCase(),
     name: safeName(decryptOptional(cipher.name, key) ?? "", "Untitled item"),
-    type: cipher.type === CIPHER_LOGIN ? "login" : "note",
+    type: typed.type,
+    ...(typed.category ? { category: typed.category } : {}),
+    username:
+      cipher.type === CIPHER_LOGIN
+        ? providerUsernameHint(decryptOptional(json(cipher.login)?.username, key))
+        : null,
     websites: websites(cipher, key),
     fields: fields.map(
       ({ id, name, kind }): ProviderFieldMeta => ({ externalFieldId: id, name, kind }),
     ),
     version: revision,
     updatedAt: revision ? new Date(revision).toISOString() : null,
+    archivedAt: archivedDateOf(cipher),
   };
-  return { meta, fields };
+  return { meta, fields, markerIndex };
 }
 
 /** Concealed and one-time-code values, which a hide-passwords collection withholds. */
@@ -370,6 +481,58 @@ function encryptedUri(uri: string, key: SymmetricKey): Json {
   };
 }
 
+/**
+ * The cipher slot a field fills: a login's username, password or one-time
+ * password by name and kind, or a card's, identity's or SSH key's standard
+ * field by any of its names (whatever its kind).
+ */
+function slotFor(cipherType: unknown, field: { name: string; kind: VaultFieldKind }) {
+  const slots = builtIns(cipherType);
+  if (cipherType === CIPHER_LOGIN) {
+    const wanted = nameKey(field.name);
+    return slots.find((candidate) =>
+      field.kind === "totp"
+        ? candidate.kind === "totp"
+        : candidate.kind === field.kind &&
+          (nameKey(candidate.name) === wanted || nameKey(candidate.key) === wanted),
+    );
+  }
+  const type = itemTypeOfCipher(cipherType);
+  const standard = type ? standardVaultFieldName(type, field.name) : null;
+  return standard ? slots.find((candidate) => candidate.name === standard) : undefined;
+}
+
+const CARD_EXPIRY_NAMES = new Set(["expiry date", "expiry", "expiration date", "expiration"]);
+
+/** A card's one-value expiry ("12/2030"), split into its month and year slots. */
+function cardExpiry(
+  cipherType: unknown,
+  field: { name: string; kind: VaultFieldKind; value?: string },
+): { month: string; year: string } | null {
+  if (cipherType !== CIPHER_CARD || !CARD_EXPIRY_NAMES.has(nameKey(field.name))) return null;
+  return field.value === undefined ? null : parseCardExpiry(field.value);
+}
+
+function markerEntry(marker: string, key: SymmetricKey): Json {
+  return {
+    name: encryptString(VAULT_TYPE_MARKER_FIELD, key),
+    value: encryptString(marker, key),
+    type: FIELD_TEXT,
+    linkedId: null,
+  };
+}
+
+/** Bitwarden's apps need an SSH key's public key and fingerprint next to its private key. */
+function checkSshKey(sshKey: Json | null) {
+  if (!sshKey) return;
+  if (!encrypted(sshKey.privateKey) || !encrypted(sshKey.publicKey)) {
+    throw new WriteRefused(
+      "provider_conflict",
+      'A Bitwarden SSH key needs its "private key" and "public key"',
+    );
+  }
+}
+
 /** A new cipher body (`CipherRequestModel`), encrypted with the owner's key. */
 export function createRequest(
   write: ProviderWriteItem,
@@ -377,27 +540,29 @@ export function createRequest(
   organizationId: string | null,
   encryptedFor: string,
 ): Json {
-  if (write.type !== "login" && write.type !== "note") {
+  const cipherType = cipherTypeFor(write.type);
+  if (cipherType === null) {
     throw new WriteRefused(
       "provider_permission_denied",
-      `Bitwarden items are logins or secure notes here, not ${write.type}`,
+      `Bitwarden cannot hold ${write.type} items`,
     );
   }
-  const isLogin = write.type === "login";
+  const isLogin = cipherType === CIPHER_LOGIN;
   if (!isLogin && write.websites.length > 0) {
     throw new WriteRefused("provider_conflict", "Only Bitwarden logins have websites");
   }
-  const login: Json | null = isLogin
-    ? {
-        uris: write.websites.map((uri) => encryptedUri(uri, key)),
-        username: null,
-        password: null,
-        totp: null,
-      }
-    : null;
+  const sections: Record<BuiltIn["section"], Json | null> = {
+    login: isLogin ? { uris: write.websites.map((uri) => encryptedUri(uri, key)) } : null,
+    card: cipherType === CIPHER_CARD ? {} : null,
+    identity: cipherType === CIPHER_IDENTITY ? {} : null,
+    sshKey: cipherType === CIPHER_SSH_KEY ? {} : null,
+  };
+  for (const slot of builtIns(cipherType)) sections[slot.section]![slot.key] = null;
   let notes: string | null = null;
   const fields: Json[] = [];
   const names = new Set<string>();
+  const marker = markerFor(write);
+  if (marker) fields.push(markerEntry(marker, key));
   for (const field of write.fields) {
     if (field.remove || field.externalFieldId !== undefined) {
       throw new WriteRefused("provider_conflict", "A new item has no existing fields to change");
@@ -407,20 +572,28 @@ export function createRequest(
       throw new WriteRefused("provider_conflict", `Two fields are named "${field.name}"`);
     }
     names.add(name);
+    // Files become attachments once the item exists.
+    if (field.kind === "file") continue;
+    if (isItemTypeMarkerName(field.name)) {
+      throw new WriteRefused("provider_conflict", `"${field.name}" is reserved for the item type`);
+    }
     const value = field.value ?? "";
-    if (login && name === "username" && field.kind === "text") {
-      login.username = encryptString(value, key);
-    } else if (login && name === "password" && field.kind === "concealed") {
-      login.password = encryptString(value, key);
-      login.passwordRevisionDate = new Date().toISOString();
+    const slot = slotFor(cipherType, field);
+    const target = slot ? sections[slot.section]! : null;
+    const expiry = cardExpiry(cipherType, field);
+    if (slot && target && target[slot.key] === null) {
+      target[slot.key] = encryptString(slot.kind === "totp" ? checkTotp(value) : value, key);
+      if (slot.id === "login.password") target.passwordRevisionDate = new Date().toISOString();
     } else if (field.kind === "totp") {
-      if (!login || login.totp !== null) {
-        throw new WriteRefused(
-          "provider_conflict",
-          "Only one Bitwarden login field holds a one-time password",
-        );
-      }
-      login.totp = encryptString(checkTotp(field.value), key);
+      throw new WriteRefused(
+        "provider_conflict",
+        isLogin
+          ? "Only one Bitwarden login field holds a one-time password"
+          : "Only a Bitwarden login holds a one-time password",
+      );
+    } else if (expiry && sections.card!.expMonth === null && sections.card!.expYear === null) {
+      sections.card!.expMonth = encryptString(expiry.month, key);
+      sections.card!.expYear = encryptString(expiry.year, key);
     } else if ((name === "note" || name === "notes") && field.kind === "text" && notes === null) {
       notes = encryptString(value, key);
     } else {
@@ -432,8 +605,9 @@ export function createRequest(
       });
     }
   }
+  checkSshKey(sections.sshKey);
   return {
-    type: isLogin ? CIPHER_LOGIN : CIPHER_SECURE_NOTE,
+    type: cipherType,
     organizationId,
     encryptedFor,
     folderId: null,
@@ -444,20 +618,17 @@ export function createRequest(
     notes,
     fields,
     passwordHistory: [],
-    login,
-    secureNote: isLogin ? null : { type: 0 },
-    card: null,
-    identity: null,
-    sshKey: null,
+    login: sections.login,
+    secureNote: cipherType === CIPHER_SECURE_NOTE ? { type: 0 } : null,
+    card: sections.card,
+    identity: sections.identity,
+    sshKey: sections.sshKey,
   };
 }
 
 function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
-
-const SSH_KEY_REFUSAL =
-  "Bitwarden derives an SSH key's public key and fingerprint from its private key, so change SSH keys in Bitwarden itself";
 
 /**
  * Applies an Opengeni write to the current encrypted cipher and returns the
@@ -477,7 +648,8 @@ export function updateRequest(
 ): Json {
   const key = itemKey(cipher, ownerKey);
   const mapped = mapCipher(cipher, ownerKey);
-  if (write.type !== mapped.meta.type) {
+  // A secure note stands for Opengeni notes, API keys and files alike.
+  if (cipherTypeFor(write.type) !== cipher.type) {
     throw new WriteRefused(
       "provider_conflict",
       `This Bitwarden item is stored as a ${mapped.meta.type}; its type can't change`,
@@ -505,8 +677,6 @@ export function updateRequest(
   let name: unknown = cipher.name;
 
   const setSlot = (slot: BuiltIn, value: string | null) => {
-    if (slot.section === "sshKey")
-      throw new WriteRefused("provider_permission_denied", SSH_KEY_REFUSAL);
     const target = section(slot.section);
     if (slot.id === "login.password" && encrypted(target.password)) {
       history.unshift({ password: target.password, lastUsedDate: now });
@@ -533,6 +703,8 @@ export function updateRequest(
 
   for (const field of write.fields) {
     const id = field.externalFieldId;
+    // Attachments are added, replaced and removed by the provider after this update.
+    if (field.kind === "file" || id?.startsWith(ATTACHMENT_FIELD_PREFIX)) continue;
     if (id === undefined) {
       const wanted = nameKey(field.name);
       if (names.has(wanted)) {
@@ -542,16 +714,23 @@ export function updateRequest(
         );
       }
       names.add(wanted);
-      // A new field fills the type's own empty field of the same name and kind
-      // (a login's one-time password is the only TOTP field).
-      const slot = slots.find((candidate) =>
-        field.kind === "totp"
-          ? candidate.kind === "totp"
-          : candidate.kind === field.kind &&
-            (nameKey(candidate.name) === wanted || nameKey(candidate.key) === wanted),
-      );
-      if (slot && !encrypted(json(cipher[slot.section])?.[slot.key])) {
+      if (isItemTypeMarkerName(field.name)) {
+        throw new WriteRefused(
+          "provider_conflict",
+          `"${field.name}" is reserved for the item type`,
+        );
+      }
+      // A new field fills the type's own empty field of the same name (a
+      // login's one-time password is the only TOTP field).
+      const slot = slotFor(cipher.type, field);
+      if (slot && !encrypted(section(slot.section)[slot.key])) {
         setSlot(slot, field.value ?? "");
+        continue;
+      }
+      const expiry = cardExpiry(cipher.type, field);
+      if (expiry && !encrypted(section("card").expMonth) && !encrypted(section("card").expYear)) {
+        section("card").expMonth = encryptString(expiry.month, key);
+        section("card").expYear = encryptString(expiry.year, key);
         continue;
       }
       if (field.kind === "totp") {
@@ -573,12 +752,6 @@ export function updateRequest(
         linkedId: null,
       });
       continue;
-    }
-    if (id.startsWith(ATTACHMENT_FIELD_PREFIX)) {
-      throw new WriteRefused(
-        "provider_permission_denied",
-        "Attachments are changed in Bitwarden itself",
-      );
     }
     const slot = slots.find((candidate) => candidate.id === id);
     if (slot) {
@@ -616,6 +789,17 @@ export function updateRequest(
     if (field.value !== undefined) entry.value = encryptString(field.value, key);
   }
 
+  // The item's type and category, where its cipher type does not say them.
+  const marker = markerFor(write);
+  if (mapped.markerIndex >= 0) {
+    if (!marker) removed.add(mapped.markerIndex);
+    else if (marker !== mapped.meta.type + (mapped.meta.category ? `/${mapped.meta.category}` : ""))
+      fields[mapped.markerIndex]!.value = encryptString(marker, key);
+  } else if (marker) {
+    fields.push(markerEntry(marker, key));
+  }
+  if (cipher.type === CIPHER_SSH_KEY) checkSshKey(section("sshKey"));
+
   const sectionBody = (part: BuiltIn["section"] | "secureNote") =>
     (part !== "secureNote" ? sections.get(part) : undefined) ?? cipher[part] ?? null;
   return {
@@ -636,6 +820,8 @@ export function updateRequest(
     identity: sectionBody("identity"),
     sshKey: sectionBody("sshKey"),
     lastKnownRevisionDate: revisionOf(cipher),
+    // Vaultwarden un-archives an item for this account when an update omits it.
+    archivedDate: typeof cipher.archivedDate === "string" ? cipher.archivedDate : null,
   };
 }
 

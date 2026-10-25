@@ -57,6 +57,20 @@ describe("native push presentation", () => {
     expect(alert.body).toContain("Open Opengeni");
   });
 
+  test("a secret approval card push shows its question but is answered only in the app", () => {
+    const approval = {
+      ...payload,
+      eventType: "session.humanInput.requested",
+      body: "Allow the agent to use GitHub › password in the browser on github.com?",
+      secretUseApproval: true,
+    };
+    expect(nativePushCategory(approval)).toBe(undefined);
+    expect(nativePushAlert(approval)).toEqual({
+      title: "The agent needs you",
+      body: "Allow the agent to use GitHub › password in the browser on github.com?",
+    });
+  });
+
   test("falls back to a title per rule and keeps the agent's text", () => {
     expect(nativePushAlert(payload)).toEqual({
       title: "The agent needs you",

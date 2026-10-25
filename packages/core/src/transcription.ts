@@ -202,42 +202,6 @@ export type TranscriptionAvailabilityContext = {
   subjectId?: string | undefined;
 };
 
-/**
- * Extensible transcription provider port. Implementations own credentials and
- * upstream request shape. Selection happens before audio is sent; providers must
- * only fall back after an explicit rejection and before any successful or
- * uncertain provider attempt. Recording persistence owns that eligibility.
- */
-export type TranscriptionProvider = {
-  readonly id: string;
-  /** The adapter guarantees that its upstream transport honors AbortSignal. */
-  readonly supportsServerDeadline: true;
-  readonly experimental?: boolean | undefined;
-  /**
-   * Present when the deployment pays the upstream provider (OpenAI/Azure):
-   * the call is admitted against and settled in Opengeni credits. Absent for
-   * the workspace's own subscriptions, which are never charged.
-   */
-  readonly deploymentFunded?:
-    | { readonly model: string; readonly pricing: VoiceInputPricing | null }
-    | undefined;
-  /**
-   * Deployment readiness when called without a workspace. When `workspaceId` is
-   * provided, providers may require a workspace-attached credential (e.g. Codex).
-   */
-  available(context?: TranscriptionAvailabilityContext): boolean | Promise<boolean>;
-  transcribe(input: {
-    audio: Uint8Array;
-    mimeType: string;
-    filename: string;
-    workspaceId: string;
-    accountId: string;
-    subjectId: string;
-    requestId: string;
-    signal?: AbortSignal | undefined;
-  }): Promise<{ text: string; languages: string[]; usage?: VoiceInputUsage | null | undefined }>;
-};
-
 export type TranscriptionService = {
   limits(): TranscriptionLimits;
   /** True when at least one ready provider can serve requests. */

@@ -37,8 +37,12 @@ export type DesktopCapability =
   | "updates"
   /** Record the audio other apps play (a meeting's other participants) as its own track. */
   | "systemAudio"
+  /** Notice when a call app starts using the microphone, and offer to record the meeting. */
+  | "meetingDetection"
   /** What Opengeni may do on this computer: switches the app enforces, and the microphone. */
-  | "computerCapabilities";
+  | "computerCapabilities"
+  /** A still of the window's page, taken without a prompt (for feedback reports). */
+  | "captureWindow";
 
 export type DesktopSystemAudioErrorCode =
   /** This computer, its OS version or this app build can't record other apps' audio. */
@@ -57,6 +61,26 @@ export interface DesktopSystemAudioError {
   /** Technical detail for logs. */
   detail?: string;
 }
+
+/** Call detection as the web app shows it in settings. */
+export interface DesktopMeetingDetectionStatus {
+  /** The person's switch: offer to record when a call starts. */
+  enabled: boolean;
+  /** This computer, its OS version and this app build can tell when a call starts. */
+  available: boolean;
+  /** Why detection isn't working right now, in a sentence for its row. */
+  problem?: string;
+}
+
+/**
+ * What the person chose on one of the app's meeting notifications: record the
+ * call an app just started, or stop recording because the call ended. `app`
+ * is the call app's name ("Zoom", "Google Chrome"); `title` suggests a name
+ * for the meeting.
+ */
+export type DesktopMeetingRequest =
+  | { kind: "record"; app: string; title: string }
+  | { kind: "stop"; app: string };
 
 /**
  * The app's own updates as the web app shows them. `downloading` means a new
@@ -260,6 +284,14 @@ export interface DesktopComputerCapabilities {
   problems?: Partial<Record<keyof DesktopComputerSettings, string>>;
 }
 
+/** A still of the desktop window's page: PNG bytes, base64-encoded. */
+export interface DesktopWindowCapture {
+  contentType: "image/png";
+  base64: string;
+  width: number;
+  height: number;
+}
+
 /** `window.opengeniDesktop` inside a desktop app. */
 export interface DesktopBridge {
   readonly version: number;
@@ -267,6 +299,13 @@ export interface DesktopBridge {
   readonly capabilities: readonly DesktopCapability[];
   /** The shell's product name, e.g. "Opengeni". */
   readonly productName: string;
+  /** The app's own version, e.g. "0.1.29". Absent from older apps. */
+  readonly appVersion?: string;
+  /**
+   * A PNG of the page in the window as it is now, at the screen's pixel
+   * density, or null when nothing is shown. With the `captureWindow` capability.
+   */
+  captureWindow?(): Promise<DesktopWindowCapture | null>;
   readonly accounts: {
     list(): Promise<DesktopAccountsSnapshot>;
     /** Show another account in the window. */
@@ -359,6 +398,28 @@ export interface DesktopBridge {
       listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
     ): Unsubscribe;
   };
+  /**
+   * Call detection. With the `meetingDetection` capability. While on, the
+   * app shows a notification when a call app (Zoom, Teams, Slack, Meet in a
+   * browser) starts using the microphone, and another when the call it is
+   * recording ends.
+   */
+  readonly meetingDetection?: {
+    status(): Promise<DesktopMeetingDetectionStatus>;
+    update(change: { enabled?: boolean }): Promise<DesktopMeetingDetectionStatus>;
+    /**
+     * Tell the app whether this page is recording a meeting, so it doesn't
+     * offer to record another and can offer to stop when the call ends.
+     */
+    setRecording(recording: boolean): void;
+    /**
+     * The person chose a notification's action. The window comes to the
+     * front first. Only the newest listener receives them.
+     */
+    onRequest(listener: (request: DesktopMeetingRequest) => void): Unsubscribe;
+    /** The switch or its state changed. */
+    onChange(listener: () => void): Unsubscribe;
+  };
   /** What Opengeni may do on this computer. With the `computerCapabilities` capability. */
   readonly computerCapabilities?: {
     status(): Promise<DesktopComputerCapabilities>;
@@ -406,6 +467,7 @@ export const DESKTOP_IPC = {
   computerDisconnect: "og:computer:disconnect",
   computerChanged: "og:computer:changed",
   openExternal: "og:open-external",
+  captureWindow: "og:capture-window",
   command: "og:command",
   menuActionsSet: "og:menu-actions:set",
   menuAction: "og:menu-action",
@@ -422,6 +484,11 @@ export const DESKTOP_IPC = {
   systemAudioStop: "og:system-audio:stop",
   systemAudioSamples: "og:system-audio:samples",
   systemAudioEnded: "og:system-audio:ended",
+  meetingDetectionStatus: "og:meeting-detection:status",
+  meetingDetectionUpdate: "og:meeting-detection:update",
+  meetingDetectionRecording: "og:meeting-detection:recording",
+  meetingDetectionRequest: "og:meeting-detection:request",
+  meetingDetectionChanged: "og:meeting-detection:changed",
   capabilitiesStatus: "og:capabilities:status",
   capabilitiesUpdate: "og:capabilities:update",
   capabilitiesRequestMicrophone: "og:capabilities:request-microphone",

@@ -5,9 +5,189 @@ import type {
 } from "./tool-action-review";
 
 const protectedName =
-  /password|passwd|secret|credential|authorization|cookie|(^|[_-])token($|[_-])|api[_-]?key|accessToken|refreshToken|privateKey/i;
+  /password|passwd|passphrase|secret|credential|authorization|cookie|(^|[_-])token($|[_-])|api[_-]?key|accessToken|refreshToken|privateKey/i;
 const protectedReviewField = (key: string, fields: readonly string[] = []) =>
   protectedName.test(key) || fields.includes(key) || fields.includes("*");
+
+const SECRET_LAST_WORDS = new Set([
+  "password",
+  "passwd",
+  "passphrase",
+  "secret",
+  "secrets",
+  "credential",
+  "credentials",
+  "cookie",
+  "cookies",
+  "token",
+  "otp",
+  "totp",
+  "dsn",
+  "authorization",
+]);
+// "code" alone is a sign-in code; "errorCode" or "countryCode" are not.
+const SECRET_CODE_KINDS = new Set([
+  "user",
+  "auth",
+  "authorization",
+  "oauth",
+  "verification",
+  "setup",
+  "recovery",
+  "device",
+  "otp",
+]);
+const SECRET_KEY_KINDS = new Set([
+  "api",
+  "private",
+  "access",
+  "secret",
+  "signing",
+  "encryption",
+  "master",
+  "license",
+]);
+// Flags and checks about a secret ("hasWebhookSecret", "expectedCredential…")
+// say whether one exists, never what it is.
+const SECRET_FLAG_FIRST_WORDS = new Set(["has", "is", "awaiting", "can", "needs", "expected"]);
+// Facts about a secret ("credentialVersion", "secretName", "apiKeyPrefix")
+// describe it without being it.
+const SECRET_METADATA_LAST_WORDS = new Set([
+  "version",
+  "versions",
+  "id",
+  "ids",
+  "count",
+  "at",
+  "name",
+  "names",
+  "label",
+  "kind",
+  "type",
+  "status",
+  "mode",
+  "source",
+  "ref",
+  "refs",
+  "reference",
+  "references",
+  "configured",
+  "present",
+  "set",
+  "enabled",
+  "required",
+  "length",
+  "prefix",
+  "hint",
+  "fingerprint",
+  "scope",
+  "scopes",
+  "provider",
+  "expiry",
+  "expires",
+  "suffix",
+  "url",
+  "uri",
+  "epoch",
+]);
+
+function nameWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_\s-]+/g, " ")
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean);
+}
+
+/**
+ * Whether a field with this name carries a key, password, token, code or
+ * other secret, judged by its last word: "apiKey", "clientSecret", "code",
+ * "userCode" and "masterPassword" do; "credentialVersion", "credentialId",
+ * "errorCode", "hasWebhookSecret" and "nextPageToken" don't. The app-action catalog
+ * generator marks actions by it and an app action's card hides by it.
+ */
+export function secretFieldName(name: string): boolean {
+  const words = nameWords(name);
+  const last = words.at(-1);
+  const before = words.at(-2);
+  if (!last || SECRET_FLAG_FIRST_WORDS.has(words[0]!)) return false;
+  if (last === "token" && before === "page") return false;
+  if (SECRET_LAST_WORDS.has(last)) return true;
+  if (last === "code") return before === undefined || SECRET_CODE_KINDS.has(before);
+  if (last === "key" && before !== undefined && SECRET_KEY_KINDS.has(before)) return true;
+  // A secret word earlier in the name ("secretValue", "privateKeyPem",
+  // "passwordHash"), unless the name only describes the secret.
+  return protectedName.test(name) && !SECRET_METADATA_LAST_WORDS.has(last);
+}
+
+// Hosts whose webhook URLs carry their secret in the path
+// ("https://hooks.slack.com/services/T…/B…/<secret>"), including ones whose
+// secret is too short to look random.
+const SECRET_PATH_HOSTS =
+  /^(hooks\.slack\.com|(\w+\.)?discord(app)?\.com|[\w-]+\.webhook\.office\.com|outlook\.office\.com|chat\.googleapis\.com|hooks\.zapier\.com)$/i;
+const URL_IN_TEXT = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+// "Server=db;User Id=app;Password=…" and similar key=value connection strings.
+const CONNECTION_STRING_SECRET =
+  /((?:^|;)\s*(?:password|pwd|user ?password|account ?key|shared ?access ?key|shared ?access ?signature|access ?key|secret|token|sig)\s*=)[^;]*/gi;
+const AUTHORIZATION_VALUE = /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g;
+// Bare tokens with a well-known shape: OpenAI/Anthropic and Stripe keys,
+// GitHub tokens, Slack tokens, AWS access key IDs and JWTs.
+const TOKEN_SHAPES =
+  /\b(?:sk-[A-Za-z0-9_-]{16,}|sk_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/g;
+
+/**
+ * Whether one URL path segment looks like a random secret rather than a
+ * readable name: a long run of letters and digits mixed, or a long opaque
+ * token. Slugs ("getting-started") and dates stay readable.
+ */
+function secretLookingPathSegment(segment: string): boolean {
+  if (/^[A-Za-z0-9_-]{32,}$/.test(segment)) return true;
+  return segment
+    .split(/[-_.~]/)
+    .some((chunk) => chunk.length >= 12 && /\d/.test(chunk) && /[A-Za-z]/.test(chunk));
+}
+
+/**
+ * One URL with its sign-in parts and query removed, and its path too for
+ * webhook hosts that keep the secret there:
+ * "postgres://app:pw@db:5432/x" → "postgres://db:5432/x",
+ * "https://hooks.example.com/in?token=…" → "https://hooks.example.com/in",
+ * "https://hooks.slack.com/services/…" → "https://hooks.slack.com/…",
+ * and any random-looking path segment hidden:
+ * "https://example.com/hooks/a1b2c3d4e5f6g7h8" → "https://example.com/hooks/…".
+ */
+function withoutUrlSecret(url: string): string {
+  const scheme = url.slice(0, url.indexOf("://") + 3);
+  const rest = url.slice(scheme.length).split(/[?#]/, 1)[0]!;
+  // The last "@" ends the sign-in part even when an unencoded password holds
+  // a "/"; a path with an "@" in it only loses its start.
+  const address = rest.slice(rest.lastIndexOf("@") + 1);
+  const host = address.split("/", 1)[0]!;
+  const hostname = host.replace(/:\d+$/, "");
+  if (SECRET_PATH_HOSTS.test(hostname) && address.length > host.length + 1) {
+    return `${scheme}${host}/…`;
+  }
+  const path = address
+    .slice(host.length)
+    .split("/")
+    .map((segment) => (secretLookingPathSegment(segment) ? "…" : segment))
+    .join("/");
+  return `${scheme}${host}${path}`;
+}
+
+/**
+ * Text with the secrets it may carry removed: the sign-in parts, query and
+ * webhook paths of every URL in it, password-like parts of a connection
+ * string, bearer or basic credentials, and bare tokens of a well-known shape.
+ */
+function withoutTextSecrets(text: string): string {
+  return text
+    .replace(URL_IN_TEXT, withoutUrlSecret)
+    .replace(CONNECTION_STRING_SECRET, "$1[Protected value]")
+    .replace(AUTHORIZATION_VALUE, "$1 [Protected value]")
+    .replace(TOKEN_SHAPES, "[Protected value]");
+}
 const bound = (value: string, limit: number) =>
   value.length > limit ? `${value.slice(0, limit)}…` : value;
 export function toolReviewFieldLabel(key: string): string {
@@ -82,7 +262,11 @@ const fieldPointer = (key: string, index: number, parent = "") =>
 export function toolReviewFields(
   argumentsValue: unknown,
   context?: ToolReviewContext,
+  toolName?: string,
 ): { fields: ToolActionReview["fields"]; moreFields: number } {
+  // An app action's card says what it does in one plain line (its
+  // consequence); its raw arguments (action id, path, body) stay in Details.
+  if (toolName === APP_ACTION_REVIEW_TOOL) return { fields: [], moreFields: 0 };
   const args = decodeReviewArguments(argumentsValue);
   if (!args) return { fields: [], moreFields: 0 };
   const entries = Object.entries(args);
@@ -175,6 +359,56 @@ export function toolReviewFields(
   };
 }
 
+/** The tool that runs an app action as the person (see @opengeni/contracts/app-actions). */
+const APP_ACTION_REVIEW_TOOL = "admin_action_call";
+// Bookkeeping and opaque identifiers say nothing a person can check.
+const APP_ACTION_UNREADABLE_KEY =
+  /^(id|operationId|idempotencyKey|expiresAt|expectedVersion|expectedRevision|expectedEtag)$|Ids?$/;
+
+/**
+ * One short readable line of an app action's key values, for example
+ * "Email: anna@example.com · Role: admin", taken from its body and query.
+ * Values are shown as labelled data, never as the question itself. Secrets
+ * (by field name), and the secrets text can carry (URL sign-in parts, queries
+ * and webhook paths, connection string passwords, bearer credentials), are
+ * never shown.
+ */
+export function appActionReviewSummary(argumentsValue: unknown): string | undefined {
+  const args = decodeReviewArguments(argumentsValue);
+  if (!args) return undefined;
+  const parts: string[] = [];
+  const visit = (key: string, value: unknown, depth: number) => {
+    if (parts.length >= 4 || APP_ACTION_UNREADABLE_KEY.test(key)) return;
+    if (secretFieldName(key)) {
+      parts.push(`${toolReviewFieldLabel(key)}: [Protected value]`);
+      return;
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      if (depth < 2)
+        for (const [name, entry] of Object.entries(value)) visit(name, entry, depth + 1);
+      return;
+    }
+    const scalar = (entry: unknown) =>
+      entry === null || ["string", "number", "boolean"].includes(typeof entry);
+    const shown = (entry: unknown) =>
+      valueText(typeof entry === "string" ? withoutTextSecrets(entry.trim()) : entry);
+    const text = Array.isArray(value)
+      ? value.length > 0 && value.length <= 4 && value.every(scalar)
+        ? value.map(shown).join(", ")
+        : ""
+      : scalar(value)
+        ? shown(value)
+        : "";
+    const line = text.replace(/\s+/g, " ").trim();
+    if (line) parts.push(`${toolReviewFieldLabel(key)}: ${bound(line, 80)}`);
+  };
+  for (const source of [args.body, args.query]) {
+    if (source && typeof source === "object" && !Array.isArray(source))
+      for (const [name, entry] of Object.entries(source)) visit(name, entry, 0);
+  }
+  return parts.length > 0 ? bound(parts.join(" · "), 240) : undefined;
+}
+
 /** Deterministic consequences from the reviewed bytes. Unknown fields remain visible. */
 export function toolReviewAction(
   toolName: string,
@@ -193,9 +427,15 @@ export function toolReviewAction(
         ),
         256,
       ),
-    approveLabel: "Approve action",
+    // An app action's card asks the person a plain question ("Invite … to
+    // your organization?"), so its button answers it.
+    approveLabel: toolName === APP_ACTION_REVIEW_TOOL ? "Allow" : "Approve action",
     effects: [] as string[],
   };
+  if (toolName === APP_ACTION_REVIEW_TOOL) {
+    const consequence = appActionReviewSummary(argumentsValue);
+    return consequence ? { ...fallback, consequence } : fallback;
+  }
   if (context?.kind !== "gmail") return fallback;
   const args = decodeReviewArguments(argumentsValue);
   if (!args) return fallback;

@@ -14,6 +14,8 @@ import {
   type DesktopBridge,
   type DesktopCommand,
   type DesktopComputerCapabilities,
+  type DesktopMeetingDetectionStatus,
+  type DesktopMeetingRequest,
   type DesktopMenuAction,
   type DesktopPlatform,
   type DesktopSystemAudioError,
@@ -78,6 +80,14 @@ if (origin && window.location.origin === origin) {
     if (appShotListener) appShotListener(result);
     else waitingAppShot = { result, at: Date.now() };
   });
+  // Likewise a meeting notification's choice, which can arrive as the page loads.
+  let meetingListener: ((request: DesktopMeetingRequest) => void) | null = null;
+  let waitingMeeting: { request: DesktopMeetingRequest; at: number } | null = null;
+  ipcRenderer.on(DESKTOP_IPC.meetingDetectionRequest, (_event, request: DesktopMeetingRequest) => {
+    if (meetingListener) meetingListener(request);
+    else waitingMeeting = { request, at: Date.now() };
+  });
+  const appVersion = argument("opengeni-app-version");
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
@@ -92,9 +102,13 @@ if (origin && window.location.origin === origin) {
       "menuActions",
       "updates",
       ...(systemAudio ? (["systemAudio"] as const) : []),
+      ...(systemAudio ? (["meetingDetection"] as const) : []),
       "computerCapabilities",
+      "captureWindow",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
+    ...(appVersion ? { appVersion } : {}),
+    captureWindow: () => ipcRenderer.invoke(DESKTOP_IPC.captureWindow),
     accounts: {
       list: () => ipcRenderer.invoke(DESKTOP_IPC.accountsList) as Promise<DesktopAccountsSnapshot>,
       switchTo: (accountId) => ipcRenderer.invoke(DESKTOP_IPC.accountsSwitch, accountId),
@@ -201,6 +215,32 @@ if (origin && window.location.origin === origin) {
                 ipcRenderer.removeListener(DESKTOP_IPC.systemAudioEnded, handler);
               };
             },
+          },
+          meetingDetection: {
+            status: () =>
+              ipcRenderer.invoke(
+                DESKTOP_IPC.meetingDetectionStatus,
+              ) as Promise<DesktopMeetingDetectionStatus>,
+            update: (change: { enabled?: boolean }) =>
+              ipcRenderer.invoke(
+                DESKTOP_IPC.meetingDetectionUpdate,
+                change,
+              ) as Promise<DesktopMeetingDetectionStatus>,
+            setRecording: (recording: boolean) =>
+              ipcRenderer.send(DESKTOP_IPC.meetingDetectionRecording, recording),
+            onRequest: (listener: (request: DesktopMeetingRequest) => void) => {
+              meetingListener = listener;
+              const waiting = waitingMeeting;
+              waitingMeeting = null;
+              if (waiting && Date.now() - waiting.at < 60_000) {
+                queueMicrotask(() => meetingListener?.(waiting.request));
+              }
+              return () => {
+                if (meetingListener === listener) meetingListener = null;
+              };
+            },
+            onChange: (listener: () => void) =>
+              subscribe(DESKTOP_IPC.meetingDetectionChanged, () => listener()),
           },
         }
       : {}),

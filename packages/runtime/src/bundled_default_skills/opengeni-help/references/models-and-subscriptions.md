@@ -75,13 +75,16 @@ later turns; it does not interrupt a reply that is already running.
 
 ## Acting as an agent
 
-When your session has organization admin access, use the admin action tools:
+Change these settings for the person with the app-action tools; don't send them
+to the settings page. To switch only this chat's model, use `session_set_model`.
 
 1. Find the action with `admin_actions_search`, then read it with
    `admin_action_describe`. Each action has a plain description.
 2. Read the current settings before writing. Send the version or revision that
    read returned, so a concurrent change is not overwritten.
-3. Call it with `admin_action_call`, then read the setting back to confirm.
+3. Call it with `admin_action_call`. A change shows the person a confirmation
+   in the chat and runs once they allow it (at once if they gave the session
+   full access). Then read the setting back to confirm.
 
 Connecting accounts:
 

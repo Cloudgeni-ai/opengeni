@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 
 import type {
+  CreateAutomationTemplateRequest,
+  CreateEventSourceRequest,
   EventSource,
   EventTypeDescriptor,
   OpenGeniClient,
+  ReadyEventSource,
   ScheduledTask,
   ScheduledTaskRun,
+  WorkspaceAutomationTemplate,
 } from "@opengeni/sdk";
 
 import {
@@ -22,19 +26,22 @@ registerDom();
 const selectMenu = await import("../src/ui/select-menu");
 
 // Popover menus need layout the test DOM lacks; plain option lists stand in,
-// and `pick` chooses by the menu's label.
+// and `pick` chooses by the menu's label, or its placeholder when unlabelled.
 const menus = new Map<string, (value: string) => void>();
 mock.module("../src/ui/select-menu", () => {
   const OptionList = ({
     options,
     onValueChange,
+    placeholder,
     "aria-label": ariaLabel,
   }: {
     options: ReadonlyArray<{ value: string; label: string }>;
     onValueChange?: (value: string) => void;
+    placeholder?: unknown;
     "aria-label"?: string;
   }) => {
-    if (ariaLabel && onValueChange) menus.set(ariaLabel, onValueChange);
+    const name = ariaLabel ?? (typeof placeholder === "string" ? placeholder : undefined);
+    if (name && onValueChange) menus.set(name, onValueChange);
     return (
       <ul aria-label={ariaLabel}>
         {options.map((option) => (
@@ -47,13 +54,14 @@ mock.module("../src/ui/select-menu", () => {
   };
   return { ...selectMenu, SelectMenu: OptionList, ComboboxSelect: OptionList };
 });
-const { AutomationsPanel } = await import("../src/automations");
-const { OpenGeniMessagesProvider } = await import("../src/messages/runtime");
+const { AutomationsPanel, builtinAutomationTemplates } = await import("../src/automations");
+const { OpenGeniMessagesProvider, createOpenGeniText } = await import("../src/messages/runtime");
 const { PortalContainerProvider } = await import("../src/ui/portal-container");
 
 const WORKSPACE_ID = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d";
 const SESSION_ID = "6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 const SOURCE_ID = "1b2c3d4e-5f60-4a7b-8c9d-0e1f2a3b4c5d";
+const WORKSPACE_SOURCE_ID = "2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f";
 const TIMESTAMP = "2026-10-21T10:00:00.000Z";
 
 function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
@@ -84,6 +92,8 @@ const mcpSource: EventSource = {
   visibility: "private",
   status: "active",
   statusReason: null,
+  statusReasonCode: null,
+  statusReasonDetail: null,
   webhookUrl: null,
   awaitingSigningSecret: false,
   mcp: { serverId: "orders-mcp", connectionId: null },
@@ -103,7 +113,52 @@ const orderCreated: EventTypeDescriptor = {
   },
   available: true,
   unavailableReason: null,
+  unavailableReasonCode: null,
+  unavailableReasonDetail: null,
 };
+
+const workspaceSource: EventSource = {
+  ...mcpSource,
+  id: WORKSPACE_SOURCE_ID,
+  kind: "workspace",
+  name: "This workspace",
+  mcp: null,
+};
+
+const transcriptReady: EventTypeDescriptor = {
+  type: "recording.transcript.ready",
+  description: "A recording's transcript is ready",
+  fields: [],
+  argumentsSchema: null,
+  available: true,
+  unavailableReason: null,
+  unavailableReasonCode: null,
+  unavailableReasonDetail: null,
+};
+
+const builtin = builtinAutomationTemplates(createOpenGeniText());
+const meetingNotes = builtin.find((template) => template.id === "meeting-notes")!;
+const morningBrief = builtin.find((template) => template.id === "morning-brief")!;
+
+function savedTemplate(
+  overrides: Partial<WorkspaceAutomationTemplate> = {},
+): WorkspaceAutomationTemplate {
+  return {
+    id: "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b",
+    workspaceId: WORKSPACE_ID,
+    name: "Order digest",
+    description: "What sold yesterday.",
+    instructions: "Summarize yesterday's orders.",
+    schedule: null,
+    triggers: [],
+    maxRunsPerHour: null,
+    createdBySubjectId: "viewer",
+    viewerAccess: "manage",
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+    ...overrides,
+  };
+}
 
 function notFound(): Error {
   return Object.assign(new Error("Not found"), { status: 404 });
@@ -125,7 +180,14 @@ function run(overrides: Partial<ScheduledTaskRun> = {}): ScheduledTaskRun {
   } as unknown as ScheduledTaskRun;
 }
 
-function fakeClient(options: { tasks?: ScheduledTask[]; sources?: EventSource[] | "off" } = {}) {
+function fakeClient(
+  options: {
+    tasks?: ScheduledTask[];
+    sources?: EventSource[] | "off";
+    ready?: ReadyEventSource[];
+    templates?: WorkspaceAutomationTemplate[] | "off";
+  } = {},
+) {
   const tasks = options.tasks ?? [];
   const client = {
     listScheduledTasks: mock(async () => tasks),
@@ -133,8 +195,13 @@ function fakeClient(options: { tasks?: ScheduledTask[]; sources?: EventSource[] 
       if (options.sources === "off") throw notFound();
       return options.sources ?? [];
     }),
-    createEventSource: mock(async () => ({ source: mcpSource })),
-    listEventSourceTypes: mock(async () => [orderCreated]),
+    listReadyEventSources: mock(async () => options.ready ?? []),
+    createEventSource: mock(async (_workspaceId: string, request: CreateEventSourceRequest) => ({
+      source: request.kind === "workspace" ? workspaceSource : mcpSource,
+    })),
+    listEventSourceTypes: mock(async (_workspaceId: string, sourceId: string) =>
+      sourceId === WORKSPACE_SOURCE_ID ? [transcriptReady] : [orderCreated],
+    ),
     createScheduledTask: mock(async (_workspaceId: string, request: Record<string, unknown>) =>
       task({ id: "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a", name: String(request.name) }),
     ),
@@ -144,6 +211,21 @@ function fakeClient(options: { tasks?: ScheduledTask[]; sources?: EventSource[] 
     triggerScheduledTask: mock(async () => task({ updatedAt: "2026-10-21T10:05:00.000Z" })),
     deleteScheduledTask: mock(async () => undefined),
     listScheduledTaskRuns: mock(async (): Promise<ScheduledTaskRun[]> => []),
+    listAutomationTemplates: mock(async () => {
+      if (options.templates === "off") throw notFound();
+      return options.templates ?? [];
+    }),
+    createAutomationTemplate: mock(
+      async (_workspaceId: string, request: CreateAutomationTemplateRequest) =>
+        savedTemplate({
+          id: "6f7a8b9c-0d1e-4f2a-8b3c-4d5e6f7a8b9c",
+          name: request.name,
+          description: request.description ?? "",
+          instructions: request.instructions,
+        }),
+    ),
+    updateAutomationTemplate: mock(async () => savedTemplate()),
+    deleteAutomationTemplate: mock(async () => undefined),
   };
   return client;
 }
@@ -381,6 +463,47 @@ test("the host's MCP server is offered before its source exists, and saving adds
   });
 });
 
+test("servers and mailboxes the person can use are offered without the host naming them", async () => {
+  const connectionId = "4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a";
+  const client = fakeClient({
+    sources: [],
+    ready: [
+      { key: "mcp-server:orders-mcp", kind: "mcp", name: "Orders" },
+      { key: `gmail:${connectionId}`, kind: "gmail", name: "Gmail (me@example.com)" },
+      { key: "workspace", kind: "workspace", name: "This workspace" },
+    ],
+  });
+  const container = await render(client, {
+    sessionId: SESSION_ID,
+    argumentDefaults: { projectId: "3f2e1d0c-9b8a-4c7d-8e6f-5a4b3c2d1e0f" },
+  });
+  await click(button(container, "New automation"));
+  await click(button(container, "Add an event"));
+  await flush();
+  // Each is offered, and only the one picked is added. This workspace's own
+  // events wait for the host to offer them.
+  expect(container.textContent).toContain("Gmail (me@example.com)");
+  expect(container.textContent).not.toContain("This workspace");
+  expect(client.createEventSource).not.toHaveBeenCalled();
+  await pick("Choose a source", "mcp-server:orders-mcp");
+  expect(client.createEventSource).toHaveBeenCalledTimes(1);
+  expect(client.createEventSource).toHaveBeenCalledWith(WORKSPACE_ID, {
+    kind: "mcp",
+    serverId: "orders-mcp",
+  });
+  await pick("Choose an event", "order.created");
+  await change(container.querySelector("textarea")!, "Tell me about each new order.");
+  await click(button(container, "Create automation"));
+  expect(client.createEventSource).toHaveBeenCalledTimes(1);
+  const [, request] = client.createScheduledTask.mock.calls[0] as unknown as [
+    string,
+    Record<string, unknown>,
+  ];
+  expect(request).toMatchObject({
+    events: { triggers: [{ sourceId: SOURCE_ID, eventTypes: ["order.created"] }] },
+  });
+});
+
 test("a failed load offers to try again", async () => {
   const client = fakeClient();
   client.listScheduledTasks.mockImplementationOnce(async () => {
@@ -449,4 +572,139 @@ test("the loading note is in the host's language", async () => {
     (note) => note.textContent,
   );
   expect(notes).toContain("Laster automatiseringer");
+});
+
+/** A row's own action, by its title. */
+function row(container: ParentNode, title: string): HTMLElement {
+  const found = [...container.querySelectorAll<HTMLElement>("[data-row-action]")].find(
+    (candidate) => candidate.textContent?.trim() === title,
+  );
+  if (!found) throw new Error(`No row "${title}"`);
+  return found;
+}
+
+test("Meeting notes starts from its template on this workspace's events, adding that source once", async () => {
+  const client = fakeClient({ sources: [] });
+  const container = await render(client, {
+    sessionId: SESSION_ID,
+    templates: builtin,
+    workspaceEvents: true,
+  });
+  await click(button(container, "New automation"));
+  expect(container.textContent).toContain("Start from scratch");
+  expect(container.textContent).toContain("When a meeting's transcript is ready");
+  await click(row(container, "Meeting notes"));
+  // The form opens filled in; picking its source to read its events adds it.
+  expect(container.querySelector("textarea")?.value).toBe(meetingNotes.instructions);
+  expect(client.createEventSource).toHaveBeenCalledTimes(1);
+  expect(client.createEventSource).toHaveBeenCalledWith(WORKSPACE_ID, { kind: "workspace" });
+  expect(client.listEventSourceTypes).toHaveBeenCalledWith(WORKSPACE_ID, WORKSPACE_SOURCE_ID);
+  await click(button(container, "Create automation"));
+  expect(client.createEventSource).toHaveBeenCalledTimes(1);
+  expect(client.createScheduledTask).toHaveBeenCalledTimes(1);
+  const [, request] = client.createScheduledTask.mock.calls[0] as unknown as [
+    string,
+    Record<string, unknown>,
+  ];
+  expect(request).toMatchObject({
+    name: "Meeting notes",
+    prompt: meetingNotes.instructions,
+    schedule: { type: "manual" },
+    events: {
+      triggers: [
+        {
+          sourceId: WORKSPACE_SOURCE_ID,
+          eventTypes: ["recording.transcript.ready"],
+          conditions: [
+            { field: "data.purpose", op: "equals", value: "meeting" },
+            { field: "data.recordedByYou", op: "equals", value: true },
+          ],
+        },
+      ],
+    },
+  });
+});
+
+test("a template on this workspace's events isn't offered where those aren't", async () => {
+  const client = fakeClient({ sources: [] });
+  const container = await render(client, { templates: [meetingNotes, morningBrief] });
+  await click(button(container, "New automation"));
+  expect(container.textContent).toContain("Morning brief");
+  expect(container.textContent).not.toContain("Meeting notes");
+  await click(row(container, "Start from scratch"));
+  expect(container.querySelector("textarea")?.value).toBe("");
+});
+
+test("with no templates, New automation opens the form", async () => {
+  const client = fakeClient({ sources: [] });
+  const container = await render(client);
+  await click(button(container, "New automation"));
+  expect(container.textContent).not.toContain("Start from scratch");
+  expect(container.querySelector("textarea")).not.toBeNull();
+});
+
+test("an automation saves as a workspace template, offered the next time", async () => {
+  const client = fakeClient({ tasks: [task()], sources: [] });
+  const container = await render(client, { sessionId: SESSION_ID });
+  await click(container.querySelector<HTMLButtonElement>("[data-row-action]")!);
+  await click(button(container, "Save as template"));
+  const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+  expect(dialog.textContent).toContain(
+    "Everyone in this workspace can start an automation from it",
+  );
+  await change(dialog.querySelector("textarea")!, "What sold yesterday.");
+  await click(button(dialog, "Save template"));
+  expect(client.createAutomationTemplate).toHaveBeenCalledWith(WORKSPACE_ID, {
+    name: "Morning digest",
+    description: "What sold yesterday.",
+    instructions: "Summarize yesterday's orders.",
+    schedule: null,
+    triggers: [],
+    maxRunsPerHour: null,
+  });
+  expect(container.querySelector('[role="status"]')?.textContent).toContain(
+    "Saved “Morning digest” as a template",
+  );
+  await click(button(container, "All automations"));
+  await click(button(container, "New automation"));
+  expect(container.textContent).toContain("Saved in this workspace");
+  await click(row(container, "Morning digest"));
+  expect(container.querySelector("textarea")?.value).toBe("Summarize yesterday's orders.");
+});
+
+test("a saved template its maker manages can be deleted from the list", async () => {
+  const client = fakeClient({ sources: [], templates: [savedTemplate()] });
+  const container = await render(client);
+  await click(button(container, "New automation"));
+  await actRun(() =>
+    button(container, "More actions for the Order digest template").dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+    ),
+  );
+  await flush();
+  const item = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (candidate) => candidate.textContent?.trim() === "Delete",
+  );
+  await click(item!);
+  const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+  expect(dialog.textContent).toContain("Delete the “Order digest” template?");
+  await click(button(dialog, "Delete template"));
+  expect(client.deleteAutomationTemplate).toHaveBeenCalledWith(WORKSPACE_ID, savedTemplate().id);
+});
+
+test("someone else's saved template has no menu, and an older server offers no saving", async () => {
+  const client = fakeClient({
+    sources: [],
+    templates: [savedTemplate({ viewerAccess: "use", createdBySubjectId: "someone" })],
+  });
+  const container = await render(client);
+  await click(button(container, "New automation"));
+  expect(container.textContent).toContain("Order digest");
+  expect(() => button(container, "More actions for the Order digest template")).toThrow();
+
+  await rendered?.unmount();
+  const older = fakeClient({ tasks: [task()], sources: [], templates: "off" });
+  const page = await render(older, { sessionId: SESSION_ID });
+  await click(page.querySelector<HTMLButtonElement>("[data-row-action]")!);
+  expect(() => button(page, "Save as template")).toThrow();
 });

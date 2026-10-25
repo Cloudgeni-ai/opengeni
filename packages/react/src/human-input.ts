@@ -7,6 +7,12 @@ export type PendingHumanInputRequest = {
   questions: HumanInputQuestion[];
   allowSkip: boolean;
   expiresAt: string | null;
+  /**
+   * `secret_use_approval` marks a host-owned approval card. It belongs to the
+   * blocked use, not to the turn that hit it, so it stays actionable after
+   * that turn ends.
+   */
+  origin?: "tool_call" | "secret_use_approval" | undefined;
 };
 
 /** A pending row stops being actionable at its durable deadline, even before refresh. */
@@ -35,13 +41,15 @@ export function humanInputRequestFromEvent(
     questions: request.questions as HumanInputQuestion[],
     allowSkip: request.allowSkip === true,
     expiresAt: typeof request.expiresAt === "string" ? request.expiresAt : null,
+    ...(request.origin === "secret_use_approval" ? { origin: "secret_use_approval" as const } : {}),
   };
 }
 
 /**
  * Fold a durable event log into the structured requests that are actionable
  * now. Responses remove one request; a terminal owning turn clears any
- * unresolved requests that died with it. Replaying history cannot resurrect a
+ * unresolved requests that died with it, except host-owned secret-use approval
+ * cards, which outlive their turn. Replaying history cannot resurrect a
  * previously answered card.
  */
 export function projectPendingHumanInputRequests(
@@ -64,6 +72,7 @@ export function projectPendingHumanInputRequests(
       event.type === "turn.cancelled"
     ) {
       for (const [id, request] of pending) {
+        if (request.origin === "secret_use_approval") continue;
         if (
           request.turnId === null ||
           event.turnId === null ||

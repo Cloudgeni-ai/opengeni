@@ -117,7 +117,13 @@ const card = secretUseApprovalHumanInput({
 });
 
 export default function SecretApprovalSection() {
-  const base: VaultItemApproval = { item: false, fields: [], grants: [], canChange: true };
+  const base: VaultItemApproval = {
+    item: false,
+    fields: [],
+    grants: [],
+    canChange: true,
+    canAddMarks: true,
+  };
   return (
     <KitSection sectionKey="secret-approval">
       <StatesGrid

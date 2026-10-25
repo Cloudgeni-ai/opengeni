@@ -381,15 +381,24 @@ if (previewParameters.get("scenario") === "hover") {
     },
     jamie,
   );
-  // A "wake me when" from the chat: it waits for an app's event.
+  // A "wake me when" on CI and an automation answering Slack mentions: both
+  // apps are named.
+  const checks = {
+    source: { kind: "github" as const, name: "GitHub" },
+    eventTypes: ["check_suite.completed"],
+  };
   const wakeOnEvent = hoverRow(3008, "Ship the billing migration", 90, {
     status: "idle",
     hasSchedules: true,
     waitingForEvents: true,
     automationWait: {
       nextRunAt: null,
-      event: { source: { kind: "github", name: "GitHub" }, eventTypes: ["check_suite.completed"] },
-      automations: 1,
+      event: checks,
+      events: [
+        checks,
+        { source: { kind: "slack", name: "Acme Slack" }, eventTypes: ["app_mention"] },
+      ],
+      automations: 2,
     },
     model: "codex/gpt-6-astra",
     reasoningEffort: "high",

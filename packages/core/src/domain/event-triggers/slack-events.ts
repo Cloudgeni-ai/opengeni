@@ -300,5 +300,7 @@ export function slackEventTypeCatalog(): EventTypeDescriptor[] {
     argumentsSchema: null,
     available: true,
     unavailableReason: null,
+    unavailableReasonCode: null,
+    unavailableReasonDetail: null,
   }));
 }

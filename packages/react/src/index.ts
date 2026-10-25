@@ -14,6 +14,11 @@ export {
   type SessionCapabilityFrameProps,
 } from "./components/session-capability-frame";
 export {
+  SessionIntegrationCapabilityCard,
+  supportsIntegrationCapabilityCard,
+  type SessionIntegrationCapabilityCardProps,
+} from "./components/session-integration-capability-card";
+export {
   attachSessionCapability,
   completeSessionCapabilityOAuth,
   prepareSessionCapabilityAccess,
@@ -130,6 +135,7 @@ export type {
   UseVoiceInputOptions,
   UseVoiceInputResult,
   VoiceInputStatus,
+  VoiceInputRecordingsClient,
 } from "./hooks/use-voice-input";
 export {
   IndexedDbVoiceRecordingStore,

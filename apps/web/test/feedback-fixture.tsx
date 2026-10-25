@@ -7,6 +7,7 @@ import { SessionTenancyOperationController } from "@opengeni/react/app/lib/sessi
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { Session } from "@opengeni/react/app/types";
 import { FeedbackDialog } from "@opengeni/react/app/components/feedback";
+import { webFeedbackContext } from "@opengeni/react/app/lib/feedback-capture";
 import { Button } from "@opengeni/react/ui/button";
 import type { CreateFeedbackRequest, Feedback } from "@opengeni/sdk";
 import "../src/styles.css";
@@ -15,12 +16,14 @@ const sessionId = "22222222-2222-4222-8222-222222222222";
 const rows: Feedback[] = [];
 const keys = new Map<string, Feedback>();
 let failNext = false;
+let lastRequest: CreateFeedbackRequest | null = null;
 const client = {
   async createFeedback(workspace: string, request: CreateFeedbackRequest) {
     if (failNext) {
       failNext = false;
       throw new Error("Connection interrupted. Please retry.");
     }
+    lastRequest = request;
     const previous = keys.get(request.idempotencyKey);
     if (previous) return { feedback: previous, replayed: true };
     const feedback: Feedback = {
@@ -32,6 +35,13 @@ const client = {
       turnId: request.turnId ?? null,
       sentiment: request.sentiment ?? null,
       comment: request.comment ?? null,
+      context: request.context ?? null,
+      screenshots: (request.screenshots ?? []).map((shot, index) => ({
+        index,
+        contentType: shot.contentType,
+        sizeBytes: Math.floor((shot.base64.length * 3) / 4),
+        sha256: "0".repeat(64),
+      })),
       createdAt: new Date().toISOString(),
     };
     rows.unshift(feedback);
@@ -179,8 +189,28 @@ function Fixture() {
         open={open}
         onOpenChange={setOpen}
         onSubmitted={() => setSubmitted(true)}
+        screenshots
+        reportContext={() =>
+          webFeedbackContext({ serverVersion: "1.2.3", deploymentRevision: "abc1234" })
+        }
       />
       {submitted ? <p role="status">General feedback submitted</p> : null}
+      {submitted && lastRequest ? (
+        <pre data-testid="last-request" className="mt-4 text-xs whitespace-pre-wrap">
+          {JSON.stringify(
+            {
+              comment: lastRequest.comment,
+              context: lastRequest.context,
+              screenshots: (lastRequest.screenshots ?? []).map((shot) => ({
+                contentType: shot.contentType,
+                base64Length: shot.base64.length,
+              })),
+            },
+            null,
+            2,
+          )}
+        </pre>
+      ) : null}
     </main>
   );
 }

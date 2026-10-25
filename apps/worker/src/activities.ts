@@ -144,6 +144,7 @@ export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSess
 export const transcribeRecordingVersion = defaultControlActivities.transcribeRecordingVersion;
 export const failRecordingTranscript = defaultControlActivities.failRecordingTranscript;
 export const deleteRecordingMedia = defaultControlActivities.deleteRecordingMedia;
+export const expireDictation = defaultControlActivities.expireDictation;
 export const recoverRecordingWorkflows = defaultControlActivities.recoverRecordingWorkflows;
 export const applyRecordingRetention = defaultControlActivities.applyRecordingRetention;
 export const createBrowserRecordingFromBundle =

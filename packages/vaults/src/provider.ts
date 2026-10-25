@@ -1,3 +1,4 @@
+import { VAULT_LIMITS } from "@opengeni/contracts";
 import type {
   ConnectionCredentialsPort,
   SecretMaterial,
@@ -36,10 +37,34 @@ export interface ProviderItemMeta {
   externalItemId: string;
   name: string;
   type: VaultItemType;
+  /** Display hint from the existing inventory; at most VAULT_LIMITS.usernameMaxChars. */
+  username?: string | null;
+  /**
+   * The provider's more specific kind of item as an Opengeni category token
+   * (`VAULT_ITEM_CATEGORIES`), such as "database" for a 1Password database
+   * item. Absent or null for the plain type.
+   */
+  category?: string | null;
   websites: string[];
   fields: ProviderFieldMeta[];
   version: string | null;
   updatedAt: string | null;
+  /**
+   * When the connected account archived the item, as the provider reports it
+   * to that account (Bitwarden's archive is per person). Absent or null for an
+   * active item. An archived item is mirrored but hidden by default and
+   * resolves as archived.
+   */
+  archivedAt?: string | null;
+}
+
+/** Never fetch a field just for this hint, or truncate it into a different username. */
+export function providerUsernameHint(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= VAULT_LIMITS.usernameMaxChars
+    ? value
+    : null;
 }
 export interface ProviderFieldValue {
   externalFieldId: string;
@@ -50,6 +75,11 @@ export interface ProviderWriteField {
   name: string;
   kind: VaultFieldKind;
   value?: string;
+  /**
+   * A file field's content and file name (kind `file` only, instead of
+   * `value`). Sent only to providers whose operations allow `writeFiles`.
+   */
+  file?: { name: string; bytes: Uint8Array };
   remove?: true;
 }
 export interface ProviderWriteItem {
@@ -57,6 +87,11 @@ export interface ProviderWriteItem {
   expectedVersion?: string | null;
   name: string;
   type: VaultItemType;
+  /**
+   * Kept by the provider natively or in its `opengeni.type` marker field.
+   * Absent or null is the plain type: an update sends the category to keep.
+   */
+  category?: string | null;
   websites: string[];
   fields: ProviderWriteField[];
 }

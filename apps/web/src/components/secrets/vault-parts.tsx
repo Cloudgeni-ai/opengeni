@@ -1,14 +1,17 @@
 import type { VaultItemSummary, VaultSummary } from "@opengeni/react";
 import {
   BracesIcon,
+  CreditCardIcon,
   FileIcon,
   FingerprintIcon,
+  IdCardIcon,
   KeyRoundIcon,
   LockKeyholeIcon,
   NotepadTextIcon,
   RefreshCwIcon,
   RotateCcwIcon,
   ServerIcon,
+  SquareTerminalIcon,
   UserIcon,
   UsersIcon,
 } from "lucide-react";
@@ -363,10 +366,22 @@ const ITEM_TYPE_ICON: Record<VaultItemSummary["type"], ReactNode> = {
   note: <NotepadTextIcon />,
   file: <FileIcon />,
   passkey: <FingerprintIcon />,
+  card: <CreditCardIcon />,
+  identity: <IdCardIcon />,
+  ssh_key: <SquareTerminalIcon />,
 };
 
 export function ItemTile({ item }: { item: Pick<VaultItemSummary, "type"> }) {
   return <LogoTile icon={ITEM_TYPE_ICON[item.type]} />;
+}
+
+/** The type's glyph at menu size, for a type picker. */
+export function ItemTypeGlyph({ type }: { type: VaultItemSummary["type"] }) {
+  return (
+    <span aria-hidden="true" className="flex text-fg-muted [&>svg]:size-4">
+      {ITEM_TYPE_ICON[type]}
+    </span>
+  );
 }
 
 export function ExpiryBadge({

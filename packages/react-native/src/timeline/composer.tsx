@@ -463,13 +463,14 @@ function formatDictationTime(seconds: number): string {
 }
 
 /**
- * A recording whose text could not be fetched yet. It stays on the device:
- * Retry sends the same audio again; Discard is the only way to drop it.
+ * A kept dictation. Its text is ready to insert, or couldn't be fetched yet
+ * and Retry tries again; Discard is the only way to drop it.
  */
 function SavedRecordingStrip({ voice }: { voice: NativeVoiceInput }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
+  const ready = voice.savedTranscript != null && voice.insertSaved !== undefined;
   return (
     <View style={{ gap: 6, paddingHorizontal: 16, paddingTop: 10 }}>
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
@@ -478,12 +479,24 @@ function SavedRecordingStrip({ voice }: { voice: NativeVoiceInput }) {
           accessibilityLiveRegion="polite"
           style={{ ...fontStyle(theme), flex: 1, fontSize: 13, lineHeight: 18, color: c.fg }}
         >
-          {voice.error ?? m.recordingSaved}
+          {voice.error ?? (ready ? m.transcriptSaved : m.recordingSaved)}
         </Text>
       </View>
+      {ready ? (
+        <Text
+          numberOfLines={2}
+          style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-subtle"] }}
+        >
+          {voice.savedTranscript}
+        </Text>
+      ) : null}
       <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 6 }}>
         <Button label={m.discard} variant="ghost" onPress={voice.cancel} />
-        <Button label={m.retry} variant="primary" onPress={voice.retry} />
+        {ready ? (
+          <Button label={m.insertTranscript} variant="primary" onPress={voice.insertSaved!} />
+        ) : (
+          <Button label={m.retry} variant="primary" onPress={voice.retry} />
+        )}
       </View>
     </View>
   );

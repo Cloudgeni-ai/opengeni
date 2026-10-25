@@ -22,6 +22,13 @@ const capability: ClientVoiceInputConfig = {
   maxDurationSeconds: 60,
   maxSizeBytes: 25 * 1024 * 1024,
   acceptedMimeTypes: ["audio/webm", "audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"],
+  // The deployment keeps dictations: each one is a recording until its text is in the draft.
+  resumable: {
+    maxDurationSeconds: 2 * 60 * 60,
+    maxSizeBytes: 512 * 1024 * 1024,
+    maxChunkSizeBytes: 8 * 1024 * 1024,
+    providerSegmentSeconds: 50,
+  },
 };
 
 const activeControl: EffectiveSessionControl = {
@@ -37,50 +44,26 @@ const activeControl: EffectiveSessionControl = {
   settlement: null,
 };
 
-class FixtureMediaRecorder {
-  static isTypeSupported(type: string) {
-    return (
-      type.startsWith("audio/webm") || type.startsWith("audio/mp4") || type.startsWith("audio/ogg")
-    );
+/** A real microphone-like stream: a quiet tone, so the browser's own MediaRecorder records it. */
+function toneStream(): MediaStream {
+  const context = new AudioContext();
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  gain.gain.value = 0.05;
+  const destination = context.createMediaStreamDestination();
+  oscillator.connect(gain).connect(destination);
+  oscillator.start();
+  for (const track of destination.stream.getTracks()) {
+    const stop = track.stop.bind(track);
+    track.stop = () => {
+      document.documentElement.dataset.transcriptionTracksStopped = "true";
+      stop();
+    };
   }
-  state: "inactive" | "recording" = "inactive";
-  mimeType: string;
-  ondataavailable: ((event: BlobEvent) => void) | null = null;
-  onstop: (() => void) | null = null;
-  constructor(
-    readonly stream: MediaStream,
-    options?: MediaRecorderOptions,
-  ) {
-    this.mimeType = options?.mimeType ?? "audio/webm";
-  }
-  start(timeslice?: number) {
-    this.state = "recording";
-    document.documentElement.dataset.transcriptionStatus = "recording";
-    document.documentElement.dataset.transcriptionTimeslice = String(timeslice ?? 0);
-    setTimeout(() => {
-      if (this.state !== "recording") return;
-      this.ondataavailable?.({
-        data: new Blob([new Uint8Array([9, 8, 7, 6])], { type: this.mimeType }),
-        timecode: timeslice ?? 5_000,
-      } as BlobEvent);
-      document.documentElement.dataset.transcriptionChunkEmitted = "true";
-    }, 0);
-  }
-  stop() {
-    this.state = "inactive";
-    this.ondataavailable?.({
-      data: new Blob([new Uint8Array([1, 2, 3, 4])], { type: this.mimeType }),
-    } as BlobEvent);
-    this.onstop?.();
-  }
+  return destination.stream;
 }
 
 function installBrowserFixtures(mode: FixtureMode) {
-  const track = {
-    stop() {
-      document.documentElement.dataset.transcriptionTracksStopped = "true";
-    },
-  };
   Object.defineProperty(navigator, "mediaDevices", {
     configurable: true,
     value: {
@@ -94,20 +77,125 @@ function installBrowserFixtures(mode: FixtureMode) {
                 document.documentElement.dataset.transcriptionMicRequests ?? "0",
               );
               document.documentElement.dataset.transcriptionMicRequests = String(requests + 1);
-              return {
-                getTracks: () => [track],
-              } as unknown as MediaStream;
+              return toneStream();
             },
     },
   });
-  Object.defineProperty(window, "MediaRecorder", {
-    configurable: true,
-    value: FixtureMediaRecorder,
+}
+
+type FixtureVersion = {
+  id: string;
+  recordingId: string;
+  versionNumber: number;
+  state: "running" | "complete";
+  errorCode: null;
+  createdAt: string;
+};
+type FixtureRecording = { id: string; state: string; version: FixtureVersion | null };
+
+/**
+ * The deployment's recordings API, kept in localStorage so it survives a
+ * reload like a real server. Uploads are acknowledged as already stored, and
+ * a finalized dictation is heard at once, or never in `hanging` mode.
+ */
+function createFixtureServer(mode: FixtureMode) {
+  const key = "opengeni.transcription-fixture.server";
+  const read = (): Record<string, FixtureRecording> => {
+    try {
+      return JSON.parse(localStorage.getItem(key) ?? "{}") as Record<string, FixtureRecording>;
+    } catch {
+      return {};
+    }
+  };
+  const write = (recordings: Record<string, FixtureRecording>) =>
+    localStorage.setItem(key, JSON.stringify(recordings));
+  const recordingView = (recording: FixtureRecording) => ({
+    id: recording.id,
+    workspaceId: "11111111-1111-4111-8111-111111111111",
+    purpose: "dictation",
+    state: recording.state,
+    errorCode: null,
+    transcript: recording.version,
+    tracks: [],
   });
+  const gone = () =>
+    Object.assign(new Error("Recording not found."), { status: 404, code: "not_found" });
+  return async (method: string, path: string, body?: unknown): Promise<unknown> => {
+    const [, recordingId, rest = ""] =
+      path.match(/\/recordings(?:\/([^/]+))?(\/.*)?$/u) ?? ([] as string[]);
+    const recordings = read();
+    const recording = recordingId ? recordings[recordingId] : undefined;
+    if (method === "GET" && !recordingId) {
+      return {
+        recordings: Object.values(recordings).map(recordingView),
+        nextBefore: null,
+      };
+    }
+    if (method === "POST" && !recordingId) {
+      const id = (body as { recordingId: string }).recordingId;
+      recordings[id] = recordings[id] ?? { id, state: "capturing", version: null };
+      write(recordings);
+      return recordingView(recordings[id]);
+    }
+    if (!recording) throw gone();
+    if (method === "POST" && rest === "/uploads") {
+      document.documentElement.dataset.transcriptionChunkEmitted = "true";
+      const chunks = (body as { chunks: Array<{ chunkNumber: number }> }).chunks;
+      return {
+        uploads: chunks.map((chunk) => ({
+          chunkNumber: chunk.chunkNumber,
+          uploaded: true,
+          url: null,
+          method: "PUT",
+          headers: {},
+          expiresAt: null,
+        })),
+      };
+    }
+    if (method === "POST" && rest === "/chunks/complete") {
+      return { uploaded: (body as { chunkNumbers: number[] }).chunkNumbers, missing: [] };
+    }
+    if (method === "POST" && rest === "/finalize") {
+      document.documentElement.dataset.transcriptionUpload = "started";
+      const heard = mode !== "hanging";
+      recording.state = heard ? "ready" : "processing";
+      recording.version = {
+        id: `${recording.id}-v1`,
+        recordingId: recording.id,
+        versionNumber: 1,
+        state: heard ? "complete" : "running",
+        errorCode: null,
+        createdAt: new Date().toISOString(),
+      };
+      write(recordings);
+      return { recording: recordingView(recording), transcript: recording.version };
+    }
+    if (method === "GET" && rest === "/transcripts") {
+      return { versions: recording.version ? [recording.version] : [] };
+    }
+    if (method === "GET" && rest === "/transcript") {
+      document.documentElement.dataset.transcriptionUpload = "completed";
+      return {
+        version: recording.version,
+        speakers: [],
+        segments: [{ index: 0, text: "fixture transcript" }],
+        nextAfter: null,
+      };
+    }
+    if (method === "DELETE" && rest === "") {
+      delete recordings[recording.id];
+      write(recordings);
+      return undefined;
+    }
+    throw new Error(`The fixture server has no ${method} ${path}.`);
+  };
 }
 
 function createFixtureClient(mode: FixtureMode) {
+  const server = createFixtureServer(mode);
   return {
+    requestJson: async (method: string, path: string, body?: unknown) =>
+      await server(method, path, body),
     async transcribeAudio(
       _workspaceId: string,
       input: { signal?: AbortSignal | undefined },

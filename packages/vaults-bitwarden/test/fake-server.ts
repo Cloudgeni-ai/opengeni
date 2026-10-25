@@ -33,6 +33,17 @@ function json(status: number, body: unknown, headers: Record<string, string> = {
   });
 }
 
+/** Whether a `major.minor.patch` client version is at least `min`. */
+function atLeast(version: string, min: [number, number, number]): boolean {
+  const parts = version.split(".").map(Number);
+  for (let i = 0; i < 3; i += 1) {
+    const part = parts[i] ?? 0;
+    if (Number.isNaN(part)) return false;
+    if (part !== min[i]) return part > min[i]!;
+  }
+  return true;
+}
+
 export class FakeBitwarden {
   readonly userKey: SymmetricKey = generateSymmetricKey();
   readonly orgId = randomUUID();
@@ -41,8 +52,14 @@ export class FakeBitwarden {
   readonly ciphers = new Map<string, Json>();
   readonly files = new Map<string, Uint8Array>();
   readonly requests: string[] = [];
+  /** Requests that came without a `Bitwarden-Client-Version` header. */
+  readonly unversioned: string[] = [];
   logins = 0;
   rateLimitLogins = false;
+  /** The server offers Bitwarden's Archive (Vaultwarden 1.37 does). */
+  archiveFeature = true;
+  /** The account has premium (Vaultwarden gives every account premium). */
+  premium = true;
   /** Overrides what `/api/config` names as the API and identity hosts. */
   environment: Json | null = null;
   /** An invited but unconfirmed member has no organization key yet. */
@@ -108,6 +125,7 @@ export class FakeBitwarden {
       id,
       collectionIds,
       attachments: body.attachments ?? null,
+      archivedDate: body.archivedDate ?? null,
       revisionDate: this.nextRevision(),
       deletedDate: null,
       object: "cipherDetails",
@@ -186,6 +204,7 @@ export class FakeBitwarden {
     return {
       id: FAKE_USER_ID,
       email: FAKE_EMAIL,
+      premium: this.premium,
       key: this.protectedKey,
       privateKey: this.privateKey,
       organizations: [
@@ -213,6 +232,8 @@ export class FakeBitwarden {
       id,
       collectionIds,
       attachments: previous?.attachments ?? null,
+      // As Vaultwarden 1.37: an update without `archivedDate` unarchives the item.
+      archivedDate: typeof body.archivedDate === "string" ? body.archivedDate : null,
       revisionDate: this.nextRevision(),
       deletedDate: null,
       object: "cipherDetails",
@@ -229,9 +250,14 @@ export class FakeBitwarden {
     const path = url.pathname;
     this.requests.push(`${method} ${path}`);
     if (url.origin !== FAKE_SERVER) throw new TypeError("fetch failed");
+    const clientVersion = new Headers(init.headers).get("bitwarden-client-version");
+    if (!clientVersion && !path.startsWith("/attachments/")) {
+      this.unversioned.push(`${method} ${path}`);
+    }
     if (method === "GET" && path === "/api/config") {
       return json(200, {
         version: "2025.9.0",
+        featureStates: this.archiveFeature ? { "pm-19148-innovation-archive": true } : {},
         environment: this.environment ?? {
           vault: FAKE_SERVER,
           api: `${FAKE_SERVER}/api`,
@@ -272,10 +298,14 @@ export class FakeBitwarden {
 
     if (method === "GET" && path === "/api/accounts/profile") return json(200, this.profile());
     if (method === "GET" && path === "/api/sync") {
+      // As Bitwarden and Vaultwarden: SSH keys only for clients from 2024.12.0.
+      const showSshKeys = clientVersion !== null && atLeast(clientVersion, [2024, 12, 0]);
       return json(200, {
         profile: this.profile(),
         collections: this.collections,
-        ciphers: [...this.ciphers.values()].map((cipher) => this.view(cipher)),
+        ciphers: [...this.ciphers.values()]
+          .filter((cipher) => showSshKeys || cipher.type !== 5)
+          .map((cipher) => this.view(cipher)),
         object: "sync",
       });
     }
@@ -293,15 +323,69 @@ export class FakeBitwarden {
       return json(200, this.save(randomUUID(), cipher, null, collectionIds));
     }
     const item = path.match(
-      /^\/api\/ciphers\/([0-9a-f-]{36})(\/details|\/delete|\/attachment\/([^/]+))?$/,
+      /^\/api\/ciphers\/([0-9a-f-]{36})(\/details|\/delete|\/archive|\/unarchive|\/attachment\/([^/]+))?$/,
     );
     if (item) {
       const stored = this.ciphers.get(item[1]!);
       if (!stored) return json(404, { message: "Cipher doesn't exist" });
       if (method === "GET" && item[2] === "/details") return json(200, this.view(stored));
+      if (method === "POST" && item[3] === "v2") {
+        if (!this.view(stored).edit)
+          return json(400, { message: "Cipher is not write accessible" });
+        const id = randomUUID().replace(/-/g, "").slice(0, 20);
+        stored.attachments = [
+          ...(stored.attachments ?? []),
+          {
+            id,
+            fileName: body!.fileName,
+            key: body!.key,
+            size: String(body!.fileSize),
+            url: `${FAKE_SERVER}/attachments/${stored.id}/${id}`,
+            pending: true,
+          },
+        ];
+        return json(200, {
+          object: "attachment-fileUpload",
+          attachmentId: id,
+          url: `/ciphers/${stored.id}/attachment/${id}`,
+          fileUploadType: 0,
+          cipherResponse: this.view(stored),
+        });
+      }
+      if (method === "POST" && item[3]) {
+        const attachment = (stored.attachments ?? []).find((a: Json) => a.id === item[3]);
+        if (!attachment) return json(400, { message: "Attachment doesn't exist" });
+        if (!(init.body instanceof FormData)) return json(400, { message: "multipart expected" });
+        const data = init.body.get("data");
+        if (!(data instanceof Blob)) return json(400, { message: "data expected" });
+        const bytes = new Uint8Array(await data.arrayBuffer());
+        if (String(bytes.byteLength) !== attachment.size) {
+          return json(400, { message: "Attachment size mismatch" });
+        }
+        this.files.set(attachment.id, bytes);
+        delete attachment.pending;
+        stored.revisionDate = this.nextRevision();
+        return new Response(null, { status: 200 });
+      }
+      if (method === "DELETE" && item[3]) {
+        if (!this.view(stored).edit)
+          return json(400, { message: "Cipher is not write accessible" });
+        const before = (stored.attachments ?? []).length;
+        stored.attachments = (stored.attachments ?? []).filter((a: Json) => a.id !== item[3]);
+        if (stored.attachments.length === before) return json(404, {});
+        this.files.delete(item[3]);
+        stored.revisionDate = this.nextRevision();
+        return json(200, { cipher: this.view(stored) });
+      }
       if (method === "GET" && item[3]) {
         const attachment = (stored.attachments ?? []).find((a: Json) => a.id === item[3]);
         return attachment ? json(200, attachment) : json(404, {});
+      }
+      if (method === "PUT" && (item[2] === "/archive" || item[2] === "/unarchive")) {
+        if (!this.archiveFeature) return json(404, { message: `no route ${method} ${path}` });
+        // Per person: only this account's view changes (the fake has one account).
+        stored.archivedDate = item[2] === "/archive" ? this.nextRevision() : null;
+        return json(200, this.view(stored));
       }
       if (method === "PUT" && item[2] === "/delete") {
         stored.deletedDate = this.nextRevision();

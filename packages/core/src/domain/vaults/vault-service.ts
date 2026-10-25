@@ -41,6 +41,7 @@ import {
   type VaultFieldVersionMeta,
   type VaultItem,
   type VaultItemSummary,
+  type VaultItemType,
   type VaultPolicy,
   type VaultSummary,
   type VaultVersionCreatedByKind,
@@ -114,7 +115,12 @@ import {
   type ProviderWriteDeps,
   type ProviderWriteOutcome,
 } from "./provider-writes";
-import { chooseSecretCandidate, createSecretResolver } from "./secret-resolver";
+import {
+  chooseSecretCandidate,
+  createSecretResolver,
+  withMainSecretFieldFallback,
+} from "./secret-resolver";
+import { prepareTypedFields, standardFieldKind } from "./typed-fields";
 import type { VaultRequestActor, VaultServiceDeps } from "./types";
 
 export interface VaultService {
@@ -256,10 +262,13 @@ function requireKey(deps: VaultServiceDeps): Uint8Array {
   return deps.encryptionKey;
 }
 
-function defaultFieldKind(name: string): VaultFieldKind {
-  return ["username", "user", "email", "login", "account", "rpid"].includes(secretNameKey(name))
-    ? "text"
-    : "concealed";
+function defaultFieldKind(type: VaultItemType, name: string): VaultFieldKind {
+  return (
+    standardFieldKind(type, name) ??
+    (["username", "user", "email", "login", "account", "rpid"].includes(secretNameKey(name))
+      ? "text"
+      : "concealed")
+  );
 }
 
 type FieldSource = {
@@ -268,6 +277,7 @@ type FieldSource = {
   kind?: VaultFieldKind | undefined;
   value?: string | undefined;
   generate?: VaultFieldInput["generate"] | undefined;
+  generateKey?: VaultFieldInput["generateKey"] | undefined;
   fromReference?: string | undefined;
   fileBase64?: string | undefined;
   fileName?: string | undefined;
@@ -277,6 +287,7 @@ type FieldSource = {
 
 type ItemSource = {
   type?: CreateVaultItemRequest["type"] | undefined;
+  category?: string | null | undefined;
   name?: string | undefined;
   websites?: string[] | undefined;
   expiresAt?: string | null | undefined;
@@ -291,6 +302,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   async function fieldWrite(
     input: FieldSource,
     existing: VaultItemRow | null,
+    type: VaultItemType,
     resolveReference: (raw: string) => Promise<string>,
     generated: string[],
   ): Promise<VaultFieldWrite> {
@@ -306,7 +318,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     if (input.remove) return { ...write, remove: true };
     if (input.restoreVersion !== undefined)
       return { ...write, restoreVersion: input.restoreVersion };
-    let kind: VaultFieldKind = input.kind ?? current?.kind ?? defaultFieldKind(input.name);
+    let kind: VaultFieldKind = input.kind ?? current?.kind ?? defaultFieldKind(type, input.name);
     let plaintext: string;
     let size: number;
     if (input.fileBase64 !== undefined) {
@@ -410,13 +422,16 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     const write: VaultItemWrite = { createdByKind: createdBy };
     if (req.name !== undefined) write.name = req.name;
     if (req.type !== undefined) write.type = req.type;
+    if (req.category !== undefined) write.category = req.category;
     if (req.websites !== undefined) write.websites = req.websites;
     if (req.expiresAt !== undefined) write.expiresAt = req.expiresAt;
     if (req.primaryFieldName !== undefined) write.primaryFieldName = req.primaryFieldName;
     if (req.fields !== undefined) {
+      const type = req.type ?? existing?.type ?? "login";
+      const fields = await prepareTypedFields(type, req.fields, resolveReference, generated);
       write.fields = [];
-      for (const field of req.fields) {
-        write.fields.push(await fieldWrite(field, existing, resolveReference, generated));
+      for (const field of fields) {
+        write.fields.push(await fieldWrite(field, existing, type, resolveReference, generated));
       }
     }
     return write;
@@ -427,6 +442,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       db: deps.db,
       context: subjectContext(actor, workspaceId),
       providers: deps.providers ?? EMPTY_VAULT_PROVIDER_REGISTRY,
+      encryptionKey: deps.encryptionKey,
       resolveReference: humanReferenceResolver(actor, workspaceId),
     };
   }
@@ -581,6 +597,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     }
     const change = {
       type: source.type,
+      category: source.category ?? null,
       name,
       websites: source.websites,
       ...(source.expiresAt ? { expiresAt: source.expiresAt } : {}),
@@ -816,31 +833,34 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         null,
       );
     }
-    const { meta, candidates } = await resolveSecretReferenceCandidates(
+    const found = await resolveSecretReferenceCandidates(deps.db, principalContext(principal), {
+      refs: [
+        reference.target.form === "id"
+          ? {
+              index: 0,
+              form: "id",
+              itemId: reference.target.itemId,
+              field: reference.target.field,
+              otp: reference.otp,
+              previous: reference.previous,
+            }
+          : {
+              index: 0,
+              form: "path",
+              segments: [...reference.target.segments],
+              otp: reference.otp,
+              previous: reference.previous,
+            },
+      ],
+    });
+    const candidates = await withMainSecretFieldFallback(
       deps.db,
       principalContext(principal),
-      {
-        refs: [
-          reference.target.form === "id"
-            ? {
-                index: 0,
-                form: "id",
-                itemId: reference.target.itemId,
-                field: reference.target.field,
-                otp: reference.otp,
-                previous: reference.previous,
-              }
-            : {
-                index: 0,
-                form: "path",
-                segments: [...reference.target.segments],
-                otp: reference.otp,
-                previous: reference.previous,
-              },
-        ],
-      },
+      [reference],
+      found.meta,
+      found.candidates,
     );
-    const outcome = chooseSecretCandidate(reference, candidates, meta);
+    const outcome = chooseSecretCandidate(reference, candidates, found.meta);
     if ("failure" in outcome) throw new SecretReferenceError([outcome.failure], null);
     return {
       itemId: outcome.candidate.itemId,
@@ -944,6 +964,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         const vault = await getVault(deps.db, context, { vaultId });
         await refreshStaleLinkedVaults({
           db: deps.db,
+          encryptionKey: deps.encryptionKey,
           context,
           vaults: [vault],
           providers: deps.providers,
@@ -1008,6 +1029,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
             itemId,
             name: existing.name,
             type: existing.type,
+            category: existing.category,
             websites: existing.websites,
             fields: existing.fields,
             expectedGeneration,
@@ -1148,6 +1170,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (deps.providers && connected.length > 0) {
         const report = await refreshLinkedVaults({
           db: deps.db,
+          encryptionKey: deps.encryptionKey,
           context,
           vaults: connected,
           providers: deps.providers,
@@ -1285,6 +1308,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
             id: row.id,
             name: row.name,
             type: row.type,
+            category: row.category ?? null,
             websites: row.websites,
             username: summary.username,
             hasTotp: summary.hasTotp,
@@ -1335,6 +1359,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
             db: deps.db,
             context,
             providers: deps.providers ?? EMPTY_VAULT_PROVIDER_REGISTRY,
+            encryptionKey: deps.encryptionKey,
             resolveReference: (raw) => resolveTextReference(principal, raw, "secret_save"),
           },
           {
@@ -1344,12 +1369,14 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
                   itemId: fullExisting.id,
                   name: fullExisting.name,
                   type: fullExisting.type,
+                  category: fullExisting.category,
                   websites: fullExisting.websites,
                   fields: fullExisting.fields,
                 }
               : null,
             change: {
               ...(existing ? {} : { type: input.type, name: input.item }),
+              ...(input.category !== undefined ? { category: input.category } : {}),
               ...(input.websites !== undefined ? { websites: input.websites } : {}),
               fields,
             },
@@ -1366,6 +1393,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const write = await itemWrite(
         {
           ...(existing ? {} : { type: input.type, name: input.item }),
+          ...(input.category !== undefined ? { category: input.category } : {}),
           ...(input.websites !== undefined ? { websites: input.websites } : {}),
           fields,
         },

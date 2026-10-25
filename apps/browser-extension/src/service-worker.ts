@@ -369,13 +369,7 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
     case "tabs.list":
       return { tabs: await tabs() };
     case "tabs.create": {
-      const created = await chrome.tabs.create({
-        // Opengeni renders and controls attached tabs in its own Browser panel.
-        // Creating a target must not steal focus or raise Chrome on the user's
-        // desktop; an explicit user action can still activate a tab separately.
-        active: false,
-        ...(command.url ? { url: command.url } : {}),
-      });
+      const created = await createTab(command.url);
       const tab = attachedTab(created);
       if (!tab) throw new BridgeCommandError("tab_unavailable", "Chrome did not create a tab");
       scheduleInventory();
@@ -390,6 +384,7 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
     }
     case "tabs.close": {
       const tabId = numericTabId(command.tabId);
+      await keepProfileOpenWithout(tabId);
       if (attachedDebuggerTabs.has(tabId)) await detachDebugger(tabId);
       await chrome.tabs.remove(tabId);
       scheduleInventory();
@@ -449,6 +444,46 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
 }
 
 const MAX_FOUND_DOWNLOADS = 16;
+
+/**
+ * Opens a tab without raising Chrome. Opengeni renders and controls attached
+ * tabs in its own Browser panel, so a new target must not steal focus; an
+ * explicit user action can still activate it. Chrome keeps running with no
+ * window open (on macOS closing the last window does not quit it), and then
+ * has no window to put a tab in, so the tab gets a new unfocused window.
+ */
+async function createTab(url: string | undefined): Promise<chrome.tabs.Tab> {
+  const windows = await chrome.windows.getAll({ windowTypes: ["normal"] });
+  if (windows.length > 0) {
+    return await chrome.tabs.create({ active: false, ...(url ? { url } : {}) });
+  }
+  const created = await chrome.windows.create({ focused: false, ...(url ? { url } : {}) });
+  const tab = created?.tabs?.[0];
+  if (!tab) throw new BridgeCommandError("tab_unavailable", "Chrome did not open a window");
+  return tab;
+}
+
+/**
+ * Closing the last tab of a window closes the window, and Chrome closes a
+ * browser profile with its last window: it stops this extension, which ends
+ * the profile's connection until someone opens a window in it again (on
+ * Windows and Linux Chrome usually quits). So before the profile's last tab is
+ * closed, the window gets a new tab page in its place, as a person closing
+ * that tab would expect to keep the browser.
+ */
+async function keepProfileOpenWithout(tabId: number): Promise<void> {
+  const open = await chrome.tabs.query({});
+  const closing = open.find((tab) => tab.id === tabId);
+  if (!closing || open.some((tab) => tab.id !== tabId)) return;
+  // A popup or app window holds only its own tab; a new tab page needs a
+  // normal window.
+  const window = await chrome.windows.get(closing.windowId);
+  if (window.type === "normal") {
+    await chrome.tabs.create({ windowId: closing.windowId, active: false });
+  } else {
+    await chrome.windows.create({ focused: false });
+  }
+}
 
 /** Completed downloads of one address since a time, as Chrome saved them. */
 async function findDownloads(url: string, startedAfter: string): Promise<FoundDownload[]> {

@@ -355,7 +355,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   project_reorder: "workspaceAdmin",
   project_delete: "workspaceAdmin",
   session_set_project: "workspaceAdmin",
-  // Present only while a person has given the session admin access.
+  // App actions: run as the person in a chat they started; changes ask first.
   admin_actions_search: "workspaceAdmin",
   admin_action_describe: "workspaceAdmin",
   admin_action_call: "workspaceAdmin",
@@ -799,6 +799,8 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
  * `runtime_mechanics` are always present; every other module is included only
  * when its capability or resource is present. The model-context inspector
  * reports them as metadata on the `operational_contract` layer.
+ * `workspace_environment` and `attachments` are retired (never rendered) and
+ * stay listed only so stored model-context snapshots still parse.
  */
 export const AGENT_PROMPT_MODULE_IDS = [
   "base_behavior",

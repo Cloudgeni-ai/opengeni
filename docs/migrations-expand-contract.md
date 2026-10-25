@@ -258,7 +258,10 @@ below), grant it in a rolling migration, drop it from
 steps, with readiness accepting no runtime DML or all four. 0929, 0930, 0932
 and 0935 granted on creation instead; 0937 withheld those grants and the
 `event_ingress_routes` DML again, and 0947 restored them. 0946 created the
-recording retention inventory withheld, and 0950 granted it.
+recording retention inventory withheld, and 0950 granted it. 0978 created the
+personal-machine owner lookup withheld; its callers check
+`has_function_privilege` first, because they run inside transactions that a
+permission error would abort.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

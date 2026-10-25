@@ -11,6 +11,7 @@ export {
   useRecorder,
   useRecording,
   useRecordingModels,
+  useRecordingNotes,
   useRecordingPeople,
   useRecordings,
   useRecordingsClient,
@@ -25,16 +26,27 @@ export type {
   UseRecordingResult,
   UseRecordingsOptions,
   UseRecordingsResult,
+  UseRecordingNotesOptions,
+  UseRecordingNotesResult,
   UseTranscriptOptions,
   UseTranscriptResult,
 } from "./hooks/use-recordings";
 export type { RecordingsClientLike, RecordingsClientOverride } from "./hooks/use-recordings";
+/** Dictation is a recording too: speech kept until its text is in the draft. */
+export { useVoiceInput } from "./hooks/use-voice-input";
+export type {
+  UseVoiceInputOptions,
+  UseVoiceInputResult,
+  VoiceInputRecordingsClient,
+  VoiceInputStatus,
+} from "./hooks/use-voice-input";
 export {
   activeSegmentIndex,
   defaultMeetingTitle,
   defaultSpeakerName,
   formatClock,
   formatDuration,
+  groupLiveTurns,
   groupTranscriptTurns,
   languageName,
   meetingPhase,
@@ -42,7 +54,14 @@ export {
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
+  tidyLiveText,
+  tidyPartialText,
   transcriptErrorText,
   versionSummary,
 } from "./recordings-model";
-export type { MeetingPhase, TranscriptTurn } from "./recordings-model";
+export type {
+  LiveTranscriptLine,
+  LiveTranscriptTurn,
+  MeetingPhase,
+  TranscriptTurn,
+} from "./recordings-model";

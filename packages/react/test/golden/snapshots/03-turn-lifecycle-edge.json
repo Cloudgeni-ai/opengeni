@@ -41,7 +41,8 @@
       "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
       "occurredAt": "2026-01-02T12:00:05.000Z",
       "outcome": "failed",
-      "failureText": "model provider unavailable"
+      "failureText": "The turn stopped unexpectedly",
+      "failureDetail": "model provider unavailable"
     },
     {
       "kind": "user-message",
@@ -69,7 +70,8 @@
       "turnId": "aaaaaaaa-0000-4000-8000-000000000004",
       "occurredAt": "2026-01-02T12:00:09.000Z",
       "outcome": "failed",
-      "failureText": "provider context window exceeded"
+      "failureText": "The turn stopped unexpectedly",
+      "failureDetail": "provider context window exceeded"
     }
   ],
   "groups": [
@@ -88,7 +90,8 @@
       "kind": "turn",
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000003",
       "outcome": "failed",
-      "failureText": "model provider unavailable",
+      "failureText": "The turn stopped unexpectedly",
+      "failureDetail": "model provider unavailable",
       "startedAt": "2026-01-02T12:00:02.000Z",
       "endedAt": "2026-01-02T12:00:05.000Z",
       "groupCount": 1,
@@ -149,7 +152,8 @@
       "kind": "turn",
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000004",
       "outcome": "failed",
-      "failureText": "provider context window exceeded",
+      "failureText": "The turn stopped unexpectedly",
+      "failureDetail": "provider context window exceeded",
       "startedAt": "2026-01-02T12:00:07.000Z",
       "endedAt": "2026-01-02T12:00:09.000Z",
       "groupCount": 1,

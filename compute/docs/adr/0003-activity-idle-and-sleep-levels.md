@@ -23,6 +23,9 @@ rest of that write, wakes the sandbox again. A quiet command (a long poll,
 sandbox sleeps only for being idle the host asks its guest how many such
 commands run (`activity` on the notice port), whatever the processor and
 traffic rules; one that runs any keeps it running for another idle period.
+So does one whose guest takes no connection when asked: it may have
+stopped, and is ended as a crashed one is if it keeps taking none
+([10](0010-crash-safety-bar.md)), rather than saved as it is.
 A caller can start one as fire-and-forget, which does not count. Idle means
 none of them. Holds carry a name and a lease the caller renews, so a crashed
 caller cannot pin a sandbox; the API still accepts a hold without a lease,

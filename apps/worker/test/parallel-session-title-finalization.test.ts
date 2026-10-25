@@ -142,7 +142,12 @@ for (const persistence of ["committed", "failed", "independent"] as const) {
             warn() {},
           },
           attempt: { turnId: crypto.randomUUID(), executionGeneration: 1 },
-          turn: { id: crypto.randomUUID(), executionGeneration: 1, model: "codex/gpt-6.1-sol" },
+          turn: {
+            id: crypto.randomUUID(),
+            executionGeneration: 1,
+            model: "codex/gpt-6.1-sol",
+            resources: [],
+          },
           turnExecutionPolicy: { providerId: "openai" },
           trigger: { type: "user.message" },
           eventing: {

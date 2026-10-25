@@ -168,7 +168,6 @@ describe("knowledge retrieval guidance experiment", () => {
         connectedMachine: false,
         repositories: false,
         gitCredentials: false,
-        attachments: false,
       },
       ...(unavailable.length
         ? { toolAvailability: { unavailable: unavailable as FirstPartyMcpToolName[] } }

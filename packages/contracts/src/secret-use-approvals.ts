@@ -4,11 +4,12 @@ import { defineSchema } from "./define-schema";
  * for each use"). A person marks a vault item, or single fields of it, as
  * needing their approval. Agents still find and reference the item; the
  * resolver refuses an unapproved use before any value is read, records the
- * request and returns a ready `request_human_input` card. The host replaces
- * that card's text with its own description of the stored request, so the
- * person always sees what is really being approved, and only the person the
- * run acts for can answer it. The answer becomes a grant: one use, this chat,
- * or a time window across their chats in the workspace.
+ * request and posts the host's own card for it in the chat (with the
+ * person's inbox item and phone notification), so the person always sees
+ * what is really being approved and the agent never relays it. Only the
+ * person the run acts for can answer it. The answer becomes a grant: one
+ * use, this chat, or a time window across their chats in the workspace; the
+ * agent learns it as a `secret_use_approval_decided` update.
  *
  * This module must not import runtime values from `./index` (the index
  * re-exports it); only types cross that edge.
@@ -93,9 +94,8 @@ function clip(text: string, max: number): string {
 }
 
 /**
- * The host-owned card for one stored request. The resolver returns it to the
- * agent, and the host writes this exact question in place of whatever the
- * agent submits under the same question id.
+ * The host-owned card for one stored request, posted by Opengeni itself as a
+ * `secret_use_approval` human-input request.
  */
 export function secretUseApprovalHumanInput(
   view: SecretUseApprovalRequestView,
@@ -137,6 +137,34 @@ export function secretUseApprovalHumanInput(
   };
 }
 
+const DECISION_PHRASES: Record<SecretUseGrantScope, string> = {
+  once: "once",
+  session: "for the rest of this chat",
+  window: "for 1 hour in their chats in this workspace",
+};
+
+/**
+ * What the agent is told when the person answers an approval card: the
+ * summary of its `secret_use_approval_decided` update. Names only, never
+ * values.
+ */
+export function secretUseApprovalDecisionSummary(
+  view: SecretUseApprovalRequestView,
+  decision: SecretUseApprovalDecision,
+): string {
+  const use = `${describeSecretUseApprovalTargets(view.targets)} ${describeSecretUseApprovalWhere(view)} (${view.toolName})`;
+  if (decision === "deny") {
+    return clip(
+      `The person denied using ${use}. Do not retry that call; continue without it or ask them what to do instead.`,
+      2048,
+    );
+  }
+  return clip(
+    `The person allowed using ${use} ${DECISION_PHRASES[decision]}. Nothing ran when it was blocked: retry that same call now, unless a retry already succeeded after they answered.`,
+    2048,
+  );
+}
+
 /** One active grant, as shown on the item's page. */
 export const SecretUseGrant = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -163,8 +191,19 @@ export const VaultItemApproval = /* @__PURE__ */ defineSchema(() =>
     /** Field names that need approval on their own. */
     fields: z.array(z.string()),
     grants: z.array(SecretUseGrant),
-    /** The caller may change the marks and revoke approvals (a signed-in person with secrets:write). */
+    /**
+     * The caller may change the marks freely and revoke approvals: a signed-in
+     * person with secrets:write. Others with secrets:write (agents, API keys)
+     * may only add marks; see `canAddMarks`.
+     */
     canChange: z.boolean(),
+    /** The caller may add marks (secrets:write); only `canChange` callers may lift them. */
+    canAddMarks: z.boolean(),
+    /**
+     * Set on the answer to a change: whether the marks are now different from
+     * before it. False when the request matched the marks already in force.
+     */
+    changed: z.boolean().optional(),
   }),
 );
 export type VaultItemApproval = z.infer<typeof VaultItemApproval>;

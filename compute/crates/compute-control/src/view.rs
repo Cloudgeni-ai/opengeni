@@ -4,9 +4,14 @@
 //! ms ([`follow`]). Change numbers come from a sequence, and a transaction
 //! can commit after one that took a later number, so each read starts from
 //! the highest number seen two seconds earlier, and every ten seconds the
-//! replica reads every row. The view is a hint: a request sent under a
-//! registration that has since changed is refused by the host and sent
-//! again, and ownership is always read from the store.
+//! replica reads every row, which also forgets the hosts whose rows are
+//! gone (given up on, then forgotten). The view is a hint: a request sent
+//! under a registration that has since changed is refused by the host and
+//! sent again, and ownership is always read from the store.
+//!
+//! Placement passes over a host this replica has read no renewal from for
+//! its lease's term: the host runs no VM by then, and the leader may wait
+//! a while longer before giving up on it while it holds sandboxes.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -79,6 +84,9 @@ pub struct Known {
 struct Inner {
     fleet: Fleet,
     hosts: HashMap<HostId, Known>,
+    /// Each host's renewal count as last read, and when this replica first
+    /// read it.
+    heard: HashMap<HostId, (u64, Instant)>,
     zones: HashMap<String, ZoneId>,
     classes: HashMap<String, ClassId>,
     rng: Rng,
@@ -88,6 +96,10 @@ struct Inner {
 #[derive(Debug)]
 pub struct View {
     inner: RwLock<Inner>,
+    /// How long a host may go without a renewal this replica reads before
+    /// placement passes it over: its lease's term, after which it runs no
+    /// VM, so a create sent to it could only wait for it to come back.
+    silent_after: Duration,
 }
 
 fn intern<T: Copy>(table: &mut HashMap<String, T>, key: &str, make: impl Fn(u16) -> T) -> T {
@@ -120,17 +132,20 @@ fn capacity(info: &Described, reported: &Reported) -> Capacity {
 }
 
 impl View {
-    /// An empty view, placing with randomness from `seed`.
+    /// An empty view, placing with randomness from `seed` on hosts heard
+    /// renewing within `silent_after`.
     #[must_use]
-    pub fn new(seed: u64) -> Self {
+    pub fn new(seed: u64, silent_after: Duration) -> Self {
         Self {
             inner: RwLock::new(Inner {
                 fleet: Fleet::new(),
                 hosts: HashMap::new(),
+                heard: HashMap::new(),
                 zones: HashMap::new(),
                 classes: HashMap::new(),
                 rng: Rng::new(seed),
             }),
+            silent_after,
         }
     }
 
@@ -149,8 +164,16 @@ impl View {
 
     /// Takes in host rows as read from the store.
     pub fn apply(&self, rows: &[HostRow]) {
+        let now = Instant::now();
         let mut inner = self.write();
         for row in rows {
+            if inner
+                .heard
+                .get(&row.id)
+                .is_none_or(|(renewals, _)| *renewals != row.renewals)
+            {
+                inner.heard.insert(row.id, (row.renewals, now));
+            }
             let zone = intern(&mut inner.zones, &row.info.zone, ZoneId);
             let class_name = class_key(&row.info);
             let class = intern(&mut inner.classes, &class_name, ClassId);
@@ -178,6 +201,26 @@ impl View {
                     capacity: row.capacity.clone(),
                 },
             );
+        }
+    }
+
+    /// As [`View::apply`], from a read of every row: a host without one is
+    /// forgotten.
+    pub fn apply_all(&self, rows: &[HostRow]) {
+        self.apply(rows);
+        let present: HashSet<HostId> = rows.iter().map(|row| row.id).collect();
+        let mut inner = self.write();
+        let inner = &mut *inner;
+        let gone: Vec<HostId> = inner
+            .hosts
+            .keys()
+            .filter(|host| !present.contains(host))
+            .copied()
+            .collect();
+        for host in gone {
+            inner.hosts.remove(&host);
+            inner.heard.remove(&host);
+            inner.fleet.remove(host);
         }
     }
 
@@ -209,6 +252,15 @@ impl View {
             .is_some_and(|known| known.state == HostState::Draining)
     }
 
+    /// Whether host `host` held any sandbox when it last reported.
+    #[must_use]
+    pub fn holds_sandboxes(&self, host: HostId) -> bool {
+        self.read()
+            .hosts
+            .get(&host)
+            .is_some_and(|known| known.capacity.sandboxes > 0)
+    }
+
     /// The host named `name`.
     #[must_use]
     pub fn named(&self, name: &str) -> Option<Known> {
@@ -225,12 +277,25 @@ impl View {
         self.read().classes.get(class).copied()
     }
 
-    /// Places `demand` on a live host not in `exclude` and books it there
-    /// until the host next reports.
+    /// Places `demand` on a live host not in `exclude`, and heard renewing
+    /// within the view's `silent_after`, and books it there until the host
+    /// next reports.
     pub fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Option<Placement> {
         let mut inner = self.write();
         let inner = &mut *inner;
-        let placement = inner.fleet.place(demand, exclude, &mut inner.rng)?;
+        let silent: Vec<HostId> = inner
+            .heard
+            .iter()
+            .filter(|(_, (_, at))| at.elapsed() > self.silent_after)
+            .map(|(host, _)| *host)
+            .collect();
+        let placement = if silent.is_empty() {
+            inner.fleet.place(demand, exclude, &mut inner.rng)?
+        } else {
+            let mut exclude = exclude.clone();
+            exclude.extend(silent);
+            inner.fleet.place(demand, &exclude, &mut inner.rng)?
+        };
         inner.fleet.reserve(placement, demand);
         Some(placement)
     }
@@ -321,7 +386,11 @@ pub async fn follow<S: Store>(view: Arc<View>, store: Arc<S>) {
                     .max()
                     .unwrap_or(after)
                     .max(seen.back().map_or(0, |&(_, highest)| highest));
-                view.apply(&rows);
+                if after == 0 {
+                    view.apply_all(&rows);
+                } else {
+                    view.apply(&rows);
+                }
                 seen.push_back((now, highest));
             }
             Err(error) => tracing::warn!(%error, "reading the hosts failed"),

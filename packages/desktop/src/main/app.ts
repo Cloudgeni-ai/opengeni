@@ -53,6 +53,7 @@ import {
   type DesktopAppShotPermissionId,
   type DesktopAppShotResult,
   type DesktopCommand,
+  type DesktopMeetingRequest,
   type DesktopMenuAction,
   type DesktopPlatform,
   type ThisComputerConnectOptions,
@@ -73,12 +74,20 @@ import {
 } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
 import { macLoginAgentName } from "./mac-login-agent";
+import {
+  MeetingDetection,
+  MeetingDetectionStore,
+  ownAppRoot,
+  promptText,
+  type MeetingPrompt,
+  type ShownPrompt,
+} from "./meeting-detection";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu, readMenuActions } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
-import { SystemAudioCaptures } from "./system-audio";
+import { SystemAudioCaptures, systemAudioUsable } from "./system-audio";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
 import { refuseAllPermissions } from "./web-permissions";
@@ -174,6 +183,10 @@ export class DesktopShell {
   private readonly systemAudio: SystemAudioCaptures;
   /** Pages whose system audio captures end when they navigate or close. */
   private readonly systemAudioPages = new WeakSet<WebContents>();
+  /** Offers to record when a call starts, and to stop when it ends. */
+  private readonly meetings: MeetingDetection;
+  /** Pages that report whether they record, cleared when they navigate or close. */
+  private readonly meetingPages = new WeakSet<WebContents>();
   /** What Opengeni may do on this computer: the This computer settings page. */
   private readonly capabilities: ComputerCapabilities;
   private tray: AppTray | null = null;
@@ -358,6 +371,21 @@ export class DesktopShell {
         ended: DESKTOP_IPC.systemAudioEnded,
       },
     });
+    this.meetings = new MeetingDetection({
+      helperPath: config.systemAudioHelperPath ?? null,
+      available: systemAudioUsable(config.systemAudioHelperPath),
+      own: {
+        pid: process.pid,
+        bundlePrefix: config.appId,
+        root: ownAppRoot(process.execPath, process.platform),
+        platform: process.platform,
+      },
+      store: new MeetingDetectionStore(app.getPath("userData")),
+      notify: (prompt, act) => this.showMeetingPrompt(prompt, act),
+      request: (request) => this.deliverMeetingRequest(request),
+      onChange: () => this.broadcast(DESKTOP_IPC.meetingDetectionChanged),
+      log: (message, caught) => console.warn(message, caught ?? ""),
+    });
     this.appShots = new AppShots({
       platform:
         process.platform === "darwin"
@@ -452,6 +480,7 @@ export class DesktopShell {
   start(): void {
     this.registerIpc();
     this.appShots.start();
+    this.meetings.start();
     const hidden =
       (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
@@ -484,6 +513,7 @@ export class DesktopShell {
     app.on("will-quit", () => {
       this.appShots.stop();
       this.systemAudio.stopAll();
+      this.meetings.stop();
       this.computer.shutdownNow();
     });
     app.on("window-all-closed", () => {
@@ -1223,6 +1253,20 @@ export class DesktopShell {
     handle(DESKTOP_IPC.openExternal, (_account, url) => {
       if (typeof url === "string") openExternalSafely(url);
     });
+    // A still of the asking page itself, for a feedback report: only the
+    // account page can ask, and it only ever gets its own pixels.
+    ipcMain.handle(DESKTOP_IPC.captureWindow, async (event) => {
+      this.senderAccount(event);
+      const image = await event.sender.capturePage();
+      if (image.isEmpty()) return null;
+      const { width, height } = image.getSize();
+      return {
+        contentType: "image/png",
+        base64: image.toPNG().toString("base64"),
+        width,
+        height,
+      };
+    });
     handle(DESKTOP_IPC.appShotsStatus, () => this.appShots.status());
     handle(DESKTOP_IPC.updatesState, () => this.updates?.pageState ?? { kind: "none" });
     handle(DESKTOP_IPC.updatesInstall, () => {
@@ -1257,6 +1301,26 @@ export class DesktopShell {
     ipcMain.handle(DESKTOP_IPC.systemAudioStop, (event, captureId: unknown) => {
       this.senderAccount(event);
       if (typeof captureId === "string") this.systemAudio.stop(captureId, event.sender);
+    });
+    handle(DESKTOP_IPC.meetingDetectionStatus, () => this.meetings.status());
+    handle(DESKTOP_IPC.meetingDetectionUpdate, (_account, change) => this.meetings.update(change));
+    ipcMain.on(DESKTOP_IPC.meetingDetectionRecording, (event, recording: unknown) => {
+      try {
+        this.senderAccount(event);
+      } catch {
+        return;
+      }
+      const page = event.sender;
+      if (!this.meetingPages.has(page)) {
+        this.meetingPages.add(page);
+        const id = page.id;
+        const end = () => this.meetings.setRecording(id, false);
+        page.once("destroyed", end);
+        page.on("did-start-navigation", (details) => {
+          if (details.isMainFrame && !details.isSameDocument) end();
+        });
+      }
+      this.meetings.setRecording(page.id, recording === true);
     });
 
     ipcMain.handle(DESKTOP_IPC.welcomeState, (event) => {
@@ -1304,6 +1368,46 @@ export class DesktopShell {
     if (!contents || contents.isDestroyed()) return;
     const send = () => {
       if (!contents.isDestroyed()) contents.send(DESKTOP_IPC.appShotsCaptured, result);
+    };
+    if (contents.isLoading()) contents.once("did-finish-load", send);
+    else send();
+  }
+
+  /** A meeting notification: buttons on macOS, a click everywhere. */
+  private showMeetingPrompt(prompt: MeetingPrompt, act: () => void): ShownPrompt {
+    if (!Notification.isSupported()) return { close: () => {} };
+    const text = promptText(prompt, process.platform);
+    const banner = new Notification({
+      title: text.title,
+      body: text.body,
+      actions: [{ type: "button", text: text.action }],
+    });
+    let done = false;
+    const choose = () => {
+      if (done) return;
+      done = true;
+      act();
+    };
+    banner.on("click", choose);
+    banner.on("action", choose);
+    banner.show();
+    return {
+      close: () => {
+        done = true;
+        banner.close();
+      },
+    };
+  }
+
+  /** The person chose a meeting notification: the window comes up and the page acts. */
+  private deliverMeetingRequest(request: DesktopMeetingRequest): void {
+    app.focus({ steal: true });
+    this.reveal();
+    const accountId = this.window?.accountId;
+    const contents = accountId ? this.window?.contentsFor(accountId) : null;
+    if (!contents || contents.isDestroyed()) return;
+    const send = () => {
+      if (!contents.isDestroyed()) contents.send(DESKTOP_IPC.meetingDetectionRequest, request);
     };
     if (contents.isLoading()) contents.once("did-finish-load", send);
     else send();

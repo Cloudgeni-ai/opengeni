@@ -269,6 +269,8 @@ const SITE_FRAME_MESSAGE_FIELDS = [
   "latencyMode",
   "controlEtag",
   "expectedDraftRevision",
+  // The viewer's own IANA time zone, so the agent sees the message's local time.
+  "timeZone",
 ] as const;
 
 /**
@@ -326,6 +328,7 @@ export const SITE_FRAME_SESSION_CREATE_FIELDS: readonly string[] = Object.freeze
   "latencyMode",
   "startMode",
   "metadata",
+  "timeZone",
 ]);
 
 function bodyRecord(value: unknown): Record<string, unknown> | null {

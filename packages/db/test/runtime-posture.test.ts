@@ -1777,6 +1777,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0959 automation templates: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1831,6 +1837,12 @@ describe("runtime database posture evaluator", () => {
             ? 3
             : 0) +
           // 0942 recording live transcript: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0956 per-message app-action grants: one full-DML FORCE-RLS table.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -1893,7 +1905,9 @@ describe("runtime database posture evaluator", () => {
         1 + // 0942 recording live transcript: full-DML, FORCE-RLS.
         1 + // 0949 personal Site sidebar states: full-DML, FORCE-RLS.
         2 + // 0952 secret approval rules and use approvals: full-DML, FORCE-RLS.
-        1; // 0954 recording notes: full-DML, FORCE-RLS.
+        1 + // 0954 recording notes: full-DML, FORCE-RLS.
+        1 + // 0959 automation templates: full-DML, FORCE-RLS.
+        1; // 0971 per-message app-action grants: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -1905,6 +1919,8 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_sidebar_states");
       expect(FORCE_RLS_TABLES).toContain("secret_approval_rules");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
+      expect(FORCE_RLS_TABLES).toContain("automation_templates");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("automation_templates");
       expect(FORCE_RLS_TABLES).toContain("secret_use_approvals");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_use_approvals");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");
@@ -3790,7 +3806,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 grants what 0937 withheld, 0946's stays deferred", () => {
+describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's stays deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -3827,6 +3843,8 @@ describe("runtime definers: 0947 grants what 0937 withheld, 0946's stays deferre
     "recordings",
     "mcp_event_subscriptions",
     "event_source_feeds",
+    "sandboxes",
+    "enrollments",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -3870,13 +3888,17 @@ describe("runtime definers: 0947 grants what 0937 withheld, 0946's stays deferre
       "list_due_mcp_event_subscriptions_v1(integer)",
       "list_due_event_source_feeds_v1(integer)",
       "list_due_recording_retention_v1(integer)",
+      "session_machine_owner_subject_v1(uuid, uuid, uuid)",
     ]);
-    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([]);
+    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
+      "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+    ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
-      runtimePosture.RUNTIME_DEFINER_ROUTINES.map(
-        (name) => `runtime role lacks EXECUTE on private routine ${name}`,
-      ),
+      runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(
+        (name) =>
+          !(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES as readonly string[]).includes(name),
+      ).map((name) => `runtime role lacks EXECUTE on private routine ${name}`),
     );
   });
 
@@ -3918,6 +3940,7 @@ describe("runtime definers: 0947 grants what 0937 withheld, 0946's stays deferre
       "prune_event_intake_v1(integer, integer, integer)",
       "list_stalled_recording_work_v1(integer)",
       "list_due_recording_retention_v1(integer)",
+      "session_machine_owner_subject_v1(uuid, uuid, uuid)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

@@ -1,12 +1,19 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
   createProviderCallBudget,
+  generateSshKeyPair,
   VaultProviderError,
   type VaultProviderContext,
   type VaultProviderErrorCode,
 } from "@opengeni/vaults";
 import { runVaultProviderContractSuite } from "@opengeni/vaults/testing";
-import { encryptString, generateSymmetricKey, symmetricKeyBytes, toB64 } from "../src/crypto";
+import {
+  decryptString,
+  encryptString,
+  generateSymmetricKey,
+  symmetricKeyBytes,
+  toB64,
+} from "../src/crypto";
 import {
   connectBitwarden,
   createBitwardenVaultProvider,
@@ -195,6 +202,25 @@ describe("Bitwarden setup", () => {
 });
 
 describe("Bitwarden adapter beyond the contract", () => {
+  test("inventory includes only the username display hint from login values", async () => {
+    const fake = await FakeBitwarden.create();
+    fake.addCipher(
+      fake.login("Login", {
+        username: "alice@example.com",
+        password: "must-not-leak",
+        totp: TOTP_SEED,
+      }),
+    );
+    fake.addCipher(fake.login("No username", {}));
+    fake.addCipher(typedCipher(fake, 2, "Note", { notes: "private-note" }));
+    const { provider } = await connect(fake);
+    const items = await provider.listItems(context(), PERSONAL_VAULT_ID);
+    expect(items.find((item) => item.name === "Login")!.username).toBe("alice@example.com");
+    expect(items.find((item) => item.name === "No username")!.username).toBeNull();
+    expect(items.find((item) => item.name === "Note")!.username).toBeNull();
+    for (const secret of ["must-not-leak", TOTP_SEED, "private-note"])
+      expect(JSON.stringify(items)).not.toContain(secret);
+  });
   test("lists My vault first, then the collections this account can open", async () => {
     const fake = await FakeBitwarden.create();
     fake.addCipher(fake.login("Mine", { password: "p" }));
@@ -350,7 +376,7 @@ describe("Bitwarden adapter beyond the contract", () => {
     await provider.writeItem(ctx, PERSONAL_VAULT_ID, {
       externalItemId: card.externalItemId,
       name: "Company card",
-      type: "note",
+      type: "card",
       websites: [],
       fields: [
         {
@@ -366,7 +392,7 @@ describe("Bitwarden adapter beyond the contract", () => {
     await provider.writeItem(ctx, PERSONAL_VAULT_ID, {
       externalItemId: identity.externalItemId,
       name: "Me",
-      type: "note",
+      type: "identity",
       websites: [],
       fields: [
         { externalFieldId: "identity.email", name: "email", kind: "text", value: "b@example.test" },
@@ -462,46 +488,114 @@ describe("Bitwarden adapter beyond the contract", () => {
     expect(stored.passwordHistory[1]).toEqual(body.passwordHistory[0]);
   });
 
-  test("an SSH key's own fields are changed in Bitwarden, but its name and notes can change here", async () => {
+  test("an SSH key is created and its key pair replaced here, as a Bitwarden SSH key", async () => {
     const fake = await FakeBitwarden.create();
-    const id = fake.addCipher(
-      typedCipher(fake, 5, "Deploy key", {
-        privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
-        publicKey: "ssh-ed25519 AAAA example",
-        keyFingerprint: "SHA256:abc",
-      }),
-    );
-    const sshKey = { ...fake.ciphers.get(id)!.sshKey };
     const { provider } = await connect(fake);
-    const item = itemNamed(await provider.listItems(context(), PERSONAL_VAULT_ID), "Deploy key");
-    const error = await refusal(
-      provider.writeItem(context(), PERSONAL_VAULT_ID, {
-        externalItemId: item.externalItemId,
-        name: "Deploy key",
-        type: "note",
-        websites: [],
-        fields: [
-          {
-            externalFieldId: "sshKey.privateKey",
-            name: "private key",
-            kind: "concealed",
-            value: "x",
-          },
-        ],
-      }),
-      "provider_permission_denied",
-    );
-    expect(error.message).toContain("SSH");
-    await provider.writeItem(context(), PERSONAL_VAULT_ID, {
-      externalItemId: item.externalItemId,
-      name: "Deploy key (old)",
-      type: "note",
+    const first = generateSshKeyPair("ed25519");
+    const created = await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      name: "Deploy key",
+      type: "ssh_key",
       websites: [],
-      fields: [{ name: "notes", kind: "text", value: "rotated" }],
+      fields: [
+        { name: "private key", kind: "concealed", value: first.privateKey },
+        { name: "public key", kind: "text", value: first.publicKey },
+        { name: "fingerprint", kind: "text", value: first.fingerprint },
+      ],
     });
-    const stored = fake.ciphers.get(id)!;
-    expect(stored.type).toBe(5);
-    expect(stored.sshKey).toEqual(sshKey);
+    expect([created.type, created.category ?? null]).toEqual(["ssh_key", null]);
+    const id = created.externalItemId;
+    const sshKeyOf = () => {
+      const stored = fake.ciphers.get(id)!;
+      expect(stored.type).toBe(5);
+      return Object.fromEntries(
+        ["privateKey", "publicKey", "keyFingerprint"].map((key) => [
+          key,
+          decryptString(stored.sshKey[key], fake.userKey),
+        ]),
+      );
+    };
+    expect(sshKeyOf()).toEqual({
+      privateKey: first.privateKey,
+      publicKey: first.publicKey,
+      keyFingerprint: first.fingerprint,
+    });
+
+    const next = generateSshKeyPair("ed25519");
+    await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      externalItemId: id,
+      name: "Deploy key (rotated)",
+      type: "ssh_key",
+      websites: [],
+      fields: [
+        {
+          externalFieldId: "sshKey.privateKey",
+          name: "private key",
+          kind: "concealed",
+          value: next.privateKey,
+        },
+        {
+          externalFieldId: "sshKey.publicKey",
+          name: "public key",
+          kind: "text",
+          value: next.publicKey,
+        },
+        {
+          externalFieldId: "sshKey.keyFingerprint",
+          name: "fingerprint",
+          kind: "text",
+          value: next.fingerprint,
+        },
+        { name: "notes", kind: "text", value: "rotated" },
+      ],
+    });
+    expect(sshKeyOf()).toEqual({
+      privateKey: next.privateKey,
+      publicKey: next.publicKey,
+      keyFingerprint: next.fingerprint,
+    });
+  });
+
+  test("cards, identities and categorized API keys are created as their own Bitwarden types", async () => {
+    const fake = await FakeBitwarden.create();
+    const { provider } = await connect(fake);
+    const card = await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      name: "Card",
+      type: "card",
+      websites: [],
+      fields: [
+        { name: "cardholder name", kind: "text", value: "Ada Example" },
+        { name: "cvv", kind: "concealed", value: "123" },
+        { name: "number", kind: "concealed", value: "4111111111111111" },
+      ],
+    });
+    expect([card.type, card.category ?? null]).toEqual(["card", null]);
+    expect(fake.ciphers.get(card.externalItemId)!.type).toBe(3);
+    const [code] = await provider.readFields(context(), PERSONAL_VAULT_ID, card.externalItemId, [
+      card.fields.find((field) => field.name === "security code")!.externalFieldId,
+    ]);
+    expect(code!.material).toEqual({ type: "text", value: "123" });
+
+    const identity = await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      name: "Me",
+      type: "identity",
+      category: "person",
+      websites: [],
+      fields: [{ name: "first name", kind: "text", value: "Ada" }],
+    });
+    expect(identity).toMatchObject({ type: "identity", category: "person" });
+    expect(fake.ciphers.get(identity.externalItemId)!.type).toBe(4);
+
+    const database = await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      name: "DB",
+      type: "api_key",
+      category: "database",
+      websites: [],
+      fields: [{ name: "value", kind: "concealed", value: "pg" }],
+    });
+    expect(database).toMatchObject({ type: "api_key", category: "database" });
+    expect(database.fields.map((field) => field.name)).toEqual(["value"]);
+    const listed = itemNamed(await provider.listItems(context(), PERSONAL_VAULT_ID), "DB");
+    expect(listed).toMatchObject({ type: "api_key", category: "database" });
   });
 
   test("an item's type can't change", async () => {
@@ -564,13 +658,156 @@ describe("Bitwarden adapter beyond the contract", () => {
     expect(value!.material).toEqual({ type: "bytes", value: bytes });
   });
 
-  test("archiving moves the item to Bitwarden's trash, where it can be restored", async () => {
+  test("archiving uses Bitwarden's Archive for this account; the item stays listed, archived", async () => {
+    const fake = await FakeBitwarden.create();
+    const id = fake.addCipher(fake.login("Old", { password: "p" }));
+    const { provider } = await connect(fake);
+    const [vault] = await provider.listVaults(context());
+    expect(vault!.operations?.archiveKind ?? "archive").toBe("archive");
+    expect(vault!.itemCount).toBe(1);
+    await provider.archiveItem(context(), PERSONAL_VAULT_ID, id);
+    expect(fake.requests).toContain(`PUT /api/ciphers/${id}/archive`);
+    expect(fake.ciphers.get(id)!.deletedDate).toBeNull();
+    const [item] = await provider.listItems(context(), PERSONAL_VAULT_ID);
+    expect(item!.externalItemId).toBe(id);
+    expect(item!.archivedAt).toBeString();
+    const [after] = await provider.listVaults(context());
+    expect(after!.itemCount).toBe(0);
+    expect(after!.contentVersion).not.toBe(vault!.contentVersion);
+  });
+
+  test("an update keeps the item archived (Vaultwarden unarchives when archivedDate is left out)", async () => {
     const fake = await FakeBitwarden.create();
     const id = fake.addCipher(fake.login("Old", { password: "p" }));
     const { provider } = await connect(fake);
     await provider.archiveItem(context(), PERSONAL_VAULT_ID, id);
+    const archivedDate = fake.ciphers.get(id)!.archivedDate;
+    await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      externalItemId: id,
+      name: "Old",
+      type: "login",
+      websites: [],
+      fields: [
+        { externalFieldId: "login.password", name: "password", kind: "concealed", value: "q" },
+      ],
+    });
+    expect(fake.ciphers.get(id)!.archivedDate).toBe(archivedDate);
+  });
+
+  test("without Bitwarden's Archive, archiving moves the item to the trash", async () => {
+    const fake = await FakeBitwarden.create();
+    fake.archiveFeature = false;
+    const id = fake.addCipher(fake.login("Old", { password: "p" }));
+    const { provider } = await connect(fake);
+    const [vault] = await provider.listVaults(context());
+    expect(vault!.operations?.archiveKind).toBe("trash");
+    await provider.archiveItem(context(), PERSONAL_VAULT_ID, id);
     expect(fake.ciphers.get(id)!.deletedDate).toBeString();
     expect(await provider.listItems(context(), PERSONAL_VAULT_ID)).toEqual([]);
+  });
+
+  test("every request declares a client version, so SSH keys sync", async () => {
+    const fake = await FakeBitwarden.create();
+    fake.addCipher(
+      typedCipher(fake, 5, "Deploy key", {
+        privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----",
+        publicKey: "ssh-ed25519 AAAA",
+        keyFingerprint: "SHA256:abc",
+      }),
+    );
+    const { provider } = await connect(fake);
+    const items = await provider.listItems(context(), PERSONAL_VAULT_ID);
+    expect(itemNamed(items, "Deploy key")).toBeDefined();
+    const id = fake.addCipher(fake.login("Mine", { password: "p" }));
+    await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      externalItemId: id,
+      name: "Mine",
+      type: "login",
+      websites: [],
+      fields: [
+        { name: "key", kind: "file", file: { name: "k", bytes: new Uint8Array([1, 2, 3]) } },
+      ],
+    });
+    await provider.archiveItem(context(), PERSONAL_VAULT_ID, id);
+    expect(fake.requests.length).toBeGreaterThan(5);
+    expect(fake.unversioned).toEqual([]);
+  });
+
+  test("API keys and files are created as secure notes; their fields and files keep their names", async () => {
+    const fake = await FakeBitwarden.create();
+    const { provider } = await connect(fake);
+    const apiKey = await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      name: "Payments API",
+      type: "api_key",
+      websites: [],
+      fields: [{ name: "credential", kind: "concealed", value: "sk_test_1" }],
+    });
+    expect(fake.ciphers.get(apiKey.externalItemId)!.type).toBe(2);
+    const credential = apiKey.fields.find((field) => field.name === "credential")!;
+    const [value] = await provider.readFields(context(), PERSONAL_VAULT_ID, apiKey.externalItemId, [
+      credential.externalFieldId,
+    ]);
+    expect(value!.material).toEqual({ type: "text", value: "sk_test_1" });
+
+    const bytes = new TextEncoder().encode("apiVersion: v1\n");
+    const file = await provider.writeItem(context(), PERSONAL_VAULT_ID, {
+      name: "kubeconfig",
+      type: "file",
+      websites: [],
+      fields: [{ name: "file", kind: "file", file: { name: "config.yaml", bytes } }],
+    });
+    const attachment = file.fields.find((field) => field.kind === "file")!;
+    expect(attachment.name).toBe("file");
+    const [read] = await provider.readFields(context(), PERSONAL_VAULT_ID, file.externalItemId, [
+      attachment.externalFieldId,
+    ]);
+    expect(read!.material).toEqual({ type: "bytes", value: bytes });
+  });
+
+  test("attachments are added, replaced and removed", async () => {
+    const fake = await FakeBitwarden.create();
+    const id = fake.addCipher(fake.login("With file", { username: "u", password: "p" }));
+    const { provider } = await connect(fake);
+    const write = (fields: Parameters<typeof provider.writeItem>[2]["fields"]) =>
+      provider.writeItem(context(), PERSONAL_VAULT_ID, {
+        externalItemId: id,
+        name: "With file",
+        type: "login",
+        websites: [],
+        fields,
+      });
+    const encode = (text: string) => new TextEncoder().encode(text);
+    const added = await write([
+      { name: "deploy.pem", kind: "file", file: { name: "deploy.pem", bytes: encode("one") } },
+    ]);
+    const first = added.fields.find((field) => field.name === "deploy.pem")!;
+    expect(added.fields.map((field) => field.name)).toEqual(
+      expect.arrayContaining(["username", "password", "deploy.pem"]),
+    );
+    await refusal(
+      write([{ name: "deploy.pem", kind: "file", file: { name: "x", bytes: encode("x") } }]),
+      "provider_conflict",
+    );
+    const replaced = await write([
+      {
+        externalFieldId: first.externalFieldId,
+        name: "deploy.pem",
+        kind: "file",
+        file: { name: "deploy.pem", bytes: encode("two") },
+      },
+    ]);
+    const second = replaced.fields.find((field) => field.name === "deploy.pem")!;
+    expect(second.externalFieldId).not.toBe(first.externalFieldId);
+    expect(fake.ciphers.get(id)!.attachments).toHaveLength(1);
+    const [value] = await provider.readFields(context(), PERSONAL_VAULT_ID, id, [
+      second.externalFieldId,
+    ]);
+    expect(value!.material).toEqual({ type: "bytes", value: encode("two") });
+    const removed = await write([
+      { externalFieldId: second.externalFieldId, name: "deploy.pem", kind: "file", remove: true },
+    ]);
+    expect(removed.fields.some((field) => field.kind === "file")).toBe(false);
+    expect(fake.ciphers.get(id)!.attachments).toEqual([]);
   });
 
   test("logs in once and reuses the token across attempts; a revoked token is replaced once", async () => {

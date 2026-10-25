@@ -17,6 +17,7 @@ import {
   browserScreenshotResponse,
   browserScreenshotError,
   browserTabDiagnosisError,
+  browserRouteError,
   browserCreateInput,
   withInitialView,
 } from "../src/routes/browser-sessions";
@@ -744,6 +745,40 @@ describe("BrowserSession route discipline", () => {
     });
     // A transient outage keeps its retryable envelope.
     expect(browserTabDiagnosisError(transient)).toBe(transient);
+  });
+
+  test("a controller change of unknown outcome stays unknown in the API envelope", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const uncertain = new BrowserControlRequestError(409, {
+      code: "outcome_unknown",
+      message:
+        "The browser profile's connection ended while closing this tab, so whether it closed is unknown; list the tabs again once the profile is connected",
+      retryable: false,
+    });
+    app.delete("/v1/test/close", () => {
+      throw browserRouteError(uncertain);
+    });
+    const response = await app.request("http://localhost/v1/test/close", {
+      method: "DELETE",
+      headers: { "x-opengeni-correlation-id": "close-request" },
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: uncertain.error.message,
+        retryable: false,
+        outcomeUnknown: true,
+        requestId: "close-request",
+      },
+    });
   });
 
   test("preserves a definite tab diagnosis in GET and DOM-read POST API envelopes", async () => {

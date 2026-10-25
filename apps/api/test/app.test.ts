@@ -2118,6 +2118,21 @@ describe("GET /v1/config/client", () => {
     expect(paused.auth).toMatchObject({ mode: "managedSession", newSignupsEnabled: false });
   });
 
+  test("projects the server's own email verification requirement", async () => {
+    const required = await fetchClientConfig(testSettings({ productAccessMode: "managed" }));
+    expect(required.auth).toMatchObject({
+      mode: "managedSession",
+      emailVerificationRequired: true,
+    });
+    const optional = await fetchClientConfig(
+      testSettings({ productAccessMode: "managed", managedAuthRequireEmailVerification: false }),
+    );
+    expect(optional.auth).toMatchObject({
+      mode: "managedSession",
+      emailVerificationRequired: false,
+    });
+  });
+
   test("keeps analytics off by default and exposes only configured public identifiers", async () => {
     const disabled = await fetchClientConfig(testSettings());
     expect(disabled.analytics).toEqual({ consentRequired: true, providers: {} });

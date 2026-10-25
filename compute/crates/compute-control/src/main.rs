@@ -16,6 +16,7 @@ use compute_control::e2b;
 use compute_control::group::{COMPUTE_API, Credentials, GcpGroup, METADATA, ServiceAccountKey};
 use compute_control::hostapi::Certificates;
 use compute_control::identity::{Expected, GOOGLE_KEYS, GceIdentity, GoogleKeys};
+use compute_control::images::Images;
 use compute_control::leader::Scaling;
 use compute_control::link::Links;
 use compute_control::service::Settings;
@@ -154,12 +155,25 @@ struct Serve {
     /// more. The default image is the hosts' base image unless named here.
     #[arg(long = "stored-image", value_parser = parse_image)]
     stored_images: Vec<(String, ImageId)>,
+    /// The OCI image this release's sandboxes of an image name start from,
+    /// as `name=registry/repository@sha256:<hex>`; repeat for more. A host
+    /// builds it into a stored image when none was, and new creates of the
+    /// name start from that; until then from the image the name had
+    /// before, or the one `--stored-image` names.
+    #[arg(long = "image-source", value_parser = parse_source)]
+    image_sources: Vec<(String, String)>,
     /// Disk in MiB each sandbox is booked for where it is placed.
     #[arg(long, default_value_t = 1024)]
     disk_mib: u64,
     /// Seconds a wake or connect may take in all.
     #[arg(long, default_value_t = 60)]
     wake_within_s: u64,
+    /// Seconds the leader waits for a host that stopped renewing while it
+    /// holds sandboxes before giving up on it, which costs them their
+    /// running programs; one that holds none, or whose instance is found
+    /// stopped or gone, goes as soon as its lease allows.
+    #[arg(long, default_value_t = 120)]
+    give_up_after_s: u64,
     /// Seconds a sandbox whose create names no sleep config runs between
     /// checkpoints, the fleet's target for how much work losing a host
     /// costs; 0 takes none.
@@ -254,6 +268,21 @@ fn parse_image(text: &str) -> Result<(String, ImageId), String> {
         .split_once('=')
         .ok_or("a stored image is `name=<image id>`")?;
     Ok((name.to_owned(), id.parse()?))
+}
+
+fn parse_source(text: &str) -> Result<(String, String), String> {
+    let (name, source) = text
+        .split_once('=')
+        .ok_or("an image source is `name=registry/repository@sha256:<hex>`")?;
+    let pinned = source.rsplit_once("@sha256:").is_some_and(|(image, hex)| {
+        !image.is_empty() && hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if name.is_empty() || !pinned {
+        return Err(format!(
+            "{source:?} is not an image pinned by digest (`registry/repository@sha256:<hex>`)"
+        ));
+    }
+    Ok((name.to_owned(), source.to_owned()))
 }
 
 fn parse_team_link(text: &str) -> Result<(String, String), String> {
@@ -476,17 +505,19 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
         settings: Settings {
             disk_mib: args.disk_mib,
             wake_within: Duration::from_secs(args.wake_within_s),
+            give_up_after: Duration::from_secs(args.give_up_after_s),
             sleep: SleepConfig {
                 checkpoint_every_ms: (args.checkpoint_every_s > 0)
                     .then(|| args.checkpoint_every_s.saturating_mul(1000)),
                 ..Settings::default().sleep
             },
             image: args.image.clone(),
-            images: args
-                .stored_images
-                .iter()
-                .map(|(name, id)| (name.clone(), Some(*id)))
-                .collect::<BTreeMap<_, _>>(),
+            images: Images::new(
+                args.stored_images
+                    .iter()
+                    .map(|(name, id)| (name.clone(), Some(*id)))
+                    .collect::<BTreeMap<_, _>>(),
+            ),
             links: args.links()?,
             ..Settings::default()
         },
@@ -496,6 +527,7 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
         e2b: args.e2b_listen()?,
         metrics: args.metrics_listen,
         host_metrics: args.host_metrics_to.clone(),
+        image_sources: args.image_sources.iter().cloned().collect(),
     };
     let running = start(store, config).await?;
     tracing::info!(

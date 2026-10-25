@@ -293,6 +293,8 @@ export type StartupPhaseItem = {
     | "provider_recovery_in_progress"
     | "compaction_required"
     | undefined;
+  /** A failed step's recorded error, shown behind Details rather than as its title. */
+  detail?: string | undefined;
   occurredAt: string;
 };
 
@@ -546,11 +548,13 @@ export type MachineInputMember = {
     | "agent_steer_instruction"
     | "child_terminal_result"
     | "media_generation_result"
+    | "secret_use_approval_decided"
     | "child_requires_action"
     | "child_requires_action_resolved"
     | "child_paused"
     | "child_waiting_capacity"
-    | "child_progress";
+    | "child_progress"
+    | "capability_setup_completed";
   classification: "success" | "failure" | "action_required" | "info";
   sourceId: string;
   summary: string;
@@ -636,7 +640,10 @@ export type TurnEndItem = {
   id: string;
   turnId: string | null;
   outcome: TurnOutcome;
+  /** People-facing failure summary for a failed turn. */
   failureText: string | null;
+  /** The recorded diagnostic text `failureText` replaced, for a Details disclosure. */
+  failureDetail?: string;
   occurredAt: string;
 };
 
@@ -720,6 +727,8 @@ export type TimelineGroup =
       items: ActivityItem[];
       outcome?: TurnOutcome;
       failureText?: string;
+      /** The recorded diagnostic text `failureText` replaced, for a Details disclosure. */
+      failureDetail?: string;
       /** One turn's chronological work history, including progress prose after settlement. */
       work?: {
         startedAt: string;
@@ -739,8 +748,10 @@ export type TimelineGroup =
           waitingOn?: "you";
         };
         /**
-         * Settled capacity-wait time inside this work span. It is not work:
-         * the worked duration and the live working clock exclude it.
+         * Settled time inside this work span in which the agent was not
+         * working: capacity waits, and the gap between a failed attempt and
+         * the Retry that reopened the turn. The worked duration and the live
+         * working clock exclude it.
          */
         pausedMs?: number;
         details: TimelineGroup[];
@@ -765,6 +776,8 @@ export type TimelineGroup =
       id: string;
       outcome: TurnOutcome;
       failureText?: string;
+      /** The recorded diagnostic text `failureText` replaced, for a Details disclosure. */
+      failureDetail?: string;
       startedAt: string;
       endedAt: string;
       groups: TimelineGroup[];

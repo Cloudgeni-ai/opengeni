@@ -4,7 +4,10 @@ import {
   workspaceControlUtf8Bytes,
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
+export * from "./secret-value";
+export * from "./integration-capability-id";
 import { defineSchema } from "./define-schema";
+import { secretValue } from "./secret-value";
 export * from "./session-target";
 export * from "./turn-serving-policy";
 import { AzureOpenAIEndpoint } from "./direct-model-provider";
@@ -40,6 +43,12 @@ export * from "./session-message-search";
 export * from "./session-goal-reports";
 export * from "./session-history-import";
 import { SessionImportedArchive } from "./session-history-import";
+import {
+  MESSAGE_TIME_ZONE_MAX_CHARS,
+  MESSAGE_TIME_ZONE_PATTERN,
+  messageTimeZoneWallClock,
+} from "./message-time-zone";
+export * from "./message-time-zone";
 import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
@@ -146,6 +155,7 @@ export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
+export * from "./interaction-action-deadline";
 export * from "./interaction-driver-diagnostic";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
@@ -158,6 +168,7 @@ export * from "./work-claims";
 export * from "./product-analytics";
 export * from "./desktop-app";
 export * from "./event-triggers";
+export * from "./automation-templates";
 import {
   ScheduledOccurrenceEvents,
   ScheduledTaskEvents,
@@ -881,6 +892,8 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "codex_compaction_v2_provider_locked",
     "provider_verification_failed",
     "upstream_unavailable",
+    /** A browser or computer action request outlived the deadline derived from its declared waits; it may still be running. */
+    "action_timeout",
     "tab_not_responding",
     "tab_crashed",
     "internal_error",
@@ -1372,18 +1385,23 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 } as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
- * Tools a session has only while it has admin access: the organization's
- * actions, run as the person who gave it, with exactly their access. Admin access, not the
- * session's tool selection, decides whether they are there.
+ * App actions: what the person could do in the app's pages and settings, run
+ * as that person in a session they started themselves. Reads run at once; a
+ * change waits for their confirmation in the chat unless the session has full
+ * access. Ordinary, selectable tools, never carried into a child session.
  */
-export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
+export const SESSION_APP_ACTION_TOOL_NAMES = [
   "admin_actions_search",
   "admin_action_describe",
   "admin_action_call",
 ] as const satisfies readonly FirstPartyMcpToolName[];
-export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(
-  SESSION_ADMIN_ACCESS_TOOL_NAMES,
+export const SESSION_APP_ACTION_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(
+  SESSION_APP_ACTION_TOOL_NAMES,
 );
+/** @deprecated Renamed to SESSION_APP_ACTION_TOOL_NAMES; these tools no longer need full access. */
+export const SESSION_ADMIN_ACCESS_TOOL_NAMES = SESSION_APP_ACTION_TOOL_NAMES;
+/** @deprecated Renamed to SESSION_APP_ACTION_TOOL_NAME_SET. */
+export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET = SESSION_APP_ACTION_TOOL_NAME_SET;
 
 /**
  * Connector-wide tools are explicit-only except prepared bot sending. Ordinary
@@ -1402,8 +1420,7 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
       name === "slack_bot_prepare_message" ||
       name === "slack_bot_send_prepared_message") &&
     !name.startsWith("fiken_") &&
-    !name.startsWith("atlassian_") &&
-    !SESSION_ADMIN_ACCESS_TOOL_NAME_SET.has(name),
+    !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -2470,11 +2487,20 @@ export const WorkspaceTranscriptionPolicy = /* @__PURE__ */ defineSchema(() =>
 export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
 
 /**
- * Workspace voice-input preferences. Public provider identifiers express the
- * preferred billing route; credentials and model configuration remain private.
+ * Speech-to-text provider identifiers. Every transcription use (dictation,
+ * meetings) chooses from the same providers. `azure-mai` is the older name
+ * of `azure-speech` and is read as it.
  */
 export const VoiceInputProviderId = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["supergrok-subscription", "codex-subscription", "openai", "azure-openai", "azure-mai"]),
+  z.enum([
+    "supergrok-subscription",
+    "codex-subscription",
+    "openai",
+    "azure-openai",
+    "azure-mai",
+    "azure-speech",
+    "elevenlabs",
+  ]),
 );
 export type VoiceInputProviderId = z.infer<typeof VoiceInputProviderId>;
 
@@ -2482,6 +2508,7 @@ export const WorkspaceVoiceInputSettings = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       enabled: primitives.boolean,
+      /** The provider dictation tries first; each provider runs one dictation model. */
       preferredProvider: VoiceInputProviderId.nullable().optional(),
       fallbackEnabled: primitives.optionalBoolean,
     })
@@ -2841,19 +2868,35 @@ export function workspaceModelCompactionThreshold(
 }
 
 /**
- * Whether members may give a session they started their own access. Off by
- * default; turning it off ends every session's admin access.
+ * What agents may do in the app for a person, organization-wide.
+ * `sessionAdminAccessAllowed`: members may give a session they started their
+ * own full access. Off by default; turning it off ends every session's full
+ * access. `chatActionsAllowed`: in a chat a person started, the agent may do
+ * what that person could do in the app's pages and settings, each change only
+ * after the person confirms it in the chat. On by default.
  */
 export const OrganizationAgentAdminAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
     sessionAdminAccessAllowed: primitives.boolean,
+    chatActionsAllowed: primitives.boolean,
     updatedAt: primitives.nullableString,
   }),
 );
 export type OrganizationAgentAdminAccess = z.infer<typeof OrganizationAgentAdminAccess>;
 
+/** Change either choice; an omitted one stays as it is. */
 export const UpdateOrganizationAgentAdminAccessRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ sessionAdminAccessAllowed: primitives.boolean }).strict(),
+  z
+    .object({
+      sessionAdminAccessAllowed: primitives.optionalBoolean,
+      chatActionsAllowed: primitives.optionalBoolean,
+    })
+    .strict()
+    .refine(
+      (value) =>
+        value.sessionAdminAccessAllowed !== undefined || value.chatActionsAllowed !== undefined,
+      { message: "Change at least one setting." },
+    ),
 );
 export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
   typeof UpdateOrganizationAgentAdminAccessRequest
@@ -3602,6 +3645,55 @@ export const OrganizationModelProviderKind = /* @__PURE__ */ defineSchema(() =>
   ]),
 );
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
+/**
+ * How an organization model provider connection signs in. Every kind uses an
+ * API key; Azure OpenAI can instead use Microsoft Entra ID, either with the
+ * organization's own app registration (`entra_client_secret`) or, only when
+ * the deployment operator offers it, the deployment's own identity
+ * (`entra_deployment_identity`).
+ */
+export const OrganizationModelProviderAuthMethod = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["api_key", "entra_client_secret", "entra_deployment_identity"]),
+);
+export type OrganizationModelProviderAuthMethod = z.infer<
+  typeof OrganizationModelProviderAuthMethod
+>;
+const MicrosoftEntraGuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+/** A Microsoft Entra directory: its tenant ID, or a verified domain such as `contoso.onmicrosoft.com`. */
+const MicrosoftEntraTenant = /* @__PURE__ */ defineSchema(() =>
+  primitives.string
+    .trim()
+    .max(253)
+    .refine(
+      (value) =>
+        MicrosoftEntraGuid.test(value) ||
+        /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/iu.test(value),
+      "must be a Microsoft Entra tenant ID or domain",
+    ),
+);
+/**
+ * Azure OpenAI only: sign in with Microsoft Entra ID instead of an API key.
+ * The client secret is write-only, stored encrypted like a key, and never
+ * returned.
+ */
+export const OrganizationModelProviderEntraAuthentication = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("method", [
+    z
+      .object({
+        method: z.literal("entra_client_secret"),
+        /** Directory (tenant) ID of the app registration. */
+        tenantId: MicrosoftEntraTenant,
+        /** Application (client) ID of the app registration. */
+        clientId: primitives.string.trim().regex(MicrosoftEntraGuid, "must be an application ID"),
+        clientSecret: primitives.string.trim().min(1).max(8192),
+      })
+      .strict(),
+    z.object({ method: z.literal("entra_deployment_identity") }).strict(),
+  ]),
+);
+export type OrganizationModelProviderEntraAuthentication = z.infer<
+  typeof OrganizationModelProviderEntraAuthentication
+>;
 export const OrganizationModelProviderConnectionResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     providerKind: OrganizationModelProviderKind,
@@ -3612,6 +3704,8 @@ export const OrganizationModelProviderConnectionResponse = /* @__PURE__ */ defin
      * `https://<resource>.openai.azure.com/openai/v1`. Absent for other kinds.
      */
     endpoint: z.string().url().optional(),
+    /** Azure OpenAI only: how the connection signs in. Absent for other kinds. */
+    authMethod: OrganizationModelProviderAuthMethod.optional(),
     createdAt: primitives.dateTime,
     updatedAt: primitives.dateTime,
   }),
@@ -3624,7 +3718,13 @@ export const UpsertOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
     .object({
       operationId: primitives.uuid,
       expectedVersion: z.number().int().nonnegative().optional(),
-      apiKey: primitives.string.trim().min(1).max(8192),
+      /** The provider key. Required unless `authentication` signs in another way. */
+      apiKey: primitives.string.trim().min(1).max(8192).optional(),
+      /**
+       * Azure OpenAI only: sign in with Microsoft Entra ID instead of
+       * `apiKey`. Send exactly one of the two.
+       */
+      authentication: OrganizationModelProviderEntraAuthentication.optional(),
       /**
        * Required for `azure_openai` and refused for every other kind: the
        * official `https://<resource>.openai.azure.com` resource endpoint (or
@@ -3639,7 +3739,11 @@ export const UpsertOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
         .strict()
         .optional(),
     })
-    .strict(),
+    .strict()
+    .refine((value) => (value.apiKey === undefined) !== (value.authentication === undefined), {
+      message: "send an API key or another sign-in method, not both",
+      path: ["apiKey"],
+    }),
 );
 export type UpsertOrganizationModelProviderConnectionRequest = z.infer<
   typeof UpsertOrganizationModelProviderConnectionRequest
@@ -6795,6 +6899,13 @@ export const FileListResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type FileListResponse = z.infer<typeof FileListResponse>;
 
+/**
+ * Largest file (raw bytes) the model may receive inline. Inline delivery needs
+ * a sha256 that pins the bytes, so an upload completed without a client digest
+ * gets a server-computed one up to this size.
+ */
+export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
 export const CreateFileUploadRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /**
@@ -7679,7 +7790,7 @@ export const SessionMcpServerInput = /* @__PURE__ */ defineSchema(() =>
     requireApproval: SessionMcpApprovalPolicy.optional(),
     // Write-only credential headers. Values are encrypted at rest and never
     // returned in session responses or events; response metadata exposes names.
-    headers: z.record(primitives.string, primitives.string).optional(),
+    headers: secretValue(z.record(primitives.string, primitives.string)).optional(),
     // Non-secret pointer resolved by the native connection credential engine.
     connectionRef: McpServerConnectionRef.optional(),
   }),
@@ -7689,7 +7800,7 @@ export type SessionMcpServerInput = z.infer<typeof SessionMcpServerInput>;
 export const SessionMcpCredentialUpdateInput = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: SessionMcpServerId,
-    headers: z.record(primitives.string, primitives.string),
+    headers: secretValue(z.record(primitives.string, primitives.string)),
   }),
 );
 export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
@@ -7706,7 +7817,7 @@ export const RotateSessionMcpCredentialsRequest = /* @__PURE__ */ defineSchema((
               id: SessionMcpServerId,
               expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
               expectedServerUrl: httpsUrl,
-              headers: z.record(primitives.string, primitives.string),
+              headers: secretValue(z.record(primitives.string, primitives.string)),
             })
             .strict()
             .or(
@@ -8412,6 +8523,67 @@ export const UpdateSessionToolPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   ]),
 );
 export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPolicyRequest>;
+
+/**
+ * The person finished setup from a capability card the agent posted in this
+ * chat (OAuth return, popup, API-key form, "use in this conversation"). The
+ * server finds the latest card for this capability, checks the capability is
+ * now usable in the chat and that the person has not written since, and then
+ * wakes the agent once so it continues the request that needed it.
+ */
+export const ContinueAfterCapabilitySetupRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().trim().min(1).max(512),
+    })
+    .strict(),
+);
+export type ContinueAfterCapabilitySetupRequest = z.infer<
+  typeof ContinueAfterCapabilitySetupRequest
+>;
+
+/** Why no continuation was sent. Each is a normal outcome, not an error. */
+export const CapabilitySetupContinuationSkipReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    // No card for this capability was posted in this chat.
+    "no_card",
+    // The person already wrote after the card; their message carries on.
+    "later_message",
+    // The capability is not yet usable in this chat.
+    "not_ready",
+    // This card completes through its own flow (it sends a message itself).
+    "not_applicable",
+    // The request that posted the card belongs to someone else, or the chat
+    // has no request to continue.
+    "not_requester",
+    // The chat is closed or archived.
+    "session_closed",
+  ]),
+);
+export type CapabilitySetupContinuationSkipReason = z.infer<
+  typeof CapabilitySetupContinuationSkipReason
+>;
+
+export const ContinueAfterCapabilitySetupResponse = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("outcome", [
+    z
+      .object({
+        // `queued` the first time; `already_queued` for every repeat of the same card.
+        outcome: z.enum(["queued", "already_queued"]),
+        updateId: primitives.uuid,
+      })
+      .strict(),
+    z
+      .object({
+        outcome: z.literal("not_needed"),
+        reason: CapabilitySetupContinuationSkipReason,
+      })
+      .strict(),
+  ]),
+);
+export type ContinueAfterCapabilitySetupResponse = z.infer<
+  typeof ContinueAfterCapabilitySetupResponse
+>;
 
 /**
  * A member's personal pin preference for a session. `expectedVersion` is
@@ -9554,6 +9726,43 @@ export function formatModelContextTimestamp(value: Date | string): string {
 const MAX_MESSAGE_SENDER_CHARS = 200;
 
 /**
+ * The IANA time zone of the person sending a message, as their client reports
+ * it (for example `Europe/Oslo`). Only the shape is enforced here; a name this
+ * server's time zone data cannot resolve is ignored at acceptance rather than
+ * failing the message, because clients may carry newer zone data.
+ */
+export const MessageTimeZone = /* @__PURE__ */ defineSchema(() =>
+  primitives.string.min(1).max(MESSAGE_TIME_ZONE_MAX_CHARS).regex(MESSAGE_TIME_ZONE_PATTERN, {
+    message: "timeZone must be an IANA time zone name such as Europe/Oslo",
+  }),
+);
+export type MessageTimeZone = z.infer<typeof MessageTimeZone>;
+
+/**
+ * Wall-clock time in the sender's own zone, followed by UTC, for example
+ * `Sunday 2026-10-25 09:08 Europe/Oslo (08:08 UTC)`. The UTC part repeats the
+ * weekday and date only when they differ from the local ones. Without a usable
+ * zone this is exactly {@link formatModelContextTimestamp}.
+ */
+export function formatZonedModelContextTimestamp(
+  value: Date | string,
+  timeZone?: string | null,
+): string {
+  const utc = formatModelContextTimestamp(value);
+  if (!timeZone) return utc;
+  const date = typeof value === "string" ? new Date(value) : value;
+  const local = messageTimeZoneWallClock(date, timeZone);
+  if (!local) return utc;
+  const pad = (part: number, width = 2) => String(part).padStart(width, "0");
+  const localDate = `${pad(local.year, 4)}-${pad(local.month)}-${pad(local.day)}`;
+  const weekday =
+    MODEL_CONTEXT_WEEKDAYS[new Date(Date.UTC(local.year, local.month - 1, local.day)).getUTCDay()];
+  const iso = date.toISOString();
+  const utcPart = localDate === iso.slice(0, 10) ? `${iso.slice(11, 16)} UTC` : utc;
+  return `${weekday} ${localDate} ${pad(local.hour)}:${pad(local.minute)} ${timeZone} (${utcPart})`;
+}
+
+/**
  * The person a human message came from, as frozen with its turn, made safe for
  * the one-line metadata part: no brackets or line breaks, bounded length.
  * Empty when nothing readable remains.
@@ -9571,11 +9780,17 @@ export function messageSenderForModel(sender: string | null | undefined): string
 /**
  * The metadata part of one accepted user-role message: its acceptance time
  * and, for a person's message, who sent it. Members of a shared workspace use
- * the same agent, so the model must be able to tell them apart.
+ * the same agent, so the model must be able to tell them apart. When the
+ * sender's client reported its time zone, the time is shown in that zone first
+ * and in UTC after it; otherwise only in UTC.
  */
-export function renderMessageSentAtForModel(sentAt: Date | string, sender?: string | null): string {
+export function renderMessageSentAtForModel(
+  sentAt: Date | string,
+  sender?: string | null,
+  timeZone?: string | null,
+): string {
   const from = messageSenderForModel(sender);
-  return `[Message sent ${formatModelContextTimestamp(sentAt)}${from ? ` by ${from}` : ""}]`;
+  return `[Message sent ${formatZonedModelContextTimestamp(sentAt, timeZone)}${from ? ` by ${from}` : ""}]`;
 }
 
 /**
@@ -9608,7 +9823,8 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
  * model knows the current date without spending a tool call on it. All of them
  * remain in the visible message's chronological position, and presentation
  * layers may omit their leading parts. `sender` names the person who sent a
- * human message; it rides on the `sentAt` part.
+ * human message, and `timeZone` is the sender's zone frozen with the turn; both
+ * ride on the `sentAt` part.
  */
 export function renderUserMessageContentForModel(
   text: string,
@@ -9617,6 +9833,7 @@ export function renderUserMessageContentForModel(
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | string | null,
   sender?: string | null,
+  timeZone?: string | null,
 ): string | Array<{ type: "input_text"; text: string }> {
   const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
   const context = modelContext?.trim();
@@ -9640,7 +9857,12 @@ export function renderUserMessageContentForModel(
         ]
       : []),
     ...(sentAt != null
-      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt, sender) }]
+      ? [
+          {
+            type: "input_text" as const,
+            text: renderMessageSentAtForModel(sentAt, sender, timeZone),
+          },
+        ]
       : []),
     { type: "input_text", text: visibleContent },
   ];
@@ -9884,6 +10106,8 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
         delivery: z.enum(["send", "steer"]),
         controlEtag: z.string().min(1).optional(),
         modelContext: primitives.string.trim().min(1).max(32768).optional(),
+        // The sender's IANA time zone; the model sees the message's local time.
+        timeZone: MessageTimeZone.optional(),
         mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
         connectionAuthorities: z.never().optional(),
         connectionAccounts: McpConnectionAccountSelections.default([]),
@@ -10126,6 +10350,8 @@ export const SessionSystemUpdateKind = /* @__PURE__ */ defineSchema(() =>
     "child_paused",
     "child_waiting_capacity",
     "child_progress",
+    "secret_use_approval_decided",
+    "capability_setup_completed",
   ]),
 );
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
@@ -10156,6 +10382,8 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
   child_paused: "deferred",
   child_waiting_capacity: "deferred",
   child_progress: "deferred",
+  secret_use_approval_decided: "immediate",
+  capability_setup_completed: "immediate",
 };
 
 /**
@@ -10335,6 +10563,37 @@ export const ChildProgressPayload = /* @__PURE__ */ defineSchema(() =>
     .passthrough(),
 );
 export type ChildProgressPayload = z.infer<typeof ChildProgressPayload>;
+
+/** Bound on the capability name copied into a setup-completed update. */
+export const CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS = 256;
+
+/**
+ * The person finished setup from the capability card `cardEventId` that the
+ * agent posted. One per card: the producer's dedupe key is the card event.
+ */
+export const CapabilitySetupCompletedPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("capability_setup_completed"),
+      capabilityId: z.string().min(1).max(512),
+      name: z.string().min(1).max(CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS),
+      cardEventId: primitives.uuid,
+    })
+    .passthrough(),
+);
+export type CapabilitySetupCompletedPayload = z.infer<typeof CapabilitySetupCompletedPayload>;
+
+/**
+ * The one fact the agent receives when a person finishes setup from its card.
+ * Written once into the durable update row and replayed verbatim afterwards.
+ * Tools are claimed available only when the server verified them in the chat;
+ * when the chat's tool list is too long to check, the fact leaves that out.
+ */
+export function capabilitySetupCompletedSummary(name: string, toolsVerified: boolean): string {
+  return toolsVerified
+    ? `The person finished setting up ${name} from your request. Its tools are now available, so continue the request that needed it.`
+    : `The person finished setting up ${name} from your request, so continue the request that needed it.`;
+}
 
 /**
  * Bound, in UTF-8 bytes including the truncation marker, on the child's final
@@ -10606,6 +10865,24 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
     ChildPausedPayload,
     ChildWaitingCapacityPayload,
     ChildProgressPayload,
+    /**
+     * The person answered Opengeni's approval card for a blocked secret use.
+     * Names only, never values or subject ids.
+     */
+    z
+      .object({
+        type: z.literal("secret_use_approval_decided"),
+        approvalId: z.string().uuid(),
+        requestId: z.string().uuid(),
+        decision: z.enum(["once", "session", "window", "deny"]),
+        /** "Item › field" names the decision covers. */
+        secrets: z.array(boundedUtf8String(512)).max(20),
+        surface: boundedUtf8String(64),
+        toolName: boundedUtf8String(200),
+        destination: boundedUtf8String(500).nullable(),
+      })
+      .passthrough(),
+    CapabilitySetupCompletedPayload,
   ]),
 );
 export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
@@ -11048,6 +11325,7 @@ const TRANSIENT_SESSION_SYSTEM_UPDATE_KINDS: ReadonlySet<string> = new Set<Sessi
     "child_progress",
     "child_waiting_capacity",
     "child_requires_action_resolved",
+    "capability_setup_completed",
   ],
 );
 
@@ -14437,7 +14715,7 @@ function compareDescending(left: number | string, right: number | string): numbe
 }
 
 export const ConnectionCredentialBundle = /* @__PURE__ */ defineSchema(() =>
-  z.record(primitives.string, z.unknown()),
+  secretValue(z.record(primitives.string, z.unknown())),
 );
 export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
 
@@ -14849,7 +15127,7 @@ export const EnableCapabilityRequest = /* @__PURE__ */ defineSchema(() =>
      * workspace-variable-sets key, injected only into the runtime MCP client,
      * and never returned by the API — responses expose header names only.
      */
-    headers: z.record(primitives.string, primitives.string).default({}),
+    headers: secretValue(z.record(primitives.string, primitives.string)).default({}),
   }),
 );
 export type EnableCapabilityRequest = z.infer<typeof EnableCapabilityRequest>;
@@ -15537,6 +15815,8 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
       connected: primitives.boolean,
       requiresConnection: primitives.boolean,
       connectionId: primitives.nullableUuid,
+      /** When the bound connection was last used, so a client can pick which account to reconnect. */
+      connectionLastUsedAt: primitives.nullableString.optional(),
       ownership: z.enum(["workspace", "personal", "none"]),
       allowedTools: z.array(z.string().min(1).max(200)).max(2000),
       toolCount: primitives.nonnegativeInteger,
@@ -19588,6 +19868,9 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // Standard timeline rendering omits it, while full event/audit reads retain
       // it. This is ordinary user-role content, not secret or privileged input.
       modelContext: primitives.string.trim().min(1).max(32768).optional(),
+      // The IANA time zone of the person sending the initial message, so the
+      // model sees its local time. Ignored without an initial message.
+      timeZone: MessageTimeZone.optional(),
       // Per-session agent persona/system instructions (org-visible metadata, NOT a
       // secret). Rides the SAME system-level instructions channel the per-workspace
       // agentInstructions rides, composed AFTER the workspace persona so it refines
@@ -19839,7 +20122,9 @@ export const HumanInputSecretSpec = /* @__PURE__ */ defineSchema(() =>
       item: VaultName,
       field: VaultFieldName.default("password"),
       fieldKind: z.enum(["concealed", "totp", "text"]).default("concealed"),
-      itemType: z.enum(["login", "api_key", "note"]).default("login"),
+      itemType: z
+        .enum(["login", "api_key", "note", "card", "identity", "ssh_key"])
+        .default("login"),
       username: z
         .object({ prompt: z.string().max(200), value: z.string().max(512).nullable().optional() })
         .strict()
@@ -20104,6 +20389,14 @@ export const SessionHumanInputRequest = /* @__PURE__ */ defineSkillContractSchem
     creationAttemptId: primitives.uuid,
     toolCallId: z.string().min(1).max(1024),
     status: HumanInputRequestStatus,
+    /**
+     * `tool_call`: the agent asked with `request_human_input` and its turn
+     * waits for the answer. `secret_use_approval`: Opengeni posted its own
+     * approval card for a blocked secret use; the turn did not wait, the
+     * card outlives it, and the answer reaches the agent as an update.
+     * Absent from older servers, meaning `tool_call`.
+     */
+    origin: z.enum(["tool_call", "secret_use_approval"]).optional(),
     questions: z.array(HumanInputQuestion).min(1).max(20),
     allowSkip: primitives.boolean,
     response: HumanInputResponse.nullable(),
@@ -20187,6 +20480,8 @@ export const SessionUserMessagePayload = /* @__PURE__ */ defineSchema(() =>
       // Model-visible application context attached to this exact user message.
       // It is retained in full event/history data but omitted by standard UI.
       modelContext: primitives.string.trim().min(1).max(32768).optional(),
+      // The sender's IANA time zone; the model sees the message's local time.
+      timeZone: MessageTimeZone.optional(),
       resources: z.array(ResourceRef).default([]),
       model: z.string().min(1).optional(),
       reasoningEffort: ReasoningEffort.optional(),
@@ -20248,6 +20543,8 @@ export const SteerSessionMessageRequest = /* @__PURE__ */ defineSchema(() =>
       annotations: SubmittedTimelineAnnotations.default([]),
       // Same model-visible message context as a queued user.message.
       modelContext: primitives.string.trim().min(1).max(32768).optional(),
+      // The sender's IANA time zone, as on a queued user.message.
+      timeZone: MessageTimeZone.optional(),
       resources: z.array(ResourceRef).default([]),
       model: z.string().min(1).optional(),
       reasoningEffort: ReasoningEffort.optional(),
@@ -20274,6 +20571,13 @@ export const SteerSessionMessageResponse = /* @__PURE__ */ defineSchema(() =>
     receipt: SessionCommandReceipt,
     routing: SessionPromptRouting,
     interruptionCount: primitives.nonnegativeInteger,
+    /**
+     * The chat runs on another person's personal machine, so the message
+     * waits for its owner instead of steering: the owner's next message
+     * brings it to the agent, or it runs once the chat moves to a machine
+     * the sender may use. Older servers omit it.
+     */
+    waitsForMachineOwner: primitives.boolean.optional(),
     replay: primitives.boolean,
   }),
 );
@@ -20287,6 +20591,8 @@ export const SubmitComposerDraftResponse = /* @__PURE__ */ defineSchema(() =>
     receipt: SessionCommandReceipt,
     routing: SessionPromptRouting,
     interruptionCount: primitives.nonnegativeInteger,
+    /** As on `SteerSessionMessageResponse`. Older servers omit it. */
+    waitsForMachineOwner: primitives.boolean.optional(),
     replay: primitives.boolean,
   }),
 );
@@ -21557,6 +21863,23 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
         }),
       )
       .optional(),
+    /**
+     * Messages other people sent here that wait because only the machine's
+     * owner may start work on it, grouped by sender. The owner's next message
+     * brings them to the agent; moving the chat to a machine the sender may
+     * use runs them. Older servers omit it.
+     */
+    waitingMessages: z
+      .array(
+        z.object({
+          /** The sender's display name, when known. */
+          name: z.string().nullable(),
+          /** The caller sent them. */
+          isYou: z.boolean(),
+          messages: z.number().int().positive(),
+        }),
+      )
+      .optional(),
   }),
 );
 export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
@@ -22239,6 +22562,10 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: primitives.optionalBoolean,
+    // Whether organization admins may connect Azure OpenAI as this
+    // deployment's own Microsoft Entra identity (the operator offers it).
+    // Absent on older servers and when not offered.
+    azureOpenAIDeploymentIdentity: primitives.optionalBoolean,
     // Whether people can connect their own computers to this deployment. Absent
     // on older servers: clients then treat it as unknown.
     connectedMachines: primitives.optionalBoolean,

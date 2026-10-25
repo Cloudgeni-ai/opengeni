@@ -43,6 +43,7 @@
           "integrate/configure-the-agent",
           "integrate/your-data",
           "integrate/background-agents",
+          "integrate/meetings",
           "integrate/users-and-tenants",
           "integrate/approvals-and-questions",
           "integrate/existing-chat-ui",

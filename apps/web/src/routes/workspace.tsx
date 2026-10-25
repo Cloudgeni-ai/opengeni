@@ -21,7 +21,7 @@ import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/commo
 import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
 import { ActionsProvider } from "@opengeni/react/app/lib/actions/actions-provider";
 import { DesktopThisComputerProvider } from "@opengeni/react/app/components/desktop/this-computer";
-import { MeetingRecorderProvider } from "@/components/meetings/recorder-context";
+import { ConsoleMeetingRecorderProvider } from "@/components/meetings/recorder-provider";
 import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-shots";
 import { RailShell } from "@/components/rail/rail-shell";
 import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
@@ -530,7 +530,7 @@ function AuthorizedWorkspaceShell({
           menu bar) span both shells, so keys work in settings too. */}
           {/* A meeting being recorded keeps going while the person moves
           between pages, so the recorder lives above both shells. */}
-          <MeetingRecorderProvider workspaceId={workspaceId}>
+          <ConsoleMeetingRecorderProvider workspaceId={workspaceId}>
             <RailProvider workspaceId={workspaceId}>
               <ActionsProvider>
                 {managementLocation ? (
@@ -547,7 +547,7 @@ function AuthorizedWorkspaceShell({
                 )}
               </ActionsProvider>
             </RailProvider>
-          </MeetingRecorderProvider>
+          </ConsoleMeetingRecorderProvider>
         </DesktopThisComputerProvider>
       </SecretsUiProvider>
     </OpenGeniProvider>

@@ -20,6 +20,7 @@ export interface FakeProviderSeedItem {
   externalItemId?: string;
   name: string;
   type?: VaultItemType;
+  category?: string | null;
   websites?: string[];
   fields: FakeProviderSeedField[];
 }
@@ -36,6 +37,8 @@ export interface FakeProviderSeed {
   capabilities?: Partial<Omit<VaultProviderCapabilities, "passkeys">>;
   /** Every call fails with this code (auth, outage and rate-limit tests). */
   failWith?: VaultProviderErrorCode | null;
+  /** Archived items stay listed, marked with `archivedAt`, as some providers do. */
+  listArchived?: boolean;
 }
 export interface FakeProviderCall {
   op:
@@ -62,10 +65,12 @@ interface FakeItem {
   externalItemId: string;
   name: string;
   type: VaultItemType;
+  category: string | null;
   websites: string[];
   fields: FakeField[];
   version: number;
   archived: boolean;
+  archivedAt: string | null;
   updatedAt: string;
 }
 interface FakeVault {
@@ -95,10 +100,12 @@ function itemMeta(item: FakeItem): ProviderItemMeta {
     externalItemId: item.externalItemId,
     name: item.name,
     type: item.type,
+    ...(item.category ? { category: item.category } : {}),
     websites: [...item.websites],
     fields: item.fields.map(({ externalFieldId, name, kind }) => ({ externalFieldId, name, kind })),
     version: String(item.version),
     updatedAt: item.updatedAt,
+    ...(item.archivedAt ? { archivedAt: item.archivedAt } : {}),
   };
 }
 
@@ -130,9 +137,11 @@ export function createFakeVaultProvider(
       externalItemId: item.externalItemId ?? fakeId("fi"),
       name: item.name,
       type: item.type ?? "login",
+      category: item.category ?? null,
       websites: item.websites ?? [],
       version: 1,
       archived: false,
+      archivedAt: null,
       updatedAt: now(),
       fields: item.fields.map((field) => ({
         externalFieldId: field.externalFieldId ?? fakeId("ff"),
@@ -200,7 +209,7 @@ export function createFakeVaultProvider(
     async listItems(ctx, externalVaultId) {
       charge(ctx, { op: "listItems", connectionId: ctx.connectionId, externalVaultId }, "list");
       return vaultById(externalVaultId)
-        .items.filter((item) => !item.archived)
+        .items.filter((item) => seed.listArchived || !item.archived)
         .map(itemMeta);
     },
     async readFields(ctx, externalVaultId, externalItemId, externalFieldIds) {
@@ -249,16 +258,19 @@ export function createFakeVaultProvider(
           externalItemId: fakeId("fi"),
           name: input.name,
           type: input.type,
+          category: null,
           websites: [],
           fields: [],
           version: 0,
           archived: false,
+          archivedAt: null,
           updatedAt: now(),
         };
         vault.items.push(item);
       }
       item.name = input.name;
       item.type = input.type;
+      item.category = input.category ?? null;
       item.websites = [...input.websites];
       for (const change of input.fields) {
         const existing = item.fields.find(
@@ -271,16 +283,20 @@ export function createFakeVaultProvider(
           if (existing) item.fields.splice(item.fields.indexOf(existing), 1);
           continue;
         }
+        // File content is kept as base64, as seeded file values are.
+        const value = change.file
+          ? btoa(Array.from(change.file.bytes, (byte) => String.fromCharCode(byte)).join(""))
+          : change.value;
         if (existing) {
           existing.name = change.name;
           existing.kind = change.kind;
-          if (change.value !== undefined) existing.value = change.value;
+          if (value !== undefined) existing.value = value;
         } else {
           item.fields.push({
             externalFieldId: fakeId("ff"),
             name: change.name,
             kind: change.kind,
-            value: change.value ?? "",
+            value: value ?? "",
           });
         }
       }
@@ -296,7 +312,9 @@ export function createFakeVaultProvider(
         "write",
       );
       const vault = writableVault(externalVaultId);
-      itemById(vault, externalItemId).archived = true;
+      const item = itemById(vault, externalItemId);
+      item.archived = true;
+      item.archivedAt = now();
       vault.contentVersion += 1;
     },
     async createVault(ctx, input) {

@@ -16,7 +16,10 @@ files:
 npmRebuild: false
 nodeGypRebuild: false
 asar: true
-electronLanguages: [en]
+# Every Chromium language ships (electronLanguages is unset; about 3 MB
+# compressed). Without a language file Chromium's own words are empty on Linux
+# and Windows, so a notification loses its click action, and the app can't
+# follow the computer's language for dates and voice. See test/packaging.test.ts.
 # The system audio helper for meeting recordings (audio-capture/), built for
 # each platform and architecture by scripts/build-audio-capture.ts.
 extraResources:

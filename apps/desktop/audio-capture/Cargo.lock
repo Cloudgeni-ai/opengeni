@@ -87,6 +87,7 @@ dependencies = [
  "cidre",
  "libloading",
  "wasapi",
+ "windows",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`9cbd934c37402ee351aa13c2303a81fd09e9116c`: upstream `cua-driver-rs-v0.37.0`
+`737e200fca49cbf6b0116f8acf7f52525aa45cef`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -63,6 +63,29 @@ the window's content has stayed the same for 1.5 s the step fails as
 `ambiguous`, naming them. A window that never settles before the step's
 deadline fails as it did before, and a name shown only on an element of an
 unrelated role waits its whole time.
+On macOS a window's accessibility reading asks the app for each element's
+attributes in one request (`AXUIElementCopyMultipleAttributeValues`) instead of
+one request per attribute, and bounds each request by what is left of the
+read's `timeout_ms`, so a slow app costs a few requests per element instead of
+about fifteen and cannot hold a read past its budget. An element whose request
+fails for another reason is read one attribute at a time, as before; the
+reading is the same. The first `get_window_state` of a process after an action
+on it (outside a `run_steps` batch) waits only while the read window is
+changing: an action returns when the app has taken it, not when its result is
+on screen, and a read at once showed the screen before it or one half way. With
+no accessibility notification for the read window within 100 ms of the action's
+end, the read goes ahead at once. Otherwise it waits until the window's
+notifications (layout
+changes, created elements, focus and selection changes, row counts, new windows
+and sheets, opened menus) have stopped for 200 ms, counted from the last one,
+and goes ahead 1 s after the action at the latest. Value and title changes do
+not count, so a window that keeps updating numbers or text (a clock, a progress
+bar, a terminal, a process monitor) does not hold the read. A window whose
+notifications show it changed while it was read (an app can pause in the middle
+of a change) is read again once quiet, at most three reads in all and not past
+that 1 s. Notifications of the process's other windows do not count (the iOS
+Simulator shows every booted device in one process). The read reports what it
+waited for as `settle`, with the number of reads.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
@@ -178,7 +201,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/9cbd934c37402ee351aa13c2303a81fd09e9116c/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/737e200fca49cbf6b0116f8acf7f52525aa45cef/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
@@ -194,7 +217,10 @@ workflow tools; lifecycle, escalation, configuration, updates and browser tools
 stay outside this interface. macOS, Linux and Windows each have a generated
 catalog, produced by running the script on that platform after every CUA pin
 change; macOS defines the admitted set, and a platform whose driver lacks a tool
-omits it. Agent schemas preserve the union of the native
+omits it. Each catalog records the CUA version it was generated from, and a
+browserd test fails unless every catalog names the `@trycua/cua-driver` version
+browserd pins, so a catalog left on an older CUA release shows up before its
+runtime refuses calls. Agent schemas preserve the union of the native
 variants, and the selected runtime checks its exact platform schema.
 Each admitted tool's input/output schemas are checked against the running worker.
 

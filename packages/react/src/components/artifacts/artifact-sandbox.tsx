@@ -27,7 +27,13 @@ export type SiteLiveState = "live" | "updating" | "reconnecting";
 export type ArtifactSandboxProps = {
   html: string;
   height?: number | undefined;
+  /**
+   * Size the frame to its document's reported height (see
+   * `PublishedHtmlArtifactFrame`); `height` is the size until the first report.
+   */
   autoHeight?: boolean | undefined;
+  /** Upper bound for `autoHeight`, in CSS pixels; taller content scrolls inside. */
+  maxAutoHeight?: number | undefined;
   theme?: "light" | "dark" | undefined;
   headerControls?: ReactNode | undefined;
   title: string;
@@ -248,6 +254,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         title={props.title}
         html={props.html}
         autoHeight={Boolean(props.autoHeight && !focused)}
+        {...(props.maxAutoHeight ? { maxAutoHeight: props.maxAutoHeight } : {})}
         {...(props.theme ? { theme: props.theme } : {})}
         {...(!focused && props.height ? { style: { height: props.height } } : {})}
         {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}

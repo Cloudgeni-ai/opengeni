@@ -83,6 +83,10 @@ import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
 import { OfficeWorkbookWebSocketTransport } from "./office-workbooks";
 import { officeWorkbookRelayFor } from "./routes/office-workbooks";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
+import {
+  API_SERVER_IDLE_TIMEOUT_SECONDS,
+  apiRequestBindingsForIdleTimeout,
+} from "./http/request-idle-timeout";
 import { startApiMetricsListener } from "./http/metrics-listener";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
@@ -616,7 +620,7 @@ export async function startApi(
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
-    idleTimeout: 255,
+    idleTimeout: API_SERVER_IDLE_TIMEOUT_SECONDS,
     fetch: (request, bunServer) => {
       const upgrade = dispatchApiWebSocketUpgrade(
         request,
@@ -625,10 +629,10 @@ export async function startApi(
         localBrowserBoundary,
       );
       if (upgrade.handled) return upgrade.response;
-      return app.fetch(
-        request,
-        apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
-      );
+      return app.fetch(request, {
+        ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
+        ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
+      });
     },
     websocket: {
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,

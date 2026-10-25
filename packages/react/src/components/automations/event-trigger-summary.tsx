@@ -37,7 +37,7 @@ export function EventTriggerSummary({
       {triggers.map((trigger) => {
         const source = sources?.find((candidate) => candidate.id === trigger.sourceId);
         const words = eventTriggerWords(t, trigger, sources ?? []);
-        const held = eventSourceStatusBadge(t, trigger);
+        const held = eventSourceStatusBadge(t, trigger, source?.name ?? words.source);
         return (
           <li key={trigger.id} className="flex min-w-0 items-start gap-3">
             <EventSourceTile

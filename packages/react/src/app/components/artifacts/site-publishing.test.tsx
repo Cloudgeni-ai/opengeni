@@ -530,6 +530,52 @@ test("readiness warnings open to a list with one-click fixes", async () => {
   await page.unmount();
 });
 
+test("a login-only deployment's sign-in notice shows on its own, not as something to fix", async () => {
+  const { client } = fakeClient();
+  const notice = {
+    code: "public_sign_in_required" as const,
+    message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+    suggestion:
+      "Anyone with the link can open it after signing in. This is a deployment setting, not a problem with the Site or its link.",
+    fix: null,
+  };
+  const alone = await renderPage({
+    client: client as never,
+    sites: { domain: "sites.example", loginOnly: true },
+    load: { state: "ready", publication: published({ access: "public", warnings: [notice] }) },
+  });
+  expect(alone.host.textContent).toContain(notice.message);
+  expect(alone.host.textContent).toContain(notice.suggestion);
+  expect(alone.host.textContent).toContain(
+    "Anyone who signs in to Opengeni. On this deployment, every Site asks visitors to sign in.",
+  );
+  expect(alone.host.textContent).not.toContain("won't work for public visitors");
+  expect(button(alone.host, "Fix")).toBeUndefined();
+  await alone.unmount();
+
+  const problem = {
+    code: "site_data_guest_read" as const,
+    message: "votes can't be read by anonymous public visitors.",
+    suggestion: "Allow guests to read votes, or publish to invited people only.",
+    fix: null,
+  };
+  const both = await renderPage({
+    client: client as never,
+    sites: { domain: "sites.example", loginOnly: true },
+    load: {
+      state: "ready",
+      publication: published({ access: "public", warnings: [notice, problem] }),
+    },
+  });
+  expect(both.host.textContent).toContain(notice.message);
+  expect(
+    [...both.host.querySelectorAll("button")].some((element) =>
+      element.textContent?.includes("1 thing won't work for public visitors"),
+    ),
+  ).toBe(true);
+  await both.unmount();
+});
+
 test("View as visitor opens the Site as its visitors' role", async () => {
   const { client } = fakeClient();
   const page = await renderPage({

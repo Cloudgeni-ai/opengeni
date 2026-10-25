@@ -258,6 +258,62 @@ export function waitingWorkCopy(
   };
 }
 
+export type WaitingMessagesCopy = {
+  title: string;
+  /** Whose machine this is, and why the messages wait. */
+  explanation: string;
+  /** What happens to them, and who can do what. */
+  next: string;
+};
+
+/**
+ * Explain messages other people sent that wait because the chat runs on
+ * somebody's personal machine, or null when none wait. They never run there
+ * on their own: the owner's next message brings them to the agent, and moving
+ * the chat to a machine the sender may use runs them.
+ */
+export function waitingMessagesCopy(
+  t: OpenGeniText,
+  access: Pick<SessionMachineAccess, "machineName" | "ownerName" | "isOwner" | "waitingMessages">,
+): WaitingMessagesCopy | null {
+  const waiting = access.waitingMessages ?? [];
+  if (waiting.length === 0) return null;
+  const machine = access.machineName;
+  const total = waiting.reduce((sum, entry) => sum + entry.messages, 0);
+  if (access.isOwner) {
+    return {
+      title: t("sessionAdmission.messagesWaitingForYouTitle", {
+        count: total,
+        people: peopleList(
+          t,
+          waiting.map((entry) => entry.name),
+        ),
+      }),
+      explanation: t("sessionAdmission.messagesWaitingForYouExplanation", { machine }),
+      next: t("sessionAdmission.messagesWaitingForYouNext", { count: total }),
+    };
+  }
+  const owner = access.ownerName?.trim() || t("sessionAdmission.theMachineOwner");
+  const yours = waiting.find((entry) => entry.isYou);
+  const others = waiting.filter((entry) => !entry.isYou);
+  return {
+    title: yours
+      ? t("sessionAdmission.yourMessagesWaitingTitle", { count: yours.messages, owner })
+      : t("sessionAdmission.othersMessagesWaitingTitle", {
+          count: total,
+          owner,
+          people: peopleList(
+            t,
+            others.map((entry) => entry.name),
+          ),
+        }),
+    explanation: t("sessionAdmission.messagesWaitingExplanation", { owner, machine }),
+    next: yours
+      ? t("sessionAdmission.yourMessagesWaitingNext", { count: yours.messages, owner })
+      : t("sessionAdmission.othersMessagesWaitingNext", { count: total, owner }),
+  };
+}
+
 /** Stream, detail, and mutation receipts can arrive in different orders. */
 export function admissionRecheckControl(
   sessionControl: Session["effectiveControl"],

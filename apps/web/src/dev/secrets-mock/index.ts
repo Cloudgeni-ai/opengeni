@@ -27,6 +27,7 @@ import {
   totpRemainingMs,
   parseTotpInput,
   generatePassword,
+  VAULT_DEFAULT_PRIMARY_FIELD,
 } from "@opengeni/contracts";
 import type { VaultItemSummary, VaultSummary } from "@opengeni/react";
 import type { VaultProviderConnectionSummary } from "@opengeni/sdk";
@@ -328,7 +329,11 @@ function routes(state: MockState): Route[] {
       .filter((input) => !input.remove)
       .map((input, position) => {
         const kind = input.kind ?? (input.name === "username" ? "text" : "concealed");
-        const value = input.generate ? generatePassword(input.generate) : (input.value ?? "");
+        const value = input.generate
+          ? generatePassword(input.generate)
+          : input.generateKey
+            ? "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-generated\n-----END OPENSSH PRIVATE KEY-----"
+            : (input.value ?? "");
         return {
           id: mockId(`${itemName}/${input.name}`),
           name: input.name,
@@ -526,13 +531,7 @@ function routes(state: MockState): Route[] {
           (field) =>
             field.name ===
             (body.primaryFieldName ??
-              (body.type === "login"
-                ? "password"
-                : body.type === "api_key"
-                  ? "value"
-                  : body.type === "note"
-                    ? "note"
-                    : "file")),
+              VAULT_DEFAULT_PRIMARY_FIELD[body.type as keyof typeof VAULT_DEFAULT_PRIMARY_FIELD]),
         );
         const totp = fields.find((field) => field.kind === "totp");
         const now = new Date().toISOString();
@@ -540,6 +539,7 @@ function routes(state: MockState): Route[] {
           id: mockId(`item-${body.name}`),
           vaultId: vault.id,
           type: body.type,
+          category: body.category ?? null,
           name: body.name,
           websites: body.websites ?? [],
           username: fields.find((field) => field.name === "username")?.value ?? null,

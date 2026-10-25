@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app";
 import type { AppDependencies } from "../src/app";
@@ -100,9 +100,10 @@ describe("get.<domain> install routes", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body.length).toBeGreaterThan(0);
-    expect(body).toContain("connect --token $enrollToken --non-interactive");
+    expect(body).toContain("'connect', '--token', $enrollToken, '--non-interactive'");
     expect(body).toContain("OPENGENI_ALLOW_DOWNGRADE");
     expect(body).toContain("Test-KeepNewerAgent");
+    expect(body).toContain("$candidateVersion = Assert-AgentStarts $staged");
     expect(body).toContain("--api-url '$quotedApiUrl' connect");
   });
 
@@ -164,6 +165,21 @@ describe("get.<domain> install routes", () => {
     expect(res.headers.get("location")).toBe(
       "https://mirror.example.com/rel/download/agent-v1.4.2/opengeni-agent-universal-apple-darwin",
     );
+  });
+
+  test("without a configured stable version, latest and the stable channel follow this build's agent release", async () => {
+    const cargo = Bun.TOML.parse(
+      await readFile(new URL("../../../agent/Cargo.toml", import.meta.url), "utf8"),
+    ) as { workspace: { package: { version: string } } };
+    const version = cargo.workspace.package.version;
+    const app = appFor(testSettings({ agentStableVersion: undefined }));
+    const latest = await app.request("/agent/latest/opengeni-agent-x86_64-pc-windows-msvc.exe");
+    expect(latest.status).toBe(302);
+    expect(latest.headers.get("location")).toBe(
+      `https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v${version}/opengeni-agent-x86_64-pc-windows-msvc.exe`,
+    );
+    const manifest = await app.request("/agent/stable/manifest.json");
+    expect(manifest.headers.get("location")).toEndWith(`/agent-v${version}/manifest.json`);
   });
 
   test("stable self-update manifest redirects to the configured immutable release", async () => {

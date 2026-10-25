@@ -8,7 +8,7 @@ use compute_core::HostPolicy;
 use compute_engine::Engine;
 
 use super::DiskGauge;
-use crate::fleet::LeaseGate;
+use crate::fleet::{Freezes, LeaseGate};
 use crate::guest_ports::GuestPort;
 use crate::layout::check_root;
 use crate::net::NetworkConfig;
@@ -39,8 +39,13 @@ pub struct HostConfig {
     pub guest_ports: Vec<GuestPort>,
     /// Guest vsock port told about every restore from a memory image, so the
     /// guest can set its clock and reconnect (see [`crate::restore_notice`]).
-    /// `None` tells the guest nothing.
+    /// `None` tells the guest nothing. With a port, every guest must listen
+    /// on it: one that takes no connection on it for long enough while its
+    /// VM runs is found stopped (see [`GuestChecks`]).
     pub restore_notice_port: Option<u32>,
+    /// How often running guests are checked for having stopped, on a host
+    /// with a restore notice port.
+    pub guest_checks: GuestChecks,
     /// The user id of the sandbox with ordinal 0. Every sandbox on a host
     /// has its own ordinal, and its VMM runs as user and group
     /// `first_uid + ordinal`, so no two VMMs share a user. Must not be 0,
@@ -84,6 +89,11 @@ pub struct HostConfig {
     /// and the control service may be handing its sandboxes to others.
     /// `None` on a host on its own.
     pub lease: Option<LeaseGate>,
+    /// On a host in a fleet, the guard's count of its freezes, which a
+    /// check of a guest needs to count a miss (see the agent's `check`
+    /// module). `None` on a host on its own, which has no guard; a host
+    /// with a lease and none counts no misses.
+    pub guard_freezes: Option<Freezes>,
     /// Where the host's events and metrics go (see [`crate::observe`]).
     pub observer: Observer,
     /// How long a sandbox stays awake before it reports what it went
@@ -98,6 +108,9 @@ pub struct HostConfig {
     /// [`crate::cpu_share`]). `None` leaves both as they are, as in tests
     /// with fake VMs.
     pub processor_share: Option<crate::cpu_share::ProcessorShare>,
+    /// How the host builds the sandbox images the control service asks for
+    /// (see [`crate::rootfs::PrepareConfig`]); `None` refuses to.
+    pub prepare: Option<crate::rootfs::PrepareConfig>,
 }
 
 impl HostConfig {
@@ -135,6 +148,35 @@ impl PagerConfig {
             record_for: Self::RECORD_FOR,
         }
     }
+}
+
+/// How often the host checks that the guest of each running sandbox still
+/// takes connections on its notice port, and how many checks in a row it
+/// may miss before it counts as stopped (see the agent's `check` module):
+/// powered off or halted, which Firecracker on x86 does not end the VM
+/// for, or hung. Its VM is then ended as a crashed one is, and its next
+/// wake boots from its disk.
+///
+/// A live guest's kernel takes such a connection by itself, however busy
+/// the guest is, so the defaults leave a live guest that answers slowly
+/// for a while (one of a burst of restores on a busy host takes seconds)
+/// a wide margin: a stopped guest is found within three minutes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuestChecks {
+    /// Between two checks of one guest.
+    pub every: Duration,
+    /// Checks in a row a guest may miss before it counts as stopped; at
+    /// least one.
+    pub misses: u32,
+}
+
+impl GuestChecks {
+    /// A check every 30 seconds; stopped after five missed in a row, two
+    /// minutes from the first to the last.
+    pub const DEFAULT: Self = Self {
+        every: Duration::from_secs(30),
+        misses: 5,
+    };
 }
 
 /// When a running sandbox counts as busy: over `window`, its VM used at
@@ -219,6 +261,9 @@ pub(super) fn check_config(config: &HostConfig) -> Result<(), String> {
         .map_err(|error| format!("state root {}: {error}", config.root.display()))?;
     if config.first_uid == 0 {
         return Err("first_uid must not be 0: VMMs run as unprivileged users".into());
+    }
+    if config.guest_checks.misses == 0 || config.guest_checks.every.is_zero() {
+        return Err("guest checks need a period and at least one miss".into());
     }
     if let Some(network) = &config.network {
         network.check()?;

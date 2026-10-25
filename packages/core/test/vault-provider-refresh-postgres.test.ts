@@ -6,7 +6,10 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { parseSecretReference, type SecretPrincipal } from "@opengeni/contracts";
 import {
   createDb,
+  decryptEnvironmentValue,
+  encryptEnvironmentValue,
   ensureManagedAccessForUser,
+  getVaultItem,
   linkProviderVault,
   type DbClient,
   type VaultDbContext,
@@ -15,6 +18,7 @@ import { createProviderCallBudget, createVaultProviderRegistry } from "@opengeni
 import { createFakeVaultProvider } from "@opengeni/vaults/testing/fake-provider";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createSecretResolver, createVaultService } from "../src/domain/vaults";
+import { toVaultItemSummary } from "../src/domain/vaults/mapping";
 import {
   LINKED_VAULT_MISS_MAX_AGE_MS,
   LINKED_VAULT_SEARCH_MAX_AGE_MS,
@@ -104,6 +108,8 @@ async function world() {
   const listCalls = () => host.calls.filter((call) => call.op === "listVaults").length;
   return {
     db,
+    context,
+    host,
     principal,
     actor,
     workspaceId: grant.workspaceId,
@@ -118,6 +124,86 @@ async function world() {
 describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
   "linked vault mirrors refresh on their own",
   () => {
+    test("provider usernames are encrypted, displayed, updated and cleared without storing field values", async () => {
+      if (!client) throw new Error("Real PostgreSQL is required");
+      const w = await world();
+      const key = new Uint8Array(32).fill(7);
+      let username: string | null | undefined = "alice@example.com";
+      await w.host.writeItem(
+        { connectionId: null, budget: createProviderCallBudget(5) },
+        "company",
+        {
+          name: "Provider login",
+          type: "login",
+          websites: [],
+          fields: [
+            { name: "username", kind: "text", value: "live-username@example.com" },
+            { name: "password", kind: "concealed", value: "provider-password-only" },
+            { name: "notes", kind: "text", value: "private-provider-notes" },
+          ],
+        },
+      );
+      const list = w.host.listItems.bind(w.host);
+      w.host.listItems = async (...args) =>
+        (await list(...args)).map((item) =>
+          item.type === "login"
+            ? { ...item, ...(username !== undefined ? { username } : {}) }
+            : item,
+        );
+      const service = createVaultService({ db: w.db, encryptionKey: key, providers: w.providers });
+      const search = async () => {
+        const result = await service.searchForAgent(w.principal, {
+          query: "Provider login",
+          limit: 20,
+          refresh: true,
+        });
+        expect(result.items).toHaveLength(1);
+        expect(JSON.stringify(result)).not.toContain("provider-password-only");
+        expect(JSON.stringify(result)).not.toContain("private-provider-notes");
+        return result.items[0]!.item;
+      };
+      const item = await search();
+      expect(item.username).toBe(username);
+      const row = await getVaultItem(w.db, w.context, { itemId: item.id });
+      expect(row.usernameHintEncrypted).toBeString();
+      expect(row.usernameHintEncrypted).not.toContain(username!);
+      expect(decryptEnvironmentValue(key, row.usernameHintEncrypted!)).toBe(username!);
+      expect(
+        row.fields.every((field) => field.valueEncrypted === null && field.currentVersion === null),
+      ).toBe(true);
+      const [stored] = await shared!.admin`
+        select username_hint_encrypted from vault_items where id = ${item.id}`;
+      expect(stored!.username_hint_encrypted).toBe(row.usernameHintEncrypted);
+      const [versions] = await shared!.admin`
+        select count(*)::int as count from vault_field_versions v
+        join vault_item_fields f on f.id = v.field_id where f.item_id = ${item.id}`;
+      expect(versions!.count).toBe(0);
+      expect(w.host.calls.filter((call) => call.op === "readFields")).toHaveLength(0);
+      expect(toVaultItemSummary(row, null).username).toBeNull();
+      expect(toVaultItemSummary({ ...row, vaultSource: "opengeni" }, key).username).toBeNull();
+      const native = {
+        ...row,
+        vaultSource: "opengeni" as const,
+        fields: row.fields.map((field) =>
+          field.name === "username"
+            ? { ...field, valueEncrypted: encryptEnvironmentValue(key, "native@example.com") }
+            : field,
+        ),
+      };
+      expect(toVaultItemSummary(native, key).username).toBe("native@example.com");
+      expect(toVaultItemSummary({ ...native, vaultSource: "host" }, key).username).toBe(
+        "native@example.com",
+      );
+      const ui = await service.listItems(w.actor, w.workspaceId, w.vaultId, {});
+      expect(ui.items.find((entry) => entry.id === item.id)!.username).toBe(username);
+      for (username of ["bob@example.com", "", null, "restored@example.com", undefined]) {
+        expect((await search()).username).toBe(username || null);
+        const updated = await getVaultItem(w.db, w.context, { itemId: item.id });
+        if (!username) expect(updated.usernameHintEncrypted).toBeNull();
+        else expect(decryptEnvironmentValue(key, updated.usernameHintEncrypted!)).toBe(username);
+      }
+    });
+
     test("agent search finds an item added in the provider once the mirror is stale", async () => {
       if (!client) return;
       const { db, principal, providers, addInProvider, ageMirror, listCalls } = await world();

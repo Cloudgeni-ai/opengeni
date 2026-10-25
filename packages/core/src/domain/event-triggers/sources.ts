@@ -28,6 +28,7 @@ import {
   updateEventSource,
   type Database,
   type EventSourceRecord,
+  type EventStatusReason,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { scheduledTaskAccess, type ScheduledTaskViewer } from "../scheduled-task-audience";
@@ -38,6 +39,7 @@ import {
   type DeliveryOutcome,
 } from "./delivery-intake";
 import { webhookEventTypeCatalog } from "./event-type-catalog";
+import { eventStatusReason } from "./status-reason";
 import {
   createGitHubEventSource,
   githubSourceEventTypes,
@@ -50,6 +52,8 @@ import { boundEvent, type NormalizedEventInput } from "./normalize";
 import { slackEventTypeCatalog } from "./slack-events";
 import { createSlackEventSource } from "./slack-source";
 import { webhookAdapter } from "./webhook-adapters";
+import { workspaceDeliveryEvents, workspaceEventTypeCatalog } from "./workspace-events";
+import { createWorkspaceEventSource } from "./workspace-source";
 import {
   withMcpEventSourceClient,
   McpEventSourceUnavailableError,
@@ -139,6 +143,8 @@ export function eventSourceForClient(source: EventSourceRecord, baseUrl: string)
     visibility: source.visibility,
     status: source.status,
     statusReason: source.statusReason,
+    statusReasonCode: source.statusReasonCode,
+    statusReasonDetail: source.statusReasonDetail,
     webhookUrl:
       source.kind === "webhook" && source.routeId
         ? eventSourceWebhookUrl(baseUrl, source.routeId)
@@ -179,7 +185,16 @@ export async function createEventSourceForViewer(
     GitHubEventSourceAccess,
 ): Promise<CreateEventSourceResponse> {
   const request = input.request;
-  if (request.kind === "mcp") return await createMcpEventSource(input, request);
+  if (request.kind === "mcp") {
+    const source = await addMcpEventSource({
+      ...input,
+      ownerSubjectId: input.viewer.subjectId,
+      serverId: request.serverId,
+      connectionId: request.connectionId,
+      name: request.name,
+    });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
   if (request.kind === "github") {
     const source = await createGitHubEventSource({ ...input, name: request.name });
     return { source: eventSourceForClient(source, input.baseUrl) };
@@ -193,6 +208,14 @@ export async function createEventSourceForViewer(
       ...input,
       ownerSubjectId: input.viewer.subjectId,
       connectionId: request.connectionId,
+      name: request.name,
+    });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
+  if (request.kind === "workspace") {
+    const source = await createWorkspaceEventSource({
+      ...input,
+      ownerSubjectId: input.viewer.subjectId,
       name: request.name,
     });
     return { source: eventSourceForClient(source, input.baseUrl) };
@@ -229,9 +252,12 @@ export async function createEventSourceForViewer(
 }
 
 /** Why a pasted webhook waits: the sending app's secret is not pasted yet. */
-function awaitingSecretReason(adapter: WebhookEventAdapter): string {
+function awaitingSecretReason(adapter: WebhookEventAdapter): EventStatusReason {
   const app = adapter === "linear" ? "Linear" : adapter === "sentry" ? "Sentry" : "the sending app";
-  return `Paste the signing secret ${app} shows for this webhook. Until then its deliveries are refused.`;
+  return eventStatusReason(
+    "awaiting_secret",
+    `Paste the signing secret ${app} shows for this webhook. Until then its deliveries are refused.`,
+  );
 }
 
 /** Network access for MCP sources; tests replace the transport. */
@@ -263,13 +289,23 @@ export function mcpSourceHttpError(error: unknown, serverName: string): HTTPExce
 
 /**
  * An MCP source listens to one connector with its creator's own sign-in, so
- * it is always private to that person. The server must offer events.
+ * it is always private to that person. The server must offer events. Adding
+ * it again returns the source the person already has.
  */
-async function createMcpEventSource(
-  input: Parameters<typeof createEventSourceForViewer>[0] & McpEventSourceNetwork,
-  request: Extract<ParsedCreateEventSourceRequest, { kind: "mcp" }>,
-): Promise<CreateEventSourceResponse> {
-  const owner = input.viewer.subjectId;
+export async function addMcpEventSource(
+  input: {
+    db: Database;
+    settings: Settings;
+    accountId: string;
+    workspaceId: string;
+    createdBySubjectId: string;
+    ownerSubjectId: string | null;
+    serverId: string;
+    connectionId?: string | undefined;
+    name?: string | undefined;
+  } & McpEventSourceNetwork,
+): Promise<EventSourceRecord> {
+  const owner = input.ownerSubjectId;
   if (!owner) {
     throw new HTTPException(422, {
       message: "An MCP event source listens with a person's own sign-in. Create it as that person.",
@@ -280,8 +316,8 @@ async function createMcpEventSource(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     ownerSubjectId: owner,
-    mcpServerId: request.serverId,
-    connectionId: request.connectionId ?? null,
+    mcpServerId: input.serverId,
+    connectionId: input.connectionId ?? null,
   };
   let connection: { name: string; connectionId: string | null };
   try {
@@ -297,21 +333,21 @@ async function createMcpEventSource(
       },
     );
   } catch (error) {
-    throw mcpSourceHttpError(error, request.serverId);
+    throw mcpSourceHttpError(error, input.serverId);
   }
   const { source } = await createEventSource(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     createdBySubjectId: input.createdBySubjectId,
     kind: "mcp",
-    name: request.name ?? connection.name,
+    name: input.name ?? connection.name,
     ownerSubjectId: owner,
     visibility: "private",
-    mcpServerId: request.serverId,
+    mcpServerId: input.serverId,
     connectionId: connection.connectionId,
   });
   forgetMcpSourceEventTypes(source.id);
-  return { source: eventSourceForClient(source, input.baseUrl) };
+  return source;
 }
 
 export async function updateEventSourceForViewer(input: {
@@ -327,12 +363,17 @@ export async function updateEventSourceForViewer(input: {
       message: "This source belongs to the workspace, so everyone in it can already use it",
     });
   }
-  if (request.visibility === "workspace" && (source.kind === "mcp" || source.kind === "gmail")) {
+  if (
+    request.visibility === "workspace" &&
+    (source.kind === "mcp" || source.kind === "gmail" || source.kind === "workspace")
+  ) {
     throw new HTTPException(422, {
       message:
         source.kind === "gmail"
           ? "A Gmail source reads your own mailbox, so it stays private to you"
-          : "An MCP source listens with your own sign-in, so it stays private to you",
+          : source.kind === "workspace"
+            ? "This source shows what you may see in the workspace, so it stays private to you"
+            : "An MCP source listens with your own sign-in, so it stays private to you",
     });
   }
   if (
@@ -368,7 +409,8 @@ export async function updateEventSourceForViewer(input: {
     ...(status !== undefined
       ? {
           status,
-          statusReason: status === "disabled" ? "Turned off" : null,
+          statusReason:
+            status === "disabled" ? eventStatusReason("turned_off", "Turned off") : null,
         }
       : {}),
     ...(request.signingSecret !== undefined
@@ -522,6 +564,7 @@ const REPLAYABLE_SOURCE_KINDS: ReadonlySet<EventSourceRecord["kind"]> = new Set(
   "github",
   "slack",
   "gmail",
+  "workspace",
 ]);
 
 /** Run a stored delivery through intake again; its events fire again even if seen before. */
@@ -554,11 +597,14 @@ export async function replayEventDelivery(input: {
   }
   const receivedAt = new Date();
   let outcome: DeliveryOutcome;
-  if (source.kind === "mcp" || source.kind === "gmail") {
+  if (source.kind === "mcp" || source.kind === "gmail" || source.kind === "workspace") {
     const events =
       source.kind === "mcp"
         ? mcpDeliveryEvents(stored.body, stored.streamKey, receivedAt)
-        : gmailDeliveryEvents(stored.body, receivedAt).map((event) => ({
+        : (source.kind === "gmail"
+            ? gmailDeliveryEvents(stored.body, receivedAt)
+            : workspaceDeliveryEvents(stored.body, source.ownerSubjectId)
+          ).map((event) => ({
             ...boundEvent(event, receivedAt),
             externalId: null,
           }));
@@ -692,6 +738,7 @@ export async function listEventSourceTypes(
   }
   if (input.source.kind === "slack") return slackEventTypeCatalog();
   if (input.source.kind === "gmail") return gmailEventTypeCatalog();
+  if (input.source.kind === "workspace") return workspaceEventTypeCatalog();
   if (input.source.kind === "webhook") {
     return webhookEventTypeCatalog(input.source.adapter ?? "standard", recent);
   }
@@ -702,5 +749,7 @@ export async function listEventSourceTypes(
     argumentsSchema: null,
     available: true,
     unavailableReason: null,
+    unavailableReasonCode: null,
+    unavailableReasonDetail: null,
   }));
 }

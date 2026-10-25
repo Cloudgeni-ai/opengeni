@@ -12,6 +12,7 @@ import {
   externalVaultConnectionDetails,
   externalVaultConnectionMetadata,
   isExternalVaultConnection,
+  frozenConnectionOperations,
   StoredVaultProviderCredentials,
 } from "../src/domain/vaults/external-provider-connections";
 
@@ -173,5 +174,23 @@ describe("bound native provider authority", () => {
       archiveItem: false,
       archiveKind: "none",
     });
+  });
+
+  test("only a remote bridge stays narrowed to its setup-time operations", () => {
+    const narrowed = { ...operations, createItemTypes: ["login" as const] };
+    expect(frozenConnectionOperations({ provider: "external", operations: narrowed })).toBe(
+      narrowed,
+    );
+    // A built-in adapter's operations are its code's: an older connection gains new ones.
+    expect(frozenConnectionOperations({ provider: "bitwarden", operations: narrowed })).toBe(
+      undefined,
+    );
+    const provider = bindVaultProviderAuthority(createFakeVaultProvider(), {
+      connectionId: "real",
+      authority,
+      operations: undefined,
+      revalidate: async () => {},
+    });
+    expect(provider.capabilities().operations).toEqual(operations);
   });
 });

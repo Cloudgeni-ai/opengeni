@@ -271,11 +271,11 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("complete signed app"));
-        assert!(pending.apply_running_at(&executable).is_err());
+        assert!(pending.apply_running_at(&executable, |_| Ok(())).is_err());
         let alias = dir.path().join("agent");
         std::os::unix::fs::symlink(&executable, &alias).unwrap();
         assert!(pending.apply_to(&alias).is_err());
-        assert!(pending.apply_running_at(&alias).is_err());
+        assert!(pending.apply_running_at(&alias, |_| Ok(())).is_err());
         assert!(fs::symlink_metadata(&alias)
             .unwrap()
             .file_type()

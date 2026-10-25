@@ -362,6 +362,7 @@ describe("reads", () => {
     expect(meta).toMatchObject({
       name: "Test Login",
       type: "login",
+      username: "alice",
       websites: ["https://login.example.test"],
       version: "1",
     });
@@ -373,13 +374,17 @@ describe("reads", () => {
       ["c:otp", "otp-code", "text"],
       ["c:recovery", "recovery", "concealed"],
       ["c:recovery#2", "recovery (2)", "concealed"],
-      ["c:paymentCard", "paymentCard", "concealed"],
+      ["c:paymentCard.cardNumber", "number", "concealed"],
+      ["c:paymentCard.cardExpirationDate:month", "expiry month", "text"],
+      ["c:paymentCard.cardExpirationDate:year", "expiry year", "text"],
+      ["c:paymentCard.cardSecurityCode", "security code", "concealed"],
       ["@notes", "notes", "concealed"],
       [expect.stringMatching(/^@file:/), "cert.pem", "file"],
       [expect.stringMatching(/^@file:/), "big.bin", "file"],
     ]);
     const note = items.find((item) => item.externalItemId === subRecord)!;
     expect(note.type).toBe("note");
+    expect(note.username).toBeNull();
     const text = JSON.stringify(items);
     for (const secret of ["pw-123", "rc-1", SEED, "4111", "rotate monthly", "deep"])
       expect(text).not.toContain(secret);
@@ -394,7 +399,7 @@ describe("reads", () => {
     const values = await provider.readFields(ctx(), rw, login, [
       "f:password",
       "f:oneTimeCode",
-      "c:paymentCard",
+      "c:paymentCard.cardNumber",
       "@notes",
       "c:recovery#2",
       fileId,
@@ -402,7 +407,7 @@ describe("reads", () => {
     expect(values[0]!.material).toEqual({ type: "text", value: "pw-123" });
     const otp = values[1]!.material;
     expect(otp.type === "totp" && otp.params.secretBase32).toBe(SEED);
-    expect(JSON.parse((values[2]!.material as { value: string }).value).cardNumber).toBe("4111");
+    expect(values[2]!.material).toEqual({ type: "text", value: "4111" });
     expect(values[3]!.material).toEqual({ type: "text", value: "rotate monthly" });
     expect(values[4]!.material).toEqual({ type: "text", value: "rc-2" });
     const file = values[5]!.material;
@@ -649,10 +654,151 @@ describe("writes", () => {
     expect(fake.records.get(note.externalItemId)!.data.type).toBe("encryptedNotes");
   });
 
-  test("refuses API keys, files and passkeys before any request", async () => {
+  test("creates cards, identities, SSH keys and API keys as Keeper record types", async () => {
+    const { fake, provider, rw } = await world();
+    const card = await provider.writeItem(ctx(), rw, {
+      name: "Team card",
+      type: "card",
+      websites: [],
+      fields: [
+        { name: "cardholder name", kind: "text", value: "Ada Example" },
+        { name: "number", kind: "concealed", value: "4111111111111111" },
+        { name: "expiry month", kind: "text", value: "6" },
+        { name: "expiry year", kind: "text", value: "2030" },
+        { name: "cvv", kind: "concealed", value: "321" },
+        { name: "brand", kind: "text", value: "Visa" },
+      ],
+    });
+    expect(card).toMatchObject({ type: "card" });
+    expect(card).not.toHaveProperty("category");
+    const cardData = fake.records.get(card.externalItemId)!.data;
+    expect(cardData.type).toBe("bankCard");
+    expect((cardData.fields as Array<{ type: string; value: unknown[] }>)[0]).toEqual({
+      type: "paymentCard",
+      value: [
+        { cardNumber: "4111111111111111", cardExpirationDate: "06/2030", cardSecurityCode: "321" },
+      ],
+    });
+    expect(card.fields.map((field) => [field.name, field.kind])).toEqual([
+      ["number", "concealed"],
+      ["expiry month", "text"],
+      ["expiry year", "text"],
+      ["security code", "concealed"],
+      ["cardholder name", "text"],
+      ["PIN", "concealed"],
+      ["brand", "text"],
+    ]);
+
+    const identity = await provider.writeItem(ctx(), rw, {
+      name: "Ada",
+      type: "identity",
+      websites: [],
+      fields: [
+        { name: "first name", kind: "text", value: "Ada" },
+        { name: "last name", kind: "text", value: "Example" },
+        { name: "email", kind: "text", value: "ada@example.test" },
+        { name: "passport number", kind: "concealed", value: "P123" },
+      ],
+    });
+    expect(identity.type).toBe("identity");
+    expect(fake.records.get(identity.externalItemId)!.data.type).toBe("contact");
+    const [first, passport] = await provider.readFields(ctx(), rw, identity.externalItemId, [
+      "f:name.first",
+      identity.fields.find((field) => field.name === "passport number")!.externalFieldId,
+    ]);
+    expect(first!.material).toEqual({ type: "text", value: "Ada" });
+    expect(passport!.material).toEqual({ type: "text", value: "P123" });
+
+    const ssh = await provider.writeItem(ctx(), rw, {
+      name: "Deploy key",
+      type: "ssh_key",
+      websites: [],
+      fields: [
+        { name: "private key", kind: "concealed", value: "PRIVATE" },
+        { name: "public key", kind: "text", value: "ssh-ed25519 AAAA test" },
+        { name: "fingerprint", kind: "text", value: "SHA256:abc" },
+      ],
+    });
+    expect(ssh.type).toBe("ssh_key");
+    const sshData = fake.records.get(ssh.externalItemId)!.data;
+    expect(sshData.type).toBe("sshKeys");
+    expect((sshData.fields as Array<{ type: string; value: unknown[] }>)[1]).toEqual({
+      type: "keyPair",
+      value: [{ privateKey: "PRIVATE", publicKey: "ssh-ed25519 AAAA test" }],
+    });
+
+    const server = await provider.writeItem(ctx(), rw, {
+      name: "Build host",
+      type: "api_key",
+      category: "server",
+      websites: [],
+      fields: [
+        { name: "hostname", kind: "text", value: "build.example.test" },
+        { name: "password", kind: "concealed", value: "pw" },
+      ],
+    });
+    expect(server).toMatchObject({ type: "api_key", category: "server" });
+    expect(fake.records.get(server.externalItemId)!.data.type).toBe("serverCredentials");
+
+    // No Keeper record type says "API key" or "passport": the marker does.
+    const token = await provider.writeItem(ctx(), rw, {
+      name: "Token",
+      type: "api_key",
+      websites: [],
+      fields: [{ name: "value", kind: "concealed", value: "tok" }],
+    });
+    expect(token.type).toBe("api_key");
+    expect(token).not.toHaveProperty("category");
+    expect(token.fields.map((field) => field.name)).toEqual(["value"]);
+    const tokenData = fake.records.get(token.externalItemId)!.data;
+    expect(tokenData.type).toBe("encryptedNotes");
+    expect(tokenData.custom).toContainEqual({
+      type: "text",
+      label: "opengeni.type",
+      value: ["api_key"],
+    });
+    const passportItem = await provider.writeItem(ctx(), rw, {
+      name: "Passport",
+      type: "note",
+      category: "passport",
+      websites: [],
+      fields: [{ name: "note", kind: "concealed", value: "P123" }],
+    });
+    expect(passportItem).toMatchObject({ type: "note", category: "passport" });
+    const listed = await provider.listItems(ctx({ forceRefresh: true }), rw);
+    expect(listed.find((item) => item.externalItemId === token.externalItemId)!.type).toBe(
+      "api_key",
+    );
+
+    // A record keeps its record type.
+    const retype = await errorOf(
+      provider.writeItem(ctx(), rw, {
+        externalItemId: card.externalItemId,
+        name: "Team card",
+        type: "ssh_key",
+        websites: [],
+        fields: [],
+      }),
+    );
+    expect(retype.code).toBe("provider_conflict");
+    expect(retype.message).toContain("Keeper cannot change a bankCard record");
+    // A note record may become an API key: only its marker changes.
+    const retyped = await provider.writeItem(ctx(), rw, {
+      externalItemId: passportItem.externalItemId,
+      name: "Passport",
+      type: "note",
+      websites: [],
+      fields: [],
+    });
+    expect(retyped.type).toBe("note");
+    expect(retyped).not.toHaveProperty("category");
+    expect(fake.records.get(passportItem.externalItemId)!.data.custom).toEqual([]);
+  });
+
+  test("refuses files and passkeys before any request", async () => {
     const { fake, provider, rw } = await world();
     const before = fake.requests.length;
-    for (const type of ["api_key", "file", "passkey"] as const) {
+    for (const type of ["file", "passkey"] as const) {
       expect(
         (
           await errorOf(
@@ -811,8 +957,41 @@ describe("writes", () => {
     expect(upstream.code).toBe("provider_conflict");
   });
 
-  test("structured fields and read-only folders refuse updates", async () => {
+  test("structured fields are patched part by part; read-only folders refuse updates", async () => {
     const { fake, provider, rw, login } = await world();
+    await provider.writeItem(ctx(), rw, {
+      externalItemId: login,
+      name: "Test Login",
+      type: "login",
+      websites: ["https://login.example.test"],
+      fields: [
+        {
+          externalFieldId: "c:paymentCard.cardNumber",
+          name: "number",
+          kind: "concealed",
+          value: "4242",
+        },
+        {
+          externalFieldId: "c:paymentCard.cardExpirationDate:month",
+          name: "expiry month",
+          kind: "text",
+          value: "7",
+        },
+      ],
+    });
+    const card = (
+      fake.records.get(login)!.data.custom as Array<{ type: string; value: unknown[] }>
+    ).find((entry) => entry.type === "paymentCard")!;
+    expect(card.value).toEqual([
+      { cardNumber: "4242", cardExpirationDate: "07/2030", cardSecurityCode: "123" },
+    ]);
+    // A structured field with several values stays one JSON value, read only.
+    const multi = fake.records.get(login)!;
+    (multi.data.custom as Array<{ type: string; label?: string; value: unknown[] }>).push({
+      type: "phone",
+      label: "phones",
+      value: [{ number: "1" }, { number: "2" }],
+    });
     expect(
       (
         await errorOf(
@@ -821,14 +1000,7 @@ describe("writes", () => {
             name: "Test Login",
             type: "login",
             websites: ["https://login.example.test"],
-            fields: [
-              {
-                externalFieldId: "c:paymentCard",
-                name: "paymentCard",
-                kind: "concealed",
-                value: "4242",
-              },
-            ],
+            fields: [{ externalFieldId: "c:phones", name: "phones", kind: "text", value: "3" }],
           }),
         )
       ).code,
@@ -884,7 +1056,7 @@ describe("writes", () => {
       archiveItem: false,
       archiveKind: "none",
       deleteItem: false,
-      createItemTypes: ["login", "note"],
+      createItemTypes: ["login", "note", "api_key", "card", "identity", "ssh_key"],
     });
   });
 });

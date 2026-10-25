@@ -7,6 +7,7 @@ import {
   acceptOrganizationInvitation,
   appendRecordingLiveSegments,
   beginRecordingAudioExpiry,
+  checkWorkspaceAllowance,
   browserRecordingActionLogObjectKey,
   browserRecordingBundleObjectKey,
   browserRecordingVideoObjectKey,
@@ -33,6 +34,7 @@ import {
   getRecording,
   getRecordingSearchDetails,
   getRecordingTranscriptPage,
+  getWorkspaceUsage,
   listDeletingRecordingObjectKeys,
   listDueRecordingRetention,
   listRecordingLiveSegments,
@@ -50,6 +52,7 @@ import {
   reserveRecordingChunks,
   saveRecordingNote,
   setCurrentRecordingTranscriptVersion,
+  setWorkspaceAllowance,
   startRecordingLiveTrack,
   updateRecordingSegments,
   updateRecordingSpeakers,
@@ -1593,5 +1596,114 @@ describe("recordings", () => {
       toMilliseconds: 120_000,
     });
     expect(stretch.segments.map((segment) => segment.startMilliseconds)).toEqual([5_000, 60_000]);
+  });
+});
+
+describe("recordings and usage allowances", () => {
+  async function completeVersion(
+    recording: Awaited<ReturnType<typeof finalizedRecording>>,
+    costUsdMicros: number,
+  ) {
+    const db = client!.db;
+    const owner = crypto.randomUUID();
+    await claimRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      leaseSeconds: 600,
+    });
+    return await completeRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      languages: ["en"],
+      diarized: false,
+      diarization: "none",
+      costUsdMicros,
+      audioMilliseconds: 10_000,
+      segments: [
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 2_000,
+          trackNumber: 0,
+          speakerLabel: "track-0",
+          text: "Hi.",
+        },
+      ],
+    });
+  }
+
+  test("a transcript and a live preview count once, at list price, for the person", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const usageScope = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+    await setWorkspaceAllowance(db, {
+      ...usageScope,
+      actorSubjectId: scope.owner,
+      includedCredits: 1_000,
+      period: "monthly",
+      memberDefault: "equal_share",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    const recording = await finalizedRecording(scope, "private");
+    await completeVersion(recording, 300);
+    let usage = await getWorkspaceUsage(db, usageScope);
+    expect(usage.workspace.used).toBe(300);
+    expect(usage.members.find((member) => member.subjectId === scope.owner)?.used).toBe(300);
+
+    // The live preview's cost grows while it streams; each increase counts once.
+    const recordingId = crypto.randomUUID();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    await createRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const live = { providerId: "elevenlabs", model: "scribe_v2_realtime" };
+    await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 0, ...live });
+    const stream = async (streamedMilliseconds: number, costUsdMicros: number) =>
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds,
+        costUsdMicros,
+        segments: [],
+      });
+    await stream(1_000, 100);
+    await stream(3_000, 250);
+    // A late, older total changes nothing.
+    await stream(2_000, 200);
+    await stream(3_000, 250);
+    usage = await getWorkspaceUsage(db, usageScope);
+    expect(usage.workspace.used).toBe(550);
+
+    await completeVersion(await finalizedRecording(scope, "workspace"), 600);
+    expect(
+      await checkWorkspaceAllowance(db, {
+        ...usageScope,
+        subjectId: scope.owner,
+        fundedWithoutCredits: true,
+      }),
+    ).toMatchObject({ code: "allowance_exhausted", scope: "workspace" });
+  });
+
+  test("an allowance that ignores unbilled usage doesn't count recordings", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const usageScope = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+    await setWorkspaceAllowance(db, {
+      ...usageScope,
+      actorSubjectId: scope.owner,
+      includedCredits: 1_000,
+      period: "monthly",
+      expectedVersion: 0,
+    });
+    await completeVersion(await finalizedRecording(scope, "private"), 300);
+    expect((await getWorkspaceUsage(db, usageScope)).workspace.used).toBe(0);
   });
 });

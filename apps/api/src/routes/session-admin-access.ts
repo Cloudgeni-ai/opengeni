@@ -123,14 +123,14 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
   });
 
   app.patch(organizationPath, async (c) => {
-    requireFullAccessIfAgent(c, "Allowing admin access for sessions");
+    requireFullAccessIfAgent(c, "Changing what agents may do for people");
     requireSameOriginBrowserMutation(c, deps);
     const organizationId = parseOrganizationId(c.req.param("organizationId"));
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
     const parsed = UpdateOrganizationAgentAdminAccessRequest.safeParse(
       await c.req.json().catch(() => null),
     );
-    if (!parsed.success) throw new HTTPException(422, { message: "invalid admin access setting" });
+    if (!parsed.success) throw new HTTPException(422, { message: "invalid agent access setting" });
     try {
       return c.json(
         OrganizationAgentAdminAccess.parse(
@@ -138,6 +138,7 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
             organizationId,
             actorSubjectId: human.subjectId,
             sessionAdminAccessAllowed: parsed.data.sessionAdminAccessAllowed,
+            chatActionsAllowed: parsed.data.chatActionsAllowed,
           }),
         ),
       );
