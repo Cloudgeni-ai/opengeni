@@ -17,6 +17,9 @@ import {
   agentCapabilityEnabled,
   type SandboxBackend,
   CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
+  isSecretReferenceError,
+  type RequestHumanInputToolInput,
+  type SecretReferenceFailure,
   type SecretResolver,
 } from "@opengeni/contracts";
 import {
@@ -996,6 +999,12 @@ export type RunOnResult = {
   content?: string;
   bytesWritten?: number;
   reason?: string;
+  /** Canonical secret failure details, including ready missing/approval cards. */
+  error?: "secret_reference_error";
+  failures?: SecretReferenceFailure[];
+  askCard?: RequestHumanInputToolInput | null;
+  approvalCard?: RequestHumanInputToolInput;
+  hint?: string;
   /** Typed refusal for a personal (Only me) machine this attempt may not use. */
   code?: PersonalMachineRefusalCode;
   notice?: string;
@@ -1273,6 +1282,12 @@ export async function executeRunOnSelfhostedMachine(
       kind: op.kind,
       ok: false,
       reason,
+      // Resolution belongs to this target boundary, not the tool gateway.
+      // Keep its canonical structured failure (as exec_command does), rather
+      // than flattening missing/approval cards into Error.message.
+      ...(isSecretReferenceError(error)
+        ? (JSON.parse(error.toModelOutput()) as Record<string, unknown>)
+        : {}),
       // A transport failure is not evidence that the process itself timed out,
       // so leave `timedOut` absent while still reporting the enforced deadline.
       ...(op.kind === "exec" ? { deadlineMs: session.effectiveExecDeadlineMs } : {}),
