@@ -1,5 +1,24 @@
 # Modular prompt changelog
 
+Connect cards in fewer calls. No prompt or tool description text changes.
+`tool_search` now also covers integrations the person could connect: when no
+installed tool clearly matches a query, it looks the query up in the
+integration catalog, and when the query contains the whole name of an
+integration whose next step is a Connect card (one of the catalog's top three
+matches), the result loads `capability_authorization_request` after its normal
+matches and says, in a new `notConnected` field (a developer message right
+after the result on native search routes): `Not connected yet: Gmail
+(capabilityId "…"). If the task needs it, call capability_authorization_request
+with that capabilityId and a short rationale to show the person its Connect
+card.` That text is 162 bytes plus about 25 to 80 bytes per named integration,
+and the card schema about 1.5 KB, only in that one search result. The two setup
+tools (`capability_catalog_search`, `capability_authorization_request`) also
+load together when either is chosen. Before, "check my gmail" loaded an
+unrelated tool or nothing, and the agent listed tool groups and searched twice
+more before the card: 4 to 6 calls and a mean 15.3 s on five staging runs.
+Searches an installed tool clearly matches never look anything up and load
+exactly what they did before; earlier requests are unchanged.
+
 Prompt-cache stability. Workspace governance (instruction policies, learning
 settings, organization profile) no longer composes into the system prompt: it
 differs by who starts a turn and changes when a policy is edited, and every

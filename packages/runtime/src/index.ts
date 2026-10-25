@@ -211,6 +211,7 @@ import {
 } from "./mcp-network";
 import {
   LazyToolModelProvider,
+  catalogConnectableIntegrationLookup,
   createResolveMissingFunctionTool,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
@@ -3595,6 +3596,9 @@ function maybeInstallLazyToolTransport(
       .filter((server) => mcpServerDefersModelSchemas(server))
       .map((server) => mcpServerRegistryId(server)),
   );
+  const harnessControlServer = mcpServers.find(
+    (server) => mcpServerRegistryId(server) === HARNESS_CONTROL_MCP_SERVER_ID,
+  );
   installLazyToolRuntime(
     agent as unknown as Parameters<typeof installLazyToolRuntime>[0],
     transport,
@@ -3637,6 +3641,7 @@ function maybeInstallLazyToolTransport(
       ? createToolSelector(options.toolSearchDecisionModel)
       : undefined,
     () => options.unavailableMcpServers ?? new Map(),
+    harnessControlServer ? catalogConnectableIntegrationLookup(harnessControlServer) : undefined,
   );
 }
 
