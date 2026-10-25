@@ -315,8 +315,9 @@ label history is not permission to admit. Historical bindings remain immutable.
 `changeset-release/main` is a barrier: earlier PRs batch first, Version is a
 singleton, and later work does not speculate across it.
 
-Use native auto-merge (for example `gh pr merge --auto`) or `queue-ready`. Protections
-must prevent native/direct auto-merge from bypassing this batcher. Only the
+Use native auto-merge (for example `gh pr merge --auto`) or `queue-ready`. While
+batcher admission is ON, protections must prevent native/direct auto-merge from
+bypassing this batcher. Only the
 authorized batcher principal may normally update queue/state refs; PR authors must not
 be able to forge those refs or the trusted candidate workflow/result artifact.
 The batch CI workflow must be trusted policy, not replaced by PR-controlled
@@ -326,6 +327,15 @@ with that policy; this source change alone does not enable them or waive any che
 Batch merge commits retain each admitted head as a parent. Native GitHub `merged`
 readback is recorded separately from main-tip landing; `closed` alone is not merge
 proof and no close-PR write substitutes for native MERGED recognition.
+
+Manual fallback restores the saved repository policy, not the batcher's full-Batch
+landing requirement. If repository auto-merge remains enabled, an outstanding
+native auto-merge request can merge once that restored policy's checks pass,
+including during the OFF transition. Such a merge is native GitHub behavior, not
+evidence of batcher admission or successful Batch CI. For an end-to-end batcher
+proof, enable the request only after stable ON is verified and keep ON throughout
+the proof; retain the exact candidate, run/attempt, tested tree and native MERGED
+readback separately from any Manual-fallback merge.
 
 ## Immutable candidates and CI result contract
 
