@@ -6024,7 +6024,7 @@ for (const mismatch of ["personal-profile", "machine", "identity"] as const) {
   });
 }
 
-describe("placement-less open reuses only a session on the chat's current machine", () => {
+describe("open reuses only a session on the chat's current machine", () => {
   const groupId = randomUUID();
   const oldMachine = randomUUID();
   const swappedMachine = randomUUID();
@@ -6109,17 +6109,100 @@ describe("placement-less open reuses only a session on the chat's current machin
     });
   }
 
-  test("an explicit placement does not read the session", async () => {
-    const old = discoveredComputerSession(randomUUID(), sessionId);
-    old.placement = { kind: "connected_machine", sandboxId: oldMachine };
+  // A session on a named machine is reused only while the chat is routed
+  // there. On any other route the server retires it on contact, so the open
+  // creates instead, and that create says how to move the chat.
+  for (const route of [
+    { name: "that machine", activeSandboxId: oldMachine, reused: true },
+    { name: "another machine", activeSandboxId: swappedMachine, reused: false },
+    { name: "an unreadable route", activeSandboxId: undefined, reused: true },
+  ] as const) {
+    test(`computer_open naming a machine when the chat is routed to ${route.name}`, async () => {
+      const old = discoveredComputerSession(randomUUID(), sessionId);
+      old.placement = { kind: "connected_machine", sandboxId: oldMachine };
+      const created = discoveredComputerSession(randomUUID(), sessionId);
+      const createRequests: unknown[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listComputerSessions: async () => ({ revision: 0, sessions: [old] }),
+            createComputerSession: async (_workspaceId, request) => {
+              createRequests.push(request);
+              return { session: created } as never;
+            },
+          }),
+          getSession:
+            route.activeSandboxId === undefined
+              ? async () => {
+                  throw new Error("session read failed");
+                }
+              : sessionRead(route.activeSandboxId),
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_open"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const placement = { kind: "connected_machine", sandboxId: oldMachine } as const;
+      const result = await definitions[0]!.execute({ placement }, context());
+      const opened = (result.structuredContent as { session: ComputerSession }).session;
+      expect(opened.id).toBe(route.reused ? old.id : created.id);
+      expect(createRequests).toEqual(route.reused ? [] : [expect.objectContaining({ placement })]);
+    });
+
+    test(`browser_open naming a machine when the chat is routed to ${route.name}`, async () => {
+      const old = discoveredBrowserSession(randomUUID(), sessionId);
+      old.placement = { kind: "connected_machine", sandboxId: oldMachine };
+      let created = 0;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listBrowserSessions: async () => ({ revision: 0, sessions: [old] }),
+            getBrowserSession: async () => old,
+            createBrowserSession: async () => {
+              created += 1;
+              return { session: { lifecycle: "starting" } } as never;
+            },
+          }),
+          getSession:
+            route.activeSandboxId === undefined
+              ? async () => {
+                  throw new Error("session read failed");
+                }
+              : sessionRead(route.activeSandboxId),
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+        context(),
+      );
+      if (route.reused) {
+        expect(created).toBe(0);
+        expect((result.structuredContent as { session: BrowserSession }).session.id).toBe(old.id);
+      } else {
+        expect(created).toBe(1);
+      }
+    });
+  }
+
+  // The chat's own sandbox group is usable from any route, so a session there
+  // is reused while the chat works on a Connected Machine.
+  test("computer_open naming the chat's own sandbox from a Connected Machine reuses it", async () => {
+    const home = discoveredComputerSession(randomUUID(), sessionId);
+    home.placement = { kind: "sandbox_group", sandboxGroupId: groupId };
     const definitions = createInteractionAttemptToolDefinitions({
       transport: {
         ...partialTransport({
-          listComputerSessions: async () => ({ revision: 0, sessions: [old] }),
+          listComputerSessions: async () => ({ revision: 0, sessions: [home] }),
+          createComputerSession: async () => {
+            throw new Error("the home Desktop is reused");
+          },
         }),
-        getSession: async () => {
-          throw new Error("an explicit placement needs no session read");
-        },
+        getSession: sessionRead(swappedMachine),
       },
       workspaceId,
       sessionId,
@@ -6127,9 +6210,35 @@ describe("placement-less open reuses only a session on the chat's current machin
       permissions: ["sessions:read", "sessions:control"],
     });
     const result = await definitions[0]!.execute(
-      { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+      { placement: { kind: "sandbox_group", sandboxGroupId: groupId } },
       context(),
     );
-    expect((result.structuredContent as { session: ComputerSession }).session.id).toBe(old.id);
+    expect((result.structuredContent as { session: ComputerSession }).session.id).toBe(home.id);
+  });
+
+  test("browser_open naming the chat's own sandbox from a Connected Machine reuses it", async () => {
+    const home = discoveredBrowserSession(randomUUID(), sessionId);
+    home.placement = { kind: "sandbox_group", sandboxGroupId: groupId };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [home] }),
+          getBrowserSession: async () => home,
+          createBrowserSession: async () => {
+            throw new Error("the home browser is reused");
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { placement: { kind: "sandbox_group", sandboxGroupId: groupId } },
+      context(),
+    );
+    expect((result.structuredContent as { session: BrowserSession }).session.id).toBe(home.id);
   });
 });

@@ -3397,13 +3397,11 @@ async function openBrowser(
       resolveProfile
         ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
         : null,
-      (value.mode === "new" || value.placement) && !resolveProfile
-        ? null
-        : resolveProfile
-          ? // Only a preference here: a failed read must not fail the open.
-            readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
-              () => null,
-            )
+      resolveProfile || (value.mode !== "new" && value.placement?.kind === "connected_machine")
+        ? // Only a preference here: a failed read must not fail the open.
+          readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(() => null)
+        : value.mode === "new" || value.placement
+          ? null
           : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
     ]);
     // The agent-facing browser is human-capable by default. A headless session
@@ -3766,9 +3764,16 @@ async function openComputer(
             associatedSessionId: sourceSessionId,
             includeTerminal: false,
           }),
-      value.mode === "new" || value.placement
+      value.mode === "new"
         ? null
-        : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
+        : value.placement?.kind === "connected_machine"
+          ? // Only a preference here: a failed read must not fail the open.
+            readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
+              () => null,
+            )
+          : value.placement
+            ? null
+            : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
     ]);
     const reusable = newestRelevant(
       listed.sessions.filter((candidate) =>
@@ -3826,6 +3831,17 @@ function compatibleInteractionPlacement(
     // Without a placement only a session on the chat's current machine is
     // reused, never one left on a machine the chat has since swapped away from.
     return current === null || placementFieldsMatch(candidate, current);
+  }
+  // A session on a Connected Machine the chat is not routed to cannot be used
+  // from here: the server retires it on contact. Opening a new one instead
+  // returns the error that says how to move the chat to that machine. The
+  // chat's own sandbox group stays usable from any route.
+  if (
+    requested.kind === "connected_machine" &&
+    current !== null &&
+    !placementFieldsMatch(current, requested)
+  ) {
+    return false;
   }
   return placementFieldsMatch(candidate, requested);
 }
