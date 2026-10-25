@@ -235,7 +235,10 @@ export async function runIdentityBackfill(args: string[], env: NodeJS.ProcessEnv
       if (stop) break;
       const started = performance.now();
       const previous = state;
-      state = await backfillIdentityBatch(sql, state, { ...options, expectedBackendPid });
+      state = await backfillIdentityBatch(sql, state, {
+        ...options,
+        expectedBackendPid: expectedBackendPid!,
+      });
       await saveIdentityCheckpoint(values.checkpoint, state);
       console.log(
         JSON.stringify({

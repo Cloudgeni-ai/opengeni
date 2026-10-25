@@ -146,7 +146,7 @@ test("bounded fill preserves all event content, aliases, non-null values and ret
         includeTypes: ["agent.toolCall.created", "agent.toolCall.output"],
         ...query,
       }),
-    ).toEqual(pages[i]);
+    ).toEqual(pages[i]!);
   let repeat = await initial();
   while (!repeat.done) repeat = await backfillIdentityBatch(fixture.admin, repeat, options);
   expect(repeat.updated).toBe(0);
@@ -238,4 +238,38 @@ test("lost backend ownership refuses a batch without advancing", async () => {
   ).rejects.toThrow("connection changed");
   expect(start.afterId).toBeNull();
   expect(start.scanned).toBe(0);
+}, 180000);
+
+test("standalone bundle runs with the same resumable CLI", async () => {
+  const built = await Bun.build({
+    entrypoints: [new URL("./backfill-event-identities.ts", import.meta.url).pathname],
+    outdir: directory,
+    target: "bun",
+  });
+  expect(built.success).toBe(true);
+  const checkpoint = join(directory, "bundle-state.json");
+  const processHandle = Bun.spawn(
+    [
+      process.execPath,
+      join(directory, "backfill-event-identities.js"),
+      "--apply",
+      "--checkpoint",
+      checkpoint,
+      "--pause-ms",
+      "0",
+    ],
+    {
+      env: { ...process.env, OPENGENI_MAINTENANCE_DATABASE_URL: fixture.adminUrl },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ]);
+  expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+  expect(JSON.parse(stdout.trim().split("\n").at(-1)!).event).toBe("complete");
+  expect(readCheckpoint(JSON.parse(await readFile(checkpoint, "utf8"))).done).toBe(true);
 }, 180000);
