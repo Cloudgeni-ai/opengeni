@@ -12,6 +12,7 @@ export * from "./mcp-event-types";
 export * from "./mcp-events-protocol";
 export * from "./normalize";
 export * from "./occurrence-payload";
+export * from "./ready-sources";
 export * from "./slack-events";
 export * from "./slack-source";
 export * from "./sources";

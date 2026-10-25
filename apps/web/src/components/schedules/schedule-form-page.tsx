@@ -103,7 +103,12 @@ import {
 } from "./schedule-model";
 import { useScheduleAccess, useScheduleNavigation } from "./schedule-parts";
 import { KnowledgeSyncFormPage } from "./knowledge-sync-form-page";
-import { useEventSourceLogo, useEventSources, useEventTriggersEnabled } from "./use-event-sources";
+import {
+  useEventSourceLogo,
+  useEventSources,
+  useEventTriggersEnabled,
+  useReadyEventSources,
+} from "./use-event-sources";
 import { SAVED_TEMPLATE_ID } from "./use-automation-templates";
 
 export type ScheduleFormMode =
@@ -406,12 +411,15 @@ function AgentScheduleForm({
   const editing = mode.kind === "edit";
   const eventTriggers = useEventTriggersEnabled();
   const eventSources = useEventSources(workspaceId, eventTriggers);
-  // This workspace's own events need no setting up, so they are offered as a
-  // source before the viewer has added one.
+  const readySources = useReadyEventSources(workspaceId, eventTriggers);
+  // Sources that need no setting up (an MCP server that offers events, the
+  // viewer's Gmail, this workspace's own events) are offered before the
+  // viewer has added them.
   const standIns = useEventSourceStandIns({
     client,
     workspaceId,
     sources: eventSources.sources,
+    readySources,
     workspaceEvents: eventTriggers,
   });
   const formSources = standIns.sources;

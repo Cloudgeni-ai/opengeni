@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { eventSourceLogoResolver, type EventSourceLogoResolver } from "@opengeni/react/automations";
 import { useAppContext } from "@opengeni/react/app/app-context";
-import type { EventSource, EventTypeDescriptor } from "@opengeni/sdk";
+import type { EventSource, EventTypeDescriptor, ReadyEventSource } from "@opengeni/sdk";
 
 /** Event triggers run on this deployment; without them the pages show schedules only. */
 export function useEventTriggersEnabled(): boolean {
@@ -54,6 +54,30 @@ export function useEventSources(workspaceId: string, enabled: boolean): EventSou
     [client, workspaceId],
   );
   return { sources: enabled ? sources : [], error, reload, loadEventTypes };
+}
+
+/**
+ * Sources the viewer can use without setting them up, such as an MCP server
+ * they are signed in to that offers events. Empty until known, and on failure:
+ * the sources they have are still offered.
+ */
+export function useReadyEventSources(workspaceId: string, enabled: boolean): ReadyEventSource[] {
+  const { client } = useAppContext();
+  const [ready, setReady] = useState<ReadyEventSource[]>([]);
+  useEffect(() => {
+    if (!enabled) return;
+    let live = true;
+    client.listReadyEventSources(workspaceId).then(
+      (next) => {
+        if (live) setReady(next);
+      },
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, enabled, workspaceId]);
+  return enabled ? ready : [];
 }
 
 /**

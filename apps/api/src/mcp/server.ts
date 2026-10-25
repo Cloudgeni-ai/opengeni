@@ -1998,6 +1998,7 @@ export function buildOpenGeniMcpServer(
           toolsProvided: scheduledTaskToolsProvided(args),
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
+          eventSourceFetch: deps.eventSourceFetch,
         });
         try {
           await syncCreatedScheduledTask({
@@ -2065,6 +2066,7 @@ export function buildOpenGeniMcpServer(
           toolsProvided: scheduledTaskToolsProvided(raw),
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
+          eventSourceFetch: deps.eventSourceFetch,
         }).catch((error: unknown) => {
           const conflict = scheduledTaskTargetAccessHttpError(error);
           if (conflict) return conflict;
@@ -2364,7 +2366,14 @@ export function buildOpenGeniMcpServer(
       },
     );
 
-    registerEventTools(server, deps, grant, json, requireVisibleTask);
+    registerEventTools(
+      server,
+      deps,
+      grant,
+      json,
+      requireVisibleTask,
+      can("scheduled_tasks:manage"),
+    );
   }
 
   server.ensureToolsListHandler();

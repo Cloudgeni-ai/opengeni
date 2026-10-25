@@ -7,6 +7,7 @@ import {
   ListEventSourcesResponse,
   ListEventTypesResponse,
   ListInboundEventsResponse,
+  ListReadyEventSourcesResponse,
   ReplayEventDeliveryResponse,
   RotateEventSourceSecretResponse,
   SendTestEventRequest,
@@ -21,6 +22,7 @@ import {
   GITHUB_WEBHOOK_PATH,
   inboundWebhookBaseUrl,
   listEventSourceTypes,
+  listReadyEventSources,
   receiveEventWebhook,
   receiveGitHubWebhook,
   replayEventDelivery,
@@ -122,6 +124,21 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       CreateEventSourceResponse.parse({ ...created, source: forViewer(viewer, created.source) }),
       201,
     );
+  });
+
+  // Sources the caller can use without setting them up, listed by key until used.
+  app.get("/v1/workspaces/:workspaceId/event-sources/ready", async (c) => {
+    const { grant, viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
+    const sources = await listReadyEventSources(
+      {
+        db,
+        settings: deps.settings,
+        ...(deps.eventSourceFetch ? { fetch: deps.eventSourceFetch } : {}),
+      },
+      { accountId: grant.accountId, workspaceId, ownerSubjectId: viewer.subjectId },
+    );
+    c.header("cache-control", "private, no-store");
+    return c.json(ListReadyEventSourcesResponse.parse({ sources }));
   });
 
   app.get("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {
