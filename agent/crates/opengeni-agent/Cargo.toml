@@ -76,6 +76,7 @@ hostname = { workspace = true }
 # The M10 disk metric (statvfs of the workspace root) — unix-only, SAFE binding.
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
+signal-hook = { workspace = true }
 
 # Windows: Chrome finds the attached-browser bridge through the per-user registry.
 [target.'cfg(windows)'.dependencies]

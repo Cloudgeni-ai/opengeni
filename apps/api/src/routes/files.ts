@@ -1,4 +1,5 @@
 import { readSessionAttachmentFiles } from "@opengeni/core";
+import { createHash } from "node:crypto";
 import { ZodError } from "zod";
 import {
   CompleteFileUploadResponse,
@@ -8,6 +9,7 @@ import {
   FileListRequest,
   FileListResponse,
   FileDownloadUrlResponse,
+  MAX_INLINE_MODEL_ATTACHMENT_BYTES,
   UpdateFileVisibilityRequest,
   UpdateFileVisibilityResponse,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
@@ -293,10 +295,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         idempotencyKey: `file.uploaded:${workspaceId}:${file.id}`,
       });
     };
-    const completeAndRecordUsage = async (): Promise<typeof upload.file> => {
+    const completeAndRecordUsage = async (computedSha256?: string): Promise<typeof upload.file> => {
       let file: typeof upload.file;
       try {
-        file = await completeFileUpload(db, workspaceId, upload.id);
+        file = await completeFileUpload(db, workspaceId, upload.id, { computedSha256 });
       } catch (error) {
         // HEAD runs outside the DB transaction. If the expiry reaper claims the
         // row in that window, report the durable state instead of leaking an
@@ -431,7 +433,25 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
       );
     }
-    const file = await completeAndRecordUsage();
+    // Inline model delivery needs a digest that pins the bytes. When the client
+    // sent none, compute it from the stored object for every file small enough
+    // to be inlined, so a plain REST upload behaves like an SDK upload.
+    let computedSha256: string | undefined;
+    if (!upload.file.sha256 && upload.file.sizeBytes <= MAX_INLINE_MODEL_ATTACHMENT_BYTES) {
+      const bytes = await objectStorage.getFileBytes(upload.file);
+      if (bytes.byteLength !== upload.file.sizeBytes) {
+        const file = await rejectAndCleanObject(
+          422,
+          "uploaded object size does not match file metadata",
+          "failed",
+        );
+        return c.json(
+          CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
+        );
+      }
+      computedSha256 = createHash("sha256").update(bytes).digest("hex");
+    }
+    const file = await completeAndRecordUsage(computedSha256);
     return c.json(
       CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
     );

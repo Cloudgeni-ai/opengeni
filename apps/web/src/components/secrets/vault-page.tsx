@@ -28,8 +28,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tool
 import {
   expiryState,
   ITEM_TYPE_FILTERS,
-  ITEM_TYPE_LABEL,
+  itemKindLabel,
   itemSubtitle,
+  itemTypeNoun,
   itemsLabel,
   vaultAudience,
 } from "@opengeni/react/app/components/secrets/vault-model";
@@ -338,9 +339,7 @@ export function VaultPage({
                   title={item.name}
                   titleAddon={item.hasTotp ? <TotpGlyph /> : null}
                   description={
-                    subtitle
-                      ? `${ITEM_TYPE_LABEL[item.type]} · ${subtitle}`
-                      : ITEM_TYPE_LABEL[item.type]
+                    subtitle ? `${itemKindLabel(item)} · ${subtitle}` : itemKindLabel(item)
                   }
                   status={
                     item.archivedAt ? (
@@ -438,9 +437,7 @@ export function VaultPage({
 
 /** "a login, API key, note or file", from the types a vault accepts. */
 function typesSentence(types: VaultItemType[]): string {
-  const words = types.map((each) =>
-    each === "api_key" ? "API key" : ITEM_TYPE_LABEL[each].toLowerCase(),
-  );
+  const words = types.map(itemTypeNoun);
   const withArticle = words.map((word, index) =>
     index === 0 ? `${/^[aeiou]/iu.test(word) ? "an" : "a"} ${word}` : word,
   );

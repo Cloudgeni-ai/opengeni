@@ -848,6 +848,12 @@ impl Engine for Firecracker {
         &vm.runtime
     }
 
+    fn process_identity(&self, vm: &FirecrackerVm) -> Result<String, EngineError> {
+        vm.process
+            .identity()
+            .map_err(|error| EngineError::io("process_identity", error))
+    }
+
     fn reads(&self, made_under: &str) -> Readable {
         readable(&self.binaries(), made_under)
     }

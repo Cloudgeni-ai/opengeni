@@ -121,6 +121,7 @@ export function applicationMenuTemplate(model: MenuModel): MenuItemConstructorOp
     const contents = model.contents();
     if (contents && !contents.isDestroyed()) action(contents);
   };
+  const zoomIn = withContents((contents) => contents.setZoomLevel(contents.getZoomLevel() + 0.5));
   const command = (
     label: string,
     name: DesktopCommand,
@@ -253,11 +254,10 @@ export function applicationMenuTemplate(model: MenuModel): MenuItemConstructorOp
           accelerator: "CmdOrCtrl+0",
           click: withContents((contents) => contents.setZoomLevel(0)),
         },
-        {
-          label: "Zoom In",
-          accelerator: "CmdOrCtrl+=",
-          click: withContents((contents) => contents.setZoomLevel(contents.getZoomLevel() + 0.5)),
-        },
+        // Keyboards with their own + key (Nordic, German and others) type + without
+        // Shift, so Zoom In answers to it; = stays as the key US keyboards share with +.
+        { label: "Zoom In", accelerator: "CmdOrCtrl+Plus", click: zoomIn },
+        { label: "Zoom In", accelerator: "CmdOrCtrl+=", click: zoomIn, visible: false },
         {
           label: "Zoom Out",
           accelerator: "CmdOrCtrl+-",

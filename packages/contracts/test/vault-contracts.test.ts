@@ -25,6 +25,9 @@ import {
   VaultFieldName,
   VaultName,
   VaultPolicy,
+  standardVaultFieldName,
+  vaultFieldNameAlternatives,
+  vaultItemCategoryToken,
   type ResolvedSecretValue,
 } from "../src/index";
 import { parseSecretReference, referenceKey } from "../src/secret-references";
@@ -118,6 +121,58 @@ describe("item requests", () => {
       UpdateVaultItemRequest.safeParse({ expectedGeneration: 2, name: "GitHub 2" }).success,
     ).toBe(true);
     expect(UpdateVaultItemRequest.safeParse({ name: "GitHub 2" }).success).toBe(false);
+  });
+  test("every item type, a category and a generated SSH key", () => {
+    for (const type of ["card", "identity", "ssh_key", "api_key", "note", "file"] as const) {
+      expect(CreateVaultItemRequest.safeParse({ type, name: "Item", fields: [] }).success).toBe(
+        true,
+      );
+    }
+    expect(
+      CreateVaultItemRequest.safeParse({
+        type: "api_key",
+        category: "database",
+        name: "Warehouse",
+        fields: [{ name: "password", value: "x" }],
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateVaultItemRequest.safeParse({
+        type: "api_key",
+        category: "Not A Token",
+        name: "Warehouse",
+        fields: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      VaultFieldInput.safeParse({ name: "private key", generateKey: {} }).data?.generateKey,
+    ).toEqual({ algorithm: "ed25519" });
+    expect(
+      VaultFieldInput.safeParse({ name: "private key", generateKey: { algorithm: "rsa4096" } })
+        .success,
+    ).toBe(true);
+    expect(
+      VaultFieldInput.safeParse({ name: "private key", generateKey: { algorithm: "dsa" } }).success,
+    ).toBe(false);
+    expect(
+      VaultFieldInput.safeParse({ name: "private key", generateKey: {}, value: "x" }).success,
+    ).toBe(false);
+  });
+  test("category tokens and the names of standard fields", () => {
+    expect(vaultItemCategoryToken("BankAccount")).toBe("bank_account");
+    expect(vaultItemCategoryToken("bank account")).toBe("bank_account");
+    expect(vaultItemCategoryToken("SSHKey")).toBe("ssh_key");
+    expect(vaultItemCategoryToken("Führerschein")).toBe("fuhrerschein");
+    expect(vaultItemCategoryToken("123")).toBeNull();
+    expect(standardVaultFieldName("card", "CVV")).toBe("security code");
+    expect(standardVaultFieldName("card", "verification number")).toBe("security code");
+    expect(standardVaultFieldName("card", "number")).toBe("number");
+    expect(standardVaultFieldName("identity", "zip")).toBe("postal code");
+    expect(standardVaultFieldName("login", "cvv")).toBeNull();
+    expect(standardVaultFieldName("card", "notes")).toBeNull();
+    expect(vaultFieldNameAlternatives("verification number")).toContain("security code");
+    expect(vaultFieldNameAlternatives("security code")).toContain("cvv");
+    expect(vaultFieldNameAlternatives("hostname")).toEqual([]);
   });
   test("list query accepts query-string values", () => {
     expect(ListVaultItemsQuery.parse({ includeArchived: "true", limit: "50" })).toEqual({

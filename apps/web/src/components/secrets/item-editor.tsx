@@ -1,6 +1,9 @@
 import {
   isValidSecretName,
   isValidTotpInput,
+  VAULT_DEFAULT_PRIMARY_FIELD,
+  VAULT_ITEM_CATEGORIES,
+  VAULT_ITEM_TYPE_FIELDS,
   VAULT_LIMITS,
   type GeneratePasswordSpecInput,
 } from "@opengeni/contracts";
@@ -14,7 +17,7 @@ import {
   type VaultItemType,
   type VaultSummary,
 } from "@opengeni/react";
-import { PlusIcon, Trash2Icon, UploadIcon } from "lucide-react";
+import { KeyRoundIcon, PlusIcon, Trash2Icon, UploadIcon } from "lucide-react";
 import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
@@ -30,10 +33,12 @@ import { PasswordGeneratorPopover } from "./password-generator-popover";
 import { HIT_AREA } from "./secret-actions";
 import { formatTotpCode, TotpRing, useTotp } from "./totp-code";
 import {
-  ITEM_TYPE_LABEL,
+  itemCategoryLabel,
+  itemTypeNoun,
   vaultErrorText,
 } from "@opengeni/react/app/components/secrets/vault-model";
 import { creatableTypes, sourceHome, vaultOperations } from "./vault-providers";
+import { ItemTypeGlyph } from "./vault-parts";
 
 /* ----------------------------------------------------------------------------
    New item and Edit item (S4): a form page. Concealed values are never
@@ -51,6 +56,13 @@ type Draft = {
   custom: boolean;
   value: string;
   generate?: GeneratePasswordSpecInput;
+  /** An SSH key's private key: make a new key pair on save. */
+  generateKey?: boolean;
+  /**
+   * An SSH key's public key or fingerprint on a saved item: Opengeni keeps
+   * them in step with the private key, so they are shown, not edited.
+   */
+  derived?: boolean;
   file?: { name: string; base64: string; size: number };
   removed?: boolean;
   existing: boolean;
@@ -83,10 +95,20 @@ function template(type: CreatableType, totp = true): Draft[] {
       return [make("note", "concealed")];
     case "file":
       return [make("file", "file")];
+    case "ssh_key":
+      // The fingerprint is always worked out from the key; the public key
+      // only needs typing for a passphrase-protected PEM key.
+      return [make("private key", "concealed"), make("public key", "text")];
+    case "card":
+    case "identity":
+      return VAULT_ITEM_TYPE_FIELDS[type].map((field) =>
+        make(field.name, field.kind === "totp" ? "concealed" : field.kind),
+      );
   }
 }
 
 function fromItem(item: VaultItem): Draft[] {
+  const derivedNames = item.type === "ssh_key" ? ["public key", "fingerprint"] : [];
   return [...item.fields]
     .sort((a, b) => a.position - b.position)
     .map((field) => ({
@@ -97,18 +119,47 @@ function fromItem(item: VaultItem): Draft[] {
       custom: false,
       value: field.kind === "text" ? (field.value ?? "") : "",
       existing: true,
+      ...(derivedNames.includes(field.name.toLowerCase()) ? { derived: true } : {}),
     }));
 }
 
-const PRIMARY_LABEL: Partial<Record<string, string>> = { value: "Key" };
+const PRIMARY_LABEL: Partial<Record<string, string>> = {
+  value: "Key",
+  "national ID number": "National ID number",
+  "address 1": "Address line 1",
+  "address 2": "Address line 2",
+  "address 3": "Address line 3",
+};
 const draftLabel = (draft: Draft) => PRIMARY_LABEL[draft.name] ?? fieldLabel(draft.name);
 
-const TYPE_OPTIONS: { value: CreatableType; label: string }[] = [
-  { value: "login", label: "Login" },
-  { value: "api_key", label: "API key" },
-  { value: "note", label: "Note" },
-  { value: "file", label: "File" },
+const TYPE_OPTIONS: { value: CreatableType; label: string; description: string }[] = [
+  { value: "login", label: "Login", description: "A username and password for a website." },
+  { value: "api_key", label: "API key", description: "A key or token for a service." },
+  { value: "note", label: "Note", description: "Private text, like recovery codes." },
+  { value: "card", label: "Card", description: "A payment card's number and expiry." },
+  { value: "identity", label: "Identity", description: "A name, address and ID numbers." },
+  { value: "ssh_key", label: "SSH key", description: "A key pair for servers and Git." },
+  { value: "file", label: "File", description: "A document or key file, up to 256 KB." },
 ];
+
+/** Name placeholders that show what each type is for. */
+const NAME_PLACEHOLDER: Partial<Record<CreatableType, string>> = {
+  login: "GitHub",
+  api_key: "OpenAI API",
+  card: "Company card",
+  identity: "Personal details",
+  ssh_key: "Deploy key",
+};
+
+const NO_CATEGORY = "none";
+
+/** The categories an item of this type can have, for the Category menu. */
+function categoryOptions(type: CreatableType): { value: string; label: string }[] {
+  const categories = Object.entries(VAULT_ITEM_CATEGORIES)
+    .filter(([, owner]) => owner === type)
+    .map(([category]) => ({ value: category, label: itemCategoryLabel(category) }));
+  return categories.length ? [{ value: NO_CATEGORY, label: "None" }, ...categories] : [];
+}
 
 const KIND_OPTIONS: {
   value: Exclude<VaultFieldKind, "file">;
@@ -179,6 +230,8 @@ export function ItemEditorPage({
         : (allowedTypes[0] ?? initialType),
   );
   const [name, setName] = useState(item?.name ?? "");
+  const [category, setCategory] = useState<string>(NO_CATEGORY);
+  const categories = useMemo(() => categoryOptions(type), [type]);
   // Each row keeps its id, so removing one keeps focus and edits on the rest.
   const [websites, setWebsites] = useState<{ id: string; value: string }[]>(() =>
     (item?.websites.length ? item.websites : [""]).map((value) => ({
@@ -202,6 +255,7 @@ export function ItemEditorPage({
   const touched = useRef(false);
   const changeType = (next: CreatableType) => {
     setType(next);
+    setCategory(NO_CATEGORY);
     // Keep what was typed into fields that exist in both templates.
     setDrafts((current) => {
       const kept = new Map(
@@ -228,7 +282,13 @@ export function ItemEditorPage({
   };
 
   const showWebsites = type === "login" || type === "api_key";
-  const visibleDrafts = drafts.filter((draft) => !draft.removed);
+  // A generated key pair brings its own public key, so its field is not asked for.
+  const generatingKey =
+    type === "ssh_key" &&
+    drafts.some((draft) => !draft.custom && draft.name === "private key" && draft.generateKey);
+  const visibleDrafts = drafts.filter(
+    (draft) => !draft.removed && !(generatingKey && !draft.custom && draft.name === "public key"),
+  );
 
   function validate(): Errors {
     const next: Errors = { fields: {} };
@@ -270,14 +330,28 @@ export function ItemEditorPage({
     if (!editing && type === "file" && !visibleDrafts.some((draft) => draft.file))
       next.fields[visibleDrafts.find((draft) => draft.kind === "file")?.key ?? ""] =
         "Choose a file.";
+    const privateKey = visibleDrafts.find((draft) => !draft.custom && draft.name === "private key");
+    if (!editing && type === "ssh_key" && privateKey) {
+      if (!privateKey.generateKey && !privateKey.value.trim())
+        next.fields[privateKey.key] = "Paste a private key, or generate a new key pair.";
+      else if (
+        privateKey.value.trim() &&
+        !/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(privateKey.value)
+      )
+        next.fields[privateKey.key] =
+          "That isn't a private key. Paste the whole key, from -----BEGIN to -----END.";
+    }
     return next;
   }
 
   function fieldInput(draft: Draft): VaultFieldInput | null {
     const base = { name: draft.name.trim(), ...(draft.fieldId ? { fieldId: draft.fieldId } : {}) };
     if (draft.removed) return draft.fieldId ? { ...base, remove: true } : null;
+    if (draft.derived) return null;
     if (draft.file)
       return { ...base, kind: "file", fileBase64: draft.file.base64, fileName: draft.file.name };
+    if (draft.generateKey && !draft.value)
+      return { ...base, kind: "concealed", generateKey: { algorithm: "ed25519" } };
     if (draft.generate && !draft.value)
       return { ...base, kind: draft.kind, generate: draft.generate };
     const value = draft.kind === "totp" ? draft.value.trim() : draft.value;
@@ -317,6 +391,7 @@ export function ItemEditorPage({
       } else {
         await onCreate({
           type,
+          ...(category !== NO_CATEGORY ? { category } : {}),
           name: name.trim(),
           ...(showWebsites && cleanWebsites.length ? { websites: cleanWebsites } : {}),
           ...(expiresAt ? { expiresAt } : {}),
@@ -375,7 +450,8 @@ export function ItemEditorPage({
       (draft.existing &&
         operations.removeField &&
         !lockedHere &&
-        draft.name !== (type === "login" ? "password" : type === "api_key" ? "value" : type));
+        !draft.derived &&
+        draft.name !== VAULT_DEFAULT_PRIMARY_FIELD[type]);
     const removeButton = removable ? (
       <Button
         type="button"
@@ -397,7 +473,20 @@ export function ItemEditorPage({
 
     let control: ReactNode;
     let hint: ReactNode = keepHint;
-    if (lockedHere) {
+    if (draft.derived) {
+      return (
+        <Field key={draft.key} label={draftLabel(draft)} group>
+          <div className="flex min-w-0 flex-col gap-1">
+            <p className="m-0 min-w-0 font-mono text-xs leading-5 break-all text-fg">
+              {draft.value || "—"}
+            </p>
+            <p className="m-0 text-xs leading-4.5 text-fg-muted">
+              Updated from the private key when you change it.
+            </p>
+          </div>
+        </Field>
+      );
+    } else if (lockedHere) {
       const saved = item?.fields.find((field) => field.id === draft.fieldId);
       return (
         <Field key={draft.key} label={draftLabel(draft)} group>
@@ -456,8 +545,11 @@ export function ItemEditorPage({
           autoComplete="off"
           suppressAutofill
           spellCheck={false}
+          className={type === "ssh_key" && draft.name === "public key" ? "font-mono" : undefined}
         />
       );
+      if (type === "ssh_key" && draft.name === "public key" && !draft.custom)
+        hint = "Filled in from the private key. Only needed for a passphrase-protected PEM key.";
     } else if (draft.kind === "totp") {
       control = (
         <SecretInput
@@ -468,6 +560,40 @@ export function ItemEditorPage({
       );
       if (draft.value.trim() && isValidTotpInput(draft.value.trim()))
         hint = <TotpPreview seed={draft.value.trim()} />;
+    } else if (type === "ssh_key" && draft.name === "private key" && !draft.custom) {
+      control = (
+        <div className="flex min-w-0 flex-col gap-2">
+          {draft.generateKey ? (
+            <p className="rounded-[10px] border border-dashed border-border-strong px-3 py-3 text-sm leading-5 text-fg-muted">
+              A new Ed25519 key pair is made when you save.
+            </p>
+          ) : (
+            <TextArea
+              rows={6}
+              value={draft.value}
+              onChange={(event) => update(draft.key, { value: event.target.value })}
+              placeholder={draft.existing ? "Unchanged" : "-----BEGIN OPENSSH PRIVATE KEY-----"}
+              className="font-mono text-xs"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="self-start pointer-coarse:h-11"
+            aria-pressed={Boolean(draft.generateKey)}
+            onClick={() => update(draft.key, { value: "", generateKey: !draft.generateKey })}
+          >
+            <KeyRoundIcon aria-hidden="true" />
+            {draft.generateKey ? "Paste a key instead" : "Generate key pair"}
+          </Button>
+        </div>
+      );
+      hint = draft.generateKey
+        ? "The private key stays in the vault. Copy the public key from the item once it's saved."
+        : (keepHint ?? "The public key and fingerprint are filled in from it.");
     } else if (type === "note" && draft.name === "note") {
       control = (
         <TextArea
@@ -561,11 +687,7 @@ export function ItemEditorPage({
     <FlushFormPage
       backLabel={item ? item.name : vault.name}
       onClose={onClose}
-      title={
-        item
-          ? `Edit ${item.name}`
-          : `New ${type === "api_key" ? "API key" : ITEM_TYPE_LABEL[type].toLowerCase()}`
-      }
+      title={item ? `Edit ${item.name}` : `New ${itemTypeNoun(type)}`}
       description={
         editing ? undefined : `Saved to ${vault.name}. Agents use it by reference, never by value.`
       }
@@ -580,12 +702,42 @@ export function ItemEditorPage({
     >
       <FieldStack>
         {!editing && typeOptions.length > 1 ? (
-          <Field label="Type" group>
-            <SegmentedControl
-              options={typeOptions}
-              value={type}
-              onValueChange={changeType}
-              fullWidth
+          typeOptions.length > 4 ? (
+            <Field label="Type">
+              <SelectMenu
+                options={typeOptions.map((option) => ({
+                  ...option,
+                  leading: <ItemTypeGlyph type={option.value} />,
+                }))}
+                value={type}
+                onValueChange={changeType}
+                size="md"
+                className="w-full sm:w-72"
+              />
+            </Field>
+          ) : (
+            <Field label="Type" group>
+              <SegmentedControl
+                options={typeOptions.map(({ value, label }) => ({ value, label }))}
+                value={type}
+                onValueChange={changeType}
+                fullWidth
+              />
+            </Field>
+          )
+        ) : null}
+        {!editing && categories.length ? (
+          <Field
+            label="Category"
+            optional
+            hint="Says what kind it is, here and in the password manager it's saved to."
+          >
+            <SelectMenu
+              options={categories}
+              value={category}
+              onValueChange={setCategory}
+              size="md"
+              className="w-full sm:w-72"
             />
           </Field>
         ) : null}
@@ -596,9 +748,7 @@ export function ItemEditorPage({
               setName(event.target.value);
               if (errors.name) setErrors((current) => ({ ...current, name: undefined }));
             }}
-            placeholder={
-              type === "login" ? "GitHub" : type === "api_key" ? "OpenAI API" : undefined
-            }
+            placeholder={NAME_PLACEHOLDER[type]}
             maxLength={VAULT_LIMITS.nameMaxChars}
             suppressAutofill
           />

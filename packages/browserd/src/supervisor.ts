@@ -160,6 +160,15 @@ import {
   type BrowserStateUploadAuthority,
 } from "./state-upload";
 import { BROWSER_WINDOW_PARK_IDLE_MS } from "./window-parking";
+import {
+  matchReopenedTabs,
+  tabUrlHash,
+  takeStoppedBrowserTabs,
+  writeStoppedBrowserTabs,
+  type BrowserRelaunchedTabs,
+  type BrowserRelaunchReason,
+  type StoppedBrowserTab,
+} from "./stopped-browser-tabs";
 
 const DEFAULT_MAX_SESSIONS = 64;
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
@@ -350,6 +359,9 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   ownedProcessIdentity?(): Promise<OwnedManagedBrowserProcess | null>;
   /** Release a failed reattach transport without closing its owned browser. */
   detach?(): Promise<void>;
+  /** This browser replaced an earlier one whose tabs it reopened with new
+   * IDs; calls naming an earlier tab then say why it is gone. */
+  noteRelaunchedTabs?(relaunched: BrowserRelaunchedTabs): void;
   /** Ends this runtime's hold on the browser. In the person's own browser
    * (attached Chrome) it also closes the tabs the session opened and left
    * blank, and releases Chrome's debugger, however the runtime goes away. */
@@ -2406,6 +2418,10 @@ export class BrowserSupervisor {
           recoveredReceipt?.operationId,
         );
       }
+      // The tabs the previous browser on this profile had when it was stopped
+      // or let go. Every launch takes the record, so it never outlives the
+      // launch right after the stop it describes.
+      const stoppedTabs = await takeStoppedBrowserTabs(sessionDirectory);
       driver = await this.createDriver(driverContext);
       const runtime: Runtime = {
         options: runtimeOptions(options),
@@ -2459,6 +2475,15 @@ export class BrowserSupervisor {
           runtime.creationObservation = observation;
           runtime.lastTargets = [observation.target];
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+        }
+        // A relaunch reopened the stopped browser's tabs with new IDs; a
+        // reattached browser kept them, so the record no longer applies.
+        if (stoppedTabs && relaunchesProfile && !restoredManifest) {
+          await noteRelaunchedTabs(driver, stoppedTabs.reason, stoppedTabs.tabs, {
+            ...(stoppedTabs.idleReleaseMinutes !== undefined
+              ? { idleReleaseMinutes: stoppedTabs.idleReleaseMinutes }
+              : {}),
+          });
         }
       } finally {
         startupPresence();
@@ -2707,7 +2732,7 @@ export class BrowserSupervisor {
         ...(cookies ? { headlessSessionCookies: cookies } : {}),
       });
       if (input.afterCapture === "restart") {
-        await this.restartRuntime(runtime, snapshot);
+        await this.restartRuntime(runtime, snapshot, "state_capture");
         driverClosed = false;
         runtime.lifecycle = "active";
       }
@@ -2731,7 +2756,7 @@ export class BrowserSupervisor {
       const failures: unknown[] = [error];
       if (driverClosed && snapshot) {
         try {
-          await this.restartRuntime(runtime, snapshot);
+          await this.restartRuntime(runtime, snapshot, "state_capture");
           driverClosed = false;
           runtime.lifecycle = "active";
         } catch (restartError) {
@@ -2758,9 +2783,14 @@ export class BrowserSupervisor {
     }
   }
 
-  private async restartRuntime(runtime: Runtime, snapshot: BrowserRuntimeSnapshot): Promise<void> {
+  private async restartRuntime(
+    runtime: Runtime,
+    snapshot: BrowserRuntimeSnapshot,
+    reason: Extract<BrowserRelaunchReason, "browser_lost" | "state_capture">,
+  ): Promise<void> {
     delete runtime.driverContext.recoverOwnedProcess;
     delete runtime.driverContext.allowOwnedProcessLaunch;
+    const previousTabs = stoppedTabsOf(runtime.lastTargets);
     const launch =
       runtime.workingJournal && runtime.workingReceipt
         ? runtime.workingJournal.begin({
@@ -2777,6 +2807,7 @@ export class BrowserSupervisor {
       await restoreTabs(driver, snapshot.tabs);
       const currentSnapshot = await driver.runtimeSnapshot();
       const currentTargets = await driver.listTargets();
+      await noteRelaunchedTabs(driver, reason, previousTabs, {}, currentTargets);
       runtime.driver = driver;
       for (const hold of runtime.presence) await this.bindPresence(runtime, hold);
       runtime.controller = this.createController(runtime, driver);
@@ -2978,7 +3009,7 @@ export class BrowserSupervisor {
       await runtime.downloadStore?.interruptInProgress("browser_restarted");
       this.retireWorkingRuntime(runtime);
       await previousDriver.close();
-      await this.restartRuntime(runtime, snapshot);
+      await this.restartRuntime(runtime, snapshot, "browser_lost");
       runtime.lifecycle = "active";
     } catch (error) {
       // Keep the binding addressable so a later request can retry recovery;
@@ -3322,6 +3353,42 @@ export class BrowserSupervisor {
     return runtime;
   }
 
+  /** Keep the tabs a managed browser has as its controller stops it or lets
+   * it go, so a browser launched on its profile later can say what became of
+   * each. Best effort: without the record a missing tab is only unexplained. */
+  private async recordStoppedTabs(
+    runtime: Runtime,
+    reason: "idle_release" | "controller_restart",
+    driverAvailable: boolean,
+  ): Promise<void> {
+    const transport = runtime.options.transport;
+    if (transport.kind !== "managed" || transport.ephemeralPartition) return;
+    let targets: readonly BrowserTarget[] = runtime.lastTargets;
+    if (driverAvailable) {
+      try {
+        targets = await runtime.driver.listTargets();
+      } catch {
+        // The last tabs this controller saw.
+      }
+    }
+    try {
+      await writeStoppedBrowserTabs(runtime.sessionDirectory, {
+        version: 2,
+        reason,
+        ...(reason === "idle_release"
+          ? { idleReleaseMinutes: Math.max(1, Math.round(this.idleReleaseMs / 60_000)) }
+          : {}),
+        stoppedAt: new Date(this.now()).toISOString(),
+        tabs: stoppedTabsOf(targets),
+      });
+    } catch (error) {
+      console.warn("browserd.stopped_tabs_record_failed", {
+        browserSessionId: runtime.options.browserSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private async disposeRuntime(
     runtime: Runtime,
     removeState: boolean,
@@ -3356,6 +3423,12 @@ export class BrowserSupervisor {
       // state an agent is working in. Release only this controller's transport;
       // the successor adopts the same live browser from the suspended receipt.
       keepBrowserRunning = !stopSuspendedBrowser && runtime.driver.detach !== undefined;
+      // Its tabs get new IDs if a browser is launched on this profile again.
+      await this.recordStoppedTabs(
+        runtime,
+        stopSuspendedBrowser ? "idle_release" : "controller_restart",
+        !driverAlreadyClosed,
+      );
     } else {
       this.retireWorkingRuntime(runtime);
     }
@@ -4685,6 +4758,35 @@ function profileManifest(
     architecture,
     tabs: snapshot.tabs,
   };
+}
+
+function stoppedTabsOf(targets: readonly BrowserTarget[]): StoppedBrowserTab[] {
+  return targets
+    .filter((target) => target.kind === "page" || target.kind === "popup")
+    .map((target) => ({
+      targetId: target.id,
+      urlHash: tabUrlHash(target.url),
+      selected: target.selected,
+    }));
+}
+
+/** Tell a relaunched browser's driver which of its tabs replaced each tab of
+ * the browser before it. Best effort: a failure only leaves an old tab ID
+ * unexplained. */
+async function noteRelaunchedTabs(
+  driver: BrowserSupervisorDriver,
+  reason: BrowserRelaunchReason,
+  previous: readonly StoppedBrowserTab[],
+  details: { idleReleaseMinutes?: number },
+  current?: readonly BrowserTarget[],
+): Promise<void> {
+  if (!driver.noteRelaunchedTabs || previous.length === 0) return;
+  try {
+    const tabs = matchReopenedTabs(previous, current ?? (await driver.listTargets()));
+    if (tabs.length > 0) driver.noteRelaunchedTabs({ reason, ...details, tabs });
+  } catch {
+    // Unexplained, not failed.
+  }
 }
 
 /** Rebuild a checkpoint's tab set on a freshly launched restored profile. A

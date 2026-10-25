@@ -157,11 +157,16 @@ unless the release runs the service with apiTls. */}}
 {{- define "opengeni.computeControl.trustEnv" -}}
 {{- if include "opengeni.computeControl.trusted" . }}
 - name: NODE_EXTRA_CA_CERTS
-  value: /etc/opengeni/compute-control-ca/ca.crt
+  value: {{ ternary "/etc/opengeni/runtime-ca/ca.crt" "/etc/opengeni/compute-control-ca/ca.crt" (not (empty .Values.computeControl.apiTls.additionalCaConfigMaps)) }}
 {{- end }}
 {{- end -}}
 
 {{- define "opengeni.computeControl.trustVolumeMount" -}}
+{{- if and (include "opengeni.computeControl.trusted" .) .Values.computeControl.apiTls.additionalCaConfigMaps }}
+- name: runtime-ca
+  mountPath: /etc/opengeni/runtime-ca
+  readOnly: true
+{{- end }}
 {{- if include "opengeni.computeControl.trusted" . }}
 - name: compute-control-ca
   mountPath: /etc/opengeni/compute-control-ca
@@ -170,6 +175,29 @@ unless the release runs the service with apiTls. */}}
 {{- end -}}
 
 {{- define "opengeni.computeControl.trustVolume" -}}
+{{- if and (include "opengeni.computeControl.trusted" .) .Values.computeControl.apiTls.additionalCaConfigMaps }}
+- name: runtime-ca
+  emptyDir:
+    sizeLimit: 4Mi
+- name: additional-ca
+  projected:
+    defaultMode: 0444
+    sources:
+      {{- range $index, $source := .Values.computeControl.apiTls.additionalCaConfigMaps }}
+      {{- if or (not (kindIs "map" $source)) (ne (len $source) 2) (not (kindIs "string" $source.name)) (not (kindIs "string" $source.key)) }}
+      {{- fail "computeControl.apiTls.additionalCaConfigMaps entries require name and key" }}
+      {{- end }}
+      {{- if or (not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $source.name)) (not (regexMatch "^[A-Za-z0-9._-]+$" $source.key)) }}
+      {{- fail "computeControl.apiTls.additionalCaConfigMaps requires valid ConfigMap names and keys" }}
+      {{- end }}
+      - configMap:
+          name: {{ $source.name | quote }}
+          optional: false
+          items:
+            - key: {{ $source.key | quote }}
+              path: {{ printf "%d.crt" $index | quote }}
+      {{- end }}
+{{- end }}
 {{- if include "opengeni.computeControl.trusted" . }}
 - name: compute-control-ca
   secret:
@@ -178,5 +206,39 @@ unless the release runs the service with apiTls. */}}
     items:
       - key: ca.crt
         path: ca.crt
+{{- end }}
+{{- end -}}
+
+{{/* Extra public authorities are an explicit operator choice, composed only
+when compute trust would otherwise replace the workload's existing CA path. */}}
+{{- define "opengeni.computeControl.trustInitContainer" -}}
+{{- $root := .root -}}
+{{- if and (include "opengeni.computeControl.trusted" $root) $root.Values.computeControl.apiTls.additionalCaConfigMaps }}
+- name: compose-runtime-ca
+  image: {{ include "opengeni.image" (dict "root" $root "image" .workload.image) | quote }}
+  imagePullPolicy: {{ .workload.image.pullPolicy }}
+  securityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 128Mi}
+  command:
+    - bun
+    - -e
+    - {{ $root.Files.Get "files/compose-trust-bundle.mjs" | quote }}
+  args:
+    - /etc/opengeni/runtime-ca/ca.crt
+    - /etc/opengeni/compute-control-ca/ca.crt
+    {{- range $index, $source := $root.Values.computeControl.apiTls.additionalCaConfigMaps }}
+    - {{ printf "/etc/opengeni/additional-ca/%d.crt" $index | quote }}
+    {{- end }}
+  volumeMounts:
+    - {name: compute-control-ca, mountPath: /etc/opengeni/compute-control-ca, readOnly: true}
+    - {name: additional-ca, mountPath: /etc/opengeni/additional-ca, readOnly: true}
+    - {name: runtime-ca, mountPath: /etc/opengeni/runtime-ca}
 {{- end }}
 {{- end -}}

@@ -813,7 +813,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
           fields: [{ name: "value", generate: { length: 24 } }],
         }),
       );
-      expect(apiKey.code).toBe("vault_read_only");
+      expect(apiKey.code).toBe("vault_operation_unsupported");
       expect(apiKey.details).toMatchObject({
         operation: "createItem",
         itemType: "api_key",
@@ -837,6 +837,8 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         }),
       );
       expect(intoPartners.details).toMatchObject({ operation: "createItem", allowedItemTypes: [] });
+      // A vault that takes no writes at all is read-only; one that takes others is not.
+      expect(intoPartners.code).toBe("vault_read_only");
       const card = await w.item(w.company, "Company card");
       const removal = await refusal(
         w.service.updateItem(w.actor, w.workspaceId, card.id, {
@@ -1032,7 +1034,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       ] as const;
       for (const [operation, call] of refused) {
         const error = await refusal(call());
-        expect(error.code).toBe("vault_read_only");
+        expect(error.code).toBe("vault_operation_unsupported");
         expect(error.details).toMatchObject({ operation, vaultId: w.company.id });
       }
       expect(w.calls("writeItem") + w.calls("archiveItem")).toBe(0);

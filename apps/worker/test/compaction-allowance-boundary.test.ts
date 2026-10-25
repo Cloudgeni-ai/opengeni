@@ -74,12 +74,15 @@ test("stream component retains the completed compaction checkpoint before refusi
           executionGeneration: 1,
           model: "scripted-model",
           initiatingHumanSubjectId: "user:frozen-initiator",
+          resources: [],
         },
         turnExecutionPolicy: { providerId: "openai" },
         providerTurn: {},
         trigger: { type: "user.message" },
         eventing: { modelRunSettings: settings },
         historySink: {
+          seedHistoryFootprint: () => undefined,
+          historyFootprintCompactionSignal: () => null,
           seedHistory: (history: unknown) => {
             expect(history).toEqual(checkpoint);
             order.push("checkpoint");

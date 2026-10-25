@@ -2,7 +2,11 @@ import {
   ensureRunAllowedBetweenModelCalls,
   ensureSessionUsageLimitAllowsBetweenModelCalls,
 } from "./admission";
-import { hasPendingSteerAfterContextCompaction, isSessionCompactionRequested } from "@opengeni/db";
+import {
+  ACTIVE_SESSION_HISTORY_COMPACTION_RATIO,
+  hasPendingSteerAfterContextCompaction,
+  isSessionCompactionRequested,
+} from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   appendSessionInstructions,
@@ -21,9 +25,14 @@ import {
   compactionProviderRejection,
   estimateSerializedValueTokens,
   compactionSummaryOutputTokens,
+  providerRequestImageLimit,
   type ModelResponseUsage,
 } from "@opengeni/runtime";
-import { type ModelProviderApi, type Settings } from "@opengeni/config";
+import {
+  type ModelProviderApi,
+  type ModelProviderWireProfile,
+  type Settings,
+} from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
 import type { CompactionSummarizer, RemoteCompactionV2Requester } from "../context-compaction";
 import {
@@ -83,6 +92,28 @@ export type RemoteCompactionPrefix = {
  */
 export function portableCompactionUsesPreparedPrefix(api: ModelProviderApi | undefined): boolean {
   return api === "responses" || api === "anthropic-messages";
+}
+
+/**
+ * Image count at which a request compacts first: the same share of the
+ * provider's per-request image ceiling as the stored-history trigger uses of
+ * the materialization guard. Null when the route's ceiling is unknown. A turn
+ * without a registry model uses the built-in OpenAI or Azure Responses route.
+ */
+export function requestImageCompactionThreshold(
+  provider: { api: ModelProviderApi; wireProfile: ModelProviderWireProfile } | null | undefined,
+  settings: Pick<Settings, "openaiProvider" | "contextWindowTokens">,
+): number | null {
+  const limit = providerRequestImageLimit(
+    provider ?? {
+      api: "responses",
+      wireProfile: settings.openaiProvider === "azure" ? "azure-openai" : "openai",
+    },
+    settings.contextWindowTokens,
+  );
+  return limit === null
+    ? null
+    : Math.max(1, Math.floor(limit * ACTIVE_SESSION_HISTORY_COMPACTION_RATIO));
 }
 
 export type CompactionPrepDeps = {

@@ -155,7 +155,7 @@ mock.module("@opengeni/db", () => ({
 let upstream: (url: string, init?: RequestInit) => Promise<Response>;
 
 const { createXaiSubscriptionTranscriptionProvider } =
-  await import("../src/transcription/providers/xai-subscription");
+  await import("@opengeni/core/transcription-service");
 const { createRealtimeWebsocketConnection, RealtimeWebsocketBrokerError } =
   await import("../src/realtime-websocket");
 const { readXaiCoreStatus, workspaceXaiOperationAvailable } =
@@ -184,15 +184,22 @@ beforeEach(() => {
 });
 
 const transcribe = () =>
-  createXaiSubscriptionTranscriptionProvider({ settings, db: {} as never }).transcribe({
-    audio: new Uint8Array([1, 2, 3]),
-    mimeType: "audio/webm",
-    filename: "clip.webm",
-    workspaceId: WORKSPACE,
-    accountId: ACCOUNT,
-    subjectId: "user:caller",
-    requestId: "request-1",
-  } as never);
+  createXaiSubscriptionTranscriptionProvider({ settings, db: {} as never })
+    .transcribe(
+      {
+        audio: { bytes: new Uint8Array([1, 2, 3]), mimeType: "audio/webm", fileName: "clip.webm" },
+        model: "grok-stt",
+        diarize: false,
+        scope: {
+          workspaceId: WORKSPACE,
+          accountId: ACCOUNT,
+          subjectId: "user:caller",
+          requestId: "request-1",
+        },
+      },
+      null,
+    )
+    .then(({ text, languages }) => ({ text, languages }));
 
 describe("SuperGrok transcription by route", () => {
   test("core: a sessionless transcription lease on a shared candidate of the caller's workspace", async () => {

@@ -56,6 +56,24 @@ export const SupergrokConnectStartRequest = /* @__PURE__ */ defineSchema(() =>
 export type SupergrokConnectStartRequest = z.infer<typeof SupergrokConnectStartRequest>;
 
 /**
+ * A started device sign-in (Codex or SuperGrok): the person enters userCode at
+ * verificationUri (or opens verificationUriComplete), then the caller polls
+ * connect/poll with state every intervalSeconds.
+ */
+export const SubscriptionDeviceSignInStart = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    userCode: primitives.string,
+    verificationUri: primitives.string,
+    verificationUriComplete: primitives.string.nullable().optional(),
+    intervalSeconds: primitives.positiveInteger,
+    expiresInSeconds: primitives.positiveInteger.optional(),
+    scope: z.enum(["workspace", "user", "organization"]).optional(),
+    state: primitives.string,
+  }),
+);
+export type SubscriptionDeviceSignInStart = z.infer<typeof SubscriptionDeviceSignInStart>;
+
+/**
  * Which Codex accounts a workspace uses: automatic (Opengeni picks from the
  * workspace's and the organization's accounts), only the workspace's own, only
  * the organization's, or none (Codex off for the workspace).

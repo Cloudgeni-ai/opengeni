@@ -3,13 +3,16 @@ import type {
   RecordingLiveProtocol,
   RecordingTrackSource,
   RecordingTranscriptionCapabilities,
+  RecordingTranscriptionFunding,
 } from "@opengeni/contracts";
+import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 
 /**
- * Recording transcription: one interface for every speech-to-text provider
- * a recording can use, plus the pure pieces that turn per-track words into
- * a transcript. Providers declare what each model can do; callers only ask
- * for what the chosen model supports.
+ * Speech to text: one interface for every provider any transcription uses
+ * (meetings, dictation and whatever comes later), plus the pure pieces that
+ * turn per-track words into a transcript. Providers declare what each model
+ * can do and who pays for it; callers only ask for what the chosen model
+ * supports.
  */
 
 export type RecordingTranscriptionModelSpec = {
@@ -20,12 +23,37 @@ export type RecordingTranscriptionModelSpec = {
   usdPerHour: number | null;
   /** Extra price share when keyterms are used (0.3 is 30% more). */
   keytermsPremium?: number;
+  /**
+   * Containers the model accepts. The worker converts other audio to the
+   * first one; absent means any format a recording is prepared in.
+   */
+  audioFormats?: readonly RecordingProviderAudioFormat[];
+  /**
+   * The Opengeni credit price of a deployment-funded model, from the
+   * deployment's voice pricing. Calls are charged in credits when credit
+   * billing is on; without a price such a call is refused.
+   */
+  creditPricing?: VoiceInputPricing | null;
 };
+
+/** Audio containers a transcription model can be sent. */
+export type RecordingProviderAudioFormat = "flac" | "wav" | "mp3" | "webm" | "mp4";
 
 export type RecordingTranscriptionAudio = {
   bytes: Uint8Array;
   mimeType: string;
   fileName: string;
+};
+
+/**
+ * Who a call is for. Providers that sign in as the workspace (a connected
+ * subscription) use it to find that sign-in; the request id is for logs.
+ */
+export type RecordingTranscriptionScope = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  requestId: string;
 };
 
 export type RecordingTranscriptionRequest = {
@@ -39,6 +67,8 @@ export type RecordingTranscriptionRequest = {
   maxSpeakers?: number | undefined;
   keyterms?: readonly string[] | undefined;
   signal?: AbortSignal | undefined;
+  /** Required by providers funded by a workspace subscription. */
+  scope?: RecordingTranscriptionScope | undefined;
 };
 
 export type RecordingTranscribedWord = {
@@ -57,10 +87,16 @@ export type RecordingTranscriptionResult = {
   /** Audio length the provider measured, when it says. */
   audioMilliseconds: number | null;
   diarized: boolean;
+  /** Empty for models without word timestamps, which return `text` instead. */
   words: RecordingTranscribedWord[];
+  /** The whole text, from models that give no word timings. */
+  text?: string | undefined;
+  /** What the provider reports it billed, for credit settlement. */
+  usage?: VoiceInputUsage | null | undefined;
 };
 
-export type RecordingTranscriptionCredentials = { apiKey: string };
+/** A provider key, or a short-lived token for providers that take one (Microsoft Entra ID). */
+export type RecordingTranscriptionCredentials = { apiKey: string } | { accessToken: string };
 
 /** A live session a client opens itself, straight to the provider. */
 export type RecordingLiveSessionGrant = {
@@ -81,11 +117,31 @@ export type RecordingLiveSessionRequest = {
 export type RecordingTranscriptionProvider = {
   id: string;
   name: string;
+  /**
+   * Who pays: the workspace's own key from its model connections, a
+   * subscription the workspace signed in to (never charged by Opengeni), or
+   * an account the deployment holds.
+   */
+  funding: RecordingTranscriptionFunding;
   models: readonly RecordingTranscriptionModelSpec[];
-  /** Transcribe a whole file. Only called for models with `capabilities.batch`. */
+  /**
+   * Whether the provider can serve this workspace now, for providers whose
+   * credential is not a key (a subscription sign-in). Key and deployment
+   * providers are available when their credential resolves. Without a
+   * scope it answers whether the deployment offers the provider at all.
+   */
+  available?(scope?: {
+    accountId?: string;
+    workspaceId: string;
+    subjectId?: string;
+  }): boolean | Promise<boolean>;
+  /**
+   * Transcribe a whole file. Only called for models with `capabilities.batch`.
+   * `credentials` is null for subscription providers, which use `scope`.
+   */
   transcribe(
     request: RecordingTranscriptionRequest,
-    credentials: RecordingTranscriptionCredentials,
+    credentials: RecordingTranscriptionCredentials | null,
   ): Promise<RecordingTranscriptionResult>;
   /**
    * Grant a client one live session. Present when some model has
@@ -167,6 +223,60 @@ export type RecordingDiarizer = {
   ): Promise<RecordingDiarizerResult>;
 };
 
+// --- Word alignment --------------------------------------------------------
+
+/** Where the aligner placed each word, in the order it was given them. */
+export type RecordingAlignedWords = {
+  words: Array<{
+    startMilliseconds: number;
+    endMilliseconds: number;
+    /** Mean log-probability of the word's sound; null when it was spread or untimed. */
+    score: number | null;
+  }>;
+  /** Words fixed by agreement with the aligner's own reading of the audio. */
+  anchoredWords: number;
+  /** Words spread evenly over a stretch that could not be aligned exactly. */
+  spreadWords: number;
+  /** Words with nothing to place (symbols); they take their neighbour's time. */
+  untimedWords: number;
+};
+
+/**
+ * Places a transcript's words on the audio (forced alignment), for models
+ * that return only text. Our CPU aligner implements this.
+ */
+export type RecordingWordAligner = {
+  id: string;
+  align(
+    audio: RecordingTranscriptionAudio,
+    words: readonly string[],
+    options: { signal?: AbortSignal | undefined },
+  ): Promise<RecordingAlignedWords>;
+};
+
+/** A text-only model's text as the words the aligner places, split at whitespace. */
+export function recordingTextWords(text: string | undefined): string[] {
+  const trimmed = text?.trim() ?? "";
+  return trimmed ? trimmed.split(/\s+/u) : [];
+}
+
+/** The words of `text` with the times the aligner gave them. */
+export function alignedTranscribedWords(
+  words: readonly string[],
+  aligned: RecordingAlignedWords,
+): RecordingTranscribedWord[] {
+  if (aligned.words.length !== words.length) {
+    throw new Error(`the aligner placed ${aligned.words.length} of ${words.length} words`);
+  }
+  return words.map((text, index) => ({
+    text,
+    startMilliseconds: aligned.words[index]!.startMilliseconds,
+    endMilliseconds: aligned.words[index]!.endMilliseconds,
+    speaker: null,
+    spaceBefore: index > 0,
+  }));
+}
+
 /**
  * Give each word the speaker whose turn overlaps it most. A word inside no
  * turn takes the nearest turn's speaker, so short gaps keep their speaker.
@@ -219,6 +329,106 @@ export function labelWordsFromTurns(
     }
     return { ...word, speaker };
   });
+}
+
+// --- Pieces of long tracks --------------------------------------------------
+
+/** A stretch of a track sent to the model on its own, on the track's timeline. */
+export type RecordingTranscriptionPiece = {
+  startMilliseconds: number;
+  endMilliseconds: number;
+  /** Words that start in [keepFrom, keepUntil) are taken from this piece. */
+  keepFromMilliseconds: number;
+  keepUntilMilliseconds: number;
+};
+
+/** Pieces overlap by this much on each side, so no word is cut at a boundary. */
+export const RECORDING_PIECE_OVERLAP_MILLISECONDS = 10_000;
+
+/**
+ * Split a track a model can't take whole into overlapping pieces. Each word
+ * is kept from the one piece whose keep window it starts in, and that piece
+ * holds the whole word because the pieces overlap past their windows.
+ */
+export function planRecordingTranscriptionPieces(
+  durationMilliseconds: number,
+  maxPieceMilliseconds: number | null,
+  overlapMilliseconds = RECORDING_PIECE_OVERLAP_MILLISECONDS,
+): RecordingTranscriptionPiece[] {
+  const duration = Math.max(0, Math.ceil(durationMilliseconds));
+  if (maxPieceMilliseconds === null || duration <= maxPieceMilliseconds) {
+    return [
+      {
+        startMilliseconds: 0,
+        endMilliseconds: duration,
+        keepFromMilliseconds: 0,
+        keepUntilMilliseconds: Number.POSITIVE_INFINITY,
+      },
+    ];
+  }
+  const overlap = Math.min(overlapMilliseconds, Math.floor(maxPieceMilliseconds / 4));
+  const stride = maxPieceMilliseconds - 2 * overlap;
+  const count = Math.ceil(duration / stride);
+  const pieces: RecordingTranscriptionPiece[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const keepFrom = index * stride;
+    const last = index === count - 1;
+    const keepUntil = last ? Number.POSITIVE_INFINITY : (index + 1) * stride;
+    pieces.push({
+      startMilliseconds: Math.max(0, keepFrom - overlap),
+      endMilliseconds: last ? duration : Math.min(duration, keepUntil + overlap),
+      keepFromMilliseconds: keepFrom,
+      keepUntilMilliseconds: keepUntil,
+    });
+  }
+  return pieces;
+}
+
+/**
+ * Join the pieces' results into one track result. Speaker ids are only
+ * meaningful inside one call, so a track sent in several pieces has none.
+ */
+export function mergeRecordingTranscriptionPieces(
+  parts: ReadonlyArray<{
+    piece: RecordingTranscriptionPiece;
+    result: RecordingTranscriptionResult;
+  }>,
+): RecordingTranscriptionResult {
+  if (parts.length === 1) {
+    const [{ piece, result }] = parts as [(typeof parts)[number]];
+    if (piece.startMilliseconds === 0) return result;
+  }
+  const several = parts.length > 1;
+  const words: RecordingTranscribedWord[] = [];
+  const languages = new Set<string>();
+  let audioMilliseconds: number | null = 0;
+  for (const { piece, result } of parts) {
+    for (const language of result.languages) languages.add(language);
+    audioMilliseconds =
+      audioMilliseconds === null || result.audioMilliseconds === null
+        ? null
+        : Math.max(audioMilliseconds, piece.startMilliseconds + result.audioMilliseconds);
+    let firstOfPiece = true;
+    for (const word of result.words) {
+      const start = word.startMilliseconds + piece.startMilliseconds;
+      if (start < piece.keepFromMilliseconds || start >= piece.keepUntilMilliseconds) continue;
+      const spaceBefore = words.length > 0 && (word.spaceBefore || firstOfPiece);
+      firstOfPiece = false;
+      words.push({
+        ...word,
+        startMilliseconds: start,
+        endMilliseconds: word.endMilliseconds + piece.startMilliseconds,
+        speaker: several ? null : word.speaker,
+        spaceBefore,
+      });
+    }
+  }
+  return {
+    languages: [...languages],
+    audioMilliseconds,
+    diarized: !several && (parts[0]?.result.diarized ?? false),
+    words,
+  };
 }
 
 // --- Tracks and segments ----------------------------------------------------
@@ -535,6 +745,12 @@ function elevenLabsError(
   return new RecordingTranscriptionError(message, "provider", false);
 }
 
+/** ElevenLabs takes only its own API key. */
+function elevenLabsApiKey(credentials: RecordingTranscriptionCredentials | null): string {
+  if (credentials && "apiKey" in credentials && credentials.apiKey) return credentials.apiKey;
+  throw new RecordingTranscriptionError("ElevenLabs needs an API key", "unauthorized", false);
+}
+
 async function errorDetail(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { detail?: { message?: unknown; status?: unknown } };
@@ -558,6 +774,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
   return {
     id: "elevenlabs",
     name: "ElevenLabs",
+    funding: "workspace_key",
     models: [
       {
         model: "scribe_v2",
@@ -579,7 +796,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
       try {
         response = await request(`${ELEVENLABS_API_BASE_URL}/v1/single-use-token/realtime_scribe`, {
           method: "POST",
-          headers: { "xi-api-key": credentials.apiKey },
+          headers: { "xi-api-key": elevenLabsApiKey(credentials) },
           signal: input.signal
             ? AbortSignal.any([input.signal, AbortSignal.timeout(15_000)])
             : AbortSignal.timeout(15_000),
@@ -641,7 +858,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
       try {
         response = await request(options.url ?? ELEVENLABS_SPEECH_TO_TEXT_URL, {
           method: "POST",
-          headers: { "xi-api-key": credentials.apiKey },
+          headers: { "xi-api-key": elevenLabsApiKey(credentials) },
           body: form,
           signal,
         });

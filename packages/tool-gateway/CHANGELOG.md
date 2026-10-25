@@ -1,5 +1,56 @@
 # @opengeni/tool-gateway
 
+## 5.3.1
+
+### Patch Changes
+
+- Updated dependencies [c8ddf55]
+- Updated dependencies [e0b3ccf]
+- Updated dependencies [1988e97]
+- Updated dependencies [e7f5d38]
+- Updated dependencies [e3782bb]
+- Updated dependencies [e1838ff]
+- Updated dependencies [ce72530]
+- Updated dependencies [4c6bf32]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [cccd692]
+- Updated dependencies [3fa5c6e]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [392db50]
+- Updated dependencies [31bca3c]
+- Updated dependencies [6acfbd3]
+- Updated dependencies [21e7ecf]
+- Updated dependencies [627b2f1]
+- Updated dependencies [c307566]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [4695d41]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [f9f0607]
+- Updated dependencies [cc319f3]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [a9809ee]
+- Updated dependencies [acac580]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [c194abb]
+- Updated dependencies [0383280]
+- Updated dependencies [7c02dbd]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/observability@5.3.0
+
 ## 5.2.1
 
 ### Patch Changes

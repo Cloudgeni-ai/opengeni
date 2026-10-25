@@ -44,6 +44,90 @@ pub use process_job::ProcessJob;
 #[allow(unsafe_code)]
 mod registry;
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod system_info;
+
+/// Whole-machine memory, processor-time and volume readings for the agent's
+/// metrics and capacity samples.
+///
+/// Elsewhere every reading is `None`, so callers report the figure as missing.
+pub mod system {
+    use std::path::Path;
+
+    /// Physical memory, in bytes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Memory {
+        /// Physical memory the operating system can use.
+        pub total_bytes: u64,
+        /// Physical memory available without paging anything out.
+        pub available_bytes: u64,
+    }
+
+    /// Processor time since boot, summed over every processor, in 100 ns ticks.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ProcessorTimes {
+        /// Idle time.
+        pub idle: u64,
+        /// Kernel-mode time. As Windows reports it, this INCLUDES the idle time.
+        pub kernel: u64,
+        /// User-mode time.
+        pub user: u64,
+    }
+
+    /// The volume holding a path, in bytes, as the calling user sees it (quotas
+    /// included).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Volume {
+        /// The volume's size.
+        pub total_bytes: u64,
+        /// The bytes the calling user can still write.
+        pub available_bytes: u64,
+    }
+
+    /// Physical memory, or `None` when it cannot be read or this is not Windows.
+    #[must_use]
+    pub fn memory() -> Option<Memory> {
+        #[cfg(windows)]
+        {
+            crate::system_info::memory()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    /// Cumulative processor times, or `None` when they cannot be read or this is
+    /// not Windows. Utilization is the change between two readings.
+    #[must_use]
+    pub fn processor_times() -> Option<ProcessorTimes> {
+        #[cfg(windows)]
+        {
+            crate::system_info::processor_times()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    /// The volume holding `path` (any existing directory on it), or `None` when
+    /// it cannot be read or this is not Windows.
+    #[must_use]
+    pub fn volume(path: &Path) -> Option<Volume> {
+        #[cfg(windows)]
+        {
+            crate::system_info::volume(path)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+            None
+        }
+    }
+}
+
 /// The default value of one key under `HKEY_CURRENT_USER`.
 ///
 /// Only Windows has a registry; elsewhere every call reports
@@ -485,6 +569,32 @@ pub(crate) fn normalize_absolute(pixel: i32, extent: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn system_readings_are_real_on_windows() {
+        let memory = system::memory().expect("memory");
+        assert!(memory.total_bytes > 0);
+        assert!(memory.available_bytes <= memory.total_bytes);
+
+        let times = system::processor_times().expect("processor times");
+        assert!(times.kernel >= times.idle, "kernel time includes idle time");
+        assert!(times.kernel + times.user > 0);
+
+        let volume = system::volume(std::path::Path::new(".")).expect("volume");
+        assert!(volume.total_bytes > 0);
+        assert!(volume.available_bytes <= volume.total_bytes);
+        let missing = std::env::temp_dir().join("opengeni-ffi-no-such-directory");
+        assert!(system::volume(&missing).is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn system_readings_are_absent_elsewhere() {
+        assert_eq!(system::memory(), None);
+        assert_eq!(system::processor_times(), None);
+        assert_eq!(system::volume(std::path::Path::new(".")), None);
+    }
 
     #[test]
     fn named_keys_and_chords_parse() {

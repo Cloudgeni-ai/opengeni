@@ -427,6 +427,10 @@ Exact tool-name pages merge two disjoint ordered index branches in one statement
 bounded non-null name projections and legacy/oversized-name fallbacks. Each
 branch retains its keyset and limit; names keep the database collation and no
 input-length restriction is introduced. See [tool-name paging](tool-name-paging.md).
+Exact call-ID pages use the same disjoint projected/fallback structure when the
+explicit type selection contains only created/output tool events. Other event
+types and losslessly encoded IDs retain their original reader. Both ID indexes
+are scoped by workspace/session; no call-ID uniqueness across sessions is assumed.
 Legacy rows retain their payload fallback (and its read cost); these projections
 do not authorize access or replace the retained payload. Full-history Find
 (`packages/db/src/session-message-search.ts`) coalesces authorized scalar windows
@@ -930,6 +934,14 @@ The console warns before Send and offers the existing authorized machine picker.
 Known owner mismatches disable futile rechecks until the pointer or access changes;
 changing machines never clears an explicit pause. Claim diagnostics classify the
 reviewed owner rejection without logging SQL, parameters or raw exception text.
+
+A queued message whose causal person is not the personal machine's owner is
+not runnable work there: claim, peek, idle, goal, wake and steer delivery skip
+it (`packages/db/src/machine-owner-wait.ts`), so it can neither block nor
+interrupt the owner's turns. The owner's next claimed turn writes it once into
+history ahead of its own prompt and supersedes it; a machine move wakes the chat
+so it can run elsewhere. Agent steers for anyone but the owner are refused up
+front. See [Connected Machines](connected-machines.md).
 
 Modal recovery: singleton human consent (`packages/core/src/application/sandbox-recovery.ts`)
 or proved provider loss (`packages/db/src/index.ts`): the quiescent group restores a
@@ -2650,6 +2662,11 @@ earlier navigation at limits, never auto-pages forward; Jump to latest restores
 live tails. Provider-identity chunk normalization completes each message
 once, in order, with `phase` (see `docs/run-lifecycle.md`).
 Pre-transfer metadata planning caps batches at 256 events; full-payload pages default to 1 MiB.
+Large and explicitly batched reads discover candidate IDs first and size only
+the usable payload prefix plus its first overflow row. Their separate payload
+read, count/byte decisions, and continuation semantics remain unchanged. The
+recursive sizing step uses scoped keyed lookups, not repeated event-table scans;
+this avoids sizing hundreds of large outputs for a page that can hold only a few.
 
 Lazy rail/Find search retained user/completed-assistant text through the browser SDK,
 excluding DOM/tools/reasoning/unfinished deltas. Rail providers preserve dialog state

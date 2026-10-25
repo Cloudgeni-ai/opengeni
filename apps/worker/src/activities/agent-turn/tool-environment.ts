@@ -1,5 +1,6 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
 import { userSetupCardPoster } from "./user-setup-card";
+import { withAppActionConfirmation } from "./app-action-confirmation";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -14,6 +15,7 @@ import {
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
+  resolveSessionAppActionAuthority,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   subscriptionCoreCodexAppsRequestAuth,
@@ -507,21 +509,37 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
-  const connectorActionPolicy: ConnectorActionPolicyHooks = {
-    preview: async (call) =>
-      await previewConnectorActionApproval(db, connectorActionIdentity, call),
-    prepare: async (call) =>
-      await prepareConnectorActionApproval(db, connectorActionIdentity, call),
-    begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
-    complete: async ({ requestId, outcome }) =>
-      await completeConnectorActionExecution(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        requestId,
-        attemptId: input.attemptId,
-        outcome,
-      }),
-  };
+  const connectorActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
+    {
+      preview: async (call) =>
+        await previewConnectorActionApproval(db, connectorActionIdentity, call),
+      prepare: async (call) =>
+        await prepareConnectorActionApproval(db, connectorActionIdentity, call),
+      begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
+      complete: async ({ requestId, outcome }) =>
+        await completeConnectorActionExecution(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          requestId,
+          attemptId: input.attemptId,
+          outcome,
+        }),
+    },
+    {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      // Live per change, the same check the API makes before running it.
+      authority: async () =>
+        (
+          await resolveSessionAppActionAuthority(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+          })
+        ).kind,
+    },
+  );
   // These reads only feed the Skill index. Disabled Skills need neither the
   // descriptors nor bundled files; agent build still rechecks live video policy.
   // Enabled reads remain independent and finish before executable preparation.
@@ -997,6 +1015,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         subjectId: "worker:first-party-mcp",
         secretResolver: attemptSecretResolver({
           db,
+          bus,
           settings: githubRestMcp.settings,
           agentConfig: session.agent,
           vaultAccess: deps.vaultAccess,
@@ -1085,6 +1104,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         },
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({ operationId, result }),
+        modelToolOutputTruncationTokens: () =>
+          eventing.modelRunSettings.modelToolOutputTruncationTokens,
         localMcpServers,
         ...(deferNonEagerToolPreparation
           ? {

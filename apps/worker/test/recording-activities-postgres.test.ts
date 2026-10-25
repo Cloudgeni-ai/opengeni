@@ -2,10 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   createRecordingTranscriptionProviderRegistry,
   RecordingTranscriptionError,
+  TranscriptionBillingRefusedError,
   type RecordingDiarizer,
+  type RecordingWordAligner,
   type RecordingTranscriptionProvider,
   type RecordingTranscriptionRequest,
+  type TranscriptionRequest,
+  type TranscriptionService,
 } from "@opengeni/core";
+import { DICTATION_RETENTION_MILLISECONDS } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
@@ -22,6 +27,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
+import { textModelCapabilities } from "@opengeni/core/transcription-service";
 import { createHash } from "node:crypto";
 import { createRecordingActivities } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -64,6 +71,7 @@ function fakeProvider(
   return {
     id: "elevenlabs",
     name: "Fake",
+    funding: "workspace_key",
     models: [
       {
         model: "scribe_v2",
@@ -90,7 +98,14 @@ function fakeProvider(
   };
 }
 
-async function capturedRecording(storage: ReturnType<typeof memoryStorage>) {
+async function capturedRecording(
+  storage: ReturnType<typeof memoryStorage>,
+  transcription: { providerId: string; model: string; options: Record<string, unknown> } = {
+    providerId: "elevenlabs",
+    model: "scribe_v2",
+    options: { language: "en" },
+  },
+) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
@@ -155,7 +170,7 @@ async function capturedRecording(storage: ReturnType<typeof memoryStorage>) {
       { trackNumber: 0, chunkCount: 2 },
       { trackNumber: 1, chunkCount: 2 },
     ],
-    transcription: { providerId: "elevenlabs", model: "scribe_v2", options: { language: "en" } },
+    transcription,
   });
   return {
     actor,
@@ -175,13 +190,14 @@ function activities(
   provider: RecordingTranscriptionProvider,
   apiKey: string | null = "key",
   diarizer: RecordingDiarizer | null = null,
+  aligner: RecordingWordAligner | null = null,
 ) {
   const warnings: string[] = [];
   const services = async () =>
     ({
       db: client!.db,
       objectStorage: storage.storage,
-      settings: { voiceInputFfmpegPath: ffmpegPath },
+      settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
       observability: { warn: (message: string) => warnings.push(message), info: () => undefined },
       startRecordingWorkflow: null,
     }) as unknown as ControlActivityServices;
@@ -193,6 +209,7 @@ function activities(
       heartbeat: () => undefined,
       cancellationSignal: () => undefined,
       diarizer: () => diarizer,
+      aligner: () => aligner,
     }),
   };
 }
@@ -446,6 +463,122 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(version).toMatchObject({ state: "failed", errorCode: "missing_provider_key" });
   });
 
+  test("a meeting can't use a model that returns only text, and sends it no audio", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "codex-subscription",
+      model: "chatgpt-dictation",
+      options: {},
+    });
+    let heard = 0;
+    const subscription: RecordingTranscriptionProvider = {
+      id: "codex-subscription",
+      name: "ChatGPT subscription",
+      funding: "workspace_subscription",
+      available: () => true,
+      models: [
+        {
+          model: "chatgpt-dictation",
+          name: "ChatGPT dictation",
+          usdPerHour: 0,
+          capabilities: textModelCapabilities({ maxDurationSeconds: 600, maxFileBytes: null }),
+        },
+      ],
+      transcribe: async () => {
+        heard += 1;
+        return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "" };
+      },
+    };
+    const run = activities(storage, subscription, null).activities;
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({
+      outcome: "failed",
+      errorCode: "model_unavailable",
+    });
+    expect(heard).toBe(0);
+  });
+
+  test("our aligner times a text-only model's words, and our diarizer names their speakers", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "codex-subscription",
+      model: "chatgpt-dictation",
+      options: {},
+    });
+    const subscription: RecordingTranscriptionProvider = {
+      id: "codex-subscription",
+      name: "ChatGPT subscription",
+      funding: "workspace_subscription",
+      available: () => true,
+      models: [
+        {
+          model: "chatgpt-dictation",
+          name: "ChatGPT dictation",
+          usdPerHour: 0,
+          capabilities: textModelCapabilities({ maxDurationSeconds: 600, maxFileBytes: null }),
+        },
+      ],
+      transcribe: async (request) => ({
+        languages: [],
+        audioMilliseconds: null,
+        diarized: false,
+        words: [],
+        text: request.audio.fileName === "track-0.webm" ? " Hello there " : "Hi. Yes!",
+      }),
+    };
+    const aligned: Array<{ fileName: string; words: readonly string[] }> = [];
+    const aligner: RecordingWordAligner = {
+      id: "test-aligner",
+      align: async (audio, words) => {
+        aligned.push({ fileName: audio.fileName, words });
+        return {
+          words: words.map((_, index) => ({
+            startMilliseconds: 200 + index * 600,
+            endMilliseconds: 600 + index * 600,
+            score: -1,
+          })),
+          anchoredWords: 0,
+          spreadWords: 0,
+          untimedWords: 0,
+        };
+      },
+    };
+    const ours: RecordingDiarizer = {
+      id: "test",
+      diarize: async () => ({
+        voiceModel: "test-voices",
+        turns: [
+          { startMilliseconds: 0, endMilliseconds: 700, speaker: "A" },
+          { startMilliseconds: 700, endMilliseconds: 2_000, speaker: "B" },
+        ],
+        voices: [],
+      }),
+    };
+    const run = activities(storage, subscription, null, ours, aligner).activities;
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    expect(aligned).toEqual([
+      { fileName: "track-0.webm", words: ["Hello", "there"] },
+      { fileName: "track-1.webm", words: ["Hi.", "Yes!"] },
+    ]);
+    const transcript = await getRecordingTranscriptPage(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(transcript.version.diarization).toBe("ours");
+    expect(
+      transcript.segments.map((segment) => [
+        segment.speakerLabel,
+        segment.text,
+        segment.startMilliseconds,
+      ]),
+    ).toEqual([
+      ["track-0", "Hello there", 200],
+      ["speaker_0", "Hi.", 200],
+      ["speaker_1", "Yes!", 800],
+    ]);
+  });
+
   test("deletion removes every object of the recording, then its rows", async () => {
     if (!client) return;
     const storage = memoryStorage();
@@ -469,6 +602,195 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 6, purged: true });
     expect(storage.objects.size).toBe(0);
     expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 0, purged: false });
+  });
+});
+
+async function capturedDictation(storage: ReturnType<typeof memoryStorage>, seconds = 3) {
+  const db = client!.db;
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(db, {
+    accountExternalSource: "recording-activities",
+    accountExternalId: suffix,
+    accountName: "Dictation activities",
+    workspaceExternalSource: "recording-activities",
+    workspaceExternalId: suffix,
+    workspaceName: "Dictation activities",
+    subjectId: `subject-${suffix}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const actor = { workspaceId: grant.workspaceId!, subjectId: grant.subjectId };
+  const recordingId = crypto.randomUUID();
+  await createRecording(db, {
+    ...actor,
+    accountId: grant.accountId,
+    recordingId,
+    purpose: "dictation",
+    // Asking to share is ignored: a dictation is only ever its owner's.
+    visibility: "workspace",
+    tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }],
+  });
+  const audio = opusWebm(seconds, 440);
+  const [row] = await reserveRecordingChunks(db, {
+    ...actor,
+    recordingId,
+    trackNumber: 0,
+    chunks: [
+      {
+        chunkNumber: 0,
+        byteLength: audio.length,
+        sha256: createHash("sha256").update(audio).digest("hex"),
+        startMilliseconds: 0,
+        durationMilliseconds: seconds * 1_000,
+      },
+    ],
+  });
+  storage.objects.set(row!.objectKey, { bytes: audio, contentType: "audio/webm" });
+  await markRecordingChunksUploaded(db, {
+    ...actor,
+    recordingId,
+    trackNumber: 0,
+    chunkNumbers: [0],
+  });
+  const versionId = crypto.randomUUID();
+  await finalizeRecording(db, {
+    ...actor,
+    recordingId,
+    versionId,
+    tracks: [{ trackNumber: 0, chunkCount: 1 }],
+    transcription: {
+      providerId: "voice-one",
+      model: "voice-input",
+      options: {},
+      creditAttribution: { kind: "human", initiatingHumanSubjectId: actor.subjectId },
+    },
+  });
+  return {
+    actor,
+    input: {
+      accountId: grant.accountId,
+      workspaceId: actor.workspaceId,
+      recordingId,
+      ownerSubjectId: actor.subjectId,
+      versionId,
+      processingOwner: versionId,
+    },
+  };
+}
+
+function dictationActivities(
+  storage: ReturnType<typeof memoryStorage>,
+  transcribe: TranscriptionService["transcribe"],
+) {
+  const services = async () =>
+    ({
+      db: client!.db,
+      objectStorage: storage.storage,
+      settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
+      observability: { warn: () => undefined, info: () => undefined },
+      startRecordingWorkflow: null,
+    }) as unknown as ControlActivityServices;
+  const service: TranscriptionService = {
+    limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+    available: () => true,
+    transcribe,
+  };
+  return createRecordingActivities(services, {
+    registry: createRecordingTranscriptionProviderRegistry([]),
+    loadApiKey: async () => null,
+    heartbeat: () => undefined,
+    cancellationSignal: () => undefined,
+    diarizer: () => null,
+    dictationTranscription: () => service,
+  });
+}
+
+describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
+  test("voice input hears a dictation once per piece, billed to who asked, then it expires", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const dictation = await capturedDictation(storage);
+    const calls: TranscriptionRequest[] = [];
+    const run = dictationActivities(storage, async (request) => {
+      calls.push(request);
+      return {
+        text: " Remember to send the numbers. ",
+        languages: ["en"],
+        providerId: "voice-one",
+        audioSeconds: 3,
+        latencyMs: 5,
+        creditCostMicros: 1_200,
+      };
+    });
+    expect(await run.transcribeRecordingVersion(dictation.input)).toEqual({
+      outcome: "complete",
+      expireAfterMilliseconds: DICTATION_RETENTION_MILLISECONDS,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      mimeType: "audio/wav",
+      preferredProvider: "voice-one",
+      subjectId: dictation.actor.subjectId,
+      billing: {
+        sourceId: `${dictation.input.recordingId}:${dictation.input.versionId}:0`,
+        attribution: { kind: "human", initiatingHumanSubjectId: dictation.actor.subjectId },
+      },
+    });
+    expect(calls[0]!.billing!.trustedDurationSeconds).toBeGreaterThan(2);
+
+    const stored = await getRecording(client.db, {
+      ...dictation.actor,
+      recordingId: dictation.input.recordingId,
+    });
+    expect(stored).toMatchObject({ purpose: "dictation", visibility: "private", state: "ready" });
+    const page = await getRecordingTranscriptPage(client.db, {
+      ...dictation.actor,
+      recordingId: dictation.input.recordingId,
+    });
+    expect(page.version).toMatchObject({ diarization: "none", languages: ["en"] });
+    expect(page.segments.map((segment) => [segment.speakerLabel, segment.text])).toEqual([
+      [null, "Remember to send the numbers."],
+    ]);
+
+    // The day is up: the dictation and its audio go.
+    expect(storage.objects.size).toBeGreaterThan(0);
+    expect(await run.expireDictation(dictation.input)).toMatchObject({ purged: true });
+    expect(storage.objects.size).toBe(0);
+    await expect(
+      getRecording(client.db, { ...dictation.actor, recordingId: dictation.input.recordingId }),
+    ).rejects.toThrow();
+    // Already gone is done.
+    expect(await run.expireDictation(dictation.input)).toEqual({ deleted: 0, purged: false });
+  });
+
+  test("a credit refusal fails the dictation without retrying", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const dictation = await capturedDictation(storage);
+    const run = dictationActivities(storage, async () => {
+      throw new TranscriptionBillingRefusedError({
+        code: "insufficient_credits",
+        message: "No credits left",
+      });
+    });
+    expect(await run.transcribeRecordingVersion(dictation.input)).toEqual({
+      outcome: "failed",
+      errorCode: "insufficient_credits",
+      expireAfterMilliseconds: DICTATION_RETENTION_MILLISECONDS,
+    });
+  });
+
+  test("expiry leaves meetings alone", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const meeting = await capturedRecording(storage);
+    const run = dictationActivities(storage, async () => {
+      throw new Error("not called");
+    });
+    expect(await run.expireDictation(meeting.input)).toEqual({ deleted: 0, purged: false });
+    expect(
+      (await getRecording(client.db, { ...meeting.actor, recordingId: meeting.input.recordingId }))
+        .state,
+    ).not.toBe("deleting");
   });
 });
 

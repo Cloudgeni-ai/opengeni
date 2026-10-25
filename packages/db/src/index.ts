@@ -22,6 +22,8 @@ export {
 } from "./scheduled-task-lifecycle";
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
+export * from "./active-session-history";
+import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";
@@ -48,6 +50,7 @@ import {
   decideSecretUseApprovalTx,
   secretUseApprovalsForSessionTx,
   secretUseApprovalView,
+  type SecretUseApprovalRow,
 } from "./secret-use-approvals";
 import type { VaultDbContext } from "./vaults";
 import { browserDeadlineCheckpoint } from "./browser-deadline-checkpoints";
@@ -119,6 +122,9 @@ export {
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
+  CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS,
+  capabilitySetupCompletedSummary,
+  type CapabilitySetupContinuationSkipReason,
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
   parseSecretReference,
@@ -155,6 +161,13 @@ import {
   turnHuman,
   inboxOrigin,
 } from "./inbox-execution-context";
+import {
+  notWaitingForMachineOwnerSql,
+  runnableQueuedTurnExists,
+  sessionMachineOwnerSubject,
+  WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT,
+  waitsForMachineOwnerSql,
+} from "./machine-owner-wait";
 import { parentOutboxAuthorityTx } from "./child-outbox-authority";
 import {
   compactionFailureHoldSequenceTx,
@@ -897,6 +910,9 @@ import {
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   TimelineAnnotations,
   renderUserMessageContentForModel,
+  MESSAGE_TIME_ZONE_METADATA_KEY,
+  messageTimeZoneFromTurnMetadata,
+  normalizeMessageTimeZone,
   SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -946,8 +962,10 @@ import {
   OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
   HumanInputQuestion as HumanInputQuestionContract,
   canonicalSkillReviewQuestion,
+  secretUseApprovalDecisionSummary,
   secretUseApprovalHumanInput,
   secretUseApprovalIdFromQuestionId,
+  secretUseApprovalQuestionId,
   SECRET_USE_APPROVAL_DECISIONS,
   type SecretUseApprovalDecision,
   SubmitHumanInputResponseRequest,
@@ -1222,6 +1240,7 @@ export const { importArchivedSession, appendArchivedSessionEvents } =
   });
 export * from "./session-model-settings";
 export * from "./session-queue-commands";
+export { WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT } from "./machine-owner-wait";
 export * from "./session-realtime";
 export * from "./session-realtime-context";
 export * from "./session-realtime-ledger";
@@ -2173,6 +2192,7 @@ export const allWorkspacePermissions: Permission[] = [
   "api_keys:manage",
   "connections:read",
   "connections:write",
+  "connections:personal",
   "capabilities:manage",
   "variable-sets:list",
   "variable-sets:read",
@@ -8281,6 +8301,7 @@ export function durableUserHistoryItem(
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | null,
   sender?: string | null,
+  timeZone?: string | null,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -8295,6 +8316,7 @@ export function durableUserHistoryItem(
       goalSnapshot,
       sentAt,
       sender,
+      timeZone,
     ),
     ...(attachmentRefs.length > 0
       ? {
@@ -9363,6 +9385,13 @@ export async function completeFileUpload(
   db: Database,
   workspaceId: string,
   uploadId: string,
+  options: {
+    /**
+     * Digest the server computed from the stored bytes. Recorded only when the
+     * file has none: a client digest is never replaced.
+     */
+    computedSha256?: string | undefined;
+  } = {},
 ): Promise<FileAsset> {
   return await withWorkspaceRls(
     db,
@@ -9410,6 +9439,9 @@ export async function completeFileUpload(
           .update(schema.files)
           .set({
             status: "ready",
+            ...(options.computedSha256 && !fileRow.sha256
+              ? { sha256: options.computedSha256 }
+              : {}),
             updatedAt: now,
           })
           .where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileRow.id)))
@@ -19443,6 +19475,7 @@ type AutomationWaitRow = {
   triggerStatus: string | null;
   triggerPosition: number | null;
   eventTypes: string[] | null;
+  sourceId: string | null;
   sourceKind: string | null;
   sourceName: string | null;
   sourceVisibility: string | null;
@@ -19451,6 +19484,14 @@ type AutomationWaitRow = {
   eventsCompletedAt: Date | null;
   hasEventSettings: string | null;
 };
+
+type AutomationWaitEvent = NonNullable<SessionAutomationWaitSummary["event"]>;
+
+/** Both lists of event types as one, in order; every event covers the rest. */
+function mergedWaitEventTypes(left: readonly string[], right: readonly string[]): string[] {
+  if (left.includes("*") || right.includes("*")) return ["*"];
+  return [...new Set([...left, ...right])];
+}
 
 /**
  * What the automations the reader can see are waiting for, per session. A
@@ -19480,37 +19521,52 @@ function automationWaitSummaries(
       left.rows[0]!.taskId.localeCompare(right.rows[0]!.taskId),
   );
   const waits = new Map<string, SessionAutomationWaitSummary>();
+  // Each chat's events by source id ("" for the ones the reader can't see).
+  const sourceEvents = new Map<string, Map<string, AutomationWaitEvent>>();
   for (const { sessionId, rows: taskRows } of ordered) {
     const task = taskRows[0]!;
     if (task.status !== "active" || (task.eventsOnce && task.eventsCompletedAt)) continue;
     const nextRun = scheduledTaskHasUpcomingRun(task, now)
       ? scheduledTaskNextRunAt(task.schedule, now)
       : null;
-    const trigger = task.hasEventSettings
+    const triggers = task.hasEventSettings
       ? taskRows
           .filter((row) => row.triggerStatus === "active")
-          .sort((left, right) => left.triggerPosition! - right.triggerPosition!)[0]
-      : undefined;
-    if (!nextRun && !trigger) continue;
-    const wait = waits.get(sessionId) ?? { nextRunAt: null, event: null, automations: 0 };
+          .sort((left, right) => left.triggerPosition! - right.triggerPosition!)
+      : [];
+    if (!nextRun && triggers.length === 0) continue;
+    const wait = waits.get(sessionId) ?? {
+      nextRunAt: null,
+      event: null,
+      events: [],
+      automations: 0,
+    };
     wait.automations += 1;
     if (nextRun && (!wait.nextRunAt || nextRun.getTime() < Date.parse(wait.nextRunAt))) {
       wait.nextRunAt = nextRun.toISOString();
     }
-    if (trigger && !wait.event) {
-      wait.event = {
-        source:
-          trigger.sourceKind &&
-          trigger.sourceName !== null &&
-          visible(trigger.sourceVisibility, trigger.sourceOwnerSubjectId, "workspace")
-            ? {
-                kind: trigger.sourceKind as EventSourceKind,
-                name: trigger.sourceName,
-              }
-            : null,
-        eventTypes: trigger.eventTypes ?? [],
-      };
+    const bySource = sourceEvents.get(sessionId) ?? new Map<string, AutomationWaitEvent>();
+    for (const trigger of triggers) {
+      const source =
+        trigger.sourceId &&
+        trigger.sourceKind &&
+        trigger.sourceName !== null &&
+        visible(trigger.sourceVisibility, trigger.sourceOwnerSubjectId, "workspace")
+          ? { kind: trigger.sourceKind as EventSourceKind, name: trigger.sourceName }
+          : null;
+      const eventTypes = trigger.eventTypes ?? [];
+      wait.event ??= { source, eventTypes: [...eventTypes] };
+      const key = source ? trigger.sourceId! : "";
+      const entry = bySource.get(key);
+      if (entry) {
+        entry.eventTypes = mergedWaitEventTypes(entry.eventTypes, eventTypes);
+      } else {
+        const added = { source, eventTypes: mergedWaitEventTypes([], eventTypes) };
+        bySource.set(key, added);
+        wait.events!.push(added);
+      }
     }
+    sourceEvents.set(sessionId, bySource);
     waits.set(sessionId, wait);
   }
   return waits;
@@ -19552,6 +19608,7 @@ export async function sessionScheduleTargets(
         triggerStatus: schema.eventTriggers.status,
         triggerPosition: schema.eventTriggers.position,
         eventTypes: schema.eventTriggers.eventTypes,
+        sourceId: schema.eventSources.id,
         sourceKind: schema.eventSources.kind,
         sourceName: schema.eventSources.name,
         sourceVisibility: schema.eventSources.visibility,
@@ -25337,20 +25394,14 @@ export async function armSubscriptionCoreCapacityWait(
             retryNotBefore,
           },
         };
-        const [waitingPrompt] = stopped
-          ? await tx
-              .select({ id: schema.sessionTurns.id })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                  eq(schema.sessionTurns.sessionId, input.sessionId),
-                  eq(schema.sessionTurns.status, "queued"),
-                  inArray(schema.sessionTurns.source, ["user", "api"]),
-                ),
-              )
-              .limit(1)
-          : [];
+        const waitingPrompt = stopped
+          ? await runnableQueuedTurnExists(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sources: ["user", "api"],
+            })
+          : false;
         const sessionStatus = stopped ? (waitingPrompt ? "queued" : "failed") : "waiting_capacity";
         await closeSessionTurnAttemptInTransaction(tx, {
           id: input.attemptId,
@@ -26062,19 +26113,13 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       );
     }
   }
-  const [queued] = turnWasCurrent
-    ? await tx
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
-            eq(schema.sessionTurns.sessionId, input.session.id),
-            eq(schema.sessionTurns.status, "queued"),
-          ),
-        )
-        .limit(1)
-    : [];
+  const queued = turnWasCurrent
+    ? await runnableQueuedTurnExists(tx, {
+        accountId: input.session.accountId,
+        workspaceId: input.session.workspaceId,
+        sessionId: input.session.id,
+      })
+    : false;
   const nextSessionStatus =
     input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
   const eventValues: SessionEventInsertWithPayload[] = [
@@ -38057,17 +38102,59 @@ export async function listSessionEventPage(
             truncatedBy = rows.length >= remainingCount ? "count" : "bytes";
           }
         } else {
-          // Plan the page from bounded metadata before selecting any canonical
-          // payload. row_to_json includes private storage columns omitted by the
-          // public event, so this conservatively bounds ordinary page transfer.
-          // One oversized event is selected alone and remains exact.
-          const metadataRows = await scopedDb
-            .select(sessionEventProjectionMetadataSelect(toolOutputPreview))
-            .from(schema.sessionEvents)
-            .where(and(...filters))
-            .orderBy(ordering)
-            .limit(queryLimit);
-          sourceRowCount = metadataRows.length;
+          // Discover the complete candidate frontier without payloads, then size
+          // only the prefix the byte/count budget can use (plus its overflow row).
+          // Indexing the ordered ID array avoids rescanning an ordered CTE at
+          // every recursion step. Keep the subsequent payload SELECT separate:
+          // this is still metadata planning, not a new page-wide snapshot.
+          const metadataRows = await rawRows<
+            SessionEventProjectionMetadataRow & { sourceRowCount: number }
+          >(
+            scopedDb,
+            sql`with recursive candidates as materialized (
+                select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence}
+                from ${schema.sessionEvents}
+                where ${and(...filters)} order by ${ordering} limit ${queryLimit}
+              ), ordered as materialized (
+                select array_agg(id order by ${
+                  options.authoritativeLatest || direction === "before"
+                    ? sql`sequence desc`
+                    : sql`sequence asc`
+                }) as ids from candidates
+              ), bounded as (
+                select sized.id, sized.sequence,
+                  1 as row_number, sized.bytes as transfer_bytes,
+                  ${bytes + (events.length === 0 ? 0 : 1)}::bigint + sized.bytes as cumulative_bytes
+                from ordered cross join lateral (
+                  select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
+                    (${transferBytesSql})::int as bytes
+                  from ${schema.sessionEvents}
+                  where ${schema.sessionEvents.id} = ordered.ids[1]
+                    and ${schema.sessionEvents.workspaceId} = ${workspaceId}
+                    and ${schema.sessionEvents.sessionId} = ${sessionId}
+                  offset 0
+                ) sized
+                union all
+                select sized.id, sized.sequence,
+                  bounded.row_number + 1, sized.bytes,
+                  bounded.cumulative_bytes + 1 + sized.bytes
+                from bounded cross join ordered
+                cross join lateral (
+                  select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
+                    (${transferBytesSql})::int as bytes
+                  from ${schema.sessionEvents}
+                  where ${schema.sessionEvents.id} = ordered.ids[bounded.row_number + 1]
+                    and ${schema.sessionEvents.workspaceId} = ${workspaceId}
+                    and ${schema.sessionEvents.sessionId} = ${sessionId}
+                  offset 0
+                ) sized
+                where bounded.cumulative_bytes <= ${maxBytes}
+                  and bounded.row_number <= ${requestedLimit - events.length}
+              ) select id, sequence, transfer_bytes as "transferBytes",
+                  (select cardinality(ids) from ordered) as "sourceRowCount"
+                from bounded order by row_number`,
+          );
+          sourceRowCount = Number(metadataRows[0]?.sourceRowCount ?? 0);
           if (metadataRows.length === 0) break;
 
           const exactIds: string[] = [];
@@ -38084,7 +38171,7 @@ export async function listSessionEventPage(
             if (estimatedBytes + separatorBytes + transferBytes > maxBytes) {
               if (events.length === 0 && exactIds.length === 0) {
                 exactIds.push(metadata.id);
-                if (metadataRows.length > 1) {
+                if (sourceRowCount > 1) {
                   hasMore = true;
                   truncatedBy = "bytes";
                 }
@@ -38097,7 +38184,7 @@ export async function listSessionEventPage(
             exactIds.push(metadata.id);
             estimatedBytes += separatorBytes + transferBytes;
           }
-          sourceRowsFullyConsumed = exactIds.length >= metadataRows.length;
+          sourceRowsFullyConsumed = exactIds.length >= sourceRowCount;
 
           if (exactIds.length > 0) {
             rows = await scopedDb
@@ -38325,14 +38412,6 @@ export async function listSessionEventConversationBookkeeping(
       .orderBy(asc(schema.sessionEvents.sequence));
     return rows.map(mapProjectedEvent);
   });
-}
-
-function sessionEventProjectionMetadataSelect(toolOutputPreview = false) {
-  return {
-    id: schema.sessionEvents.id,
-    sequence: schema.sessionEvents.sequence,
-    transferBytes: sql<number>`(${sessionEventTransferBytes(toolOutputPreview)})::int`,
-  } satisfies Record<keyof SessionEventProjectionMetadataRow, unknown>;
 }
 
 /**
@@ -39419,6 +39498,7 @@ function mapSessionHumanInputRequest(
     turnGeneration: row.turnGeneration,
     creationAttemptId: row.creationAttemptId,
     toolCallId: row.toolCallId,
+    origin: row.origin === "secret_use_approval" ? "secret_use_approval" : "tool_call",
     status: row.status as SessionHumanInputRequest["status"],
     questions: row.questions,
     allowSkip: row.allowSkip,
@@ -39464,7 +39544,8 @@ export async function listSessionHumanInputRequests(
     const actionablePendingIds =
       options.status === "pending"
         ? await scopedDb.execute<{ id: string }>(sql`
-            select request_row.id
+            select actionable.id from (
+            select request_row.id, request_row.created_at
             from session_human_input_requests request_row
             join sessions session_row
               on session_row.workspace_id = request_row.workspace_id
@@ -39480,6 +39561,7 @@ export async function listSessionHumanInputRequests(
             where request_row.workspace_id = ${workspaceId}
               and request_row.session_id = ${sessionId}
               and request_row.status = 'pending'
+              and request_row.origin = 'tool_call'
               and (request_row.expires_at is null or request_row.expires_at > now())
               and session_row.status = 'requires_action'
               and session_row.active_turn_id = request_row.turn_id
@@ -39495,7 +39577,16 @@ export async function listSessionHumanInputRequests(
                   and accepted_row.type in ('user.approvalDecision', 'user.humanInputResponse')
                   and accepted_row.sequence > trigger_row.sequence
               )
-            order by request_row.created_at desc, request_row.id desc
+            union all
+            -- Opengeni's own approval cards wait on no turn: pending is actionable.
+            select request_row.id, request_row.created_at
+            from session_human_input_requests request_row
+            where request_row.workspace_id = ${workspaceId}
+              and request_row.session_id = ${sessionId}
+              and request_row.status = 'pending'
+              and request_row.origin = 'secret_use_approval'
+            ) actionable
+            order by actionable.created_at desc, actionable.id desc
             limit ${limit}
           `)
         : null;
@@ -39715,7 +39806,8 @@ export type AcceptSessionHumanInputResponseResult =
       request: SessionHumanInputRequest;
       event: SessionEvent;
       events: SessionEvent[];
-      workflowWakeRevision: number;
+      /** Null when no wake was needed (an approval card answered while its chat is busy). */
+      workflowWakeRevision: number | null;
     }
   | {
       action: "completed";
@@ -39808,6 +39900,328 @@ async function humanInputResponseEventForRequest(
   return event ? mapEvent(event) : null;
 }
 
+type AcceptSessionHumanInputResponseInput = Parameters<typeof acceptSessionHumanInputResponse>[1];
+
+async function humanInputRequestIsSecretUseApprovalCard(
+  db: Database,
+  input: Pick<AcceptSessionHumanInputResponseInput, "workspaceId" | "sessionId" | "requestId">,
+): Promise<boolean> {
+  if (!UUID_PATTERN.test(input.requestId)) return false;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ origin: schema.sessionHumanInputRequests.origin })
+      .from(schema.sessionHumanInputRequests)
+      .where(
+        and(
+          eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+          eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+          eq(schema.sessionHumanInputRequests.id, input.requestId),
+        ),
+      )
+      .limit(1);
+    return row?.origin === "secret_use_approval";
+  });
+}
+
+/** Unwinds the answer transaction when another answer settled the card first. */
+class SecretUseApprovalCardSettledError extends Error {
+  constructor() {
+    super("The approval card was already answered");
+  }
+}
+
+/**
+ * Answer one of Opengeni's own secret approval cards. Only the person the
+ * blocked run acted for, signed in to Opengeni themselves, may answer, with
+ * one of the card's choices. In one transaction the card is answered, the
+ * request becomes a grant (or a denial), and the agent gets a
+ * `secret_use_approval_decided` input that wakes an idle chat. The turn that
+ * was blocked is never resumed: nothing ran, so the agent retries the call.
+ */
+async function acceptSecretUseApprovalCardResponse(
+  db: Database,
+  input: AcceptSessionHumanInputResponseInput,
+): Promise<AcceptSessionHumanInputResponseResult> {
+  const loaded = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [request] = await scopedDb
+      .select()
+      .from(schema.sessionHumanInputRequests)
+      .where(
+        and(
+          eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+          eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+          eq(schema.sessionHumanInputRequests.id, input.requestId),
+        ),
+      )
+      .limit(1);
+    if (!request) return null;
+    const approvalId = secretUseApprovalIdFromQuestionId(request.toolCallId);
+    const approvals = approvalId
+      ? await secretUseApprovalsForSessionTx(scopedDb, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          ids: [approvalId],
+        })
+      : new Map<string, SecretUseApprovalRow>();
+    const sameSubmission = input.clientEventId
+      ? (
+          await scopedDb
+            .select()
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, input.sessionId),
+                eq(schema.sessionEvents.clientEventId, input.clientEventId),
+              ),
+            )
+            .limit(1)
+        )[0]
+      : undefined;
+    const answer =
+      request.status === "pending"
+        ? null
+        : await humanInputResponseEventForRequest(scopedDb, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            requestId: request.id,
+          });
+    return {
+      request,
+      approval: approvalId ? (approvals.get(approvalId) ?? null) : null,
+      sameSubmission,
+      answer,
+    };
+  });
+  if (!loaded) return { action: "not_found" };
+  const { request, approval } = loaded;
+  const settled = async (): Promise<AcceptSessionHumanInputResponseResult> => {
+    const current = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+      const [row] = await scopedDb
+        .select()
+        .from(schema.sessionHumanInputRequests)
+        .where(
+          and(
+            eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+            eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+            eq(schema.sessionHumanInputRequests.id, input.requestId),
+          ),
+        )
+        .limit(1);
+      const event = row
+        ? await humanInputResponseEventForRequest(scopedDb, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            requestId: row.id,
+          })
+        : null;
+      return row ? { row, event } : null;
+    });
+    if (!current) return { action: "not_found" };
+    const mapped = mapSessionHumanInputRequest(current.row);
+    if (!current.event) {
+      return { action: "conflict", request: mapped, events: [], workflowWakeRevision: null };
+    }
+    return {
+      action: "completed",
+      request: mapped,
+      event: current.event,
+      events: [],
+      workflowWakeRevision: null,
+      settledBy:
+        input.clientEventId && current.event.clientEventId === input.clientEventId
+          ? "same_submission"
+          : "earlier_response",
+    };
+  };
+  if (loaded.sameSubmission) {
+    if (
+      loaded.sameSubmission.type !== "user.humanInputResponse" ||
+      (loaded.sameSubmission.payload as { requestId?: unknown }).requestId !== request.id
+    ) {
+      throw new Error("clientEventId belongs to a different session operation");
+    }
+    return await settled();
+  }
+  if (request.status !== "pending") return await settled();
+  const mappedRequest = mapSessionHumanInputRequest(request);
+  // The card has no deadline, so there is nothing to expire.
+  if (input.expireOnly) {
+    return { action: "conflict", request: mappedRequest, events: [], workflowWakeRevision: null };
+  }
+  if ((input.secretAnswers?.length ?? 0) > 0) {
+    throw new HumanInputResponseValidationError(
+      "INVALID_RESPONSE",
+      "An approval card takes no secret answers.",
+    );
+  }
+  const response = validateHumanInputResponse(mappedRequest, input.response);
+  const question = request.questions[0];
+  const answer =
+    response.outcome === "answered" && question
+      ? response.answers.find((candidate) => candidate.questionId === question.id)
+      : undefined;
+  const decision = answer?.values[0];
+  if (
+    !answer ||
+    answer.values.length !== 1 ||
+    Boolean(answer.other?.trim()) ||
+    !(SECRET_USE_APPROVAL_DECISIONS as readonly string[]).includes(decision ?? "")
+  ) {
+    throw new HumanInputResponseValidationError(
+      "INVALID_RESPONSE",
+      "Choose one of the card's options to allow or deny this secret.",
+    );
+  }
+  const responderKind = childRequiresActionRespondedByKindFor(
+    input.respondedBy,
+    input.respondedByKind,
+  );
+  if (
+    responderKind !== "human" ||
+    input.personSignedIn !== true ||
+    !approval ||
+    input.respondedBy !== approval.approverSubjectId
+  ) {
+    throw new HumanInputResponseValidationError(
+      "HUMAN_AUTH_REQUIRED",
+      "Only the person this agent works for can allow it to use this secret, signed in to Opengeni themselves.",
+    );
+  }
+  const chosen = decision as SecretUseApprovalDecision;
+  const view = secretUseApprovalView(approval);
+  const answered: { event?: SessionEvent; request?: SessionHumanInputRequest } = {};
+  try {
+    const result = await withWorkspaceSessionActivityRls(db, input.workspaceId, (scopedDb) =>
+      addSessionSystemUpdateWithSourceMutation(
+        scopedDb,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          kind: "secret_use_approval_decided",
+          classification: chosen === "deny" ? "info" : "action_required",
+          sourceId: approval.id,
+          dedupeKey: `secret-use-approval-decided:${approval.id}`,
+          summary: secretUseApprovalDecisionSummary(view, chosen),
+          payload: {
+            type: "secret_use_approval_decided",
+            approvalId: approval.id,
+            requestId: request.id,
+            decision: chosen,
+            secrets: view.targets
+              .slice(0, 20)
+              .map((target) =>
+                (target.fieldName
+                  ? `${target.itemName} › ${target.fieldName}`
+                  : target.itemName
+                ).slice(0, 512),
+              ),
+            surface: view.surface.slice(0, 64),
+            toolName: view.toolName.slice(0, 200),
+            destination: view.destination?.slice(0, 500) ?? null,
+          },
+        },
+        async () => undefined,
+        {
+          prepareSource: async (tx, sessionId) => {
+            const locks = await lockSessionEventWriteRows(tx, {
+              workspaceId: input.workspaceId,
+              controlLock: "share",
+              sessionIds: [sessionId],
+            });
+            const session = locks.sessions[0];
+            if (!session) throw new Error("Failed to answer the approval card");
+            const [locked] = await tx
+              .select()
+              .from(schema.sessionHumanInputRequests)
+              .where(
+                and(
+                  eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+                  eq(schema.sessionHumanInputRequests.sessionId, sessionId),
+                  eq(schema.sessionHumanInputRequests.id, request.id),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            if (locked?.status !== "pending") throw new SecretUseApprovalCardSettledError();
+            const now = new Date();
+            const decided = await decideSecretUseApprovalTx(tx, {
+              workspaceId: input.workspaceId,
+              sessionId,
+              approvalId: approval.id,
+              decision: chosen,
+              subjectId: input.respondedBy,
+              now,
+            });
+            if (!decided) throw new SecretUseApprovalCardSettledError();
+            const [updated] = await tx
+              .update(schema.sessionHumanInputRequests)
+              .set({
+                status: "answered",
+                response,
+                respondedBy: input.respondedBy,
+                respondedAt: now,
+                updatedAt: now,
+              })
+              .where(eq(schema.sessionHumanInputRequests.id, request.id))
+              .returning();
+            if (!updated) throw new Error("Failed to answer the approval card");
+            // Turnless: the card belongs to no waiting turn, and the answer
+            // must not read as a resume of the turn that was blocked.
+            const [event] = await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId,
+                    sequence: session.lastSequence + 1,
+                    type: "user.humanInputResponse",
+                    payload: { requestId: request.id, response, respondedByKind: responderKind },
+                    clientEventId: input.clientEventId ?? null,
+                    occurredAt: now,
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning();
+            if (!event) throw new Error("Failed to append the approval card's answer");
+            await tx
+              .update(schema.sessions)
+              .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+              .where(eq(schema.sessions.id, sessionId));
+            answered.event = mapEvent(event);
+            answered.request = mapSessionHumanInputRequest(updated);
+            return { events: [answered.event] };
+          },
+        },
+      ),
+    );
+    if (!("update" in result) || !answered.event || !answered.request) {
+      // An archived or cancelled chat takes no more work.
+      return {
+        action: "conflict",
+        request: mappedRequest,
+        events: [],
+        workflowWakeRevision: null,
+      };
+    }
+    return {
+      action: "accepted",
+      request: answered.request,
+      event: answered.event,
+      events: result.events,
+      workflowWakeRevision: result.workflowWakeRevision,
+    };
+  } catch (error) {
+    if (error instanceof SecretUseApprovalCardSettledError) return await settled();
+    throw error;
+  }
+}
+
 /**
  * First-writer-wins settlement for one structured input boundary. Session +
  * logical turn + current freeze generation are locked with the row; the
@@ -39849,6 +40263,11 @@ export async function acceptSessionHumanInputResponse(
     secretWriteContext?: VaultDbContext;
   },
 ): Promise<AcceptSessionHumanInputResponseResult> {
+  // Opengeni's own secret approval cards wait on no turn; their answer is a
+  // grant plus a machine input for the agent. `origin` never changes.
+  if (await humanInputRequestIsSecretUseApprovalCard(db, input)) {
+    return await acceptSecretUseApprovalCardResponse(db, input);
+  }
   const secretAnswers = input.expireOnly ? [] : (input.secretAnswers ?? []);
   const secretAnswerQuestionIds = new Set(secretAnswers.map((answer) => answer.questionId));
   if (secretAnswerQuestionIds.size !== secretAnswers.length) {
@@ -40159,75 +40578,6 @@ export async function acceptSessionHumanInputResponse(
             "Choose Save or Don't save for this Skill review.",
           );
         }
-        // Secret approval cards: only the person the run acts for decides,
-        // signed in themselves, with one of the card's own choices. The only
-        // other answer is the system denying on a scheduled run's timeout.
-        const secretApprovalAnswers: Array<{
-          approvalId: string;
-          decision: SecretUseApprovalDecision;
-        }> = [];
-        const boundApprovals = expired
-          ? new Map()
-          : await secretUseApprovalsForSessionTx(tx as unknown as Database, {
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              ids: request.questions.flatMap((question) => {
-                const id = secretUseApprovalIdFromQuestionId(question.id);
-                return id === null ? [] : [id];
-              }),
-            });
-        if (boundApprovals.size > 0) {
-          const responderKind = childRequiresActionRespondedByKindFor(
-            input.respondedBy,
-            input.respondedByKind,
-          );
-          const answered = response.outcome === "answered" ? response.answers : null;
-          const systemDenial =
-            responderKind === "system" &&
-            answered !== null &&
-            [...boundApprovals.keys()].every((approvalId) =>
-              answered.some(
-                (answer) =>
-                  secretUseApprovalIdFromQuestionId(answer.questionId) === approvalId &&
-                  answer.values.length === 1 &&
-                  answer.values[0] === "deny",
-              ),
-            );
-          for (const approval of boundApprovals.values()) {
-            if (
-              !systemDenial &&
-              (responderKind !== "human" ||
-                input.personSignedIn !== true ||
-                input.respondedBy !== approval.approverSubjectId)
-            ) {
-              throw new HumanInputResponseValidationError(
-                "HUMAN_AUTH_REQUIRED",
-                "Only the person this agent works for can allow it to use this secret, signed in to Opengeni themselves.",
-              );
-            }
-          }
-          if (response.outcome === "answered") {
-            for (const answer of response.answers) {
-              const approvalId = secretUseApprovalIdFromQuestionId(answer.questionId);
-              if (approvalId === null || !boundApprovals.has(approvalId)) continue;
-              const decision = answer.values[0];
-              if (
-                answer.values.length !== 1 ||
-                Boolean(answer.other?.trim()) ||
-                !(SECRET_USE_APPROVAL_DECISIONS as readonly string[]).includes(decision ?? "")
-              ) {
-                throw new HumanInputResponseValidationError(
-                  "INVALID_RESPONSE",
-                  "Choose one of the card's options to allow or deny this secret.",
-                );
-              }
-              secretApprovalAnswers.push({
-                approvalId,
-                decision: decision as SecretUseApprovalDecision,
-              });
-            }
-          }
-        }
         if (response.outcome === "answered" && secretAnswers.length > 0) {
           if (
             secretAnswers.some((answer) => answer.saveTo === "user") &&
@@ -40300,16 +40650,6 @@ export async function acceptSessionHumanInputResponse(
             workspaceId: input.workspaceId,
             subjectId: input.respondedBy,
             requestId: request.id,
-          });
-        }
-        for (const answer of secretApprovalAnswers) {
-          await decideSecretUseApprovalTx(tx as unknown as Database, {
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            approvalId: answer.approvalId,
-            decision: answer.decision,
-            subjectId: input.respondedBy,
-            now,
           });
         }
         await applySessionResponseMcpCredentialUpdatesInTransaction(
@@ -41113,18 +41453,25 @@ export async function appendSessionHistoryItems(
     items: Array<{ position: number; item: Record<string, unknown> }>;
     /** Tool outputs already have durable timeline events; retire their receipts with history. */
     completedToolCallIds?: string[];
+    /**
+     * Receives the stored footprint of the rows this call inserted, measured by
+     * PostgreSQL in the same statement, once the append has committed.
+     */
+    onAppendedFootprint?: (delta: ActiveSessionHistoryFootprint) => void;
   },
 ): Promise<boolean> {
   if (input.items.length === 0 && !input.completedToolCallIds?.length) {
     return true;
   }
+  let appendedFootprint: ActiveSessionHistoryFootprint | null = null;
   // One idempotent transaction: a deadlock/serialization victim rolled back
   // entirely, so it retries as a unit; it contains no external effect.
-  return await retryRlsPersistence(
+  const appended = await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     { stage: "session_history_append", correlationId: input.expectedAttemptId },
     async (tx) => {
+      appendedFootprint = null;
       const allowed = await lockTurnAttemptWriteFenceTx(tx, {
         rowProjection: "event",
         workspaceId: input.workspaceId,
@@ -41134,7 +41481,7 @@ export async function appendSessionHistoryItems(
         attemptId: input.expectedAttemptId,
       });
       if (!allowed.allowed) return false;
-      const saved =
+      const inserted =
         input.items.length === 0
           ? []
           : await tx
@@ -41172,7 +41519,40 @@ export async function appendSessionHistoryItems(
                 turnId: schema.sessionHistoryItems.turnId,
                 item: schema.sessionHistoryItems.item,
                 itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+                // Measured exactly as the active-history guard measures:
+                // bytes of the ordered JSON text, shape of the jsonb projection
+                // the insert trigger maintains.
+                jsonBytes: sql<string>`octet_length(${schema.sessionHistoryItems.item}::text)`,
+                jsonNodes: sql<string>`(
+                  select count(*)
+                  from jsonb_path_query(session_history_items.item, 'strict $.**')
+                )`,
+                jsonProperties: sql<string>`(
+                  select count(*)
+                  from jsonb_path_query(
+                    session_history_items.item,
+                    'strict $.** ? (@.type() == "object")'
+                  ) as object_value
+                  cross join lateral jsonb_object_keys(object_value) as property
+                )`,
               });
+      // Rows skipped by ON CONFLICT were already stored, so only fresh inserts
+      // add to the active footprint.
+      appendedFootprint = inserted.reduce<ActiveSessionHistoryFootprint>(
+        (total, row) => ({
+          jsonBytes: total.jsonBytes + Number(row.jsonBytes) + 1,
+          rows: total.rows + 1,
+          jsonNodes: total.jsonNodes + Number(row.jsonNodes),
+          jsonProperties: total.jsonProperties + Number(row.jsonProperties),
+        }),
+        { jsonBytes: 0, rows: 0, jsonNodes: 0, jsonProperties: 0 },
+      );
+      const saved = inserted.map(({ position, turnId, item, itemCodecVersion }) => ({
+        position,
+        turnId,
+        item,
+        itemCodecVersion,
+      }));
       // A position conflict is idempotent only when the exact conversation
       // item is already there. Never acknowledge a different item as saved.
       // Fresh inserts already return their durable representation. Re-reading
@@ -41234,6 +41614,10 @@ export async function appendSessionHistoryItems(
       return true;
     },
   );
+  // Assigned inside the retried transaction callback; the last attempt wins.
+  const delta = appendedFootprint as ActiveSessionHistoryFootprint | null;
+  if (appended && delta) input.onAppendedFootprint?.(delta);
+  return appended;
 }
 
 export type PendingSessionToolCallInput = {
@@ -41925,270 +42309,6 @@ export async function getActiveSessionHistoryItems(
   });
 }
 
-/**
- * Profiled upper envelope for one session's complete active, model-facing
- * transcript. Bytes alone do not bound the decoded object graph, so rows, JSON
- * nodes, and object properties are independently limited. Normal token-driven
- * compaction keeps active history far below these boundaries. The limits are a
- * final materialization guard: a corrupt/imported/pathological transcript fails
- * deterministically before a Postgres driver decodes it instead of using the
- * pod OOM killer as admission.
- */
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 15 * 1024 * 1024;
-export const ACTIVE_SESSION_HISTORY_MAX_ROWS = 8_192;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 131_072;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 65_536;
-
-export type ActiveSessionHistoryLimitKind =
-  | "json_bytes"
-  | "rows"
-  | "json_nodes"
-  | "json_properties";
-
-export class ActiveSessionHistoryLimitExceededError extends Error {
-  readonly code = "active_history_too_large";
-
-  constructor(
-    readonly actualBytes: number,
-    readonly maximumBytes: number,
-    readonly limitKind: ActiveSessionHistoryLimitKind = "json_bytes",
-    readonly actual: number = actualBytes,
-    readonly maximum: number = maximumBytes,
-  ) {
-    super(activeSessionHistoryLimitMessage(limitKind, actual, maximum));
-    this.name = "ActiveSessionHistoryLimitExceededError";
-  }
-}
-
-function activeSessionHistoryLimitMessage(
-  kind: ActiveSessionHistoryLimitKind,
-  actual: number,
-  maximum: number,
-): string {
-  if (kind === "json_bytes") {
-    return `Active session history is ${actual} UTF-8 JSON bytes, exceeding the ${maximum}-byte materialization limit.`;
-  }
-  const label =
-    kind === "rows"
-      ? "rows"
-      : kind === "json_nodes"
-        ? "decoded JSON nodes"
-        : "decoded JSON object properties";
-  return `Active session history has ${actual} ${label}; the materialization limit is ${maximum}.`;
-}
-
-/**
- * Memory-bounded active-history read for model input and compaction. PostgreSQL
- * first measures the complete logical window without returning any JSONB item,
- * then keyset-pages the admitted rows on the same repeatable-read snapshot.
- */
-export async function getActiveSessionHistoryItemsPaged(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  pageSize = ACTIVE_SESSION_HISTORY_MAX_ROWS,
-  maximumJsonBytes = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
-  maximumRows = ACTIVE_SESSION_HISTORY_MAX_ROWS,
-  maximumJsonNodes = ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
-  maximumJsonProperties = ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES,
-): Promise<
-  Array<{
-    id: string;
-    position: number;
-    item: Record<string, unknown>;
-    providerArtifactInvalidatedAt: Date | null;
-  }>
-> {
-  if (
-    !Number.isSafeInteger(pageSize) ||
-    pageSize < 1 ||
-    pageSize > ACTIVE_SESSION_HISTORY_MAX_ROWS
-  ) {
-    throw new Error(
-      `active session history page size must be an integer between 1 and ${ACTIVE_SESSION_HISTORY_MAX_ROWS}`,
-    );
-  }
-  if (!Number.isSafeInteger(maximumJsonBytes) || maximumJsonBytes < 1) {
-    throw new Error("active session history JSON limit must be a positive safe integer");
-  }
-  for (const [name, value] of [
-    ["row", maximumRows],
-    ["JSON node", maximumJsonNodes],
-    ["JSON property", maximumJsonProperties],
-  ] as const) {
-    if (!Number.isSafeInteger(value) || value < 1) {
-      throw new Error(`active session history ${name} limit must be a positive safe integer`);
-    }
-  }
-
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) => {
-      // Measure one logical JSON array. pg_column_size(jsonb) is deliberately
-      // insufficient because TOAST/compression could hide the decoded size.
-      const [size] = await scopedDb
-        .select({
-          bytes: sql<string>`case
-            when count(*) = 0 then 2
-            else sum(octet_length((${schema.sessionHistoryItems.item})::text)) + count(*) + 1
-          end`,
-          rows: sql<string>`count(*)`,
-        })
-        .from(schema.sessionHistoryItems)
-        .where(
-          and(
-            eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-            eq(schema.sessionHistoryItems.sessionId, sessionId),
-            eq(schema.sessionHistoryItems.active, true),
-          ),
-        );
-      const actualBytes = Number(size?.bytes ?? 0);
-      if (!Number.isSafeInteger(actualBytes) || actualBytes < 0) {
-        throw new Error(
-          `Active session history size is not a safe integer: ${String(size?.bytes)}`,
-        );
-      }
-      if (actualBytes > maximumJsonBytes) {
-        throw new ActiveSessionHistoryLimitExceededError(actualBytes, maximumJsonBytes);
-      }
-      const actualRows = Number(size?.rows ?? 0);
-      if (!Number.isSafeInteger(actualRows) || actualRows < 0) {
-        throw new Error(
-          `Active session history row count is not a safe integer: ${String(size?.rows)}`,
-        );
-      }
-      if (actualRows > maximumRows) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "rows",
-          actualRows,
-          maximumRows,
-        );
-      }
-
-      // Bound decoded shape independently from bytes. LIMIT maximum+1 keeps
-      // rejection work proportional to the admitted envelope.
-      const [nodeCount] = await rawRows<{ nodes: string }>(
-        scopedDb,
-        sql`
-          select count(*)::text as nodes
-          from (
-            select node
-            from session_history_items history
-            cross join lateral jsonb_path_query(history.item, 'strict $.**') as node
-            where history.workspace_id = ${workspaceId}
-              and history.session_id = ${sessionId}
-              and history.active = true
-            limit ${maximumJsonNodes + 1}
-          ) bounded_nodes
-        `,
-      );
-      const actualJsonNodes = Number(nodeCount?.nodes ?? 0);
-      if (!Number.isSafeInteger(actualJsonNodes) || actualJsonNodes < 0) {
-        throw new Error(
-          `Active session history JSON node count is not a safe integer: ${String(nodeCount?.nodes)}`,
-        );
-      }
-      if (actualJsonNodes > maximumJsonNodes) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "json_nodes",
-          actualJsonNodes,
-          maximumJsonNodes,
-        );
-      }
-
-      const [propertyCount] = await rawRows<{ properties: string }>(
-        scopedDb,
-        sql`
-          select count(*)::text as properties
-          from (
-            select property
-            from session_history_items history
-            cross join lateral jsonb_path_query(
-              history.item,
-              'strict $.** ? (@.type() == "object")'
-            ) as object_value
-            cross join lateral jsonb_object_keys(object_value) as property
-            where history.workspace_id = ${workspaceId}
-              and history.session_id = ${sessionId}
-              and history.active = true
-            limit ${maximumJsonProperties + 1}
-          ) bounded_properties
-        `,
-      );
-      const actualJsonProperties = Number(propertyCount?.properties ?? 0);
-      if (!Number.isSafeInteger(actualJsonProperties) || actualJsonProperties < 0) {
-        throw new Error(
-          `Active session history JSON property count is not a safe integer: ${String(propertyCount?.properties)}`,
-        );
-      }
-      if (actualJsonProperties > maximumJsonProperties) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "json_properties",
-          actualJsonProperties,
-          maximumJsonProperties,
-        );
-      }
-
-      const rows: Array<{
-        id: string;
-        position: number;
-        item: Record<string, unknown>;
-        providerArtifactInvalidatedAt: Date | null;
-      }> = [];
-      let afterPosition: number | null = null;
-      for (;;) {
-        const page: Array<{
-          id: string;
-          position: number;
-          item: Record<string, unknown>;
-          itemCodecVersion: number | null;
-          providerArtifactInvalidatedAt: Date | null;
-        }> = await scopedDb
-          .select({
-            id: schema.sessionHistoryItems.id,
-            position: schema.sessionHistoryItems.position,
-            item: schema.sessionHistoryItems.item,
-            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-            providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, sessionId),
-              eq(schema.sessionHistoryItems.active, true),
-              ...(afterPosition === null
-                ? []
-                : [gt(schema.sessionHistoryItems.position, afterPosition)]),
-            ),
-          )
-          .orderBy(schema.sessionHistoryItems.position)
-          .limit(pageSize);
-        rows.push(
-          ...page.map(({ itemCodecVersion, ...row }) => ({
-            ...row,
-            item: fromPostgresLosslessJson(row.item, itemCodecVersion),
-          })),
-        );
-        if (rows.length === actualRows || page.length < pageSize) return rows;
-        const nextPosition = page.at(-1)!.position;
-        if (afterPosition !== null && nextPosition <= afterPosition) {
-          throw new Error("active session history keyset did not advance");
-        }
-        afterPosition = nextPosition;
-      }
-    },
-    { isolationLevel: "repeatable read" },
-  );
-}
-
 /** Bounded finalized voice turns used only to resume a later realtime call. */
 export async function getSessionRealtimeContinuityEntries(
   db: Database,
@@ -42802,7 +42922,31 @@ async function pendingSteerExists(
       ),
     )
     .limit(1);
-  if (steerPrompt) return true;
+  if (steerPrompt) {
+    // A queued Steer that waits for the personal machine's owner cannot run,
+    // so it must not hand the owner's running turn over to it.
+    const owner = await sessionMachineOwnerSubject(db, {
+      accountId: null,
+      workspaceId,
+      sessionId,
+    });
+    if (owner === null) return true;
+    const [runnableSteer] = await db
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          eq(schema.sessionTurns.status, "queued"),
+          ne(schema.sessionTurns.id, turnId),
+          sql`${schema.sessionTurns.metadata} ->> 'delivery' = 'steer'`,
+          notWaitingForMachineOwnerSql(owner),
+        ),
+      )
+      .limit(1);
+    if (runnableSteer) return true;
+  }
   const [agentSteer] = await db
     .select({ id: schema.sessionSystemUpdates.id })
     .from(schema.sessionSystemUpdates)
@@ -62670,6 +62814,34 @@ export async function readLease(
   });
 }
 
+/**
+ * Waits while a sandbox group's lease is warming, the spawner that won
+ * cold->warming still bringing its box up, reading it every `pollMs`. Returns
+ * the first read that is no longer warming (warm once the spawner commits,
+ * cold or draining if its attempt ended, null if the lease is gone), or the
+ * last read, still warming, once `timeoutMs` has passed. An abort of `signal`
+ * ends the wait with its reason.
+ */
+export async function waitWhileLeaseWarming(
+  db: Database,
+  workspaceId: string,
+  sandboxGroupId: string,
+  options: { timeoutMs: number; pollMs: number; signal?: AbortSignal | undefined },
+): Promise<LeaseSnapshot | null> {
+  const deadline = Date.now() + options.timeoutMs;
+  let lease: LeaseSnapshot | null = null;
+  do {
+    await waitForSandboxTransition(
+      Math.max(0, Math.min(options.pollMs, deadline - Date.now())),
+      options.signal,
+      "sandbox warming wait cancelled",
+    );
+    lease = await readLease(db, workspaceId, sandboxGroupId);
+    if (lease?.liveness !== "warming") return lease;
+  } while (Date.now() < deadline);
+  return lease;
+}
+
 // P4.2 — record the (re-)resolved desktop data-plane URL on an ALREADY-WARM
 // lease, EPOCH-FENCED. commitWarmingToWarm records the URL at cold→warming→warm
 // (the spawn path); this is the WARM-path counterpart used when a viewer mints
@@ -70323,6 +70495,13 @@ export async function evaluateGoalContinuation(
         if (!row || row.status !== "active") {
           return { decision: "none" } as const;
         }
+        // A message waiting for the personal machine's owner is not queued
+        // work: the owner's goal keeps going beside it.
+        const machineOwner = await sessionMachineOwnerSubject(tx, {
+          accountId: null,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
         const [pendingTurn] = await tx
           .select({
             id: schema.sessionTurns.id,
@@ -70334,6 +70513,7 @@ export async function evaluateGoalContinuation(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
               eq(schema.sessionTurns.sessionId, input.sessionId),
               inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+              notWaitingForMachineOwnerSql(machineOwner),
             ),
           )
           .limit(1);
@@ -70675,6 +70855,11 @@ export async function materializeGoalContinuation(
             ),
           );
 
+        const machineOwner = await sessionMachineOwnerSubject(tx, {
+          accountId: null,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
         const [pendingTurn] = await tx
           .select({
             id: schema.sessionTurns.id,
@@ -70693,6 +70878,8 @@ export async function materializeGoalContinuation(
                 "recovering",
                 "waiting_capacity",
               ]),
+              // Waiting messages never hold back the owner's goal.
+              notWaitingForMachineOwnerSql(machineOwner),
             ),
           )
           .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
@@ -71241,6 +71428,11 @@ export type InitializeSessionStartInput = {
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
   /**
+   * Normalized IANA zone of the person sending the initial message, frozen in
+   * the initial turn's metadata.
+   */
+  initialTimeZone?: string;
+  /**
    * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
    * scheduled firing passes its task's value, which is copied, never
    * recomputed. Omitted by every other caller (the acceptance rule applies).
@@ -71296,6 +71488,14 @@ export type InitializeSessionStartResult = {
   /** True when this call installed/repaired start state or committed a new wake revision. */
   changed: boolean;
 };
+
+/** Trusted per-message facts the create request froze for the initial turn. */
+function initialTurnMetadata(
+  input: Pick<InitializeSessionStartInput, "initialTimeZone">,
+): Record<string, unknown> {
+  const timeZone = normalizeMessageTimeZone(input.initialTimeZone);
+  return timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {};
+}
 
 /**
  * Install a newly created session's complete first runnable unit atomically.
@@ -71854,8 +72054,11 @@ export async function initializeSessionStartAtomically(
                   sandboxBackend: session.sandboxBackend,
                   sandboxOs: session.sandboxOs,
                   metadata: input.turnExecutionPolicy
-                    ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
-                    : {},
+                    ? metadataWithTurnExecutionPolicyV1(
+                        initialTurnMetadata(input),
+                        input.turnExecutionPolicy,
+                      )
+                    : initialTurnMetadata(input),
                   lineage: {},
                   ...initiatorColumns(creator),
                   initiatingHumanSubjectId: initialTurnInitiatingHumanSubjectId,
@@ -72360,7 +72563,8 @@ function systemUpdateCausalHumanTurnId(
     ? lineage?.parentTurnId
     : update.kind === "goal_continuation" ||
         update.kind === "background_command_result" ||
-        update.kind === "session_wait_timeout"
+        update.kind === "session_wait_timeout" ||
+        update.kind === "capability_setup_completed"
       ? lineage?.causalTurnId
       : null;
   if (typeof value !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value)) {
@@ -72414,7 +72618,8 @@ function systemUpdateCausalExecutionKey(
     isChildLifecycleSystemUpdateKind(update.kind) ||
     update.kind === "goal_continuation" ||
     update.kind === "background_command_result" ||
-    update.kind === "session_wait_timeout"
+    update.kind === "session_wait_timeout" ||
+    update.kind === "capability_setup_completed"
   ) {
     // Malformed historical authority-bearing rows still own distinct claims.
     // They may carry ordinary authority-neutral context, but they must never
@@ -72705,7 +72910,11 @@ async function planInboxBatch(
       loaded.context &&
       !loaded.context.externalLink &&
       (loaded.eligibleIds.has(updates[0].id) ||
-        (updates[0].kind === "goal_continuation" && compatible(updates[0])))),
+        // A setup continuation stands in for the person's own "done": like a
+        // goal continuation it runs in their receiving context.
+        ((updates[0].kind === "goal_continuation" ||
+          updates[0].kind === "capability_setup_completed") &&
+          compatible(updates[0])))),
   );
   const candidates = receiverOwned && updates[0] && !compatible(updates[0]) ? [] : updates;
   const selected = selectBoundedSystemUpdateBatch(
@@ -73962,31 +74171,62 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
 }
 
 /** The session lock must already be held. Shared with pre-claim failure settlement
- * so a failed batch claim is attributed to the same logical turn. */
+ * so a failed batch claim is attributed to the same logical turn.
+ *
+ * On a personal machine, messages from anyone but its owner wait
+ * (`machine-owner-wait.ts`): they are never the head. `waiting` returns the
+ * ones sent before the owner's claimed head (queued ahead of it, or sent
+ * before an owner's Steer that jumped them), oldest first, which that turn
+ * takes in as context ahead of its own prompt. */
 async function selectQueuedSessionClaimBatch(
   tx: Database,
   session: typeof schema.sessions.$inferSelect,
   pendingAgentSteer: boolean,
-): Promise<Array<typeof schema.sessionTurns.$inferSelect>> {
+): Promise<{
+  batch: Array<typeof schema.sessionTurns.$inferSelect>;
+  waiting: Array<typeof schema.sessionTurns.$inferSelect>;
+}> {
+  const machineOwner = await sessionMachineOwnerSubject(tx, {
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+  });
+  const waits =
+    machineOwner === null
+      ? sql`false`
+      : sql`coalesce(${waitsForMachineOwnerSql(machineOwner)}, false)`;
   // Only fetch full prompt/authority rows for the leading Steer run (or the
   // ordinary head). A long queue of later Sends must not inflate claim memory.
-  const previews = await rawRows<{ id: string; version: number }>(
+  // Waiting messages break that run, and only those sent before the head are
+  // taken in with it.
+  const previews = await rawRows<{ id: string; version: number; waits: boolean }>(
     tx,
     sql`
-    with ordered as (
-      select id, version, position, created_at,
-        row_number() over (order by position, created_at, id) as ordinal,
-        count(*) filter (where metadata->>'delivery' is distinct from 'steer')
-          over (order by position, created_at, id rows unbounded preceding) as sends
+    with candidates as (
+      select id, version, position, created_at, ${waits} as waits,
+        metadata->>'delivery' is distinct from 'steer' as send
       from session_turns
       where workspace_id = ${session.workspaceId} and session_id = ${session.id}
         and status = 'queued' and source in ('user', 'api')
         and (${pendingAgentSteer} = false or metadata->>'delivery' = 'steer')
+    ), ordered as (
+      select id, version, position, created_at, waits,
+        count(*) filter (where not waits) over run as runnable,
+        count(*) filter (where not waits and send) over run as sends,
+        count(*) filter (where waits) over run as waited
+      from candidates
+      window run as (order by position, created_at, id rows unbounded preceding)
+    ), head as (
+      select waited, created_at from ordered where not waits and runnable = 1
     )
-    select id, version from ordered where ordinal = 1 or sends = 0
+    select id, version, waits from ordered
+    where exists (select 1 from head) and (
+      (waits and (runnable = 0 or created_at < (select created_at from head)))
+      or (not waits and runnable = 1)
+      or (not waits and sends = 0 and waited = (select waited from head)))
     order by position, created_at, id`,
   );
-  if (previews.length === 0) return [];
+  if (previews.length === 0) return { batch: [], waiting: [] };
   const locked = await lockSessionEventWriteRows(tx, {
     workspaceId: session.workspaceId,
     controlLock: "already_locked",
@@ -73994,7 +74234,7 @@ async function selectQueuedSessionClaimBatch(
     turnIds: previews.map((turn) => turn.id),
   });
   const lockedById = new Map(locked.turns.map((turn) => [turn.id, turn]));
-  const queued = previews.map((preview) => {
+  const rows = previews.map((preview) => {
     const turn = lockedById.get(preview.id);
     if (
       !turn ||
@@ -74007,10 +74247,11 @@ async function selectQueuedSessionClaimBatch(
         "Queued claim selection changed under the session lock",
       );
     }
-    return turn;
+    return { turn, waits: preview.waits === true };
   });
+  const queued = rows.filter((row) => !row.waits).map((row) => row.turn);
   const first = queued[0];
-  if (!first) return [];
+  if (!first) return { batch: [], waiting: [] };
   const plainSteer = (turn: typeof first) =>
     turn.metadata?.delivery === "steer" &&
     turn.executionGeneration === 0 &&
@@ -74050,7 +74291,16 @@ async function selectQueuedSessionClaimBatch(
       break;
     batch.push(next);
   }
-  return batch;
+  // A waiting message whose history cannot be rendered stays queued rather
+  // than failing the owner's claim.
+  const waiting = rows
+    .filter((row) => row.waits && validHistory(row.turn))
+    .map((row) => row.turn)
+    .sort(
+      (left, right) =>
+        left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+    );
+  return { batch, waiting };
 }
 
 /**
@@ -75399,11 +75649,12 @@ export async function claimSessionWorkForAttempt(
         // internal instruction is delivered as context on that same human turn
         // instead of manufacturing another system inference ahead of it.
         // Ordinary queued sends retain the established Agent-Steer priority.
-        const queuedBatch = await selectQueuedSessionClaimBatch(
-          tx as unknown as Database,
-          session,
-          Boolean(pendingAgentSteer),
-        );
+        const { batch: queuedBatch, waiting: waitingMessages } =
+          await selectQueuedSessionClaimBatch(
+            tx as unknown as Database,
+            session,
+            Boolean(pendingAgentSteer),
+          );
         const queuedTurnRow = queuedBatch.at(-1);
         for (const member of queuedBatch) {
           await goalSnapshotForAcceptedTurnInTransaction(tx as unknown as Database, member);
@@ -76549,9 +76800,25 @@ export async function claimSessionWorkForAttempt(
               eq(schema.sessionHistoryItems.sessionId, sessionId),
             ),
           );
-        const historyTurns = [...queuedBatch.slice(0, -1), row];
+        // Messages that waited for this machine's owner come first, in the
+        // order they were sent, marked as such; then the claimed batch.
+        const waitingHistory = waitingMessages.map((waitingTurn) => ({
+          historyTurn: waitingTurn,
+          modelContext: [WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT, waitingTurn.modelContext?.trim()]
+            .filter(Boolean)
+            .join("\n\n"),
+          goalSnapshot: undefined,
+        }));
+        const historyTurns = [
+          ...waitingHistory,
+          ...[...queuedBatch.slice(0, -1), row].map((historyTurn) => ({
+            historyTurn,
+            modelContext: historyTurn.modelContext,
+            goalSnapshot: SessionGoalSnapshot.parse(historyTurn.goalSnapshot),
+          })),
+        ];
         await tx.insert(schema.sessionHistoryItems).values(
-          historyTurns.map((historyTurn, index) =>
+          historyTurns.map(({ historyTurn, modelContext, goalSnapshot }, index) =>
             withLosslessContentWriteVersion(
               {
                 accountId: session.accountId,
@@ -76566,12 +76833,14 @@ export async function claimSessionWorkForAttempt(
                       ? (historyTurn.resources as ResourceRef[])
                       : [],
                     TimelineAnnotations.parse(historyTurn.annotations),
-                    historyTurn.modelContext,
-                    SessionGoalSnapshot.parse(historyTurn.goalSnapshot),
+                    modelContext,
+                    goalSnapshot,
                     // Acceptance time, not claim time: a queued message keeps the
                     // moment the user sent it.
                     historyTurn.createdAt,
                     humanTurnSenderLabel(historyTurn),
+                    // The sender's zone frozen in the turn at acceptance.
+                    messageTimeZoneFromTurnMetadata(historyTurn.metadata),
                   ),
                 ),
               },
@@ -76580,7 +76849,9 @@ export async function claimSessionWorkForAttempt(
             ),
           ),
         );
-        const consumed = queuedBatch.slice(0, -1);
+        // Both the waiting messages and the batch's earlier members are
+        // delivered with this turn and never run on their own.
+        const consumed = [...waitingMessages, ...queuedBatch.slice(0, -1)];
         const consumedEvents: SessionEventInsertWithPayload[] = consumed.map((member, index) => ({
           accountId: session.accountId,
           workspaceId,
@@ -78495,6 +78766,7 @@ export async function peekSessionWork(
               eq(schema.sessionHumanInputRequests.turnId, turn.id),
               eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
               eq(schema.sessionHumanInputRequests.status, "pending"),
+              eq(schema.sessionHumanInputRequests.origin, "tool_call"),
               isNotNull(schema.sessionHumanInputRequests.expiresAt),
             ),
           )
@@ -78612,18 +78884,13 @@ export async function peekSessionWork(
       throw new Error(`Session ${sessionId} has terminal active turn ${turn.id} (${turn.status})`);
     }
 
-    const [queued] = await scopedDb
-      .select({ id: schema.sessionTurns.id })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.status, "queued"),
-          inArray(schema.sessionTurns.source, ["user", "api"]),
-        ),
-      )
-      .limit(1);
+    // A message waiting for the personal machine's owner is not work yet.
+    const queued = await runnableQueuedTurnExists(scopedDb, {
+      accountId: session.accountId,
+      workspaceId,
+      sessionId,
+      sources: ["user", "api"],
+    });
     if (queued || session.compactRequested) return runnable;
     const waitState = await sessionInputWaitStateTx(scopedDb, workspaceId, sessionId, session);
     const inputWaitPeek =
@@ -79481,7 +79748,7 @@ async function settleSessionWorkBeforeAttemptClaim(
               desc(schema.sessionSystemUpdates.id),
             )
             .limit(1);
-          const queuedBatch = await selectQueuedSessionClaimBatch(
+          const { batch: queuedBatch } = await selectQueuedSessionClaimBatch(
             tx as unknown as Database,
             session,
             Boolean(pendingAgentSteer),
@@ -79619,6 +79886,7 @@ async function settleSessionWorkBeforeAttemptClaim(
                 eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
                 eq(schema.sessionHumanInputRequests.turnId, turn.id),
                 eq(schema.sessionHumanInputRequests.status, "pending"),
+                eq(schema.sessionHumanInputRequests.origin, "tool_call"),
               ),
             )
             .returning({
@@ -80556,17 +80824,13 @@ export async function settleSessionIdleWithParentOutbox(
       ) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
-      const [queued] = await tx
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, sessionId),
-            eq(schema.sessionTurns.status, "queued"),
-          ),
-        )
-        .limit(1);
+      // A message waiting for the personal machine's owner does not keep the
+      // chat busy: it is not work until the owner writes or the chat moves.
+      const queued = await runnableQueuedTurnExists(tx as unknown as Database, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId,
+      });
       if (queued || !["queued", "running", "idle"].includes(session.status)) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
@@ -81964,6 +82228,7 @@ export async function applySessionTurnSettlement(
               eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
               eq(schema.sessionHumanInputRequests.turnId, input.turnId),
               eq(schema.sessionHumanInputRequests.status, "pending"),
+              eq(schema.sessionHumanInputRequests.origin, "tool_call"),
             ),
           )
           .limit(1)
@@ -82051,23 +82316,11 @@ export async function applySessionTurnSettlement(
         return { action: "pending_steer_withdrawn" as const, events: [] as [] };
       }
 
-      // A secret approval card is bound to its stored request by question id;
-      // the host's own text replaces whatever the agent sent, so the person
-      // always sees what is really being approved.
-      const secretApprovals = await secretUseApprovalsForSessionTx(tx as unknown as Database, {
-        workspaceId,
-        sessionId: input.sessionId,
-        ids: (input.runState?.humanInputRequests ?? []).flatMap((request) =>
-          request.questions.flatMap((question) => {
-            const id = secretUseApprovalIdFromQuestionId(question.id);
-            return id === null ? [] : [id];
-          }),
-        ),
-      });
-      const approvalCardRequestIds = new Set<string>();
-      const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => {
-        let approvalCard = false;
-        const questions = request.questions.map((question) => {
+      // Secret approval cards are Opengeni's own (origin secret_use_approval),
+      // never an agent's request: the runtime refuses to ask with one.
+      const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => ({
+        ...request,
+        questions: request.questions.map((question) => {
           const parsed = HumanInputQuestionContract.parse(question);
           if (parsed.skillReview) {
             const canonical = canonicalSkillReviewQuestion(question);
@@ -82076,19 +82329,11 @@ export async function applySessionTurnSettlement(
             }
             return canonical;
           }
-          const approvalId = secretUseApprovalIdFromQuestionId(parsed.id);
-          const approval = approvalId === null ? undefined : secretApprovals.get(approvalId);
-          if (approval) {
-            approvalCard = true;
-            return secretUseApprovalHumanInput(secretUseApprovalView(approval)).questions[0]!;
-          }
           return parsed.kind === "text" || parsed.allowOther
             ? parsed
             : { ...parsed, allowOther: true };
-        });
-        if (approvalCard) approvalCardRequestIds.add(request.id);
-        return { ...request, questions, ...(approvalCard ? { allowSkip: false } : {}) };
-      });
+        }),
+      }));
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
@@ -82356,18 +82601,13 @@ export async function applySessionTurnSettlement(
 
       let effectiveSessionStatus = input.sessionStatus;
       if (input.sessionStatus === "idle" && input.activeTurnId === null) {
-        const [waitingPrompt] = await tx
-          .select({ id: schema.sessionTurns.id })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              eq(schema.sessionTurns.status, "queued"),
-              inArray(schema.sessionTurns.source, ["user", "api"]),
-            ),
-          )
-          .limit(1);
+        // Messages waiting for the personal machine's owner leave it idle.
+        const waitingPrompt = await runnableQueuedTurnExists(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          sources: ["user", "api"],
+        });
         if (waitingPrompt) effectiveSessionStatus = "queued";
       }
       const now = new Date();
@@ -82467,6 +82707,7 @@ export async function applySessionTurnSettlement(
                 eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
                 eq(schema.sessionHumanInputRequests.turnId, input.turnId),
                 eq(schema.sessionHumanInputRequests.status, "pending"),
+                eq(schema.sessionHumanInputRequests.origin, "tool_call"),
               ),
             )
             .returning({
@@ -82598,50 +82839,13 @@ export async function applySessionTurnSettlement(
           };
         }
       }
-      // The requested event feeds push, chat integrations and timelines, so
-      // an approval card's event carries the same host text as its row.
-      const canonicalApprovalRequests = new Map(
-        humanInputRequests
-          .filter((request) => approvalCardRequestIds.has(request.id))
-          .map((request) => [request.id, request]),
-      );
-      const turnEvents =
-        canonicalApprovalRequests.size === 0
-          ? input.events
-          : input.events.map((event) => {
-              if (event.type !== "session.humanInput.requested") return event;
-              const payload =
-                event.payload && typeof event.payload === "object"
-                  ? (event.payload as Record<string, unknown>)
-                  : null;
-              const request =
-                payload?.request && typeof payload.request === "object"
-                  ? (payload.request as Record<string, unknown>)
-                  : null;
-              const canonical =
-                typeof request?.id === "string"
-                  ? canonicalApprovalRequests.get(request.id)
-                  : undefined;
-              if (!payload || !request || !canonical) return event;
-              return {
-                ...event,
-                payload: {
-                  ...payload,
-                  request: {
-                    ...request,
-                    questions: canonical.questions,
-                    allowSkip: canonical.allowSkip,
-                  },
-                },
-              };
-            });
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
         ...terminalHumanInputEvents,
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
-        ...turnEvents,
+        ...input.events,
         ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
       ];
       const values = settlementEvents.map((event) => {
@@ -84122,6 +84326,53 @@ export async function getSessionTurn(
       )
       .limit(1);
     return row ? mapSessionTurn(row) : null;
+  });
+}
+
+/** How many of a session's newest finished turns the message-zone lookup reads. */
+const LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW = 64;
+
+/**
+ * The time zone of the newest finished turn in a session whose message
+ * carried one, among its latest {@link LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW}
+ * finished turns. Walks the newest-finished-first index and stops there, so a
+ * long session costs one bounded index range.
+ */
+export async function getLatestSessionMessageTimeZone(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | undefined> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const recent = scopedDb
+      .select({
+        metadata: schema.sessionTurns.metadata,
+        finishedAt: schema.sessionTurns.finishedAt,
+        position: schema.sessionTurns.position,
+        createdAt: schema.sessionTurns.createdAt,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          isNotNull(schema.sessionTurns.finishedAt),
+        ),
+      )
+      .orderBy(
+        desc(schema.sessionTurns.finishedAt),
+        desc(schema.sessionTurns.position),
+        desc(schema.sessionTurns.createdAt),
+      )
+      .limit(LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW)
+      .as("recent");
+    const rows = await scopedDb
+      .select({ metadata: recent.metadata })
+      .from(recent)
+      .where(sql`${recent.metadata} ? ${MESSAGE_TIME_ZONE_METADATA_KEY}`)
+      .orderBy(desc(recent.finishedAt), desc(recent.position), desc(recent.createdAt))
+      .limit(1);
+    return messageTimeZoneFromTurnMetadata(rows[0]?.metadata);
   });
 }
 
@@ -85785,18 +86036,14 @@ export async function markSessionWorkflowWakeDelivered(
                 return { action: "pending_admission", blocker: "pending_input_wait" } as const;
               }
             }
-            const [pendingPromptTurn] = await tx
-              .select({ id: schema.sessionTurns.id })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                  eq(schema.sessionTurns.sessionId, input.sessionId),
-                  eq(schema.sessionTurns.status, "queued"),
-                  inArray(schema.sessionTurns.source, ["user", "api"]),
-                ),
-              )
-              .limit(1);
+            // A message waiting for the personal machine's owner is not
+            // undelivered work, so it must not keep the wake pending.
+            const pendingPromptTurn = await runnableQueuedTurnExists(tx as unknown as Database, {
+              accountId: null,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sources: ["user", "api"],
+            });
             if (pendingPromptTurn) {
               return {
                 action: "pending_admission",
@@ -86202,6 +86449,259 @@ export async function addSessionSystemUpdate(
     throw new Error(`Internal update payload discriminator must equal kind ${input.kind}`);
   }
   return await addSessionSystemUpdateWithSourceMutation(db, input, async () => undefined);
+}
+
+export type EnqueueCapabilitySetupContinuationInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  capabilityId: string;
+  /** The live catalog's name for the capability, shown to the agent. */
+  capabilityName: string;
+  /**
+   * Whether the caller verified the capability's tools are in the chat (not
+   * only assumed because the chat's tool list was too long to check).
+   */
+  toolsVerified: boolean;
+  /** The authenticated person who finished setup. */
+  requesterSubjectId: string;
+};
+
+export type EnqueueCapabilitySetupContinuationResult =
+  | {
+      outcome: "queued" | "already_queued";
+      update: SessionSystemUpdate;
+      shouldWake: boolean;
+      workflowWakeRevision: number | null;
+      temporalWorkflowId: string | null;
+      events: SessionEvent[];
+    }
+  | {
+      outcome: "not_needed";
+      reason: Extract<
+        CapabilitySetupContinuationSkipReason,
+        "no_card" | "later_message" | "not_requester" | "session_closed"
+      >;
+    };
+
+class CapabilitySetupContinuationNotNeeded extends Error {
+  constructor(readonly reason: "later_message" | "not_requester") {
+    super(`capability setup continuation not needed: ${reason}`);
+  }
+}
+
+/** The card's dedupe key: at most one continuation per posted card. */
+export function capabilitySetupContinuationDedupeKey(cardEventId: string): string {
+  return `capability-setup-continuation:${cardEventId}`;
+}
+
+/**
+ * Wake the agent once after the person finished setup from the latest card it
+ * posted for `capabilityId`. The caller has already checked that the
+ * capability is usable in this chat. Nothing is sent when no such card exists,
+ * when the person has written since the card (their message carries on), or
+ * when the request the card belongs to is someone else's. The update runs in
+ * the person's receiving context, exactly as their own next message would.
+ */
+export async function enqueueCapabilitySetupContinuation(
+  db: Database,
+  input: EnqueueCapabilitySetupContinuationInput,
+): Promise<EnqueueCapabilitySetupContinuationResult> {
+  const read = await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const tx = scoped as unknown as Database;
+    const [card] = await tx
+      .select({ id: schema.sessionEvents.id, sequence: schema.sessionEvents.sequence })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.type, "tool.auth_needed"),
+          sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    if (!card) return { kind: "skip", reason: "no_card" } as const;
+    const [existing] = await tx
+      .select()
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          eq(schema.sessionSystemUpdates.dedupeKey, capabilitySetupContinuationDedupeKey(card.id)),
+        ),
+      )
+      .limit(1);
+    if (existing) return { kind: "existing", update: mapSessionSystemUpdate(existing) } as const;
+    const [session] = await tx
+      .select({
+        status: schema.sessions.status,
+        contentArchiveState: schema.sessions.contentArchiveState,
+        executionContextTurnId: schema.sessions.executionContextTurnId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    if (!session || session.status === "cancelled" || session.contentArchiveState !== null) {
+      return { kind: "skip", reason: "session_closed" } as const;
+    }
+    if (await userMessageAfterSequenceTx(tx, input, card.sequence)) {
+      return { kind: "skip", reason: "later_message" } as const;
+    }
+    if (!session.executionContextTurnId) return { kind: "skip", reason: "not_requester" } as const;
+    const [context] = await tx
+      .select()
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, session.executionContextTurnId),
+        ),
+      )
+      .limit(1);
+    // The continuation stands in for the requester's own "done", so it runs
+    // on their receiving context: the person who made the request, or for a
+    // request no person made (a host server's own key) that same principal.
+    // Someone else finishing setup in a shared chat can simply say so.
+    if (
+      !context ||
+      (turnHuman(context) ?? context.initiatorSubjectId) !== input.requesterSubjectId
+    ) {
+      return { kind: "skip", reason: "not_requester" } as const;
+    }
+    return { kind: "card", card, context } as const;
+  });
+  if (read.kind === "skip") return { outcome: "not_needed", reason: read.reason };
+  if (read.kind === "existing") {
+    return {
+      outcome: "already_queued",
+      update: read.update,
+      shouldWake: false,
+      workflowWakeRevision: null,
+      temporalWorkflowId: null,
+      events: [],
+    };
+  }
+  const { card, context } = read;
+  const human = turnHuman(context);
+  // The receiving context's exact authority, as a goal continuation copies
+  // its causal turn's: the claim then admits it into that context and
+  // resolves the person's current accounts, including the one just set up.
+  const personalConnectionDelegations = parsedPersonalConnectionDelegations(
+    context.personalConnectionDelegations,
+    `session_turns:${input.workspaceId}:${input.sessionId}:${context.id}`,
+  );
+  const xaiProviderAccountAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
+    context.xaiProviderAccountAuthoritySnapshot,
+  );
+  const claudeProviderAccountAuthoritySnapshot = ClaudeProviderAccountAuthoritySnapshotV1.parse(
+    context.claudeProviderAccountAuthoritySnapshot,
+  );
+  const name = input.capabilityName.trim().slice(0, CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS);
+  try {
+    const result = await addSessionSystemUpdateWithSourceMutation(
+      db,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        kind: "capability_setup_completed",
+        classification: "success",
+        sourceId: card.id,
+        dedupeKey: capabilitySetupContinuationDedupeKey(card.id),
+        summary: capabilitySetupCompletedSummary(name || input.capabilityId, input.toolsVerified),
+        payload: {
+          type: "capability_setup_completed",
+          capabilityId: input.capabilityId,
+          name: name || input.capabilityId.slice(0, CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS),
+          cardEventId: card.id,
+        },
+        lineage: {
+          causalTurnId: context.id,
+          ...(human && personalConnectionDelegations.length > 0
+            ? { connectionAuthoritySubjectId: human }
+            : {}),
+          ...(human && xaiProviderAccountAuthoritySnapshot.scope === "user"
+            ? { xaiAuthoritySubjectId: human }
+            : {}),
+          ...(human && claudeProviderAccountAuthoritySnapshot.scope === "user"
+            ? { claudeAuthoritySubjectId: human }
+            : {}),
+        },
+        personalConnectionDelegations,
+        mcpAccountBindings: parseAcceptedMcpAccountBindings(context.mcpAccountBindings),
+        xaiProviderAccountAuthoritySnapshot,
+        claudeProviderAccountAuthoritySnapshot,
+      },
+      async () => undefined,
+      {
+        // Re-check under the session lock: a message or a new receiving
+        // context committed since the read wins over this continuation.
+        prepareSource: async (tx) => {
+          const [locked] = await tx
+            .select({ executionContextTurnId: schema.sessions.executionContextTurnId })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .limit(1);
+          if (await userMessageAfterSequenceTx(tx, input, card.sequence)) {
+            throw new CapabilitySetupContinuationNotNeeded("later_message");
+          }
+          if (locked?.executionContextTurnId !== context.id) {
+            throw new CapabilitySetupContinuationNotNeeded("not_requester");
+          }
+        },
+      },
+    );
+    if (result.reason === "session_cancelled") {
+      return { outcome: "not_needed", reason: "session_closed" };
+    }
+    return {
+      outcome: result.added ? "queued" : "already_queued",
+      update: result.update,
+      shouldWake: result.shouldWake,
+      workflowWakeRevision: result.workflowWakeRevision,
+      temporalWorkflowId: result.temporalWorkflowId,
+      events: result.events,
+    };
+  } catch (error) {
+    if (error instanceof CapabilitySetupContinuationNotNeeded) {
+      return { outcome: "not_needed", reason: error.reason };
+    }
+    throw error;
+  }
+}
+
+async function userMessageAfterSequenceTx(
+  tx: Database,
+  input: Pick<EnqueueCapabilitySetupContinuationInput, "workspaceId" | "sessionId">,
+  sequence: number,
+): Promise<boolean> {
+  const [message] = await tx
+    .select({ id: schema.sessionEvents.id })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.message"),
+        gt(schema.sessionEvents.sequence, sequence),
+      ),
+    )
+    .limit(1);
+  return message !== undefined;
 }
 
 /**
@@ -87702,6 +88202,13 @@ export async function acceptSessionApprovalDecision(
     mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
     /** Bounded decider kind for the parent's resolution notice; `human` when omitted. */
     respondedByKind?: ChildRequiresActionRespondedByKind;
+    /**
+     * The decider is signed in where an app-action change may be confirmed:
+     * the app itself, or an embed the deployment opted in; never a key, chat
+     * integration or other token carrying their identity. Only such a
+     * decision confirms an app-action change.
+     */
+    decidedBySignedInPerson?: boolean;
     clientEventId?: string | null;
     interactionIntervention?: {
       interventionId: string;
@@ -87955,6 +88462,8 @@ export async function acceptSessionApprovalDecision(
                 "approval actor",
                 1024,
               ),
+              decisionByKind: input.respondedByKind ?? "human",
+              decisionBySignedInPerson: input.decidedBySignedInPerson === true,
               decisionEventId: event.id,
               decidedAt: event.occurredAt,
               updatedAt: new Date(),
@@ -88064,6 +88573,7 @@ async function scheduledHumanWaitTargetInRlsContext(
         eq(schema.sessionHumanInputRequests.turnId, turn.id),
         eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
         eq(schema.sessionHumanInputRequests.status, "pending"),
+        eq(schema.sessionHumanInputRequests.origin, "tool_call"),
       ),
     )
     .orderBy(
@@ -88412,6 +88922,113 @@ export async function appendTurnCapabilityCardOnce(
 }
 
 export type SessionEventAppendClass = "raw" | "semantic" | "mixed";
+
+/**
+ * Post Opengeni's own approval card for a blocked secret use, in the chat of
+ * the exact attempt that was blocked. The card is a `secret_use_approval`
+ * human-input request: its `session.humanInput.requested` event shows it in
+ * the chat and Slack thread and opens the person's inbox item and phone
+ * notification, and it stays answerable after the turn. A request that
+ * already has a pending card is not posted again, so an identical blocked
+ * use never notifies twice. Returns whether the person has been asked; false
+ * only when this attempt no longer owns the chat or the request was decided.
+ */
+export async function postSecretUseApprovalCard(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    approval: SecretUseApprovalRow;
+  },
+): Promise<{ asked: boolean; requestId: string | null; events: SessionEvent[] }> {
+  const card = secretUseApprovalHumanInput(secretUseApprovalView(input.approval));
+  const toolCallId = secretUseApprovalQuestionId(input.approval.id);
+  const requestId = crypto.randomUUID();
+  let existingId: string | null = null;
+  const result = await mutateAndAppendSessionEventsForTurnAttempt(
+    db,
+    input.workspaceId,
+    input.sessionId,
+    input.turnId,
+    input.executionGeneration,
+    input.attemptId,
+    [
+      {
+        type: "session.humanInput.requested",
+        payload: {
+          request: {
+            id: requestId,
+            questions: card.questions,
+            allowSkip: false,
+            expiresAt: null,
+            origin: "secret_use_approval",
+          },
+        },
+      },
+    ],
+    {
+      rowProjection: "event",
+      // The attempt fence holds the session row, which also serializes the
+      // answer path: the request's state read here is current.
+      mutate: async (tx, fence) => {
+        existingId = null;
+        const [existing] = await tx
+          .select({ id: schema.sessionHumanInputRequests.id })
+          .from(schema.sessionHumanInputRequests)
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+              eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+              eq(schema.sessionHumanInputRequests.toolCallId, toolCallId),
+              eq(schema.sessionHumanInputRequests.origin, "secret_use_approval"),
+              eq(schema.sessionHumanInputRequests.status, "pending"),
+            ),
+          )
+          .limit(1);
+        if (existing) {
+          existingId = existing.id;
+          return false;
+        }
+        if (!fence.allowed || !fence.session) return false;
+        const [approval] = await tx
+          .select({ status: schema.secretUseApprovals.status })
+          .from(schema.secretUseApprovals)
+          .where(
+            and(
+              eq(schema.secretUseApprovals.workspaceId, input.workspaceId),
+              eq(schema.secretUseApprovals.id, input.approval.id),
+            ),
+          )
+          .limit(1);
+        if (approval?.status !== "pending") return false;
+        const inserted = await tx
+          .insert(schema.sessionHumanInputRequests)
+          .values({
+            id: requestId,
+            accountId: fence.session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            turnGeneration: input.executionGeneration,
+            creationAttemptId: input.attemptId,
+            toolCallId,
+            origin: "secret_use_approval",
+            questions: card.questions,
+            allowSkip: false,
+            expiresAt: null,
+          })
+          .onConflictDoNothing()
+          .returning({ id: schema.sessionHumanInputRequests.id });
+        return inserted.length > 0;
+      },
+    },
+  );
+  if (result.mutationApplied) return { asked: true, requestId, events: result.events };
+  return { asked: existingId !== null, requestId: existingId, events: [] };
+}
 export type SessionEventAppendPhase =
   | "transaction"
   | "mutation"
@@ -90806,6 +91423,7 @@ export * from "./automations";
 export * from "./event-triggers";
 export * from "./mcp-event-subscriptions";
 export * from "./event-source-feeds";
+export * from "./automation-templates";
 export * from "./organization-model-providers";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";

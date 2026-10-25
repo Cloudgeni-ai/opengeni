@@ -26,6 +26,11 @@ pub fn session(env: &Environment, path: &Path, threads: usize) -> Result<Session
         .map_err(|error| format!("session: {error}"))?
         .with_inter_threads(1)
         .map_err(|error| format!("session: {error}"))?
+        // Memory patterns plan one arena layout per input shape and keep it;
+        // embedding inputs change length with every piece of speech, so the
+        // plans only pile up (about 0.6 GB on a half-hour meeting).
+        .with_memory_pattern(false)
+        .map_err(|error| format!("session: {error}"))?
         .commit_from_file(path)
         .map_err(|error| format!("loading {}: {error}", path.display()))
 }

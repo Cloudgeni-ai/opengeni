@@ -14,11 +14,15 @@ import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
 import { t } from "@opengeni/react/app/lib/console-text";
 import {
   AutomationWhenField,
+  automationTemplateOfSaved,
+  automationTemplatesFor,
   emptyEventTriggersDraft,
-  eventSourceChoiceOf,
   eventTriggersDraftFrom,
   hasEventTriggerIssues,
+  useEventSourceStandIns,
   validateEventTriggers,
+  withTemplateSources,
+  type AutomationTemplate,
   type EventTriggersIssues,
 } from "@opengeni/react/automations";
 
@@ -99,7 +103,13 @@ import {
 } from "./schedule-model";
 import { useScheduleAccess, useScheduleNavigation } from "./schedule-parts";
 import { KnowledgeSyncFormPage } from "./knowledge-sync-form-page";
-import { useEventSourceLogo, useEventSources, useEventTriggersEnabled } from "./use-event-sources";
+import {
+  useEventSourceLogo,
+  useEventSources,
+  useEventTriggersEnabled,
+  useReadyEventSources,
+} from "./use-event-sources";
+import { SAVED_TEMPLATE_ID } from "./use-automation-templates";
 
 export type ScheduleFormMode =
   | {
@@ -118,6 +128,13 @@ type Source =
   | { status: "error"; error: Error }
   | { status: "ready"; task: ScheduledTask };
 
+/** A template saved in the workspace that `?template=` names. */
+type SavedTemplate =
+  | { status: "none" }
+  | { status: "loading" }
+  | { status: "error"; error: Error }
+  | { status: "ready"; template: AutomationTemplate | undefined };
+
 export function ScheduleFormPage({
   workspaceId,
   mode,
@@ -132,6 +149,42 @@ export function ScheduleFormPage({
   );
   const [attempt, setAttempt] = useState(0);
   const go = useScheduleNavigation(workspaceId);
+  const eventTriggers = useEventTriggersEnabled();
+  const savedTemplateId =
+    mode.kind === "create" && mode.template && SAVED_TEMPLATE_ID.test(mode.template)
+      ? mode.template
+      : undefined;
+  const [saved, setSaved] = useState<SavedTemplate>(() =>
+    savedTemplateId ? { status: "loading" } : { status: "none" },
+  );
+
+  useEffect(() => {
+    if (!savedTemplateId) {
+      setSaved({ status: "none" });
+      return;
+    }
+    let live = true;
+    setSaved({ status: "loading" });
+    client.listAutomationTemplates(workspaceId).then(
+      (list) => {
+        if (!live) return;
+        const found = list.find((entry) => entry.id === savedTemplateId);
+        // One that is gone opens a blank form, like an unknown built-in id.
+        setSaved({ status: "ready", template: found && automationTemplateOfSaved(found) });
+      },
+      (error: unknown) => {
+        if (live) {
+          setSaved({
+            status: "error",
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        }
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [attempt, client, savedTemplateId, workspaceId]);
 
   useEffect(() => {
     if (!sourceId) {
@@ -163,6 +216,38 @@ export function ScheduleFormPage({
       ? { label: "Automation", onClick: () => go.detail(mode.scheduleId) }
       : { label: "Automations", onClick: go.list };
 
+  if (saved.status === "loading" || saved.status === "error") {
+    return (
+      <FormPage
+        title="New automation"
+        submitLabel="Create automation"
+        back={back}
+        onCancel={back.onClick}
+        loading={saved.status === "loading"}
+        loadingFields={4}
+        submitDisabled
+      >
+        {saved.status === "error" ? (
+          <ErrorMessage
+            title="Couldn't load the template"
+            {...apiErrorDetails(saved.error)}
+            action={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setAttempt((value) => value + 1)}
+              >
+                Try again
+              </Button>
+            }
+          >
+            {apiErrorAdvice(saved.error)}
+          </ErrorMessage>
+        ) : null}
+      </FormPage>
+    );
+  }
   if (source.status === "loading" || source.status === "error") {
     return (
       <FormPage
@@ -205,6 +290,16 @@ export function ScheduleFormPage({
   }
 
   const task = source.status === "ready" ? source.task : null;
+  const chosen =
+    mode.kind !== "create"
+      ? undefined
+      : saved.status === "ready"
+        ? saved.template
+        : templateById(mode.template, eventTriggers);
+  // A template on events opens blank where events don't run.
+  const template = chosen
+    ? automationTemplatesFor([chosen], { eventTriggers, workspaceEvents: true })[0]
+    : undefined;
   if (mode.kind === "edit" && task && isKnowledgeSync(task)) {
     return (
       <KnowledgeSyncFormPage
@@ -221,6 +316,7 @@ export function ScheduleFormPage({
       workspaceId={workspaceId}
       mode={mode}
       task={task}
+      template={template}
       back={
         mode.kind === "edit" && task
           ? { label: task.name, onClick: back.onClick }
@@ -297,12 +393,15 @@ function AgentScheduleForm({
   workspaceId,
   mode,
   task,
+  template,
   back,
 }: {
   workspaceId: string;
   mode: ScheduleFormMode;
   /** The schedule being edited, or duplicated from. */
   task: ScheduledTask | null;
+  /** The template a new automation starts from. */
+  template: AutomationTemplate | undefined;
   back: { label: string; onClick: () => void };
 }) {
   const context = useAppContext();
@@ -312,6 +411,18 @@ function AgentScheduleForm({
   const editing = mode.kind === "edit";
   const eventTriggers = useEventTriggersEnabled();
   const eventSources = useEventSources(workspaceId, eventTriggers);
+  const readySources = useReadyEventSources(workspaceId, eventTriggers);
+  // Sources that need no setting up (an MCP server that offers events, the
+  // viewer's Gmail, this workspace's own events) are offered before the
+  // viewer has added them.
+  const standIns = useEventSourceStandIns({
+    client,
+    workspaceId,
+    sources: eventSources.sources,
+    readySources,
+    workspaceEvents: eventTriggers,
+  });
+  const formSources = standIns.sources;
   const sourceLogo = useEventSourceLogo();
   const canAsk = useCanCreateScheduleWithAgent(workspaceId);
   const ask = useCreateWithOpenGeni(workspaceId);
@@ -406,8 +517,6 @@ function AgentScheduleForm({
     if (mode.kind === "create" && mode.eventSourceId && eventTriggers) {
       return draftForEventSource(mode.eventSourceId, defaults);
     }
-    const template =
-      mode.kind === "create" ? templateById(mode.template, eventTriggers) : undefined;
     if (template) return draftFromTemplate(template, defaults);
     return newScheduleDraft(defaults);
   });
@@ -477,13 +586,6 @@ function AgentScheduleForm({
     if (patch.events !== undefined) setEventIssues(undefined);
   };
 
-  // A template's trigger names the app, not a source: it takes the first
-  // active source of that app once sources load.
-  const templateApp =
-    mode.kind === "create" && !task && eventTriggers
-      ? templateById(mode.template, eventTriggers)?.event?.choice
-      : undefined;
-  const loadedSources = eventSources.sources;
   // A GitHub event names a repository, but a run can only open the
   // repositories its message carries.
   const needsRepositories =
@@ -491,29 +593,16 @@ function AgentScheduleForm({
     !inheritsChatSettings &&
     !draft.resources.some((resource) => resource.kind === "repository") &&
     draft.events.triggers.some(
-      (trigger) =>
-        loadedSources?.find((source) => source.id === trigger.sourceId)?.kind === "github",
+      (trigger) => formSources?.find((source) => source.id === trigger.sourceId)?.kind === "github",
     );
+  // A template's trigger names a kind of source: it takes the viewer's own
+  // once their sources load.
   useEffect(() => {
-    if (!templateApp || !loadedSources) return;
-    const match = loadedSources.find(
-      (source) => source.status === "active" && eventSourceChoiceOf(source) === templateApp,
-    );
-    if (!match) return;
-    setDraft((current) =>
-      current.events.triggers.some((trigger) => !trigger.sourceId)
-        ? {
-            ...current,
-            events: {
-              ...current.events,
-              triggers: current.events.triggers.map((trigger) =>
-                trigger.sourceId ? trigger : { ...trigger, sourceId: match.id },
-              ),
-            },
-          }
-        : current,
-    );
-  }, [loadedSources, templateApp]);
+    setDraft((current) => {
+      const events = withTemplateSources(current.events, formSources);
+      return events === current.events ? current : { ...current, events };
+    });
+  }, [formSources]);
 
   // Keep following the workspace default as the catalog resolves it.
   const followedDefault = draft.modelFollowsDefault ? modelCatalog.defaultSelection : null;
@@ -653,6 +742,20 @@ function AgentScheduleForm({
         current.visibility === "private" ? current : { ...current, visibility: "private" },
       );
   }, [privateReason]);
+  // A new automation that listens to something only its owner sees (their
+  // meetings, mailbox or MCP connection) starts out Only me; they can still
+  // share it.
+  const listensPrivately = draft.events.triggers.some(
+    (trigger) =>
+      formSources?.find((source) => source.id === trigger.sourceId)?.visibility === "private",
+  );
+  useEffect(() => {
+    if (!creating || !listensPrivately || canCreatePrivate !== true || audienceChosenRef.current)
+      return;
+    setDraft((current) =>
+      current.visibility === "private" ? current : { ...current, visibility: "private" },
+    );
+  }, [canCreatePrivate, creating, listensPrivately]);
   const showAudience =
     !personal &&
     (canCreatePrivate === true || draft.visibility === "private" || privateReason !== null);
@@ -959,7 +1062,7 @@ function AgentScheduleForm({
     const cadenceProblem = cadenceIssue(draft.cadence, new Date());
     const triggerIssues =
       draft.events.triggers.length > 0
-        ? validateEventTriggers(t, draft.events, eventSources.sources ?? [])
+        ? validateEventTriggers(t, draft.events, formSources ?? [])
         : undefined;
     if (triggerIssues?.maxRunsPerHour) next.maxRunsPerHour = triggerIssues.maxRunsPerHour;
     setErrors(next);
@@ -973,6 +1076,11 @@ function AgentScheduleForm({
       return false;
     const submitted: ScheduleDraft = {
       ...draft,
+      // A trigger on this workspace's events adds the viewer's source for them.
+      events: await withFriendlyError(
+        "Couldn't add the event source.",
+        standIns.realEvents(draft.events),
+      ),
       // Pins only for connectors a person changed; everything else stays live.
       pinnedAccounts: !pinnable
         ? []
@@ -1380,12 +1488,12 @@ function AgentScheduleForm({
             events={draft.events}
             onEventsChange={(events) => update({ events })}
             eventTriggers={eventTriggers}
-            sources={eventSources.sources}
-            loadEventTypes={eventSources.loadEventTypes}
+            sources={formSources}
+            loadEventTypes={standIns.loadEventTypes}
             eventIssues={eventIssues}
             error={errors.when}
             sourceLogo={sourceLogo}
-            onAddSource={() => go.newSource(templateApp)}
+            onAddSource={(choice) => go.newSource(choice)}
             frequencies={SCHEDULE_FREQUENCIES}
             now={now}
           />

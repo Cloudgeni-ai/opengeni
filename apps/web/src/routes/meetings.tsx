@@ -1,10 +1,9 @@
 // Meetings: the list with the recorder, and each meeting's own page. The pages
-// live in components/meetings; these route components own navigation.
+// are @opengeni/react/meetings'; these route components own navigation.
 import { useNavigate } from "@tanstack/react-router";
 
 import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
-import { MeetingDetailPage } from "@/components/meetings/meeting-detail-page";
-import { MeetingsListPage } from "@/components/meetings/meetings-list-page";
+import { MeetingDetailPage, MeetingsListPage } from "@opengeni/react/meetings";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 
@@ -68,6 +67,12 @@ export function MeetingDetailRoute({
             to: "/workspaces/$workspaceId/settings",
             params: { workspaceId },
             search: { section: "general" },
+          })
+        }
+        onOpenChat={(sessionId) =>
+          void navigate({
+            to: "/workspaces/$workspaceId/sessions/$sessionId",
+            params: { workspaceId, sessionId },
           })
         }
       />

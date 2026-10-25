@@ -25,6 +25,7 @@ import {
 import type { Hono } from "hono";
 import type { ScheduledTask } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
+import { withAgentScheduleTimeZone } from "../scheduled-task-time-zone";
 import {
   isAuthenticatedPersonAuthorization,
   requireAccessGrant,
@@ -237,7 +238,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = authorization.grant;
     const legacy = rejectLegacyVariableSetFields(c, await readRequestJson(c));
     if ("response" in legacy) return legacy.response;
-    const rawPayload = legacy.payload;
+    // An agent's schedule without a zone uses the zone of the message that asked for it.
+    const { input: rawPayload } = await withAgentScheduleTimeZone(db, grant, legacy.payload);
     const payload = parseRequestBody(CreateScheduledTaskRequest, rawPayload, {
       status: 400,
       message: "invalid scheduled task create request",
@@ -265,6 +267,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
       verifySlackChannel: slackChannelVerifier(grant),
+      eventSourceFetch: deps.eventSourceFetch,
     });
     await syncCreatedScheduledTask({ db, workflowClient, task });
     const [created] = await withScheduledTaskEvents(db, [task]);
@@ -413,7 +416,12 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const body = await readRequestJson(c);
     const legacy = rejectLegacyVariableSetFields(c, body);
     if ("response" in legacy) return legacy.response;
-    const rawPayload = legacy.payload;
+    const { input: rawPayload } = await withAgentScheduleTimeZone(
+      db,
+      grant,
+      legacy.payload,
+      existing.schedule,
+    );
     const parsedPayload = parseRequestBody(UpdateScheduledTaskRequest, rawPayload, {
       status: 400,
       message: "invalid scheduled task update request",
@@ -441,6 +449,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
       verifySlackChannel: slackChannelVerifier(grant),
+      eventSourceFetch: deps.eventSourceFetch,
     });
     const task = await updateScheduledTaskForApi(
       db,

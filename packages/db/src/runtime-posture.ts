@@ -48,9 +48,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * trigger dispatcher's identity-only due inventory and intake retention pass
  * (0929), the recording recovery sweep's stalled-work inventory (0930), the
  * MCP Events subscription pump's due inventory (0932), the source feed pump's
- * due inventory (0935) and the recording retention sweep's due inventory
- * (0946). Each is owned by its tables' owner, never PUBLIC, with a pinned
- * search_path. Runtime EXECUTE is required, except while a routine is in
+ * due inventory (0935), the recording retention sweep's due inventory (0946)
+ * and the lookup of whose personal machine a chat runs on (0978). Each is
+ * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
+ * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
  */
 export const RUNTIME_DEFINER_ROUTINES = [
@@ -60,6 +61,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_due_mcp_event_subscriptions_v1(integer)",
   "list_due_event_source_feeds_v1(integer)",
   "list_due_recording_retention_v1(integer)",
+  "session_machine_owner_subject_v1(uuid, uuid, uuid)",
 ] as const;
 
 /**
@@ -68,10 +70,13 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * (and provisioning) waits until a binary that knows it is the previous
  * release; until then readiness accepts the routine with or without runtime
  * EXECUTE. 0937 withheld the first five and 0947 granted them; 0946 withheld
- * the recording retention inventory and 0950 granted it. None is withheld now.
+ * the recording retention inventory and 0950 granted it. 0978 withholds the
+ * personal-machine owner lookup; until a later migration grants it, the
+ * runtime treats the lookup as unavailable and keeps the earlier behaviour.
  */
-export const DEFERRED_RUNTIME_PRIVATE_ROUTINES =
-  [] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
+export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
+  "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
  * The tables each runtime definer reads or writes as its owner. Once they all
@@ -89,6 +94,12 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "recordings",
     "recording_transcript_versions",
     "workspaces",
+  ],
+  "session_machine_owner_subject_v1(uuid, uuid, uuid)": [
+    "sessions",
+    "sandboxes",
+    "enrollments",
+    "organization_memberships",
   ],
 };
 
@@ -1630,6 +1641,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
   "count_workspace_allowance_debit()",
   "count_unbilled_model_allowance_debit()",
+  "count_unbilled_allowance_usage(uuid, uuid, text, bigint, text)",
   "capture_usage_allowance_attribution()",
   "reverse_video_allowance_refund()",
   "capture_usage_allowance_period(uuid, uuid, jsonb, timestamp with time zone)",
@@ -1691,6 +1703,7 @@ export const FORCE_RLS_TABLES = [
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
+  "automation_templates",
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
@@ -2030,6 +2043,7 @@ export const FORCE_RLS_TABLES = [
   "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
   "session_title_operations",
+  "session_turn_app_action_grants",
   "session_turn_attempts",
   "session_turn_machine_consents",
   "session_turn_startup_milestones",
@@ -2229,6 +2243,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
+  "automation_templates",
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
@@ -2375,6 +2390,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_system_update_outbox",
   "session_system_updates",
   "session_title_operations",
+  "session_turn_app_action_grants",
   "session_turn_attempts",
   "session_turns",
   "session_workflow_wake_outbox",

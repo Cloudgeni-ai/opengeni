@@ -428,7 +428,16 @@ export const SITE_PUBLISH_WARNING_CODES = [
   "agent_model_outside_unavailable",
   /** The page was too large to read, so what it uses was not checked. */
   "page_not_checked",
+  /**
+   * A public Site on a login-only deployment: every visitor signs in to
+   * Opengeni first. A notice about the deployment, with nothing to fix.
+   */
+  "public_sign_in_required",
 ] as const;
+
+/** Warnings that only inform: nothing on the Site can or needs to change. */
+export const SITE_PUBLISH_NOTICE_CODES: ReadonlySet<(typeof SITE_PUBLISH_WARNING_CODES)[number]> =
+  /* @__PURE__ */ new Set(["public_sign_in_required"]);
 
 /**
  * Something the published version uses that its audience may not do. Found

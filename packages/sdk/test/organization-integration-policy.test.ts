@@ -25,7 +25,12 @@ test("organization integration identities are discoverable through the authentic
 
 test("organization policy reads and writes preserve the explicit organization and operation", async () => {
   const calls: unknown[][] = [];
-  const policy = { mode: "restricted" as const, allowedIntegrationKeys: [], revision: 1 };
+  const policy = {
+    mode: "restricted" as const,
+    allowedIntegrationKeys: [],
+    personalIntegrationSetup: "members" as const,
+    revision: 1,
+  };
   const client = {
     async requestJson<T>(...args: unknown[]): Promise<T> {
       calls.push(args);

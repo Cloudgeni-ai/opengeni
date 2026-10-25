@@ -190,13 +190,13 @@ export async function resolveInteractionSecretValues(input: {
       const foreign = error as unknown as {
         failures: SecretReferenceFailure[];
         askCard?: SecretReferenceError["askCard"];
-        approvalCard?: SecretReferenceError["approvalCard"];
+        approval?: SecretReferenceError["approval"];
       };
       throw secretReferenceHttpError(
         new SecretReferenceError(
           foreign.failures,
           foreign.askCard ?? buildMissingSecretAskCard(foreign.failures, { hasActingHuman: false }),
-          foreign.approvalCard ?? null,
+          foreign.approval ?? null,
         ),
       );
     }

@@ -1,9 +1,11 @@
 import {
   createContext,
+  forwardRef,
   useContext,
   useId,
   useRef,
-  type ComponentProps,
+  type ComponentPropsWithoutRef,
+  type ComponentRef,
   type ReactNode,
 } from "react";
 import { ArrowLeftIcon, XIcon } from "lucide-react";
@@ -57,7 +59,7 @@ export function useDetailPresentation(): DetailPresentation {
    -------------------------------------------------------------------------- */
 
 /** The sheet root. Control it with `open` and `onOpenChange` (tie it to the URL). */
-export function DetailSheet(props: ComponentProps<typeof Sheet>) {
+export function DetailSheet(props: ComponentPropsWithoutRef<typeof Sheet>) {
   return <Sheet {...props} />;
 }
 
@@ -67,7 +69,7 @@ const SHEET_PANEL =
   "flex min-h-0 min-w-0 flex-col bg-surface text-fg shadow-[var(--og-shadow-lg)] @container/detail";
 
 export interface DetailSheetContentProps extends Omit<
-  ComponentProps<typeof DialogPrimitive.Content>,
+  ComponentPropsWithoutRef<typeof DialogPrimitive.Content>,
   "children"
 > {
   children: ReactNode;
@@ -79,13 +81,13 @@ export interface DetailSheetContentProps extends Omit<
  * and an optional DetailFooter. Pass `aria-describedby={undefined}` when the
  * header has no subtitle.
  */
-export function DetailSheetContent({
-  children,
-  className,
-  onOpenAutoFocus,
-  onCloseAutoFocus,
-  ...props
-}: DetailSheetContentProps) {
+export const DetailSheetContent = /* @__PURE__ */ forwardRef<
+  ComponentRef<typeof DialogPrimitive.Content>,
+  DetailSheetContentProps
+>(function DetailSheetContent(
+  { children, className, onOpenAutoFocus, onCloseAutoFocus, ...props },
+  ref,
+) {
   // Sheets usually open from a list row, not a DetailSheetTrigger, so Radix
   // has nothing to return focus to. Remember what had focus as the sheet
   // opened (the row) and go back there on close.
@@ -97,6 +99,7 @@ export function DetailSheetContent({
         className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-200 starting:opacity-0"
       />
       <DialogPrimitive.Content
+        ref={ref}
         data-slot="detail-sheet"
         {...props}
         onOpenAutoFocus={(event) => {
@@ -132,7 +135,7 @@ export function DetailSheetContent({
       </DialogPrimitive.Content>
     </DialogContainedPortal>
   );
-}
+});
 
 /**
  * The same sheet panel without the overlay, in the page flow. For docs,

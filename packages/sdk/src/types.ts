@@ -828,6 +828,28 @@ export type UpdateSessionToolPolicyRequest =
       expectedVersion: number;
     };
 
+/**
+ * The person finished setup from a capability card the agent posted in this
+ * chat. The server wakes the agent once per card so it continues the request
+ * that needed the capability.
+ */
+export type ContinueAfterCapabilitySetupRequest = {
+  capabilityId: string;
+};
+
+/** Why no continuation was sent. Each is a normal outcome, not an error. */
+export type CapabilitySetupContinuationSkipReason =
+  | "no_card"
+  | "later_message"
+  | "not_ready"
+  | "not_applicable"
+  | "not_requester"
+  | "session_closed";
+
+export type ContinueAfterCapabilitySetupResponse =
+  | { outcome: "queued" | "already_queued"; updateId: string }
+  | { outcome: "not_needed"; reason: CapabilitySetupContinuationSkipReason };
+
 export type SessionEffectiveToolPolicy = {
   mode: SessionToolPolicy["mode"];
   inheritedFromSessionId: string | null;
@@ -2423,7 +2445,7 @@ export type HumanInputSecretSpec = {
   item: string;
   field?: string | undefined;
   fieldKind?: "concealed" | "totp" | "text" | undefined;
-  itemType?: "login" | "api_key" | "note" | undefined;
+  itemType?: "login" | "api_key" | "note" | "card" | "identity" | "ssh_key" | undefined;
   username?: { prompt: string; value?: string | null | undefined } | null | undefined;
   website?: string | null | undefined;
   looksLike?: string | null | undefined;
@@ -2520,6 +2542,12 @@ export type SessionHumanInputRequest = {
   creationAttemptId: string;
   toolCallId: string;
   status: "pending" | "answered" | "skipped" | "expired" | "cancelled";
+  /**
+   * `secret_use_approval`: Opengeni's own approval card for a blocked secret
+   * use, answerable after its turn ends. Absent from older servers, meaning
+   * `tool_call`.
+   */
+  origin?: "tool_call" | "secret_use_approval" | undefined;
   questions: HumanInputQuestion[];
   allowSkip: boolean;
   response: HumanInputResponse | null;
@@ -3839,6 +3867,13 @@ export type CreateSessionRequest = {
   startMode?: "realtime" | "standard" | undefined;
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
+  /**
+   * IANA time zone of the person sending `initialMessage` (for example
+   * `Europe/Oslo`), so the model sees the message's local time. In a browser
+   * or app the client fills in the device's zone when this is omitted;
+   * invalid names are dropped.
+   */
+  timeZone?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —
   // how a host supplies per-agent-type prompts without leaking them into the
@@ -3954,6 +3989,7 @@ export const KNOWN_PERMISSIONS = [
   "usage_allowances:manage",
   "connections:read",
   "connections:write",
+  "connections:personal",
   "capabilities:manage",
   "environments:manage",
   "environments:use",
@@ -4519,14 +4555,34 @@ export type OrganizationModelProviderConnection = {
   version: number;
   /** Azure OpenAI only: the non-secret `https://<resource>.openai.azure.com/openai/v1` endpoint. */
   endpoint?: string | undefined;
+  /** Azure OpenAI only: how the connection signs in. */
+  authMethod?: OrganizationModelProviderAuthMethod | undefined;
   createdAt: string;
   updatedAt: string;
 };
 
+/**
+ * How an organization connection signs in: an API key, or for Azure OpenAI
+ * Microsoft Entra ID as the organization's own app or this deployment's
+ * identity (only when the deployment operator offers it).
+ */
+export type OrganizationModelProviderAuthMethod =
+  | "api_key"
+  | "entra_client_secret"
+  | "entra_deployment_identity";
+
+/** Azure OpenAI only: a Microsoft Entra ID sign-in sent instead of `apiKey`. */
+export type OrganizationModelProviderEntraAuthentication =
+  | { method: "entra_client_secret"; tenantId: string; clientId: string; clientSecret: string }
+  | { method: "entra_deployment_identity" };
+
 export type UpsertOrganizationModelProviderConnectionRequest = {
   operationId: string;
   expectedVersion?: number | undefined;
-  apiKey: string;
+  /** The provider key. Send it, or `authentication`, not both. */
+  apiKey?: string | undefined;
+  /** Azure OpenAI only: sign in with Microsoft Entra ID instead of `apiKey`. */
+  authentication?: OrganizationModelProviderEntraAuthentication | undefined;
   /** Required for `azure_openai` (its resource endpoint); refused for every other kind. */
   endpoint?: string | undefined;
   claudeIdentity?: { accountUuid: string; deviceId: string } | undefined;
@@ -4836,16 +4892,23 @@ export type UpdateModelAccountPreferencesRequest = {
 };
 
 /**
- * Whether owners and admins may give agent sessions admin access. Off by
- * default; turning it off ends every session's admin access.
+ * What agents may do in the app for a person, organization-wide.
+ * `sessionAdminAccessAllowed`: members may give a session they started their
+ * own full access (off by default; turning it off ends every session's full
+ * access). `chatActionsAllowed`: in a chat a person started, the agent may do
+ * what that person could do in the app's pages and settings, each change only
+ * after the person confirms it in the chat (on by default).
  */
 export type OrganizationAgentAdminAccess = {
   sessionAdminAccessAllowed: boolean;
+  chatActionsAllowed: boolean;
   updatedAt: string | null;
 };
 
+/** Change either choice; an omitted one stays as it is. */
 export type UpdateOrganizationAgentAdminAccessRequest = {
-  sessionAdminAccessAllowed: boolean;
+  sessionAdminAccessAllowed?: boolean;
+  chatActionsAllowed?: boolean;
 };
 
 /**
@@ -5381,6 +5444,11 @@ export type ClientConfig = {
   apiContractRevision: string;
   serverVersion?: string | undefined;
   claudeSubscriptionEnabled?: boolean | undefined;
+  /**
+   * Organization admins may connect Azure OpenAI as this deployment's own
+   * Microsoft Entra identity (the operator offers it). Absent otherwise.
+   */
+  azureOpenAIDeploymentIdentity?: boolean | undefined;
   /** Whether people can connect their own computers; absent on older servers. */
   connectedMachines?: boolean | undefined;
   /**
@@ -5410,6 +5478,13 @@ export type ClientConfig = {
    * choice (embedded stock UIs then show the picker). Opengeni itself omits it.
    */
   modelSelection?: boolean | undefined;
+  /**
+   * `false` when a host's session proxy owns chat setup (`createSession`), so
+   * the browser cannot add a newly connected capability to a chat and stock
+   * conversations leave the agent's capability cards to the host. Opengeni
+   * itself omits it.
+   */
+  chatConnections?: boolean | undefined;
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
   sandboxFiles?: boolean | undefined;
   /**
@@ -6271,6 +6346,8 @@ export type UpdateSlackChannelRoutesRequest = {
 
 export type VoiceInputProviderId =
   | "azure-mai"
+  | "azure-speech"
+  | "elevenlabs"
   | "supergrok-subscription"
   | "codex-subscription"
   | "openai"
@@ -7222,7 +7299,9 @@ export type SessionSystemUpdateKind =
   | "child_requires_action_resolved"
   | "child_paused"
   | "child_waiting_capacity"
-  | "child_progress";
+  | "child_progress"
+  | "secret_use_approval_decided"
+  | "capability_setup_completed";
 
 export type SessionSystemUpdateState =
   | "pending"
@@ -7474,6 +7553,8 @@ export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expecte
   delivery: "send" | "steer";
   controlEtag?: string;
   modelContext?: string;
+  /** IANA time zone of the sender; see `UserMessageEventInput`. */
+  timeZone?: string;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
   connectionAccounts?: McpConnectionAccountSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -7486,6 +7567,8 @@ export type SubmitComposerDraftResponse = {
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  /** As on `SteerMessageResult`. Older servers omit it. */
+  waitsForMachineOwner?: boolean | undefined;
   replay: boolean;
 };
 
@@ -9439,6 +9522,8 @@ export type ApiIntegrationInstallationSummary = {
   connected: boolean;
   requiresConnection: boolean;
   connectionId: string | null;
+  /** When the bound connection was last used, or null when never or unbound. */
+  connectionLastUsedAt?: string | null;
   ownership: "workspace" | "personal" | "none";
   allowedTools: string[];
   toolCount: number;
@@ -10171,6 +10256,13 @@ export type UserMessageEventInput = {
     text: string;
     annotations?: SubmittedTimelineAnnotation[] | undefined;
     modelContext?: string | undefined;
+    /**
+     * IANA time zone of the person sending the message (for example
+     * `Europe/Oslo`), so the model sees the message's local time. In a
+     * browser or app the client fills in the device's zone when this is
+     * omitted; invalid names are dropped.
+     */
+    timeZone?: string | undefined;
     resources?: ResourceRef[] | undefined;
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
@@ -10528,6 +10620,19 @@ export type SessionMachineAccess = {
    *  messages) waiting because only the machine's owner may start work on it,
    *  grouped by whose work it is. Older servers omit it. */
   waitingWork?: SessionWaitingWork[] | undefined;
+  /** Messages other people sent here that wait because only the machine's
+   *  owner may start work on it, grouped by sender. The owner's next message
+   *  brings them to the agent; moving the chat to a machine the sender may
+   *  use runs them. Older servers omit it. */
+  waitingMessages?: SessionWaitingMessages[] | undefined;
+};
+
+export type SessionWaitingMessages = {
+  /** The sender's display name, when known. */
+  name: string | null;
+  /** The caller sent them. */
+  isYou: boolean;
+  messages: number;
 };
 
 export type SessionWaitingWork = {

@@ -93,21 +93,35 @@ export function compactionFailureDetails(
 
 const COMPACTION_TURN_FAILURE_PREFIX = "compaction summarization failed:";
 
+/** How a turn's failure reads on its chip and notice; see {@link presentTurnFailureText}. */
+export type TurnFailurePresentation = {
+  summary: string;
+  /** The recorded text the summary replaced, offered behind Details. */
+  detail?: string;
+  /** The summary names a compaction failure, whose own landmark owns the detail. */
+  compaction?: true;
+};
+
 /**
- * Short chip copy for a turn's failure reason. A compaction failure records the
- * raw provider text after a fixed prefix; the chip names the outcome instead
- * and keeps the recorded text as `detail` (a hover title). Every other reason
- * passes through unchanged.
+ * Short copy for a turn's failure reason. A compaction failure records the raw
+ * provider text after a fixed prefix, and a diagnostic failure (an unclassified
+ * error or operator text; see `presentFailure`) records text not written for
+ * people. Both name the outcome instead (`diagnosticOutcome` for a diagnostic)
+ * and keep the recorded text as `detail`, behind Details. Copy the worker
+ * wrote for people passes through unchanged. Presentation only: the stored
+ * (and model-facing) event keeps its text.
  */
 export function presentTurnFailureText(
   t: OpenGeniText,
   failureText: string | null | undefined,
-): { summary: string; detail?: string } | null {
+  diagnosticOutcome: string | null = null,
+): TurnFailurePresentation | null {
   const text = failureText?.trim();
   if (!text) return null;
   if (text.toLowerCase().startsWith(COMPACTION_TURN_FAILURE_PREFIX)) {
-    return { summary: COMPACTION_FAILURE_TITLE(t), detail: text };
+    return { summary: COMPACTION_FAILURE_TITLE(t), detail: text, compaction: true };
   }
+  if (diagnosticOutcome) return { summary: diagnosticOutcome, detail: text };
   return { summary: text };
 }
 

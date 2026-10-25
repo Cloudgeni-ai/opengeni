@@ -6,13 +6,12 @@ import {
   createWorkspaceRetainedVideoLoader,
 } from "../../timeline";
 import { isModelUnavailableSubmissionError } from "../../lib/format";
+import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
-import {
-  attachSessionCapability,
-  completeSessionCapabilityOAuth,
-} from "../components/capabilities/attach-session-capability";
+import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
+import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
 import { loadSessionFeedback } from "../../session-feedback-model";
 import { turnRatingsFromFeedback } from "../../session-feedback-model";
 import { PersonalResourceAttachmentSurface } from "../components/personal-resource-attachment-surface";
@@ -81,6 +80,7 @@ import {
   SessionChrome,
   KnowledgeActivityProvider,
   LearningRefusalActionsProvider,
+  OpenGeniLinkProvider,
   type LearningRefusalPlace,
   type TimelineSearchTarget,
 } from "../../session-ui";
@@ -190,11 +190,6 @@ import type {
   SessionEditableArtifactSummary,
   SessionEditableArtifactsStatus,
 } from "../components/session/editable-artifacts-workspace";
-import {
-  oauthConnectionOwnership,
-  oauthConnectionRef,
-  catalogConnectionAccountSelection,
-} from "../lib/capabilities";
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { useSessionRouteMemory } from "../lib/last-session-memory";
 import { hasAccountPermission, hasWorkspacePermission } from "../lib/permissions";
@@ -252,7 +247,7 @@ import {
   sessionDockLayoutStorageId,
   updateSessionDockNavigation,
 } from "../lib/session-dock-preferences";
-import { useAppLinkResolver } from "../lib/session-artifact-navigation";
+import { useWorkspaceAppLinkResolver } from "../lib/session-artifact-navigation";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
@@ -903,39 +898,19 @@ export function SessionRoute({
       return;
     }
     void (async () => {
-      const item = capabilityCatalog.find((candidate) => candidate.id === capabilityId);
-      const connectionId = params.get("connectionId");
-      const providerDomain = params.get("providerDomain");
-      const ownership = oauthConnectionOwnership(params.get("ownership"));
-      if (!item || item.kind !== "mcp" || !connectionId || !providerDomain || !ownership) {
-        throw new Error("The authorized capability could not be resolved from the live catalog.");
-      }
-      await capabilityClient.enableCapability(workspaceId, item.id, {
-        connectionRef: oauthConnectionRef(
-          ownership,
-          connectionId,
-          providerDomain,
-          catalogConnectionAccountSelection(item),
-        ),
+      const finished = await finishMcpCapabilityOAuthReturn({
+        client: capabilityClient,
+        workspaceId,
+        sessionId,
+        capabilityId,
+        params,
+        catalog: capabilityCatalog,
+        refreshCatalog: refreshCapabilityCatalog,
       });
-      await refreshCapabilityCatalog(workspaceId);
-      const connected = (await capabilityClient.listCapabilities(workspaceId)).items.find(
-        (candidate) => candidate.id === item.id,
-      );
-      if (!connected?.enabled)
-        throw new Error(
-          "The connection was authorized, but enabling its tools could not be verified.",
-        );
-      if (connected.connectionRef?.subjectScope === "subject") {
-        toast.success(`${item.name} connected`, {
-          description:
-            "Review its connection card to allow your personal account in this conversation.",
-        });
-        return;
-      }
-      await attachSessionCapability(t, capabilityClient, workspaceId, sessionId, connected);
-      toast.success(`${item.name} connected`, {
-        description: "It is available to new tool calls in this session.",
+      toast.success(`${finished.name} connected`, {
+        description: finished.needsPersonalReview
+          ? "Review its connection card to allow your personal account in this conversation."
+          : "It is available to new tool calls in this session.",
       });
     })().catch((error) => {
       toast.error("Connection succeeded, but setup needs attention", {
@@ -2004,7 +1979,7 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
-  const resolveLink = useAppLinkResolver();
+  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId);
   const hostMessageContext = useHostMessageContext();
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
@@ -3526,7 +3501,7 @@ function SessionChatPane(props: {
     reviewDetailPane,
     createElement(
       "div",
-      { className: reviewDetails ? "hidden" : "contents", inert: reviewDetails ? true : undefined },
+      { className: reviewDetails ? "hidden" : "contents", ...inertProps(Boolean(reviewDetails)) },
       createElement(
         LightboxProvider,
         null,
@@ -3816,19 +3791,22 @@ function SessionChatPane(props: {
               />
               {waitingSubSessions.length > 0 ? (
                 <Suspense fallback={null}>
-                  <DescendantRequests
-                    client={context.client}
-                    workspaceId={props.session.workspaceId}
-                    parentSessionId={props.session.id}
-                    waiting={waitingSubSessions}
-                    onResolved={props.onDescendantResolved}
-                    refreshSignal={props.descendantRefreshSignal}
-                    loadSkillReview={loadSkillReview}
-                    allowedSaveTo={secretSaveTargets(
-                      context.accessContext,
-                      props.session.workspaceId,
-                    )}
-                  />
+                  {/* Links in sub-session questions resolve like links in the timeline. */}
+                  <OpenGeniLinkProvider resolveLink={resolveLink}>
+                    <DescendantRequests
+                      client={context.client}
+                      workspaceId={props.session.workspaceId}
+                      parentSessionId={props.session.id}
+                      waiting={waitingSubSessions}
+                      onResolved={props.onDescendantResolved}
+                      refreshSignal={props.descendantRefreshSignal}
+                      loadSkillReview={loadSkillReview}
+                      allowedSaveTo={secretSaveTargets(
+                        context.accessContext,
+                        props.session.workspaceId,
+                      )}
+                    />
+                  </OpenGeniLinkProvider>
                 </Suspense>
               ) : null}
               <SessionChrome

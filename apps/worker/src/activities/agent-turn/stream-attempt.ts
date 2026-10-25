@@ -32,6 +32,7 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { handOverWaitToSteer } from "./waiting-steer";
+import { withAppActionApprovalTitle } from "./app-action-confirmation";
 import { startSteerWatch, type SteerWatch } from "./steer-watch";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
@@ -117,6 +118,7 @@ import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
+import { requestImageCompactionThreshold } from "./compaction-prep";
 import {
   interruptionCallIdsFromPause,
   settleOpenSuffixResumeIfNeeded,
@@ -296,7 +298,7 @@ export type TurnStreamAttemptDeps = {
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
-  turn: Pick<SessionTurn, "initiator" | "initiatorContext"> & {
+  turn: Pick<SessionTurn, "initiator" | "initiatorContext" | "resources"> & {
     initiatingHumanSubjectId: string | null;
     id: string;
     executionGeneration: number;
@@ -607,6 +609,7 @@ export async function runTurnStreamAttempt(
         ...(runCredentialsNote ? { runCredentialsNote } : {}),
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
+        mountedFileResources: turn.resources.filter((resource) => resource.kind === "file"),
         providerApi,
         ...(settings.subscriptionCrossProviderFailoverEnabled &&
         compactionModeOptions.codexCompactionMode === "portable" &&
@@ -628,6 +631,14 @@ export async function runTurnStreamAttempt(
       });
       runInput = prepared.input;
       historySink.providerArtifactCandidates = prepared.providerArtifactCandidates;
+      historySink.seedHistoryFootprint(prepared.historyFootprint, prepared.historyRecovery);
+      if (prepared.historyRecovery) {
+        observability.warn("active history exceeds the materialization guard; compacting", {
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          ...prepared.historyRecovery,
+        });
+      }
       // Slice index = the length of the model-facing (active) history this turn
       // is seeded from; new items beyond it (the trigger message + this turn's
       // generated items) are the ones to persist. After a compaction this is the
@@ -1113,6 +1124,13 @@ export async function runTurnStreamAttempt(
             modelResponseContextSignal(modelResponseState, responseCountBeforeStream),
           contextCompactionRequested: () =>
             isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
+          contextHistoryFootprint: {
+            storedFootprint: historySink.historyFootprintCompactionSignal,
+            imageThreshold: requestImageCompactionThreshold(
+              resolvedModel?.provider,
+              eventing.modelRunSettings,
+            ),
+          },
           onModelPreparationPhase: (measurement) => {
             recordTurnStartupPhase(observability, {
               phase: `model_prepare_${measurement.phase}`,
@@ -2202,9 +2220,12 @@ export async function runTurnStreamAttempt(
                     payload: {
                       approvals: approvals.map((approval) =>
                         withPublicApprovalFields(
-                          withMcpToolDisplayMetadata(
-                            eventing.preparedTools?.mcpServers ?? [],
-                            approval,
+                          withAppActionApprovalTitle(
+                            withMcpToolDisplayMetadata(
+                              eventing.preparedTools?.mcpServers ?? [],
+                              approval,
+                            ),
+                            { workspaceId: input.workspaceId, sessionId: input.sessionId },
                           ),
                         ),
                       ),
@@ -2671,6 +2692,13 @@ export async function runTurnStreamAttempt(
           ...safeErrorDiagnostic(attemptError),
           signalTokens: compactionNeeded?.signalTokens,
           thresholdTokens: compactionNeeded?.thresholdTokens,
+          ...(compactionNeeded?.historyFootprint
+            ? {
+                historyFootprintDimension: compactionNeeded.historyFootprint.dimension,
+                historyFootprintActual: compactionNeeded.historyFootprint.actual,
+                historyFootprintThreshold: compactionNeeded.historyFootprint.threshold,
+              }
+            : {}),
           ...(requestSizeError ? { ...requestSizeError.requestSize } : {}),
         });
         // When compaction is needed before the turn's first model request,

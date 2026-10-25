@@ -115,6 +115,12 @@ import {
 } from "../former-placement-retirement";
 import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
 import {
+  captureZoomedComputerFrame,
+  parseComputerFrameRegionQuery,
+  parseComputerFrameSizeQuery,
+  translateZoomedComputerAction,
+} from "../computer-frame-zoom";
+import {
   controllerCacheAllowsHostFetch,
   controllerCachedUrlIsUsable,
   controllerHasCacheableDataPlane,
@@ -127,8 +133,10 @@ import {
 } from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
+  interactionActionDeadlineApiError,
   interactionControlApiError,
   legacyInteractionCapacityError,
 } from "../http/interaction-control-error";
@@ -619,6 +627,10 @@ export function registerComputerSessionRoutes(
         "sessions:read",
       );
       const targetId = requireOpaqueParam(context, "targetId");
+      const region = parseComputerFrameRegionQuery(context.req.query("region"));
+      const regionFrame = region
+        ? parseComputerFrameSizeQuery(context.req.query("regionFrame"))
+        : null;
       const frame = await withActiveComputerController(
         context,
         grant,
@@ -627,12 +639,22 @@ export function registerComputerSessionRoutes(
         "session.read",
         "computer.read",
         async ({ sessionClient, binding }) => {
+          const expected = {
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId,
+          };
           try {
-            return await captureModelComputerFrame(sessionClient, {
-              computerSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              targetId,
-            });
+            return region
+              ? await captureZoomedComputerFrame(
+                  sessionClient,
+                  targetId,
+                  region,
+                  regionFrame,
+                  MODEL_COMPUTER_FRAME_MAX_BYTES,
+                  (captured) => validateComputerFrameForApi(captured, expected),
+                )
+              : await captureModelComputerFrame(sessionClient, expected);
           } catch (error) {
             if (error instanceof ComputerFrameEvidenceMismatchError) {
               observeComputerFrameEvidenceMismatch(deps.observability, error.reason);
@@ -736,53 +758,69 @@ export function registerComputerSessionRoutes(
       );
       const request = await parseJsonBody(context, ComputerActionRequest);
       const startedAtMs = performance.now();
-      const result = await withActiveComputerController(
+      // The response waits for the whole batch, which may outlast the
+      // server's idle timeout.
+      const result = await withoutRequestIdleTimeout(
         context,
-        grant,
-        workspaceId,
-        computerSessionId,
-        "session.control",
-        "computer.action",
-        async ({ sessionClient, binding, record }) => {
-          if (
-            record.session.placement.kind === "sandbox_group" &&
-            deps.settings.sandboxDesktopInteractive === false &&
-            grant.principalKind !== "agent_attempt"
-          ) {
-            throw new HTTPException(403, { message: "Human desktop input is disabled" });
-          }
-          const commandFields = {
-            protocolVersion: INTERACTION_PROTOCOL_VERSION,
-            operationId: request.operationId,
-            computerSessionId,
-            controllerGeneration: binding.controllerGeneration,
-            targetId: request.targetId,
-            expectedTargetGeneration: request.expectedTargetGeneration,
-            expectedObservationId: request.expectedObservationId,
-            expectedFrameId: request.expectedFrameId,
-            actor: interactionActorForGrant(grant),
-            action: request.action,
-          };
-          ComputerActionCommand.parse(commandFields);
-          const secretValues = await resolveInteractionSecretValues({
-            port: interactionSecrets,
+        async () =>
+          await withActiveComputerController(
+            context,
             grant,
-            texts: computerActionSecretTexts(request.action),
-            use: { surface: "desktop", toolName: "computer_act", operationId: request.operationId },
-            beforeResolve: requirePlacementAcceptsSecretValues(
-              deps.db,
-              grant,
-              workspaceId,
-              record.session.placement,
-            ),
-          });
-          return await sessionClient.action(
-            ComputerActionCommand.parse({
-              ...commandFields,
-              ...(secretValues === undefined ? {} : { secretValues }),
-            }),
-          );
-        },
+            workspaceId,
+            computerSessionId,
+            "session.control",
+            "computer.action",
+            async ({ sessionClient, binding, record }) => {
+              if (
+                record.session.placement.kind === "sandbox_group" &&
+                deps.settings.sandboxDesktopInteractive === false &&
+                grant.principalKind !== "agent_attempt"
+              ) {
+                throw new HTTPException(403, { message: "Human desktop input is disabled" });
+              }
+              // A pointer action on a zoomed frame acts on the native frame
+              // the zoom was cut from, in that frame's pixels.
+              const translated = translateZoomedComputerAction({
+                expectedFrameId: request.expectedFrameId,
+                action: request.action,
+              });
+              const commandFields = {
+                protocolVersion: INTERACTION_PROTOCOL_VERSION,
+                operationId: request.operationId,
+                computerSessionId,
+                controllerGeneration: binding.controllerGeneration,
+                targetId: request.targetId,
+                expectedTargetGeneration: request.expectedTargetGeneration,
+                expectedObservationId: request.expectedObservationId,
+                expectedFrameId: translated.expectedFrameId,
+                actor: interactionActorForGrant(grant),
+                action: translated.action,
+              };
+              ComputerActionCommand.parse(commandFields);
+              const secretValues = await resolveInteractionSecretValues({
+                port: interactionSecrets,
+                grant,
+                texts: computerActionSecretTexts(request.action),
+                use: {
+                  surface: "desktop",
+                  toolName: "computer_act",
+                  operationId: request.operationId,
+                },
+                beforeResolve: requirePlacementAcceptsSecretValues(
+                  deps.db,
+                  grant,
+                  workspaceId,
+                  record.session.placement,
+                ),
+              });
+              return await sessionClient.action(
+                ComputerActionCommand.parse({
+                  ...commandFields,
+                  ...(secretValues === undefined ? {} : { secretValues }),
+                }),
+              );
+            },
+          ),
       );
       observeComputerActionResult(deps.observability, startedAtMs, request, result);
       return context.json(result);
@@ -1335,7 +1373,7 @@ export function registerComputerSessionRoutes(
         );
       }
       if (operation !== "computer.end") {
-        assertConnectedMachineComputerAccess(enrollment, operation);
+        await assertConnectedMachineComputerAccess(enrollment, operation);
       }
       const placementInstanceId = attachedEndPlacementInstanceId(
         operation,
@@ -1469,7 +1507,19 @@ export function registerComputerSessionRoutes(
             if (!enrollment?.connectionInstanceId) {
               throw new ComputerSessionStateError("Connected Machine is unavailable");
             }
-            assertConnectedMachineComputerAccess(enrollment, operation);
+            await assertConnectedMachineComputerAccess(enrollment, operation, async () => {
+              const sandbox = await getChannelAMachineSandbox(
+                deps.db,
+                {
+                  accountId: grant.accountId,
+                  workspaceId: sourceSession.workspaceId,
+                  sessionId: sourceSession.id,
+                },
+                await handle.machineAuthority(),
+                resolved.sandboxId!,
+              );
+              return sandbox?.name ?? null;
+            });
             screenControlAllowed = enrollment.allowScreenControl === true;
           }
           if (expectedPlacement?.kind === "connected_machine") {
@@ -2281,18 +2331,21 @@ function attachedEndPlacementInstanceId(
   return liveGeneration;
 }
 
-function assertConnectedMachineComputerAccess(
+async function assertConnectedMachineComputerAccess(
   enrollment: {
     hasDisplay: boolean;
     desktopUnavailableReason: string | null;
     allowScreenControl: boolean;
+    os?: string | null;
   },
   operation: ChannelAOperation,
-): void {
-  const error = connectedMachineComputerAccessError(
-    enrollment,
-    operation === "computer.action" || operation === "computer.control",
-  );
+  /** The checked machine's name, read only when access fails. */
+  machineName: () => Promise<string | null> = async () => null,
+): Promise<void> {
+  const requiresControl = operation === "computer.action" || operation === "computer.control";
+  if (!connectedMachineComputerAccessError(enrollment, requiresControl)) return;
+  const name = await machineName().catch(() => null);
+  const error = connectedMachineComputerAccessError(enrollment, requiresControl, name);
   if (!error) return;
   if (error.status === 403) {
     throw new HTTPException(403, { message: error.message });
@@ -2344,6 +2397,8 @@ function interactionFailure(error: unknown) {
 }
 
 function computerRouteError(error: unknown): HTTPException {
+  const actionDeadline = interactionActionDeadlineApiError(error);
+  if (actionDeadline) return actionDeadline;
   const connectedMachineError = interactionControlApiError(error, "computer");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;

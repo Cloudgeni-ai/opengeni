@@ -16,8 +16,18 @@ import { ComboboxSelect, SelectMenu, type SelectOption } from "../../ui/select-m
 import { cn } from "../../lib/cn";
 import { EventArgumentsField } from "./event-arguments-field";
 import { eventArgumentsForEvent } from "./event-arguments-model";
-import { eventSourceKindLabel } from "./event-source-model";
+import {
+  eventSourceAddLabel,
+  eventSourceChoiceName,
+  eventSourceKindLabel,
+  eventStatusReasonText,
+  type EventSourceChoice,
+} from "./event-source-model";
 import { EventSourceTile, type EventSourceLogoResolver } from "./event-source-tile";
+import {
+  automationTemplateSourceChoice,
+  eventSourceFitsTemplate,
+} from "./automation-template-model";
 import {
   EVENT_CONDITION_OPERATORS,
   EVENT_TRIGGER_CONDITIONS_MAX,
@@ -27,6 +37,7 @@ import {
   eventConditionOperatorLabel,
   eventTypeIssue,
   eventTypeLabel,
+  eventTypesLabel,
   newEventConditionDraft,
   newEventTriggerDraft,
   type EventConditionDraft,
@@ -99,8 +110,11 @@ export interface EventTriggersFieldProps {
   issues?: EventTriggersIssues | undefined;
   /** The source's brand logo, from the host's connector catalog. */
   sourceLogo?: EventSourceLogoResolver | undefined;
-  /** Opens the host's "Add a source" page; offered when no source fits. */
-  onAddSource?: (() => void) | undefined;
+  /**
+   * Opens the host's "Add a source" page; offered when no source fits. Gets
+   * the kind a template's trigger asks for, when it asks for one.
+   */
+  onAddSource?: ((choice?: EventSourceChoice) => void) | undefined;
   /** Offer "Run once, then finish" (default true). */
   allowOnce?: boolean | undefined;
   /**
@@ -216,7 +230,7 @@ export interface EventTriggerEditorProps {
   eventTypes: EventTypesState | undefined;
   issues?: EventTriggerIssues | undefined;
   sourceLogo?: EventSourceLogoResolver | undefined;
-  onAddSource?: (() => void) | undefined;
+  onAddSource?: ((choice?: EventSourceChoice) => void) | undefined;
   /** Arguments a new MCP subscription starts with; see `EventTriggersField`. */
   argumentDefaults?: Readonly<Record<string, unknown>> | undefined;
   /** Move focus to the source picker when the block appears. */
@@ -241,6 +255,9 @@ export function EventTriggerEditor({
   const t = useOpenGeniText();
   const blockRef = useRef<HTMLDivElement>(null);
   const source = sources?.find((candidate) => candidate.id === value.sourceId);
+  /** What a template asked for, while no source of that kind is chosen. */
+  const wanted = !value.sourceId ? value.templateSource : undefined;
+  const wantedChoice = wanted ? automationTemplateSourceChoice(wanted) : undefined;
   const descriptors = eventTypes?.status === "ready" ? eventTypes.eventTypes : [];
   const schemaOf = (types: readonly string[]) =>
     types
@@ -260,7 +277,16 @@ export function EventTriggerEditor({
     ...(candidate.status === "active"
       ? {}
       : {
-          description: candidate.statusReason ?? t("automations.editor.sourceOff"),
+          description:
+            eventStatusReasonText(
+              t,
+              {
+                text: candidate.statusReason,
+                code: candidate.statusReasonCode,
+                detail: candidate.statusReasonDetail,
+              },
+              candidate.name,
+            ) ?? t("automations.editor.sourceOff"),
         }),
   }));
   const label = t("automations.editor.eventN", { index: index + 1 });
@@ -282,9 +308,15 @@ export function EventTriggerEditor({
             variant={sourceOptions.length > 8 ? "combobox" : "menu"}
             options={sourceOptions}
             value={value.sourceId || null}
-            onValueChange={(sourceId) =>
-              onChange({ ...value, sourceId, eventTypes: [], conditions: [], argumentsText: "" })
-            }
+            onValueChange={(sourceId) => {
+              const picked = sources?.find((candidate) => candidate.id === sourceId);
+              // A source of the kind the template asked for keeps its events.
+              onChange(
+                wanted && picked && eventSourceFitsTemplate(wanted, picked)
+                  ? { ...value, sourceId }
+                  : { ...value, sourceId, eventTypes: [], conditions: [], argumentsText: "" },
+              );
+            }}
             placeholder={
               sources === undefined
                 ? t("automations.editor.loadingSources")
@@ -296,7 +328,11 @@ export function EventTriggerEditor({
               onAddSource ? (
                 <span>
                   {t("automations.editor.noSources")}{" "}
-                  <button type="button" className="og-link" onClick={onAddSource}>
+                  <button
+                    type="button"
+                    className="og-link"
+                    onClick={() => onAddSource(wantedChoice)}
+                  >
                     {t("automations.editor.addSource")}
                   </button>
                 </span>
@@ -322,6 +358,30 @@ export function EventTriggerEditor({
           <Trash2Icon aria-hidden="true" />
         </Button>
       </div>
+      {wanted && wantedChoice && sources !== undefined ? (
+        <p className="m-0 text-sm leading-5 text-fg-muted">
+          {t("automations.editor.templateWants", {
+            events: eventTypesLabel(t, value.eventTypes),
+            source:
+              wanted.kind === "mcp" && wanted.mcpServerId
+                ? wanted.mcpServerId
+                : eventSourceChoiceName(t, wantedChoice),
+          })}
+          {onAddSource ? (
+            <>
+              {" "}
+              <button
+                type="button"
+                className="og-link"
+                onClick={() => onAddSource(wantedChoice)}
+                disabled={disabled}
+              >
+                {eventSourceAddLabel(t, wantedChoice)}
+              </button>
+            </>
+          ) : null}
+        </p>
+      ) : null}
       {value.sourceId ? (
         <>
           <Field
@@ -356,6 +416,7 @@ export function EventTriggerEditor({
                 })
               }
               state={eventTypes}
+              sourceName={source?.name}
               single={source?.kind === "mcp"}
               invalid={Boolean(issues?.eventTypes)}
               disabled={disabled}
@@ -404,6 +465,7 @@ export function EventTypePicker({
   value,
   onChange,
   state,
+  sourceName,
   single = false,
   invalid = false,
   disabled = false,
@@ -411,6 +473,8 @@ export function EventTypePicker({
   value: string[];
   onChange: (eventTypes: string[]) => void;
   state: EventTypesState | undefined;
+  /** The source's name, which the reasons a type can't be picked mention. */
+  sourceName?: string | undefined;
   /** Only one type (MCP triggers); picking replaces it. */
   single?: boolean | undefined;
   invalid?: boolean | undefined;
@@ -423,20 +487,29 @@ export function EventTypePicker({
     const picked = new Set(value);
     const known: SelectOption[] = descriptors
       .filter((descriptor) => !picked.has(descriptor.type))
-      .map((descriptor) => ({
-        value: descriptor.type,
-        label: descriptor.type,
-        description: descriptor.available
-          ? descriptor.description
-          : (descriptor.unavailableReason ?? descriptor.description),
-        disabled: !descriptor.available,
-        ...(descriptor.available
-          ? {}
-          : {
-              disabledReason: descriptor.unavailableReason ?? t("automations.picker.cantReceive"),
-            }),
-        keywords: [descriptor.description],
-      }));
+      .map((descriptor) => {
+        const unavailable = descriptor.available
+          ? null
+          : eventStatusReasonText(
+              t,
+              {
+                text: descriptor.unavailableReason,
+                code: descriptor.unavailableReasonCode,
+                detail: descriptor.unavailableReasonDetail,
+              },
+              sourceName,
+            );
+        return {
+          value: descriptor.type,
+          label: descriptor.type,
+          description: unavailable ?? descriptor.description,
+          disabled: !descriptor.available,
+          ...(descriptor.available
+            ? {}
+            : { disabledReason: unavailable ?? t("automations.picker.cantReceive") }),
+          keywords: [descriptor.description],
+        };
+      });
     const all: SelectOption[] =
       single || picked.has("*")
         ? []
@@ -474,7 +547,7 @@ export function EventTypePicker({
           ]
         : [];
     return [...matches, ...custom];
-  }, [descriptors, query, single, t, value]);
+  }, [descriptors, query, single, sourceName, t, value]);
 
   const add = (picked: string) => {
     const type = picked.startsWith(CUSTOM_PREFIX) ? picked.slice(CUSTOM_PREFIX.length) : picked;

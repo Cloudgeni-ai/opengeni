@@ -322,10 +322,13 @@ describe("workflow timeout contract", () => {
           .map((step) => ({ file, job, step })),
       ),
     );
-    expect(callers).toHaveLength(5);
+    expect(callers).toHaveLength(6);
     expect(callers.find(({ job }) => job === "browser-acceptance")?.step.with?.browsers).toBe(
       "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
     );
+    expect(
+      callers.find(({ file }) => file === "compact-session-view.yml")?.step.with?.browsers,
+    ).toBe("chromium");
 
     const action = Bun.YAML.parse(await readFile(playwrightActionPath, "utf8")) as {
       inputs: Record<string, { default?: unknown }>;

@@ -63,6 +63,7 @@ describe("OAuth client requirements", () => {
     }
     // Native Connect readiness owns these; listing them would double-gate.
     expect(listed.has("https://gmailmcp.googleapis.com/mcp/v1")).toBe(false);
+    expect(listed.has("https://calendarmcp.googleapis.com/mcp/v1")).toBe(false);
     expect(listed.has("https://mcp.slack.com/mcp")).toBe(false);
   });
 

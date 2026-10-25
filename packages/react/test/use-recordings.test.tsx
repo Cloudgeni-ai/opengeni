@@ -180,4 +180,53 @@ describe("useRecording", () => {
     expect(reads).toBe(settled);
     await hook.unmount();
   }, 15_000);
+
+  test("notices when a meeting recorded on another device stops", async () => {
+    let reads = 0;
+    let stopped = false;
+    const base: Recording = {
+      id: RECORDING_ID,
+      workspaceId: WORKSPACE_ID,
+      ownerSubjectId: "subject",
+      visibility: "private",
+      title: "Weekly sync",
+      purpose: "meeting",
+      state: "capturing",
+      startedAt: "2026-10-23T10:00:00.000Z",
+      captureEndedAt: null,
+      durationMilliseconds: 0,
+      errorCode: null,
+      externalRef: null,
+      audioDeletedAt: null,
+      metadata: {},
+      transcription: {},
+      tracks: [],
+      transcript: null,
+      createdAt: "2026-10-23T10:00:00.000Z",
+      updatedAt: "2026-10-23T10:00:00.000Z",
+    };
+    const recordings = {
+      getRecording: async () => {
+        reads += 1;
+        return stopped ? { ...base, state: "processing" as const } : base;
+      },
+      listRecordingTranscriptVersions: async () => [],
+    };
+    const hook = await renderHook(
+      () => useRecording(RECORDING_ID, { recordings, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.recording?.state).toBe("capturing");
+    expect(hook.result.current.processing).toBe(false);
+    // Capture is read slowly: nothing new within the transcription cadence.
+    const first = reads;
+    await flush(3_200);
+    expect(reads).toBe(first);
+    stopped = true;
+    await flush(7_200);
+    expect(hook.result.current.recording?.state).toBe("processing");
+    expect(hook.result.current.processing).toBe(true);
+    await hook.unmount();
+  }, 25_000);
 });

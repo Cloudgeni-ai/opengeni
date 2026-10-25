@@ -24,6 +24,7 @@ import {
   organizationDirectModelIdPrefix,
   withOrganizationDirectCatalogProvider,
   withOrganizationDirectCredential,
+  withOrganizationAzureOpenAIEntraCredential,
   withOrganizationOpperCatalogProvider,
   withOrganizationOpperCredential,
   withWorkspaceOpperCatalogProvider,
@@ -329,10 +330,12 @@ export async function settingsWithOrganizationProviderCredentials(
   const opperSettings = opperKey
     ? withOrganizationOpperCredential(openRouterSettings, opperKey, opperModels)
     : withOrganizationOpperCatalogProvider(openRouterSettings, opperModels);
-  // Organization OpenAI and Azure OpenAI: the decrypted key (and Azure's
-  // endpoint) come from the same active row; without one the catalog keeps
-  // Azure's non-secret endpoint of the last connection and the turn fails
-  // closed in the runtime. Never a deployment credential.
+  // Organization OpenAI and Azure OpenAI: the decrypted key or Azure's
+  // Microsoft Entra ID sign-in (and Azure's endpoint) come from the same
+  // active row; without one the catalog keeps Azure's non-secret endpoint of
+  // the last connection and the turn fails closed in the runtime. Never a
+  // deployment credential, except the deployment identity an operator
+  // explicitly offered to organizations.
   let result = opperSettings;
   for (const provider of ["openai", "azure_openai"] as const) {
     const models = await buildModels(provider, organizationDirectModelIdPrefix(provider));
@@ -343,10 +346,18 @@ export async function settingsWithOrganizationProviderCredentials(
       prepared,
     );
     if (credential && (provider === "openai" || credential.endpoint)) {
-      result = withOrganizationDirectCredential(result, provider, credential.apiKey, {
-        endpoint: credential.endpoint,
-        models,
-      });
+      result =
+        "azureEntra" in credential
+          ? provider === "azure_openai"
+            ? withOrganizationAzureOpenAIEntraCredential(result, credential.azureEntra, {
+                endpoint: credential.endpoint,
+                models,
+              })
+            : withOrganizationDirectCatalogProvider(result, provider, { endpoint: null, models })
+          : withOrganizationDirectCredential(result, provider, credential.apiKey, {
+              endpoint: credential.endpoint,
+              models,
+            });
       continue;
     }
     result = withOrganizationDirectCatalogProvider(result, provider, {

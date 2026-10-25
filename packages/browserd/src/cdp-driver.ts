@@ -7,6 +7,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, resolve as resolvePath } from "node:path";
 import {
+  BROWSER_ACTION_NAVIGATION_SETTLE_MS,
+  BROWSER_ACTION_REQUEST_SETTLE_MS,
+  BROWSER_ANIMATION_SETTLE_MS,
+  BROWSER_DEFAULT_WAIT_MS,
+  BROWSER_LOCATOR_WAIT_MS,
+  BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS,
   BrowserActionCommand,
   BrowserClipboard,
   BrowserDiagnosticBatch,
@@ -99,8 +105,11 @@ import {
 } from "./headless-session-cookies";
 import { BrowserWindowParking } from "./window-parking";
 import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
+import type { BrowserRelaunchedTabs, BrowserRelaunchReason } from "./stopped-browser-tabs";
 
-const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+/** The request deadline that carries an action is derived from this bound and
+ * the other declared waits (see browserActionDeadlineMs). */
+const DEFAULT_ACTION_TIMEOUT_MS = BROWSER_DEFAULT_WAIT_MS;
 // Attached Chrome without file access receives upload bytes over its
 // one-megabyte command channel: 384 KiB per chunk is 512 KiB of base64.
 const ATTACHED_TRANSFER_CHUNK_BYTES = 384 * 1024;
@@ -188,16 +197,58 @@ const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 const BROWSER_CLOSE_REQUEST_TIMEOUT_MS = 5_000;
 const NETWORK_IDLE_MS = 500;
 /** How long an action's locator waits for its element to appear or enable. */
-const LOCATOR_WAIT_MS = 10_000;
+const LOCATOR_WAIT_MS = BROWSER_LOCATOR_WAIT_MS;
 /** Response types that stay open for the life of the page by design. */
 const STREAMING_MIME_TYPES = new Set(["text/event-stream", "multipart/x-mixed-replace"]);
 /** How long a navigation may wait for its server to answer before the tab
  * stops loading. Chromium itself waits for the operating system's connect
  * timeout, which outlives every caller's deadline. */
-const NAVIGATION_COMMIT_TIMEOUT_MS = 20_000;
+const NAVIGATION_COMMIT_TIMEOUT_MS = BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS;
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
+/** Pages whose last accessibility read had at most this many nodes count as
+ * cheap to rebuild (about 25 ms for a rebuilt read of 1,000 nodes). */
+export const ACCESSIBILITY_CHEAP_REBUILD_NODES = 1_000;
+/** How often a polling read on a cheap page rebuilds the tree. */
+export const ACCESSIBILITY_REBUILD_INTERVAL_MS = 1_000;
+
+/** Why the driver reads a tab's accessibility tree: for an outline the model
+ * sees, for a locator or wait ("read", which may be a poll), right after a
+ * locator or wait first missed in an action ("miss"), or for the last look
+ * before reporting that a locator found nothing. */
+export type AccessibilityRead = "outline" | "read" | "miss" | "final";
+
+/**
+ * Whether to rebuild Chromium's accessibility tree before a read (see
+ * rebuildAccessibility for the staleness it repairs). A rebuild makes Chromium
+ * build the whole tree again; on large pages (mail, consoles, long documents)
+ * that costs hundreds of milliseconds and renderer CPU per action, which every
+ * user would pay for a rare pattern. So only the look before a failure always
+ * rebuilds: a locator never reports
+ * "not found", and a wait never times out, from a stale tree. Routine reads
+ * rebuild only on cheap pages: every outline, the first read of each call or
+ * batch action, and polls about once a second. A tab not read yet rebuilds
+ * once. Larger pages also rebuild once when an action's locator or wait first
+ * misses, so a stale tree costs one rebuild there rather than the whole wait.
+ * The cost is judged by the node count of the tab's last read rather
+ * than by timing a rebuild: a count does not swing with host load, and every
+ * read refreshes it, so a page that grows or shrinks is re-judged at once.
+ */
+export function accessibilityRebuildWanted(input: {
+  read: AccessibilityRead;
+  lastNodeCount: number | null;
+  firstReadOfCall: boolean;
+  msSinceRebuild: number;
+}): boolean {
+  if (input.read === "final" || input.lastNodeCount === null) return true;
+  if (input.lastNodeCount > ACCESSIBILITY_CHEAP_REBUILD_NODES) return input.read === "miss";
+  return (
+    input.read === "outline" ||
+    input.firstReadOfCall ||
+    input.msSinceRebuild >= ACCESSIBILITY_REBUILD_INTERVAL_MS
+  );
+}
 type BrowserPermissionAction = Extract<BrowserAction, { type: "permission" }>;
 const CDP_PERMISSION_NAMES: Record<BrowserPermissionAction["permission"], string> = {
   geolocation: "geolocation",
@@ -391,6 +442,12 @@ type TargetState = {
   documentGeneration: string;
   frameGeneration: string;
   accessibility: CdpAccessibilitySnapshot | null;
+  /** When Chromium's accessibility tree for this tab was last rebuilt, how
+   * many nodes its last read had, and whether the next read is the first of a
+   * call or batch action (see accessibilityRebuildWanted). */
+  accessibilityRebuiltAt: number;
+  accessibilityNodeCount: number | null;
+  accessibilityRebuildDue: boolean;
   dialog: BrowserDialog | null;
   /** Hit-target guards a JavaScript dialog kept from being read back. Page
    * scripts are paused under the dialog, so they are removed once it closes. */
@@ -572,6 +629,49 @@ export type BrowserRuntimeSnapshot = {
   tabs: Array<{ url: string; selected: boolean }>;
 };
 
+/** How many vanished tabs the driver remembers, to say why each is gone. */
+const MAX_GONE_TARGETS = 64;
+
+/** What the driver knows about a tab that no longer exists. */
+export type GoneBrowserTarget =
+  | { kind: "closed"; at: string; byCloseCall: boolean }
+  | {
+      kind: "relaunched";
+      reason: BrowserRelaunchReason;
+      idleReleaseMinutes?: number;
+      replacementId: string | null;
+    };
+
+const LIST_CURRENT_TABS = "list the current tabs and use one of their IDs";
+
+/** The answer for a tab ID that names no open tab: why it is gone when the
+ * driver knows, and how to carry on. Always starts "browser target does not
+ * exist", which callers match. */
+export function goneBrowserTargetMessage(gone: GoneBrowserTarget | null): string {
+  if (!gone) {
+    return `browser target does not exist: this ID is not one of this browser's tabs; ${LIST_CURRENT_TABS}`;
+  }
+  if (gone.kind === "closed") {
+    const by = gone.byCloseCall
+      ? "by a close-tab call"
+      : "by its page, or by a person or agent using this browser";
+    return `browser target does not exist: this tab was closed at ${gone.at} ${by}; ${LIST_CURRENT_TABS}`;
+  }
+  const minutes = gone.idleReleaseMinutes;
+  const why =
+    gone.reason === "idle_release"
+      ? `this browser was stopped after going unused${minutes ? ` for ${minutes} minute${minutes === 1 ? "" : "s"}` : ""} and relaunched on its next call`
+      : gone.reason === "controller_restart"
+        ? "this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call"
+        : gone.reason === "browser_lost"
+          ? "this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched"
+          : "this browser restarted to save its profile state";
+  const next = gone.replacementId
+    ? `this tab's page is now tab ${gone.replacementId}`
+    : LIST_CURRENT_TABS;
+  return `browser target does not exist: ${why}, so its tabs reopened with new IDs and unsaved page input may be lost; ${next}`;
+}
+
 function hasBrowserEmulation(
   value: BrowserSessionEmulation | undefined,
 ): value is BrowserSessionEmulation {
@@ -610,6 +710,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly createdTargetIds = new Set<string>();
   /** Blank tabs this session closed itself, most recent last. */
   private readonly closedBlankTargetIds = new Set<string>();
+  /** Tabs that vanished while this driver knew them, or that a relaunch
+   * replaced, most recent last: a later call naming one learns why. */
+  private readonly goneTargets = new Map<string, GoneBrowserTarget>();
+  /** Tabs a close-tab call of this driver is closing. */
+  private readonly closingTargetIds = new Set<string>();
   /** The tab an earlier runtime of this session was using; start continues
    * in it rather than opening another. */
   private rebindTargetId: string | null = null;
@@ -1030,6 +1135,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
   ): Promise<void> {
     await connection.send("Target.closeTarget", { targetId });
+    await this.settleClosedTarget(connection, targetId);
+  }
+
+  private async settleClosedTarget(
+    connection: BrowserCdpConnection,
+    targetId: string,
+  ): Promise<void> {
     const deadline = Date.now() + TARGET_CLOSE_SETTLE_TIMEOUT_MS;
     while ((await this.targetInfos(connection)).some((info) => info.targetId === targetId)) {
       if (Date.now() >= deadline) return;
@@ -1054,12 +1166,34 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
-    await this.closeTargetAndSettle(connection, targetId);
+    this.closingTargetIds.add(targetId);
+    try {
+      await connection.send("Target.closeTarget", { targetId });
+    } catch (error) {
+      this.closingTargetIds.delete(targetId);
+      throw error;
+    }
+    // The browser closed the tab. Losing the connection before the tab list
+    // is read must not report the close as a failure (attached Chrome can
+    // end the connection right after the tab closes).
+    let settleFailure: unknown;
+    try {
+      await this.settleClosedTarget(connection, targetId);
+    } catch (error) {
+      settleFailure = error;
+    }
+    this.rememberClosedTarget(targetId, true);
+    this.closingTargetIds.delete(targetId);
     this.removeState(targetId);
     this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     this.ownedTabsChanged();
-    return await this.listTargets();
+    try {
+      if (settleFailure !== undefined) throw settleFailure;
+      return await this.listTargets();
+    } catch (error) {
+      throw closedTargetListFailure(error);
+    }
   }
 
   /** Close the tabs this session opened in the person's browser that are
@@ -1350,6 +1484,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
     if (!info && this.closedBlankTargetIds.has(targetId))
       throw this.closedBlankTargetError(targetId);
+    if (!info && this.goneTargets.has(targetId)) throw this.missingTargetError(targetId);
     if (!info || !isVisibleTarget(info)) return null;
     const state = await this.ensureTargetState(info);
     // A JavaScript dialog blocks ordinary page-domain inspection. Keep the
@@ -1911,6 +2046,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
         state.locatorFollowsNavigation =
           command.action.type === "batch" && !command.action.fenceEachAction && actionIndex > 0;
+        state.accessibilityRebuildDue = true;
         const effectsBeforeAction = state.actionEffectCount;
         try {
           if (action.type === "handle_dialog") {
@@ -2324,7 +2460,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await connection.send("Target.setDiscoverTargets", { discover: true });
       this.browserUnsubscribe.push(
         connection.on("Target.targetDestroyed", (event) => {
-          if (typeof event.params.targetId === "string") this.removeState(event.params.targetId);
+          if (typeof event.params.targetId !== "string") return;
+          this.rememberClosedTarget(event.params.targetId);
+          this.removeState(event.params.targetId);
         }),
         connection.on("Target.detachedFromTarget", (event) => {
           const sessionId = event.params.sessionId;
@@ -2720,6 +2858,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const result = state.tail.then(async () => {
       this.assertCurrentTargetState(state);
       state.nodeRoute = null;
+      state.accessibilityRebuildDue = true;
       try {
         return await operation(state, info);
       } finally {
@@ -2856,6 +2995,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         frame.id,
       ),
       accessibility: null,
+      accessibilityRebuiltAt: 0,
+      accessibilityNodeCount: null,
+      accessibilityRebuildDue: true,
       dialog: null,
       diagnostics: {
         consoleErrorCount: 0,
@@ -3164,6 +3306,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     pageFrames: readonly MainFrame[],
     pageNodes: readonly CdpAxNode[],
+    rebuild: boolean,
   ): Promise<CdpAxNode[]> {
     const connection = await this.ensureConnection();
     const known = [...pageNodes];
@@ -3196,6 +3339,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               node.backendDOMNodeId === owner.backendNodeId,
           );
           if (!ownerNode || typeof ownerNode.nodeId !== "string") continue;
+          if (rebuild) await this.rebuildAccessibility(oopif.sessionId);
           const nodes = await this.collectAccessibilityFrames(oopif.sessionId, frames);
           const ids = new Set(nodes.map((node) => node.nodeId));
           const origin = frameOrigin(frames[0]?.url);
@@ -3612,7 +3756,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         ? state.accessibility
         : state.dialog
           ? emptyAccessibilitySnapshot()
-          : await this.refreshAccessibility(state);
+          : await this.refreshAccessibility(state, "outline");
     const focused = accessibility.focusedRef
       ? accessibility.entriesByRef.get(accessibility.focusedRef)
       : null;
@@ -3710,12 +3854,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return result.result?.value === true;
   }
 
-  private async refreshAccessibility(state: TargetState): Promise<CdpAccessibilitySnapshot> {
+  /**
+   * Read the tab's accessibility tree, first rebuilding Chromium's tree when
+   * accessibilityRebuildWanted says this read should.
+   */
+  private async refreshAccessibility(
+    state: TargetState,
+    read: AccessibilityRead = "read",
+  ): Promise<CdpAccessibilitySnapshot> {
+    const rebuilding =
+      this.engine !== "lightpanda" &&
+      accessibilityRebuildWanted({
+        read,
+        lastNodeCount: state.accessibilityNodeCount,
+        firstReadOfCall: state.accessibilityRebuildDue,
+        msSinceRebuild: Date.now() - state.accessibilityRebuiltAt,
+      });
     for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
       const before = flattenFrameTree(await this.frameTree(state.sessionId));
+      if (rebuilding) await this.rebuildAccessibility(state.sessionId);
+      state.accessibilityRebuildDue = false;
       const nodes = await this.collectAccessibilityFrames(state.sessionId, before);
       if (state.oopifs.size > 0)
-        nodes.push(...(await this.oopifAccessibility(state, before, nodes)));
+        nodes.push(...(await this.oopifAccessibility(state, before, nodes, rebuilding)));
       const after = flattenFrameTree(await this.frameTree(state.sessionId));
       if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
         continue;
@@ -3728,9 +3889,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       });
       this.assertCurrentTargetState(state);
       state.accessibility = accessibility;
+      state.accessibilityNodeCount = nodes.length;
+      if (rebuilding) state.accessibilityRebuiltAt = Date.now();
       return accessibility;
     }
     throw new Error("browser frame tree did not settle for a bounded accessibility observation");
+  }
+
+  /**
+   * Chromium updates its accessibility tree incrementally and can miss a
+   * change: content assigned to a shadow-root slot after that slot was laid
+   * out stays out of the tree (or is reported as not rendered) while it is
+   * on screen, so a custom context menu can be visible yet absent. Restarting
+   * the domain makes the next read build the tree from the current DOM and
+   * layout, at some cost on large pages, so refreshAccessibility rebuilds it
+   * only for the reads that matter. DOM-backed node ids are DOM node ids, so
+   * refs survive the rebuild (see normalizeCdpAccessibilityTree for the
+   * others).
+   */
+  private async rebuildAccessibility(sessionId: string): Promise<void> {
+    if (this.engine === "lightpanda") return;
+    const connection = await this.ensureConnection();
+    await connection.send("Accessibility.disable", {}, { sessionId });
+    await connection.send("Accessibility.enable", {}, { sessionId });
   }
 
   private async collectAccessibilityFrames(
@@ -4961,19 +5142,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       : { document: state.documentGeneration, frame: state.frameGeneration };
     let pause = 25;
     let entry: CdpAccessibilityEntry;
+    let finalAttempt = false;
+    let missed = false;
+    let read: AccessibilityRead = "read";
     for (;;) {
       let found: CdpAccessibilityEntry | null = null;
+      const purpose: AccessibilityRead = finalAttempt ? "final" : read;
+      read = "read";
       try {
-        found = await this.resolveLocator(state, locator);
+        found = await this.resolveLocator(state, locator, purpose);
       } catch (error) {
-        if (
-          locator.kind === "ref" ||
-          !(
-            error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found"
-          ) ||
-          Date.now() >= deadline
-        ) {
-          throw error;
+        const notFound =
+          error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found";
+        if (locator.kind === "ref" || !notFound || finalAttempt) throw error;
+        // Polls may reuse Chromium's tree; "not found" is only reported from
+        // a freshly built one, and the first miss looks again at once.
+        if (!missed) {
+          missed = true;
+          read = "miss";
+          continue;
+        }
+        if (Date.now() >= deadline) {
+          finalAttempt = true;
+          continue;
         }
       }
       if (
@@ -5089,11 +5280,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async resolveLocator(
     state: TargetState,
     locator: BrowserLocator,
+    read: AccessibilityRead = "read",
   ): Promise<CdpAccessibilityEntry> {
     // Each resolution decides where this node's DOM and runtime calls go:
     // the page session, or the session of the cross-origin frame holding it.
     state.nodeRoute = null;
-    const entry = await this.resolveLocatorInPage(state, locator);
+    const entry = await this.resolveLocatorInPage(state, locator, read);
     state.nodeRoute = this.oopifForFrame(state, entry.frameId);
     return entry;
   }
@@ -5101,6 +5293,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async resolveLocatorInPage(
     state: TargetState,
     locator: BrowserLocator,
+    read: AccessibilityRead = "read",
   ): Promise<CdpAccessibilityEntry> {
     await this.refreshFrame(state);
     if (locator.kind === "css" || locator.kind === "test_id" || locator.kind === "placeholder") {
@@ -5117,7 +5310,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (partial) return partial;
       }
     }
-    const accessibility = await this.refreshAccessibility(state);
+    const accessibility = await this.refreshAccessibility(state, read);
     if (locator.kind === "ref") {
       const entry = accessibility.entriesByRef.get(locator.ref);
       if (!entry || entry.backendDOMNodeId === null) {
@@ -5134,7 +5327,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // name is the requested text, that is the element the caller named.
     const unique =
       uniqueEntries(matches) ??
-      (needle !== undefined && !(locator.kind === "role" && locator.exact)
+      (needle !== undefined && !locator.exact
         ? uniqueEntries(matches.filter((entry) => sameAccessibleName(entry.name, needle)))
         : null);
     if (!unique) {
@@ -5183,13 +5376,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       targetId: state.targetId,
       documentGeneration: state.documentGeneration,
     }).entriesByRef.get(previous.ref);
-    if (!current || current.backendDOMNodeId !== previous.backendDOMNodeId) {
-      throw new InteractionDefiniteDriverError(
-        "locator_not_found",
-        "browser element reference is stale or unavailable",
-      );
-    }
-    return current;
+    // Chromium's incremental tree can report a visible node as not rendered.
+    // Without this proof, the rebuilt full tree decides whether the ref holds.
+    return current && current.backendDOMNodeId === previous.backendDOMNodeId ? current : null;
   }
 
   private async uniqueDomMatch(state: TargetState, selector: string): Promise<number> {
@@ -5255,8 +5444,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async locatorCandidates(
     state: TargetState,
     locator: BrowserLocator,
+    read: AccessibilityRead,
   ): Promise<CdpAccessibilityEntry[]> {
-    if (locator.kind === "ref") return [await this.resolveLocatorInPage(state, locator)];
+    if (locator.kind === "ref") return [await this.resolveLocatorInPage(state, locator, read)];
     await this.refreshFrame(state);
     if (locator.kind === "css" || locator.kind === "test_id" || locator.kind === "placeholder") {
       const nodeIds = await this.domMatchNodeIds(state, domLocatorSelector(locator));
@@ -5266,7 +5456,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       return entries;
     }
-    const accessibility = await this.refreshAccessibility(state);
+    const accessibility = await this.refreshAccessibility(state, read);
     const byBackend = new Map<number, CdpAccessibilityEntry>();
     for (const entry of accessibilityLocatorMatches(accessibility.entries, locator)) {
       if (entry.backendDOMNodeId !== null && !byBackend.has(entry.backendDOMNodeId)) {
@@ -6476,7 +6666,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     const timeoutMs = action.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS;
     const deadline = Date.now() + timeoutMs;
+    let pollMs = 0;
+    let lookedFinal = false;
+    let locatorPolls = 0;
     while (Date.now() < deadline) {
+      const pollStartedAt = Date.now();
       if (action.condition === "load") {
         // An explicit load wait means the load event: images and other
         // subresources finished, unlike navigation's own interactive wait.
@@ -6503,8 +6697,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           return;
         }
       } else if (action.locator) {
-        const visible = await this.locatorVisible(state, action.locator);
+        // Polls may reuse Chromium's tree; the one after the first miss and
+        // the one expected to be last before the deadline look at a freshly
+        // built one, once each.
+        const last: boolean = !lookedFinal && pollStartedAt + pollMs + 50 >= deadline;
+        const visible = await this.locatorVisible(
+          state,
+          action.locator,
+          last ? "final" : locatorPolls === 1 ? "miss" : "read",
+        );
         if (action.condition === "visible" ? visible : !visible) return;
+        lookedFinal ||= last;
+        locatorPolls += 1;
+        pollMs = Date.now() - pollStartedAt;
       } else {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -6512,6 +6717,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
       }
       await delay(50);
+    }
+    if (
+      action.locator &&
+      !lookedFinal &&
+      (action.condition === "visible" || action.condition === "hidden")
+    ) {
+      // A poll ran longer than expected and the deadline passed first: the
+      // timeout is still only reported from a freshly built tree.
+      const visible = await this.locatorVisible(state, action.locator, "final");
+      if (action.condition === "visible" ? visible : !visible) return;
     }
     // Some live pages never go quiet: a long poll or a request the page keeps
     // open is indistinguishable from a slow fetch until it ends. Network idle
@@ -6536,10 +6751,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return value === "interactive" || value === "complete";
   }
 
-  private async locatorVisible(state: TargetState, locator: BrowserLocator): Promise<boolean> {
+  private async locatorVisible(
+    state: TargetState,
+    locator: BrowserLocator,
+    read: AccessibilityRead = "read",
+  ): Promise<boolean> {
     let candidates: CdpAccessibilityEntry[];
     try {
-      candidates = await this.locatorCandidates(state, locator);
+      candidates = await this.locatorCandidates(state, locator, read);
     } catch (error) {
       if (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found") {
         return false;
@@ -7012,9 +7231,57 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!info || !isVisibleTarget(info)) {
       if (!info && this.closedBlankTargetIds.has(targetId))
         throw this.closedBlankTargetError(targetId);
-      throw new InteractionDefiniteDriverError("target_not_found", "browser target does not exist");
+      throw this.missingTargetError(info ? null : targetId);
     }
     return info;
+  }
+
+  /** No open tab has this ID: say why when this driver knows, and how to
+   * carry on. */
+  private missingTargetError(targetId: string | null): InteractionDefiniteDriverError {
+    return new InteractionDefiniteDriverError(
+      "target_not_found",
+      goneBrowserTargetMessage(targetId ? (this.goneTargets.get(targetId) ?? null) : null),
+    );
+  }
+
+  /** A tab this driver knew closed. A close this driver asked for says so;
+   * any other close came from the page or from someone using the browser. */
+  private rememberClosedTarget(targetId: string, byCloseCall = false): void {
+    const closing = byCloseCall || this.closingTargetIds.has(targetId);
+    const existing = this.goneTargets.get(targetId);
+    if (existing?.kind === "relaunched") return;
+    if (existing && !closing) return;
+    if (!closing && !this.firstSeenAt.has(targetId) && !this.states.has(targetId)) return;
+    this.rememberGoneTarget(targetId, {
+      kind: "closed",
+      at: this.timestamp().replace(/\.\d{3}Z$/u, "Z"),
+      byCloseCall: closing,
+    });
+  }
+
+  private rememberGoneTarget(targetId: string, gone: GoneBrowserTarget): void {
+    this.goneTargets.delete(targetId);
+    this.goneTargets.set(targetId, gone);
+    while (this.goneTargets.size > MAX_GONE_TARGETS) {
+      this.goneTargets.delete(this.goneTargets.keys().next().value!);
+    }
+  }
+
+  /** The browser this driver runs replaced an earlier one, whose tabs it
+   * reopened with new IDs: a call naming an earlier tab learns why it is gone
+   * and which tab shows its page now. */
+  noteRelaunchedTabs(relaunched: BrowserRelaunchedTabs): void {
+    for (const tab of relaunched.tabs) {
+      this.rememberGoneTarget(tab.targetId, {
+        kind: "relaunched",
+        reason: relaunched.reason,
+        ...(relaunched.idleReleaseMinutes !== undefined
+          ? { idleReleaseMinutes: relaunched.idleReleaseMinutes }
+          : {}),
+        replacementId: tab.replacementId,
+      });
+    }
   }
 
   /** The session closed its own empty tab when it last let go of the
@@ -7372,6 +7639,20 @@ export function isBlankTabUrl(url: string): boolean {
   );
 }
 
+/** Why the tab list after a completed close could not be read. A lost
+ * connection leaves the result unknown, not failed: the tab closed, but which
+ * tabs remain is unread. Other failures keep their own classification. */
+function closedTargetListFailure(error: unknown): unknown {
+  if (!(error instanceof CdpTransportError || error instanceof CdpCommandTimeoutError)) {
+    return error;
+  }
+  return new InteractionOutcomeUnknownDriverError(
+    "outcome_unknown",
+    "The tab closed, but the browser's connection ended before its remaining tabs could be listed; list the tabs again once the browser is connected",
+    false,
+  );
+}
+
 function absoluteTargetUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0 || value.length > 16_384) return null;
   try {
@@ -7481,7 +7762,9 @@ function accessibilityLocatorMatches(
     (entry) =>
       entry.backendDOMNodeId !== null &&
       entry.role === "text" &&
-      (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase()),
+      (locator.exact
+        ? sameAccessibleName(entry.name, locator.text)
+        : (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase())),
   );
 }
 
@@ -7696,14 +7979,15 @@ const KEY_DEFINITIONS: Record<string, KeyDefinition> = {
 
 // Typical exit animations take 100-300 ms. Longer finite animations are
 // waited for only this long, so a slow transition cannot stall every action.
-const ANIMATION_SETTLE_LIMIT_MS = 750;
+// Action request deadlines count these settle limits (BROWSER_ACTION_SETTLE_MAX_MS).
+const ANIMATION_SETTLE_LIMIT_MS = BROWSER_ANIMATION_SETTLE_MS;
 // Requests an action starts usually answer in well under a second; a request
 // that stays open (a stream, a stalled server) must not hold the result back.
-const ACTION_REQUEST_SETTLE_LIMIT_MS = 1_500;
+const ACTION_REQUEST_SETTLE_LIMIT_MS = BROWSER_ACTION_REQUEST_SETTLE_MS;
 // A navigation an action starts (a form post, a followed link) is waited for
 // this long to show its new document; a server slower than this leaves the
 // result on the page as it is, still loading.
-const ACTION_NAVIGATION_SETTLE_LIMIT_MS = 10_000;
+const ACTION_NAVIGATION_SETTLE_LIMIT_MS = BROWSER_ACTION_NAVIGATION_SETTLE_MS;
 const ACTION_REQUEST_POLL_MS = 20;
 // Input after which a page handler commonly starts a request: a click or
 // key that submits, a choice, a chosen file, a click at a point, typed keys

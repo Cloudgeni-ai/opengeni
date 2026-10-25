@@ -4,7 +4,7 @@ import type { TranscriptionService } from "@opengeni/core";
 import * as dbModule from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
-import { createTranscriptionService } from "../src/transcription/service";
+import { createTranscriptionService } from "@opengeni/core/transcription-service";
 
 const SECRET = "transcription-route-secret";
 const WORKSPACE = "00000000-0000-4000-8000-000000000001";

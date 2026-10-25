@@ -882,3 +882,186 @@ test("Drive card connects through its dedicated provider and enables only the co
     window.open = previousOpen;
   }
 });
+
+test("connecting your own account to a capability enabled for personal accounts changes no installation", async () => {
+  sessionStorage.clear();
+  let committed = false;
+  const enables: unknown[] = [];
+  const personal = {
+    ...item,
+    id: "personal-service",
+    connectionRef: { providerDomain: "service.example", kind: "oauth2", subjectScope: "subject" },
+  } as CapabilityCatalogItem;
+  const account = { ...connection, id: "own-account", subjectId: "user:own" };
+  const attempt = {
+    id: "own-attempt",
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership: "personal",
+    revision: 1,
+    state: "credential_input",
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection",
+    nextAction: { type: "credentials", fields: [] },
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  const begins: unknown[] = [];
+  const client = {
+    listCapabilities: async () => ({ items: [personal] }),
+    listConnections: async () => (committed ? [account] : []),
+    listOwnConnectionAccounts: async () => (committed ? [account] : []),
+    enableCapability: async (...input: unknown[]) => {
+      enables.push(input);
+    },
+    connectTransport: () => ({
+      begin: async (_workspaceId: string, input: unknown) => {
+        begins.push(input);
+        return attempt;
+      },
+      advance: async () => {
+        committed = true;
+        return {
+          ...attempt,
+          revision: 2,
+          state: "complete",
+          credentialsCommitted: true,
+          nextAction: { type: "none" },
+          account: {
+            id: account.id,
+            providerId: "mcp-oauth",
+            ownership: "personal",
+            status: "connected",
+            label: "Example service",
+            version: 1,
+          },
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId={personal.id}
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    const button = [...document.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Continue to Example service",
+    );
+    expect(button).toBeDefined();
+    await actRun(() => button!.click());
+    await flush();
+    expect(begins).toEqual([
+      expect.objectContaining({ providerId: "mcp-oauth", ownership: "personal" }),
+    ]);
+    expect(enables).toEqual([]);
+    expect(document.querySelector('[role="alert"]')?.textContent ?? null).toBeNull();
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
+function conversationClient(options: { failAttach?: boolean } = {}) {
+  const calls: string[] = [];
+  const continuations: unknown[][] = [];
+  const attached = {
+    ...item,
+    tools: [{ kind: "mcp", id: "service" }],
+    metadata: {},
+  } as unknown as CapabilityCatalogItem;
+  const client = {
+    listCapabilities: async () => ({ items: [attached] }),
+    listConnections: async () => [connection],
+    getSession: async () => ({
+      tools: [],
+      firstPartyMcpTools: [],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      toolPolicyVersion: 3,
+      effectiveToolPolicy: { effectiveIds: [], mandatoryIds: [], idsTruncated: false },
+    }),
+    updateSessionToolPolicy: async () => {
+      calls.push("updateSessionToolPolicy");
+      if (options.failAttach) throw new Error("Version conflict");
+      return {};
+    },
+    continueAfterCapabilitySetup: async (...input: unknown[]) => {
+      calls.push("continueAfterCapabilitySetup");
+      continuations.push(input);
+      return { outcome: "queued", updateId: "update" };
+    },
+    connectTransport: () => ({}),
+  } as unknown as OpenGeniClient;
+  return { client, calls, continuations };
+}
+
+test("using a connection in the conversation lets the agent continue its request once", async () => {
+  const h = conversationClient();
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={h.client}
+      workspaceId="workspace"
+      sessionId="session"
+      capabilityId="service"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    const use = [...document.querySelectorAll("button.og-session-capability-primary")].find(
+      (node) => node.textContent === "Use in this conversation",
+    ) as HTMLButtonElement | undefined;
+    expect(use).toBeDefined();
+    await actRun(() => use!.click());
+    await flush();
+    // Only after the conversation's tools were updated, and exactly once.
+    expect(h.calls).toEqual(["updateSessionToolPolicy", "continueAfterCapabilitySetup"]);
+    expect(h.continuations).toEqual([["workspace", "session", { capabilityId: "service" }]]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a failed conversation attach never continues the agent's request", async () => {
+  const h = conversationClient({ failAttach: true });
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={h.client}
+      workspaceId="workspace"
+      sessionId="session"
+      capabilityId="service"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    const use = [...document.querySelectorAll("button.og-session-capability-primary")].find(
+      (node) => node.textContent === "Use in this conversation",
+    ) as HTMLButtonElement | undefined;
+    await actRun(() => use!.click());
+    await flush();
+    expect(h.calls).toEqual(["updateSessionToolPolicy"]);
+    expect(document.querySelector('[role="alert"]')?.textContent ?? "").toContain(
+      "Version conflict",
+    );
+  } finally {
+    await view.unmount();
+  }
+});

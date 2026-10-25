@@ -45,6 +45,18 @@ be targets. Slack, push and email surfaces link to the card instead of
 collecting values, and voice asks the person to answer in the app. The full
 model is in [`secrets.md`](secrets.md#asking-a-person).
 
+## Opengeni's own cards
+
+A request's `origin` says who asked. `tool_call` (the default, and what an
+older server's rows mean) is an agent's `request_human_input` call: its turn
+waits for the answer. `secret_use_approval` is Opengeni's own approval card
+for a blocked secret use: the turn did not wait, so the card is not closed
+when the turn ends, stays in the pending list and the person's inbox until
+answered, and its answer reaches the agent as a `secret_use_approval_decided`
+update instead of resuming a turn. Only the signed-in person the run acts for
+can answer it, in Opengeni; Slack and push link to it. See
+[Approval for each use](secrets.md#approval-for-each-use).
+
 ## Durable lifecycle
 
 One `request_human_input` interruption maps to one row in

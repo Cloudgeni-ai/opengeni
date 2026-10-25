@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as contracts from "@opengeni/contracts";
 import { z } from "zod";
-import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
+import { ACTION_CATALOG } from "@opengeni/contracts/app-actions";
 import { ACTION_REQUEST_SCHEMAS } from "../src/mcp/action-schema-imports.gen";
 import { describeAction } from "../src/organization-mcp";
 

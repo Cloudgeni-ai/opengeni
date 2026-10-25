@@ -1,16 +1,37 @@
+import { isDeepStrictEqual } from "node:util";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { organizationAccessPresetPermissions, type AccessGrant } from "@opengeni/contracts";
+import {
+  normalizeOrganizationAccessPolicy,
+  organizationAccessPresetPermissions,
+  type AccessGrant,
+} from "@opengeni/contracts";
+import {
+  APP_ACTION_CALL_TOOL_NAME,
+  appActionChangesState,
+  appActionCallCarriesSecrets,
+  findAppAction,
+} from "@opengeni/contracts/app-actions";
 
-import { resolveSessionAdminAuthority, type Database } from "@opengeni/db";
+import {
+  listConfirmedAppActionChanges,
+  resolveSessionAppActionAuthority,
+  type Database,
+  type SessionAppActionUnavailableReason,
+} from "@opengeni/db";
 import * as z4 from "zod/v4";
 
-import { callOrganizationAction, describeActionResult, searchActions } from "../organization-mcp";
+import {
+  callOrganizationAction,
+  describeAction,
+  describeActionResult,
+  searchActions,
+} from "../organization-mcp";
 
 /**
- * How a session with admin access reaches the organization's actions: the
- * same actions as the organization MCP server, run in this process as the
- * person who gave the session their access, with exactly what they can do.
+ * How a session reaches the app's actions: the same actions as the
+ * organization MCP server, run in this process as a person, with exactly what
+ * they can do.
  */
 export type SessionAdminAccessDispatch = {
   /** This API's own origin; calls never leave the process. */
@@ -32,53 +53,110 @@ function failure(message: string): CallToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
 }
 
+// Fixed texts, whatever the session's access: what the model reads never
+// changes mid-session. Every refusal says nothing ran.
+const UNAVAILABLE: Record<SessionAppActionUnavailableReason, string> = {
+  organization_off:
+    "Nothing was run: this organization has turned off app actions in chat. The person can do it in the app, or an owner or admin can turn them on again under Security.",
+  not_person_session:
+    "Nothing was run: app actions run only in a chat a person started themselves, never in a child or service session.",
+  no_person_present:
+    "Nothing was run: nobody sent this turn's message, so there is no one to act for or to confirm a change. Scheduled, goal and other unattended turns can't run app actions.",
+  not_signed_in_person:
+    "Nothing was run: this turn's message wasn't sent by a person signed in to a chat (for example it came from an API key or a service), so there is no one to act for.",
+  not_member: "Nothing was run: the person who sent this message can no longer use this workspace.",
+};
+const NOT_CONFIRMED =
+  "Nothing was run: this change needs a confirmation from the person who sent this turn's message, given in this chat where they are signed in; an Allow from anyone else, or sent through a key or another integration, doesn't count. Call it again once with the same arguments so they can allow it. If they declined, or someone else answered, tell them so and don't call it again.";
+const READ_ONLY =
+  "Nothing was run: this chat was opened through an embed or another integration, so app actions here can only read, not change anything. The person can make this change in the app itself.";
+const SECRETS =
+  "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. The person can do it in the app's settings themselves.";
+
+const CallInput = z4.object({
+  id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
+  pathParameters: z4
+    .record(z4.string(), z4.string().min(1).max(1024))
+    .default({})
+    .describe("Values for the path's :parameters, for example { workspaceId }."),
+  query: z4
+    .record(
+      z4.string(),
+      z4.union([
+        z4.string(),
+        z4.number(),
+        z4.boolean(),
+        z4.array(z4.union([z4.string(), z4.number()])),
+      ]),
+    )
+    .default({})
+    .describe("Query string parameters."),
+  body: z4
+    .record(z4.string(), z4.unknown())
+    .optional()
+    .describe("The JSON request body, for actions that take one."),
+});
+type CallArgs = z4.infer<typeof CallInput>;
+
+/** Whether a saved, confirmed call is exactly this one, after the same input parsing. */
+function confirmedCall(saved: string, args: CallArgs): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(saved);
+  } catch {
+    return false;
+  }
+  const parsed = CallInput.safeParse(value);
+  return parsed.success && isDeepStrictEqual(parsed.data, args);
+}
+
 /**
- * Register the admin tools. The server admits them only while the session
- * has admin access; every call checks it again, live, so turning it off,
- * the organization stopping it, or the person losing their role takes effect
- * on the very next call.
+ * Register the app-action tools. The server lists them in a chat a person
+ * started (or one with full access); each call resolves, live, as whom it runs:
+ * with full access, the person who gave it, as before; otherwise the person
+ * who sent this turn's message, whose changes run only after they confirm
+ * each one in the chat. The worker shows that confirmation; this checks it.
  */
 export function registerSessionAdminAccessTools(input: {
   server: McpServer;
   db: Database;
   grant: AccessGrant;
   sessionId: string;
+  attempt: { turnId: string; attemptId: string };
   access: SessionAdminAccessDispatch;
   authorize: () => Promise<void>;
 }): void {
-  const { server, db, grant, sessionId, access, authorize } = input;
+  const { server, db, grant, sessionId, attempt, access, authorize } = input;
   const currentAuthority = async () => {
     await authorize();
-    return await resolveSessionAdminAuthority(db, {
+    return await resolveSessionAppActionAuthority(db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId,
+      turnId: attempt.turnId,
     });
   };
-  const ended = () =>
-    failure(
-      "This session no longer has full access. The person who started it can give it again from the session's menu in the app.",
-    );
 
   server.registerTool(
     "admin_actions_search",
     {
-      title: "Find organization actions",
+      title: "Find app actions",
       description:
-        "This session has full access: it can do what the person who gave it can do in the app, and nothing more. Search every action (sessions and chats, workspaces and their settings, people, connections and capabilities, knowledge, files, schedules, models, keys, billing and organization settings); actions beyond that person's own access are refused when called. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
+        "Find what the person could do themselves in the app's pages and settings, so you can do it for them here instead of sending them there: switch or set models, invite people and share chats, check their plan, credits and usage, change workspace and organization settings, and manage sessions, connections, schedules, files, knowledge and keys. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
       inputSchema: {
         query: z4
           .string()
           .max(200)
           .default("")
-          .describe("Words to look for, for example 'list sessions' or 'connections'."),
+          .describe("Words to look for, for example 'invite', 'usage' or 'default model'."),
         limit: z4.number().int().min(1).max(50).default(20).describe("Results per page."),
         offset: z4.number().int().min(0).default(0).describe("Results to skip, for paging."),
       },
       annotations: { readOnlyHint: true },
     },
     async ({ query, limit, offset }) => {
-      if (!(await currentAuthority())) return ended();
+      const authority = await currentAuthority();
+      if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
       return text(searchActions({ query, limit, offset }));
     },
   );
@@ -86,74 +164,94 @@ export function registerSessionAdminAccessTools(input: {
   server.registerTool(
     "admin_action_describe",
     {
-      title: "Describe an organization action",
+      title: "Describe an app action",
       description:
-        "Show an organization action's method, path, path parameters and the JSON schema of its input, so admin_action_call can run it correctly.",
+        "Show an app action's method, path, path parameters, the JSON schema of its input and whether it changes anything, so admin_action_call can run it correctly.",
       inputSchema: {
         id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
       },
       annotations: { readOnlyHint: true },
     },
     async ({ id }) => {
-      if (!(await currentAuthority())) return ended();
-      return describeActionResult(id);
+      const authority = await currentAuthority();
+      if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
+      const entry = findAppAction(id);
+      if (!entry || entry.browserOnly || entry.retired) return describeActionResult(id);
+      return text({ ...describeAction(entry), changes: appActionChangesState(entry) });
     },
   );
 
   server.registerTool(
-    "admin_action_call",
+    APP_ACTION_CALL_TOOL_NAME,
     {
-      title: "Run an organization action",
+      title: "Run an app action",
       description:
-        "Run one action as the person who gave this session full access, with exactly what they can do right now, in any workspace they can use. Pass path parameters (for example workspaceId), query parameters and a JSON body. Returns the HTTP status and response; 403 means that person can't do it. Changes are real: confirm the target first.",
-      inputSchema: {
-        id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
-        pathParameters: z4
-          .record(z4.string(), z4.string().min(1).max(1024))
-          .default({})
-          .describe("Values for the path's :parameters, for example { workspaceId }."),
-        query: z4
-          .record(
-            z4.string(),
-            z4.union([
-              z4.string(),
-              z4.number(),
-              z4.boolean(),
-              z4.array(z4.union([z4.string(), z4.number()])),
-            ]),
-          )
-          .default({})
-          .describe("Query string parameters."),
-        body: z4
-          .record(z4.string(), z4.unknown())
-          .optional()
-          .describe("The JSON request body, for actions that take one."),
-      },
+        "Run one app action as the person, with exactly what they can do in the app and nothing more. A read (changes: false) runs right away. A change first shows the person a confirmation in this chat and runs only if they allow it, unless they gave this session full access; only the person who sent the message can allow it, and if they decline, don't ask again. Actions that create, show or rotate keys, passwords or other secrets are left to the app unless the session has full access. Pass path parameters (for example workspaceId), query parameters and a JSON body. Returns the HTTP status and response; 403 means the person can't do it. Tell them plainly what changed.",
+      inputSchema: CallInput.shape,
       annotations: { readOnlyHint: false, openWorldHint: false },
     },
-    async ({ id, pathParameters, query, body }) => {
+    async (args) => {
       const authority = await currentAuthority();
-      if (!authority) return ended();
-
+      if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
+      const entry = findAppAction(args.id);
+      if (
+        authority.kind !== "full_access" &&
+        entry &&
+        appActionCallCarriesSecrets(entry, args.body)
+      )
+        return failure(SECRETS);
+      if (authority.kind === "read_only" && entry && appActionChangesState(entry))
+        return failure(READ_ONLY);
+      if (authority.kind === "confirm" && entry && appActionChangesState(entry)) {
+        // Enforced here, not only in the chat: the change runs only if this
+        // attempt is executing exactly these arguments, which this same
+        // person approved.
+        const confirmed = await listConfirmedAppActionChanges(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          subjectId: authority.subjectId,
+          toolName: APP_ACTION_CALL_TOOL_NAME,
+        });
+        if (!confirmed.some((saved) => confirmedCall(saved, args))) return failure(NOT_CONFIRMED);
+      }
       return await callOrganizationAction(
         {
           caller: {
             kind: "person",
             accountId: grant.accountId,
             subjectId: authority.subjectId,
-            // The cap is everything: each route still resolves this person's
-            // live role and workspace access, exactly as in their browser.
-            access: {
-              preset: "full",
-              permissions: organizationAccessPresetPermissions("full"),
-              workspaceScope: { kind: "all" },
-            },
+            // Each route still resolves this person's live role and workspace
+            // access, exactly as in their browser. Full access reaches every
+            // workspace they can use, as before. Otherwise the cap is what the
+            // message itself could do when it was sent (frozen with the turn,
+            // so an embed's narrower token stays narrow) in this chat's
+            // workspace, so steps that widen an agent's access stay refused.
+            access:
+              authority.kind === "full_access"
+                ? {
+                    preset: "full",
+                    permissions: organizationAccessPresetPermissions("full"),
+                    workspaceScope: { kind: "all" },
+                  }
+                : normalizeOrganizationAccessPolicy({
+                    preset: "custom",
+                    permissions: authority.permissions,
+                    workspaceScope: { kind: "selected", workspaceIds: [grant.workspaceId] },
+                  }),
           },
           origin: access.origin,
           dispatch: access.dispatch,
           ...(access.signal ? { signal: access.signal } : {}),
         },
-        { id, pathParameters, query, ...(body !== undefined ? { body } : {}) },
+        {
+          id: args.id,
+          pathParameters: args.pathParameters,
+          query: args.query,
+          ...(args.body !== undefined ? { body: args.body } : {}),
+        },
       );
     },
   );

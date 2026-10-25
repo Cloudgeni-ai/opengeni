@@ -12,6 +12,12 @@ import {
   gmailToolAvailableOnDeployment,
   gmailToolSupportsScopes,
 } from "@opengeni/runtime/gmail-rest-mcp";
+import {
+  GOOGLE_CALENDAR_REQUESTED_SCOPES,
+  GOOGLE_CALENDAR_REST_MCP_TOOLS,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL as RUNTIME_GOOGLE_CALENDAR_MCP_URL,
+  googleCalendarToolSupportsScopes,
+} from "@opengeni/runtime/google-calendar-rest-mcp";
 import { canonicalProviderDomain } from "./provider-domain";
 
 /**
@@ -48,6 +54,14 @@ export const OFFICIAL_DRIVE_MCP_SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
   "https://www.googleapis.com/auth/drive.file",
 ] as const;
+
+/** Identity of the hosted Calendar MCP; it only selects the local REST bridge. */
+export const OFFICIAL_GOOGLE_CALENDAR_MCP_URL = RUNTIME_GOOGLE_CALENDAR_MCP_URL;
+/** Calendar list (read), events (read and write) and free/busy; never the broad `calendar` scope. */
+export const OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES: readonly string[] =
+  GOOGLE_CALENDAR_REQUESTED_SCOPES;
+
+const GOOGLE_OAUTH_ONLY_FOR = `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}, ${OFFICIAL_DRIVE_MCP_URL} or ${OFFICIAL_GOOGLE_CALENDAR_MCP_URL}`;
 
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
@@ -239,7 +253,7 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   },
   postDiscoveryProviderDomain: {
     domain: "gmailmcp.googleapis.com",
-    message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL} or ${OFFICIAL_DRIVE_MCP_URL}`,
+    message: GOOGLE_OAUTH_ONLY_FOR,
   },
   // Google's OAuth endpoints do not implement RFC 8707's `resource` parameter.
   sendResourceParameter: false,
@@ -329,10 +343,72 @@ const OFFICIAL_DRIVE_PROFILE: OAuthProviderProfile = {
   },
 };
 
+/**
+ * Google Calendar runs through Opengeni's reviewed Calendar REST bridge, like
+ * Gmail: discovery reads Google's OAuth metadata directly and never contacts
+ * the hosted Calendar MCP identity. The grant is requested without
+ * `include_granted_scopes`, so a Calendar token never carries Gmail or Drive
+ * access the same person granted to this client earlier.
+ */
+const OFFICIAL_GOOGLE_CALENDAR_PROFILE: OAuthProviderProfile = {
+  key: "official-google-calendar",
+  accountIdentityMetadataKeys: ["googleCalendarEmail"],
+  match: { mcpUrls: [OFFICIAL_GOOGLE_CALENDAR_MCP_URL] },
+  canonicalProviderDomain: "calendarmcp.googleapis.com",
+  requireExactMcpUrl: {
+    url: OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+    message: `Google Calendar OAuth must use ${OFFICIAL_GOOGLE_CALENDAR_MCP_URL}`,
+  },
+  defaultOwnership: "personal",
+  requiredOwnership: {
+    ownership: "personal",
+    message: "Google Calendar connections must be personal-owned",
+  },
+  authorizationServer: {
+    issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    authorizationEndpointOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    tokenEndpointOrigins: [GOOGLE_TOKEN_ORIGIN],
+    message: "Google Calendar authorization metadata did not remain bound to Google",
+    skipInLocalTest: false,
+  },
+  postDiscoveryProviderDomain: {
+    domain: "calendarmcp.googleapis.com",
+    message: GOOGLE_OAUTH_ONLY_FOR,
+  },
+  sendResourceParameter: false,
+  extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+  requestedScopes: OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES,
+  reportedScopesRequired: true,
+  freshRefreshTokenRequired: true,
+  fullRequestedScopesRequired: true,
+  confidentialClientRequired: true,
+  providerOAuthDiscovery: {
+    issuer: GOOGLE_OAUTH_ISSUER_ORIGIN,
+    metadataUrl: `${GOOGLE_OAUTH_ISSUER_ORIGIN}/.well-known/openid-configuration`,
+  },
+  localToolVerification: {
+    url: "https://www.googleapis.com/calendar/v3/users/me/calendarList/primary",
+    method: "GET",
+    required: true,
+    validateIdentity: (payload) => {
+      // The primary calendar's ID is the account's email address.
+      if (typeof payload.id !== "string" || !/^[^\s@]+@[^\s@]+$/u.test(payload.id)) {
+        throw new Error("Google Calendar account verification failed");
+      }
+      return { googleCalendarEmail: payload.id };
+    },
+    toolsForScopes: (scopes) =>
+      GOOGLE_CALENDAR_REST_MCP_TOOLS.filter((tool) =>
+        googleCalendarToolSupportsScopes(tool.name, scopes),
+      ).map(({ name, description }) => ({ name, ...(description ? { description } : {}) })),
+  },
+};
+
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [
   HOSTED_SLACK_PROFILE,
   OFFICIAL_GMAIL_PROFILE,
   OFFICIAL_DRIVE_PROFILE,
+  OFFICIAL_GOOGLE_CALENDAR_PROFILE,
 ];
 
 /** Exact built-in profile by its stable key; throws on an unknown key. */
@@ -355,8 +431,12 @@ const RESERVED_AUTHORIZATION_SERVERS: readonly {
 }[] = [
   {
     issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
-    allowedProfileKeys: [OFFICIAL_GMAIL_PROFILE.key, OFFICIAL_DRIVE_PROFILE.key],
-    message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL} or ${OFFICIAL_DRIVE_MCP_URL}`,
+    allowedProfileKeys: [
+      OFFICIAL_GMAIL_PROFILE.key,
+      OFFICIAL_DRIVE_PROFILE.key,
+      OFFICIAL_GOOGLE_CALENDAR_PROFILE.key,
+    ],
+    message: GOOGLE_OAUTH_ONLY_FOR,
   },
   {
     // A URL variant that dodges the hosted-Slack profile match (for example a

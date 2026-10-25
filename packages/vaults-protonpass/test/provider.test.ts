@@ -3,9 +3,11 @@ import { chmodSync, existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   createProviderCallBudget,
+  generateSshKeyPair,
   VaultProviderError,
   type VaultProviderContext,
 } from "@opengeni/vaults";
+import { mapItem } from "../src/mapping";
 import { createProtonPassVaultProvider, type ProtonPassVaultProvider } from "../src/provider";
 import { type FakeCli, TOTP_SEED, VALID_TOKEN, makeFakeCli } from "./fixture";
 
@@ -288,7 +290,14 @@ describe("vaults", () => {
     const custom = vaults[2]!;
     expect(custom.operations?.archiveItem).toBe(false);
     expect(custom.operations?.archiveKind).toBe("none");
-    expect(custom.operations?.createItemTypes).toEqual(["login", "note", "api_key"]);
+    expect(custom.operations?.createItemTypes).toEqual([
+      "login",
+      "note",
+      "api_key",
+      "card",
+      "identity",
+      "ssh_key",
+    ]);
     expect(vaults[0]!.operations).toBeUndefined();
   });
 
@@ -650,6 +659,221 @@ describe("writes", () => {
       field_type: "hidden",
       value: "sk_test_x",
     });
+  });
+
+  test("creates cards, identities, Wi-Fi, SSH keys and categorized items as their own types", async () => {
+    const { fake, provider } = setup();
+    const card = await provider.writeItem(ctx(), RW, {
+      name: "Card",
+      type: "card",
+      websites: [],
+      fields: [
+        { name: "cardholder name", kind: "text", value: "Ada Example" },
+        { name: "number", kind: "concealed", value: "4111111111111111" },
+        { name: "cvv", kind: "concealed", value: "123" },
+        { name: "expiry month", kind: "text", value: "7" },
+        { name: "expiry year", kind: "text", value: "2031" },
+        { name: "brand", kind: "text", value: "" },
+      ],
+    });
+    expect(card).toMatchObject({ type: "card", category: null });
+    expect(card.fields.map((field) => field.name)).toEqual([
+      "cardholder name",
+      "number",
+      "expiry month",
+      "expiry year",
+      "security code",
+    ]);
+    const cardCreate = fake.log().find((entry) => entry.argv[2] === "credit-card")!;
+    expect(JSON.parse(cardCreate.stdin)).toMatchObject({
+      cvv: "123",
+      expiration_date: "2031-07",
+      number: "4111111111111111",
+    });
+    const [month] = await provider.readFields(ctx(), RW, card.externalItemId, [
+      "card.expiration_date:month",
+    ]);
+    expect(month!.material).toMatchObject({ value: "7" });
+
+    const identity = await provider.writeItem(ctx(), RW, {
+      name: "Me",
+      type: "identity",
+      websites: [],
+      fields: [
+        { name: "first name", kind: "text", value: "Ada" },
+        { name: "postal code", kind: "text", value: "0150" },
+        { name: "ssn", kind: "concealed", value: "010101-12345" },
+        { name: "job title", kind: "text", value: "Engineer" },
+      ],
+    });
+    expect(identity.type).toBe("identity");
+    expect(identity.fields.map((field) => [field.name, field.kind])).toEqual([
+      ["first name", "text"],
+      ["postal code", "text"],
+      ["national ID number", "concealed"],
+      ["job title", "text"],
+    ]);
+
+    const wifi = await provider.writeItem(ctx(), RW, {
+      name: "Office Wi-Fi",
+      type: "api_key",
+      category: "wifi",
+      websites: [],
+      fields: [
+        { name: "ssid", kind: "text", value: "office" },
+        { name: "password", kind: "concealed", value: "hunter22" },
+      ],
+    });
+    expect(wifi).toMatchObject({ type: "api_key", category: "wifi" });
+    expect(fake.log().some((entry) => entry.argv[2] === "wifi")).toBe(true);
+
+    const database = await provider.writeItem(ctx(), RW, {
+      name: "DB",
+      type: "api_key",
+      category: "database",
+      websites: [],
+      fields: [{ name: "value", kind: "concealed", value: "pg-secret" }],
+    });
+    expect(database).toMatchObject({ type: "api_key", category: "database" });
+    // The marker is stored but never shown as a field.
+    expect(database.fields.map((field) => field.name)).toEqual(["value"]);
+
+    const bank = await provider.writeItem(ctx(), RW, {
+      name: "Bank",
+      type: "note",
+      category: "bank_account",
+      websites: [],
+      fields: [{ name: "note", kind: "concealed", value: "IBAN NO00 0000" }],
+    });
+    expect(bank).toMatchObject({ type: "note", category: "bank_account" });
+    const [bankNote] = await provider.readFields(ctx(), RW, bank.externalItemId, ["@note"]);
+    expect(bankNote!.material).toMatchObject({ value: "IBAN NO00 0000" });
+
+    const pair = generateSshKeyPair("ed25519");
+    const ssh = await provider.writeItem(ctx(), RW, {
+      name: "Deploy key",
+      type: "ssh_key",
+      websites: [],
+      fields: [
+        { name: "private key", kind: "concealed", value: pair.privateKey },
+        { name: "public key", kind: "text", value: pair.publicKey },
+        { name: "fingerprint", kind: "text", value: pair.fingerprint },
+      ],
+    });
+    expect(ssh.type).toBe("ssh_key");
+    expect(ssh.fields.map((field) => field.name)).toEqual([
+      "private key",
+      "public key",
+      "fingerprint",
+    ]);
+    const sshCreate = fake.log().find((entry) => entry.argv[2] === "ssh-key")!;
+    // The private key goes in on stdin only, never on argv.
+    expect(sshCreate.argv).toContain("--from-private-key=/dev/stdin");
+    expect(sshCreate.argv.join(" ")).not.toContain("PRIVATE KEY");
+    expect(sshCreate.stdin).toBe(pair.privateKey);
+    const [fingerprint] = await provider.readFields(ctx(), RW, ssh.externalItemId, [
+      "ssh.fingerprint",
+    ]);
+    expect(fingerprint!.material).toMatchObject({ value: pair.fingerprint });
+  });
+
+  test("refuses card, identity and SSH key shapes Proton Pass cannot hold, before pass-cli", async () => {
+    const { fake, provider } = setup();
+    for (const item of [
+      {
+        name: "brand",
+        type: "card" as const,
+        websites: [],
+        fields: [{ name: "brand", kind: "text" as const, value: "Visa" }],
+      },
+      {
+        name: "half expiry",
+        type: "card" as const,
+        websites: [],
+        fields: [{ name: "expiry month", kind: "text" as const, value: "7" }],
+      },
+      {
+        name: "other card field",
+        type: "card" as const,
+        websites: [],
+        fields: [{ name: "bank", kind: "text" as const, value: "x" }],
+      },
+      {
+        name: "identity title",
+        type: "identity" as const,
+        websites: [],
+        fields: [{ name: "title", kind: "text" as const, value: "Dr" }],
+      },
+      {
+        name: "login category",
+        type: "login" as const,
+        category: "database",
+        websites: [],
+        fields: [],
+      },
+      {
+        name: "ssh extra",
+        type: "ssh_key" as const,
+        websites: [],
+        fields: [{ name: "host", kind: "text" as const, value: "example.test" }],
+      },
+      { name: "ssh empty", type: "ssh_key" as const, websites: [], fields: [] },
+    ]) {
+      const error = await errorOf(provider.writeItem(ctx(), RW, item));
+      expect([item.name, error.code]).toEqual([item.name, "provider_unavailable"]);
+    }
+    expect(fake.log()).toEqual([]);
+  });
+
+  test("reads every Proton item kind as its own type and category", () => {
+    const base = {
+      id: "i1",
+      share_id: RW,
+      state: "Active" as const,
+      flags: [],
+      create_time: "2026-10-01T00:00:00",
+      modify_time: "2026-10-01T00:00:00",
+    };
+    const item = (content: unknown, note = "", extra: unknown[] = []) =>
+      mapItem({
+        ...base,
+        content: { title: "t", note, content, extra_fields: extra },
+      } as Parameters<typeof mapItem>[0]).meta;
+    expect(item({ Alias: null })).toMatchObject({ type: "note", category: "email_alias" });
+    expect(item({ Wifi: { ssid: "s", password: "p", sections: [] } })).toMatchObject({
+      type: "api_key",
+      category: "wifi",
+    });
+    const card = item({
+      CreditCard: {
+        cardholder_name: "A",
+        card_type: "Visa",
+        number: "4111",
+        verification_number: "1",
+        expiration_date: "2030-12",
+        pin: "",
+      },
+    });
+    expect(card.type).toBe("card");
+    expect(card.fields.map((field) => field.name)).toEqual([
+      "cardholder name",
+      "brand",
+      "number",
+      "expiry month",
+      "expiry year",
+      "security code",
+    ]);
+    expect(item({ Identity: { first_name: "A", work_email: "a@example.test" } })).toMatchObject({
+      type: "identity",
+      fields: [
+        { externalFieldId: "identity.first_name", name: "first name", kind: "text" },
+        { externalFieldId: "identity.work_email", name: "work email", kind: "text" },
+      ],
+    });
+    // A marker outside a custom item does not change Proton's own type.
+    expect(
+      item({ Note: null }, "n", [{ name: "opengeni.type", content: { Text: "api_key" } }]),
+    ).toMatchObject({ type: "note", category: null });
   });
 
   test("accepts created and existing item ids that start with a dash", async () => {

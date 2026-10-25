@@ -82,6 +82,39 @@ export function normalizeCdpAccessibilityTree(options: {
   for (const node of options.nodes) {
     if (typeof node.nodeId === "string") rawById.set(node.nodeId, node);
   }
+  // A DOM-backed node's id is its DOM node id, stable for the document's
+  // life. A node with no DOM node (CSS generated text) gets a fresh negative
+  // id whenever Chromium rebuilds its accessibility tree, which the driver
+  // does on every read. Its ref therefore comes from its place in the tree:
+  // the nearest DOM-backed ancestor and its position among that parent's
+  // other DOM-less children, so it stays the same across rebuilds.
+  const refKeys = new Map<string, string>();
+  const positions = new Map<string, number>();
+  const positionedParents = new Set<string>();
+  const refKey = (nodeId: string, depth = 0): string => {
+    const known = refKeys.get(nodeId);
+    if (known !== undefined) return known;
+    const node = rawById.get(nodeId);
+    let key = nodeId;
+    if (node && finitePositiveInteger(node.backendDOMNodeId) === null && depth < 64) {
+      const parentId = typeof node.parentId === "string" ? node.parentId : null;
+      const parent = parentId === null ? undefined : rawById.get(parentId);
+      if (parentId !== null && parent) {
+        if (!positionedParents.has(parentId)) {
+          positionedParents.add(parentId);
+          let position = 0;
+          for (const childId of childIds(parent)) {
+            const child = rawById.get(childId);
+            if (child && finitePositiveInteger(child.backendDOMNodeId) === null)
+              positions.set(childId, position++);
+          }
+        }
+        key = `${refKey(parentId, depth + 1)}\0${roleValue(node)}\0${positions.get(nodeId) ?? -1}`;
+      }
+    }
+    refKeys.set(nodeId, key);
+    return key;
+  };
   const entriesByNodeId = new Map<string, CdpAccessibilityEntry>();
   const usedRefs = new Set<string>();
   for (const [nodeId, node] of rawById) {
@@ -96,7 +129,7 @@ export function normalizeCdpAccessibilityTree(options: {
         targetId: options.targetId,
         documentGeneration: options.documentGeneration,
         frameId: typeof node.frameId === "string" ? node.frameId : null,
-        nodeId,
+        nodeId: refKey(nodeId),
         backendDOMNodeId,
       },
       usedRefs,

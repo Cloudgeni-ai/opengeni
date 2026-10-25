@@ -119,7 +119,12 @@ for (const scenario of [
             warn() {},
           },
           attempt: { turnId: crypto.randomUUID(), executionGeneration: 1 },
-          turn: { id: crypto.randomUUID(), executionGeneration: 1, model: "scripted-model" },
+          turn: {
+            id: crypto.randomUUID(),
+            executionGeneration: 1,
+            model: "scripted-model",
+            resources: [],
+          },
           turnExecutionPolicy: { providerId: "openai" },
           trigger: { type: "user.message" },
           eventing: {
@@ -163,6 +168,8 @@ for (const scenario of [
           },
           historySink: {
             seedHistory() {},
+            seedHistoryFootprint() {},
+            historyFootprintCompactionSignal: () => null,
             reconcileConversationTruth: async () => {
               order.push("history");
             },

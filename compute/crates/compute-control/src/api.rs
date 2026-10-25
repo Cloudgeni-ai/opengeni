@@ -320,6 +320,22 @@ pub struct MoveBody {
     /// The host to adopt it; the next wake places it when omitted.
     #[serde(default)]
     pub to: Option<String>,
+    /// Move it even while it is awake: it is saved where it stands,
+    /// memory and all, and its open connections end. Without it, a
+    /// sandbox something keeps awake is refused as busy.
+    #[serde(default)]
+    pub awake: bool,
+}
+
+/// A drain.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrainBody {
+    /// Hand off the sandboxes that stay awake too, each saved where it
+    /// stands, memory and all, its open connections ending. Without it,
+    /// those stay on the host and are counted `left`.
+    #[serde(default)]
+    pub awake: bool,
 }
 
 /// A host as the operator sees it.
@@ -542,9 +558,9 @@ async fn move_to<S: Store>(
 ) -> Result<Json<SandboxView>, ApiError> {
     let team = api.team(&headers).await?;
     let service = &api.0.service;
-    let to = body.and_then(|Json(body)| body.to);
+    let body = body.map(|Json(body)| body).unwrap_or_default();
     let row = service
-        .move_to(&team, parse_id(&id)?, to.as_deref())
+        .move_to(&team, parse_id(&id)?, body.to.as_deref(), body.awake)
         .await?;
     Ok(Json(SandboxView::of(service, row)))
 }
@@ -639,9 +655,11 @@ async fn drain<S: Store>(
     State(api): State<Api<S>>,
     headers: HeaderMap,
     Path(name): Path<String>,
+    body: Option<Json<DrainBody>>,
 ) -> Result<Json<Drained>, ApiError> {
     api.operator(&headers).await?;
-    Ok(Json(api.0.service.drain(&name).await?))
+    let awake = body.is_some_and(|Json(body)| body.awake);
+    Ok(Json(api.0.service.drain(&name, awake).await?))
 }
 
 async fn undrain<S: Store>(

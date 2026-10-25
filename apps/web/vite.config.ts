@@ -181,8 +181,12 @@ export default defineConfig({
               // both this group and startup-contract-tables import them, so they
               // must live here rather than in a shared app chunk.
               // Co-locating them avoids an extra initial graph request too.
+              // Every schema here calls the dependency-free defineSchema leaf
+              // while loading, so it lives here too; left to automatic
+              // splitting it can land in a shared app chunk that imports this
+              // group back, and these schemas would then read it too early.
               name: "zod-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/](?:permissions|primitives|skills)\.tsx?$)/,
+              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/](?:define-schema|permissions|primitives|skills)\.tsx?$)/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
@@ -517,12 +521,14 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // The meeting recordings client and hooks load only with the
-              // lazy recorder host and the Meetings pages. Entry-aware merging
-              // otherwise folds them into the shared chunk that carries the
-              // session page's media icons, so a direct session downloads them.
+              // The Meetings hooks load only with the lazy recorder host and
+              // the Meetings pages. Entry-aware merging otherwise folds them
+              // into the shared chunk that carries the session page's media
+              // icons, so a direct session downloads them. The SDK recordings
+              // client stays out of this group: composer dictation uses it as
+              // soon as a session opens, so it belongs to the session graph.
               name: "recordings",
-              test: /packages[\\/](?:sdk[\\/]src[\\/]recordings|react[\\/]src[\\/](?:recordings|hooks[\\/]use-recordings))\.ts$/,
+              test: /packages[\\/]react[\\/]src[\\/](?:recordings|hooks[\\/]use-recordings)\.ts$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

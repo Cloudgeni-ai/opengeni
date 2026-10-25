@@ -168,10 +168,12 @@ function rulesSetting(css: Root, selector: string, property: string) {
 let bridge: Root;
 let compiled: Root;
 
+// A full Tailwind compile of the bridge host stylesheet takes about a second
+// alone and several seconds on a loaded CI runner, beyond the default hook limit.
 beforeAll(async () => {
   bridge = await buildBridgeHostCss();
   compiled = parse(await readFile(join(packageRoot, "styles/compiled.css"), "utf8"));
-});
+}, 60_000);
 
 describe("Tailwind v4 source bridge cascade", () => {
   test("keeps every zero-specificity default layered so call-site utilities win", () => {

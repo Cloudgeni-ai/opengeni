@@ -86,6 +86,31 @@ export const DEPRECATED_ROUTES: readonly RouteDeprecation[] = [
       successor: "https://docs.opengeni.ai/integrate/background-agents#from-your-products-events",
     }),
   ),
+  // Resumable voice input recordings. A dictation is now a recording with
+  // purpose "dictation", uploaded and transcribed like any other recording.
+  ...(
+    [
+      ["GET", "/v1/workspaces/:workspaceId/transcription-recordings"],
+      ["POST", "/v1/workspaces/:workspaceId/transcription-recordings"],
+      ["GET", "/v1/workspaces/:workspaceId/transcription-recordings/:recordingId"],
+      [
+        "PUT",
+        "/v1/workspaces/:workspaceId/transcription-recordings/:recordingId/chunks/:chunkNumber",
+      ],
+      ["POST", "/v1/workspaces/:workspaceId/transcription-recordings/:recordingId/finalize"],
+      ["POST", "/v1/workspaces/:workspaceId/transcription-recordings/:recordingId/process-next"],
+      ["DELETE", "/v1/workspaces/:workspaceId/transcription-recordings/:recordingId"],
+    ] as const
+  ).map(
+    ([method, path]): RouteDeprecation => ({
+      method,
+      path,
+      deprecatedAt: "2026-10-25T00:00:00Z",
+      sunset: "2027-01-26T00:00:00Z",
+      link: "https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings",
+      successor: "https://docs.opengeni.ai/integrate/meetings#dictation",
+    }),
+  ),
 ];
 
 const MINIMUM_NOTICE_MS = 90 * 24 * 60 * 60 * 1000;

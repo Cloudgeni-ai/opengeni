@@ -81,7 +81,15 @@ export type SecretsVaultView = "availability" | "new-item";
 export type SecretsItemView = "edit";
 export type SecretsConnectionView = "choose-vaults" | "replace-token";
 
-const CREATABLE_TYPES = ["login", "api_key", "note", "file"] as const;
+const CREATABLE_TYPES = [
+  "login",
+  "api_key",
+  "note",
+  "card",
+  "identity",
+  "ssh_key",
+  "file",
+] as const;
 type CreatableType = (typeof CREATABLE_TYPES)[number];
 
 export function parseCreatableType(value: unknown): CreatableType | undefined {

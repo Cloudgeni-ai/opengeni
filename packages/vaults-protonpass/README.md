@@ -64,7 +64,8 @@ out and refuses later calls.
   contention.
 - **Secrets never go on argv.** The PAT is passed only in the environment of
   `pass-cli login`. Item values for create go in on stdin
-  (`item create … --from-template -`).
+  (`item create … --from-template -`, and an SSH private key through
+  `item create ssh-key import --from-private-key=/dev/stdin`).
 - **Private, isolated state.** Each provider has its own `0700` state
   directory (used as `HOME` and `PROTON_PASS_SESSION_DIR`), the `env` key
   provider with a random per-instance `PROTON_PASS_ENCRYPTION_KEY`, telemetry
@@ -107,7 +108,7 @@ out and refuses later calls.
 | List vaults | yes | `share list --only-vaults`; write access from the share role. Falls back to `vault list` (access unknown) when shares cannot be listed. |
 | List items, read values | yes | Values read live, cached per attempt; `forceRefresh` bypasses the cache. |
 | Read files | yes | Downloaded to a private directory, at most 256 KiB. |
-| Create | login, note, custom (`api_key`) | Including a TOTP seed on logins. A login takes only fields named `username`, `email` and `password` plus one TOTP; any other field is refused before running anything (use an `api_key` item). |
+| Create | login, note, `api_key`, card, identity, SSH key | Including a TOTP seed on logins. A login takes only fields named `username`, `email` and `password` plus one TOTP; any other field is refused before running anything (use an `api_key` item). Cards, identities, Wi-Fi and SSH keys are created as Proton's own kinds and take only the fields those kinds have (see below). |
 | Update | **no** | The CLI's update takes values only as `--field` arguments and cannot change TOTP or time fields, so updates would put secrets on argv. Reported as `provider_unavailable` without running anything. |
 | Archive | trash (recoverable) | `item trash`. Permanent delete and restore are not exposed. |
 | Create vault, write files | no | |
@@ -125,6 +126,23 @@ Field ids: `@note`, `login.username`, `login.email`, `login.password`,
 `login.totp`, `x:<name>` (extra fields), `s:<section>/<field>` (custom item
 sections), `ssh.*`, `wifi.*`, `card.*`, `identity.*` and `@file:<id>`, with
 `#n` on repeated names.
+
+### Item types
+
+| Proton kind | Opengeni type / category | Created from here as |
+| --- | --- | --- |
+| Login | `login` | `item create login` |
+| Note | `note` | `item create note` |
+| Credit card | `card` | `item create credit-card`: cardholder name, number, security code, expiry month and year (stored as `YYYY-MM`), PIN and note. pass-cli 2.4.2 ignores a card type on create and Proton sets the brand from the number, so a non-empty `brand` is refused. |
+| Identity | `identity` | `item create identity`: the standard identity fields Proton has a slot for (first, middle and last name, company, email, phone, address 1, city, state, postal code, country, national ID, passport and license number) and Proton's own fields under their names ("full name", "work email", …). "title", "username", "address 2" and "address 3" have no slot and are refused. |
+| SSH key | `ssh_key` | `item create ssh-key import`. Proton derives the public key; Opengeni derives the fingerprint on read. Other fields are refused. |
+| Wi-Fi | `api_key` / `wifi` | `item create wifi` when the fields are `ssid`, `password` and `note`; otherwise a custom item with the marker. |
+| Alias | `note` / `email_alias` | Not created here (aliases come from SimpleLogin). |
+| Custom | `api_key` | `item create custom`. A custom item also carries any type and category Proton has no kind for (an `api_key` with category `database`, a `note` with category `bank_account`) in a text field named `opengeni.type`, which is hidden on read. |
+
+Logins, cards, identities and SSH keys cannot carry a category in Proton;
+such a write is refused with the reason instead of being stored as another
+kind.
 
 ## Testing
 

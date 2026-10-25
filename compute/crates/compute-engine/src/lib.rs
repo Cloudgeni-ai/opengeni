@@ -90,6 +90,22 @@ pub trait Engine: Send + Sync + 'static {
         self.runtime()
     }
 
+    /// Names `vm`'s process apart from every other process the host has
+    /// run or will run, across reboots. State that lives only in that
+    /// process, such as which pages its next [`SnapshotKind::Diff`] holds,
+    /// can then be recorded for an agent that restarts beside the VM: a
+    /// record naming another process says nothing about this one. Engines
+    /// that cannot tell report an error, and such state is never trusted
+    /// after a restart.
+    fn process_identity(&self, vm: &Self::Vm) -> Result<String, EngineError> {
+        let _ = vm;
+        Err(EngineError::new(
+            ErrorKind::Transient,
+            "process_identity",
+            "this engine cannot name its VM processes",
+        ))
+    }
+
     /// Whether any VMM this engine keeps can load an image made under
     /// runtime `made_under`, on any processor. A runtime on another
     /// processor is not a [`Readable::No`]: whether its saved processor

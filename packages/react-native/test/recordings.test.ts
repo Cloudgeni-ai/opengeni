@@ -4,11 +4,13 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
+  AppendRecordingLiveSegmentsRequest,
   CreateRecordingRequest,
   CreateRecordingUploadsRequest,
   FinalizeRecordingRequest,
+  RecordingLiveSession,
 } from "@opengeni/contracts";
-import type { RecorderSnapshot, RecordingTransport } from "@opengeni/sdk/recordings";
+import type { LiveWebSocket, RecorderSnapshot, RecordingTransport } from "@opengeni/sdk/recordings";
 import { readAdtsFrame, wholeAdtsFrames } from "../src/recordings/adts";
 import {
   createFileRecordingChunkStore,
@@ -20,6 +22,7 @@ import {
   createNativeRecorder,
   type NativeAudioCapture,
   type NativeAudioChunkEvent,
+  type NativeAudioPcmEvent,
   type NativeAudioStateEvent,
 } from "../src/recordings/native-recorder";
 
@@ -220,12 +223,14 @@ function fakeNative(directoryOf: (recordingId: string) => string) {
     onChunk: new Set<(event: NativeAudioChunkEvent) => void>(),
     onState: new Set<(event: NativeAudioStateEvent) => void>(),
     onError: new Set<(event: { recordingId: string; code: string; message: string }) => void>(),
+    onPcm: new Set<(event: NativeAudioPcmEvent) => void>(),
   };
   const state = {
     active: null as string | null,
     next: 0,
     elapsed: 0,
     paused: false,
+    livePcm: false,
     started: null as null | Record<string, unknown>,
   };
   const writeChunk = async (options: { emit?: boolean } = {}) => {
@@ -273,7 +278,10 @@ function fakeNative(directoryOf: (recordingId: string) => string) {
     elapsedMilliseconds: () => state.elapsed,
     level: () => 0.5,
     activeRecordingId: () => state.active,
-    addListener(event: "onChunk" | "onState" | "onError", listener: never) {
+    setLivePcm(enabled: boolean) {
+      state.livePcm = enabled;
+    },
+    addListener(event: "onChunk" | "onState" | "onError" | "onPcm", listener: never) {
       const set = listeners[event] as Set<unknown>;
       set.add(listener);
       return { remove: () => set.delete(listener) };
@@ -286,6 +294,22 @@ function fakeNative(directoryOf: (recordingId: string) => string) {
     emitState: (event: NativeAudioStateEvent) => {
       for (const listener of listeners.onState) listener(event);
     },
+    /** A tenth of a second at 16 kHz, as the native tap sends it. */
+    emitPcm: (recordedMilliseconds: number, value = 1_000) => {
+      const samples = new Int16Array(1_600).fill(value);
+      const bytes = new Uint8Array(samples.buffer);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      for (const listener of listeners.onPcm) {
+        listener({
+          recordingId: state.active!,
+          data: btoa(binary),
+          sampleRate: 16_000,
+          recordedMilliseconds,
+        });
+      }
+    },
+    pcmListeners: () => listeners.onPcm.size,
   };
 }
 
@@ -331,6 +355,52 @@ function fakeServer() {
   }) as unknown as typeof globalThis.fetch;
   return { client, state, stored, fetch };
 }
+
+class FakeLiveSocket implements LiveWebSocket {
+  static opened: FakeLiveSocket[] = [];
+  readyState = 0;
+  sent: Array<Record<string, unknown>> = [];
+  onopen: ((event: unknown) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onclose: ((event: { code?: number }) => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+  constructor(readonly url: string) {
+    FakeLiveSocket.opened.push(this);
+  }
+  open() {
+    this.readyState = 1;
+    this.onopen?.({});
+    this.receive({ message_type: "session_started", session_id: "s" });
+  }
+  receive(message: Record<string, unknown>) {
+    this.onmessage?.({ data: JSON.stringify(message) });
+  }
+  send(data: string) {
+    this.sent.push(JSON.parse(data) as Record<string, unknown>);
+    if (this.sent.at(-1)!.commit === true) {
+      queueMicrotask(() =>
+        this.receive({
+          message_type: "committed_transcript_with_timestamps",
+          text: "Thanks, everyone.",
+          words: [{ text: "Thanks,", start: 0.01, end: 0.1, type: "word" }],
+        }),
+      );
+    }
+  }
+  close() {
+    this.readyState = 3;
+    this.onclose?.({ code: 1000 });
+  }
+}
+
+const liveGrant: RecordingLiveSession = {
+  providerId: "elevenlabs",
+  model: "scribe_v2_realtime",
+  protocol: "elevenlabs.scribe_realtime",
+  url: "wss://live.example/?token=t",
+  audio: { encoding: "pcm_s16le", sampleRate: 16_000 },
+  expiresAt: new Date(Date.now() + 600_000).toISOString(),
+};
 
 describe("native recorder", () => {
   test("records ADTS chunks, uploads them and finalizes, with interruptions as pauses", async () => {
@@ -467,5 +537,86 @@ describe("native recorder", () => {
     expect(fake.state.active).toBeNull();
     expect(recorder.snapshot.state).toBe("idle");
     expect(await store.listRecordings()).toEqual([]);
+  });
+
+  test("streams the microphone to the live transcript while recording, not while paused", async () => {
+    FakeLiveSocket.opened = [];
+    const { store } = await storeIn();
+    const fake = fakeNative((id) => store.directory(id));
+    const server = fakeServer();
+    const saved: AppendRecordingLiveSegmentsRequest[] = [];
+    const recorder = createNativeRecorder({
+      client: {
+        ...server.client,
+        createRecordingLiveSession: async () => liveGrant,
+        appendRecordingLiveSegments: async (_workspace, _recording, request) => {
+          saved.push(request);
+          return { saved: request.segments.length, ended: false };
+        },
+      },
+      workspaceId: WORKSPACE,
+      native: fake.native,
+      store,
+      fs: nodeFs,
+      randomUUID: () => RECORDING,
+      requestPermission: async () => true,
+      notification: { title: "t", text: "t" },
+      fetch: server.fetch,
+      liveTranscript: true,
+      liveWebSocket: FakeLiveSocket,
+    });
+    await recorder.start();
+    expect(fake.state.livePcm).toBe(true);
+    expect(recorder.snapshot.live?.[0]).toMatchObject({ trackNumber: 0, state: "connecting" });
+    fake.emitPcm(0);
+    await new Promise((done) => setTimeout(done, 0));
+    const socket = FakeLiveSocket.opened[0]!;
+    socket.open();
+    expect(recorder.snapshot.live?.[0]?.state).toBe("live");
+    expect(socket.sent).toHaveLength(1);
+    expect(atob(socket.sent[0]!.audio_base_64 as string).length).toBe(3_200);
+    socket.receive({ message_type: "partial_transcript", text: "Good morn" });
+    expect(recorder.snapshot.live?.[0]?.partial).toBe("Good morn");
+
+    recorder.pause();
+    fake.emitPcm(100);
+    expect(socket.sent).toHaveLength(1);
+    recorder.resume();
+    await new Promise((done) => setTimeout(done, 0));
+    fake.emitPcm(100);
+    expect(socket.sent).toHaveLength(2);
+
+    await recorder.stop();
+    expect(fake.state.livePcm).toBe(false);
+    expect(fake.pcmListeners()).toBe(0);
+    expect(socket.sent.at(-1)).toMatchObject({ commit: true });
+    expect(recorder.snapshot.state).toBe("stopped");
+    expect(recorder.snapshot.live?.[0]?.state).toBe("closed");
+    expect(saved.flatMap((request) => request.segments.map((segment) => segment.text))).toEqual([
+      "Thanks, everyone.",
+    ]);
+  });
+
+  test("without the live calls or a native tap, recording goes on with no live transcript", async () => {
+    const { store } = await storeIn();
+    const fake = fakeNative((id) => store.directory(id));
+    const server = fakeServer();
+    const recorder = createNativeRecorder({
+      client: server.client,
+      workspaceId: WORKSPACE,
+      native: fake.native,
+      store,
+      fs: nodeFs,
+      randomUUID: () => RECORDING,
+      requestPermission: async () => true,
+      notification: { title: "t", text: "t" },
+      fetch: server.fetch,
+      liveTranscript: true,
+    });
+    await recorder.start();
+    expect(recorder.snapshot.state).toBe("recording");
+    expect(fake.state.livePcm).toBe(false);
+    expect(recorder.snapshot.live ?? null).toBeNull();
+    await recorder.discard();
   });
 });

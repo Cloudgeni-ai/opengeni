@@ -17,8 +17,10 @@
  *
  * Items and fields a person marked "ask me each time" (0952) resolve for an
  * agent only under that person's grant: one use, the chat, or a time window.
- * Without one, nothing is read; the use is recorded as a request and the
- * failure carries a ready approval card. The check sits after every
+ * Without one, nothing is read; the use is recorded as a request, Opengeni
+ * posts its own approval card in the chat (which also reaches the person's
+ * inbox and phone), and the failure tells the agent the person was asked.
+ * Their answer reaches the agent as a machine input. The check sits after every
  * reference is chosen and before any provider read or decryption, so it is
  * the same for hosted and connected vaults and for every delivery surface.
  */
@@ -29,8 +31,8 @@ import {
   parseTotpInput,
   referenceKey,
   secretNameKey,
+  vaultFieldNameAlternatives,
   SecretReferenceError,
-  secretUseApprovalHumanInput,
   VAULT_LIMITS,
   type ResolvedSecretValue,
   type SecretMaterial,
@@ -40,6 +42,7 @@ import {
   type SecretResolver,
   type SecretUseApprovalTarget,
   type SecretUseContext,
+  type SessionEvent,
   type VaultProviderFreshness,
 } from "@opengeni/contracts";
 import {
@@ -47,10 +50,10 @@ import {
   listSecretApprovalRules,
   listUsableSecretUseGrants,
   listVaultsForSubject,
+  postSecretUseApprovalCard,
   recordVaultSecretUse,
   requestSecretUseApproval,
   resolveSecretReferenceCandidates,
-  secretUseApprovalView,
   useSecretUseOnceGrants,
   type SecretReferenceCandidate,
   type SecretReferenceLookup,
@@ -83,9 +86,119 @@ export type SecretResolverOptions = {
    * 1Password connection tokens load for that subject. `deps.providers` wins.
    */
   providersForSubject?: (subjectId: string | null) => VaultProviderRegistry;
+  /**
+   * Live fan-out for events the resolver committed (an approval card's
+   * request). Best effort: readers catch up from the durable log anyway.
+   */
+  publishEvents?: (events: SessionEvent[]) => Promise<void>;
 };
 
 type Chosen = { reference: SecretReference; candidate: SecretReferenceCandidate };
+
+/**
+ * Names password managers give an item's main secret: a login's `password`,
+ * a 1Password API credential's `credential`, an Opengeni API key's `value`.
+ * Moving an item between them renames that field (1Password's `credential`
+ * becomes Bitwarden's `password`), which would break every reference to it.
+ */
+const MAIN_SECRET_FIELD_NAMES = ["password", "credential", "value"] as const;
+
+/**
+ * The other names of the field a reference ends in (never for OTP
+ * references): the main-secret names, which must match a concealed field, or
+ * the other names of a type's standard field (`VAULT_FIELD_NAME_SYNONYMS`),
+ * such as a card's "cvv" for its "security code".
+ */
+function fieldAlternativesOf(
+  reference: SecretReference,
+): { names: string[]; concealedOnly: boolean } | null {
+  if (reference.otp) return null;
+  const field =
+    reference.target.form === "id"
+      ? reference.target.field
+      : reference.target.segments.length > 1
+        ? reference.target.segments.at(-1)
+        : null;
+  if (!field) return null;
+  const key = secretNameKey(field);
+  if (MAIN_SECRET_FIELD_NAMES.some((name) => name === key)) {
+    return { names: MAIN_SECRET_FIELD_NAMES.filter((name) => name !== key), concealedOnly: true };
+  }
+  const names = vaultFieldNameAlternatives(field);
+  return names.length > 0 ? { names, concealedOnly: false } : null;
+}
+
+/** The same reference naming another field. */
+function withFieldName(reference: SecretReference, field: string): SecretReference {
+  const target = reference.target;
+  if (target.form === "id") return { ...reference, target: { ...target, field } };
+  // Only references with a field segment (two or three segments) get here.
+  const segments: [string, string] | [string, string, string] =
+    target.segments.length === 3
+      ? [target.segments[0], target.segments[1], field]
+      : [target.segments[0], field];
+  return { ...reference, target: { form: "path", segments } };
+}
+
+/**
+ * Keeps references working across password managers. When a reference names
+ * `password`, `credential` or `value` and finds nothing, it is looked up
+ * again with each of the other two names, and if exactly one of them resolves
+ * to a concealed field, the reference uses that field. A reference to another
+ * name of a type's standard field (a card's "cvv", "verification number" or
+ * "security code") is looked up the same way under its other names.
+ * An exact name always wins, and two matches resolve nothing, so no value is
+ * ever guessed. Costs one more lookup, and only for such a miss.
+ */
+export async function withMainSecretFieldFallback(
+  db: VaultServiceDeps["db"],
+  context: Parameters<typeof resolveSecretReferenceCandidates>[1],
+  references: readonly SecretReference[],
+  meta: SecretResolutionMeta,
+  candidates: readonly SecretReferenceCandidate[],
+): Promise<SecretReferenceCandidate[]> {
+  const alternatives: Array<{
+    refIndex: number;
+    reference: SecretReference;
+    concealedOnly: boolean;
+  }> = [];
+  references.forEach((reference, refIndex) => {
+    const requested = fieldAlternativesOf(reference);
+    if (!requested) return;
+    const own = candidates.filter((candidate) => candidate.refIndex === refIndex);
+    const outcome = chooseSecretCandidate(reference, own, meta);
+    if (!("failure" in outcome) || outcome.failure.code !== "not_found") return;
+    for (const name of requested.names) {
+      alternatives.push({
+        refIndex,
+        reference: withFieldName(reference, name),
+        concealedOnly: requested.concealedOnly,
+      });
+    }
+  });
+  if (alternatives.length === 0) return [...candidates];
+  const found = await resolveSecretReferenceCandidates(db, context, {
+    refs: alternatives.map((alternative, index) => lookupFor(alternative.reference, index)),
+  });
+  const matches = new Map<number, SecretReferenceCandidate[]>();
+  alternatives.forEach((alternative, index) => {
+    const own = found.candidates.filter((candidate) => candidate.refIndex === index);
+    const outcome = chooseSecretCandidate(alternative.reference, own, found.meta);
+    if ("failure" in outcome) return;
+    if (alternative.concealedOnly && outcome.candidate.fieldKind !== "concealed") return;
+    matches.set(alternative.refIndex, [
+      ...(matches.get(alternative.refIndex) ?? []),
+      { ...outcome.candidate, refIndex: alternative.refIndex },
+    ]);
+  });
+  const result: SecretReferenceCandidate[] = [];
+  references.forEach((_, refIndex) => {
+    const match = matches.get(refIndex);
+    if (match?.length === 1) result.push(match[0]!);
+    else result.push(...candidates.filter((candidate) => candidate.refIndex === refIndex));
+  });
+  return result;
+}
 
 function lookupFor(reference: SecretReference, index: number): SecretReferenceLookup {
   return reference.target.form === "id"
@@ -424,8 +537,9 @@ export function createSecretResolver(
 
   /**
    * Check the chosen references against "ask me each time" rules. Returns
-   * the grants the use relies on; throws `approval_required` with a ready
-   * card, after recording the request, when a reference is not covered.
+   * the grants the use relies on; throws `approval_required`, after
+   * recording the request and posting its card, when a reference is not
+   * covered.
    */
   async function approvalsFor(
     chosen: readonly Chosen[],
@@ -505,6 +619,15 @@ export function createSecretResolver(
       toolName: use.toolName,
       destination,
     });
+    const card = await postSecretUseApprovalCard(deps.db, {
+      workspaceId: principal.workspaceId,
+      sessionId: principal.sessionId,
+      turnId: principal.turnId,
+      attemptId: principal.attemptId,
+      executionGeneration: principal.executionGeneration,
+      approval: request,
+    });
+    if (card.events.length > 0) await opts.publishEvents?.(card.events).catch(() => undefined);
     throw new SecretReferenceError(
       uncovered.map(({ reference, candidate }) => ({
         raw: reference.raw,
@@ -512,7 +635,7 @@ export function createSecretResolver(
         message: `${displayName(candidate)} needs the person's approval for each use; they have not allowed this one yet`,
       })),
       null,
-      secretUseApprovalHumanInput(secretUseApprovalView(request)),
+      { approvalId: request.id, asked: card.asked },
     );
   }
 
@@ -539,9 +662,17 @@ export function createSecretResolver(
     }
 
     const choose = async () => {
-      const { meta, candidates } = await resolveSecretReferenceCandidates(deps.db, context, {
+      const found = await resolveSecretReferenceCandidates(deps.db, context, {
         refs: references.map((reference, index) => lookupFor(reference, index)),
       });
+      const meta = found.meta;
+      const candidates = await withMainSecretFieldFallback(
+        deps.db,
+        context,
+        references,
+        meta,
+        found.candidates,
+      );
       const outcomes = references.map((reference, index) => {
         const own = candidates.filter((candidate) => candidate.refIndex === index);
         return { reference, candidates: own, outcome: chooseSecretCandidate(reference, own, meta) };

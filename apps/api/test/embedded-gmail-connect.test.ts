@@ -734,3 +734,77 @@ test("Gmail is discoverable for named users without exposing mailbox credentials
     ),
   ).toEqual(legacyShared);
 });
+
+test("personal sign-in providers are offered to a person holding only connections:personal", async () => {
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: randomUUID(),
+    accountName: "Narrow mail",
+    workspaceExternalSource: "test",
+    workspaceExternalId: randomUUID(),
+    workspaceName: "Fixture",
+    subjectId: `user:${randomUUID()}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  workspaces.push(grant.workspaceId);
+  const identity = await ensureExternalIdentity(client.db, {
+    accountId: grant.accountId,
+    externalId: "narrow-mail-user",
+  });
+  const key = randomBytes(24).toString("hex");
+  await createOrganizationApiKey(client.db, {
+    accountId: grant.accountId,
+    name: "Fixture",
+    prefix: "test",
+    keyHash: createHash("sha256").update(key).digest("hex"),
+    permissions: ["workspace:read", "connections:read", "connections:personal"],
+  });
+  const app = createApp({
+    db: client.db,
+    bus: {} as never,
+    workflowClient: {} as never,
+    managedAuth: null,
+    settings: testSettings({
+      productAccessMode: "managed",
+      integrationsEnabled: true,
+      publicBaseUrl: "https://runtime.example.test",
+      environmentsEncryptionKey: randomBytes(32).toString("base64"),
+      integrationsStateSecret: "narrow-mail-fixture-state",
+      slackClientId: "fixture-slack-client",
+      slackClientSecret: "fixture-slack-secret",
+      integrationsOauthClientsJson: JSON.stringify({
+        "https://accounts.google.com": {
+          clientId: "fixture-client",
+          clientSecret: "fixture-secret",
+          tokenEndpointAuthMethod: "client_secret_post",
+        },
+      }),
+    }),
+  });
+  const catalog = await app.request(
+    `/v1/workspaces/${identity.personalWorkspaceId}/connect/catalog`,
+    {
+      headers: {
+        authorization: `Bearer ${key}`,
+        "x-opengeni-external-actor": encodeURIComponent(
+          JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+        ),
+      },
+    },
+  );
+  expect(catalog.status).toBe(200);
+  const providers = (await catalog.json()) as Array<{
+    id: string;
+    readiness: string;
+    ownership: string[];
+  }>;
+  const provider = (id: string) => providers.find((item) => item.id === id);
+  expect(provider("gmail")).toMatchObject({ readiness: "available", ownership: ["personal"] });
+  expect(provider("slack-personal")).toMatchObject({
+    readiness: "available",
+    ownership: ["personal"],
+  });
+  // Shared and installation setups still need connections:write.
+  expect(provider("github-personal")?.readiness).toBe("unsupported");
+  expect(provider("mcp-headers")?.readiness).toBe("unsupported");
+});

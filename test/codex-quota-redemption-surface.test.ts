@@ -8,7 +8,7 @@ const repo = join(import.meta.dir, "..");
 // may call, including this one: an owner decision allows reset
 // credits under Full access. The route still requires the person, in their
 // browser or through a verified agent acting as them; nothing else may name it.
-const ORGANIZATION_MCP_CATALOG = "apps/api/src/mcp/action-catalog.gen.ts";
+const ORGANIZATION_MCP_CATALOG = "packages/contracts/src/app-action-catalog.gen.ts";
 
 async function sourceFiles(root: string): Promise<string[]> {
   const files: string[] = [];

@@ -20,6 +20,8 @@ const source = {
   visibility: "workspace",
   status: "active",
   statusReason: null,
+  statusReasonCode: null,
+  statusReasonDetail: null,
   webhookUrl: null,
   awaitingSigningSecret: false,
   mcp: null,
@@ -39,6 +41,8 @@ function trigger(overrides: Partial<EventTrigger> = {}): EventTrigger {
     arguments: null,
     status: "active",
     statusReason: null,
+    statusReasonCode: null,
+    statusReasonDetail: null,
     createdAt: "2026-10-23T10:00:00.000Z",
     updatedAt: "2026-10-23T10:00:00.000Z",
     ...overrides,
@@ -96,6 +100,25 @@ describe("EventTriggerSummary", () => {
     );
     expect(view.container.textContent).toContain("Needs attention");
     expect(view.container.querySelector("a")).toBeNull();
+    await view.unmount();
+  });
+
+  test("a held trigger words a known reason itself, naming its source", async () => {
+    const view = await renderComponent(
+      <EventTriggerSummary
+        triggers={[
+          trigger({
+            status: "blocked",
+            statusReason: "Reconnect GitHub to keep its events coming",
+            statusReasonCode: "reconnect",
+          }),
+        ]}
+        sources={[source]}
+      />,
+    );
+    expect(view.container.textContent).toContain(
+      "Reconnect Acme GitHub to keep its events coming.",
+    );
     await view.unmount();
   });
 

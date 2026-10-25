@@ -195,6 +195,10 @@ describe("GitHub event types", () => {
     const issues = byType.get("issues.opened");
     expect(issues?.available).toBe(false);
     expect(issues?.unavailableReason).toContain('"issues"');
+    expect(issues).toMatchObject({
+      unavailableReasonCode: "github_event_not_subscribed",
+      unavailableReasonDetail: "issues",
+    });
     expect(byType.get("discussion.created")).toMatchObject({
       description: "Received 1 time recently",
       available: false,

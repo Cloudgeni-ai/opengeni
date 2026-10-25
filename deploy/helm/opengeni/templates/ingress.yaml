@@ -18,13 +18,17 @@
   {{- end }}
 {{- end }}
 {{- if and .Values.ingress.enabled (or .Values.api.enabled .Values.web.enabled) }}
+{{- $annotations := deepCopy (.Values.ingress.annotations | default dict) }}
+{{- if and .Values.ingress.maxRequestBody (not (hasKey $annotations "nginx.ingress.kubernetes.io/proxy-body-size")) }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-body-size" (toString .Values.ingress.maxRequestBody) }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "opengeni.fullname" . }}
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- with $annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

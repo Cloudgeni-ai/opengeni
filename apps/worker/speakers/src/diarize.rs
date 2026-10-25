@@ -12,6 +12,8 @@
 use crate::cluster;
 use crate::models::{Embedder, MIN_EMBEDDING_SAMPLES, Result, Segmentation, cosine, normalized};
 use serde::Serialize;
+use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub const SAMPLE_RATE: usize = 16_000;
 
@@ -96,7 +98,10 @@ fn segment(model: &mut Segmentation, audio: &[f32], step: usize) -> Result<(Vec<
     while starts.last().unwrap() + model.window < audio.len() {
         starts.push(starts.last().unwrap() + step);
     }
-    const BATCH: usize = 32;
+    // Windows per segmentation run. The arena keeps the largest run's
+    // activations for the whole process, about 25 MB per window, and more
+    // windows per run save no measurable CPU.
+    const BATCH: usize = 4;
     let mut windows = Vec::with_capacity(starts.len());
     let mut frames = 0;
     for batch in starts.chunks(BATCH) {
@@ -118,17 +123,19 @@ fn segment(model: &mut Segmentation, audio: &[f32], step: usize) -> Result<(Vec<
     Ok((windows, frames))
 }
 
-/// The audio a local speaker spoke in a window: frames where only they
-/// talk when there is enough of it, otherwise every frame they talk in.
-fn local_audio(
-    audio: &[f32],
+/// Where a local speaker spoke in a window, as stretches of the audio:
+/// frames where only they talk when there is enough of it, otherwise every
+/// frame they talk in. Stretches, not copies, so every window's speech is
+/// never held at once; the second value says whether it is clean speech.
+fn local_runs(
+    audio_len: usize,
     window: &Window,
     window_samples: usize,
     speaker: usize,
     min_clean: usize,
-) -> (Vec<f32>, bool) {
+) -> (Vec<Range<usize>>, bool) {
     let frames = window.masks.len();
-    let gather = |only: bool| -> Vec<f32> {
+    let gather = |only: bool| -> Vec<Range<usize>> {
         let mut out = Vec::new();
         let mut run: Option<usize> = None;
         for frame in 0..=frames {
@@ -144,9 +151,9 @@ fn local_audio(
                 (true, None) => run = Some(frame),
                 (false, Some(first)) => {
                     let from = window.start + first * window_samples / frames;
-                    let to = (window.start + frame * window_samples / frames).min(audio.len());
+                    let to = (window.start + frame * window_samples / frames).min(audio_len);
                     if from < to {
-                        out.extend_from_slice(&audio[from..to]);
+                        out.push(from..to);
                     }
                     run = None;
                 }
@@ -156,31 +163,64 @@ fn local_audio(
         out
     };
     let clean = gather(true);
-    if clean.len() >= min_clean {
+    if run_samples(&clean) >= min_clean {
         (clean, true)
     } else {
         (gather(false), false)
     }
 }
 
-/// Embed every job, spreading them over the embedders (one per thread).
-pub fn embed_all(embedders: &mut [Embedder], jobs: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>> {
-    let per = jobs.len().div_ceil(embedders.len().max(1)).max(1);
-    let mut parts: Vec<Vec<Vec<f32>>> = Vec::new();
-    let mut rest = jobs.into_iter();
-    loop {
-        let part: Vec<Vec<f32>> = rest.by_ref().take(per).collect();
-        if part.is_empty() {
-            break;
-        }
-        parts.push(part);
+fn run_samples(runs: &[Range<usize>]) -> usize {
+    runs.iter().map(|run| run.len()).sum()
+}
+
+/// The samples of the stretches, joined.
+fn gather(audio: &[f32], runs: &[Range<usize>]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(run_samples(runs));
+    for run in runs {
+        out.extend_from_slice(&audio[run.clone()]);
     }
-    let results: Vec<Result<Vec<Vec<f32>>>> = std::thread::scope(|scope| {
+    out
+}
+
+/// Embed `count` pieces of audio over the embedders (one per thread). Each
+/// thread takes the next piece when it is free and asks `samples` for it
+/// only then, so only one piece per thread is in memory at a time.
+pub fn embed_all<F, S>(
+    embedders: &mut [Embedder],
+    count: usize,
+    samples: F,
+) -> Result<Vec<Vec<f32>>>
+where
+    F: Fn(usize) -> S + Sync,
+    S: AsRef<[f32]>,
+{
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    // Each thread returns the (index, embedding) pairs it computed.
+    type Done = Vec<(usize, Vec<f32>)>;
+    let results: Vec<Result<Done>> = std::thread::scope(|scope| {
         let handles: Vec<_> = embedders
             .iter_mut()
-            .zip(parts)
-            .map(|(embedder, part)| {
-                scope.spawn(move || part.iter().map(|samples| embedder.embed(samples)).collect())
+            .take(count.max(1))
+            .map(|embedder| {
+                let (next, failed, samples) = (&next, &failed, &samples);
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= count || failed.load(Ordering::Relaxed) {
+                            return Ok(done);
+                        }
+                        match embedder.embed(samples(index).as_ref()) {
+                            Ok(vector) => done.push((index, vector)),
+                            Err(error) => {
+                                failed.store(true, Ordering::Relaxed);
+                                return Err(error);
+                            }
+                        }
+                    }
+                })
             })
             .collect();
         handles
@@ -188,9 +228,11 @@ pub fn embed_all(embedders: &mut [Embedder], jobs: Vec<Vec<f32>>) -> Result<Vec<
             .map(|handle| handle.join().expect("embedding thread"))
             .collect()
     });
-    let mut out = Vec::new();
+    let mut out = vec![Vec::new(); count];
     for result in results {
-        out.extend(result?);
+        for (index, vector) in result? {
+            out[index] = vector;
+        }
     }
     Ok(out)
 }
@@ -326,8 +368,8 @@ pub fn diarize(
             if !window.masks.iter().any(|mask| mask & (1 << speaker) != 0) {
                 continue;
             }
-            let (samples, clean) = local_audio(audio, window, window_samples, speaker, min_clean);
-            let embeddable = samples.len() >= MIN_EMBEDDING_SAMPLES;
+            let (runs, clean) = local_runs(audio.len(), window, window_samples, speaker, min_clean);
+            let embeddable = run_samples(&runs) >= MIN_EMBEDDING_SAMPLES;
             locals.push(Local {
                 window: index,
                 speaker,
@@ -335,12 +377,13 @@ pub fn diarize(
                 embedding: None,
             });
             if embeddable {
-                jobs.push((locals.len() - 1, samples));
+                jobs.push((locals.len() - 1, runs));
             }
         }
     }
-    let (targets, samples): (Vec<usize>, Vec<Vec<f32>>) = jobs.into_iter().unzip();
-    for (target, embedding) in targets.into_iter().zip(embed_all(embedders, samples)?) {
+    let embeddings = embed_all(embedders, jobs.len(), |index| gather(audio, &jobs[index].1))?;
+    for ((target, _), embedding) in jobs.iter().zip(embeddings) {
+        let target = *target;
         locals[target].embedding = Some(embedding);
     }
 

@@ -351,8 +351,12 @@ Vault secrets reach a machine only per command. When an `exec_command` or
 `/bin/sh -c` on POSIX hosts or `powershell -NoProfile -NonInteractive -Command`
 on Windows (an explicit supported `shell` argument is honoured), splices each
 reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
-`ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
-`/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
+`ExecRequest.env`. This also applies when the POSIX host's default login shell
+is zsh: a secret-bearing `run_on` exec explicitly selects `/bin/sh`, rather than
+letting the host choose a shell. The tool gateway preserves references and
+escapes until this delivery boundary, including for Codemode calls; it never
+substitutes values into `run_on` command text. `{{secretfile:…}}` files are written
+under the 0700 `/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
 end; terminal one-offs clean it on return, while yielded `run_on` commands retain
 it as described below. That best-effort cleanup
 first waits for any write still in flight from an exec that timed out during
@@ -499,6 +503,20 @@ agent report for the same generation replaces either inference. Native-host
 diagnostics are written to stderr because stdout carries Chrome frames.
 Oversized tab titles are truncated and oversized tab URLs make only that tab
 uncontrollable; neither ends the profile's connection.
+
+Chrome closes a profile together with its last window, which stops the
+extension and ends the profile's connection (`browser_closed_port`) even when
+Chrome itself keeps running, as it does on macOS. The extension therefore never
+closes a profile's only tab without first opening a new tab page in its place
+(a new unfocused window when that tab is in a popup or app window), and when
+Chrome has no window open it creates a requested tab in a new unfocused window.
+A tab close whose connection ends before the extension answers is reported as
+`outcome_unknown` (HTTP 409), because the tab may already be closed; a tab
+Chrome reports as gone is `target_not_found`, and the agent then forgets only
+that tab, not its current browser. A close the browser acknowledged whose
+connection ends before the remaining tabs are listed is also `outcome_unknown`.
+A profile whose last window the person closed stays disconnected until a
+window opens in it again.
 
 An accepted full inventory snapshot observes every connected profile once through
 `attached_browser_inventories.observed_at`. Unchanged profiles need neither a
@@ -702,6 +720,42 @@ owner:
   workspace, the machine's authority must be current, and the run's grant must
   be active. Removing the person, revoking the machine or revoking the grant
   stops the next attempt.
+
+In a chat on a personal machine, only the owner's own messages start work. A
+message somebody else sends there (through the API, an agent acting for them,
+or an integration) is accepted and kept, but it waits for the owner instead of
+becoming the chat's next turn:
+
+- It is never claimed while the chat stays on that machine, never steers (it
+  cannot interrupt the owner's running turn) and does not count as pending
+  work, so the chat stays idle or keeps running the owner's turn. The send
+  result reports `waitsForMachineOwner: true`, and the operator
+  `session_send_message` tool returns a warning saying so.
+- The owner's next own turn takes the waiting messages in, oldest first, as
+  history ahead of the owner's prompt, each with a short note that it waited
+  for the owner. The agent sees what the other person wrote, and the owner's
+  message says what to do with it. The taken-in rows end as superseded by that
+  turn and never run again.
+- Moving the chat to another machine wakes it, so waiting messages the new
+  machine may run start as their own turns.
+- Steering a waiting message returns `409 WAITING_FOR_MACHINE_OWNER`. An
+  agent's steer into such a chat for anyone but the owner is refused before
+  anything changes (`personal_machine_owner_required`).
+- `get_session_machine_access` lists whose messages wait (`waitingMessages`),
+  and the console explains them in one notice that needs no action.
+
+Whether a message waits is decided live from the chat's current machine
+(`opengeni_private.session_machine_owner_subject_v1`), with the same causal person the attempt
+admission trigger reads. That lookup authorizes nothing; the trigger stays the
+only authority. The console still warns other people before they send. Updates
+from other people's work (agent messages and worker results) keep their own
+waiting-work path, which the owner continues explicitly.
+
+The lookup takes effect one release after it ships: migration 0978 creates it
+without runtime `EXECUTE`, and a later migration grants it once the previous
+release knows it. Until then the lookup reports no personal machine, so nothing
+waits, `waitingMessages` is omitted, and a message from someone other than the
+owner is still refused when it is claimed.
 
 On macOS, the enrollment display offer is independent of Screen Recording
 permission. A detected display keeps the existing screen-control consent option
