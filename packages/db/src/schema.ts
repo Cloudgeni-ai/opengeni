@@ -6610,6 +6610,15 @@ export const imageGenerationOperations = pgTable(
       >()
       .notNull()
       .default("prepared"),
+    /** Opengeni-credit price frozen at admission; zero when credits do not fund it. */
+    pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
+    /** A priced operation is debited exactly once, when its image is delivered. */
+    creditState: text("credit_state")
+      .$type<"not_applicable" | "pending" | "debited">()
+      .notNull()
+      .default("not_applicable"),
+    /** The turn's canonical chat model whose plan and trial grants may pay. */
+    creditUsageModelId: text("credit_usage_model_id"),
     providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     lastError: text("last_error"),
@@ -6627,6 +6636,9 @@ export const imageGenerationOperations = pgTable(
       table.createdAt,
       table.id,
     ),
+    creditHold: index("image_generation_operations_credit_hold_idx")
+      .on(table.workspaceId, table.providerStartedAt)
+      .where(sql`${table.creditState} = 'pending' and ${table.status} = 'provider_started'`),
     workspaceAccount: foreignKey({
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
@@ -6654,6 +6666,16 @@ export const imageGenerationOperations = pgTable(
       sql`(${table.status} = 'prepared' and ${table.providerStartedAt} is null and ${table.completedAt} is null)
         or (${table.status} in ('provider_started', 'outcome_unknown', 'retention_failed') and ${table.providerStartedAt} is not null and ${table.completedAt} is null)
         or (${table.status} = 'completed' and ${table.providerStartedAt} is not null and ${table.completedAt} is not null)`,
+    ),
+    creditValid: check(
+      "image_generation_operations_credit_chk",
+      sql`(${table.pricedCostMicros} = 0 and ${table.creditState} = 'not_applicable'
+          and ${table.creditUsageModelId} is null)
+        or (${table.pricedCostMicros} between 1 and 1000000000
+          and (${table.creditUsageModelId} is null
+            or octet_length(${table.creditUsageModelId}) between 1 and 256)
+          and ((${table.creditState} = 'pending' and ${table.status} <> 'completed')
+            or (${table.creditState} = 'debited' and ${table.status} = 'completed')))`,
     ),
   }),
 );
