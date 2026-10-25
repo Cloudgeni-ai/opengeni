@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   supersededParkedRuns,
+  supersededQueuedRuns,
   type ParkedRun,
 } from "./main-approval-superseded";
 
@@ -45,4 +46,33 @@ test("never cancels runs with running jobs or other pending environments", () =>
     run(33, 20),
   ];
   expect(supersededParkedRuns(runs, "f".repeat(40), now)).toEqual([33]);
+});
+
+test("cancels only not-started main runs older than the newest main run", () => {
+  const queued = [
+    {
+      id: 1,
+      createdAt: hoursAgo(30),
+      runAttempt: 1,
+      runStartedAt: hoursAgo(30),
+    },
+    {
+      id: 2,
+      createdAt: hoursAgo(20),
+      runAttempt: 2,
+      runStartedAt: hoursAgo(2),
+    },
+    {
+      id: 3,
+      createdAt: hoursAgo(20),
+      runAttempt: 3,
+      runStartedAt: hoursAgo(7),
+    },
+    { id: 4, createdAt: hoursAgo(1), runAttempt: 1, runStartedAt: hoursAgo(1) },
+  ];
+  // The newest main run is itself queued: it is kept. A recent re-run is kept.
+  expect(supersededQueuedRuns(queued, hoursAgo(1), now)).toEqual([1, 3]);
+  // A newer run already started: every older queued first attempt is superseded.
+  expect(supersededQueuedRuns(queued, hoursAgo(0), now)).toEqual([1, 3, 4]);
+  expect(supersededQueuedRuns(queued, "not a date", now)).toEqual([]);
 });

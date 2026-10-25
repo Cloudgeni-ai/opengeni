@@ -48,6 +48,41 @@ export function supersededParkedRuns(
     .map((r) => r.id);
 }
 
+export type QueuedRun = {
+  id: number;
+  createdAt: string;
+  runAttempt: number;
+  /** When this attempt was requested; later than createdAt for a re-run. */
+  runStartedAt: string;
+};
+
+export const KEEP_RERUN_YOUNGER_THAN_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Main CI runs that have not started any job and are older than the newest
+ * main-push CI run: the newer run tests a superset of their commits. Never
+ * touches started runs; a re-run is kept until it has waited six hours.
+ */
+export function supersededQueuedRuns(
+  queued: QueuedRun[],
+  newestCreatedAt: string,
+  now: number,
+): number[] {
+  const newest = Date.parse(newestCreatedAt);
+  if (!Number.isFinite(newest)) return [];
+  return queued
+    .filter(
+      (r) =>
+        Number.isSafeInteger(r.id) &&
+        r.id > 0 &&
+        (r.runAttempt === 1 ||
+          now - Date.parse(r.runStartedAt) > KEEP_RERUN_YOUNGER_THAN_MS) &&
+        Number.isFinite(Date.parse(r.createdAt)) &&
+        Date.parse(r.createdAt) < newest,
+    )
+    .map((r) => r.id);
+}
+
 async function main() {
   const repo = process.env.GITHUB_REPOSITORY ?? "Cloudgeni-ai/opengeni";
   const token = process.env.GITHUB_TOKEN;
@@ -68,6 +103,19 @@ async function main() {
     return res.status === 202 || res.status === 204 ? null : res.json();
   };
   const mainSha = ((await api("commits/main")) as { sha: string }).sha;
+  type CiRun = {
+    id: number;
+    head_sha: string;
+    created_at: string;
+    run_attempt: number;
+    run_started_at: string;
+  };
+  const ciRuns = (query: string) =>
+    api(
+      `actions/workflows/ci.yml/runs?branch=main&event=push&${query}`,
+    ) as Promise<{
+      workflow_runs: CiRun[];
+    }>;
   const inspect = async (run: {
     id: number;
     head_sha: string;
@@ -101,25 +149,54 @@ async function main() {
   };
   const runs: ParkedRun[] = [];
   for (let page = 1; page <= 10; page++) {
-    const data = (await api(
-      `actions/workflows/ci.yml/runs?branch=main&event=push&status=waiting&per_page=100&page=${page}`,
-    )) as {
-      workflow_runs: { id: number; head_sha: string; created_at: string }[];
-    };
+    const data = await ciRuns(`status=waiting&per_page=100&page=${page}`);
     for (let i = 0; i < data.workflow_runs.length; i += 8) {
       const chunk = data.workflow_runs.slice(i, i + 8);
       runs.push(...(await Promise.all(chunk.map(inspect))));
     }
     if (data.workflow_runs.length < 100) break;
   }
-  const cancel = supersededParkedRuns(runs, mainSha, Date.now());
+  const parked = supersededParkedRuns(runs, mainSha, Date.now());
   console.log(
-    `${runs.length} parked main CI runs; cancelling ${cancel.length} superseded${dryRun ? " (dry run)" : ""}`,
+    `${runs.length} parked main CI runs; ${parked.length} superseded`,
   );
-  for (const id of cancel) {
-    console.log(`cancel ${id}`);
-    if (!dryRun) await api(`actions/runs/${id}/cancel`, { method: "POST" });
+
+  const newest = (await ciRuns("per_page=1")).workflow_runs[0];
+  const queued: QueuedRun[] = [];
+  for (let page = 1; page <= 5; page++) {
+    const data = await ciRuns(`status=queued&per_page=100&page=${page}`);
+    queued.push(
+      ...data.workflow_runs.map((r) => ({
+        id: r.id,
+        createdAt: r.created_at,
+        runAttempt: r.run_attempt,
+        runStartedAt: r.run_started_at,
+      })),
+    );
+    if (data.workflow_runs.length < 100) break;
   }
+  const notStarted = newest
+    ? supersededQueuedRuns(queued, newest.created_at, Date.now())
+    : [];
+  console.log(
+    `${queued.length} queued main CI runs; ${notStarted.length} superseded`,
+  );
+
+  // One failed cancel (already finished, raced) must not stop the rest.
+  let failed = 0;
+  for (const id of [...parked, ...notStarted]) {
+    console.log(`cancel ${id}${dryRun ? " (dry run)" : ""}`);
+    if (dryRun) continue;
+    try {
+      await api(`actions/runs/${id}/cancel`, { method: "POST" });
+    } catch (error) {
+      failed++;
+      console.log(
+        `  skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (failed) console.log(`${failed} cancels skipped; the next pass retries`);
 }
 
 if (import.meta.main) await main();
