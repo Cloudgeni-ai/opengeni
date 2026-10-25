@@ -433,7 +433,17 @@ test("a navigation the browser cancels after answering fails at once on the page
   }
 });
 
-test("an action whose document changed after it found its element finds it again on the new page", async () => {
+/** A batch whose hover is a later action, so its locator follows the page to
+ * a new document by design. */
+const hoverLaterInBatch = {
+  type: "batch" as const,
+  actions: [
+    { type: "wait" as const, condition: "load" as const },
+    { type: "hover" as const, locator: grantAccess },
+  ],
+};
+
+test("a single action whose document changed after it found its element is refused", async () => {
   const fixture = navigationFixture();
   try {
     await fixture.driver.start();
@@ -441,9 +451,49 @@ test("an action whose document changed after it found its element finds it again
     // frameNavigated event has not been processed when input would go out.
     fixture.commitSilentlyOn("DOM.getBoxModel", fixture.pages.b!);
     const receipt = await fixture.controller.run(
-      // Pointer input lands on whatever page the tab shows at its coordinates.
+      // Pointer input would land on whatever page the tab shows at its
+      // coordinates; the caller checked the old page, so nothing is sent.
       await fixture.command({ type: "hover", locator: grantAccess }),
     );
+    expect(receipt.state).toBe("failed");
+    expect(receipt.error?.code).toBe("document_stale");
+    expect(receipt.error?.message).toBe(
+      "browser document changed after the action found its element; no input was sent",
+    );
+    expect(inputCalls(fixture.calls)).toEqual([]);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("the first action of a batch never moves to another page either", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    fixture.commitSilentlyOn("DOM.getBoxModel", fixture.pages.b!);
+    const receipt = await fixture.controller.run(
+      await fixture.command({
+        type: "batch",
+        actions: [
+          { type: "hover", locator: grantAccess },
+          { type: "wait", condition: "load" },
+        ],
+      }),
+    );
+    expect(receipt.state).toBe("failed");
+    expect(receipt.error?.code).toBe("document_stale");
+    expect(inputCalls(fixture.calls)).toEqual([]);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a later batch action whose document changed after it found its element finds it again on the new page", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    fixture.commitSilentlyOn("DOM.getBoxModel", fixture.pages.b!);
+    const receipt = await fixture.controller.run(await fixture.command(hoverLaterInBatch));
     expect(receipt.error ?? null).toBeNull();
     expect(receipt.state).toBe("completed");
     expect(receipt.observation?.target.url).toBe(fixture.pages.b!.url);
@@ -460,16 +510,16 @@ test("an action whose document changed after it found its element finds it again
   }
 });
 
-test("input is refused when the new page does not have the element", async () => {
+test("a later batch action is refused when the new page does not have the element", async () => {
   const fixture = navigationFixture();
   try {
     await fixture.driver.start();
     fixture.commitSilentlyOn("DOM.getBoxModel", fixture.pages.c!);
-    const receipt = await fixture.controller.run(
-      await fixture.command({ type: "hover", locator: grantAccess }),
-    );
-    expect(receipt.state).toBe("failed");
-    expect(receipt.error?.code).toBe("document_stale");
+    const receipt = await fixture.controller.run(await fixture.command(hoverLaterInBatch));
+    // The batch's earlier action ran, so the batch as a whole is unknown;
+    // this action sent nothing.
+    expect(receipt.state).toBe("outcome_unknown");
+    expect(receipt.error?.message).toContain("(document_stale: browser document changed");
     expect(receipt.error?.message).toContain("its element was not found on the new page");
     expect(receipt.error?.message).toContain("no input was sent");
     expect(inputCalls(fixture.calls)).toEqual([]);
@@ -478,16 +528,16 @@ test("input is refused when the new page does not have the element", async () =>
   }
 }, 20_000);
 
-test("input is refused when the document changes again while the element is found once more", async () => {
+test("a later batch action is refused when the document changes again while the element is found once more", async () => {
   const fixture = navigationFixture();
   try {
     await fixture.driver.start();
     fixture.commitSilentlyOn("DOM.getBoxModel", fixture.pages.b!, fixture.pages.b2!);
-    const receipt = await fixture.controller.run(
-      await fixture.command({ type: "hover", locator: grantAccess }),
-    );
-    expect(receipt.state).toBe("failed");
-    expect(receipt.error?.code).toBe("document_stale");
+    const receipt = await fixture.controller.run(await fixture.command(hoverLaterInBatch));
+    // The batch's earlier action ran, so the batch as a whole is unknown;
+    // this action sent nothing.
+    expect(receipt.state).toBe("outcome_unknown");
+    expect(receipt.error?.message).toContain("(document_stale: browser document changed");
     expect(receipt.error?.message).toContain("no input was sent");
     expect(inputCalls(fixture.calls)).toEqual([]);
   } finally {

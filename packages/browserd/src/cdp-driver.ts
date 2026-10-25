@@ -2124,11 +2124,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 this.assertExpectedGenerations(command, state);
               }
               await this.dispatchAction(state, action, command.operationId, {
-                // A fenceEachAction batch acts only on the document it was
-                // checked against, so its actions never move to another one.
-                refindAfterDocumentChange: !(
-                  command.action.type === "batch" && command.action.fenceEachAction
-                ),
+                // Only an action whose locators already follow the page to a
+                // new document (a later action of a batch without
+                // fenceEachAction) may look again there. A single or first
+                // action is fenced to the document the caller checked, so a
+                // change before its input stays a refusal.
+                refindAfterDocumentChange: state.locatorFollowsNavigation === true,
               });
             });
           }
@@ -4454,12 +4455,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     } catch (error) {
       // The page moved to a new document after the action found its element,
       // just before its first input event (which would have landed on the new
-      // page at the old element's position). An element named by role, text
-      // or another locator may well be on the new page too, so look for it
-      // there once, within the action's own locator deadline. A ref names an
-      // element of the page the caller saw, so it never moves to another. A
-      // document change while the action still waits for its element stays a
-      // refusal: an action fenced to its document does not follow the page.
+      // page at the old element's position). Only an action whose locators
+      // follow the page by design (a later action of a batch without
+      // fenceEachAction) looks for an element named by role, text or another
+      // locator once more there, within its own locator deadline. A single or
+      // first action is fenced to the document its caller checked, and a ref
+      // names an element of the page the caller saw: both stay refusals.
       const locators = actionLocators(action);
       if (
         options.refindAfterDocumentChange !== true ||
@@ -9576,8 +9577,6 @@ function isNavigationTimeout(error: unknown): boolean {
   );
 }
 
-/** The server never answered and the tab stopped loading: unlike a slow
- * page, nothing will appear in it later. */
 /** The page committed a new document after an action found its element and
  * before its first input event: nothing was sent to either document. */
 class DocumentMovedBeforeInputError extends InteractionDefiniteDriverError {
@@ -9597,6 +9596,8 @@ function actionLocators(action: BrowserAction): BrowserLocator[] {
   return locators.filter((locator): locator is BrowserLocator => locator !== undefined);
 }
 
+/** The server never answered and the tab stopped loading: unlike a slow
+ * page, nothing will appear in it later. */
 class NavigationNotAnsweredError extends InteractionDefiniteDriverError {
   constructor(timeoutMs: number) {
     super(
