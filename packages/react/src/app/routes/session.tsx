@@ -30,6 +30,7 @@ import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
 import { failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { isPaymentRequiredError } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
@@ -1430,7 +1431,7 @@ export function SessionRoute({
         session={session}
         events={events}
         connectionState={connectionState}
-        primary={chatPane}
+        primary={<ChatPaymentPages>{chatPane}</ChatPaymentPages>}
         onReloadSession={refreshSession}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}

@@ -79,6 +79,9 @@ test("reads, full access, and whatever the API refuses run without a card", asyn
     ["read_only", invite],
     ["confirm", { id: "createApiKey", pathParameters: { workspaceId: "ws-1" } }],
     ["unavailable", invite],
+    // Opening a payment page charges nothing: the page itself asks.
+    ["confirm", { id: "createBillingCheckout", body: { amountUsd: 20 } }],
+    ["confirm", { id: "createBillingPortalSession", body: {} }],
   ] as const) {
     const { seen, hooks } = wrapped(kind);
     await hooks.prepare({ ...appCall("call-1", args), approvalMode: "session_mcp" });

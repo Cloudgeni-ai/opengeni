@@ -1273,7 +1273,10 @@ describe("API helpers", () => {
     expect(params.success_url).toContain("http://127.0.0.1:3000/workspaces/test/organization");
     expect(params.cancel_url).toContain("checkout=cancelled");
     expect(stripeCheckoutSessionCreateParams(base).success_url).toBe(
-      "http://127.0.0.1:3000/billing?checkout=success",
+      "http://127.0.0.1:3000/checkout-complete.html?checkout=success",
+    );
+    expect(stripeCheckoutSessionCreateParams(base).cancel_url).toBe(
+      "http://127.0.0.1:3000/checkout-complete.html?checkout=cancelled",
     );
     expect(() =>
       stripeCheckoutSessionCreateParams({

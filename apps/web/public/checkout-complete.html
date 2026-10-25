@@ -66,17 +66,18 @@
     <main>
       <h1 id="title">You're all set</h1>
       <p id="body">
-        Go back to your Opengeni tab. Your credits show up there in a few seconds. You can close
-        this tab.
+        Go back to the chat or page you came from. Your credits show up there in a few seconds. You
+        can close this tab.
       </p>
     </main>
     <script>
       if (new URLSearchParams(location.search).get("checkout") === "cancelled") {
         document.getElementById("title").textContent = "Checkout cancelled";
         document.getElementById("body").textContent =
-          "Nothing was charged. Go back to your Opengeni tab to continue. You can close this tab.";
+          "Nothing was charged. Go back to the chat or page you came from to continue. You can close this tab.";
       }
-      // Opengeni opened this tab for checkout, so the browser lets it close itself.
+      // When Opengeni opened this tab for checkout, the browser lets it close
+      // itself; a tab opened from a link stays, with this message.
       setTimeout(() => window.close(), 1500);
     </script>
   </body>

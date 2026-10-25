@@ -3,9 +3,12 @@ import {
   ACTION_CATALOG,
   appActionCallChangesState,
   appActionCallHandlesSecrets,
+  appActionCallNeedsConfirmation,
   appActionConfirmationTitle,
   appActionHandlesSecrets,
+  appActionNeedsConfirmation,
   findAppAction,
+  PAYMENT_PAGE_ACTIONS,
 } from "../src/app-actions";
 import {
   appActionReviewSummary,
@@ -34,6 +37,26 @@ test("reads are told apart from changes; anything unrecognised counts as a chang
   const retired = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/search");
   expect(retired?.retired).toBeDefined();
   expect(appActionCallChangesState({ id: retired!.id })).toBe(false);
+});
+
+test("opening a payment page is a change that needs no confirmation in the chat", () => {
+  for (const id of PAYMENT_PAGE_ACTIONS) {
+    const entry = findAppAction(id);
+    // Every listed action exists, opens its page by POST and hands no secret over.
+    expect([id, entry?.method, appActionHandlesSecrets(entry!)]).toEqual([id, "POST", false]);
+    expect(appActionNeedsConfirmation(entry!)).toBe(false);
+    expect(appActionCallNeedsConfirmation({ id, body: { amountUsd: 20 } })).toBe(false);
+    expect(appActionCallChangesState({ id })).toBe(true);
+  }
+  // The same action named by its route reads the same.
+  expect(appActionCallNeedsConfirmation({ id: "POST /v1/billing/checkout" })).toBe(false);
+  // A subscription change charges at once, so it still asks.
+  expect(appActionCallNeedsConfirmation({ id: "upgradeBillingSubscription" })).toBe(true);
+  expect(appActionCallNeedsConfirmation({ id: "createOrganizationInvitation" })).toBe(true);
+  expect(appActionCallNeedsConfirmation({ id: "getMyUsage" })).toBe(false);
+  for (const unknown of [{ id: "noSuchAction" }, {}, null, "not json"]) {
+    expect(appActionCallNeedsConfirmation(unknown)).toBe(true);
+  }
 });
 
 test("the confirmation is a plain question built only from checked values", () => {

@@ -1,6 +1,6 @@
 import {
   APP_ACTION_CALL_TOOL_NAME,
-  appActionCallChangesState,
+  appActionCallNeedsConfirmation,
   appActionCallHandlesSecrets,
   appActionConfirmationTitle,
 } from "@opengeni/contracts/app-actions";
@@ -71,7 +71,7 @@ export function withAppActionConfirmation(
     let confirm = decided.get(call.approvalId);
     if (confirm === undefined) {
       confirm =
-        appActionCallChangesState(call.arguments) &&
+        appActionCallNeedsConfirmation(call.arguments) &&
         !appActionCallHandlesSecrets(call.arguments) &&
         (await chat.authority()) === "confirm";
       decided.set(call.approvalId, confirm);

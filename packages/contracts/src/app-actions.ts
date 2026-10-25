@@ -64,6 +64,43 @@ export function appActionCallChangesState(args: unknown): boolean {
 }
 
 /**
+ * Actions that only open a payment page (Stripe Checkout or the billing
+ * portal) and charge nothing themselves: the person pays, or doesn't, on that
+ * page, which is its own confirmation. The chat shows the page as a button.
+ */
+export const PAYMENT_PAGE_ACTIONS: ReadonlySet<string> = new Set([
+  "createBillingCheckout",
+  "createSubscriptionCheckout",
+  "createBillingPortalSession",
+  "createSubscriptionPortalSession",
+]);
+
+/** Whether the action only opens a payment page (see {@link PAYMENT_PAGE_ACTIONS}). */
+export function appActionOpensPaymentPage(entry: ActionCatalogEntry): boolean {
+  return PAYMENT_PAGE_ACTIONS.has(entry.id);
+}
+
+/**
+ * Whether running the action needs the person's confirmation in the chat
+ * first: every change, except opening a payment page, which asks on the page
+ * itself.
+ */
+export function appActionNeedsConfirmation(entry: ActionCatalogEntry): boolean {
+  return appActionChangesState(entry) && !appActionOpensPaymentPage(entry);
+}
+
+/**
+ * The same, for an admin_action_call's arguments: also true for anything that
+ * can't be recognised (unknown action, bad input).
+ */
+export function appActionCallNeedsConfirmation(args: unknown): boolean {
+  const id = callArguments(args)?.id;
+  if (typeof id !== "string") return true;
+  const entry = findAppAction(id);
+  return entry === undefined || appActionNeedsConfirmation(entry);
+}
+
+/**
  * Whether the action can create, show, copy or rotate a key, password, token
  * or other secret, or hand one to the app (its catalog entry lists where).
  */

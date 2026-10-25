@@ -1,4 +1,5 @@
 import { normalizeMcpOutput, parseSandboxFileArtifactReceipt } from "@opengeni/sdk";
+import { paymentPageOf } from "./payment-page";
 import { mcpToolLeaf } from "./tool-display-name";
 import type { ActivityItem, TimelineGroup } from "./types";
 
@@ -27,11 +28,13 @@ export function isPatchFilename(filename: string): boolean {
 
 /**
  * Deliberately published images and patches are primary output, not
- * incidental screenshots or work files.
+ * incidental screenshots or work files; so is a payment page an app action
+ * opened, whose button the person needs.
  */
 export function activityPresentsImage(items: readonly ActivityItem[]): boolean {
   return items.some((item) => {
     if (item.kind !== "tool-call") return false;
+    if (paymentPageOf(item)) return true;
     const name = mcpToolLeaf(item.name);
     if (name === "generate_image" || name === "image_generation_call") return true;
     if (item.status !== "complete" || name !== "sandbox_file_publish") return false;

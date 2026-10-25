@@ -358,16 +358,18 @@ export function describeAction(entry: ActionCatalogEntry) {
 export async function callOrganizationAction(
   context: OrganizationActionContext,
   input: z.infer<typeof OrganizationActionCallInput>,
+  options: {
+    /** A fixed note added to a successful result, for the caller's surface. */
+    note?: string | undefined;
+  } = {},
 ): Promise<CallToolResult> {
   const outcome = await runOrganizationAction(context, input);
   return "refused" in outcome
     ? outcome.refused
-    : await toolResult(
-        outcome.response,
-        outcome.entry,
-        input.query,
-        outcome.externalPerson === true,
-      );
+    : await toolResult(outcome.response, outcome.entry, input.query, {
+        externalPerson: outcome.externalPerson === true,
+        note: options.note,
+      });
 }
 
 /**
@@ -475,7 +477,12 @@ async function toolResult(
   response: Response,
   entry: ActionCatalogEntry,
   query: z.infer<typeof OrganizationActionCallInput>["query"],
-  externalPerson: boolean,
+  options: {
+    /** The caller uses Opengeni through another product: no app page to send them to. */
+    externalPerson: boolean;
+    /** A fixed note added to a successful result, for the caller's surface. */
+    note?: string | undefined;
+  },
 ): Promise<CallToolResult> {
   const status = response.status;
   const location = response.headers.get("location");
@@ -512,7 +519,7 @@ async function toolResult(
     if (truncated && !trimmed)
       result.truncated = { returnedBytes: MAX_RESPONSE_BYTES, totalBytes: bytes.byteLength };
   }
-  if ((status === 401 || status === 403) && externalPerson) {
+  if ((status === 401 || status === 403) && options.externalPerson) {
     result.hint = EXTERNAL_PERSON_REFUSED_HINT;
   } else if (
     (status === 401 || status === 403) &&
@@ -520,6 +527,7 @@ async function toolResult(
   ) {
     result.hint = "This action has to be done by the person in the Opengeni app in a browser.";
   }
+  if (options.note && status < 400) result.note = options.note;
   return {
     content: [{ type: "text", text: JSON.stringify(result) }],
     ...(status >= 400 ? { isError: true } : {}),

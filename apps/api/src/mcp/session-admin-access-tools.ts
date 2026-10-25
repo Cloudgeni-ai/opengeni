@@ -11,6 +11,8 @@ import {
   APP_ACTION_CALL_TOOL_NAME,
   appActionChangesState,
   appActionCallCarriesSecrets,
+  appActionNeedsConfirmation,
+  appActionOpensPaymentPage,
   findAppAction,
   type ActionCatalogEntry,
 } from "@opengeni/contracts/app-actions";
@@ -82,6 +84,9 @@ const SECRETS =
   "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. The person can do it in the app's settings themselves.";
 const EXTERNAL_PERSON_SECRETS =
   "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. Tell the person plainly that this isn't available here, without pointing them to a page.";
+
+const PAYMENT_PAGE =
+  "The chat shows the person this page as a button that opens it, and for credits confirms there once they've paid, so you needn't repeat the link. If you do share it, copy url exactly as returned, including everything after #: a retyped or shortened link doesn't open. Test-mode pages (ids starting cs_test_) are expected where the deployment takes test payments; share them like any other.";
 
 const CallInput = z4.object({
   id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
@@ -325,11 +330,14 @@ export function registerSessionAdminAccessTools(input: {
         appActionCallCarriesSecrets(entry, args.body)
       )
         return failure(isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_SECRETS : SECRETS);
-      if (authority.kind === "read_only" && entry && appActionChangesState(entry))
+      // Opening a payment page charges nothing, so it runs without a
+      // confirmation here and in an embed alike; the page itself asks, and
+      // the route still checks that this person may pay.
+      if (authority.kind === "read_only" && entry && appActionNeedsConfirmation(entry))
         return failure(
           isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_READ_ONLY : READ_ONLY,
         );
-      if (authority.kind === "confirm" && entry && appActionChangesState(entry)) {
+      if (authority.kind === "confirm" && entry && appActionNeedsConfirmation(entry)) {
         // Enforced here, not only in the chat: the change runs only if this
         // attempt is executing exactly these arguments, which this same
         // person approved.
@@ -344,12 +352,16 @@ export function registerSessionAdminAccessTools(input: {
         });
         if (!confirmed.some((saved) => confirmedCall(saved, args))) return failure(NOT_CONFIRMED);
       }
-      return await callOrganizationAction(reach.actAs(authority), {
-        id: args.id,
-        pathParameters: args.pathParameters,
-        query: args.query,
-        ...(args.body !== undefined ? { body: args.body } : {}),
-      });
+      return await callOrganizationAction(
+        reach.actAs(authority),
+        {
+          id: args.id,
+          pathParameters: args.pathParameters,
+          query: args.query,
+          ...(args.body !== undefined ? { body: args.body } : {}),
+        },
+        entry && appActionOpensPaymentPage(entry) ? { note: PAYMENT_PAGE } : {},
+      );
     },
   );
 }

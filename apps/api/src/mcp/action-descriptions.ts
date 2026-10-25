@@ -310,6 +310,36 @@ const RULES: Rule[] = [
     pattern: /\/sessions\/:sessionId\/realtime\/supergrok$/,
     text: () => "Start a SuperGrok realtime voice connection for a session.",
   },
+  // Buying credits: "add $20 to my account" should find these first time.
+  {
+    method: "GET",
+    pattern: /^\/v1\/billing$/,
+    text: () => "Read the organization's credit balance: how much money is left to spend.",
+  },
+  {
+    method: "POST",
+    pattern: /^\/v1\/billing\/checkout$/,
+    text: () =>
+      "Buy credits: add money to the organization's balance, for example amountUsd 20 (5 to 10,000). Returns a secure payment page; creating it charges nothing, the person pays on the page.",
+  },
+  {
+    method: "GET",
+    pattern: /^\/v1\/billing\/checkout\/:checkoutSessionId$/,
+    text: () =>
+      "Check whether a credits payment went through, with the new balance once its credits are added.",
+  },
+  {
+    method: "POST",
+    pattern: /^\/v1\/billing\/portal$/,
+    text: () =>
+      "Open the billing portal, where the person sees invoices and changes their payment method.",
+  },
+  {
+    method: "POST",
+    pattern: /\/workspaces\/:workspaceId\/allowance\/grants$/,
+    text: () =>
+      "Give a workspace extra allowance credits under its spending limit. This doesn't add money to the organization's balance; to buy credits use createBillingCheckout.",
+  },
 ];
 
 /** Actions that must carry a description (subscriptions, models and vault connections). */
