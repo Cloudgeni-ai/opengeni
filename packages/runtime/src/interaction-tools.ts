@@ -289,6 +289,10 @@ const BrowserScreenshotInput = z
     quality: z.number().int().min(1).max(100).optional(),
   })
   .strict();
+// Shown only on a full-page capture that could not keep every scrollbar's
+// space; static, so it never changes text already sent.
+const INEXACT_SCROLLBARS_NOTE =
+  "Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.";
 const BrowserScreenshotOutput = z
   .object({
     kind: z.literal("browser_screenshot"),
@@ -305,6 +309,7 @@ const BrowserScreenshotOutput = z
     scrollY: z.number(),
     capturedAt: z.string(),
     fullPage: z.boolean(),
+    note: z.string().optional(),
   })
   .strict();
 const BrowserReadInput = z
@@ -2181,6 +2186,7 @@ export function createInteractionAttemptToolDefinitions(
             scrollY: frame.scrollY,
             capturedAt: frame.capturedAt,
             fullPage: value.fullPage ?? false,
+            ...(frame.inexactScrollbars ? { note: INEXACT_SCROLLBARS_NOTE } : {}),
           },
           [browserToolImageContent(frame.data, frame.mediaType)],
         );

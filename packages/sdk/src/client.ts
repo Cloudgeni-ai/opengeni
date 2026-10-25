@@ -5068,7 +5068,13 @@ export class OpenGeniClient {
     ) {
       throw invalidApiResponseError("browser frame evidence does not match its request");
     }
-    return { ...metadata, data };
+    return {
+      ...metadata,
+      data,
+      ...(response.headers.get("x-opengeni-browser-frame-note") === "inexact-scrollbars"
+        ? { inexactScrollbars: true as const }
+        : {}),
+    };
   }
 
   async closeBrowserTarget(

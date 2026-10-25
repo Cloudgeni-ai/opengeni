@@ -20,10 +20,10 @@ export {
   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
 };
 
-export type BrowserFrameMetadata = Omit<BrowserImageFrame, "data">;
+export type BrowserFrameMetadata = Omit<BrowserImageFrame, "data" | "inexactScrollbars">;
 
 export function browserFrameMetadata(frame: BrowserImageFrame): BrowserFrameMetadata {
-  const { data: _data, ...metadata } = frame;
+  const { data: _data, inexactScrollbars: _inexact, ...metadata } = frame;
   return metadata;
 }
 

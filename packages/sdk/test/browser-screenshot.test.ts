@@ -45,6 +45,26 @@ test("captures the requested browser target as a bounded image", async () => {
   expect(path).toContain(`/browser-sessions/${browserSessionId}/targets/${targetId}/screenshot`);
   expect(frame.data).toEqual(data);
   expect(frame.mediaType).toBe("image/jpeg");
+  expect(frame.inexactScrollbars).toBeUndefined();
+});
+
+test("reports a full-page capture that could not keep every scrollbar", async () => {
+  const sdk = new OpenGeniClient({
+    baseUrl: "https://api.example.test",
+    fetch: async () => {
+      const response = frameResponse();
+      response.headers.set("x-opengeni-browser-frame-note", "inexact-scrollbars");
+      return response;
+    },
+  });
+  const frame = await sdk.captureBrowserTarget(
+    workspaceId,
+    browserSessionId,
+    targetId,
+    {},
+    { fullPage: true },
+  );
+  expect(frame.inexactScrollbars).toBe(true);
 });
 
 test("forwards explicit full-page and encoding options without changing request-options position", async () => {

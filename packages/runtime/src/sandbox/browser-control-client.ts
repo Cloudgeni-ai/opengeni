@@ -225,6 +225,8 @@ export type BrowserControlFrame = {
   mediaType: "image/jpeg" | "image/png";
   metadataHeader: string;
   metadata: BrowserFrameMetadata;
+  /** Set when a full-page capture could not keep every scrollbar's space. */
+  inexactScrollbars?: true;
 };
 
 export type BrowserControlScreenshotOptions = {
@@ -2899,7 +2901,15 @@ function browserControlFrame(
   ) {
     throw new BrowserControlProtocolError("browser frame evidence does not match its request");
   }
-  return { data, mediaType, metadataHeader, metadata };
+  return {
+    data,
+    mediaType,
+    metadataHeader,
+    metadata,
+    ...(get("x-opengeni-browser-frame-note") === "inexact-scrollbars"
+      ? { inexactScrollbars: true as const }
+      : {}),
+  };
 }
 
 function computerControlFrame(
