@@ -1074,7 +1074,9 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             Some(_) => Reply::Done,
             None => error(ErrorCode::NotFound, "no such sandbox"),
         },
-        Request::HandOff { id, owner_epoch } => {
+        Request::HandOff {
+            id, owner_epoch, ..
+        } => {
             if !holds(id) {
                 return error(ErrorCode::NotFound, "no such sandbox");
             }

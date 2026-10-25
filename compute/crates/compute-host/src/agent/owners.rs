@@ -134,7 +134,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 from_files,
                 reply,
             } => self.adopt(id, config, owner, from_files, reply),
-            Command::HandOff { id, owner, reply } => self.hand_off(id, owner, reply),
+            Command::HandOff {
+                id,
+                owner,
+                awake,
+                reply,
+            } => self.hand_off(id, owner, awake, reply),
             Command::Reconcile { rulings, reply } => self.reconcile(rulings, reply),
             Command::Owned {
                 owner,
@@ -502,15 +507,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         });
     }
 
-    /// Hands sandbox `id`, held under `owner`, off; see
-    /// [`crate::protocol::Request::HandOff`].
+    /// Hands sandbox `id`, held under `owner`, off, even while it is awake
+    /// with `awake`; see [`crate::protocol::Request::HandOff`].
     ///
     /// It is sent unfenced, so it keeps the barrier [`Self::owned`] keeps:
     /// while a create, adopt or change of owner may yet land, or a removal
     /// that would delete the store's copy runs, it is answered busy, never
     /// "not found", which the service could take as final. It joins only a
     /// removal that hands the sandbox off.
-    pub(super) fn hand_off(&mut self, id: Id, owner: OwnerEpoch, reply: Reply<()>) {
+    ///
+    /// Handed off awake, every hold on it ends at once: from then on the
+    /// hand-off refuses new ones, as it refuses wakes, so the streams that
+    /// held it end at their next write, and nothing keeps it from being
+    /// paused, saved and archived with its memory. Holds named in its
+    /// record stay recorded: one renewed after a hand-off that did not
+    /// finish holds it again.
+    pub(super) fn hand_off(&mut self, id: Id, owner: OwnerEpoch, awake: bool, reply: Reply<()>) {
         if self.blocked.contains_key(&id.0) {
             let _ = reply.send(Err(self.blocked_error(id)));
             return;
@@ -572,17 +584,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             waiting.push(reply);
             return;
         }
-        let awake = self
-            .core
-            .sandbox(id.0)
-            .is_none_or(|view| view.holds > 0 || view.runs());
-        if awake {
+        let Some(view) = self.core.sandbox(id.0) else {
+            let _ = reply.send(Err(HostError::Awake(id)));
+            return;
+        };
+        let held = view.holds > 0;
+        if (held || view.runs()) && !awake {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
         }
         if let Err(error) = self.request_sleep(id, Level::Archived) {
             let _ = reply.send(Err(error));
             return;
+        }
+        if held {
+            self.input(Input::LetGo { sandbox: id.0 });
         }
         self.handing_off.insert(id.0, vec![reply]);
         self.continue_hand_off(id);

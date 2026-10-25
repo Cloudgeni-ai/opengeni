@@ -176,12 +176,18 @@ impl Handle {
         .await?
     }
 
-    /// Hands a sandbox held under `owner` off, and returns once this host
-    /// no longer has it; see [`crate::protocol::Request::HandOff`].
-    pub async fn hand_off(&self, id: Id, owner: OwnerEpoch) -> Result<(), HostError> {
+    /// Hands a sandbox held under `owner` off, even while it is awake with
+    /// `awake`, and returns once this host no longer has it; see
+    /// [`crate::protocol::Request::HandOff`].
+    pub async fn hand_off(&self, id: Id, owner: OwnerEpoch, awake: bool) -> Result<(), HostError> {
         self.fleet_only("hand off")?;
-        self.send_naming_owner(|reply| Command::HandOff { id, owner, reply })
-            .await?
+        self.send_naming_owner(|reply| Command::HandOff {
+            id,
+            owner,
+            awake,
+            reply,
+        })
+        .await?
     }
 
     /// Takes in the control service's rulings on the sandboxes the host

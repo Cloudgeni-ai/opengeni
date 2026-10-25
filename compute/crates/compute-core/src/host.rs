@@ -126,6 +126,13 @@ pub enum Input {
         /// The reason that ended.
         hold: HoldId,
     },
+    /// Every hold on the sandbox ended at once, whatever held it, as when
+    /// its host hands it off awake. Counts as activity, as a release does;
+    /// a hold released later, already ended here, changes nothing.
+    LetGo {
+        /// The sandbox.
+        sandbox: SandboxId,
+    },
     /// The sandbox did work on its own while running, such as a build using
     /// its processors or a download moving data. Counts as activity only
     /// while it runs with no step in progress but a checkpoint, which lets
@@ -794,13 +801,8 @@ impl Host {
                 until,
                 priority,
             } => self.hold(now, sandbox, (hold, until), priority, out),
-            Input::Release { sandbox, hold } => {
-                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
-                    slot.holds.remove(&hold);
-                    slot.touch(now);
-                    self.mark(sandbox);
-                }
-            }
+            Input::Release { sandbox, hold } => self.release(now, sandbox, Some(hold)),
+            Input::LetGo { sandbox } => self.release(now, sandbox, None),
             Input::Busy { sandbox } => self.busy(now, sandbox),
             Input::Finished {
                 sandbox,
@@ -857,6 +859,21 @@ impl Host {
             slot.touch(now);
             slot.requested = Level::Running;
             slot.request_wake(priority, now);
+            self.mark(sandbox);
+        }
+    }
+
+    /// Takes in [`Input::Release`] of `hold`, or [`Input::LetGo`] for
+    /// every hold.
+    fn release(&mut self, now: At, sandbox: SandboxId, hold: Option<HoldId>) {
+        if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+            match hold {
+                Some(hold) => {
+                    slot.holds.remove(&hold);
+                }
+                None => slot.holds.clear(),
+            }
+            slot.touch(now);
             self.mark(sandbox);
         }
     }
