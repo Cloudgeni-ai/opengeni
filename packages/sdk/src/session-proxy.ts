@@ -15,6 +15,7 @@ import type {
 } from "./types";
 import { mintToolToken, resolveToolTokenSecret } from "./tool-auth";
 import { getSessionProxyWorkspaceGrant } from "./session-proxy-client";
+import { normalizeMessageTimeZone } from "@opengeni/contracts/message-time-zone";
 export {
   getSessionProxyArtifactAssociation,
   getSessionProxyWorkspaceGrant,
@@ -422,6 +423,8 @@ const CREATE_FIELDS: ReadonlySet<string> = new Set([
   "resources",
   "startMode",
   "modelContext",
+  // The person's own time zone, so the agent sees their local time.
+  "timeZone",
   // Packaged-app bookkeeping; see `browserCreateFields`.
   "visibility",
   "clientEventId",
@@ -1828,6 +1831,7 @@ function createResources(value: unknown): FileResourceRef[] {
 /** Browser attachments are added; explicit browser model choices win, as for messages. */
 type BrowserCreateFields = {
   modelContext?: string | undefined;
+  timeZone?: string | undefined;
   clientEventId?: string | undefined;
   expectedNewSessionDraftRevision?: number | undefined;
 };
@@ -1847,6 +1851,8 @@ function browserCreateFields(body: Record<string, unknown> | undefined): Browser
     reject(400, "invalid_model_context", "modelContext must be a string.");
   }
   if (modelContext?.trim()) fields.modelContext = modelContext;
+  const timeZone = normalizeMessageTimeZone(body?.timeZone);
+  if (timeZone) fields.timeZone = timeZone;
   const visibility = body?.visibility;
   if (visibility !== undefined && visibility !== "workspace" && visibility !== "private") {
     reject(400, "invalid_visibility", "visibility must be workspace or private.");
@@ -1904,6 +1910,10 @@ function withBrowserCreateChoices(
     ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
     ...(created.clientEventId === undefined && browser.clientEventId
       ? { clientEventId: browser.clientEventId }
+      : {}),
+    // The person's zone unless the host chose one for this create.
+    ...(created.timeZone === undefined && browser.timeZone && input.startMode !== "realtime"
+      ? { timeZone: browser.timeZone }
       : {}),
   };
 }

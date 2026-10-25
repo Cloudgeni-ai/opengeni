@@ -897,6 +897,9 @@ import {
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   TimelineAnnotations,
   renderUserMessageContentForModel,
+  MESSAGE_TIME_ZONE_METADATA_KEY,
+  messageTimeZoneFromTurnMetadata,
+  normalizeMessageTimeZone,
   SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -8281,6 +8284,7 @@ export function durableUserHistoryItem(
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | null,
   sender?: string | null,
+  timeZone?: string | null,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -8295,6 +8299,7 @@ export function durableUserHistoryItem(
       goalSnapshot,
       sentAt,
       sender,
+      timeZone,
     ),
     ...(attachmentRefs.length > 0
       ? {
@@ -71276,6 +71281,11 @@ export type InitializeSessionStartInput = {
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
   /**
+   * Normalized IANA zone of the person sending the initial message, frozen in
+   * the initial turn's metadata.
+   */
+  initialTimeZone?: string;
+  /**
    * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
    * scheduled firing passes its task's value, which is copied, never
    * recomputed. Omitted by every other caller (the acceptance rule applies).
@@ -71331,6 +71341,14 @@ export type InitializeSessionStartResult = {
   /** True when this call installed/repaired start state or committed a new wake revision. */
   changed: boolean;
 };
+
+/** Trusted per-message facts the create request froze for the initial turn. */
+function initialTurnMetadata(
+  input: Pick<InitializeSessionStartInput, "initialTimeZone">,
+): Record<string, unknown> {
+  const timeZone = normalizeMessageTimeZone(input.initialTimeZone);
+  return timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {};
+}
 
 /**
  * Install a newly created session's complete first runnable unit atomically.
@@ -71889,8 +71907,11 @@ export async function initializeSessionStartAtomically(
                   sandboxBackend: session.sandboxBackend,
                   sandboxOs: session.sandboxOs,
                   metadata: input.turnExecutionPolicy
-                    ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
-                    : {},
+                    ? metadataWithTurnExecutionPolicyV1(
+                        initialTurnMetadata(input),
+                        input.turnExecutionPolicy,
+                      )
+                    : initialTurnMetadata(input),
                   lineage: {},
                   ...initiatorColumns(creator),
                   initiatingHumanSubjectId: initialTurnInitiatingHumanSubjectId,
@@ -76607,6 +76628,8 @@ export async function claimSessionWorkForAttempt(
                     // moment the user sent it.
                     historyTurn.createdAt,
                     humanTurnSenderLabel(historyTurn),
+                    // The sender's zone frozen in the turn at acceptance.
+                    messageTimeZoneFromTurnMetadata(historyTurn.metadata),
                   ),
                 ),
               },

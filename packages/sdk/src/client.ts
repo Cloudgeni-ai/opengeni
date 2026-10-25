@@ -5,6 +5,10 @@ import {
 } from "./session-sequence";
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
 import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
+import {
+  currentMessageTimeZone,
+  normalizeMessageTimeZone,
+} from "@opengeni/contracts/message-time-zone";
 import type { WorkspaceBackgroundCommandListResponse } from "./types";
 import type {
   InsightsSiteUsageQuery,
@@ -994,6 +998,15 @@ export type OpenGeniClientOptions = {
   /** Positive deadline for interactive session commands. Defaults to 15 seconds. */
   sessionCommandTimeoutMs?: number;
   /**
+   * Whether a person's messages carry this device's IANA time zone when the
+   * caller does not set `timeZone` itself, so the agent sees their local time.
+   * `"auto"` (the default) does this only in a browser or React Native app,
+   * where the device clock belongs to the person typing; servers never
+   * attach their own zone. `false` never fills it in. An explicit, valid
+   * `timeZone` on a message is always sent.
+   */
+  messageTimeZone?: "auto" | false | undefined;
+  /**
    * How this client treats an API that advertises a different
    * `x-opengeni-api-contract` revision.
    *
@@ -1022,6 +1035,49 @@ function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "com
   if (options.apiContract) return options.apiContract;
   const browser = typeof window !== "undefined" && typeof document !== "undefined";
   return browser && !options.apiKey ? "strict" : "compatible";
+}
+
+/** A browser page or React Native app, where the device clock is the person's own. */
+function runsOnPersonsDevice(): boolean {
+  if (typeof window !== "undefined" && typeof document !== "undefined") return true;
+  const nav = (globalThis as { navigator?: { product?: unknown } }).navigator;
+  return nav?.product === "ReactNative";
+}
+
+/**
+ * One person's message body with its `timeZone` settled: a valid explicit zone,
+ * else (when enabled) the device's zone, else none. `automatic` marks a zone the
+ * caller did not choose, which may be dropped for a server that predates it.
+ */
+function withMessageTimeZone<T extends { timeZone?: string | undefined }>(
+  body: T,
+  mode: OpenGeniClientOptions["messageTimeZone"],
+): { body: T; automatic: boolean } {
+  const { timeZone: requested, ...rest } = body;
+  const explicit = normalizeMessageTimeZone(requested);
+  if (explicit) return { body: { ...rest, timeZone: explicit } as T, automatic: false };
+  const device = mode !== false && runsOnPersonsDevice() ? currentMessageTimeZone() : undefined;
+  return device
+    ? { body: { ...rest, timeZone: device } as T, automatic: true }
+    : { body: rest as T, automatic: false };
+}
+
+function withoutMessageTimeZone<T extends { timeZone?: string | undefined }>(body: T): T {
+  const { timeZone: _timeZone, ...rest } = body;
+  return rest as T;
+}
+
+/**
+ * Whether a request was refused only because the server (or an embedding
+ * host's session relay) predates message time zones: older servers reject
+ * unknown fields on the strict message and steer bodies with these messages,
+ * and older relays refuse unknown create fields by name.
+ */
+function rejectsMessageTimeZoneField(error: unknown): boolean {
+  if (!(error instanceof OpenGeniApiError)) return false;
+  const text = `${error.message}\n${error.body}`;
+  if (error.status === 422) return /invalid (session event|steer request)/.test(text);
+  return error.status === 400 && /timeZone\W+cannot be set/.test(text);
 }
 
 /** Per-request cancellation for operations whose caller owns an AbortSignal. */
@@ -1510,19 +1566,32 @@ export class OpenGeniClient {
     request: CreateSessionRequest,
   ): Promise<CreateSessionResponse> {
     const limited = request.usageLimitMicros !== undefined && request.usageLimitMicros !== null;
+    // Only an initial message a person sends carries their time zone.
+    const { body: zoned, automatic } =
+      request.initialMessage && request.startMode !== "realtime"
+        ? withMessageTimeZone(request, this.options.messageTimeZone)
+        : { body: withoutMessageTimeZone(request), automatic: false };
     // A limited create spells out the default start mode. Servers that
     // predate usage limits accept only `realtime` there, so they reject the
     // whole request before creating or starting anything, rather than
     // dropping the unknown limit and starting uncapped work.
     const body: CreateSessionRequest =
-      limited && request.startMode === undefined ? { ...request, startMode: "standard" } : request;
-    let created: CreateSessionResponse;
-    try {
-      created = await this.requestJson<CreateSessionResponse>(
+      limited && zoned.startMode === undefined ? { ...zoned, startMode: "standard" } : zoned;
+    const post = async (payload: CreateSessionRequest) =>
+      await this.requestJson<CreateSessionResponse>(
         "POST",
         `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
-        body,
+        payload,
       );
+    let created: CreateSessionResponse;
+    try {
+      try {
+        created = await post(body);
+      } catch (error) {
+        // A relay that predates message time zones refuses the unknown field.
+        if (!automatic || !rejectsMessageTimeZoneField(error)) throw error;
+        created = await post(withoutMessageTimeZone(body));
+      }
     } catch (error) {
       if (
         limited &&
@@ -3124,11 +3193,23 @@ export class OpenGeniClient {
     sessionId: string,
     event: ClientSessionEventInput,
   ): Promise<SessionEvent> {
-    return await this.requestSessionCommand<SessionEvent>(
-      "POST",
-      `${sessionPath(workspaceId, sessionId)}/events`,
-      event,
+    const path = `${sessionPath(workspaceId, sessionId)}/events`;
+    if (event.type !== "user.message") {
+      return await this.requestSessionCommand<SessionEvent>("POST", path, event);
+    }
+    const { body: payload, automatic } = withMessageTimeZone(
+      event.payload,
+      this.options.messageTimeZone,
     );
+    try {
+      return await this.requestSessionCommand<SessionEvent>("POST", path, { ...event, payload });
+    } catch (error) {
+      if (!automatic || !rejectsMessageTimeZoneField(error)) throw error;
+      return await this.requestSessionCommand<SessionEvent>("POST", path, {
+        ...event,
+        payload: withoutMessageTimeZone(payload),
+      });
+    }
   }
 
   async sendMessage(
@@ -3373,7 +3454,7 @@ export class OpenGeniClient {
     return await this.requestSessionCommand<SubmitComposerDraftResponse>(
       "POST",
       `${sessionPath(workspaceId, sessionId)}/composer-draft/submit`,
-      request,
+      withMessageTimeZone(request, this.options.messageTimeZone).body,
     );
   }
 
@@ -3654,11 +3735,18 @@ export class OpenGeniClient {
   ): Promise<SteerMessageResult> {
     const input = typeof message === "string" ? { text: message } : message;
     assertNoMessageTools(input);
-    return await this.requestSessionCommand<SteerMessageResult>(
-      "POST",
-      `${sessionPath(workspaceId, sessionId)}/steer`,
-      input,
-    );
+    const path = `${sessionPath(workspaceId, sessionId)}/steer`;
+    const { body, automatic } = withMessageTimeZone(input, this.options.messageTimeZone);
+    try {
+      return await this.requestSessionCommand<SteerMessageResult>("POST", path, body);
+    } catch (error) {
+      if (!automatic || !rejectsMessageTimeZoneField(error)) throw error;
+      return await this.requestSessionCommand<SteerMessageResult>(
+        "POST",
+        path,
+        withoutMessageTimeZone(body),
+      );
+    }
   }
 
   // --- Goals -------------------------------------------------------------------

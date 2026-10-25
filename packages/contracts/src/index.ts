@@ -40,6 +40,12 @@ export * from "./session-message-search";
 export * from "./session-goal-reports";
 export * from "./session-history-import";
 import { SessionImportedArchive } from "./session-history-import";
+import {
+  MESSAGE_TIME_ZONE_MAX_CHARS,
+  MESSAGE_TIME_ZONE_PATTERN,
+  messageTimeZoneWallClock,
+} from "./message-time-zone";
+export * from "./message-time-zone";
 import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
@@ -9565,6 +9571,43 @@ export function formatModelContextTimestamp(value: Date | string): string {
 const MAX_MESSAGE_SENDER_CHARS = 200;
 
 /**
+ * The IANA time zone of the person sending a message, as their client reports
+ * it (for example `Europe/Oslo`). Only the shape is enforced here; a name this
+ * server's time zone data cannot resolve is ignored at acceptance rather than
+ * failing the message, because clients may carry newer zone data.
+ */
+export const MessageTimeZone = /* @__PURE__ */ defineSchema(() =>
+  primitives.string.min(1).max(MESSAGE_TIME_ZONE_MAX_CHARS).regex(MESSAGE_TIME_ZONE_PATTERN, {
+    message: "timeZone must be an IANA time zone name such as Europe/Oslo",
+  }),
+);
+export type MessageTimeZone = z.infer<typeof MessageTimeZone>;
+
+/**
+ * Wall-clock time in the sender's own zone, followed by UTC, for example
+ * `Sunday 2026-10-25 09:08 Europe/Oslo (08:08 UTC)`. The UTC part repeats the
+ * weekday and date only when they differ from the local ones. Without a usable
+ * zone this is exactly {@link formatModelContextTimestamp}.
+ */
+export function formatZonedModelContextTimestamp(
+  value: Date | string,
+  timeZone?: string | null,
+): string {
+  const utc = formatModelContextTimestamp(value);
+  if (!timeZone) return utc;
+  const date = typeof value === "string" ? new Date(value) : value;
+  const local = messageTimeZoneWallClock(date, timeZone);
+  if (!local) return utc;
+  const pad = (part: number, width = 2) => String(part).padStart(width, "0");
+  const localDate = `${pad(local.year, 4)}-${pad(local.month)}-${pad(local.day)}`;
+  const weekday =
+    MODEL_CONTEXT_WEEKDAYS[new Date(Date.UTC(local.year, local.month - 1, local.day)).getUTCDay()];
+  const iso = date.toISOString();
+  const utcPart = localDate === iso.slice(0, 10) ? `${iso.slice(11, 16)} UTC` : utc;
+  return `${weekday} ${localDate} ${pad(local.hour)}:${pad(local.minute)} ${timeZone} (${utcPart})`;
+}
+
+/**
  * The person a human message came from, as frozen with its turn, made safe for
  * the one-line metadata part: no brackets or line breaks, bounded length.
  * Empty when nothing readable remains.
@@ -9582,11 +9625,17 @@ export function messageSenderForModel(sender: string | null | undefined): string
 /**
  * The metadata part of one accepted user-role message: its acceptance time
  * and, for a person's message, who sent it. Members of a shared workspace use
- * the same agent, so the model must be able to tell them apart.
+ * the same agent, so the model must be able to tell them apart. When the
+ * sender's client reported its time zone, the time is shown in that zone first
+ * and in UTC after it; otherwise only in UTC.
  */
-export function renderMessageSentAtForModel(sentAt: Date | string, sender?: string | null): string {
+export function renderMessageSentAtForModel(
+  sentAt: Date | string,
+  sender?: string | null,
+  timeZone?: string | null,
+): string {
   const from = messageSenderForModel(sender);
-  return `[Message sent ${formatModelContextTimestamp(sentAt)}${from ? ` by ${from}` : ""}]`;
+  return `[Message sent ${formatZonedModelContextTimestamp(sentAt, timeZone)}${from ? ` by ${from}` : ""}]`;
 }
 
 /**
@@ -9619,7 +9668,8 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
  * model knows the current date without spending a tool call on it. All of them
  * remain in the visible message's chronological position, and presentation
  * layers may omit their leading parts. `sender` names the person who sent a
- * human message; it rides on the `sentAt` part.
+ * human message, and `timeZone` is the sender's zone frozen with the turn; both
+ * ride on the `sentAt` part.
  */
 export function renderUserMessageContentForModel(
   text: string,
@@ -9628,6 +9678,7 @@ export function renderUserMessageContentForModel(
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | string | null,
   sender?: string | null,
+  timeZone?: string | null,
 ): string | Array<{ type: "input_text"; text: string }> {
   const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
   const context = modelContext?.trim();
@@ -9651,7 +9702,12 @@ export function renderUserMessageContentForModel(
         ]
       : []),
     ...(sentAt != null
-      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt, sender) }]
+      ? [
+          {
+            type: "input_text" as const,
+            text: renderMessageSentAtForModel(sentAt, sender, timeZone),
+          },
+        ]
       : []),
     { type: "input_text", text: visibleContent },
   ];
@@ -9895,6 +9951,8 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
         delivery: z.enum(["send", "steer"]),
         controlEtag: z.string().min(1).optional(),
         modelContext: primitives.string.trim().min(1).max(32768).optional(),
+        // The sender's IANA time zone; the model sees the message's local time.
+        timeZone: MessageTimeZone.optional(),
         mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
         connectionAuthorities: z.never().optional(),
         connectionAccounts: McpConnectionAccountSelections.default([]),
@@ -19599,6 +19657,9 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // Standard timeline rendering omits it, while full event/audit reads retain
       // it. This is ordinary user-role content, not secret or privileged input.
       modelContext: primitives.string.trim().min(1).max(32768).optional(),
+      // The IANA time zone of the person sending the initial message, so the
+      // model sees its local time. Ignored without an initial message.
+      timeZone: MessageTimeZone.optional(),
       // Per-session agent persona/system instructions (org-visible metadata, NOT a
       // secret). Rides the SAME system-level instructions channel the per-workspace
       // agentInstructions rides, composed AFTER the workspace persona so it refines
@@ -20198,6 +20259,8 @@ export const SessionUserMessagePayload = /* @__PURE__ */ defineSchema(() =>
       // Model-visible application context attached to this exact user message.
       // It is retained in full event/history data but omitted by standard UI.
       modelContext: primitives.string.trim().min(1).max(32768).optional(),
+      // The sender's IANA time zone; the model sees the message's local time.
+      timeZone: MessageTimeZone.optional(),
       resources: z.array(ResourceRef).default([]),
       model: z.string().min(1).optional(),
       reasoningEffort: ReasoningEffort.optional(),
@@ -20259,6 +20322,8 @@ export const SteerSessionMessageRequest = /* @__PURE__ */ defineSchema(() =>
       annotations: SubmittedTimelineAnnotations.default([]),
       // Same model-visible message context as a queued user.message.
       modelContext: primitives.string.trim().min(1).max(32768).optional(),
+      // The sender's IANA time zone, as on a queued user.message.
+      timeZone: MessageTimeZone.optional(),
       resources: z.array(ResourceRef).default([]),
       model: z.string().min(1).optional(),
       reasoningEffort: ReasoningEffort.optional(),
