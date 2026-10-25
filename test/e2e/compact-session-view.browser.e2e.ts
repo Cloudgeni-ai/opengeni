@@ -112,7 +112,7 @@ describe("compact session view on the live local workspace route (API fixture)",
         childReadStarted?: ReturnType<typeof deferred>;
         failReads: boolean;
         failFirstPage?: boolean;
-        allowStaleFirstPage?: boolean;
+        allowStaleWindowFirstPage?: boolean;
         overlapRootOnContinuation?: boolean;
         staleFirstPageRoot?: FixtureRow;
         holdSearch?: ReturnType<typeof deferred>;
@@ -412,8 +412,15 @@ describe("compact session view on the live local workspace route (API fixture)",
           const failedAtStart = fixture.failReads;
           await hold?.promise;
           const firstPage = !url.searchParams.has("cursor");
-          const allowStaleFirstPage = firstPage && fixture.allowStaleFirstPage;
-          if (firstPage) fixture.allowStaleFirstPage = false;
+          // Only the independently paged group window owns this permission.
+          // Discovery reads (including fallback polls) carry siteConversations
+          // and must keep failing without consuming the window's stale page.
+          const windowFirstPage =
+            firstPage &&
+            url.searchParams.get("includePinned") === "false" &&
+            !url.searchParams.has("siteConversations");
+          const allowStaleFirstPage = windowFirstPage && fixture.allowStaleWindowFirstPage;
+          if (allowStaleFirstPage) fixture.allowStaleWindowFirstPage = false;
           if (
             (hold ? failedAtStart : fixture.failReads) ||
             (fixture.failFirstPage && firstPage && !allowStaleFirstPage)
@@ -981,7 +988,19 @@ describe("compact session view on the live local workspace route (API fixture)",
           // 50, just like discovery. Permit its one overlapping stale first
           // page; only the following cursor page carries revision 2.
           archiveFixture.staleFirstPageRoot = root;
-          archiveFixture.allowStaleFirstPage = true;
+          archiveFixture.allowStaleWindowFirstPage = true;
+          // A discovery poll/retry can land between arming this permission
+          // and clicking Show more. It must fail without consuming the
+          // independently requested continuation window's stale first page.
+          archiveFixture.readStarted = false;
+          const [discoveryResponse] = await Promise.all([
+            page.waitForResponse(
+              (response) => response.request().headers()[INVALIDATION_READ_HEADER] === "1",
+            ),
+            invalidateBrowseRead(),
+          ]);
+          expect(discoveryResponse.status()).toBe(500);
+          expect(archiveFixture.allowStaleWindowFirstPage).toBe(true);
         }
         const [continuationResponse] = await Promise.all([
           page.waitForResponse((response) => {
@@ -996,6 +1015,7 @@ describe("compact session view on the live local workspace route (API fixture)",
           disclosure.click(),
         ]);
         const continuationPage = await continuationResponse.json();
+        if (localArchived) expect(archiveFixture.allowStaleWindowFirstPage).toBe(false);
         expect(
           continuationPage.sessions.find((row: FixtureRow) => row.id === root.id),
         ).toMatchObject({
