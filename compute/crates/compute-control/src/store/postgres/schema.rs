@@ -102,17 +102,23 @@ alter table compute_sandboxes add constraint compute_sandboxes_owner_host
     foreign key (owner) references compute_hosts (id) deferrable initially deferred;
 ";
 
-/// Version 4: the stored images built from OCI images (`Store::record_built`),
-/// in the order recorded (`seq`), by the fleet's name for each.
+/// Version 4: the stored image built from each OCI image
+/// (`Store::record_built`), and which of them each of the fleet's image
+/// names used, the latest with the highest `used`.
 const MIGRATION_4: &str = "
 create table if not exists compute_images (
     source text primary key,
-    name text not null,
     image text not null,
-    built_ms bigint not null,
-    seq bigint generated always as identity
+    built_ms bigint not null
 );
-create index if not exists compute_images_by_name on compute_images (name, seq);
+create sequence if not exists compute_image_uses;
+create table if not exists compute_image_names (
+    name text not null,
+    source text not null references compute_images (source),
+    used bigint not null,
+    primary key (name, source)
+);
+create index if not exists compute_image_names_by_use on compute_image_names (name, used);
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

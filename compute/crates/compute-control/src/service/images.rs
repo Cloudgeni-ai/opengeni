@@ -29,7 +29,12 @@ impl<S: Store> Service<S> {
         turn: usize,
     ) -> Result<Option<ImageId>, Failure> {
         if let Some(image) = self.store.image_built(source).await? {
-            return Ok(Some(image));
+            // Another replica recorded it: this name uses it now too.
+            return Ok(Some(
+                self.store
+                    .record_built(source, name, image, now_ms())
+                    .await?,
+            ));
         }
         let live: Vec<_> = self
             .view

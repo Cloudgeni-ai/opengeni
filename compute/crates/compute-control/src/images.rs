@@ -19,6 +19,7 @@ use compute_protocol::host::ImageId;
 use tokio::time::Instant;
 
 use crate::service::Service;
+use crate::service::now_ms;
 use crate::store::Store;
 
 /// How often a replica asks again while a build is under way, or while no
@@ -80,8 +81,19 @@ pub async fn follow<S: Store>(service: Arc<Service<S>>, sources: BTreeMap<String
     for (name, source) in sources {
         match store.image_built(&source).await {
             Ok(Some(image)) => {
-                images.set(&name, image);
-                continue;
+                // Built for another name, or before: this name uses it now,
+                // so it is this name's to fall back on later too.
+                match store.record_built(&source, &name, image, now_ms()).await {
+                    Ok(kept) => {
+                        images.set(&name, kept);
+                        continue;
+                    }
+                    Err(error) => {
+                        // Used meanwhile; recorded at the next ask.
+                        images.set(&name, image);
+                        tracing::warn!(%error, %name, "recording the image's use failed");
+                    }
+                }
             }
             Ok(None) => {
                 if let Ok(Some(image)) = store.latest_built(&name).await {

@@ -63,3 +63,30 @@ async fn a_release_s_image_is_built_by_a_host_and_new_creates_start_from_it() {
         });
     assert_eq!(created, Some(Some(built)), "the create starts from it");
 }
+
+/// Two names a release builds from one source both start from its image,
+/// and each is recorded, so either keeps it while a later release's source
+/// of its own is built.
+#[tokio::test]
+async fn names_sharing_a_source_each_record_its_image() {
+    let fleet = Fleet::start_with_sources(&[("sandbox", SOURCE), ("alias", SOURCE)], |_| {}).await;
+    let settings = fleet.running.service.settings();
+    let _host = fleet.host("host-a.example").await;
+    let built = built_from(SOURCE);
+    until(
+        Duration::from_secs(30),
+        "both names follow the image",
+        async || {
+            settings.image_named("sandbox") == Some(Some(built))
+                && settings.image_named("alias") == Some(Some(built))
+        },
+    )
+    .await;
+    for name in ["sandbox", "alias"] {
+        assert_eq!(
+            fleet.store.latest_built(name).await.unwrap(),
+            Some(built),
+            "{name} is recorded with the image it starts from"
+        );
+    }
+}

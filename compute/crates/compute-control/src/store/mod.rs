@@ -433,10 +433,12 @@ pub trait Store: Send + Sync + 'static {
     /// reference pinned by digest), if one was.
     fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
 
-    /// Records `image` as built from `source`, under the fleet's name
-    /// `name` for it, at `at_ms`, unless an image was recorded for `source`
-    /// already. Answers the image recorded, which creates of `source` use:
-    /// builds are not byte for byte the same, so the first recorded wins.
+    /// Records `image` as built from `source` at `at_ms`, unless an image
+    /// was recorded for `source` already, and that the fleet's name `name`
+    /// now uses `source`. Answers the image recorded for `source`, which
+    /// creates of `name` use: builds are not byte for byte the same, so the
+    /// first recorded wins. Every name that uses a source is recorded, so
+    /// two names sharing one each keep it as their latest.
     fn record_built(
         &self,
         source: &str,
@@ -445,7 +447,7 @@ pub trait Store: Send + Sync + 'static {
         at_ms: u64,
     ) -> impl Future<Output = Result<ImageId>> + Send;
 
-    /// The image last recorded under the name `name`, from any source.
+    /// The image of the source the name `name` was last recorded as using.
     fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
 }
 

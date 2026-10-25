@@ -33,9 +33,10 @@ struct Inner {
     lifecycles: BTreeMap<Id, LifecycleRow>,
     /// By team, then request id.
     requests: BTreeMap<(String, String), RequestRow>,
-    /// Each OCI image, the name recorded with it and the image built from
-    /// it, in the order recorded.
-    built: Vec<(String, String, ImageId)>,
+    /// The image built from each OCI image.
+    built: HashMap<String, ImageId>,
+    /// Which OCI image each name used, the latest last.
+    image_uses: Vec<(String, String)>,
     next_host: u64,
     next_host_epoch: u64,
     changes: u64,
@@ -658,12 +659,7 @@ impl Store for MemoryStore {
     }
 
     fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
-        let built = self
-            .lock()
-            .built
-            .iter()
-            .find_map(|(recorded, _, image)| (recorded == source).then_some(*image));
-        ready(Ok(built))
+        ready(Ok(self.lock().built.get(source).copied()))
     }
 
     fn record_built(
@@ -674,26 +670,22 @@ impl Store for MemoryStore {
         _at_ms: u64,
     ) -> impl Future<Output = Result<ImageId>> + Send {
         let mut inner = self.lock();
-        let first = inner
-            .built
-            .iter()
-            .find_map(|(recorded, _, first)| (recorded == source).then_some(*first));
-        let recorded = first.unwrap_or_else(|| {
-            inner
-                .built
-                .push((source.to_owned(), name.to_owned(), image));
-            image
-        });
+        let recorded = *inner.built.entry(source.to_owned()).or_insert(image);
+        inner
+            .image_uses
+            .retain(|(named, used)| named != name || used != source);
+        inner.image_uses.push((name.to_owned(), source.to_owned()));
         ready(Ok(recorded))
     }
 
     fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
-        let latest = self
-            .lock()
-            .built
+        let inner = self.lock();
+        let latest = inner
+            .image_uses
             .iter()
             .rev()
-            .find_map(|(_, named, image)| (named == name).then_some(*image));
+            .find_map(|(named, source)| (named == name).then(|| inner.built.get(source).copied()))
+            .flatten();
         ready(Ok(latest))
     }
 }

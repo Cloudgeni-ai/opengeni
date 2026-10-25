@@ -155,8 +155,10 @@ an init system of its own.
   recorded is the one every replica, and every later rollout of the same
   release, uses. New creates of the name then start from it. Until then
   they start from the image recorded under the name last (the release
-  before's), or the one `--stored-image` names. A rollback finds its
-  release's image recorded already. Existing sandboxes keep the image they
+  before's), or the one `--stored-image` names. Each name that uses a
+  source is recorded with it, also when two names share one, so each
+  keeps its own image to start from while its next is built. A rollback
+  finds its release's image recorded already. Existing sandboxes keep the image they
   were created from; their agent follows agent releases on its own
   (ADR 21).
 - **What every image gets, for the SDK to work.** The SDK runs commands

@@ -32,14 +32,24 @@ impl PostgresStore {
         image: ImageId,
         at_ms: u64,
     ) -> Result<ImageId> {
-        // Two statements: one alone would not see a row another recorded
-        // while it waited on it.
+        // Separate statements: one alone would not see a row another
+        // recorded while it waited on it. The use comes after the image it
+        // names, which is never deleted.
         let client = self.client().await?;
         client
             .execute(
-                "insert into compute_images (source, name, image, built_ms) \
-                 values ($1, $2, $3, $4) on conflict (source) do nothing",
-                &[&source, &name, &image.to_string(), &big(at_ms)?],
+                "insert into compute_images (source, image, built_ms) \
+                 values ($1, $2, $3) on conflict (source) do nothing",
+                &[&source, &image.to_string(), &big(at_ms)?],
+            )
+            .await
+            .map_err(database)?;
+        client
+            .execute(
+                "insert into compute_image_names (name, source, used) \
+                 values ($1, $2, nextval('compute_image_uses')) \
+                 on conflict (name, source) do update set used = excluded.used",
+                &[&name, &source],
             )
             .await
             .map_err(database)?;
@@ -57,7 +67,9 @@ impl PostgresStore {
         self.client()
             .await?
             .query_opt(
-                "select image from compute_images where name = $1 order by seq desc limit 1",
+                "select images.image from compute_image_names names \
+                 join compute_images images on images.source = names.source \
+                 where names.name = $1 order by names.used desc limit 1",
                 &[&name],
             )
             .await

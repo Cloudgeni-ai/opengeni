@@ -542,6 +542,29 @@ async fn images<S: Store>(store: S) {
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
     assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
     assert_eq!(store.image_built(&new).await.unwrap(), Some(next));
+
+    // A second name using the old source keeps it as its latest, with the
+    // image recorded first, while the first name moved on.
+    let alias = format!("{name}-alias");
+    assert_eq!(
+        store
+            .record_built(&old, &alias, image_id(), 4)
+            .await
+            .unwrap(),
+        first
+    );
+    assert_eq!(store.latest_built(&alias).await.unwrap(), Some(first));
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
+
+    // A rollback to the old source makes it the name's latest again.
+    assert_eq!(
+        store
+            .record_built(&old, &name, image_id(), 5)
+            .await
+            .unwrap(),
+        first
+    );
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(first));
 }
 
 #[tokio::test]
