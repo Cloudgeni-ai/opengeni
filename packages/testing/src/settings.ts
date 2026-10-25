@@ -394,6 +394,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     recordingFramerate: 15,
     recordingMaxSeconds: 600,
     recordingMaxBytes: 268_435_456,
+    recordingWordAlignment: false,
     daytonaApiKey: undefined,
     daytonaApiUrl: undefined,
     daytonaTarget: undefined,
