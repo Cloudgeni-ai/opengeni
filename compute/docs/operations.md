@@ -388,13 +388,26 @@ authority alone for agent links.
   going there and hands off every sandbox on it that nothing holds awake;
   each is adopted elsewhere on its next wake (ADR 18). The answer counts
   those `moved` and those `left` (held awake, or the host did not answer):
-  drain again until none are left, or until those left are let go of by
-  their users. `POST /v1/hosts/<name>/undrain` takes the host back.
+  drain again until none are left. Some never let go: a desktop someone
+  keeps open, a program that never stops working. Once the sandboxes
+  that go to sleep have gone, drain with `{"awake": true}` as the body:
+  each sandbox still awake then has its holds and any wake asked of it
+  ended and is paused, saved and archived where it stands, memory and
+  all, and carries on where its next wake places it after a pause of
+  seconds to a minute. Its open connections end, as in any move; a
+  command still running goes on, and its output stays readable. One
+  whose VM cannot be saved (its disk may have lost writes) stays `left`:
+  deleting the host recovers it from its latest archive. A host from
+  before this option ignores it and leaves those sandboxes `left`.
+  `POST /v1/sandboxes/<id>/move` takes
+  `"awake": true` too. `POST /v1/hosts/<name>/undrain` takes the host
+  back.
 - **Removing a host.** Drain it to zero, then delete the machine (on GCP,
   `gcloud compute instance-groups managed delete-instances` so the group
   does not replace it). Never delete a host that still owns sandboxes: the
-  service would treat it as lost and recover them, which is safe but
-  slower than a drain and wakes them from the archive.
+  service would treat it as lost and recover them from their latest
+  archive, which loses their programs and what they wrote since; drain
+  with `{"awake": true}` first.
 - **A lost host.** A host whose lease renewals stop is given up on after
   its term and margin: the service fences it first (on GCP it resets the
   instance, or finds it stopped or gone), then clears its sandboxes'

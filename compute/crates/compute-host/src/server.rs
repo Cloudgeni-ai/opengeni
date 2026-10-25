@@ -161,9 +161,11 @@ async fn respond(
                 .adopt(id, config, OwnerEpoch(owner_epoch), !whole)
                 .await,
         ),
-        Request::HandOff { id, owner_epoch } => {
-            done(handle.hand_off(id, OwnerEpoch(owner_epoch)).await)
-        }
+        Request::HandOff {
+            id,
+            owner_epoch,
+            awake,
+        } => done(handle.hand_off(id, OwnerEpoch(owner_epoch), awake).await),
         Request::Remove { id, generation } => done(handle.remove(id, generation).await),
         Request::Touch {
             id,

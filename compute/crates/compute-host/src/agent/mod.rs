@@ -275,6 +275,7 @@ enum Command {
     HandOff {
         id: Id,
         owner: OwnerEpoch,
+        awake: bool,
         reply: Reply<()>,
     },
     /// The control service's rulings on the sandboxes the host listed when
