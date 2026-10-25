@@ -790,7 +790,8 @@ End-to-end agent runs require the full stack plus valid model and sandbox creden
 
 Follow [`docs/merge-batcher.md`](docs/merge-batcher.md); historical measurements
 and inactive alternatives remain in [`docs/merge-queue.md`](docs/merge-queue.md).
-Admission uses GitHub: an open, non-draft PR with `queue-ready` and the configured
+Admission uses GitHub: an open, non-draft PR with native auto-merge requested
+(`gh pr merge --auto --squash`) **or** `queue-ready`, and the configured
 required fast GitHub-hosted checks (lint, types and selected unit tests) passing
 on its exact current head, not the full PR suite. Agent comments,
 VM attestations and reviewer session UUIDs are not admission requirements.
@@ -829,7 +830,7 @@ Explicit true, empty/null parameters, nonboolean values, extra fields or duplica
 rules are not that equivalence; unknown or mixed policy remains hold. The batcher
 is the **only normal path to main**; this queue-only instruction takes effect with
 that activation without waiting for another source edit. Submit the documented
-ready signal (`queue-ready`) and
+ready signal (`gh pr merge --auto --squash` **or** `queue-ready`; either suffices) and
 observe the **Batch ready** result and exact landed SHA. Do not directly squash or
 merge a PR to main, use `--admin`, call a direct merge API, or push main. Do not
 create/update/delete queue or batcher-state refs or manually rerun/cancel Batch CI.
