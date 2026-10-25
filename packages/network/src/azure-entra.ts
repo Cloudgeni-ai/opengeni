@@ -1,27 +1,39 @@
 // Microsoft Entra ID access tokens for Azure AI services (Azure OpenAI, Azure
 // Speech and other Cognitive Services accounts), from a service principal's
-// client secret or a workload identity's federated token file. Plain fetch to
-// the tenant's OAuth 2.0 token endpoint; no Azure SDK.
+// client secret, a workload identity's federated token file, or managed identity.
 
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import type {
+  AuthenticationResult,
+  ManagedIdentityRequestParams,
+  NetworkRequestOptions,
+  NetworkResponse,
+} from "@azure/msal-node";
 
 /** The audience every Azure AI services data-plane call accepts. */
 export const AZURE_COGNITIVE_SERVICES_SCOPE = "https://cognitiveservices.azure.com/.default";
 export const AZURE_PUBLIC_AUTHORITY_HOST = "https://login.microsoftonline.com";
 
-export type AzureEntraCredentialConfig = {
-  /** The directory (tenant) ID or a verified domain of the tenant. */
-  tenantId: string;
-  /** The application (client) ID of the app registration or managed identity. */
-  clientId: string;
-  /** A workload identity's federated token file. Kubernetes mounts and rotates it. */
-  federatedTokenFile?: string | undefined;
-  /** A service principal's client secret, where there is no workload identity. */
-  clientSecret?: string | undefined;
-  /** Defaults to the public cloud; sovereign clouds use their own host. */
-  authorityHost?: string | undefined;
-};
+export type AzureEntraCredentialConfig =
+  | {
+      source?: "client_credentials";
+      /** The directory (tenant) ID or a verified domain of the tenant. */
+      tenantId: string;
+      /** The application (client) ID of the app registration or managed identity. */
+      clientId: string;
+      /** A workload identity's federated token file. Kubernetes mounts and rotates it. */
+      federatedTokenFile?: string | undefined;
+      /** A service principal's client secret, where there is no workload identity. */
+      clientSecret?: string | undefined;
+      /** Defaults to the public cloud; sovereign clouds use their own host. */
+      authorityHost?: string | undefined;
+    }
+  | {
+      source: "managed_identity";
+      /** Omit for a system-assigned identity. */
+      clientId?: string | undefined;
+    };
 
 export type AzureEntraTokenErrorReason = "not_configured" | "network" | "rejected" | "unavailable";
 
@@ -73,6 +85,12 @@ export type AzureEntraAccessTokenSourceOptions = {
   now?: () => number;
   scope?: string;
   requestTimeoutMilliseconds?: number;
+  /** Test seam; production uses Microsoft's MSAL managed identity client. */
+  managedIdentityClient?: {
+    acquireToken(
+      request: ManagedIdentityRequestParams,
+    ): Promise<Pick<AuthenticationResult, "accessToken" | "expiresOn" | "refreshOn">>;
+  };
 };
 
 /** Refresh this long before expiry, or at half the lifetime of a shorter-lived token. */
@@ -87,10 +105,12 @@ function authorityBase(host: string | undefined): string {
   return (host ?? AZURE_PUBLIC_AUTHORITY_HOST).replace(/\/*$/u, "/");
 }
 
-/** Whether a configuration names a usable credential: a token file or a secret. */
+/** Whether a configuration names an identity source; availability is checked on acquisition. */
 export function azureEntraCredentialConfigured(
   config: Partial<AzureEntraCredentialConfig> | null | undefined,
 ): config is AzureEntraCredentialConfig {
+  if (config?.source === "managed_identity") return true;
+  if (!config || !("tenantId" in config)) return false;
   return Boolean(
     config?.tenantId?.trim() &&
     config.clientId?.trim() &&
@@ -119,12 +139,81 @@ export function createAzureEntraAccessTokenSource(
   const now = options.now ?? (() => Date.now());
   const scope = options.scope ?? AZURE_COGNITIVE_SERVICES_SCOPE;
   const timeout = options.requestTimeoutMilliseconds ?? DEFAULT_REQUEST_TIMEOUT_MILLISECONDS;
-  const tokenUrl = `${authorityBase(config.authorityHost)}${encodeURIComponent(config.tenantId.trim())}/oauth2/v2.0/token`;
   let cached: { token: string; refreshAt: number; expiresAt: number } | null = null;
   let retryAfter = 0;
   let pending: Promise<string> | null = null;
+  let managedIdentityClient = options.managedIdentityClient;
+
+  // Reuse this source's bounded fetch while MSAL owns Azure host discovery,
+  // headers and response parsing. Never follow redirects with identity headers.
+  async function managedIdentityRequest<T>(
+    method: "GET" | "POST",
+    url: string,
+    requestOptions?: NetworkRequestOptions,
+  ): Promise<NetworkResponse<T>> {
+    const response = await request(url, {
+      method,
+      redirect: "error",
+      signal: AbortSignal.timeout(timeout),
+      ...(requestOptions?.headers ? { headers: requestOptions.headers } : {}),
+      ...(requestOptions?.body ? { body: requestOptions.body } : {}),
+    });
+    return {
+      status: response.status,
+      headers: Object.fromEntries(response.headers),
+      body: (await response.json()) as T,
+    };
+  }
 
   async function requestToken(): Promise<string> {
+    if (config.source === "managed_identity") {
+      let token;
+      try {
+        managedIdentityClient ??= new (await import("@azure/msal-node")).ManagedIdentityApplication(
+          {
+            managedIdentityIdParams: config.clientId
+              ? { userAssignedClientId: config.clientId }
+              : {},
+            system: {
+              disableInternalRetries: true,
+              networkClient: {
+                sendGetRequestAsync: (url, requestOptions) =>
+                  managedIdentityRequest("GET", url, requestOptions),
+                sendPostRequestAsync: (url, requestOptions) =>
+                  managedIdentityRequest("POST", url, requestOptions),
+              },
+            },
+          },
+        );
+        // This source owns refresh and refused-token invalidation. MSAL's
+        // process-wide cache must not hand us the token we just discarded.
+        token = await managedIdentityClient.acquireToken({ resource: scope, forceRefresh: true });
+      } catch {
+        throw new AzureEntraTokenError("Could not acquire a managed identity token", {
+          reason: "unavailable",
+          retryable: true,
+        });
+      }
+      const expiresAt = token.expiresOn?.getTime() ?? 0;
+      const lifetime = expiresAt - now();
+      if (!token.accessToken || !Number.isFinite(lifetime) || lifetime <= 0) {
+        throw new AzureEntraTokenError("Managed identity returned no usable token", {
+          reason: "unavailable",
+          retryable: true,
+        });
+      }
+      cached = {
+        token: token.accessToken,
+        expiresAt,
+        refreshAt: Math.min(
+          expiresAt - Math.min(REFRESH_MARGIN_MILLISECONDS, lifetime / 2),
+          token.refreshOn?.getTime() ?? Infinity,
+        ),
+      };
+      retryAfter = 0;
+      return token.accessToken;
+    }
+    const tokenUrl = `${authorityBase(config.authorityHost)}${encodeURIComponent(config.tenantId.trim())}/oauth2/v2.0/token`;
     const body = new URLSearchParams({
       grant_type: "client_credentials",
       client_id: config.clientId.trim(),
@@ -263,14 +352,22 @@ export function sharedAzureEntraAccessTokenSource(
 ): AzureEntraAccessTokenSource {
   const key = createHash("sha256")
     .update(
-      JSON.stringify([
-        authorityBase(config.authorityHost),
-        config.tenantId.trim(),
-        config.clientId.trim(),
-        options.scope ?? AZURE_COGNITIVE_SERVICES_SCOPE,
-        config.federatedTokenFile?.trim() ?? null,
-        config.clientSecret ?? null,
-      ]),
+      JSON.stringify(
+        config.source === "managed_identity"
+          ? [
+              "managed_identity",
+              config.clientId ?? null,
+              options.scope ?? AZURE_COGNITIVE_SERVICES_SCOPE,
+            ]
+          : [
+              authorityBase(config.authorityHost),
+              config.tenantId.trim(),
+              config.clientId.trim(),
+              options.scope ?? AZURE_COGNITIVE_SERVICES_SCOPE,
+              config.federatedTokenFile?.trim() ?? null,
+              config.clientSecret ?? null,
+            ],
+      ),
       "utf8",
     )
     .digest("hex");

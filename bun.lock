@@ -660,6 +660,7 @@
       "name": "@opengeni/network",
       "version": "5.2.1",
       "dependencies": {
+        "@azure/msal-node": "5.6.0",
         "undici": "^6.21.3",
         "ws": "8.21.1",
       },

@@ -123,6 +123,20 @@ export function buildOpenAIClientFromSettings(
 ): OpenAI {
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
+    const identityTokenSource =
+      settings.azureOpenaiAuthMode === "managed_identity"
+        ? sharedAzureEntraAccessTokenSource({
+            source: "managed_identity",
+            clientId: settings.azureClientId,
+          })
+        : settings.azureOpenaiAuthMode === "workload_identity"
+          ? sharedAzureEntraAccessTokenSource({
+              tenantId: settings.azureTenantId!,
+              clientId: settings.azureClientId!,
+              federatedTokenFile: settings.azureFederatedTokenFile!,
+              authorityHost: settings.azureAuthorityHost,
+            })
+          : null;
     const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
     return new ReplayableJsonOpenAI(
       {
@@ -142,7 +156,9 @@ export function buildOpenAIClientFromSettings(
             modelStreamIdlePolicy(settings),
             instrumentedModelFetch(
               providerId,
-              openAIResponsesFetch(settings),
+              identityTokenSource
+                ? azureEntraBearerFetch(openAIResponsesFetch(settings), identityTokenSource, false)
+                : openAIResponsesFetch(settings),
               settings.openaiResponsesWebSocketEnabled,
             ),
           ),
@@ -318,6 +334,13 @@ function providerClientCacheKey(
                 azureOpenaiDeployment: settings.azureOpenaiDeployment ?? null,
                 azureOpenaiApiVersion: settings.azureOpenaiApiVersion ?? null,
                 usesAdToken: Boolean(settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey),
+                azureOpenaiAuthMode: settings.azureOpenaiAuthMode,
+                azureIdentity: {
+                  tenantId: settings.azureTenantId,
+                  clientId: settings.azureClientId,
+                  federatedTokenFile: settings.azureFederatedTokenFile,
+                  authorityHost: settings.azureAuthorityHost,
+                },
               }
             : null,
       }),
@@ -449,6 +472,7 @@ function organizationAzureEntraTokenSource(
 function azureEntraBearerFetch(
   inner: typeof fetch,
   tokenSource: AzureEntraAccessTokenSource,
+  organizationCredential = true,
 ): typeof fetch {
   const send = async (
     input: Parameters<typeof fetch>[0],
@@ -466,7 +490,7 @@ function azureEntraBearerFetch(
     try {
       token = await tokenSource();
     } catch (error) {
-      if (error instanceof AzureEntraTokenError && !error.retryable)
+      if (organizationCredential && error instanceof AzureEntraTokenError && !error.retryable)
         return azureEntraRefusedResponse();
       throw error;
     }
