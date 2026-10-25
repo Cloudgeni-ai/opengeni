@@ -11,7 +11,7 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use opengeni_agent_platform::{
-        DesktopBackend as _, LinuxDesktop, ReopeningDesktop, X11Display,
+        DesktopBackend as _, LinuxDesktop, ReopeningDesktop, X11Display, XServerCheck,
     };
 
     fn xvfb() -> Option<PathBuf> {
@@ -92,6 +92,8 @@ mod linux {
             name: format!(":{number}"),
             authority: Some(client_authority.clone()),
             session: None,
+            // The test's own Xvfb: the checked connect path, socket file only.
+            server: XServerCheck::AgentUser,
         };
         let desktop = ReopeningDesktop::new({
             let display = display.clone();

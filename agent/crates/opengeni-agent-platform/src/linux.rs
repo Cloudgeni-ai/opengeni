@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use x11rb::connection::{Connection as _, RequestConnection as _};
 
-pub use crate::linux_session::X11Display;
+pub use crate::linux_session::{X11Display, XServerCheck};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
     EventMask, ImageFormat, InputFocus, MapState, PropMode, Screen, StackMode, Window, WindowClass,
@@ -588,7 +588,7 @@ impl LinuxDesktop {
                 .map_err(LinuxWindowActivationError::before)?;
             verify_window_input_owners(&conn, screen.root, activation.window.id, &prepared)
                 .map_err(LinuxWindowActivationError::before)?;
-            inject_prepared_inputs(&conn, screen.root, &prepared)
+            inject_prepared_inputs(&conn, screen.root, &this.display, &prepared)
                 .map_err(LinuxWindowActivationError::after)?;
             verify_activation_state(&conn, &screen, &activation.window, activation.route)
                 .map_err(LinuxWindowActivationError::after)?;
@@ -636,11 +636,7 @@ impl LinuxDesktop {
     }
 
     fn require_current_session(&self) -> PlatformResult<()> {
-        match &self.display.session {
-            Some(session) => crate::linux_session::require_current_session(session)
-                .map_err(PlatformError::Unsupported),
-            None => Ok(()),
-        }
+        require_session_on_screen(&self.display)
     }
 
     /// Why this desktop may not be used right now, in plain words: its login
@@ -1540,19 +1536,33 @@ fn inject_inputs(
 ) -> PlatformResult<()> {
     let (prepared, plan) = prepare_inputs(conn, inputs)?;
     let remap = KeymapRemap::apply(conn, display, &plan)?;
-    let delivered = inject_prepared_inputs(conn, root, &prepared);
+    let delivered = inject_prepared_inputs(conn, root, display, &prepared);
     if let Some(remap) = remap {
         remap.restore();
     }
     delivered
 }
 
+/// Refuses once a desktop found through a login session is no longer the
+/// one on the screen, or that session ended.
+fn require_session_on_screen(display: &X11Display) -> PlatformResult<()> {
+    match &display.session {
+        Some(session) => crate::linux_session::require_current_session(session)
+            .map_err(PlatformError::Unsupported),
+        None => Ok(()),
+    }
+}
+
 fn inject_prepared_inputs(
     conn: &x11rb::rust_connection::RustConnection,
     root: Window,
+    display: &X11Display,
     inputs: &[PreparedInput],
 ) -> PlatformResult<()> {
     for input in inputs {
+        // The screen can switch to another session mid-batch; the rest of the
+        // batch must not land in a desktop nobody sees. One small file read.
+        require_session_on_screen(display)?;
         match input {
             PreparedInput::Pointer(pointer) => inject_pointer(conn, root, pointer)?,
             PreparedInput::Key { events, .. } => {

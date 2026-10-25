@@ -28,8 +28,25 @@ use std::path::{Path, PathBuf};
 
 use x11rb::errors::ConnectError;
 use x11rb::reexports::x11rb_protocol::parse_display::parse_display;
-use x11rb::reexports::x11rb_protocol::xauth::Family;
+use x11rb::reexports::x11rb_protocol::xauth::{get_auth, Family};
 use x11rb::rust_connection::{DefaultStream, RustConnection};
+
+/// Which X server a display may be served by. It is checked before the
+/// connection setup, which carries the cookie, is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum XServerCheck {
+    /// Connect the way any X client does (abstract socket, socket file,
+    /// TCP). Used only where there is no session state to check a display
+    /// against: a host without logind.
+    #[default]
+    Unchecked,
+    /// Only the display's socket file, served by the agent's own user: the
+    /// agent's virtual desktop, or an X server the user runs themselves.
+    AgentUser,
+    /// Only the display's socket file, served by the agent's user or by root
+    /// (a rootful X server): the screen of the user's own login session.
+    AgentUserOrRoot,
+}
 
 /// One X11 display plus the authority file that admits this user to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,16 +60,20 @@ pub struct X11Display {
     /// one. A desktop opened on it stops working once that session is no
     /// longer the one on the screen.
     pub session: Option<String>,
+    /// Which X server may serve it.
+    pub server: XServerCheck,
 }
 
 impl X11Display {
-    /// A display with the default authority.
+    /// A display with the default authority, connected without a server
+    /// check.
     #[must_use]
     pub fn named(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             authority: None,
             session: None,
+            server: XServerCheck::Unchecked,
         }
     }
 
@@ -60,10 +81,59 @@ impl X11Display {
     /// file. The file is read on every connect, so a cookie the display manager
     /// rewrites at login is picked up by the next connection.
     ///
+    /// A checked display is reached only through its socket file in
+    /// `/tmp/.X11-unix`, never the abstract socket name or TCP, which any
+    /// local user can claim, and the server's user is verified before the
+    /// cookie is sent.
+    ///
     /// # Errors
     ///
-    /// The X11 connect failure, such as a refused cookie.
+    /// The X11 connect failure, such as a refused cookie or a server run by
+    /// another user.
     pub fn connect(&self) -> Result<(RustConnection, usize), ConnectError> {
+        let allow_root = match self.server {
+            XServerCheck::Unchecked => return self.connect_unchecked(),
+            XServerCheck::AgentUser => false,
+            XServerCheck::AgentUserOrRoot => true,
+        };
+        let parsed = parse_display(Some(&self.name))?;
+        let number = display_number(&self.name).ok_or(ConnectError::DisplayParsingError(
+            x11rb::errors::DisplayParsingError::Unknown,
+        ))?;
+        let path = SessionRoots::default()
+            .x11_sockets
+            .join(format!("X{number}"));
+        let stream = std::os::unix::net::UnixStream::connect(&path)?;
+        let server_uid = rustix::net::sockopt::socket_peercred(&stream)
+            .map_err(std::io::Error::from)?
+            .uid
+            .as_raw();
+        if !server_allowed(server_uid, nix::unistd::getuid().as_raw(), allow_root) {
+            return Err(ConnectError::IoError(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "the X server of display {} runs as another user (uid {server_uid})",
+                    self.name
+                ),
+            )));
+        }
+        let (stream, (family, address)) = DefaultStream::from_unix_stream(stream)?;
+        let (name, data) = match &self.authority {
+            Some(authority) => authority_cookie(authority, family, &address, parsed.display),
+            None => get_auth(family, &address, parsed.display).ok().flatten(),
+        }
+        .unwrap_or_default();
+        RustConnection::connect_to_stream_with_auth_info(
+            stream,
+            usize::from(parsed.screen),
+            name,
+            data,
+        )
+        .map(|connection| (connection, usize::from(parsed.screen)))
+    }
+
+    /// The X11 default connect order, for hosts with no session state.
+    fn connect_unchecked(&self) -> Result<(RustConnection, usize), ConnectError> {
         let Some(authority) = &self.authority else {
             return x11rb::connect(Some(&self.name));
         };
@@ -88,6 +158,11 @@ impl X11Display {
             ConnectError::IoError,
         ))
     }
+}
+
+/// Whether an X server run by `server_uid` may receive this agent's cookie.
+fn server_allowed(server_uid: u32, agent_uid: u32, allow_root: bool) -> bool {
+    server_uid == agent_uid || (allow_root && server_uid == 0)
 }
 
 const MIT_MAGIC_COOKIE_1: &[u8] = b"MIT-MAGIC-COOKIE-1";
@@ -213,6 +288,9 @@ pub(crate) enum Absence {
 pub(crate) struct DisplayCandidates {
     pub(crate) displays: Vec<X11Display>,
     pub(crate) absence: Absence,
+    /// An inherited `DISPLAY` that was not tried because it is neither the
+    /// screen of the user's login session nor an X server the user runs.
+    pub(crate) skipped: Option<String>,
 }
 
 /// One logind session, from its runtime state file.
@@ -242,16 +320,22 @@ pub(crate) fn display_candidates(agent: &AgentIdentity, roots: &SessionRoots) ->
         name: name.clone(),
         authority: agent.xauthority.clone(),
         session: None,
+        server: XServerCheck::Unchecked,
     });
     // The agent's own virtual desktop is the only display it may use: falling
-    // back to the person's screen would surprise them.
+    // back to the person's screen would surprise them. The agent started its
+    // X server itself, so it runs as the agent's user.
     if let Some(inherited) = inherited
         .as_ref()
         .filter(|inherited| agent.virtual_display.as_ref() == Some(&inherited.name))
     {
         return DisplayCandidates {
-            displays: vec![inherited.clone()],
+            displays: vec![X11Display {
+                server: XServerCheck::AgentUser,
+                ..inherited.clone()
+            }],
             absence: Absence::Explicit,
+            skipped: None,
         };
     }
     if !roots.logind.join("sessions").is_dir() {
@@ -260,6 +344,7 @@ pub(crate) fn display_candidates(agent: &AgentIdentity, roots: &SessionRoots) ->
             Some(inherited) => DisplayCandidates {
                 displays: vec![inherited],
                 absence: Absence::Explicit,
+                skipped: None,
             },
             None => DisplayCandidates {
                 displays: vec![X11Display {
@@ -267,20 +352,23 @@ pub(crate) fn display_candidates(agent: &AgentIdentity, roots: &SessionRoots) ->
                     ..X11Display::named(":0")
                 }],
                 absence: Absence::NoLogind,
+                skipped: None,
             },
         };
     }
     let sessions = session_displays(agent, roots);
     let mut absence = sessions.absence;
     let mut displays: Vec<X11Display> = Vec::new();
-    if let Some((inherited, number)) = inherited.and_then(|inherited| {
-        let number = display_number(&inherited.name)?;
-        Some((inherited, number))
-    }) {
+    let mut skipped = None;
+    if let Some(inherited) = inherited {
+        let number = display_number(&inherited.name);
+        let claimed = number.is_some_and(|number| {
+            sessions.named.contains(&number) || logind_names_display(&roots.logind, number)
+        });
         if let Some(session) = sessions
             .active
             .iter()
-            .find(|display| display_number(&display.name) == Some(number))
+            .find(|display| number.is_some() && display_number(&display.name) == number)
         {
             // A display inherited from whatever started the agent (a terminal,
             // or a service manager a past login exported it to) names the
@@ -288,18 +376,28 @@ pub(crate) fn display_candidates(agent: &AgentIdentity, roots: &SessionRoots) ->
             // session's own follows in case it is stale.
             displays.push(X11Display {
                 session: session.session.clone(),
+                server: session.server,
                 ..inherited
             });
-        } else if !sessions.named.contains(&number)
-            && !logind_names_display(&roots.logind, number)
-            && x11_socket_owner(&roots.x11_sockets, number) == Some(agent.uid)
+        } else if !claimed
+            && number.is_some_and(|number| {
+                x11_socket_owner(&roots.x11_sockets, number) == Some(agent.uid)
+            })
         {
             // An X server the user runs themselves (an Xvfb or VNC server)
             // that is no login session's screen.
-            displays.push(inherited);
+            displays.push(X11Display {
+                server: XServerCheck::AgentUser,
+                ..inherited
+            });
             if sessions.active.is_empty() {
                 absence = Absence::Explicit;
             }
+        } else if !claimed {
+            // Not a login session's screen (another user's, the login screen
+            // or one a past login left behind are claimed and need no word),
+            // and not the user's own X server: say why it was not used.
+            skipped = Some(inherited.name);
         }
     }
     for display in sessions.active {
@@ -307,7 +405,11 @@ pub(crate) fn display_candidates(agent: &AgentIdentity, roots: &SessionRoots) ->
             displays.push(display);
         }
     }
-    DisplayCandidates { displays, absence }
+    DisplayCandidates {
+        displays,
+        absence,
+        skipped,
+    }
 }
 
 /// The displays of the user's active login sessions, the display numbers any
@@ -374,6 +476,7 @@ fn session_displays(agent: &AgentIdentity, roots: &SessionRoots) -> SessionDispl
                 .and_then(|environment| environment.authority.clone())
                 .or_else(|| default_authority.clone()),
             session: Some(session.id.clone()),
+            server: XServerCheck::AgentUserOrRoot,
         };
         if !active.contains(&display) {
             active.push(display);
@@ -524,7 +627,7 @@ pub(crate) fn unavailable_reason(
     display: &str,
     error: &str,
 ) -> String {
-    match candidates.absence {
+    let reason = match candidates.absence {
         Absence::Explicit => format!(
             "The display this agent was started with (DISPLAY={display}) could not be opened: {error}."
         ),
@@ -548,6 +651,14 @@ pub(crate) fn unavailable_reason(
         Absence::NoLogind => {
             format!("No graphical desktop is reachable: display {display} could not be opened ({error}).")
         }
+    };
+    match &candidates.skipped {
+        Some(skipped) => format!(
+            "{reason} The inherited DISPLAY={skipped} was not used: it is not the screen of the \
+             agent user's own login session or an X server run by that user. Run that X server \
+             as the agent's user, or start the agent with --virtual-desktop."
+        ),
+        None => reason,
     }
 }
 
@@ -782,6 +893,15 @@ mod tests {
     fn in_session(name: &str, session: &str) -> X11Display {
         X11Display {
             session: Some(session.into()),
+            server: XServerCheck::AgentUserOrRoot,
+            ..X11Display::named(name)
+        }
+    }
+
+    /// A display served by an X server the agent's user runs.
+    fn own(name: &str) -> X11Display {
+        X11Display {
+            server: XServerCheck::AgentUser,
             ..X11Display::named(name)
         }
     }
@@ -800,7 +920,7 @@ mod tests {
             ..agent.clone()
         };
         let found = display_candidates(&virtual_desktop, &fixture.roots());
-        assert_eq!(found.displays, vec![X11Display::named(":99")]);
+        assert_eq!(found.displays, vec![own(":99")]);
         assert_eq!(found.absence, Absence::Explicit);
         // An inherited display naming the session's screen comes first with its
         // own authority, and the session's follows in case that one is stale.
@@ -835,7 +955,7 @@ mod tests {
         assert_eq!(found.displays, vec![session.clone()]);
         fixture.own_x_server(5);
         let found = display_candidates(&other, &fixture.roots());
-        assert_eq!(found.displays, vec![X11Display::named(":5"), session]);
+        assert_eq!(found.displays, vec![own(":5"), session]);
         // With nobody signed in, a display a past login left in the service
         // manager's environment is not tried at all.
         let empty = Fixture::new();
@@ -849,7 +969,7 @@ mod tests {
         // A user-run X server still opens, and the reason names it.
         empty.own_x_server(5);
         let found = display_candidates(&other, &empty.roots());
-        assert_eq!(found.displays, vec![X11Display::named(":5")]);
+        assert_eq!(found.displays, vec![own(":5")]);
         assert_eq!(found.absence, Absence::Explicit);
         // Without logind there is nothing to check against.
         let no_logind = SessionRoots {
@@ -1089,16 +1209,17 @@ mod tests {
         assert_eq!(display_number("/tmp/launch-abc/org.x:0"), None);
     }
 
+    fn entry(family: u16, address: &[u8], number: &[u8], name: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut bytes = family.to_be_bytes().to_vec();
+        for field in [address, number, name, data] {
+            bytes.extend(u16::try_from(field.len()).unwrap().to_be_bytes());
+            bytes.extend(field);
+        }
+        bytes
+    }
+
     #[test]
     fn reads_the_cookie_for_one_display_from_an_authority_file() {
-        fn entry(family: u16, address: &[u8], number: &[u8], name: &[u8], data: &[u8]) -> Vec<u8> {
-            let mut bytes = family.to_be_bytes().to_vec();
-            for field in [address, number, name, data] {
-                bytes.extend(u16::try_from(field.len()).unwrap().to_be_bytes());
-                bytes.extend(field);
-            }
-            bytes
-        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Xauthority");
         let mut file = entry(256, b"host", b"1", MIT_MAGIC_COOKIE_1, b"one");
@@ -1120,5 +1241,173 @@ mod tests {
             authority_cookie(&dir.path().join("missing"), Family::LOCAL, b"host", 0),
             None
         );
+    }
+
+    #[test]
+    fn only_the_agents_user_or_root_for_its_own_session_may_serve_a_checked_display() {
+        assert!(server_allowed(1000, 1000, false));
+        assert!(server_allowed(1000, 1000, true));
+        assert!(server_allowed(0, 1000, true));
+        assert!(!server_allowed(0, 1000, false));
+        assert!(!server_allowed(1001, 1000, true));
+        assert!(!server_allowed(1001, 1000, false));
+    }
+
+    #[test]
+    fn a_skipped_inherited_display_is_named_in_the_reason() {
+        let fixture = Fixture::new();
+        // Inherited :7 has no socket the user owns and nobody is signed in.
+        let agent = AgentIdentity {
+            display: Some(":7".into()),
+            ..agent()
+        };
+        let found = display_candidates(&agent, &fixture.roots());
+        assert!(found.displays.is_empty());
+        assert_eq!(found.skipped.as_deref(), Some(":7"));
+        let reason = unavailable_reason(&found, ":0", "");
+        assert!(
+            reason.contains("The inherited DISPLAY=:7 was not used"),
+            "{reason}"
+        );
+        assert!(reason.contains("--virtual-desktop"), "{reason}");
+        // A display some login session names needs no extra word.
+        fixture.session("c9", agent.uid + 1, "TYPE=x11\nDISPLAY=:7\nACTIVE=1\n");
+        assert_eq!(display_candidates(&agent, &fixture.roots()).skipped, None);
+    }
+
+    struct RemoveOnDrop(PathBuf);
+
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// What the first client to reach `listener` sends, up to `needle`.
+    fn first_client_bytes(listener: &std::os::unix::net::UnixListener, needle: &[u8]) -> Vec<u8> {
+        use std::io::Read as _;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut received = Vec::new();
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                        .unwrap();
+                    let mut chunk = [0_u8; 256];
+                    while received
+                        .windows(needle.len())
+                        .all(|window| window != needle)
+                    {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => received.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    return received;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < deadline, "no client connected");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept: {error}"),
+            }
+        }
+    }
+
+    /// The abstract socket name and the TCP port of a display can be claimed
+    /// by any local user, and a socket file of the user's own can be stale.
+    /// A checked display must never hand its cookie to such a listener.
+    #[test]
+    fn a_squatted_abstract_x11_socket_never_receives_the_cookie() {
+        use std::os::linux::net::SocketAddrExt as _;
+        use std::os::unix::net::{SocketAddr, UnixListener};
+
+        let sockets = PathBuf::from("/tmp/.X11-unix");
+        let number = 4700 + std::process::id() % 1000;
+        let path = sockets.join(format!("X{number}"));
+        if !sockets.is_dir() || path.exists() {
+            eprintln!(
+                "SKIP: {} is missing or {} is taken",
+                sockets.display(),
+                path.display()
+            );
+            return;
+        }
+        // A stale socket file of the user's own: nothing listens on it.
+        match UnixListener::bind(&path) {
+            Ok(listener) => drop(listener),
+            Err(error) => {
+                eprintln!("SKIP: cannot create {}: {error}", path.display());
+                return;
+            }
+        }
+        let _remove = RemoveOnDrop(path.clone());
+        // Someone else's listener on the display's abstract name.
+        let squatter = match SocketAddr::from_abstract_name(path.as_os_str().as_encoded_bytes())
+            .and_then(|address| UnixListener::bind_addr(&address))
+        {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("SKIP: abstract name taken: {error}");
+                return;
+            }
+        };
+        squatter.set_nonblocking(true).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let authority = dir.path().join("Xauthority");
+        let cookie = b"cookie-of-the-real-desktop";
+        std::fs::write(
+            &authority,
+            entry(65535, b"", b"", MIT_MAGIC_COOKIE_1, cookie),
+        )
+        .unwrap();
+
+        // With nobody signed in, the inherited display is taken for an X
+        // server the user runs, because the user owns its socket file.
+        let fixture = Fixture::new();
+        let agent = AgentIdentity {
+            display: Some(format!(":{number}")),
+            xauthority: Some(authority.clone()),
+            ..agent()
+        };
+        let roots = SessionRoots {
+            x11_sockets: sockets,
+            ..fixture.roots()
+        };
+        let found = display_candidates(&agent, &roots);
+        let display = X11Display {
+            authority: Some(authority.clone()),
+            ..own(&format!(":{number}"))
+        };
+        assert_eq!(found.displays, vec![display.clone()]);
+        // The checked connect, with and without an authority file, goes to the
+        // socket file only and is refused there.
+        for display in [
+            display.clone(),
+            X11Display {
+                authority: None,
+                ..display.clone()
+            },
+        ] {
+            assert!(display.connect().is_err());
+            assert_eq!(
+                squatter.accept().map(|_| ()).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "{display:?} reached the abstract listener"
+            );
+        }
+        // The default X11 order would have handed the cookie to the listener.
+        let unchecked = X11Display {
+            server: XServerCheck::Unchecked,
+            ..display
+        };
+        let client = std::thread::spawn(move || unchecked.connect().is_ok());
+        let received = first_client_bytes(&squatter, cookie);
+        assert!(!client.join().unwrap());
+        assert!(received
+            .windows(cookie.len())
+            .any(|window| window == cookie));
     }
 }
