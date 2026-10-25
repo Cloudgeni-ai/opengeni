@@ -591,6 +591,57 @@ describe("buildTimeline", () => {
     expect(JSON.stringify(settled)).not.toMatch(/limit reached/i);
   });
 
+  test("a retried turn's worked time excludes the idle gap before Retry", () => {
+    reset();
+    const at = (seconds: number, value: SessionEvent): SessionEvent => ({
+      ...value,
+      occurredAt: new Date(1718000000000 + seconds * 1000).toISOString(),
+    });
+    // The attempt fails at start; the person clicks Retry about a minute later.
+    const failedAttempt = () => [
+      at(0, event("turn.queued", { turnId: "turn-1" })),
+      at(1, event("turn.started", {})),
+      at(3, event("turn.failed", { error: "Model provider unavailable" })),
+    ];
+    const retried = [
+      ...failedAttempt(),
+      at(73, event("turn.recovery.requested", { reason: "human_retry" })),
+      at(74, event("turn.started", {})),
+      at(80, event("agent.toolCall.created", { id: "t", name: "exec", arguments: {} })),
+      at(90, event("agent.toolCall.output", { id: "t", output: "ok" })),
+      at(100, event("agent.message.completed", { text: "Done", phase: "final_answer" })),
+      at(101, event("turn.completed", {})),
+    ];
+    const workOf = (events: SessionEvent[]) => {
+      const group = groupTimeline(englishText, buildTimeline(englishText, events), {
+        readableTurns: true,
+      }).find((entry) => entry.kind === "activity" && entry.work);
+      if (!group || group.kind !== "activity" || !group.work) throw new Error("no work row");
+      return { ...group, work: group.work };
+    };
+    const settled = workOf(retried);
+    // Seventy seconds between the failure and Retry are not work.
+    expect(settled.work.pausedMs).toBe(70_000);
+    const status = readableWorkStatus(englishText, settled);
+    expect(status.kind).toBe("worked");
+    expect(status.durationMs).toBe(
+      Date.parse(settled.work.endedAt!) - Date.parse(settled.work.startedAt) - 70_000,
+    );
+    expect(status.durationMs).toBeLessThan(40_000);
+
+    // While the retried attempt runs, the live clock starts after the gap too.
+    reset();
+    const running = workOf([
+      ...failedAttempt(),
+      at(73, event("turn.recovery.requested", { reason: "human_retry" })),
+      at(74, event("turn.started", {})),
+      at(80, event("agent.toolCall.created", { id: "t", name: "exec", arguments: {} })),
+    ]);
+    const live = readableWorkStatus(englishText, running);
+    expect(live.kind).toBe("working");
+    expect(Date.parse(live.since!) - Date.parse(running.work.startedAt)).toBe(70_000);
+  });
+
   test("accepts every typed admission reason with its matching event semantics", () => {
     reset();
     const cases = [
