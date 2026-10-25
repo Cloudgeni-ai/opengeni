@@ -58,7 +58,10 @@ struct BaseRecord {
     /// The VMM process the record is about.
     process: String,
     /// The image the VM's memory is based on; `None` for a VM booted
-    /// fresh, whose memory was all zeros.
+    /// fresh, whose memory was all zeros. Required, `null` included: a
+    /// record that lost the field must not read as zeros, or a save would
+    /// drop every page the VM did not change since its image.
+    #[serde(deserialize_with = "Option::deserialize")]
     image: Option<RecordedImage>,
 }
 
@@ -564,6 +567,10 @@ mod tests {
         assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "cut short");
         fs::write(&path, br#"{"process":"vmm","image":null,"imagee":null}"#).unwrap();
         assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "a damaged field");
+        // Read as zeros, a record without its image would have a save drop
+        // every page the VM kept from that image.
+        fs::write(&path, br#"{"process":"vmm"}"#).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "no image field");
         fs::write(&path, br#"{"process":"vmm","image":null}"#).unwrap();
         assert_eq!(sandbox.base(Some("vmm")), Base::Zero);
     }
