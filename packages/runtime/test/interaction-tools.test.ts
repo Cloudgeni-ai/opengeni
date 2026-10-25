@@ -26,6 +26,7 @@ import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
   nativeCuaSchema,
+  openComputerAppWindow,
   type UserSetupCardPoster,
 } from "../src/interaction-tools";
 import { computerObservationText } from "../src/computer-model-text";
@@ -4658,6 +4659,231 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  test("finds an app's open window on each platform's target shape", () => {
+    const target = (fields: Partial<ComputerTarget>): ComputerTarget => ({
+      ...computerTarget(),
+      focused: false,
+      ...fields,
+    });
+    const screen = target({ id: "screen-1", kind: "screen", applicationId: null, title: "Screen" });
+    // macOS: windows carry the app's bundle ID.
+    const calculator = target({ id: "mac-window", applicationId: "com.apple.calculator" });
+    expect(openComputerAppWindow([screen, calculator], "com.apple.Calculator")?.id).toBe(
+      "mac-window",
+    );
+    expect(openComputerAppWindow([screen, calculator], "Calculator")?.id).toBe("mac-window");
+    // Windows (CUA): no app ID; a document window's title ends with the app name.
+    const notepad = target({ id: "win-notepad", applicationId: null, title: "Untitled - Notepad" });
+    const calc = target({ id: "win-calc", applicationId: null, title: "Calculator", processId: 7 });
+    for (const id of ["notepad", "Notepad.exe", "C:\\Windows\\System32\\notepad.exe"])
+      expect(openComputerAppWindow([screen, notepad, calc], id)?.id).toBe("win-notepad");
+    expect(
+      openComputerAppWindow(
+        [screen, notepad, calc],
+        "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+      ),
+    ).toBeNull();
+    expect(openComputerAppWindow([screen, notepad, calc], "calculator")?.id).toBe("win-calc");
+    // Linux (AT-SPI): an app target names the app; its windows share its process.
+    const geditApp = target({
+      id: "app-gedit",
+      kind: "app",
+      applicationId: null,
+      title: "gedit",
+      processId: 51,
+    });
+    const geditWindow = target({
+      id: "linux-window",
+      applicationId: null,
+      title: "notes.txt (~/Documents)",
+      processId: 51,
+    });
+    expect(openComputerAppWindow([screen, geditApp, geditWindow], "org.gnome.gedit")?.id).toBe(
+      "linux-window",
+    );
+    expect(openComputerAppWindow([screen, geditApp, geditWindow], "gedit.desktop")?.id).toBe(
+      "linux-window",
+    );
+    // Linux (CUA): only the title names it.
+    const cuaGedit = target({
+      id: "cua-gedit",
+      applicationId: null,
+      title: "Untitled Document 1 - gedit",
+    });
+    expect(openComputerAppWindow([screen, cuaGedit], "gedit")?.id).toBe("cua-gedit");
+    // A window of another app is never matched by its title, nor an unreadable one.
+    const other = target({ id: "other", applicationId: "com.example.editor", title: "Notepad" });
+    expect(openComputerAppWindow([screen, other], "notepad")).toBeNull();
+    const away = target({ id: "away", applicationId: "com.apple.calculator", offScreen: true });
+    expect(openComputerAppWindow([screen, away], "com.apple.calculator")).toBeNull();
+    // The window used last wins over the focused one.
+    const front = target({ id: "front", applicationId: "com.apple.calculator", focused: true });
+    const last = target({ id: "last", applicationId: "com.apple.calculator", current: true });
+    expect(openComputerAppWindow([front, last], "com.apple.calculator")?.id).toBe("last");
+    expect(openComputerAppWindow([screen, notepad], "TextEdit")).toBeNull();
+  });
+
+  test("computer_open with applicationId observes an already-open window instead of launching another copy", async () => {
+    const screen: ComputerTarget = {
+      ...computerTarget(),
+      id: "screen-1",
+      kind: "screen",
+      applicationId: null,
+    };
+    const notepad: ComputerTarget = {
+      ...computerTarget(),
+      id: "cua:window:7:1",
+      applicationId: null,
+      title: "Untitled - Notepad",
+      focused: false,
+    };
+    const session = activeComputerSession();
+    const launches: ComputerActionRequest[] = [];
+    const observed: string[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets: [screen, notepad],
+        }),
+        observeComputerTarget: async (_w, _s, targetId) => {
+          observed.push(targetId);
+          return computerObservation(targetId === notepad.id ? notepad : screen);
+        },
+        captureComputerTarget: async (_w, _s, targetId) => ({
+          frameId: "frame-1",
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targetId,
+          targetGeneration: notepad.targetGeneration,
+          sequence: 0,
+          mediaType: "image/jpeg" as const,
+          width: 640,
+          height: 400,
+          capturedAt: now,
+          sha256: "0".repeat(64),
+          data: Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+        }),
+        actInComputer: async (_w, _s, value) => {
+          launches.push(value);
+          return computerReceipt(value.operationId, computerObservation(notepad));
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId, applicationId: "notepad.exe" },
+      context(),
+    );
+    expect(launches).toHaveLength(0);
+    expect(observed).toEqual([notepad.id]);
+    expect(result.structuredContent).toMatchObject({ existing: { target: { id: notepad.id } } });
+    expect(result.structuredContent).not.toHaveProperty("launch");
+    expect((result.content[0] as { text: string }).text).toContain(
+      `Not launched: the app is already open in ${notepad.id}; act on that target with the observation below.`,
+    );
+    // The open window is the current target for the next read.
+    await definitions[1]!.execute({}, context());
+    expect(observed.at(-1)).toBe(notepad.id);
+  });
+
+  test("computer_open never reports a launch that ran, or may have run, as failed", async () => {
+    const screen: ComputerTarget = {
+      ...computerTarget(),
+      id: "screen-1",
+      kind: "screen",
+      applicationId: null,
+    };
+    const appWindow: ComputerTarget = {
+      ...computerTarget(),
+      id: "window-app",
+      applicationId: "com.example.app",
+    };
+    const session = activeComputerSession();
+    let act: () => Promise<ComputerActionReceipt> = async () => {
+      throw new Error("unset");
+    };
+    let recorded: () => Promise<ComputerActionReceipt> = async () => {
+      throw new OpenGeniApiError(404, "Not found");
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets: [screen],
+        }),
+        actInComputer: async () => await act(),
+        getComputerActionReceipt: async () => await recorded(),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const open = async () =>
+      await definitions[0]!.execute(
+        { computerSessionId, applicationId: "com.example.app" },
+        { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+      );
+    const unknownNote =
+      "The computer opened, but the launch of com.example.app has no known outcome: it may have started. Check computer_targets for its window before launching it again.";
+
+    // A retry whose fence changed is refused; the first try's receipt answers.
+    act = async () => {
+      throw new OpenGeniApiError(409, "operation ID reused with another request", {
+        code: "operation_conflict",
+      });
+    };
+    recorded = async () => computerReceipt(randomUUID(), computerObservation(appWindow));
+    const retried = await open();
+    expect(retried.isError).toBeFalsy();
+    expect(retried.structuredContent).toMatchObject({
+      launch: { state: "completed", observation: { target: { id: "window-app" } } },
+    });
+    expect(retried.content).toHaveLength(1);
+
+    // A lost reply with nothing recorded may still have launched the app.
+    act = async () => {
+      throw new OpenGeniApiError(504, "Gateway timeout", { outcomeUnknown: true });
+    };
+    recorded = async () => {
+      throw new OpenGeniApiError(404, "Not found");
+    };
+    const lost = await open();
+    expect(lost.isError).toBeFalsy();
+    expect((lost.content[1] as { text: string }).text.startsWith(unknownNote)).toBe(true);
+
+    // So may a launch the computer itself reports with an unknown outcome.
+    act = async () => ({
+      ...computerReceipt(randomUUID(), computerObservation(screen)),
+      state: "outcome_unknown",
+      observation: null,
+      error: { code: "outcome_unknown", message: "The action timed out", retryable: false },
+    });
+    const timedOut = await open();
+    expect(timedOut.content[1]).toEqual({ type: "text", text: unknownNote });
+
+    // A definite refusal still says it could not launch.
+    act = async () => {
+      throw new OpenGeniApiError(422, "no installed application has bundle id com.example.app");
+    };
+    const refused = await open();
+    expect((refused.content[1] as { text: string }).text).toContain(
+      "The computer opened, but com.example.app could not be launched:",
+    );
+  });
+
   test("an action naming its observation is fenced from the target list without a re-read", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
@@ -6691,6 +6917,35 @@ function externalAuthRun(): AuthRun {
 /** A controller that has nothing recorded under the operation ID asked for. */
 async function noRecordedReceipt(): Promise<never> {
   throw new OpenGeniApiError(404, "operation not found", { code: "resource_not_found" });
+}
+
+function activeComputerSession(): ComputerSession {
+  return {
+    ...discoveredComputerSession(computerSessionId, sessionId),
+    lifecycle: "active",
+    controller: {
+      controllerId: "synthetic-controller",
+      controllerGeneration: "controller-1",
+      placementInstanceId: "placement-1",
+    },
+    platform: "windows",
+    adapter: "opengeni.cua.windows.v1",
+    seatId: "seat-1",
+    displayId: "display-1",
+    capabilities: {
+      semanticObservation: true,
+      appDiscovery: true,
+      appLaunch: true,
+      windowCapture: true,
+      screenCapture: true,
+      semanticActions: true,
+      pointerInput: true,
+      keyboardInput: true,
+      clipboard: true,
+      backgroundActions: true,
+      parallelApps: true,
+    },
+  };
 }
 
 function partialTransport(value: Partial<InteractionTransport>): InteractionTransport {
