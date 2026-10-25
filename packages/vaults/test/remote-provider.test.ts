@@ -347,6 +347,23 @@ describe("remote vault provider requests", () => {
 });
 
 describe("remote vault inventory", () => {
+  test("preserves signed username hints and accepts older inventories that omit them", async () => {
+    const { transport } = fakeReceiver(() =>
+      ok({
+        items: [
+          item("with-hint", { username: "alice@example.com" }),
+          item("old-provider"),
+          item("no-hint", { username: null }),
+        ],
+        nextCursor: null,
+        snapshot: "snap-1",
+      }),
+    );
+    const remote = provider(transport);
+    const items = await remote.listItems(ctx(), "vault-1");
+    expect(items.map((entry) => entry.username)).toEqual(["alice@example.com", null, null]);
+    expect(items.every((entry) => entry.fields.every((field) => !("value" in field)))).toBe(true);
+  });
   test("pages vault and item inventories with snapshots and reports freshness once per page", async () => {
     const items = Array.from({ length: 150 }, (_, index) => item(`item-${index}`));
     const { transport, seen } = fakeReceiver((request) => {

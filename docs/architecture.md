@@ -1694,6 +1694,8 @@ tool arguments resolve per call at the execution boundary, so vault and policy
 changes apply to the next command without restarting a box.
 Connected-vault refreshes commit their mirror and status atomically against the
 pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
+The mirror encrypts the provider's optional username display hint separately
+from field values, which remain provider-resolved rather than stored locally.
 Managed 1Password creation preflights canonical link policy without retaining
 trial rows or holding DB locks over provider I/O; post-create failures retain
 the upstream identity for Link/Refresh recovery, never destructive compensation.

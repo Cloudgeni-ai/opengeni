@@ -9,6 +9,7 @@ import {
   type VaultSyncStatus,
 } from "@opengeni/contracts";
 import {
+  encryptEnvironmentValue,
   getProviderVaultSyncTarget,
   isVaultError,
   setVaultSyncStatus,
@@ -19,6 +20,7 @@ import {
 import {
   isVaultProviderError,
   providerOperations,
+  providerUsernameHint,
   readProviderItemInventory,
   readProviderVaultInventory,
   VaultProviderError,
@@ -32,7 +34,8 @@ import {
 /**
  * Provider vault metadata mirror (design §10.9, OP-1/OP-4; external vaults
  * §8–§9). A linked vault keeps a metadata-only mirror (item names, types,
- * websites, field names and kinds); values are always read live. A sync costs
+ * websites, field names and kinds, plus an encrypted username display hint);
+ * field values are always read live. A sync costs
  * one vault listing and skips the item listing entirely when the provider's
  * `contentVersion` is unchanged, so FAMILY-plan quotas are not burnt on
  * no-op refreshes.
@@ -63,6 +66,7 @@ export interface ProviderMirrorItem {
   /** The provider's own name, kept when it had to be sanitized or de-duplicated. */
   providerName: string;
   type: VaultItemType;
+  username: string | null;
   websites: string[];
   fields: ProviderMirrorField[];
   primaryExternalFieldId: string | null;
@@ -283,6 +287,7 @@ export function planProviderMirror(
       name,
       providerName: item.name,
       type: item.type,
+      username: providerUsernameHint(item.username),
       websites: [...item.websites],
       fields,
       primaryExternalFieldId: providerPrimaryFieldId({ type: item.type, fields: item.fields }),
@@ -504,6 +509,7 @@ export function databaseProviderMirrorStore(
   context: VaultDbContext,
   vaultId: string,
   expectedCacheEpoch: string,
+  encryptionKey: Uint8Array | null = null,
 ): ProviderMirrorStore {
   return {
     async settleRefresh(update, plan) {
@@ -513,6 +519,10 @@ export function databaseProviderMirrorStore(
             items: plan.items.map((item) => ({
               providerItemRef: item.externalItemId,
               providerVersion: item.version,
+              usernameHintEncrypted:
+                encryptionKey !== null && item.username !== null
+                  ? encryptEnvironmentValue(encryptionKey, item.username)
+                  : null,
               // Passkeys live only in hosted vaults (D20); providers never mirror them.
               type: item.type === "passkey" ? "login" : item.type,
               // The base name: the routine de-duplicates against the stored mirror
@@ -562,6 +572,7 @@ export function databaseProviderMirrorStore(
  */
 export async function syncLinkedProviderVault(input: {
   db: Database;
+  encryptionKey?: Uint8Array | null;
   context: VaultDbContext;
   vaultId: string;
   providers: VaultProviderRegistry;
@@ -579,6 +590,7 @@ export async function syncLinkedProviderVault(input: {
     input.context,
     input.vaultId,
     target.providerCacheEpoch ?? "0",
+    input.encryptionKey ?? null,
   );
   const now = input.now ?? (() => new Date());
   const rateLimitedUntil = target.rateLimitedUntil ? new Date(target.rateLimitedUntil) : null;
@@ -781,6 +793,7 @@ export type LinkedVaultRefreshReport = {
  */
 export async function refreshLinkedVaults(input: {
   db: Database;
+  encryptionKey?: Uint8Array | null;
   context: VaultDbContext;
   vaults: readonly LinkedVaultFreshness[];
   providers: VaultProviderRegistry;
@@ -818,6 +831,7 @@ export async function refreshLinkedVaults(input: {
       run = Promise.race([
         syncLinkedProviderVault({
           db: input.db,
+          encryptionKey: input.encryptionKey ?? null,
           context: input.context,
           vaultId: vault.id,
           providers: input.providers,
@@ -875,6 +889,7 @@ export async function refreshLinkedVaults(input: {
  */
 export async function refreshStaleLinkedVaults(input: {
   db: Database;
+  encryptionKey?: Uint8Array | null;
   context: VaultDbContext;
   vaults: readonly LinkedVaultFreshness[];
   providers: VaultProviderRegistry;

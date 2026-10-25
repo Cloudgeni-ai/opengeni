@@ -72,6 +72,7 @@ export interface ProviderItemChange {
 
 export interface ProviderWriteDeps {
   db: Database;
+  encryptionKey?: Uint8Array | null;
   context: VaultDbContext;
   providers: VaultProviderRegistry;
   /** Resolves `fromReference` field inputs (audited as a use by the caller). */
@@ -334,6 +335,7 @@ async function refreshAfterWrite(
   try {
     const result = await syncLinkedProviderVault({
       db: deps.db,
+      encryptionKey: deps.encryptionKey ?? null,
       context: deps.context,
       vaultId: vault.id,
       providers: deps.providers,

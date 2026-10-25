@@ -11,7 +11,8 @@ import * as primitives from "./primitives";
  * key (`vaultProviderWireResponseKey`) so a response can never be replayed as
  * a request.
  *
- * Every shape is strict and bounded. Metadata shapes have no value fields.
+ * Every shape is strict and bounded. Item metadata may carry a username display
+ * hint, but never other field values.
  * Mutations carry an idempotency key; Opengeni never retries a mutation
  * automatically and reports an ambiguous outcome instead.
  */
@@ -359,13 +360,14 @@ export const VaultProviderWireFieldMeta = /* @__PURE__ */ defineSchema(() =>
 );
 export type VaultProviderWireFieldMeta = z.infer<typeof VaultProviderWireFieldMeta>;
 
-/** Item metadata. There is deliberately no value field. */
+/** Item metadata, including an optional username display hint but no other values. */
 export const VaultProviderWireItemMeta = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       externalItemId: ExternalId,
       name: ItemName,
       type: VaultItemType,
+      username: z.string().max(VAULT_LIMITS.usernameMaxChars).nullable().optional(),
       websites: z.array(Website).max(VAULT_LIMITS.websitesPerItem),
       fields: z
         .array(VaultProviderWireFieldMeta)

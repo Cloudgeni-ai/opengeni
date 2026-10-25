@@ -4,13 +4,14 @@
  * type 1 login, 2 secure note, 3 card, 4 identity, 5 SSH key; custom field
  * type 0 text, 1 hidden, 2 boolean, 3 linked.
  *
- * Listing decrypts only names: the item name, website addresses, custom field
- * names and attachment file names. Values are decrypted only on read, for the
+ * Listing decrypts display metadata: the item name, website addresses, custom
+ * field names, attachment file names and the login username hint. Other values are decrypted only on read, for the
  * exact fields asked for. Writes re-encrypt only what changes and send every
  * other encrypted value back untouched, so passkeys, attachments, history and
  * anything this mapping does not know survive an update.
  */
 import { createHash } from "node:crypto";
+import { providerUsernameHint } from "@opengeni/vaults";
 import { isValidTotpInput } from "@opengeni/contracts";
 import {
   VAULT_LIMITS,
@@ -244,7 +245,7 @@ export function revisionOf(cipher: Json): string | null {
 }
 
 /**
- * Metadata and field layout. Only names are decrypted; a field is listed when
+ * Metadata and field layout. Only display metadata is decrypted; a field is listed when
  * it holds a value. Fails with `BitwardenCryptoError` when a name cannot be
  * opened.
  */
@@ -299,6 +300,10 @@ export function mapCipher(cipher: Json, ownerKey: SymmetricKey): MappedCipher {
     externalItemId: String(cipher.id).toLowerCase(),
     name: safeName(decryptOptional(cipher.name, key) ?? "", "Untitled item"),
     type: cipher.type === CIPHER_LOGIN ? "login" : "note",
+    username:
+      cipher.type === CIPHER_LOGIN
+        ? providerUsernameHint(decryptOptional(json(cipher.login)?.username, key))
+        : null,
     websites: websites(cipher, key),
     fields: fields.map(
       ({ id, name, kind }): ProviderFieldMeta => ({ externalFieldId: id, name, kind }),

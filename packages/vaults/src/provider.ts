@@ -1,3 +1,4 @@
+import { VAULT_LIMITS } from "@opengeni/contracts";
 import type {
   ConnectionCredentialsPort,
   SecretMaterial,
@@ -36,10 +37,21 @@ export interface ProviderItemMeta {
   externalItemId: string;
   name: string;
   type: VaultItemType;
+  /** Display hint from the existing inventory; at most VAULT_LIMITS.usernameMaxChars. */
+  username?: string | null;
   websites: string[];
   fields: ProviderFieldMeta[];
   version: string | null;
   updatedAt: string | null;
+}
+
+/** Never fetch a field just for this hint, or truncate it into a different username. */
+export function providerUsernameHint(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= VAULT_LIMITS.usernameMaxChars
+    ? value
+    : null;
 }
 export interface ProviderFieldValue {
   externalFieldId: string;

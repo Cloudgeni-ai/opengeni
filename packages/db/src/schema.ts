@@ -1747,6 +1747,7 @@ export const vaultItems = pgTable(
     primaryFieldId: uuid("primary_field_id"),
     providerItemRef: text("provider_item_ref"),
     providerVersion: text("provider_version"),
+    usernameHintEncrypted: text("username_hint_encrypted"),
     passkeySignCount: bigint("passkey_sign_count", { mode: "number" }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
