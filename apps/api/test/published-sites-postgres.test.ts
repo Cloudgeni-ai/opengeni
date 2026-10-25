@@ -826,6 +826,32 @@ test("publishing is off without a Sites domain", async () => {
   expect(config.json.sites).toBeNull();
 });
 
+test("a public Site on a login-only deployment carries a sign-in notice in its publication", async () => {
+  const f = await fixture({ sitesLoginOnly: true });
+  const site = await f.publish("Family recipes");
+  const members = await f.publication(f.owner, site.id, "PUT", {});
+  expect(members.status, JSON.stringify(members.json)).toBe(201);
+  expect(members.json.warnings).toEqual([]);
+  const opened = await f.publication(f.owner, site.id, "PUT", { access: "public" });
+  expect(opened.status, JSON.stringify(opened.json)).toBe(200);
+  expect(opened.json).toMatchObject({ access: "public", status: "active" });
+  expect(opened.json.warnings).toEqual([
+    expect.objectContaining({
+      code: "public_sign_in_required",
+      message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+      fix: null,
+    }),
+  ]);
+  const again = await f.publication(f.owner, site.id, "GET");
+  expect(again.json.warnings).toEqual(opened.json.warnings);
+  // Without login-only, the same public Site has nothing to say.
+  const open = await fixture();
+  const openSite = await open.publish("Family recipes");
+  await open.publication(open.owner, openSite.id, "PUT", {});
+  const openPublic = await open.publication(open.owner, openSite.id, "PUT", { access: "public" });
+  expect(openPublic.json.warnings).toEqual([]);
+});
+
 test("managers publish workspace Sites under globally unique, held hostnames", async () => {
   const f = await fixture();
   const other = await fixture();
