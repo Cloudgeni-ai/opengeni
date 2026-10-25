@@ -23,6 +23,7 @@ import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
+  MODEL_ATTACHMENT_TEXT_BUDGET_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
   collapseRepeatedSessionGoalContexts,
   expandUnchangedSessionGoalContexts,
@@ -1675,7 +1676,7 @@ function hasAttachmentRefs(item: CompactionItem): boolean {
  * Only the newest user message that carries attachments keeps them inline
  * after compaction. Older retained messages drop their references, so their
  * files are listed in the dated attachment catalog instead of being replayed
- * as images on every later request. Their text is unchanged and they are
+ * as images or extracted document text on every later request. Their text is unchanged and they are
  * charged only for that text.
  */
 function withOnlyNewestAttachmentsInline(items: readonly CompactionItem[]): CompactionItem[] {
@@ -1692,6 +1693,7 @@ function withOnlyNewestAttachmentsInline(items: readonly CompactionItem[]): Comp
     const stripped: CompactionItem = { ...item };
     delete stripped[MODEL_ATTACHMENT_REFS_FIELD];
     delete stripped[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
+    delete stripped[MODEL_ATTACHMENT_TEXT_BUDGET_FIELD];
     return stripped;
   });
 }

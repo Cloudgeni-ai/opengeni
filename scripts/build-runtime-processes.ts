@@ -70,10 +70,11 @@ const sharedBuild = {
   sourcemap: "none" as const,
 };
 
-// LiteParse and Sharp must resolve from the workload package's node_modules at
-// runtime. Both load platform-specific native packages dynamically, so bundling
-// either one detaches those bindings from their installed dependency graph.
-const nativeRuntimeExternals = ["@llamaindex/liteparse", "sharp"];
+// LiteParse, Sharp and AnyDoc must resolve from the workload package's
+// node_modules at runtime. Each loads a platform-specific native package
+// dynamically, so bundling one detaches that binding from its installed
+// dependency graph.
+const nativeRuntimeExternals = ["@llamaindex/liteparse", "sharp", "@firecrawl/anydoc"];
 
 // Packages that read a file next to their own module at load time. Bundling
 // freezes that location to the build machine's path, so the asset is missing

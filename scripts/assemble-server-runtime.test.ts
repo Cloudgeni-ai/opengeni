@@ -13,9 +13,12 @@ import { PACKAGE_ASSET_RUNTIME_EXTERNALS } from "./build-runtime-processes";
 const guardedSource =
   "export async function runMigrateCli() {}\nif (import.meta.main) await runMigrateCli();\n";
 
-test("only the worker image retains the native Documents parser", () => {
+test("only the worker image retains the native document parsers", () => {
   expect(API_RUNTIME_EXTERNALS).not.toContain("@llamaindex/liteparse");
   expect(WORKER_RUNTIME_EXTERNALS).toContain("@llamaindex/liteparse");
+  // Attachment text for models is extracted by the worker only.
+  expect(API_RUNTIME_EXTERNALS).not.toContain("@firecrawl/anydoc");
+  expect(WORKER_RUNTIME_EXTERNALS).toContain("@firecrawl/anydoc");
   expect(API_RUNTIME_EXTERNALS).toContain("sharp");
   expect(API_RUNTIME_EXTERNALS).toContain("ws");
   expect(WORKER_RUNTIME_EXTERNALS).toContain("ws");

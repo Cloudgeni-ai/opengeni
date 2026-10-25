@@ -5,7 +5,8 @@ import { join, relative, resolve, sep } from "node:path";
 import { copyRuntimeDependencies } from "./copy-runtime-dependencies";
 
 // The standalone API always queues Documents parsing through Temporal. Keep
-// LiteParse's native closure only in the worker image. The API npm package still
+// LiteParse's native closure only in the worker image, like AnyDoc's, which
+// the worker uses to show attachment text to models. The API npm package still
 // declares it for embedded createApp compositions that use inline indexing.
 // The 1Password SDK stays a real package in both images: its core loads a WASM
 // file from beside its own module, which a bundle cannot carry. The Keeper
@@ -22,6 +23,7 @@ export const API_RUNTIME_EXTERNALS = [
 ];
 export const WORKER_RUNTIME_EXTERNALS = [
   "@llamaindex/liteparse",
+  "@firecrawl/anydoc",
   "sharp",
   "@1password/sdk",
   "@keeper-security/secrets-manager-core",

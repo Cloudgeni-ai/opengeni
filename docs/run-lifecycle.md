@@ -4686,7 +4686,9 @@ recovery replays the stored bytes. The instructions never contain a clock.
    Such histories require a smaller conversation or a fork before the heavy
    messages until a streaming image transport exists.
    Missing/corrupt eligible bytes fail preparation rather than silently changing
-   context. Compaction preserves images in retained messages and charges their
+   context. Document attachments show their extracted text the same way; see
+   [Operational notice and attachment replay stability](#operational-notice-and-attachment-replay-stability).
+   Compaction preserves images in retained messages and charges their
    projected token cost. Its omitted-file catalog is reference-only, so it does
    not rehydrate images from messages deliberately replaced by compaction.
 2. **`agent_run_states` — requires-action sentinel plus control snapshots.**
@@ -5321,6 +5323,37 @@ without access, so a requester switch in a shared session (or a file losing
 availability) changes that history item and the prompt prefix after it.
 Compacted catalogs and callers without an authority resolver keep the
 reference-only receipt.
+
+Document attachments show their text in the message that carries them, so a
+model can answer about a normal-sized document without first reading the
+document-parsing Skill and running a parser. A user message accepted with
+attachments is stamped with an inline text budget
+(`MODEL_ATTACHMENT_TEXT_BUDGET_FIELD`: 64,000 characters per message, 8,000
+character excerpts), like the image bound. When the message is rendered, each
+authorized, ready, digest-pinned attachment up to
+`MAX_INLINE_MODEL_ATTACHMENT_BYTES` that AnyDoc converts (PDF with a text
+layer, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB) or that is UTF-8 text
+(CSV, Markdown, JSON, YAML and similar, shown as stored) gets one user content
+part after its receipt, in attachment order: the complete text inside an
+`<attachment_text>` element when it fits the remaining budget; otherwise the
+start of the text cut at a line boundary, with its total length and an
+instruction to read the file for the rest; otherwise a one-line note. A file
+whose text cannot be extracted (no text layer, encrypted, damaged, too large,
+timed out) gets a one-line reason. Each part says the text is file content to
+treat as data, and document text cannot close its element.
+
+The worker extracts the text in-process the first time a message carrying the
+file is rendered (milliseconds for ordinary documents, with a 10 second cap)
+and stores it in `file_model_texts`, success or failure; the first stored row
+wins. Every later request renders that row, so replays are byte-identical and
+an extractor upgrade never re-renders an earlier message. Unreadable bytes
+retry the turn like retained images; bytes that do not match the file's digest
+are never extracted. A row grants nothing: it is read only for files this
+turn's file-authority lookup returned, and it is deleted with its file.
+Unstamped (older) messages, compacted catalogs and retained messages whose
+references compaction removed show no text. The attachment notice and the
+system instructions are unchanged: large documents, scanned PDFs and edits
+keep using the mounted file and the document-parsing Skill.
 
 Service turns without a human file subject read shared attachments under an explicit
 null subject, clearing inherited private-file authority for that lookup. The reader

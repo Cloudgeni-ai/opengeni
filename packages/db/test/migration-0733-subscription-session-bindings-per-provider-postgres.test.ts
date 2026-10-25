@@ -497,6 +497,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "automation_templates",
       // 0971 per-turn app action grants are also withheld.
       "session_turn_app_action_grants",
+      // 0975 file model texts are also withheld.
+      "file_model_texts",
     ].sort();
     // 0823 (personal machine consent) adds protected tables the runtime role
     // never reads directly; insert them in the sorted protected list.

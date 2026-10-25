@@ -32,6 +32,8 @@ import { projectReasoningConfigurations, supportsReasoningConfiguration } from "
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
 import { resolveRigProviderImageForRun, settingsWithWorkspaceSandboxImage } from "@opengeni/core";
 import { createModelHistoryAttachmentProjector } from "../run-input";
+import { createAttachmentTextLoader } from "../attachment-text";
+import type { FileAsset } from "@opengeni/contracts";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
@@ -387,17 +389,18 @@ export async function prepareGovernanceAndModel(
   // transport, including typed image projection for vision-capable Chat models.
   const supportsImageInput = modelInputPolicy.supportsImageInput;
   media.modelCanReceiveRetainedSessionImages = supportsImageInput;
+  const readAttachmentBytes = objectStorage
+    ? async (file: FileAsset) => {
+        const object = await retryWhileMissing(async () =>
+          objectStorage.getObjectBytes(file.objectKey),
+        );
+        if (!object) throw new Error("attachment object is missing");
+        return object.bytes;
+      }
+    : undefined;
   const attachmentProjector = createModelHistoryAttachmentProjector(
     modelInputPolicy,
-    objectStorage
-      ? async (file) => {
-          const object = await retryWhileMissing(async () =>
-            objectStorage.getObjectBytes(file.objectKey),
-          );
-          if (!object) throw new Error("attachment object is missing");
-          return object.bytes;
-        }
-      : undefined,
+    readAttachmentBytes,
     (fileIds) =>
       getFilesForSubject(db, {
         accountId: input.accountId,
@@ -405,6 +408,11 @@ export async function prepareGovernanceAndModel(
         subjectId: fileAuthoritySubjectId,
         fileIds,
       }),
+    createAttachmentTextLoader({
+      db,
+      accountId: input.accountId,
+      readFileBytes: readAttachmentBytes,
+    }),
   );
   const useReasoningUpdates =
     runSettings.reasoningConfigurationUpdatesEnabled &&

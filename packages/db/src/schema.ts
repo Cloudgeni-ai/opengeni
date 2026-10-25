@@ -80,6 +80,7 @@ export * from "./editable-artifacts-schema";
 export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";
 export * from "./secret-approvals-schema";
+export * from "./file-model-texts-schema";
 export * from "./slack-api-rate-limit-schema";
 export * from "./organization-recovery-schema";
 

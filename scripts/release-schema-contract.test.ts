@@ -2340,6 +2340,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0975_file_model_texts.sql",
       "0974_personal_integration_setup_policy.sql",
       "0973_capability_setup_continuations_validate.sql",
       "0972_capability_setup_continuations.sql",

@@ -65,6 +65,7 @@ import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
+  MODEL_ATTACHMENT_TEXT_BUDGET_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
 } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
@@ -845,12 +846,14 @@ describe("codex-parity rebuild", () => {
         ...user("first photo"),
         [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: olderId }],
         [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+        [MODEL_ATTACHMENT_TEXT_BUDGET_FIELD]: { messageChars: 64_000, excerptChars: 8_000 },
       },
       assistant("looked at it"),
       {
         ...user("second photo"),
         [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: newerId }],
         [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+        [MODEL_ATTACHMENT_TEXT_BUDGET_FIELD]: { messageChars: 64_000, excerptChars: 8_000 },
       },
       user("what changed between them?"),
     ];
@@ -869,6 +872,11 @@ describe("codex-parity rebuild", () => {
         expect(first).toEqual(user("first photo"));
         expect(second[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: newerId }]);
         expect(second[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]).toBe(2000);
+        // The newest keeps its text budget; the older one lost it with its references.
+        expect(second[MODEL_ATTACHMENT_TEXT_BUDGET_FIELD]).toEqual({
+          messageChars: 64_000,
+          excerptChars: 8_000,
+        });
         const catalog = rebuilt.find((item) => item[MODEL_ATTACHMENT_CATALOG_MARKER] === true)!;
         expect(catalog[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: olderId }]);
         expect(rebuilt.indexOf(catalog)).toBeLessThan(rebuilt.indexOf(first));
@@ -890,9 +898,10 @@ describe("codex-parity rebuild", () => {
       expect(rebuilt.some((item) => item.content === "first photo")).toBe(true);
     });
 
-    test("the image bound never reaches the provider", () => {
+    test("the image bound and text budget never reach the provider", () => {
       const wire = sanitizeHistoryItemsForModel(history()) as CompactionItem[];
       expect(JSON.stringify(wire)).not.toContain(MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD);
+      expect(JSON.stringify(wire)).not.toContain(MODEL_ATTACHMENT_TEXT_BUDGET_FIELD);
     });
   });
 

@@ -6695,6 +6695,25 @@ export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD =
   "opengeni_attachment_image_max_dimension" as const;
 /** Bound stamped on newly accepted user messages with attachments. */
 export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION = 2000;
+/**
+ * Private durable field on user history items: how much extracted document
+ * text this message's attachments may show the model inline. Stamped when the
+ * message is accepted, so a later change of the budget never re-renders a
+ * message an earlier request already sent. Items without it (older messages)
+ * never show attachment text.
+ */
+export const MODEL_ATTACHMENT_TEXT_BUDGET_FIELD = "opengeni_attachment_text_budget" as const;
+export type ModelAttachmentTextBudget = {
+  /** Characters of extracted text all attachments of one message may show together. */
+  messageChars: number;
+  /** Characters shown from a document that does not fit the remaining budget. */
+  excerptChars: number;
+};
+/** Budget stamped on newly accepted user messages with attachments. */
+export const MODEL_ATTACHMENT_TEXT_BUDGET: Readonly<ModelAttachmentTextBudget> = {
+  messageChars: 64_000,
+  excerptChars: 8_000,
+};
 
 export const ResourceRef = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]),

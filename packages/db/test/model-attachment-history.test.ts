@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
+  MODEL_ATTACHMENT_TEXT_BUDGET_FIELD,
   type ResourceRef,
 } from "@opengeni/contracts";
 import { durableUserHistoryItem } from "../src/index";
@@ -31,11 +32,13 @@ describe("durable user attachment history", () => {
       [MODEL_ATTACHMENT_REFS_FIELD]: [resources[0]],
       // Stamped at acceptance, so later bound changes never re-render it.
       [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+      // Likewise the extracted document text the message may show inline.
+      [MODEL_ATTACHMENT_TEXT_BUDGET_FIELD]: { messageChars: 64_000, excerptChars: 8_000 },
     });
     expect(JSON.stringify(item)).not.toContain("base64");
   });
 
-  test("a message without files carries no image bound", () => {
+  test("a message without files carries no image bound or text budget", () => {
     const item = durableUserHistoryItem("hello", []);
     expect(item).toEqual({ type: "message", role: "user", content: "hello" });
   });

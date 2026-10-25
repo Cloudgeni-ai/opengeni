@@ -32,6 +32,7 @@ import {
 } from "./model-call-timing";
 export * from "./human-input-secret-answers";
 export * from "./secret-use-approvals";
+export * from "./file-model-texts";
 export * from "./connected-machine-audience";
 import { type ActiveSandboxPointer } from "./active-sandbox";
 import { sessionRetentionFromRow } from "./session-archive";
@@ -898,6 +899,8 @@ import {
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
+  MODEL_ATTACHMENT_TEXT_BUDGET,
+  MODEL_ATTACHMENT_TEXT_BUDGET_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   TimelineAnnotations,
   renderUserMessageContentForModel,
@@ -8312,6 +8315,7 @@ export function durableUserHistoryItem(
       ? {
           [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs,
           [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION,
+          [MODEL_ATTACHMENT_TEXT_BUDGET_FIELD]: { ...MODEL_ATTACHMENT_TEXT_BUDGET },
         }
       : {}),
     ...(annotations.length > 0

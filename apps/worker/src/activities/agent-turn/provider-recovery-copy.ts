@@ -57,7 +57,7 @@ export function providerRecoverySubject(input: ProviderRecoveryCopyInput): strin
     case "sandbox_command_start_unavailable":
       return "The sandbox isn't ready yet";
     case "retained_attachment_unavailable":
-      return "An image from earlier in this conversation can't be read from storage";
+      return "A file from earlier in this conversation can't be read from storage";
     case "turn_execution_policy_definition_mismatch":
       return "A configuration update is being applied";
     default:

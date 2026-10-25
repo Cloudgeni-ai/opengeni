@@ -1884,7 +1884,7 @@ export const englishMessages = {
   "lib.format.yourOrganizationDoesnTHave":
     "Your remaining credits don't cover this model. Choose a model they cover or add credits. Your message and attachments are saved.",
   "lib.providerRecovery.anImageFromEarlierIn":
-    "An image from earlier in this conversation can't be read from storage",
+    "A file from earlier in this conversation can't be read from storage",
   "lib.providerRecovery.opengeniToolServiceUnavailable":
     "Opengeni’s tool service is temporarily unavailable",
   "lib.providerRecovery.aRequiredMcpServerIs": "A required MCP server is unreachable",

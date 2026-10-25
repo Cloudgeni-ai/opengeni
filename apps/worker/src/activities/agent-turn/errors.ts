@@ -1913,10 +1913,10 @@ function baseAgentRunFailurePayload(
   }
   if (findRetainedAttachmentUnavailableError(error)) {
     // Storage may lag after a replica outage. The same turn retries with the
-    // connectivity backoff and never continues without the image's pixels.
+    // connectivity backoff and never continues without the file's content.
     return {
       error:
-        "An image attached earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
+        "A file attached earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
       code: RETAINED_ATTACHMENT_UNAVAILABLE_CODE,
       retryable: true,
     };
