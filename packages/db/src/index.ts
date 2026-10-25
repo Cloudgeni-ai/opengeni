@@ -63012,6 +63012,34 @@ export async function readLease(
   });
 }
 
+/**
+ * Waits while a sandbox group's lease is warming, the spawner that won
+ * cold->warming still bringing its box up, reading it every `pollMs`. Returns
+ * the first read that is no longer warming (warm once the spawner commits,
+ * cold or draining if its attempt ended, null if the lease is gone), or the
+ * last read, still warming, once `timeoutMs` has passed. An abort of `signal`
+ * ends the wait with its reason.
+ */
+export async function waitWhileLeaseWarming(
+  db: Database,
+  workspaceId: string,
+  sandboxGroupId: string,
+  options: { timeoutMs: number; pollMs: number; signal?: AbortSignal | undefined },
+): Promise<LeaseSnapshot | null> {
+  const deadline = Date.now() + options.timeoutMs;
+  let lease: LeaseSnapshot | null = null;
+  do {
+    await waitForSandboxTransition(
+      Math.max(0, Math.min(options.pollMs, deadline - Date.now())),
+      options.signal,
+      "sandbox warming wait cancelled",
+    );
+    lease = await readLease(db, workspaceId, sandboxGroupId);
+    if (lease?.liveness !== "warming") return lease;
+  } while (Date.now() < deadline);
+  return lease;
+}
+
 // P4.2 — record the (re-)resolved desktop data-plane URL on an ALREADY-WARM
 // lease, EPOCH-FENCED. commitWarmingToWarm records the URL at cold→warming→warm
 // (the spawn path); this is the WARM-path counterpart used when a viewer mints
