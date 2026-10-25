@@ -32,6 +32,9 @@ import { OpenGeniContext } from "../session-context";
 import { usePolledValue } from "./internal";
 
 const PROCESSING_POLL_MS = 3_000;
+// A meeting recorded on another device changes little until it ends, so pages
+// showing it read it less often, only to notice when the capture finishes.
+const CAPTURING_POLL_MS = 10_000;
 
 /**
  * Client surface of the recording hooks, as `OpenGeniRecordingsClient` provides
@@ -66,8 +69,12 @@ export type RecordingsClientLike = Pick<
   | "saveRecordingNote"
 >;
 
-/** Refresh every few seconds while `active`, without an extra read when it turns on. */
-function useRefreshWhile(active: boolean, refresh: () => Promise<void>): void {
+/** Refresh every `intervalMs` while `active`, without an extra read when it turns on. */
+function useRefreshWhile(
+  active: boolean,
+  refresh: () => Promise<void>,
+  intervalMs: number = PROCESSING_POLL_MS,
+): void {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
   useEffect(() => {
@@ -79,14 +86,14 @@ function useRefreshWhile(active: boolean, refresh: () => Promise<void>): void {
         void refreshRef.current().finally(() => {
           if (!cancelled) tick();
         });
-      }, PROCESSING_POLL_MS);
+      }, intervalMs);
     };
     tick();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [active]);
+  }, [active, intervalMs]);
 }
 
 export type RecordingsClientOverride = {
@@ -467,7 +474,10 @@ function isProcessing(recording: Recording | null | undefined): boolean {
   return recording.state === "processing" || state === "queued" || state === "processing";
 }
 
-/** The recordings the signed-in person can see, newest first. Polls while any is processing. */
+/**
+ * The recordings the signed-in person can see, newest first. Polls while any is
+ * being transcribed, and less often while any is still being recorded.
+ */
 export function useRecordings(options: UseRecordingsOptions = {}): UseRecordingsResult {
   const { client, workspaceId } = useEmbeddedRecordings(
     options,
@@ -506,11 +516,13 @@ export function useRecordings(options: UseRecordingsOptions = {}): UseRecordings
       ...olderForThisList.recordings.filter((recording) => !seen.has(recording.id)),
     ];
   }, [state.data, olderForThisList]);
+  const anyProcessing = recordings.some(isProcessing);
   useRefreshWhile(
     options.pollIntervalMs === undefined &&
       (options.enabled ?? true) &&
-      recordings.some(isProcessing),
+      (anyProcessing || recordings.some((recording) => recording.state === "capturing")),
     state.refresh,
+    anyProcessing ? PROCESSING_POLL_MS : CAPTURING_POLL_MS,
   );
   const nextBefore = olderForThisList
     ? olderForThisList.nextBefore
@@ -567,7 +579,11 @@ export type UseRecordingResult = {
   remove: () => Promise<void>;
 };
 
-/** One recording with its transcript versions. Polls while it is being transcribed. */
+/**
+ * One recording with its transcript versions. Polls while it is being
+ * transcribed, and less often while it is still being recorded, here or on
+ * another device, so a page showing it notices when the recording ends.
+ */
 export function useRecording(
   recordingId: string | null,
   options: UseRecordingOptions = {},
@@ -595,7 +611,11 @@ export function useRecording(
   const nowProcessing =
     isProcessing(recording) ||
     versions.some((version) => version.state === "queued" || version.state === "processing");
-  useRefreshWhile(enabled && nowProcessing, state.refresh);
+  useRefreshWhile(
+    enabled && (nowProcessing || recording?.state === "capturing"),
+    state.refresh,
+    nowProcessing ? PROCESSING_POLL_MS : CAPTURING_POLL_MS,
+  );
   const refresh = state.refresh;
   const require = () => {
     if (!recordingId) throw new Error("No recording selected.");
