@@ -14,6 +14,7 @@ import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-
 import { z } from "zod";
 
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { parseRequestBody } from "../http/request-body";
 
 /* ----------------------------------------------------------------------------
    Connected agents: outside MCP clients people signed in to the organization
@@ -47,11 +48,12 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
         message: "Only the person who connected this agent can change what it can do.",
       });
     }
-    const parsed = UpdateOrganizationMcpConnectionRequest.safeParse(
+    const parsed = parseRequestBody(
+      UpdateOrganizationMcpConnectionRequest,
       await c.req.json().catch(() => null),
+      { status: 400, message: "invalid access setting" },
     );
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid access setting" });
-    const access = parsed.data.access;
+    const access = parsed.access;
     if (access.workspaceScope.kind === "selected") {
       for (const workspaceId of access.workspaceScope.workspaceIds) {
         const workspace = await getWorkspace(deps.db, workspaceId);

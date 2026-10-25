@@ -1,3 +1,5 @@
+import type { z } from "zod";
+import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
@@ -2246,29 +2248,14 @@ async function authorizeSourceSession(
   }
 }
 
-async function parseJsonBody<T>(
+async function parseJsonBody<Schema extends z.ZodType>(
   context: Context,
-  schema: {
-    safeParse(value: unknown):
-      | { success: true; data: T }
-      | {
-          success: false;
-          error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] };
-        };
-  },
-): Promise<T> {
-  const value = await context.req.json().catch(() => undefined);
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) {
-    // Name the first rejected field, so a caller (often a model) can correct
-    // that one value instead of guessing which part of the body was wrong.
-    const issue = parsed.error.issues[0];
-    const detail = issue
-      ? `: ${issue.path.length ? `${issue.path.map(String).join(".")}: ` : ""}${issue.message}`
-      : "";
-    throw new HTTPException(400, { message: `invalid request body${detail}`.slice(0, 300) });
-  }
-  return parsed.data;
+  schema: Schema,
+): Promise<z.output<Schema>> {
+  return parseRequestBody(schema, await context.req.json().catch(() => undefined), {
+    status: 400,
+    message: "invalid request body",
+  });
 }
 
 async function parseEmptyJsonBody(context: Context): Promise<void> {

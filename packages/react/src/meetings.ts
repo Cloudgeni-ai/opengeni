@@ -4,8 +4,11 @@
  * meeting settings. Built on the hooks in `@opengeni/react/recordings`.
  *
  * Mount {@link MeetingRecorderProvider} once above the host's routes, so a
- * recording keeps going while the person moves around. The pages navigate
- * through callbacks (`onOpen`, `meetingHref`, `onBack`), so any router works.
+ * recording keeps going while the person moves around. Import it from
+ * `@opengeni/react/meetings-recorder` there: that entry holds only the
+ * recorder, so the rest of this UI stays out of the host's startup code. The
+ * pages navigate through callbacks (`onOpen`, `meetingHref`, `onBack`), so any
+ * router works.
  */
 export {
   createMeetingRecorderStore,

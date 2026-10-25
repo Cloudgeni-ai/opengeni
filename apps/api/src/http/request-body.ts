@@ -21,15 +21,48 @@ const requestBodyJsonErrors = new WeakSet<SyntaxError>();
 
 const MAX_REPORTED_ISSUES = 10;
 
-/** Parse an already-read request body against its public request schema. */
+/**
+ * How a route answers invalid input. Routes that have always answered with
+ * their own status and lead-in keep them; the offending fields are appended
+ * to the message and listed in `details.issues`.
+ */
+export type RequestValidationOptions = {
+  status?: 400 | 422;
+  /** The route's own lead-in, for example "Invalid Skill request". */
+  message?: string;
+};
+
+/**
+ * Parse an already-read request body against its request schema.
+ *
+ * This and its siblings below are the one way a route validates client input,
+ * so every invalid request names its fields, and the organization MCP action
+ * catalog reads the schema a route passes here as that action's input
+ * (`scripts/public-api/action-catalog.ts`). Without options a failure rethrows
+ * the `ZodError` (route-local `instanceof ZodError` handlers keep working) and
+ * `app.onError` answers 400; with options it throws the public error itself.
+ */
 export function parseRequestBody<Schema extends z.ZodType>(
   schema: Schema,
   body: unknown,
+  options?: RequestValidationOptions,
 ): z.output<Schema> {
   const parsed = schema.safeParse(body);
   if (parsed.success) return parsed.data;
+  if (options) throw requestValidationError(parsed.error, "body", options);
   requestBodyValidationErrors.add(parsed.error);
   throw parsed.error;
+}
+
+/** Parse a route's query parameters (`c.req.query()`) against their schema. */
+export function parseRequestQuery<Schema extends z.ZodType>(
+  schema: Schema,
+  query: unknown,
+  options: RequestValidationOptions = {},
+): z.output<Schema> {
+  const parsed = schema.safeParse(query);
+  if (parsed.success) return parsed.data;
+  throw requestValidationError(parsed.error, "query", options);
 }
 
 /**
@@ -57,8 +90,9 @@ export async function readRequestJson(c: Context): Promise<unknown> {
 export async function parseRequestJson<Schema extends z.ZodType>(
   c: Context,
   schema: Schema,
+  options?: RequestValidationOptions,
 ): Promise<z.output<Schema>> {
-  return parseRequestBody(schema, await readRequestJson(c));
+  return parseRequestBody(schema, await readRequestJson(c), options);
 }
 
 /**
@@ -146,19 +180,36 @@ export function requestBodyValidationHttpError(error: unknown): ApiHttpError | n
       details: { code: "invalid_json" },
     });
   }
-  const zodError = inputError;
+  return requestValidationError(inputError, "body", {});
+}
+
+/**
+ * The public error for invalid client input, naming every offending field
+ * (bounded), for a route that maps a `ZodError` from its input itself.
+ */
+export function requestValidationError(
+  zodError: ZodError,
+  location: "body" | "query",
+  options: RequestValidationOptions,
+): ApiHttpError {
   const issues = zodError.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => ({
     path: issue.path.map(String).join("."),
     message: issue.message,
   }));
-  const summary = issues.map((issue) => `${issue.path || "request"}: ${issue.message}`).join("; ");
+  const whole = location === "query" ? "query" : "request";
+  const summary = issues.map((issue) => `${issue.path || whole}: ${issue.message}`).join("; ");
   const omittedIssueCount = Math.max(0, zodError.issues.length - issues.length);
-  return new ApiHttpError(400, {
+  const lead =
+    options.message?.replace(/[\s.:]+$/u, "") ||
+    (location === "query" ? "Invalid query parameters" : "Invalid request body");
+  return new ApiHttpError(options.status ?? 400, {
     code: "validation_failed",
-    message: `Invalid request body: ${summary}${
-      omittedIssueCount > 0 ? `; and ${omittedIssueCount} more` : ""
-    }`,
+    message: `${lead}: ${summary}${omittedIssueCount > 0 ? `; and ${omittedIssueCount} more` : ""}`,
     retryable: false,
-    details: { code: "invalid_request_body", issues, omittedIssueCount },
+    details: {
+      code: location === "query" ? "invalid_request_query" : "invalid_request_body",
+      issues,
+      omittedIssueCount,
+    },
   });
 }

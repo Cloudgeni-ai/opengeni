@@ -45,6 +45,7 @@ import {
   requireCodexAppsHuman,
 } from "./codex";
 import { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError } from "./subscription-core-http";
+import { parseRequestBody } from "../http/request-body";
 
 export { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError };
 
@@ -387,16 +388,17 @@ export async function coreCodexDesignateApps(
   if (!deps.settings.codexConnectedAppsEnabled) {
     throw new HTTPException(409, { message: "Codex Apps is disabled for this deployment" });
   }
-  const parsed = CodexAppsDesignationRequest.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) {
-    throw new HTTPException(400, { message: "accountId and expectedVersion are required" });
-  }
+  const parsed = parseRequestBody(
+    CodexAppsDesignationRequest,
+    await c.req.json().catch(() => null),
+    { status: 400, message: "accountId and expectedVersion are required" },
+  );
   const result = await designateSubscriptionCoreCodexApps(deps.db, {
     accountId,
     workspaceId,
-    connectionId: parsed.data.accountId,
+    connectionId: parsed.accountId,
     subjectId: human.subjectId,
-    expectedVersion: parsed.data.expectedVersion,
+    expectedVersion: parsed.expectedVersion,
   });
   if (result.kind === "not_found") {
     throw new HTTPException(404, { message: "codex account not found" });
@@ -425,17 +427,16 @@ export async function coreCodexClearApps(
   workspaceId: string,
   { human, accountId }: AppsHuman,
 ) {
-  const parsed = z
-    .object({ expectedVersion: z.number().int().nonnegative() })
-    .safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) {
-    throw new HTTPException(400, { message: "expectedVersion is required" });
-  }
+  const parsed = parseRequestBody(
+    z.object({ expectedVersion: z.number().int().nonnegative() }),
+    await c.req.json().catch(() => null),
+    { status: 400, message: "expectedVersion is required" },
+  );
   const result = await clearSubscriptionCoreCodexApps(deps.db, {
     accountId,
     workspaceId,
     subjectId: human.subjectId,
-    expectedVersion: parsed.data.expectedVersion,
+    expectedVersion: parsed.expectedVersion,
   });
   if (result.kind === "forbidden") {
     throw new HTTPException(403, {

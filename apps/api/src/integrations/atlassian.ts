@@ -83,6 +83,7 @@ import { atlassianKnowledgeSourceIdentity } from "@opengeni/documents/atlassian"
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
+import { requestValidationError } from "../http/request-body";
 import {
   ATLASSIAN_NATIVE_RETIRED_MESSAGE,
   ATLASSIAN_NATIVE_RETIRED_REASON,
@@ -716,7 +717,10 @@ export async function saveAtlassianSources(
   assertNativeAtlassianAvailable();
   const parsed = SaveAtlassianSourcesRequest.safeParse(input.payload);
   if (!parsed.success) {
-    throw new HTTPException(400, { message: "invalid Atlassian source selection" });
+    throw requestValidationError(parsed.error, "body", {
+      status: 400,
+      message: "invalid Atlassian source selection",
+    });
   }
   const existing = await getConnectionMetadata(
     deps.db,

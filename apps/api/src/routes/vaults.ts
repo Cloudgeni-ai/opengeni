@@ -45,7 +45,7 @@ import {
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { ApiHttpError } from "../http/api-error";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { vaultProviderRegistryFor } from "./vault-providers";
 
 const PREFIX = "/v1/workspaces/:workspaceId";
@@ -227,29 +227,17 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get(`${PREFIX}/vaults/:vaultId/items`, (c) =>
     vaultRoute(c, async () => {
       const { workspaceId, actor } = await authorize(c, "secrets:list");
-      const parsed = ListVaultItemsQuery.safeParse(c.req.query());
-      if (!parsed.success) {
-        // Name each bad parameter, so a caller can fix the query without guessing.
-        const issues = parsed.error.issues.slice(0, 10).map((issue) => ({
-          path: issue.path.map(String).join("."),
-          message: issue.message,
-        }));
-        throw new ApiHttpError(422, {
-          code: "validation_failed",
-          message: `Invalid vault item query: ${issues
-            .map((issue) => `${issue.path || "query"}: ${issue.message}`)
-            .join("; ")}`,
-          retryable: false,
-          details: { issues },
-        });
-      }
+      const parsed = parseRequestQuery(ListVaultItemsQuery, c.req.query(), {
+        status: 422,
+        message: "Invalid vault item query",
+      });
       return c.json(
         // Providers let opening a linked vault refresh a stale mirror first.
         await vaultsWithProviders(actor, workspaceId).listItems(
           actor,
           workspaceId,
           c.req.param("vaultId")!,
-          parsed.data,
+          parsed,
         ),
       );
     }),
