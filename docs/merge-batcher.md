@@ -289,6 +289,10 @@ checks and candidate CI. This documentation/admin change must be deployed togeth
 with the matching reviewed core/workflow implementation; it does not change an
 already running controller or authorize activation.
 
+Mark a draft PR ready for review before expecting admission. A `queue-ready`
+label on a draft does not make it eligible; check the current draft flag and
+exact-head check results rather than toggling the label to troubleshoot a wait.
+
 For a parked singleton, open the failed GitHub check and its logs, fix the cause,
 push a new head and let required checks finish before signalling readiness. A
 label toggle alone does not retry the same parked head. Parking comments identify
@@ -311,7 +315,7 @@ label history is not permission to admit. Historical bindings remain immutable.
 `changeset-release/main` is a barrier: earlier PRs batch first, Version is a
 singleton, and later work does not speculate across it.
 
-Use native auto-merge (for example `gh merge --auto`) or `queue-ready`. Protections
+Use native auto-merge (for example `gh pr merge --auto`) or `queue-ready`. Protections
 must prevent native/direct auto-merge from bypassing this batcher. Only the
 authorized batcher principal may normally update queue/state refs; PR authors must not
 be able to forge those refs or the trusted candidate workflow/result artifact.
