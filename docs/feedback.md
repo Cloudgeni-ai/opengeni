@@ -61,7 +61,15 @@ only the authenticated principal's general feedback, newest first. Pass
 by the web rating indicator. `limit` is 1-100 (default 50); this is a bounded recent list, not a full export.
 The SDK equivalent is `client.listOwnFeedback(workspaceId, { sessionId, limit })`.
 
-The web sidebar offers **Send feedback**. Completed assistant messages show
+The web and desktop account menu offers **Send feedback** under **Help & feedback**.
+Its form attaches up to three images: **Take screenshot** (the desktop app takes a
+still of its own page without asking, and does so as the form opens; a browser
+uses tab capture, which asks first), **Add image**, or pasting one. Each can be
+removed before sending. Reports from web and the desktop app carry the same
+context as phone reports: `source` `web` or `desktop`, the platform, the server
+version (and the desktop app's own version), the page in view, the browser, the
+language, the time zone, whether the device was online and the last error toasts
+the person saw. Completed assistant messages show
 thumbs up/down beside Copy and the timestamp on hover, keyboard focus, or touch.
 The optional-comment form submits the selected reply's exact turn. Messages from
 the same turn share the current rating. The route loads the viewer's recent
