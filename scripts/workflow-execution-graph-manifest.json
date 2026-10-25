@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "dda481c98d50b45fc04a3ecc2a2c315ad79d80b63dc7e0325cdfdc2b38f538f1"
+      "sha256": "e0b4a984f6d635cecca9fce5644a1d730fc59bcb002206cd9c422a90b830ace3"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -1021,6 +1021,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "plan",
+      "step": "Verify identical-tree complete Batch unit coverage",
+      "sha256": "6377c1b5e0f2fbac9a02cac69a05f25047a63154089fe7820496f1afa1da713b"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "release-image-validation",
       "step": "Require every non-image CI lane",
       "sha256": "8923598067fd947eb7285944861701e054227ed53f559c11925ddcbdb79ff40e"
@@ -1077,7 +1083,13 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "unit-shards",
       "step": "Install dependencies",
-      "sha256": "e4fcbcf8dfa696270d7185fee7c21706af0a4b314368f407203418f3493dbeb2"
+      "sha256": "46b46d0e81ae3c2d2c7e3db1e0ea01b795d635595e56aaa8353f72ca663b7e8c"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "unit-shards",
+      "step": "Verify reused complete unit proof for this main attempt",
+      "sha256": "d92eff6097731e332996453c51c23b20430672a38960a2e76b413fccf3e340ae"
     },
     {
       "workflow": ".github/workflows/compact-session-view.yml",
