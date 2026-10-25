@@ -1,5 +1,6 @@
 //! Periodic sampling of host memory and disk, and of VM processor use and
-//! traffic.
+//! traffic; the checks of running guests start from it too (see
+//! [`super::check`]).
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -186,6 +187,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.summarize();
         self.retire_unused();
         self.retire_unused_images();
+        self.check_guests();
         self.refill();
     }
 

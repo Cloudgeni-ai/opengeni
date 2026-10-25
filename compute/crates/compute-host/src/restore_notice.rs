@@ -76,6 +76,18 @@
 //! boots the disk (see [`crate::protocol::Request::Adopt`]). A guest that
 //! does not know the request does not answer; the host waits a short
 //! while and saves anyway, so the disk is then as after a power cut.
+//!
+//! Last, while a sandbox runs the host connects to the port every so often
+//! without sending a line, and closes the connection again: a guest reads
+//! its end and ignores it. The guest's kernel takes a connection to a
+//! listening port by itself, before the guest reads anything, so a guest
+//! that is busy, or still writing its disks out for a `sync`, takes it as
+//! well; one that takes none for minutes has stopped while its VM runs on
+//! (see [`crate::agent`]). Only a connection the VMM was asked for and the
+//! guest did not take counts: one the host could not even ask for, its
+//! VMM's socket out of reach, says nothing about the guest (see
+//! [`Reach`]). So a host that sets a notice port expects every guest it
+//! runs to listen on it, and ends one that does not.
 
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -83,6 +95,7 @@ use std::{fmt, io};
 
 use compute_engine::vsock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 
 /// Where a notice stands among those sent to one sandbox's guest: the
 /// sandbox's owner epoch, then its record's generation and revision, when
@@ -249,16 +262,82 @@ async fn exchange(
 /// Longest answer to `activity` or `sync` a guest may give.
 const MAX_ACTIVITY: usize = 32;
 
+/// Longest the host waits for a running guest to take a connection on its
+/// notice port, for a check and an activity ask alike, so both tell a
+/// guest that takes none the same way. Firecracker itself gives up on a
+/// connection its guest leaves unanswered after two seconds.
+pub const REACH_LIMIT: Duration = Duration::from_secs(5);
+
+/// Whether a running guest took a connection on its notice port.
+#[derive(Debug)]
+pub enum Reach {
+    /// It took one.
+    Reached,
+    /// Its VMM had the request, and the guest refused it or left it
+    /// unanswered within the limit: it may have stopped (see the module
+    /// documentation).
+    Unreached(io::Error),
+    /// The host could not ask: it could not reach or write to the VMM's
+    /// socket in time, as when it is out of descriptors. That says nothing
+    /// about the guest.
+    Untried(io::Error),
+}
+
+/// Connects to `port` in the guest behind `vsock_socket` within `limit`,
+/// or says why not: never [`Reach::Reached`].
+async fn dial(vsock_socket: &Path, port: u32, limit: Duration) -> Result<UnixStream, Reach> {
+    let until = tokio::time::Instant::now() + limit;
+    let asked = match tokio::time::timeout_at(until, vsock::request(vsock_socket, port)).await {
+        Ok(Ok(asked)) => asked,
+        Ok(Err(error)) => return Err(Reach::Untried(error)),
+        Err(_) => {
+            return Err(Reach::Untried(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the VMM's socket took no request",
+            )));
+        }
+    };
+    match tokio::time::timeout_at(until, vsock::answered(asked)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => Err(Reach::Unreached(error)),
+        Err(_) => Err(Reach::Unreached(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the guest took no connection",
+        ))),
+    }
+}
+
+/// How a running guest answered `activity`.
+#[derive(Debug)]
+pub enum Commands {
+    /// That many commands started through its helper still run.
+    Running(u32),
+    /// It took the connection but gave no count in time: a guest that does
+    /// not know the question, or one slow to answer it. Or the host could
+    /// not ask it ([`Reach::Untried`]).
+    Unknown(io::Error),
+    /// It took no connection in time ([`Reach::Unreached`]): it may have
+    /// stopped (see the module documentation).
+    Unreached(io::Error),
+}
+
 /// Asks a running guest how many commands started through its helper are
-/// still running and keep it awake (see the module documentation), giving
-/// up after `limit`.
-///
-/// # Errors
-///
-/// The guest did not answer in time, or answered something else.
-pub async fn ask_commands(vsock_socket: &Path, port: u32, limit: Duration) -> io::Result<u32> {
+/// still running and keep it awake (see the module documentation), and
+/// says whether it took the connection at all: it has `reach` to take it,
+/// as [`reachable`] gives it, then `limit` to answer.
+pub async fn ask_commands(
+    vsock_socket: &Path,
+    port: u32,
+    reach: Duration,
+    limit: Duration,
+) -> Commands {
+    let mut stream = match dial(vsock_socket, port, reach).await {
+        Ok(stream) => stream,
+        Err(Reach::Unreached(error)) => return Commands::Unreached(error),
+        Err(Reach::Untried(error)) => return Commands::Unknown(error),
+        Err(Reach::Reached) => unreachable!("a failed dial reached nothing"),
+    };
     let asked = async {
-        let mut stream = vsock::connect(vsock_socket, port).await?;
         stream.write_all(b"activity\n").await?;
         let mut answer = Vec::with_capacity(MAX_ACTIVITY);
         let mut byte = [0_u8; 1];
@@ -280,9 +359,24 @@ pub async fn ask_commands(vsock_socket: &Path, port: u32, limit: Duration) -> io
             "answer to activity too long",
         ))
     };
-    tokio::time::timeout(limit, asked)
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the guest did not answer activity"))?
+    match tokio::time::timeout(limit, asked).await {
+        Ok(Ok(count)) => Commands::Running(count),
+        Ok(Err(error)) => Commands::Unknown(error),
+        Err(_) => Commands::Unknown(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the guest did not answer activity",
+        )),
+    }
+}
+
+/// Whether a running guest takes a connection on its notice port within
+/// `limit` (see the module documentation). The connection is closed at
+/// once, without a line.
+pub async fn reachable(vsock_socket: &Path, port: u32, limit: Duration) -> Reach {
+    match dial(vsock_socket, port, limit).await {
+        Ok(_) => Reach::Reached,
+        Err(reach) => reach,
+    }
 }
 
 /// Asks a running guest to write everything it holds for its disks to
@@ -471,18 +565,115 @@ mod tests {
             ],
         );
         let limit = Duration::from_millis(200);
-        assert_eq!(ask_commands(&socket, 53, limit).await.unwrap(), 2);
-        assert_eq!(ask_commands(&socket, 53, limit).await.unwrap(), 0);
+        assert!(matches!(
+            ask_commands(&socket, 53, limit, limit).await,
+            Commands::Running(2)
+        ));
+        assert!(matches!(
+            ask_commands(&socket, 53, limit, limit).await,
+            Commands::Running(0)
+        ));
         for _ in 0..2 {
-            let error = ask_commands(&socket, 53, limit).await.unwrap_err();
+            let Commands::Unknown(error) = ask_commands(&socket, 53, limit, limit).await else {
+                panic!("a wrong answer is no count");
+            };
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
-        let error = ask_commands(&socket, 53, limit).await.unwrap_err();
+        let Commands::Unknown(error) = ask_commands(&socket, 53, limit, limit).await else {
+            panic!("a guest that took the connection was reached");
+        };
         assert_eq!(
             error.kind(),
             io::ErrorKind::TimedOut,
             "a guest that never answers"
         );
+    }
+
+    /// What a stand-in VMM does with each connection to its guest.
+    #[derive(Clone, Copy, Debug)]
+    enum Handshake {
+        /// Drops it, as Firecracker does once its guest refused it or left
+        /// it unanswered for too long.
+        Drop,
+        /// Holds it unanswered, as while it still waits for the guest.
+        Hold,
+        /// Says the guest took it, and the guest never answers.
+        Take,
+    }
+
+    /// A stand-in for a VMM whose guest's connections all go as
+    /// `handshake` says.
+    fn handshaking_guest(name: &str, handshake: Handshake) -> std::path::PathBuf {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("handshake-{name}-"))
+            .tempdir()
+            .unwrap();
+        let socket = dir.path().join("vsock.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let _dir = dir;
+            let mut held = Vec::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                assert_eq!(lines.next_line().await.unwrap().unwrap(), "CONNECT 53");
+                match handshake {
+                    Handshake::Drop => continue,
+                    Handshake::Hold => {}
+                    Handshake::Take => write.write_all(b"OK 1073741824\n").await.unwrap(),
+                }
+                held.push((lines, write));
+            }
+        });
+        socket
+    }
+
+    /// A guest whose kernel takes no connection on its notice port is told
+    /// apart from one that takes it and gives no count, whether its VMM
+    /// drops the connection or still waits on it when time is up. A VMM
+    /// socket the host cannot reach says nothing about the guest.
+    #[tokio::test]
+    async fn a_guest_that_takes_no_connection_is_unreached() {
+        let limit = Duration::from_millis(200);
+        for socket in [
+            handshaking_guest("dropped", Handshake::Drop),
+            handshaking_guest("held", Handshake::Hold),
+        ] {
+            assert!(
+                matches!(
+                    ask_commands(&socket, 53, limit, limit).await,
+                    Commands::Unreached(_)
+                ),
+                "{}",
+                socket.display()
+            );
+            assert!(
+                matches!(reachable(&socket, 53, limit).await, Reach::Unreached(_)),
+                "{}",
+                socket.display()
+            );
+        }
+        let gone = tempfile::tempdir().unwrap();
+        let socket = gone.path().join("vsock.sock");
+        assert!(matches!(
+            reachable(&socket, 53, limit).await,
+            Reach::Untried(_)
+        ));
+        let Commands::Unknown(error) = ask_commands(&socket, 53, limit, limit).await else {
+            panic!("a guest the host could not ask was not found unreached");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        // One that takes it is reached, whatever it then says.
+        let socket = handshaking_guest("taken", Handshake::Take);
+        assert!(matches!(
+            reachable(&socket, 53, limit).await,
+            Reach::Reached
+        ));
+        let Commands::Unknown(error) = ask_commands(&socket, 53, limit, limit).await else {
+            panic!("a guest that took the connection was reached");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
     #[tokio::test]

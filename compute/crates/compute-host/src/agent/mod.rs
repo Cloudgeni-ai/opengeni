@@ -27,7 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 
-use crate::fleet::{Admission, LeaseGate};
+use crate::fleet::{Admission, Freezes, LeaseGate};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths};
 use crate::net::{NetworkConfig, Networks};
@@ -41,6 +41,7 @@ use crate::step::{After, Live, Reading, Report};
 use crate::store::{Claimed, OwnerEpoch, Store};
 use compute_protocol::fleet::Ruling;
 
+mod check;
 mod config;
 mod disk;
 mod fetch;
@@ -59,7 +60,7 @@ mod usage;
 mod warm;
 
 use config::check_config;
-pub use config::{BusyRule, HostConfig, PagerConfig};
+pub use config::{BusyRule, GuestChecks, HostConfig, PagerConfig};
 pub use sample::DiskGauge;
 use sample::ShareCheck;
 
@@ -391,14 +392,24 @@ enum Event<V> {
         claimed: Box<Claimed>,
         reply: Reply<()>,
     },
-    /// A sandbox about to sleep only for being idle told whether a command
-    /// started through its guest's helper still runs (see
-    /// [`crate::restore_notice::ask_commands`]).
+    /// A sandbox about to sleep only for being idle told whether it stays
+    /// awake: a command started through its guest's helper still runs (see
+    /// [`crate::restore_notice::ask_commands`]), or its guest took no
+    /// connection, so that it may have stopped (see [`check`]).
     Asked {
         id: Id,
         op: OpId,
         step: Step,
-        running: bool,
+        stays: bool,
+    },
+    /// A check of whether VM process `incarnation` of `id`'s guest still
+    /// takes connections ended (see [`check`]). `unfrozen`: the host has
+    /// no guard, or its guard says it did not freeze the VMs meanwhile.
+    Checked {
+        id: Id,
+        incarnation: u64,
+        reach: crate::restore_notice::Reach,
+        unfrozen: bool,
     },
     /// The check of a template found on disk ended.
     TemplateChecked {
@@ -532,6 +543,11 @@ struct Slot<V> {
     /// Whether its guest can run, for its agent-link streams; see
     /// [`HostAgent::tell_clocks`].
     link_clock: crate::resume::RunClock,
+    /// Since when its guest can run, if it can: its VM runs, with no step
+    /// that pauses it, and the lease lets VMs run. A check counts only what
+    /// a guest did not take while it could run all along (see [`check`]);
+    /// see [`HostAgent::tell_clocks`].
+    runs_since: Option<Instant>,
     op: Option<Running>,
     destroy: bool,
     removers: Vec<Reply<()>>,
@@ -541,6 +557,8 @@ struct Slot<V> {
     deferred: Option<Step>,
     /// Processor use and traffic measured so far, while its guest runs.
     usage: usage::Usage,
+    /// Whether its running guest still takes connections (see [`check`]).
+    check: Option<check::Check>,
     /// The incarnation of the running VM and its memory statistics when
     /// last sampled running; see [`HostAgent::check_uncompressed`].
     stats: Option<(u64, MemoryStats)>,
@@ -735,6 +753,7 @@ pub struct HostAgent<E: Engine, S: Store> {
     then_adopt: owners::Adopts,
     guest_ports: Arc<[GuestPort]>,
     restore_notice_port: Option<u32>,
+    guest_checks: GuestChecks,
     link: Option<compute_link::Hub>,
     #[cfg(target_os = "linux")]
     fetcher: Option<Arc<crate::lazy::Fetcher>>,
@@ -756,6 +775,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     about: About,
     /// The lease this host holds in a fleet; see [`HostConfig::lease`].
     lease: Option<LeaseGate>,
+    /// The guard's freeze count; see [`HostConfig::guard_freezes`].
+    guard_freezes: Option<Freezes>,
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
@@ -910,8 +931,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
         // Huge-page profiles cannot compress, whatever the host says.
-        let can_compress = config.can_compress && engine.memory_profile().compress;
-        let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
+        let profile = engine.memory_profile();
         let allocation_unit = allocation_unit(&config.root)?;
         let save_copies = save_copies(&config.root)?;
         let rootfs = open_rootfs(&config, records.ownership()).await?;
@@ -923,8 +943,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             held,
             ready,
         } = Warm::start(&engine, &config, &rootfs, &images).await;
-        let runtime = engine.runtime().to_owned();
-        let store_configured = store.is_configured();
+        let about = About {
+            runtime: engine.runtime().to_owned(),
+            checkpoints: store.is_configured() && save_copies == 1,
+            ..config.about
+        };
         let mut agent = Self {
             engine: Arc::new(engine),
             #[cfg(target_os = "linux")]
@@ -979,18 +1002,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             processor_share: ShareCheck::of(config.processor_share, config.policy.cpu_budget),
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
+            guest_checks: config.guest_checks,
             link: config.agent_link,
             busy: config.busy,
-            can_compress,
-            reserve_whole,
+            can_compress: config.can_compress && profile.compress,
+            reserve_whole: profile.pages == PageSize::Huge,
             save_copies,
             allocation_unit,
-            about: About {
-                runtime,
-                checkpoints: store_configured && save_copies == 1,
-                ..config.about
-            },
+            about,
             lease: config.lease,
+            guard_freezes: config.guard_freezes,
             commands_tx: commands_tx.downgrade(),
             observer: config.observer,
             summary_every: config.summary_every,
@@ -1102,6 +1123,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 _ports: ports,
                 _link: link,
                 link_clock,
+                runs_since: None,
                 op: None,
                 destroy: false,
                 removers: Vec::new(),
@@ -1109,6 +1131,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 hand_off: false,
                 deferred: None,
                 usage: usage::Usage::default(),
+                check: None,
                 stats: None,
                 reported: None,
                 summarized: Instant::now(),

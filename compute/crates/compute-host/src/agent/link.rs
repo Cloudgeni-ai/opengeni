@@ -112,24 +112,33 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// Tells each sandbox's agent-link streams whether its guest can run
-    /// now: its VM runs, with no step that pauses it, and the lease lets
-    /// VMs run. Streams its guest has not taken up again end only after
-    /// it could run for a while, since it takes them up as soon as it
-    /// runs.
-    pub(super) fn tell_clocks(&self) {
-        if self.link.is_none() {
-            return;
-        }
+    /// Notes for each sandbox whether its guest can run now: the agent
+    /// holds its VM, which it lends a step only to pause it or work on it
+    /// paused, the VM is running, and the lease lets VMs run. A step that
+    /// has not taken the VM, such as one still asking the guest whether a
+    /// command runs, leaves the guest running. Its checks count only what
+    /// the guest did not take while it could run all along (see
+    /// [`super::check`]), and its agent-link streams are told: those its
+    /// guest has not taken up again end only after it could run for a
+    /// while, since it takes them up as soon as it runs.
+    pub(super) fn tell_clocks(&mut self) {
         let acting = self.may_act();
-        for (id, slot) in &self.slots {
+        let now = tokio::time::Instant::now();
+        for (id, slot) in &mut self.slots {
             let runs = acting
                 && slot.vm.is_some()
                 && self
                     .core
                     .sandbox(*id)
-                    .is_some_and(|view| view.state.level == Level::Running && view.step.is_none());
-            slot.link_clock.set(runs);
+                    .is_some_and(|view| view.state.level == Level::Running);
+            match (runs, slot.runs_since) {
+                (true, None) => slot.runs_since = Some(now),
+                (false, Some(_)) => slot.runs_since = None,
+                _ => {}
+            }
+            if self.link.is_some() {
+                slot.link_clock.set(runs);
+            }
         }
     }
 }
