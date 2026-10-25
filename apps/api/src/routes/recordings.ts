@@ -39,6 +39,7 @@ import {
 } from "@opengeni/core";
 import {
   appendRecordingLiveSegments,
+  checkWorkspaceAllowance,
   createRecording,
   createRecordingPerson,
   createRecordingTranscriptVersion,
@@ -141,6 +142,37 @@ export function registerRecordingRoutes(
       /** Who a deployment-funded transcript this request asks for is billed to. */
       creditAttribution: creditDebitAttributionForGrant(grant),
     };
+  }
+
+  /**
+   * Transcripts and live previews count toward the workspace's usage
+   * allowance at the provider's list price (0976), so new transcription work
+   * is refused once the workspace's or the person's allowance is used up.
+   * Work already started finishes.
+   */
+  async function admitRecordingUsage(actor: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+  }): Promise<void> {
+    const exhausted = await checkWorkspaceAllowance(db, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      fundedWithoutCredits: true,
+    });
+    if (!exhausted) return;
+    throw new ApiHttpError(402, {
+      code: exhausted.code,
+      message: exhausted.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: {
+        scope: exhausted.scope,
+        resetsAt: exhausted.resetsAt,
+        ...(exhausted.subjectId ? { subjectId: exhausted.subjectId } : {}),
+      },
+    });
   }
 
   function recordingIdParam(c: Context): string {
@@ -393,6 +425,7 @@ export function registerRecordingRoutes(
       }
       return c.json(result.recording, result.created ? 201 : 200);
     }
+    await admitRecordingUsage(actor);
     const workspace = await getWorkspace(db, actor.workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
     if (body.transcription) await transcriptionChoice(actor.workspaceId, body.transcription);
@@ -606,6 +639,8 @@ export function registerRecordingRoutes(
     if (recording.purpose === "dictation" && body.transcription) {
       throw invalid("A dictation uses the workspace's voice input model");
     }
+    // Dictations are paid for with credits, which their ledger debit counts.
+    if (recording.purpose !== "dictation") await admitRecordingUsage(actor);
     const transcription = await versionChoice(
       actor,
       recording,
@@ -872,6 +907,7 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingLiveSessionRequest);
     const { provider, spec } = liveModelChoice(body);
+    await admitRecordingUsage(actor);
     const credentials = await providerCredentials(provider.id, actor);
     if (!credentials) {
       throw new ApiHttpError(409, {
