@@ -4555,6 +4555,123 @@ describe("interaction attempt tools", () => {
     ]);
   });
 
+  test("zooms into a region of the window as its own pointer frame", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const captures: unknown[] = [];
+    const zoomedFrameId = "native-frame:zoom.1600.0.960.1410.760.1116";
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => ({ ...observation, observationId: randomUUID() }),
+        captureComputerTarget: async (_workspaceId, _computerSessionId, _targetId, _o, options) => {
+          captures.push(options);
+          return {
+            frameId: options?.region ? zoomedFrameId : "regular-frame",
+            computerSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            sequence: 0,
+            mediaType: "image/jpeg" as const,
+            width: options?.region ? 760 : 1024,
+            height: options?.region ? 1116 : 564,
+            capturedAt: now,
+            sha256: "0".repeat(64),
+            ...(options?.region
+              ? {
+                  region: { x: 640, y: 0, width: 384, height: 564 },
+                  regionFrame: { width: 1024, height: 564 },
+                }
+              : {}),
+            data: image,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    const observe = definitions[0]!;
+    const model = { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } };
+    await observe.execute({ computerSessionId, targetId: target.id }, model as never);
+    const zoomed = await observe.execute(
+      { computerSessionId, targetId: target.id, region: { x: 640, y: 0, width: 384, height: 564 } },
+      { ...model, operationId: randomUUID() } as never,
+    );
+    // The region is measured on the last full screenshot this attempt saw.
+    expect(captures).toEqual([
+      {},
+      {
+        region: { x: 640, y: 0, width: 384, height: 564 },
+        regionFrame: { width: 1024, height: 564 },
+      },
+    ]);
+    expect(zoomed.structuredContent).toMatchObject({
+      frameId: zoomedFrameId,
+      capturedFrame: {
+        width: 760,
+        height: 1116,
+        region: { x: 640, y: 0, width: 384, height: 564 },
+        regionFrame: { width: 1024, height: 564 },
+      },
+    });
+    const text = (zoomed.content[0] as { text: string }).text;
+    expect(text).toContain(
+      `Zoomed screenshot 760x1116 pixels of the 1024x564 screenshot's region at 640,0 size 384x564 (2x); pointer x,y on frame ${zoomedFrameId} use these zoomed pixels.`,
+    );
+    // The elements were just read: the zoom lists only what changed.
+    expect(text).toContain("No element changed since");
+    expect(
+      (observe.inputSchema as { properties: Record<string, unknown> }).properties,
+    ).toHaveProperty("region");
+  });
+
+  test("says so when a server without zoom returns the full screenshot", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => ({ ...observation, observationId: randomUUID() }),
+        captureComputerTarget: async () => ({
+          frameId: "regular-frame",
+          computerSessionId,
+          controllerGeneration: target.controllerGeneration,
+          targetId: target.id,
+          targetGeneration: target.targetGeneration,
+          sequence: 0,
+          mediaType: "image/jpeg" as const,
+          width: 640,
+          height: 352,
+          capturedAt: now,
+          sha256: "0".repeat(64),
+          data: Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId, targetId: target.id, region: { x: 0, y: 0, width: 100, height: 100 } },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } } as never,
+    );
+    expect(result.structuredContent).toMatchObject({
+      frameId: "regular-frame",
+      capturedFrame: { width: 640, height: 352 },
+    });
+    expect((result.content[0] as { text: string }).text).toContain(
+      "Screenshot 640x352 pixels; pointer x,y use these pixels.",
+    );
+    expect(result.content[1]).toEqual({
+      type: "text",
+      text: "Not zoomed: this Opengeni server does not support region, so this is the full screenshot of the target.",
+    });
+    expect(result.content[2]).toMatchObject({ type: "image" });
+  });
+
   test("computer_open returns the screen's screenshot in the same call when includeScreenshot is set", async () => {
     const session: ComputerSession = {
       ...discoveredComputerSession(computerSessionId, sessionId),

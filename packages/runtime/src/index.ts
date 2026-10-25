@@ -3399,6 +3399,7 @@ export function buildOpenGeniAgent(
       options.approvedToolCallId,
     );
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
+    installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     return agent;
   }
@@ -3536,6 +3537,7 @@ export function buildOpenGeniAgent(
     options.approvedToolCallId,
   );
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
+  installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   return agent;
 }
@@ -3706,6 +3708,42 @@ function installModelMcpCallIdentity(agent: ApprovalCapableAgent): void {
 function modelMcpSourceCallId(modelName: string): string | undefined {
   const identity = modelMcpCallIdentity.getStore();
   return identity?.modelName === modelName ? identity.callId : undefined;
+}
+
+/** First-party tools that move this chat to another machine. */
+const ROUTE_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set(["sandbox_swap", "sandbox_attach"]);
+
+/**
+ * Run the tools that move this chat to another machine in model order. A
+ * model that writes `sandbox_swap` and then `computer_open` (or any other
+ * call) in one response means the later call for the machine it swapped to,
+ * but calls of one response otherwise start together: the later call would
+ * read the chat's route before the swap committed and act on, or be refused
+ * by, the machine the chat was leaving. Earlier calls of the response finish
+ * on the old machine first; later ones start after the move. Reinstalled on
+ * every clone like the other MCP projections. A `tool_invoke` of a swap is
+ * rewritten to the swap's own call before the runner orders the response, so
+ * it is ordered the same way. A swap inside a Code Mode program is one step of
+ * that program's single call and is not ordered against the response's other
+ * calls.
+ */
+export function installRouteMoveOrdering(agent: ApprovalCapableAgent): void {
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) =>
+      tool.type === "function" &&
+      ROUTE_MOVING_TOOL_FAMILIES.has(toolCallFamily(agent.mcpServers ?? [], [], tool.name) ?? "")
+        ? { ...tool, exclusiveExecution: true }
+        : tool,
+    );
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installRouteMoveOrdering(cloned);
+      return cloned;
+    };
+  }
 }
 
 const TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS = 2_000;
