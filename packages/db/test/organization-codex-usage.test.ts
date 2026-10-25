@@ -262,6 +262,11 @@ describe("organization core usage bounded request lock", () => {
 
   test("deadline cancels the body and joins local teardown before unlocking", async () => {
     const f = coreFixture();
+    // The budget is anchored before admission, so on a slow runner a real clock
+    // can spend all 10ms before dispatch (no fetch, or a never-joined probe).
+    // Freeze it: only the request timer, armed at dispatch, expires the budget.
+    const clock = spyOn(performance, "now").mockImplementation(() => 100);
+    restores.push(() => clock.mockRestore());
     const joining = deferred<void>();
     const joinedGate = deferred<void>();
     let cancelled = false;
