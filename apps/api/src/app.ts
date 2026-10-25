@@ -395,8 +395,8 @@ import {
 } from "./routes/managed-auth-session-sets";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
 import { projectClientModel } from "./model-catalog";
-import { createTranscriptionService } from "./transcription/service";
-import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
+import { createTranscriptionService } from "@opengeni/core/transcription-service";
+import { createFfmpegTranscriptionSegmenter } from "@opengeni/core/transcription-service";
 import { registerTeamsBotRoutes } from "./integrations/teams-bot";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
 import { resolveSignedStateSecret } from "./signed-state-secret";

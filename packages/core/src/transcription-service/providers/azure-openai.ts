@@ -1,5 +1,5 @@
 import { voiceInputModelReportsDurationOnly, type VoiceInputPricing } from "@opengeni/config";
-import type { TranscriptionProvider } from "@opengeni/core";
+import type { TranscriptionProvider } from "../../transcription";
 import { fetchError, parseTranscriptionResponseBody, responseError } from "./openai";
 
 export function createAzureOpenAiTranscriptionProvider(input: {

@@ -1,4 +1,4 @@
-import type { PreparedTranscriptionSegment, TranscriptionSegmenter } from "@opengeni/core";
+import type { PreparedTranscriptionSegment, TranscriptionSegmenter } from "../transcription";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";

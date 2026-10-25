@@ -5,8 +5,8 @@ import {
 } from "@opengeni/config";
 import { VOICE_INPUT_ACCEPTED_MIME_TYPES } from "@opengeni/contracts";
 import { voiceTranscriptionSettlementKeys } from "@opengeni/db";
+import { createVoiceInputBilling } from "../domain/voice-input-billing";
 import {
-  createVoiceInputBilling,
   filenameForMimeType,
   isAcceptedMimeType,
   normalizeMimeType,
@@ -17,7 +17,7 @@ import {
   type TranscriptionProvider,
   type TranscriptionService,
   TranscriptionServiceError,
-} from "@opengeni/core";
+} from "../transcription";
 import type { Database } from "@opengeni/db";
 import { createFfmpegAudioNormalizer, type TranscriptionAudioNormalizer } from "./normalize";
 import { createMaiTranscriptionProvider } from "./providers/azure-mai";

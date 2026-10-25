@@ -1,5 +1,8 @@
 import { type Settings } from "@opengeni/config";
-import { type TranscriptionAvailabilityContext, type TranscriptionProvider } from "@opengeni/core";
+import {
+  type TranscriptionAvailabilityContext,
+  type TranscriptionProvider,
+} from "../../transcription";
 import {
   getWorkspace,
   readSubscriptionCoreProviderRouteForWorkspace,
@@ -14,7 +17,7 @@ import {
   XAI_CLIENT_VERSION,
   XAI_PUBLIC_API_BASE_URL,
 } from "@opengeni/xai-subscription";
-import { workspaceXaiOperationAvailable } from "../../xai-subscription-core";
+import { workspaceXaiOperationAvailable } from "../../xai-operation-availability";
 import { coreTranscriptionUnavailable, transcribeOnSubscriptionCore } from "./subscription-core";
 
 const TRANSCRIBE_URL = `${XAI_PUBLIC_API_BASE_URL}/stt`;

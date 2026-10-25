@@ -18,10 +18,10 @@ import {
   voiceInputBillableUsage,
   type TranscriptionBilling,
 } from "@opengeni/core";
-import { createFfmpegAudioNormalizer } from "../src/transcription/normalize";
-import { createTranscriptionService } from "../src/transcription/service";
-import { createMaiTranscriptionProvider } from "../src/transcription/providers/azure-mai";
-import { parseTranscriptionResponseBody } from "../src/transcription/providers/openai";
+import { createFfmpegAudioNormalizer } from "@opengeni/core/transcription-service";
+import { createTranscriptionService } from "@opengeni/core/transcription-service";
+import { createMaiTranscriptionProvider } from "@opengeni/core/transcription-service";
+import { parseTranscriptionResponseBody } from "@opengeni/core/transcription-service";
 
 const pricing = { microsPerMinute: 6000, marginBps: 500 };
 const request = {

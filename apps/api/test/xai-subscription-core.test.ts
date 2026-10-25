@@ -155,7 +155,7 @@ mock.module("@opengeni/db", () => ({
 let upstream: (url: string, init?: RequestInit) => Promise<Response>;
 
 const { createXaiSubscriptionTranscriptionProvider } =
-  await import("../src/transcription/providers/xai-subscription");
+  await import("@opengeni/core/transcription-service");
 const { createRealtimeWebsocketConnection, RealtimeWebsocketBrokerError } =
   await import("../src/realtime-websocket");
 const { readXaiCoreStatus, workspaceXaiOperationAvailable } =
