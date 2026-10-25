@@ -26,6 +26,7 @@ import {
 } from "../site-uploads";
 import {
   sessionTargetContext,
+  isSecretReferenceError,
   SetSessionTargetRequest,
   CreateScheduledTaskRequest,
   ScheduledTaskAgentConfigInput,
@@ -4530,28 +4531,35 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
-      const typedOp = op as RunOnOp;
-      const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
-      // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
-      const claims = exactAgentAttemptClaims(grant);
-      const secretResolver =
-        claims && claims.sessionId === sessionId && typedOp.kind !== "read"
-          ? await createRunOnSecretResolver(
-              deps,
-              { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
-              (subjectId) =>
-                vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
-            )
-          : null;
-      return json(
-        await withUserSetupCard(
-          await runOnSandbox(services, await fleetContext(), target, typedOp, {
-            ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
-            ...(secretResolver ? { secretResolver } : {}),
-          }),
-          userSetupCard("run_on", target),
-        ),
-      );
+      try {
+        const typedOp = op as RunOnOp;
+        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+        // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
+        const claims = exactAgentAttemptClaims(grant);
+        const secretResolver =
+          claims && claims.sessionId === sessionId && typedOp.kind !== "read"
+            ? await createRunOnSecretResolver(
+                deps,
+                { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
+                (subjectId) =>
+                  vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
+              )
+            : null;
+        return json(
+          await withUserSetupCard(
+            await runOnSandbox(services, await fleetContext(), target, typedOp, {
+              ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+              ...(secretResolver ? { secretResolver } : {}),
+            }),
+            userSetupCard("run_on", target),
+          ),
+        );
+      } catch (error) {
+        if (isSecretReferenceError(error)) {
+          return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
+        }
+        throw error;
+      }
     },
   );
 
