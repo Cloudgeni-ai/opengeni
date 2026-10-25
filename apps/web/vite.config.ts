@@ -172,14 +172,17 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // Zod, Permission and the pure Skill receipt schemas initialize
-              // before the contracts barrel and organization-access read them.
-              // Keep these leaves outside shared app chunks that import their
-              // consumers back; otherwise eager Permission.options or
-              // SkillWriteReceipt reads can run before initialization.
+              // Zod, Permission, the shared contract primitives and the pure
+              // Skill receipt schemas initialize before the contracts barrel and
+              // organization-access read them. Keep these leaves outside shared
+              // app chunks that import their consumers back; otherwise eager
+              // Permission.options, SkillWriteReceipt or primitive reads can run
+              // before initialization. The primitives depend only on Zod, and
+              // both this group and startup-contract-tables import them, so they
+              // must live here rather than in a shared app chunk.
               // Co-locating them avoids an extra initial graph request too.
               name: "zod-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/](?:permissions|skills)\.tsx?$)/,
+              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/](?:permissions|primitives|skills)\.tsx?$)/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
