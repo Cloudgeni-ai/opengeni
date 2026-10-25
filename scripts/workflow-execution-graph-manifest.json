@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/batch-ci.yml",
-      "sha256": "605daeab2bf825d6073906c38ee7de215548d8b9e7d8464a83731acc48740093"
+      "sha256": "b54e9a3fea1f1b754307dad72241aea62b9e8e3991c3ccdde0885d9bf8bfc509"
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
@@ -620,6 +620,12 @@
       "job": "source",
       "step": "Previous-binary database readiness",
       "sha256": "2f05aa9bffac152003fa13cbd180ccde355e865e0c57642387ae7aa28b1b3a6d"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "source",
+      "step": "Production web bundle",
+      "sha256": "c41962f2fb0c1ab7d43747b3fc36cf2700f1c7b42566a1ec30402cd8fc3ca086"
     },
     {
       "workflow": ".github/workflows/batch-ci.yml",
