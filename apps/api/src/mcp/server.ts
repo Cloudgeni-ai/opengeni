@@ -166,6 +166,7 @@ import {
   upsertWorkClaim,
   acceptSessionHumanInputResponse,
   HumanInputResponseValidationError,
+  getWorkspaceGrant,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
@@ -401,6 +402,7 @@ import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
+import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -7190,6 +7192,19 @@ function registerCapabilityDiscoveryTools(
           message: setup.detail,
         });
       }
+      // The card offers only what the person's own grant can finish, by the
+      // same rule. When it says they can't connect here, the agent must not
+      // send them to it. The person is the human this agent acts for; without
+      // a workspace membership there is nothing to say beyond the card.
+      const personSubjectId = exactAgentAttemptClaims(grant)
+        ? (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
+            .initiatingHumanSubjectId
+        : grant.subjectId;
+      const person = personSubjectId
+        ? await getWorkspaceGrant(deps.db, personSubjectId, grant.workspaceId)
+        : null;
+      const personCannotConnect =
+        person !== null && inChatCapabilitySetup(person, item.id, item).kind === "unavailable";
       const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: setup.action ?? "connect",
@@ -7216,8 +7231,9 @@ function registerCapabilityDiscoveryTools(
         status: "authorization_requested",
         action: setup.action,
         eventId,
-        message:
-          item.id === CONNECTED_MACHINE_CAPABILITY_ID
+        message: personCannotConnect
+          ? `The card was posted, but this person can't connect ${item.name} from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.`
+          : item.id === CONNECTED_MACHINE_CAPABILITY_ID
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
