@@ -157,6 +157,12 @@ about 18 percent, which is in the same range as pyannote 3.1. It uses about
 3 CPU minutes per hour of audio, so an hour of meeting takes about 30
 seconds on 8 cores.
 
+Memory stays small and nearly flat with length: about 300 MB for a
+half-hour meeting on one thread, plus about 70 MB for each further thread,
+and about 900 MB for a two-hour meeting on four threads. Each thread embeds
+one piece of speech at a time instead of holding every window's speech at
+once.
+
 `opengeni-speakers diarize` reads 16 kHz mono f32 audio on stdin or from
 `--input` and prints `{turns, speakers}` JSON, each speaker with its total
 speech and averaged voice vector. `opengeni-speakers embed --segments FILE`
