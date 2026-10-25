@@ -22,6 +22,7 @@ import {
 import * as z4 from "zod/v4";
 
 import {
+  actionInOneWorkspace,
   callOrganizationAction,
   describeAction,
   describeActionResult,
@@ -71,8 +72,14 @@ const NOT_CONFIRMED =
   "Nothing was run: this change needs a confirmation from the person who sent this turn's message, given in this chat where they are signed in; an Allow from anyone else, or sent through a key or another integration, doesn't count. Call it again once with the same arguments so they can allow it. If they declined, or someone else answered, tell them so and don't call it again.";
 const READ_ONLY =
   "Nothing was run: this chat was opened through an embed or another integration, so app actions here can only read, not change anything. The person can make this change in the app itself.";
+// For someone who uses Opengeni through another product, there is no
+// Opengeni app page to send them to.
+const EXTERNAL_PERSON_READ_ONLY =
+  "Nothing was run: this person uses Opengeni through another product, and app actions here can only read, not change anything. Tell them plainly, without pointing them to a page.";
 const SECRETS =
   "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. The person can do it in the app's settings themselves.";
+const EXTERNAL_PERSON_SECRETS =
+  "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. Tell the person plainly that this isn't available here, without pointing them to a page.";
 
 const CallInput = z4.object({
   id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
@@ -116,6 +123,11 @@ export type SessionAppActionAuthority = Awaited<
   ReturnType<typeof resolveSessionAppActionAuthority>
 >;
 type ActingAuthority = Exclude<SessionAppActionAuthority, { kind: "unavailable" }>;
+
+/** Someone who uses Opengeni through another product, such as a person in an embedded chat. */
+function isExternalPerson(subjectId: string): boolean {
+  return subjectId.startsWith("external_user:");
+}
 
 /**
  * The one authority path for what a session does as a person: the app-action
@@ -233,7 +245,16 @@ export function registerSessionAdminAccessTools(input: {
     async ({ query, limit, offset }) => {
       const authority = await currentAuthority();
       if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
-      return text(searchActions({ query, limit, offset }));
+      // Offer only what can succeed: someone who uses Opengeni through another
+      // product reaches this chat's workspace and nothing beyond it.
+      return text(
+        searchActions({
+          query,
+          limit,
+          offset,
+          ...(isExternalPerson(authority.subjectId) ? { reachable: actionInOneWorkspace } : {}),
+        }),
+      );
     },
   );
 
@@ -275,9 +296,11 @@ export function registerSessionAdminAccessTools(input: {
         entry &&
         appActionCallCarriesSecrets(entry, args.body)
       )
-        return failure(SECRETS);
+        return failure(isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_SECRETS : SECRETS);
       if (authority.kind === "read_only" && entry && appActionChangesState(entry))
-        return failure(READ_ONLY);
+        return failure(
+          isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_READ_ONLY : READ_ONLY,
+        );
       if (authority.kind === "confirm" && entry && appActionChangesState(entry)) {
         // Enforced here, not only in the chat: the change runs only if this
         // attempt is executing exactly these arguments, which this same
