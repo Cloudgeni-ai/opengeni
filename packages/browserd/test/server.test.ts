@@ -462,6 +462,20 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("browser and computer actions lift the idle timeout before they run", async () => {
+    const source = await readFile(new URL("../src/server.ts", import.meta.url), "utf8");
+    for (const run of [
+      "await this.supervisor.action(command)",
+      "await supervisor.action(command)",
+    ]) {
+      const at = source.indexOf(run);
+      expect(at).toBeGreaterThan(0);
+      const lift = source.lastIndexOf("liftActionIdleTimeout(server, request);", at);
+      expect(lift).toBeGreaterThan(source.lastIndexOf('segments[3] === "actions"', at));
+    }
+    expect(source).toContain("server.timeout(request, 0)");
+  });
+
   test.each([
     { code: "timeout" as const, status: 504 },
     { code: "resource_unavailable" as const, status: 503 },

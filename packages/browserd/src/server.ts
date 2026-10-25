@@ -169,6 +169,18 @@ type InteractionSocketData = BrowserSocketData | ComputerSocketData | ComputerRf
 type BrowserServer = ReturnType<typeof Bun.serve<InteractionSocketData>>;
 type BrowserSocket = Bun.ServerWebSocket<InteractionSocketData>;
 
+/**
+ * An action request answers only once its action or batch finished, which
+ * its declared waits may let run past the server's idle timeout; the server
+ * may then reset the connection while the batch keeps running. Bun clamps a
+ * per-request idle timeout to 255 seconds, so turn it off for this request:
+ * the caller's deadline, derived from the same declared waits, bounds it, and
+ * a caller that gives up closes the connection.
+ */
+function liftActionIdleTimeout(server: BrowserServer, request: Request): void {
+  server.timeout(request, 0);
+}
+
 export type BrowserControlServerOptions = {
   supervisor: BrowserSupervisor;
   computerSupervisor?: ComputerSupervisor;
@@ -622,6 +634,7 @@ export class BrowserControlServer {
           409,
         );
       }
+      liftActionIdleTimeout(server, request);
       const receipt = await this.supervisor.action(command);
       // Older clients parse receipts strictly. Return resolved targets only to
       // a caller that asked for them.
@@ -970,6 +983,7 @@ export class BrowserControlServer {
           409,
         );
       }
+      liftActionIdleTimeout(server, request);
       const receipt = await supervisor.action(command);
       // Older clients parse receipts strictly. Return role stand-ins only to
       // a caller that asked for them.

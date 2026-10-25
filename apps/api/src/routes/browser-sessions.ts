@@ -256,6 +256,7 @@ import {
 import { resolveBrowserActionFences, type BrowserActionFences } from "../browser-action-fences";
 import { InteractionRouteStages, reportInteractionRouteStages } from "../interaction-route-stages";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { liftRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
@@ -1649,6 +1650,9 @@ export function registerBrowserSessionRoutes(
         "sessions:control",
       );
       const request = await parseJsonBody(context, BrowserActionRequest);
+      // The response waits for the whole batch, which may outlast the
+      // server's idle timeout.
+      liftRequestIdleTimeout(context);
       const workspaceFileIds = browserUploadFileIds(request.action);
       if (workspaceFileIds.length > 0) {
         await requireAccessGrant(context, deps, workspaceId, "files:read");

@@ -3007,7 +3007,11 @@ describe("action request deadlines", () => {
   /** A runner whose controller takes `runMs` to answer; like the real runner,
    * it gives up once the request's own timeoutMs has passed. Time advances
    * through the system clock, so the test does not actually wait. */
-  function slowController(runMs: number, respond: (call: NativeCall) => unknown) {
+  function slowController(
+    runMs: number,
+    respond: (call: NativeCall) => unknown,
+    runnerMaxMs = Number.POSITIVE_INFINITY,
+  ) {
     const calls: NativeCall[] = [];
     const session: BrowserControlPlacementSession = {
       async exec() {
@@ -3021,8 +3025,9 @@ describe("action request deadlines", () => {
       },
       async browserControlHttp(call) {
         calls.push(call);
-        setSystemTime(new Date(Date.now() + Math.min(runMs, call.timeoutMs)));
-        if (call.timeoutMs < runMs) throw new Error("browser controller request timed out");
+        const timeoutMs = Math.min(call.timeoutMs, runnerMaxMs);
+        setSystemTime(new Date(Date.now() + Math.min(runMs, timeoutMs)));
+        if (timeoutMs < runMs) throw new Error("browser controller request timed out");
         return {
           kind: "response",
           status: 200,
@@ -3107,12 +3112,12 @@ describe("action request deadlines", () => {
     expect(calls[0]!.timeoutMs).toBeGreaterThan(70_000);
   });
 
-  test("a single action keeps the one-minute request budget", async () => {
+  test("a single action without waits keeps the one-minute request budget", async () => {
     const { client, calls } = slowController(1_000, receipt);
     const browser = client.sessionClient({ reference, controlToken, viewToken });
     await browser.action({
       ...command(),
-      action: { type: "click", locator: { kind: "text", text: "Send" } },
+      action: { type: "press", key: "Enter" },
     });
     expect(calls[0]!.timeoutMs).toBe(60_000);
   });
@@ -3129,6 +3134,28 @@ describe("action request deadlines", () => {
       retryable: false,
     });
     expect((error as Error).cause).toBeInstanceOf(BrowserControlTransportError);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("an older runner's 15-minute clamp is reported as the deadline it reached", async () => {
+    setSystemTime(new Date("2026-08-10T12:00:00.000Z"));
+    const longBatch = {
+      type: "batch" as const,
+      actions: Array.from({ length: 10 }, () => ({
+        type: "wait" as const,
+        condition: "visible" as const,
+        locator: { kind: "text" as const, text: "Done" },
+        timeoutMs: 120_000,
+      })),
+    };
+    expect(browserActionDeadlineMs(longBatch)).toBe(20 * 60_000);
+    const { client, calls } = slowController(18 * 60_000, receipt, 15 * 60_000);
+    const browser = client.sessionClient({ reference, controlToken, viewToken });
+    const error = await browser
+      .action({ ...command(), action: longBatch })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(BrowserControlActionDeadlineError);
+    expect(error).toMatchObject({ deadlineMs: 15 * 60_000 });
     expect(calls).toHaveLength(1);
   });
 

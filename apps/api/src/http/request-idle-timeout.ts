@@ -1,0 +1,35 @@
+import type { Context } from "hono";
+
+const REQUEST_IDLE_TIMEOUT_BINDING = "opengeniSetRequestIdleTimeout";
+
+/** The API server's idle timeout: a connection that sends or receives nothing
+ * for this long is closed, even while its handler is still running. It is
+ * also the longest idle timeout Bun accepts, per server or per request. */
+export const API_SERVER_IDLE_TIMEOUT_SECONDS = 255;
+
+type RequestIdleTimeoutBindings = {
+  [REQUEST_IDLE_TIMEOUT_BINDING]?: (seconds: number) => void;
+};
+
+/** Lets a route change this request's idle timeout (Bun's `server.timeout`). */
+export function apiRequestBindingsForIdleTimeout(
+  setIdleTimeout: (seconds: number) => void,
+): RequestIdleTimeoutBindings {
+  return { [REQUEST_IDLE_TIMEOUT_BINDING]: setIdleTimeout };
+}
+
+/**
+ * For a route whose response legitimately waits for longer bounded work (an
+ * action batch, bounded by its own deadline at the controller), stop the
+ * server's idle timer from resetting the connection while that work runs.
+ * Bun clamps a per-request idle timeout to 255 seconds, so the timer is
+ * turned off rather than lengthened; the work's own deadline bounds the
+ * request, and a client that goes away still closes it. Without a server
+ * binding (in-process requests) there is nothing to change.
+ */
+export function liftRequestIdleTimeout(c: Context): void {
+  const setIdleTimeout = (c.env as RequestIdleTimeoutBindings | undefined)?.[
+    REQUEST_IDLE_TIMEOUT_BINDING
+  ];
+  if (typeof setIdleTimeout === "function") setIdleTimeout(0);
+}

@@ -1,5 +1,5 @@
 import { CuaNativeTools } from "./native-tools";
-import type { ComputerNativeCallRequest } from "@opengeni/contracts";
+import { COMPUTER_LOCATOR_WAIT_MS, type ComputerNativeCallRequest } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type {
@@ -2231,8 +2231,8 @@ const ACTIONS_ON_UNSEEN: ReadonlySet<string> = new Set([
 
 /** How long a batch step that names its element waits for it to appear and
  * enable: CUA's longest wait for one step. Action request deadlines are
- * derived from it: keep it equal to COMPUTER_LOCATOR_WAIT_MS in contracts. */
-const NAMED_STEP_WAIT_MS = 10_000;
+ * derived from the same bound. */
+const NAMED_STEP_WAIT_MS = COMPUTER_LOCATOR_WAIT_MS;
 
 /** How long its lookup then waits, once the check found the element. */
 const NAMED_STEP_FIND_MS = 1_000;

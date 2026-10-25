@@ -555,6 +555,20 @@ export class BrowserControlActionDeadlineError extends Error {
  * or its reply timer). A transport failure that arrives once the deadline has
  * elapsed is that deadline; an earlier one remains an ordinary transport fault. */
 const ACTION_DEADLINE_DETECTION_SLACK_MS = 1_000;
+/** Connected Machine runners released before the 20-minute request maximum
+ * clamp every request to 15 minutes, so on them a longer deadline ends there. */
+const LEGACY_RUNNER_REQUEST_MAX_MS = 15 * 60_000;
+
+/** The deadline a transport failure after `elapsedMs` proves was reached, if any. */
+function reachedActionDeadline(deadlineMs: number, elapsedMs: number): number | null {
+  if (elapsedMs >= deadlineMs - ACTION_DEADLINE_DETECTION_SLACK_MS) return deadlineMs;
+  if (
+    deadlineMs > LEGACY_RUNNER_REQUEST_MAX_MS &&
+    elapsedMs >= LEGACY_RUNNER_REQUEST_MAX_MS - ACTION_DEADLINE_DETECTION_SLACK_MS
+  )
+    return LEGACY_RUNNER_REQUEST_MAX_MS;
+  return null;
+}
 
 async function withActionDeadline<T>(
   surface: "browser" | "computer",
@@ -565,11 +579,12 @@ async function withActionDeadline<T>(
   try {
     return await request(deadlineMs);
   } catch (error) {
-    if (
-      error instanceof BrowserControlTransportError &&
-      Date.now() - startedAt >= deadlineMs - ACTION_DEADLINE_DETECTION_SLACK_MS
-    ) {
-      throw new BrowserControlActionDeadlineError(surface, deadlineMs, { cause: error });
+    const reached =
+      error instanceof BrowserControlTransportError
+        ? reachedActionDeadline(deadlineMs, Date.now() - startedAt)
+        : null;
+    if (reached !== null) {
+      throw new BrowserControlActionDeadlineError(surface, reached, { cause: error });
     }
     throw error;
   }

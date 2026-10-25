@@ -21,20 +21,39 @@ export const BROWSER_LOCATOR_WAIT_MS = 10_000;
 export const BROWSER_DEFAULT_WAIT_MS = 30_000;
 /** A navigation waits this long for its server to answer before it stops. */
 export const BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS = 20_000;
+/** After page input, a navigation the input started is waited for this long
+ * to show its new document. */
+export const BROWSER_ACTION_NAVIGATION_SETTLE_MS = 10_000;
+/** After page input, requests the input started are waited for this long. */
+export const BROWSER_ACTION_REQUEST_SETTLE_MS = 1_500;
+/** After page input, finite animations are waited for this long. */
+export const BROWSER_ANIMATION_SETTLE_MS = 750;
 /** A named (non-ref) computer locator waits this long to appear and enable. */
 export const COMPUTER_LOCATOR_WAIT_MS = 10_000;
 
 /** No action request gets less than the transport's historical default, so a
  * single action keeps exactly the budget it always had. */
 export const INTERACTION_ACTION_DEADLINE_FLOOR_MS = 60_000;
-/** Fixed allowance per request for dispatch, the post-action settle and the
- * receipt's observation, which run once per request whatever its length. */
+/** Fixed allowance per request for reading the target before the actions and
+ * observing it for the receipt, which run once per request whatever its length. */
 export const INTERACTION_ACTION_DEADLINE_MARGIN_MS = 30_000;
 /** The longest any controller request may run. */
 export const INTERACTION_ACTION_DEADLINE_MAX_MS = 20 * 60_000;
 
 /** Input dispatch and round trips of one browser action beyond its waits. */
 const BROWSER_ACTION_DISPATCH_MS = 2_000;
+/** One settle pass after page input: a navigation the input started, the
+ * requests it started (plus the response's apply and round trips), and
+ * finite animations within their one-second evaluation budget. */
+const BROWSER_SETTLE_PASS_MS =
+  BROWSER_ACTION_NAVIGATION_SETTLE_MS +
+  BROWSER_ACTION_REQUEST_SETTLE_MS +
+  250 +
+  BROWSER_ANIMATION_SETTLE_MS +
+  1_000;
+/** The settle after a request's last action (or after a failure): one pass,
+ * then one frame for late-starting requests and a second pass for those. */
+export const BROWSER_ACTION_SETTLE_MAX_MS = 2 * BROWSER_SETTLE_PASS_MS + 1_000;
 /** Input dispatch of one computer action plus its bounded settle. */
 const COMPUTER_ACTION_DISPATCH_MS = 8_000;
 /** A launched application's first window may take this long to appear. */
@@ -104,12 +123,16 @@ function boundedDeadline(waitsMs: number): number {
 
 /**
  * The request deadline for one browser action or batch: the sum of each
- * action's declared maximum wait plus a fixed margin, never below the
- * historical single-request default and never above the controller maximum.
+ * action's declared maximum wait, the settle after the last action, and a
+ * fixed margin, never below the historical single-request default and never
+ * above the controller maximum.
  */
 export function browserActionDeadlineMs(action: BrowserAction | BrowserActionBatch): number {
   const actions = action.type === "batch" ? action.actions : [action];
-  return boundedDeadline(actions.reduce((sum, item) => sum + browserActionMaxWaitMs(item), 0));
+  return boundedDeadline(
+    actions.reduce((sum, item) => sum + browserActionMaxWaitMs(item), 0) +
+      BROWSER_ACTION_SETTLE_MAX_MS,
+  );
 }
 
 /** The request deadline for one computer action or batch; see browserActionDeadlineMs. */

@@ -125,6 +125,7 @@ import {
 } from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { liftRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
@@ -734,6 +735,9 @@ export function registerComputerSessionRoutes(
         "sessions:control",
       );
       const request = await parseJsonBody(context, ComputerActionRequest);
+      // The response waits for the whole batch, which may outlast the
+      // server's idle timeout.
+      liftRequestIdleTimeout(context);
       const startedAtMs = performance.now();
       const result = await withActiveComputerController(
         context,

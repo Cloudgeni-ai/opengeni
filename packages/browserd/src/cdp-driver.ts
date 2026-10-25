@@ -7,6 +7,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, resolve as resolvePath } from "node:path";
 import {
+  BROWSER_ACTION_NAVIGATION_SETTLE_MS,
+  BROWSER_ACTION_REQUEST_SETTLE_MS,
+  BROWSER_ANIMATION_SETTLE_MS,
   BROWSER_DEFAULT_WAIT_MS,
   BROWSER_LOCATOR_WAIT_MS,
   BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS,
@@ -7701,14 +7704,15 @@ const KEY_DEFINITIONS: Record<string, KeyDefinition> = {
 
 // Typical exit animations take 100-300 ms. Longer finite animations are
 // waited for only this long, so a slow transition cannot stall every action.
-const ANIMATION_SETTLE_LIMIT_MS = 750;
+// Action request deadlines count these settle limits (BROWSER_ACTION_SETTLE_MAX_MS).
+const ANIMATION_SETTLE_LIMIT_MS = BROWSER_ANIMATION_SETTLE_MS;
 // Requests an action starts usually answer in well under a second; a request
 // that stays open (a stream, a stalled server) must not hold the result back.
-const ACTION_REQUEST_SETTLE_LIMIT_MS = 1_500;
+const ACTION_REQUEST_SETTLE_LIMIT_MS = BROWSER_ACTION_REQUEST_SETTLE_MS;
 // A navigation an action starts (a form post, a followed link) is waited for
 // this long to show its new document; a server slower than this leaves the
 // result on the page as it is, still loading.
-const ACTION_NAVIGATION_SETTLE_LIMIT_MS = 10_000;
+const ACTION_NAVIGATION_SETTLE_LIMIT_MS = BROWSER_ACTION_NAVIGATION_SETTLE_MS;
 const ACTION_REQUEST_POLL_MS = 20;
 // Input after which a page handler commonly starts a request: a click or
 // key that submits, a choice, a chosen file, a click at a point, typed keys

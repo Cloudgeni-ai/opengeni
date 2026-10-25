@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  BROWSER_ACTION_SETTLE_MAX_MS,
   BrowserActionBatch,
   INTERACTION_ACTION_DEADLINE_FLOOR_MS,
   INTERACTION_ACTION_DEADLINE_MARGIN_MS,
@@ -15,16 +16,32 @@ const button = { kind: "role" as const, role: "button", name: "Save", exact: tru
 const field = { kind: "label" as const, text: "Name" };
 
 describe("browser action deadlines", () => {
-  test("a single action keeps the historical one-minute request budget", () => {
-    expect(browserActionDeadlineMs({ type: "click", locator: button })).toBe(
+  test("counts the settle after page input once per request", () => {
+    // One pass (navigation 10 s, requests 1.5 s, apply 0.25 s, animations
+    // 0.75 s plus their 1 s evaluation), a 1 s frame, and a second pass.
+    expect(BROWSER_ACTION_SETTLE_MAX_MS).toBe(2 * 13_500 + 1_000);
+  });
+
+  test("a single action without waits keeps the historical one-minute request budget", () => {
+    expect(browserActionDeadlineMs({ type: "press", key: "Enter" })).toBe(
       INTERACTION_ACTION_DEADLINE_FLOOR_MS,
     );
     expect(
       browserActionDeadlineMs({ type: "viewport", width: 800, height: 600, mobile: false }),
     ).toBe(60_000);
-    // A navigate's own server and document waits already exceed the floor.
+  });
+
+  test("a single action whose own waits exceed the floor gets them", () => {
+    // A click that navigates: its locator wait, dispatch and the settle.
+    expect(browserActionDeadlineMs({ type: "click", locator: button })).toBe(
+      10_000 + 2_000 + BROWSER_ACTION_SETTLE_MAX_MS + INTERACTION_ACTION_DEADLINE_MARGIN_MS,
+    );
     expect(browserActionDeadlineMs({ type: "navigate", url: "https://example.test/" })).toBe(
-      20_000 + 30_000 + 2_000 + INTERACTION_ACTION_DEADLINE_MARGIN_MS,
+      20_000 +
+        30_000 +
+        2_000 +
+        BROWSER_ACTION_SETTLE_MAX_MS +
+        INTERACTION_ACTION_DEADLINE_MARGIN_MS,
     );
   });
 
@@ -44,8 +61,10 @@ describe("browser action deadlines", () => {
       ],
     });
     // wait 30 s + locator 10 s; fill locator 10 s; press without locator;
-    // wait 90 s + locator 10 s; 2 s dispatch each; one 30 s margin.
-    expect(browserActionDeadlineMs(batch)).toBe(40_000 + 10_000 + 0 + 100_000 + 4 * 2_000 + 30_000);
+    // wait 90 s + locator 10 s; 2 s dispatch each; one settle; one 30 s margin.
+    expect(browserActionDeadlineMs(batch)).toBe(
+      40_000 + 10_000 + 0 + 100_000 + 4 * 2_000 + BROWSER_ACTION_SETTLE_MAX_MS + 30_000,
+    );
   });
 
   test("an explicit wait's timeoutMs replaces the default wait", () => {
@@ -56,7 +75,9 @@ describe("browser action deadlines", () => {
     });
     expect(browserActionMaxWaitMs(wait())).toBe(30_000 + 2_000);
     expect(browserActionMaxWaitMs(wait(120_000))).toBe(120_000 + 2_000);
-    expect(browserActionDeadlineMs(wait(120_000))).toBe(120_000 + 2_000 + 30_000);
+    expect(browserActionDeadlineMs(wait(120_000))).toBe(
+      120_000 + 2_000 + BROWSER_ACTION_SETTLE_MAX_MS + 30_000,
+    );
   });
 
   test("a navigate with waitUntil, sent as navigate then wait, gets both bounds", () => {
@@ -67,7 +88,9 @@ describe("browser action deadlines", () => {
         { type: "wait", condition: "network_idle" },
       ],
     });
-    expect(browserActionDeadlineMs(batch)).toBe(20_000 + 30_000 + 2_000 + 30_000 + 2_000 + 30_000);
+    expect(browserActionDeadlineMs(batch)).toBe(
+      20_000 + 30_000 + 2_000 + 30_000 + 2_000 + BROWSER_ACTION_SETTLE_MAX_MS + 30_000,
+    );
   });
 
   test("locator-bearing actions add one locator wait per locator", () => {
