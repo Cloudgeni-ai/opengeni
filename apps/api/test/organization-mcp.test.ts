@@ -378,6 +378,9 @@ describe("organization MCP server", () => {
     const update = await describeAction("PATCH /v1/workspaces/:workspaceId/vaults/:vaultId");
     expect(update.input[0]).toMatchObject({ name: "UpdateVaultRequest", in: "body" });
     expect(update.input[0]!.schema!.required).toContain("expectedGeneration");
+    const remove = await describeAction("DELETE /v1/workspaces/:workspaceId/vaults/:vaultId");
+    expect(remove.input[0]).toMatchObject({ name: "DeleteVaultRequest", in: "body" });
+    expect(remove.input[0]!.schema!.required).toEqual(["confirmName"]);
     const link = await describeAction("POST /v1/workspaces/:workspaceId/vaults/link");
     expect(link.input[0]).toMatchObject({ name: "LinkProviderVaultRequest", in: "body" });
     expect(link.input[0]!.schema).toMatchObject({ type: "object" });
