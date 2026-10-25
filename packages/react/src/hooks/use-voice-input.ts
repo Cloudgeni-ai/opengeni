@@ -226,6 +226,8 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   const watchRef = useRef<
     (dictation: Dictation, versionId: string | null, generation: number) => Promise<void>
   >(async () => undefined);
+  /** `loadSaved`, to look again once a leftover upload lands. */
+  const loadSavedRef = useRef<(generation: number) => Promise<void>>(async () => undefined);
 
   const now = useCallback(() => (latest.current.now ?? currentDate)(), []);
 
@@ -326,12 +328,14 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       const client = latest.current.recordings;
       const workspace = latest.current.workspaceId;
       if (!client || !latest.current.durable) return;
-      await uploader()
+      // Dictations a closed page or crashed app left on this device: finish
+      // uploading them here.
+      const resumed = await uploader()
         .resume({
           only: (stored) =>
             stored.create.purpose === "dictation" && stored.workspaceId === workspace,
         })
-        .catch(() => undefined);
+        .catch((): string[] => []);
       let listed;
       try {
         listed = await client.listRecordings(workspace, { purpose: "dictation", limit: 10 });
@@ -340,6 +344,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       }
       if (generation !== generationRef.current || dictationRef.current) return;
       const taken = readTaken();
+      const listedIds = new Set(listed.recordings.map((recording) => recording.id));
       for (const recording of listed.recordings) {
         if (taken.has(recording.id)) {
           // Its text went into a draft while the delete couldn't reach the server.
@@ -351,9 +356,26 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
           );
           continue;
         }
-        // Still being spoken here or in another tab; that composer owns it.
-        if (recording.state === "capturing") continue;
         const dictation: Dictation = { recordingId: recording.id, autoInsert: false, text: null };
+        if (recording.state === "capturing") {
+          // Still being spoken in another tab or on another device: that composer owns it.
+          if (!resumed.includes(recording.id)) continue;
+          // Left behind on this device: hold it while its last chunks upload.
+          hold(dictation, "retrying");
+          void uploader()
+            .finish(recording.id)
+            .then(
+              (upload) => {
+                if (generation !== generationRef.current) return;
+                if (upload.discarded) settleIdle();
+                else if (upload.failed)
+                  hold(dictation, "error", voiceInputCode(upload.failed.code));
+                else void watchRef.current(dictation, null, generation);
+              },
+              () => undefined,
+            );
+          return;
+        }
         if (recording.state === "failed") {
           hold(
             dictation,
@@ -366,9 +388,22 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
         void watchRef.current(dictation, null, generation);
         return;
       }
+      // One the server hasn't heard of yet: offer it once its upload lands.
+      const unlisted = resumed.filter((id) => !listedIds.has(id));
+      if (unlisted.length > 0) {
+        void Promise.any(unlisted.map((id) => uploader().finish(id))).then(
+          () => {
+            if (generation === generationRef.current && !dictationRef.current) {
+              void loadSavedRef.current(generation);
+            }
+          },
+          () => undefined,
+        );
+      }
     },
-    [hold, uploader],
+    [hold, settleIdle, uploader],
   );
+  loadSavedRef.current = loadSaved;
 
   /** Take the text: delete the dictation, then insert it once. */
   const take = useCallback(

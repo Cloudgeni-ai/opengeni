@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   createMemoryRecordingChunkStore,
+  RecordingUploader,
   type Recorder,
+  type RecordingChunkStore,
   type RecorderOptions,
   type RecorderPlatform,
   type RecorderSnapshot,
@@ -213,9 +215,26 @@ class FakeServer {
       this.seed({ id, workspaceId, state: "capturing" });
       return { id } as never;
     },
-    createRecordingUploads: async () => ({ uploads: [] }) as never,
-    completeRecordingChunks: async () => ({}) as never,
-    finalizeRecording: async () => ({}) as never,
+    createRecordingUploads: async (_workspaceId, _recordingId, request) =>
+      ({
+        uploads: request.chunks.map((chunk) => ({
+          chunkNumber: chunk.chunkNumber,
+          uploaded: true,
+          url: null,
+          method: "PUT",
+          headers: {},
+          expiresAt: null,
+        })),
+      }) as never,
+    completeRecordingChunks: async (_workspaceId, _recordingId, request) =>
+      ({ uploaded: request.chunkNumbers, missing: [] }) as never,
+    finalizeRecording: async (_workspaceId, recordingId) => {
+      const recording = this.recordings.get(recordingId);
+      if (!recording) throw Object.assign(new Error("gone"), { status: 404 });
+      if (recording.state === "capturing") this.finalize(recordingId);
+      const version = recording.versions.at(-1)!;
+      return { recording: { id: recordingId }, transcript: { ...version } } as never;
+    },
     deleteRecording: async (_workspaceId, recordingId) => {
       if (this.deleteFails === "offline") throw new TypeError("Failed to fetch");
       this.deletes.push(recordingId);
@@ -262,13 +281,18 @@ class FakeServer {
   };
 }
 
-function fakePlatform(server: FakeServer, options?: { deny?: boolean }) {
+function fakePlatform(
+  server: FakeServer,
+  options?: { deny?: boolean; store?: RecordingChunkStore },
+) {
   const recorders: Array<{ options: RecorderOptions; stopped: boolean; discarded: boolean }> = [];
   const stream = { getTracks: () => [] } as unknown as MediaStream;
+  const store = options?.store;
   const platform: RecorderPlatform = {
     supported: true,
     systemAudioSupported: false,
-    createStore: () => createMemoryRecordingChunkStore(),
+    createStore: () => store ?? createMemoryRecordingChunkStore(),
+    isCaptureActive: async () => false,
     createRecorder(recorderOptions): Recorder {
       const entry = { options: recorderOptions, stopped: false, discarded: false };
       recorders.push(entry);
@@ -516,6 +540,49 @@ describe("useVoiceInput: dictations as recordings", () => {
     // One still being spoken in another tab is that tab's to finish.
     expect(server.recordings.has("other-tab")).toBe(true);
     expect(hook.result.current.status).toBe("idle");
+    await hook.unmount();
+  });
+
+  test("finishes uploading a dictation a closed page left on this device, then offers it", async () => {
+    const server = new FakeServer();
+    server.heard = "left mid-sentence";
+    const store = createMemoryRecordingChunkStore();
+    // A page started a dictation, saved a chunk, and was closed before it stopped.
+    const crashed = new RecordingUploader({ client: server.client, store });
+    await crashed.begin({
+      workspaceId: "ws-1",
+      recordingId: "crashed",
+      create: {
+        recordingId: "crashed",
+        purpose: "dictation",
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+      },
+    } as never);
+    await crashed.addChunk({
+      recordingId: "crashed",
+      trackNumber: 0,
+      chunkNumber: 0,
+      bytes: new Uint8Array([1, 2, 3]),
+      sha256: "00",
+      startMilliseconds: 0,
+      durationMilliseconds: 1_000,
+    });
+    crashed.dispose();
+    await waitFor(() => server.recordings.has("crashed"));
+    expect(server.recordings.get("crashed")?.state).toBe("capturing");
+
+    const { platform } = fakePlatform(server, { store });
+    const { hook, draft } = await renderDurable(server, platform);
+    await waitFor(() => hook.result.current.status === "transcript-ready");
+    expect(hook.result.current.recordingId).toBe("crashed");
+    expect(hook.result.current.savedTranscript).toBe("left mid-sentence");
+    expect(draft.value).toBe("");
+    await act(async () => {
+      await hook.result.current.insertSavedTranscript();
+      await settle();
+    });
+    expect(draft.value).toBe("left mid-sentence");
+    expect(server.recordings.has("crashed")).toBe(false);
     await hook.unmount();
   });
 

@@ -1095,13 +1095,13 @@ export const englishMessages = {
     "Recording is too large. Try a shorter message.",
   "composerTranscriptionControl.recordingPressEscapeToStop":
     "Recording. Press Escape to stop without transcribing.",
-  "composerTranscriptionControl.recordingSavedOnThisDevice": "Recording saved on this device.",
+  "composerTranscriptionControl.recordingSavedOnThisDevice": "Recording saved.",
   "composerTranscriptionControl.requestingMicrophone": "Requesting microphone…",
   "composerTranscriptionControl.retryVoiceInput": "Retry voice input",
   "composerTranscriptionControl.savedRetryingTranscription": "Saved. Retrying transcription…",
   "composerTranscriptionControl.savedTranscriptionFailedRetryWhen":
     "Saved. Transcription failed, retry when ready.",
-  "composerTranscriptionControl.savingAudioLocally": "Saving audio locally…",
+  "composerTranscriptionControl.savingAudioLocally": "Saving audio…",
   "composerTranscriptionControl.startVoiceInput": "Start voice input",
   "composerTranscriptionControl.stopAndTranscribe": "Stop and transcribe",
   "composerTranscriptionControl.stopsAndTranscribesInSeconds":
