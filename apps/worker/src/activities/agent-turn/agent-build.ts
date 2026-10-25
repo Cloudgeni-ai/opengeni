@@ -47,8 +47,11 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import {
   executeGatewayImageGeneration,
+  GatewayImageApiError,
   imageGenerationCreditRefusedResult,
+  imageGenerationProviderFailedResult,
   managedImageGenerationCredential,
+  reportImageGenerationProviderFailure,
 } from "../gateway-image-generation";
 import {
   executeCodexImageGeneration,
@@ -481,6 +484,20 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             // agent plainly so it can tell the person, instead of failing.
             if (error instanceof ImageGenerationCreditError) {
               return imageGenerationCreditRefusedResult(error);
+            }
+            // The image provider answered without an image (out of credit,
+            // rate limited, refused, down). That is this tool's failure, not
+            // the chat model's: the agent gets a plain reason and the turn
+            // continues. Nothing is debited and no credits stay held.
+            if (error instanceof GatewayImageApiError) {
+              const result = imageGenerationProviderFailedResult(error);
+              reportImageGenerationProviderFailure(observability, {
+                error,
+                result,
+                modelId: route.modelId,
+                funding: route.pricedCostMicros > 0 ? "opengeni_credits" : "workspace_gateway",
+              });
+              return result;
             }
             throw error;
           }
