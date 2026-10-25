@@ -112,9 +112,10 @@ export function OrganizationOnboardingPanel({
   const [statusRequest, setStatusRequest] = useState(0);
   const [organizationName, setOrganizationName] = useState("");
   const [busy, setBusy] = useState(false);
-  // Someone using Opengeni on their own ("Run agents in the cloud") is not
-  // asked to invent an organization: one named after them is created right
-  // away. The name form shows only for the developer path, or if that fails.
+  // Someone using Opengeni on their own ("Get help with everyday things" or
+  // "Run agents in the cloud") is not asked to invent an organization: one
+  // named after them is created right away. The name form shows only for the
+  // developer path, or if that fails.
   const personalSetupStarted = useRef(false);
   const [personalSetupFailed, setPersonalSetupFailed] = useState(false);
   // Named automatically, so the model step says what it's called and offers
@@ -364,7 +365,7 @@ export function OrganizationOnboardingPanel({
 
   const personalSetup =
     state === "required" &&
-    useCase === "cloud" &&
+    (useCase === "everyday" || useCase === "cloud") &&
     !invitation &&
     !createdSetup &&
     !personalSetupFailed;

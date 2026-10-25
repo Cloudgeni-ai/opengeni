@@ -918,7 +918,7 @@ export async function completeSelfServiceOrganizationSetup(input: {
   organizationName: string;
   operationId: string;
   /** The signup answer to "How do you want to use Opengeni?", kept on the organization. */
-  useCase?: "embed" | "cloud";
+  useCase?: "everyday" | "embed" | "cloud";
 }): Promise<{
   status: "complete";
   organizationId: string;
