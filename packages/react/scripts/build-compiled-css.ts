@@ -27,7 +27,10 @@ const checkOnly = process.argv.includes("--check");
 // included, so its utilities ship scoped like every other component's, and so
 // are the plain stylesheets its components import (connect and setup cards,
 // This computer, capability cards): an embed needs only this one file.
-const input = `@import "tailwindcss/theme.css" layer(theme);
+// The layer order is Tailwind's own (`@import "tailwindcss"` declares it in a
+// bridge host), so flattening keeps components before utilities there too.
+const input = `@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
 @import "./index.css";
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "./responsive.css";
