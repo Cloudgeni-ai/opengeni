@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
+import type postgres from "postgres";
 import { sqlParameterLiteral } from "./helpers/sql-literal";
 import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  getSession,
   effectiveSessionPolicyQuery,
   withWorkspaceSubjectRls,
 } from "../src";
@@ -27,6 +29,49 @@ const TURNS = 1500;
 const BACKGROUND_SESSIONS = 6000;
 // Leave room for whatever events session creation appended.
 const FIRST_SEQUENCE = 1000;
+
+test("a session detail read projects effective policy only once", async () => {
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: suffix,
+    accountName: "Policy read count",
+    workspaceExternalSource: "test",
+    workspaceExternalId: suffix,
+    workspaceName: "Policy read count",
+    subjectId: `policy-read-${suffix}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const session = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    initialMessage: "hello",
+    resources: [],
+    metadata: {},
+    model: "stored-model",
+    reasoningEffort: "high",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  const debug = driver.options.debug;
+  const queries: string[] = [];
+  driver.options.debug = (_id, query) => {
+    queries.push(query);
+  };
+  try {
+    const detail = await getSession(client.db, grant.workspaceId, session.id);
+    expect(detail).toMatchObject({
+      id: session.id,
+      model: "stored-model",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+    });
+    expect(queries.filter((query) => query.includes('"latest_started_policy"'))).toHaveLength(1);
+  } finally {
+    driver.options.debug = debug;
+  }
+});
 
 test("effective session policy reads recent history only, however long the session", async () => {
   const suffix = crypto.randomUUID();

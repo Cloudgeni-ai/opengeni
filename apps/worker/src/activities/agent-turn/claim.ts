@@ -239,7 +239,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // accounts again inside the claim, as their next message would.
   const resolveContinuedAccounts: NonNullable<
     ClaimSessionWorkForAttemptInput["resolveContinuedConnectionAccounts"]
-  > = async (tx, { sessionId, intent }) =>
+  > = async (tx, { sessionId, intent, session }) =>
     await measureTurnStartupPhase(
       observability,
       {
@@ -255,6 +255,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           workspaceId: input.workspaceId,
           sessionId,
           intent,
+          claimedSession: session,
         }),
     );
   const claim = await measureTurnStartupPhase(
@@ -340,10 +341,12 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       })
     : Promise.resolve(null);
   void codexAppsDesignationRead.catch(() => undefined);
-  // Both are fresh scoped reads on the root pool after exact claim ownership.
-  // Neither consumes the other's result; retain the capability helper's own
-  // subject/delegation authority and await both before credential/policy gates.
-  const [session, mcpSettings] = await Promise.all([
+  // Independent root-pool scopes, only after durable claim ownership. A valid
+  // accepted policy needs no mutable session/catalog input, but still passes
+  // the exact live attempt fence. Legacy policy installation stays below.
+  // Join every scope before failure handling so no policy operation outlives
+  // preparation. No transaction-local RLS scopes overlap on one connection.
+  const [session, mcpSettings, preparedPolicy, trigger] = await Promise.allSettled([
     measureTurnStartupPhase(
       observability,
       {
@@ -373,7 +376,30 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           codexApps: codexAppsDesignationRead,
         }),
     ),
-  ]);
+    claimedPolicy.kind === "valid"
+      ? installOrReadTurnExecutionPolicyForAttempt(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          executionGeneration: turn.executionGeneration,
+          attemptId: input.attemptId,
+          policyForAbsent: claimedPolicy.policy,
+        })
+      : Promise.resolve(null),
+    getSessionEvent(db, input.workspaceId, turn.triggerEventId),
+  ]).then(([sessionRead, capabilitiesRead, policyRead, triggerRead]) => {
+    if (sessionRead.status === "rejected") throw sessionRead.reason;
+    if (capabilitiesRead.status === "rejected") throw capabilitiesRead.reason;
+    if (policyRead.status === "rejected") throw policyRead.reason;
+    if (triggerRead.status === "rejected") throw triggerRead.reason;
+    return [
+      sessionRead.value,
+      capabilitiesRead.value,
+      policyRead.value,
+      triggerRead.value,
+    ] as const;
+  });
   // Read the active-credential flag once for the runtime capability overlay.
   // Accepted billing/provider identity comes from the turn policy below,
   // never from this mutable health snapshot.
@@ -422,15 +448,17 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const policyForAbsent = credentialRestriction
     ? { ...candidatePolicy, credentialRestriction }
     : candidatePolicy;
-  const installedPolicy = await installOrReadTurnExecutionPolicyForAttempt(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    turnId: attempt.turnId,
-    executionGeneration: attempt.executionGeneration,
-    attemptId: input.attemptId,
-    policyForAbsent,
-  });
+  const installedPolicy =
+    preparedPolicy ??
+    (await installOrReadTurnExecutionPolicyForAttempt(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: attempt.turnId,
+      executionGeneration: attempt.executionGeneration,
+      attemptId: input.attemptId,
+      policyForAbsent,
+    }));
   if (!installedPolicy.accepted) {
     throw new TurnAttemptFencedError(`turn execution policy was fenced: ${installedPolicy.reason}`);
   }
@@ -509,7 +537,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   billingState.isClaudeTurn =
     verifiedExecutionPolicy.provider.kind === "claude-subscription-workspace" ||
     verifiedExecutionPolicy.provider.kind === "claude-subscription-organization";
-  const trigger = await getSessionEvent(db, input.workspaceId, attempt.triggerEventId);
   if (!trigger) {
     throw new Error(`Trigger event not found: ${attempt.triggerEventId}`);
   }

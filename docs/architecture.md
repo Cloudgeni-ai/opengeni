@@ -31,6 +31,11 @@ Turn post-provision timing uses the existing startup events/metrics through
 mint/join, client publication and credential materialization settle concurrently
 before owned setup; see [run lifecycle](run-lifecycle.md#agent-loop-request-lifecycle-observability).
 
+Worker pre-dispatch timing, nested phase boundaries and the real-PostgreSQL
+comparison harness: [startup round trips](design/turn-predispatch-round-trips.md).
+Continuation account resolution reuses the claim's locked session connector
+configuration, but reads live account authority in the same claim transaction.
+
 ---
 
 ## 2. Opengeni
