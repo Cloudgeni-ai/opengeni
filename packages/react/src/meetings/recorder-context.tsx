@@ -24,7 +24,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { desktopCapability } from "../app/lib/desktop";
+import { getDesktopBridge, hasDesktopCapability } from "@opengeni/sdk/desktop-bridge";
 import type { UseRecorderResult } from "../recordings";
 
 export type MeetingRecorder = UseRecorderResult;
@@ -178,7 +178,12 @@ function useDesktopMeetingRequests(
     latest.current = navigation;
   });
   useEffect(() => {
-    const detection = desktopCapability("meetingDetection")?.meetingDetection;
+    // The bridge itself, not the app layer's helper, which would bring every
+    // contract into this module, mounted above a host's routes.
+    const bridge = getDesktopBridge();
+    const detection = hasDesktopCapability(bridge, "meetingDetection")
+      ? bridge?.meetingDetection
+      : undefined;
     if (!detection) return;
     return detection.onRequest((request) => {
       const recorder = store.get();

@@ -144,6 +144,10 @@
       "types": "./src/meetings.ts",
       "default": "./src/meetings.ts"
     },
+    "./meetings-recorder": {
+      "types": "./src/meetings-recorder.ts",
+      "default": "./src/meetings-recorder.ts"
+    },
     "./artifacts": {
       "types": "./src/artifacts.ts",
       "default": "./src/artifacts.ts"
