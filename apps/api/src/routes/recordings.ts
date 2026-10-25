@@ -26,14 +26,15 @@ import {
   type WorkspaceRecordingSettings,
 } from "@opengeni/contracts";
 import {
-  createRecordingTranscriptionProviderRegistry,
+  createRecordingTranscriptionDeployment,
   DEFAULT_RECORDING_LIVE_TRANSCRIPTION,
-  DEFAULT_RECORDING_TRANSCRIPTION,
   estimateRecordingTranscriptionCostMicros,
   findRecordingTranscriptionModel,
   RecordingTranscriptionError,
   requireAccessGrant,
   type ApiRouteDeps,
+  type RecordingTranscriptionCredentials,
+  type RecordingTranscriptionDeployment,
   type RecordingTranscriptionProviderRegistry,
 } from "@opengeni/core";
 import {
@@ -115,10 +116,19 @@ function storedTranscription(
 export function registerRecordingRoutes(
   app: Hono,
   deps: ApiRouteDeps,
-  options: { registry?: RecordingTranscriptionProviderRegistry } = {},
+  options: {
+    registry?: RecordingTranscriptionProviderRegistry;
+    deployment?: RecordingTranscriptionDeployment;
+  } = {},
 ): void {
   const { db } = deps;
-  const registry = options.registry ?? createRecordingTranscriptionProviderRegistry();
+  const deployment =
+    options.deployment ??
+    createRecordingTranscriptionDeployment(
+      deps.settings,
+      options.registry ? { providers: [...options.registry.values()] } : {},
+    );
+  const registry = deployment.registry;
   const base = "/v1/workspaces/:workspaceId/recordings";
 
   async function actorFor(c: Context, permission: "sessions:read" | "sessions:create") {
@@ -164,7 +174,7 @@ export function registerRecordingRoutes(
   ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
     const workspace = await getWorkspace(db, workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
-    const defaults = settings.transcription ?? DEFAULT_RECORDING_TRANSCRIPTION;
+    const defaults = settings.transcription ?? deployment.defaultTranscription;
     const providerId = requested.providerId ?? defaults.providerId;
     const model = requested.model ?? (requested.providerId ? undefined : defaults.model);
     const found = model ? findRecordingTranscriptionModel(registry, providerId, model) : null;
@@ -266,13 +276,20 @@ export function registerRecordingRoutes(
     });
   }
 
-  /** The provider key a workspace's recordings use, its own or its organization's. */
-  async function providerApiKey(
+  /**
+   * The credential a workspace's recordings use with a provider: the
+   * deployment's own for providers it manages, else the workspace's or its
+   * organization's key.
+   */
+  async function providerCredentials(
     providerId: string,
     scope: { accountId: string; workspaceId: string },
-  ): Promise<string | null> {
+  ): Promise<RecordingTranscriptionCredentials | null> {
+    const managed = deployment.deploymentCredentials(providerId);
+    if (managed) return await managed;
     if (providerId !== "elevenlabs") return null;
-    return await loadElevenLabsApiKey(db, deps.settings, scope);
+    const apiKey = await loadElevenLabsApiKey(db, deps.settings, scope);
+    return apiKey ? { apiKey } : null;
   }
 
   /** The live model a request names, else the provider's first, else the deployment's. */
@@ -826,14 +843,18 @@ export function registerRecordingRoutes(
     const workspace = await getWorkspace(db, actor.workspaceId);
     const defaults =
       resolveWorkspaceRecordingSettings(workspace?.settings).transcription ??
-      DEFAULT_RECORDING_TRANSCRIPTION;
+      deployment.defaultTranscription;
     const models: RecordingTranscriptionModel[] = [...registry.values()].flatMap((provider) =>
       provider.models.map((spec) => ({
         providerId: provider.id,
         providerName: provider.name,
         model: spec.model,
         name: spec.name,
-        available: provider.id === "elevenlabs" ? elevenLabs : false,
+        available: deployment.deploymentManaged(provider.id)
+          ? true
+          : provider.id === "elevenlabs"
+            ? elevenLabs
+            : false,
         capabilities: spec.capabilities,
         usdPerHour: spec.usdPerHour,
       })),
@@ -851,8 +872,8 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingLiveSessionRequest);
     const { provider, spec } = liveModelChoice(body);
-    const apiKey = await providerApiKey(provider.id, actor);
-    if (!apiKey) {
+    const credentials = await providerCredentials(provider.id, actor);
+    if (!credentials) {
       throw new ApiHttpError(409, {
         code: "conflict",
         message: `Add an ${provider.name} API key to this workspace's models to see a live transcript.`,
@@ -873,7 +894,7 @@ export function registerRecordingRoutes(
     try {
       grant = await provider.createLiveSession!(
         { model: spec.model, language: language ?? undefined },
-        { apiKey },
+        credentials,
       );
     } catch (error) {
       if (!(error instanceof RecordingTranscriptionError)) throw error;

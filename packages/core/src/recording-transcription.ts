@@ -20,7 +20,15 @@ export type RecordingTranscriptionModelSpec = {
   usdPerHour: number | null;
   /** Extra price share when keyterms are used (0.3 is 30% more). */
   keytermsPremium?: number;
+  /**
+   * Containers the model accepts. The worker converts other audio to the
+   * first one; absent means any format a recording is prepared in.
+   */
+  audioFormats?: readonly RecordingProviderAudioFormat[];
 };
+
+/** Audio containers a transcription model can be sent. */
+export type RecordingProviderAudioFormat = "flac" | "wav" | "mp3" | "webm" | "mp4";
 
 export type RecordingTranscriptionAudio = {
   bytes: Uint8Array;
@@ -60,7 +68,8 @@ export type RecordingTranscriptionResult = {
   words: RecordingTranscribedWord[];
 };
 
-export type RecordingTranscriptionCredentials = { apiKey: string };
+/** A provider key, or a short-lived token for providers that take one (Microsoft Entra ID). */
+export type RecordingTranscriptionCredentials = { apiKey: string } | { accessToken: string };
 
 /** A live session a client opens itself, straight to the provider. */
 export type RecordingLiveSessionGrant = {
@@ -219,6 +228,106 @@ export function labelWordsFromTurns(
     }
     return { ...word, speaker };
   });
+}
+
+// --- Pieces of long tracks --------------------------------------------------
+
+/** A stretch of a track sent to the model on its own, on the track's timeline. */
+export type RecordingTranscriptionPiece = {
+  startMilliseconds: number;
+  endMilliseconds: number;
+  /** Words that start in [keepFrom, keepUntil) are taken from this piece. */
+  keepFromMilliseconds: number;
+  keepUntilMilliseconds: number;
+};
+
+/** Pieces overlap by this much on each side, so no word is cut at a boundary. */
+export const RECORDING_PIECE_OVERLAP_MILLISECONDS = 10_000;
+
+/**
+ * Split a track a model can't take whole into overlapping pieces. Each word
+ * is kept from the one piece whose keep window it starts in, and that piece
+ * holds the whole word because the pieces overlap past their windows.
+ */
+export function planRecordingTranscriptionPieces(
+  durationMilliseconds: number,
+  maxPieceMilliseconds: number | null,
+  overlapMilliseconds = RECORDING_PIECE_OVERLAP_MILLISECONDS,
+): RecordingTranscriptionPiece[] {
+  const duration = Math.max(0, Math.ceil(durationMilliseconds));
+  if (maxPieceMilliseconds === null || duration <= maxPieceMilliseconds) {
+    return [
+      {
+        startMilliseconds: 0,
+        endMilliseconds: duration,
+        keepFromMilliseconds: 0,
+        keepUntilMilliseconds: Number.POSITIVE_INFINITY,
+      },
+    ];
+  }
+  const overlap = Math.min(overlapMilliseconds, Math.floor(maxPieceMilliseconds / 4));
+  const stride = maxPieceMilliseconds - 2 * overlap;
+  const count = Math.ceil(duration / stride);
+  const pieces: RecordingTranscriptionPiece[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const keepFrom = index * stride;
+    const last = index === count - 1;
+    const keepUntil = last ? Number.POSITIVE_INFINITY : (index + 1) * stride;
+    pieces.push({
+      startMilliseconds: Math.max(0, keepFrom - overlap),
+      endMilliseconds: last ? duration : Math.min(duration, keepUntil + overlap),
+      keepFromMilliseconds: keepFrom,
+      keepUntilMilliseconds: keepUntil,
+    });
+  }
+  return pieces;
+}
+
+/**
+ * Join the pieces' results into one track result. Speaker ids are only
+ * meaningful inside one call, so a track sent in several pieces has none.
+ */
+export function mergeRecordingTranscriptionPieces(
+  parts: ReadonlyArray<{
+    piece: RecordingTranscriptionPiece;
+    result: RecordingTranscriptionResult;
+  }>,
+): RecordingTranscriptionResult {
+  if (parts.length === 1) {
+    const [{ piece, result }] = parts as [(typeof parts)[number]];
+    if (piece.startMilliseconds === 0) return result;
+  }
+  const several = parts.length > 1;
+  const words: RecordingTranscribedWord[] = [];
+  const languages = new Set<string>();
+  let audioMilliseconds: number | null = 0;
+  for (const { piece, result } of parts) {
+    for (const language of result.languages) languages.add(language);
+    audioMilliseconds =
+      audioMilliseconds === null || result.audioMilliseconds === null
+        ? null
+        : Math.max(audioMilliseconds, piece.startMilliseconds + result.audioMilliseconds);
+    let firstOfPiece = true;
+    for (const word of result.words) {
+      const start = word.startMilliseconds + piece.startMilliseconds;
+      if (start < piece.keepFromMilliseconds || start >= piece.keepUntilMilliseconds) continue;
+      const spaceBefore = words.length > 0 && (word.spaceBefore || firstOfPiece);
+      firstOfPiece = false;
+      words.push({
+        ...word,
+        startMilliseconds: start,
+        endMilliseconds: word.endMilliseconds + piece.startMilliseconds,
+        speaker: several ? null : word.speaker,
+        spaceBefore,
+      });
+    }
+  }
+  return {
+    languages: [...languages],
+    audioMilliseconds,
+    diarized: !several && (parts[0]?.result.diarized ?? false),
+    words,
+  };
 }
 
 // --- Tracks and segments ----------------------------------------------------
@@ -535,6 +644,12 @@ function elevenLabsError(
   return new RecordingTranscriptionError(message, "provider", false);
 }
 
+/** ElevenLabs takes only its own API key. */
+function elevenLabsApiKey(credentials: RecordingTranscriptionCredentials): string {
+  if ("apiKey" in credentials && credentials.apiKey) return credentials.apiKey;
+  throw new RecordingTranscriptionError("ElevenLabs needs an API key", "unauthorized", false);
+}
+
 async function errorDetail(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { detail?: { message?: unknown; status?: unknown } };
@@ -579,7 +694,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
       try {
         response = await request(`${ELEVENLABS_API_BASE_URL}/v1/single-use-token/realtime_scribe`, {
           method: "POST",
-          headers: { "xi-api-key": credentials.apiKey },
+          headers: { "xi-api-key": elevenLabsApiKey(credentials) },
           signal: input.signal
             ? AbortSignal.any([input.signal, AbortSignal.timeout(15_000)])
             : AbortSignal.timeout(15_000),
@@ -641,7 +756,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
       try {
         response = await request(options.url ?? ELEVENLABS_SPEECH_TO_TEXT_URL, {
           method: "POST",
-          headers: { "xi-api-key": credentials.apiKey },
+          headers: { "xi-api-key": elevenLabsApiKey(credentials) },
           body: form,
           signal,
         });

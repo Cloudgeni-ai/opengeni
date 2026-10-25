@@ -1,11 +1,13 @@
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import {
   buildRecordingSegments,
-  createRecordingTranscriptionProviderRegistry,
+  createRecordingTranscriptionDeployment,
   estimateRecordingTranscriptionCostMicros,
   findRecordingTranscriptionModel,
   labelWordsFromTurns,
+  mergeRecordingTranscriptionPieces,
   planRecordingTracks,
+  planRecordingTranscriptionPieces,
   recordingDiarizationKind,
   recordingSpeakerLabels,
   RecordingTranscriptionError,
@@ -14,7 +16,14 @@ import {
   type RecordingDiarizerResult,
   type RecordingDiarizer,
   type RecordingTranscribedWord,
+  type RecordingTranscriptionAudio,
+  type RecordingTranscriptionCredentials,
+  type RecordingTranscriptionDeployment,
+  type RecordingTranscriptionModelSpec,
+  type RecordingTranscriptionProvider,
   type RecordingTranscriptionProviderRegistry,
+  type RecordingTranscriptionRequest,
+  type RecordingTranscriptionResult,
   type RecordingTrackWords,
   type TranscriptionSegmenter,
   type TranscriptionService,
@@ -64,6 +73,9 @@ import {
   preparedAudioFormat,
   recordingAudioContainer,
   RecordingAudioError,
+  RECORDING_PIECE_BYTES_PER_SECOND,
+  renderRecordingAudioPiece,
+  type RecordingPieceFormat,
 } from "./recording-audio";
 import type { ControlActivityServices } from "./types";
 import { createLocalDiarizer, recordingSpeakersConfig } from "./recording-speakers";
@@ -99,6 +111,7 @@ export type RecordingTranscriptOutcome = (
 const TRANSCRIPT_LEASE_SECONDS = 3 * 60 * 60;
 
 export type RecordingActivityOptions = {
+  /** Providers to offer instead of the deployment's own, such as fakes in tests. */
   registry?: RecordingTranscriptionProviderRegistry;
   loadApiKey?: (
     db: Database,
@@ -164,12 +177,116 @@ function shiftWords(
   }));
 }
 
+/** The prepared formats as a model names them. */
+function preparedPieceFormat(extension: string): RecordingPieceFormat {
+  return extension === "m4a" ? "mp4" : "webm";
+}
+
+/** Formats the worker can write, in the order it prefers them for a model. */
+const WRITABLE_PIECE_FORMATS: readonly RecordingPieceFormat[] = ["flac", "wav", "webm", "mp4"];
+
+/**
+ * Transcribe one track with a model, converting it when the model needs
+ * another format and sending it in overlapping pieces when it is longer
+ * than the model takes in one request.
+ */
+export async function transcribeTrack(input: {
+  provider: RecordingTranscriptionProvider;
+  spec: RecordingTranscriptionModelSpec;
+  audio: RecordingTranscriptionAudio & { extension: string };
+  durationMilliseconds: number;
+  ffmpegPath: string;
+  credentials: RecordingTranscriptionCredentials;
+  request: Omit<RecordingTranscriptionRequest, "audio">;
+  onPiece?: (index: number) => void;
+  tempRoot?: string;
+}): Promise<RecordingTranscriptionResult> {
+  const source = preparedPieceFormat(input.audio.extension);
+  const accepted = input.spec.audioFormats;
+  let format: RecordingPieceFormat | null = null;
+  if (accepted && !accepted.includes(source)) {
+    format = WRITABLE_PIECE_FORMATS.find((candidate) => accepted.includes(candidate)) ?? null;
+    if (!format) throw new PermanentRecordingFailure("model_unavailable");
+  }
+  const { maxDurationSeconds, maxFileBytes } = input.spec.capabilities;
+  const bytesPerSecond = format ? RECORDING_PIECE_BYTES_PER_SECOND[format] : undefined;
+  const limits = [
+    maxDurationSeconds === null ? null : maxDurationSeconds * 1_000,
+    // Converted audio has a known rate; keep a tenth spare under the file limit.
+    maxFileBytes !== null && bytesPerSecond
+      ? Math.floor(((maxFileBytes * 0.9) / bytesPerSecond) * 1_000)
+      : null,
+  ].filter((limit): limit is number => limit !== null);
+  const pieces = planRecordingTranscriptionPieces(
+    input.durationMilliseconds,
+    limits.length > 0 ? Math.min(...limits) : null,
+  );
+  const parts: Array<{
+    piece: (typeof pieces)[number];
+    result: RecordingTranscriptionResult;
+  }> = [];
+  for (const [index, piece] of pieces.entries()) {
+    input.onPiece?.(index);
+    const whole = pieces.length === 1;
+    const audio =
+      whole && !format
+        ? input.audio
+        : await renderRecordingAudioPiece({
+            audio: input.audio,
+            startMilliseconds: piece.startMilliseconds,
+            endMilliseconds: piece.endMilliseconds,
+            whole,
+            format: format ?? source,
+            ffmpegPath: input.ffmpegPath,
+            tempRoot: input.tempRoot,
+            signal: input.request.signal,
+          }).then((rendered) => ({
+            bytes: rendered.bytes,
+            mimeType: rendered.mimeType,
+            fileName: `${input.audio.fileName.replace(/\.[^.]+$/u, "")}-${index}.${rendered.extension}`,
+          }));
+    const result = await input.provider.transcribe(
+      {
+        ...input.request,
+        audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
+      },
+      input.credentials,
+    );
+    parts.push({ piece, result });
+  }
+  return mergeRecordingTranscriptionPieces(parts);
+}
+
 export function createRecordingActivities(
   services: () => Promise<ControlActivityServices>,
   options: RecordingActivityOptions = {},
 ) {
-  const registry = options.registry ?? createRecordingTranscriptionProviderRegistry();
   const loadApiKey = options.loadApiKey ?? loadRecordingProviderApiKey;
+  let deploymentMemo: { settings: Settings; deployment: RecordingTranscriptionDeployment } | null =
+    null;
+  const deploymentFor = (settings: Settings): RecordingTranscriptionDeployment => {
+    if (deploymentMemo?.settings !== settings) {
+      deploymentMemo = {
+        settings,
+        deployment: createRecordingTranscriptionDeployment(
+          settings,
+          options.registry ? { providers: [...options.registry.values()] } : {},
+        ),
+      };
+    }
+    return deploymentMemo.deployment;
+  };
+  /** The deployment's own credential for providers it manages, else the workspace's key. */
+  const credentialsFor = async (
+    db: Database,
+    settings: Settings,
+    scope: { accountId: string; workspaceId: string; providerId: string },
+  ): Promise<RecordingTranscriptionCredentials | null> => {
+    const managed = deploymentFor(settings).deploymentCredentials(scope.providerId);
+    if (managed) return await managed;
+    const apiKey = await loadApiKey(db, settings, scope);
+    return apiKey ? { apiKey } : null;
+  };
   let defaultDiarizer: { settings: Settings; diarizer: RecordingDiarizer | null } | null = null;
   const diarizerFor = (settings: Settings): RecordingDiarizer | null => {
     if (options.diarizer) return options.diarizer(settings);
@@ -258,17 +375,17 @@ export function createRecordingActivities(
         return await transcribeDictation(objectStorage, job);
       }
       const found = findRecordingTranscriptionModel(
-        registry,
+        deploymentFor(settings).registry,
         job.version.providerId,
         job.version.model,
       );
       if (!found) throw new PermanentRecordingFailure("model_unavailable");
-      const apiKey = await loadApiKey(db, settings, {
+      const credentials = await credentialsFor(db, settings, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         providerId: job.version.providerId,
       });
-      if (!apiKey) throw new PermanentRecordingFailure("missing_provider_key");
+      if (!credentials) throw new PermanentRecordingFailure("missing_provider_key");
       const plans = planRecordingTracks(job.recording.tracks);
       const capabilities = found.spec.capabilities;
       const requested = job.version.options;
@@ -323,9 +440,16 @@ export function createRecordingActivities(
         };
         const [result, ours] = await withHeartbeat(() =>
           Promise.all([
-            found.provider.transcribe(
-              {
-                audio: trackAudio,
+            transcribeTrack({
+              provider: found.provider,
+              spec: found.spec,
+              audio: { ...trackAudio, extension: audio.extension },
+              durationMilliseconds: audio.durationMilliseconds,
+              ffmpegPath: settings.voiceInputFfmpegPath,
+              credentials,
+              onPiece: (piece) =>
+                heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber, piece }),
+              request: {
                 model: found.spec.model,
                 language: requested.language,
                 diarize,
@@ -333,8 +457,7 @@ export function createRecordingActivities(
                 keyterms: capabilities.keyterms ? requested.keyterms : undefined,
                 signal,
               },
-              { apiKey },
-            ),
+            }),
             useOurs
               ? ourDiarizer
                   .diarize(trackAudio, { maxSpeakers: requested.maxSpeakers, signal })
