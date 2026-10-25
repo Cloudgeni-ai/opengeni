@@ -57,6 +57,12 @@ import {
   type InteractionDispatchTrace,
 } from "@opengeni/interaction";
 import {
+  NETWORK_LONG_POLL_MS,
+  requestIgnoredForIdle,
+  requestLoad,
+  type TrackedRequest,
+} from "./network-idle";
+import {
   accessibilityContainer,
   namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
@@ -541,19 +547,9 @@ type TargetState = {
   inflightRequests: Set<string>;
   networkTrackingOverflow: boolean;
   failedRequests: Set<string>;
-  requests: Map<
-    string,
-    {
-      method: string;
-      url: string;
-      /** The document that issued the request; absent when not reported. */
-      loaderId: string | null;
-      browserInitiated: boolean;
-      /** An event stream or other response that never finishes by design,
-       * so it does not keep the page from being network idle. */
-      stream: boolean;
-    }
-  >;
+  requests: Map<string, TrackedRequest>;
+  /** When a request that counts as page loading (see requestLoading) last
+   * started or ended. Requests that never count do not move it. */
   lastNetworkActivityAt: number;
   networkActivitySequence: number;
   /** Counts cross-document navigations the page started in its main frame. */
@@ -596,6 +592,8 @@ type OopifSession = {
   parentSessionId: string;
   /** Frame ids rendered by this session (the OOPIF and its same-process children). */
   frameIds: Set<string>;
+  /** Stops this session's network and load listeners when it detaches. */
+  unsubscribe: Array<() => void>;
 };
 
 export type AgentBrowserDriverOptions = {
@@ -3243,104 +3241,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             ),
           ]
         : []),
-      connection.on(
-        "Network.requestWillBeSent",
-        (event) => {
-          const requestId = stringField(event.params, "requestId");
-          if (requestId) {
-            if (state.inflightRequests.size >= 10_000 && !state.inflightRequests.has(requestId)) {
-              state.networkTrackingOverflow = true;
-            } else {
-              state.inflightRequests.add(requestId);
-            }
-            const request = isRecord(event.params.request) ? event.params.request : {};
-            const initiator = isRecord(event.params.initiator) ? event.params.initiator : {};
-            state.requests.set(requestId, {
-              method: boundedMethod(request.method),
-              url: boundedUrlField(request.url) ?? "about:blank",
-              loaderId: stringField(event.params, "loaderId"),
-              // Chrome fetches the page's icon (/favicon.ico or a declared
-              // <link rel=icon>) by itself, reported as type Other with an
-              // "other" initiator. A missing icon is not a page failure and,
-              // being on almost every site, would otherwise show as a failed
-              // request in every observation.
-              browserInitiated: event.params.type === "Other" && initiator.type === "other",
-              stream: event.params.type === "EventSource",
-            });
-            boundMap(state.requests, 10_000);
-          }
-          state.networkActivitySequence += 1;
-          state.lastNetworkActivityAt = Date.now();
-        },
-        sessionId,
-      ),
-      connection.on(
-        "Network.loadingFinished",
-        (event) => {
-          const requestId = stringField(event.params, "requestId");
-          if (requestId) {
-            state.inflightRequests.delete(requestId);
-            state.failedRequests.delete(requestId);
-            state.requests.delete(requestId);
-          }
-          state.networkActivitySequence += 1;
-          state.lastNetworkActivityAt = Date.now();
-        },
-        sessionId,
-      ),
-      connection.on(
-        "Network.loadingFailed",
-        (event) => {
-          const requestId = stringField(event.params, "requestId");
-          if (requestId) {
-            state.inflightRequests.delete(requestId);
-            // A document request's id is its navigation's loader id. One the
-            // browser cancelled (a newer navigation took over) never commits.
-            if (
-              event.params.type === "Document" &&
-              (event.params.canceled === true || event.params.errorText === "net::ERR_ABORTED")
-            ) {
-              state.abandonedLoaders.push(requestId);
-              if (state.abandonedLoaders.length > COMMITTED_LOADER_HISTORY)
-                state.abandonedLoaders.shift();
-            }
-            if (event.params.canceled !== true && event.params.errorText !== "net::ERR_ABORTED") {
-              this.recordFailedRequest(state, requestId, {
-                message:
-                  boundedTextField(event.params.errorText, 8_192) ?? "Network request failed",
-              });
-            }
-            state.failedRequests.delete(requestId);
-            state.requests.delete(requestId);
-          }
-          state.networkActivitySequence += 1;
-          state.lastNetworkActivityAt = Date.now();
-        },
-        sessionId,
-      ),
-      connection.on(
-        "Network.responseReceived",
-        (event) => {
-          const requestId = stringField(event.params, "requestId");
-          const response = isRecord(event.params.response) ? event.params.response : null;
-          const request = requestId ? state.requests.get(requestId) : undefined;
-          if (
-            request &&
-            typeof response?.mimeType === "string" &&
-            STREAMING_MIME_TYPES.has(response.mimeType.split(";")[0]!.trim().toLowerCase())
-          ) {
-            request.stream = true;
-          }
-          if (requestId && typeof response?.status === "number" && response.status >= 400) {
-            this.recordFailedRequest(state, requestId, {
-              message: `HTTP ${Math.trunc(response.status)}`,
-              status: Math.trunc(response.status),
-              url: boundedUrlField(response.url),
-            });
-          }
-        },
-        sessionId,
-      ),
+      ...this.trackNetwork(connection, state, sessionId, true),
       connection.on(
         "Page.javascriptDialogOpening",
         (event) => {
@@ -3366,6 +3267,168 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     }
     return state;
+  }
+
+  /**
+   * Keeps the tab's request ledger from one session's Network domain: the
+   * page's, or a cross-origin iframe's. Such a frame's document request starts
+   * on its parent's session and ends on the frame's own, so every session of
+   * a tab shares one ledger keyed by request id. Failed requests are reported
+   * from the page session only, as before frames were tracked.
+   */
+  private trackNetwork(
+    connection: BrowserCdpConnection,
+    state: TargetState,
+    sessionId: string,
+    page: boolean,
+  ): Array<() => void> {
+    const counted = (request: TrackedRequest | undefined) =>
+      request === undefined || (!request.ignored && !request.stream);
+    return [
+      connection.on(
+        "Network.requestWillBeSent",
+        (event) => {
+          const requestId = stringField(event.params, "requestId");
+          const now = Date.now();
+          let tracked: TrackedRequest | undefined;
+          if (requestId) {
+            if (state.inflightRequests.size >= 10_000 && !state.inflightRequests.has(requestId)) {
+              state.networkTrackingOverflow = true;
+            } else {
+              state.inflightRequests.add(requestId);
+            }
+            const request = isRecord(event.params.request) ? event.params.request : {};
+            const initiator = isRecord(event.params.initiator) ? event.params.initiator : {};
+            const type = stringField(event.params, "type");
+            const url = boundedUrlField(request.url) ?? "about:blank";
+            // Chrome fetches the page's icon (/favicon.ico or a declared
+            // <link rel=icon>) by itself, reported as type Other with an
+            // "other" initiator. A missing icon is not a page failure and,
+            // being on almost every site, would otherwise show as a failed
+            // request in every observation.
+            const browserInitiated = type === "Other" && initiator.type === "other";
+            tracked = {
+              method: boundedMethod(request.method),
+              url,
+              loaderId: stringField(event.params, "loaderId"),
+              browserInitiated,
+              stream: type === "EventSource",
+              ignored: requestIgnoredForIdle(type, url, browserInitiated),
+              type,
+              frameId: stringField(event.params, "frameId"),
+              sessionId,
+              // A redirect is the same request continuing under the same id.
+              startedAt: state.requests.get(requestId)?.startedAt ?? now,
+              respondedAt: null,
+              dataAt: null,
+            };
+            state.requests.set(requestId, tracked);
+            boundMap(state.requests, 10_000);
+          }
+          state.networkActivitySequence += 1;
+          if (counted(tracked)) state.lastNetworkActivityAt = now;
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Network.loadingFinished",
+        (event) => {
+          const requestId = stringField(event.params, "requestId");
+          const request = requestId ? state.requests.get(requestId) : undefined;
+          if (requestId) {
+            state.inflightRequests.delete(requestId);
+            state.failedRequests.delete(requestId);
+            state.requests.delete(requestId);
+          }
+          state.networkActivitySequence += 1;
+          if (counted(request)) state.lastNetworkActivityAt = Date.now();
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Network.loadingFailed",
+        (event) => {
+          const requestId = stringField(event.params, "requestId");
+          const request = requestId ? state.requests.get(requestId) : undefined;
+          if (requestId) {
+            state.inflightRequests.delete(requestId);
+            // A document request's id is its navigation's loader id. One the
+            // browser cancelled (a newer navigation took over) never commits.
+            if (
+              page &&
+              event.params.type === "Document" &&
+              (event.params.canceled === true || event.params.errorText === "net::ERR_ABORTED")
+            ) {
+              state.abandonedLoaders.push(requestId);
+              if (state.abandonedLoaders.length > COMMITTED_LOADER_HISTORY)
+                state.abandonedLoaders.shift();
+            }
+            if (
+              page &&
+              event.params.canceled !== true &&
+              event.params.errorText !== "net::ERR_ABORTED"
+            ) {
+              this.recordFailedRequest(state, requestId, {
+                message:
+                  boundedTextField(event.params.errorText, 8_192) ?? "Network request failed",
+              });
+            }
+            state.failedRequests.delete(requestId);
+            state.requests.delete(requestId);
+          }
+          state.networkActivitySequence += 1;
+          if (counted(request)) state.lastNetworkActivityAt = Date.now();
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Network.responseReceived",
+        (event) => {
+          const requestId = stringField(event.params, "requestId");
+          const response = isRecord(event.params.response) ? event.params.response : null;
+          const request = requestId ? state.requests.get(requestId) : undefined;
+          if (request) request.respondedAt = Date.now();
+          if (
+            request &&
+            typeof response?.mimeType === "string" &&
+            STREAMING_MIME_TYPES.has(response.mimeType.split(";")[0]!.trim().toLowerCase())
+          ) {
+            request.stream = true;
+          }
+          if (page && requestId && typeof response?.status === "number" && response.status >= 400) {
+            this.recordFailedRequest(state, requestId, {
+              message: `HTTP ${Math.trunc(response.status)}`,
+              status: Math.trunc(response.status),
+              url: boundedUrlField(response.url),
+            });
+          }
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Network.dataReceived",
+        (event) => {
+          const requestId = stringField(event.params, "requestId");
+          const request = requestId ? state.requests.get(requestId) : undefined;
+          if (request) request.dataAt = Date.now();
+        },
+        sessionId,
+      ),
+    ];
+  }
+
+  /** A cross-origin iframe's document request started on its parent's session.
+   * Once the frame has stopped loading, or is gone, it can no longer be loading
+   * however the frame's own session reported it. */
+  private finishFrameDocuments(state: TargetState, frameIds: ReadonlySet<string>): void {
+    for (const requestId of [...state.inflightRequests]) {
+      const request = state.requests.get(requestId);
+      if (request?.type !== "Document" || !request.frameId || !frameIds.has(request.frameId))
+        continue;
+      state.inflightRequests.delete(requestId);
+      state.requests.delete(requestId);
+      state.lastNetworkActivityAt = Date.now();
+    }
   }
 
   /** Page-level auto-attach: one flattened child session per cross-origin
@@ -3394,7 +3457,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       "Target.setAutoAttach",
       {
         autoAttach: true,
-        waitForDebuggerOnStart: false,
+        // A new frame waits until its session listens, so the requests its
+        // first scripts start are seen (onFrameAttached always resumes it).
+        waitForDebuggerOnStart: true,
         flatten: true,
         filter: [{ type: "iframe" }],
       },
@@ -3410,13 +3475,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     const sessionId = params.sessionId;
     if (typeof sessionId !== "string") return;
+    const waiting = params.waitingForDebugger === true;
     let info: TargetInfo;
     try {
       info = normalizeTargetInfo(params.targetInfo);
     } catch {
+      if (waiting)
+        await connection
+          .send("Runtime.runIfWaitingForDebugger", {}, { sessionId })
+          .catch(() => undefined);
       return;
     }
-    const waiting = params.waitingForDebugger === true;
     try {
       if (info.type !== "iframe" || this.states.get(state.targetId) !== state) {
         if (waiting) await connection.send("Runtime.runIfWaitingForDebugger", {}, { sessionId });
@@ -3428,18 +3497,50 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       // A cross-origin iframe's target id is its frame id.
-      state.oopifs.set(info.targetId, {
+      const oopif: OopifSession = {
         frameId: info.targetId,
         sessionId,
         parentSessionId,
         frameIds: new Set([info.targetId]),
-      });
+        unsubscribe: [],
+      };
+      state.oopifs.set(info.targetId, oopif);
+      // The frame's requests count toward the tab's network activity, and its
+      // document request, begun on the parent's session, finishes here.
+      oopif.unsubscribe.push(
+        ...this.trackNetwork(connection, state, sessionId, false),
+        connection.on(
+          "Page.frameStoppedLoading",
+          (event) => {
+            const frameId = stringField(event.params, "frameId");
+            if (frameId) this.finishFrameDocuments(state, new Set([frameId]));
+          },
+          sessionId,
+        ),
+      );
       state.accessibility = null;
       await Promise.all([
         connection.send("DOM.enable", {}, { sessionId }),
         connection.send("Page.enable", {}, { sessionId }),
         connection.send("Accessibility.enable", {}, { sessionId }),
+        connection.send("Network.enable", {}, { sessionId }),
       ]);
+      // A frame that was already running when its session attached (one the
+      // page had before this controller) may have finished loading unheard.
+      if (!waiting) {
+        const loaded = await connection
+          .send<{ result?: { value?: unknown } }>(
+            "Runtime.evaluate",
+            {
+              expression: "location.href !== 'about:blank' && document.readyState === 'complete'",
+              returnByValue: true,
+            },
+            { sessionId, timeoutMs: 5_000 },
+          )
+          .catch(() => null);
+        if (loaded?.result?.value === true)
+          this.finishFrameDocuments(state, new Set([info.targetId]));
+      }
       await this.attachFrameSessions(connection, state, sessionId);
     } catch {
       // A frame that navigated away or closed during setup is simply absent.
@@ -3457,6 +3558,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.oopifs.delete(oopif.frameId);
       if (state.nodeRoute === oopif) state.nodeRoute = null;
       state.accessibility = null;
+      for (const stop of oopif.unsubscribe.splice(0)) stop();
+      // Nothing reports the requests of a frame that is gone.
+      for (const requestId of [...state.inflightRequests]) {
+        if (state.requests.get(requestId)?.sessionId !== sessionId) continue;
+        state.inflightRequests.delete(requestId);
+        state.requests.delete(requestId);
+      }
+      this.finishFrameDocuments(state, oopif.frameIds);
       // Nested frames went with their parent session.
       for (const nested of [...state.oopifs.values()]) {
         if (nested.parentSessionId === sessionId) this.forgetFrameSession(state, nested.sessionId);
@@ -7189,6 +7298,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let lookedFinal = false;
     let locatorPolls = 0;
     let loaded = false;
+    // When a poll last saw a request still loading: one that stops counting
+    // (its body stalled, or it waited too long for a response) leaves the
+    // same quiet window after it as one that finished.
+    let loadingSeenAt = 0;
     while (Date.now() < deadline) {
       const pollStartedAt = Date.now();
       if (action.condition === "load") {
@@ -7203,14 +7316,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             true,
           );
         }
-        // Live pages keep event streams open for good. Only requests that
-        // can still finish count as loading; anything not positively known
-        // to be a stream (a slow fetch or a long poll alike) still counts.
-        const loading = [...state.inflightRequests].some(
-          (requestId) => state.requests.get(requestId)?.stream !== true,
-        );
         loaded = await this.documentReady(state);
-        if (loaded && !loading && Date.now() - state.lastNetworkActivityAt >= NETWORK_IDLE_MS) {
+        const now = Date.now();
+        let loading = false;
+        let longPolls = 0;
+        for (const requestId of state.inflightRequests) {
+          const load = requestLoad(state.requests.get(requestId), now);
+          if (load === "loading") {
+            loading = true;
+            break;
+          }
+          if (load === "long_poll") longPolls += 1;
+        }
+        if (loading) loadingSeenAt = now;
+        if (
+          loaded &&
+          !loading &&
+          now - Math.max(state.lastNetworkActivityAt, loadingSeenAt) >= NETWORK_IDLE_MS
+        ) {
+          if (longPolls > 0) {
+            state.actionTrace?.trace.record({
+              actionIndex: state.actionTrace.actionIndex,
+              kind: "network_busy",
+              message: `page loaded; its network went quiet except for ${longPolls === 1 ? "1 request" : `${longPolls} requests`} still waiting for a response after ${formatSeconds(NETWORK_LONG_POLL_MS)} (as long polls do), so the wait ended without ${longPolls === 1 ? "it" : "them"}`,
+            } satisfies BrowserActionNoteValue);
+          }
           return;
         }
       } else if (action.locator) {
@@ -7341,7 +7471,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const deadline = Date.now() + ACTION_REQUEST_SETTLE_LIMIT_MS;
     const pending = () =>
       state.networkTrackingOverflow ||
-      [...state.inflightRequests].some((requestId) => !before.open.has(requestId));
+      [...state.inflightRequests].some(
+        (requestId) =>
+          !before.open.has(requestId) &&
+          requestLoad(state.requests.get(requestId), Date.now()) === "loading",
+      );
     while (pending() && Date.now() < deadline && !state.dialog) {
       await delay(ACTION_REQUEST_POLL_MS);
     }
@@ -8073,6 +8207,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!state) return;
     this.failAllScreencasts(state, new CdpTransportError("browser target closed"));
     for (const unsubscribe of state.unsubscribe) unsubscribe();
+    for (const oopif of state.oopifs.values()) {
+      for (const stop of oopif.unsubscribe.splice(0)) stop();
+    }
     this.states.delete(targetId);
     if (!preserveFirstSeen) {
       this.firstSeenAt.delete(targetId);
