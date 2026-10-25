@@ -1349,6 +1349,7 @@ export class OpenGeniClient {
     return body;
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async createTranscriptionRecording(
     workspaceId: string,
     input: CreateTranscriptionRecordingInput,
@@ -1364,6 +1365,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async getTranscriptionRecording(
     workspaceId: string,
     recordingId: string,
@@ -1380,6 +1382,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async listTranscriptionRecordings(
     workspaceId: string,
     options: { signal?: AbortSignal | undefined } = {},
@@ -1399,6 +1402,7 @@ export class OpenGeniClient {
     return body;
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async uploadTranscriptionRecordingChunk(
     workspaceId: string,
     recordingId: string,
@@ -1448,6 +1452,7 @@ export class OpenGeniClient {
     return body;
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async finalizeTranscriptionRecording(
     workspaceId: string,
     recordingId: string,
@@ -1468,6 +1473,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async processNextTranscriptionRecordingSegment(
     workspaceId: string,
     recordingId: string,
@@ -1484,6 +1490,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
   async discardTranscriptionRecording(
     workspaceId: string,
     recordingId: string,

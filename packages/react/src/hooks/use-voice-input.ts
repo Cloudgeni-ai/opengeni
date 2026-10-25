@@ -1,19 +1,17 @@
-import { OpenGeniApiError, type ClientVoiceInputConfig, type OpenGeniClient } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
+import type { ClientVoiceInputConfig, RecordingTranscriptVersion } from "@opengeni/contracts";
+import type { OpenGeniClient } from "@opengeni/sdk";
 import {
-  IndexedDbVoiceRecordingStore,
-  VoiceRecordingOwnedError,
-  VoiceRecordingStorageUnavailableError,
-  createVoiceRecordingManifest,
-  type VoiceRecordingChunk,
-  type VoiceRecordingManifest,
-  type VoiceRecordingStore,
-} from "../voice-recording-store";
-import {
-  acquireDefaultVoiceRecordingOwnerLease,
-  liveVoiceRecordingOwnerIds,
-  type VoiceRecordingOwnerLease,
-} from "../voice-recording-owner";
+  OpenGeniRecordingsClient,
+  RecordingUploader,
+  browserRecorderPlatform,
+  type OpenGeniRecordingsTransport,
+  type Recorder,
+  type RecorderPlatform,
+  type RecordingTransport,
+  type RecordingUploadStatus,
+} from "@opengeni/sdk/recordings";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { VoiceRecordingStore } from "../voice-recording-store";
 import { appendFinalTranscript } from "./use-transcription";
 
 export type VoiceInputStatus =
@@ -27,7 +25,25 @@ export type VoiceInputStatus =
   | "transcript-ready"
   | "error";
 
+/** The recording calls dictation makes, as `OpenGeniRecordingsClient` provides them. */
+export type VoiceInputRecordingsClient = Pick<
+  OpenGeniRecordingsClient,
+  | "createRecording"
+  | "createRecordingUploads"
+  | "completeRecordingChunks"
+  | "finalizeRecording"
+  | "deleteRecording"
+  | "listRecordings"
+  | "listRecordingTranscriptVersions"
+  | "getRecordingTranscript"
+  | "createRecordingTranscript"
+>;
+
 export type UseVoiceInputOptions = {
+  /**
+   * The SDK client. Dictation records through its recordings API; a client
+   * with only `transcribeAudio` records in memory and sends one request.
+   */
   client: VoiceInputClient | null;
   workspaceId: string;
   capability: ClientVoiceInputConfig | null;
@@ -36,27 +52,25 @@ export type UseVoiceInputOptions = {
   setValue: (value: string) => void;
   focusInput: () => void;
   disabled?: boolean | undefined;
-  /** Test/embed seam. Production defaults to the origin-scoped IndexedDB store. */
-  createRecordingStore?: (() => VoiceRecordingStore) | undefined;
-  createRecordingId?: (() => string) | undefined;
-  createOwnerId?: (() => string) | undefined;
+  /** A recordings client, such as a host proxy. Built from `client` otherwise. */
+  recordings?: Partial<VoiceInputRecordingsClient> | undefined;
+  /** How this device records; the browser's by default. */
+  platform?: RecorderPlatform | undefined;
+  /** How often a dictation's transcript is checked. Default 1 second. */
+  pollIntervalMilliseconds?: number | undefined;
   now?: (() => Date) | undefined;
-  /** Test/embed seam. Production uses bounded exponential recovery backoff. */
+  /** @deprecated Dictations are kept by the shared recording store; ignored. */
+  createRecordingStore?: (() => VoiceRecordingStore) | undefined;
+  /** @deprecated The recorder chooses the recording id; ignored. */
+  createRecordingId?: (() => string) | undefined;
+  /** @deprecated Recordings are claimed with Web Locks; ignored. */
+  createOwnerId?: (() => string) | undefined;
+  /** @deprecated The server retries transcription itself; ignored. */
   automaticRetryDelayMilliseconds?: number | undefined;
 };
 
-type ResumableVoiceInputClient = Pick<
-  OpenGeniClient,
-  | "createTranscriptionRecording"
-  | "getTranscriptionRecording"
-  | "uploadTranscriptionRecordingChunk"
-  | "finalizeTranscriptionRecording"
-  | "processNextTranscriptionRecordingSegment"
-  | "discardTranscriptionRecording"
->;
-
 type VoiceInputClient = Pick<OpenGeniClient, "transcribeAudio"> &
-  Partial<ResumableVoiceInputClient>;
+  Partial<Pick<OpenGeniClient, "requestJson">>;
 
 export type UseVoiceInputResult = {
   status: VoiceInputStatus;
@@ -70,1156 +84,696 @@ export type UseVoiceInputResult = {
   recordingStartedAt: number | null;
   /** Capture stops and transcribes automatically after this many seconds. */
   maxRecordingSeconds: number | null;
+  /** The speech is saved (on this device or the server) and isn't lost by a reload. */
   locallySaved: boolean;
   hasRecoverableRecording: boolean;
   savedTranscript: string | null;
+  /** The microphone's level from 0 to 1 while recording, when the recorder meters it. */
+  level: () => number | null;
   start: () => Promise<boolean>;
-  /** Stop capture, durably settle the final chunk, then transcribe into the draft. */
+  /** Stop capture, then transcribe into the draft. */
   stop: () => void;
-  /** Retry finalization/transcription from the already-persisted recording. */
+  /** Transcribe a saved dictation again, or keep waiting for one still being heard. */
   retry: () => void;
-  /** Explicitly insert a durably saved transcript whose prior handoff may be uncertain. */
+  /** Insert a saved transcript into the draft. */
   insertSavedTranscript: () => Promise<void>;
   /**
    * Cancel active work without losing speech: a recording longer than a few
-   * seconds and any stopped/transcribing recording stay locally recoverable.
+   * seconds and any stopped or transcribing one stay saved to insert later.
    */
   cancel: () => void;
-  /** Intentionally delete the current durable recording. */
+  /** Intentionally delete the current dictation. */
   discard: () => Promise<void>;
 };
 
-export const VOICE_RECORDING_TIMESLICE_MILLISECONDS = 5_000;
+export const VOICE_RECORDING_TIMESLICE_MILLISECONDS = 1_000;
+/** @deprecated Dictations no longer use owner heartbeats. */
 export const VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS = 5_000;
+/** @deprecated Dictations no longer use owner heartbeats. */
 export const VOICE_RECORDING_OWNER_STALE_MILLISECONDS = 30_000;
+/** The longest one-shot dictation, recorded in memory and sent in one request. */
 export const VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS = 600;
-// Cancel deletes only an accidental start; anything longer is kept for the user.
-const VOICE_RECORDING_DISCARD_ON_CANCEL_MAX_MILLISECONDS = 3_000;
+/** The longest dictation recorded through the recordings API. */
 export const VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS = 8 * 60 * 60;
-export const VOICE_RECORDING_RECOVERY_STATUS_POLL_MILLISECONDS = 2_000;
-export const VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS = 30_000;
-const TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS = 5_000;
+// Cancel deletes only an accidental start; anything longer is kept for the user.
+const DISCARD_ON_CANCEL_MAX_MILLISECONDS = 3_000;
+const DEFAULT_POLL_MILLISECONDS = 1_000;
+const MAX_POLL_MILLISECONDS = 15_000;
+const TAKEN_STORAGE_KEY = "opengeni.voice-input.taken.v1";
 const MIME_PREFERENCES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
-const createDefaultVoiceRecordingId = () => crypto.randomUUID();
 const currentDate = () => new Date();
 
-export function transcriptionRecoveryMutationDelayMilliseconds(
-  retryAfterMilliseconds: number | undefined,
-  attempt: number,
-  random: () => number = Math.random,
-): number {
-  const hint =
-    typeof retryAfterMilliseconds === "number" &&
-    Number.isInteger(retryAfterMilliseconds) &&
-    retryAfterMilliseconds > 0
-      ? retryAfterMilliseconds
-      : TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS;
-  const boundedHint = Math.max(
-    500,
-    Math.min(hint, VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS),
-  );
-  const exponent = Math.max(0, Math.min(Math.floor(attempt), 6));
-  const exponential = Math.min(
-    VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS,
-    boundedHint * 2 ** exponent,
-  );
-  const sampledJitter = random();
-  const jitterRatio = Number.isFinite(sampledJitter) ? Math.max(0, Math.min(1, sampledJitter)) : 0;
-  return Math.min(
-    VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS,
-    Math.ceil(exponential * (1 + jitterRatio * 0.2)),
-  );
+const recordingClients = new WeakMap<object, OpenGeniRecordingsClient>();
+
+/**
+ * The recordings client dictation uses, or null when only one-shot
+ * transcription is possible (no recordings client, or the deployment can't
+ * keep dictations).
+ */
+function dictationClient(
+  explicit: Partial<VoiceInputRecordingsClient> | undefined,
+  client: VoiceInputClient | null,
+): VoiceInputRecordingsClient | null {
+  let candidate: object | undefined = explicit;
+  if (!candidate && client && typeof client.requestJson === "function") {
+    candidate = recordingClients.get(client);
+    if (!candidate) {
+      const created = new OpenGeniRecordingsClient(client as OpenGeniRecordingsTransport);
+      recordingClients.set(client, created);
+      candidate = created;
+    }
+  }
+  if (!candidate) return null;
+  const methods = candidate as Record<string, unknown>;
+  const required: Array<keyof VoiceInputRecordingsClient> = [
+    "createRecording",
+    "createRecordingUploads",
+    "completeRecordingChunks",
+    "finalizeRecording",
+    "deleteRecording",
+    "listRecordings",
+    "listRecordingTranscriptVersions",
+    "getRecordingTranscript",
+    "createRecordingTranscript",
+  ];
+  return required.every((method) => typeof methods[method] === "function")
+    ? (candidate as VoiceInputRecordingsClient)
+    : null;
 }
 
-export function useVoiceInput({
-  client,
-  workspaceId,
-  capability,
-  enabled,
-  value,
-  setValue,
-  focusInput,
-  disabled = false,
-  createRecordingStore,
-  createRecordingId = createDefaultVoiceRecordingId,
-  createOwnerId,
-  now = currentDate,
-  automaticRetryDelayMilliseconds,
-}: UseVoiceInputOptions): UseVoiceInputResult {
+/** What one dictation is doing, outside React state so async work reads it current. */
+type Dictation = {
+  recordingId: string;
+  /** Insert the text as soon as it is ready; off once cancelled or recovered. */
+  autoInsert: boolean;
+  text: string | null;
+};
+
+/**
+ * Dictation for a composer: record the microphone, transcribe it with the
+ * workspace's voice input, and add the text to the draft without sending.
+ *
+ * Each dictation is a recording (purpose `dictation`): saved on the device
+ * every second, uploaded as it is spoken, transcribed by the server, private
+ * to its speaker and deleted a day after it is heard. Closing the tab, losing
+ * the connection or a failed transcription loses nothing: the next composer
+ * that opens in this workspace offers the saved text. Taking the text deletes
+ * the dictation first, so two tabs never insert the same speech.
+ */
+export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResult {
+  const { workspaceId, capability, enabled, value, focusInput, disabled = false } = options;
+  const sdkClient = options.client;
+  const recordings = useMemo(
+    () => dictationClient(options.recordings, sdkClient),
+    [options.recordings, sdkClient],
+  );
+  const defaultPlatform = useMemo(() => browserRecorderPlatform(), []);
+  const platform = options.platform ?? defaultPlatform;
+  const durable = Boolean(recordings && capability?.resumable && platform.supported);
+
   const [status, setStatus] = useState<VoiceInputStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [recordingId, setRecordingId] = useState<string | null>(null);
   const [durationSeconds, setDurationSeconds] = useState(0);
-  const [locallySaved, setLocallySaved] = useState(false);
-  const [storageAvailable, setStorageAvailable] = useState(
-    () => Boolean(createRecordingStore) || typeof globalThis.indexedDB !== "undefined",
-  );
-  const createRecordingStoreRef = useRef(createRecordingStore);
-  createRecordingStoreRef.current = createRecordingStore;
-  const nowRef = useRef(now);
-  nowRef.current = now;
-  const readNow = useCallback(() => nowRef.current(), []);
-  const generationRef = useRef(0);
-  const workspaceIdRef = useRef(workspaceId);
-  const ownerIdRef = useRef<string | null>(null);
-  const ownerLeaseRef = useRef<VoiceRecordingOwnerLease | null>(null);
-  const ownerIdPromiseRef = useRef<Promise<string> | null>(null);
-  const createOwnerIdRef = useRef(createOwnerId);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Cancel/Escape/voice takeover keep a real dictation instead of deleting it.
-  const holdOnStopRef = useRef(false);
-  const recordingStartedAtRef = useRef(0);
-  const automaticRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const automaticRetryAttemptRef = useRef(0);
-  const ownerHeartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const controllerRef = useRef<AbortController | null>(null);
-  const disabledRef = useRef(disabled);
-  const valueRef = useRef(value);
-  const storeRef = useRef<VoiceRecordingStore | null>(null);
-  const storePromiseRef = useRef<Promise<VoiceRecordingStore> | null>(null);
-  const ownsStoreRef = useRef(false);
-  const manifestRef = useRef<VoiceRecordingManifest | null>(null);
-  const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const persistenceErrorRef = useRef<unknown>(null);
-  const captureLimitErrorRef = useRef<string | null>(null);
-  const captureSettledRef = useRef<Promise<void>>(Promise.resolve());
-  const resolveCaptureSettledRef = useRef<(() => void) | null>(null);
+  const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
+  const [savedTranscript, setSavedTranscript] = useState<string | null>(null);
+  const [held, setHeld] = useState(false);
+  const errorRef = useRef<string | null>(null);
+  errorRef.current = error;
+
+  const latest = useRef({
+    ...options,
+    recordings,
+    platform,
+    durable,
+    disabled,
+    value,
+  });
+  latest.current = { ...options, recordings, platform, durable, disabled, value };
   const statusRef = useRef(status);
-  valueRef.current = value;
   statusRef.current = status;
-  disabledRef.current = disabled;
-  workspaceIdRef.current = workspaceId;
+  const generationRef = useRef(0);
+  const dictationRef = useRef<Dictation | null>(null);
+  const recorderRef = useRef<Recorder | null>(null);
+  const oneShotRef = useRef<OneShotCapture | null>(null);
+  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const uploaderRef = useRef<RecordingUploader | null>(null);
+  const startedAtRef = useRef(0);
+  /** Text a one-shot dictation heard while it couldn't go into the draft. */
+  const oneShotText = useRef<string | null>(null);
+  /** `watch`, for the callbacks declared before it (it calls them in turn). */
+  const watchRef = useRef<
+    (dictation: Dictation, versionId: string | null, generation: number) => Promise<void>
+  >(async () => undefined);
 
-  const ensureOwnerId = useCallback(async (): Promise<string> => {
-    if (ownerIdRef.current) return ownerIdRef.current;
-    ownerIdPromiseRef.current ??= (async () => {
-      const injectedOwnerId = createOwnerIdRef.current?.();
-      if (injectedOwnerId) {
-        ownerIdRef.current = injectedOwnerId;
-        return injectedOwnerId;
-      }
-      const lease = await acquireDefaultVoiceRecordingOwnerLease();
-      ownerLeaseRef.current = lease;
-      ownerIdRef.current = lease.ownerId;
-      return lease.ownerId;
-    })();
-    return await ownerIdPromiseRef.current;
+  const now = useCallback(() => (latest.current.now ?? currentDate)(), []);
+
+  const maxRecordingSeconds = capability
+    ? durable && capability.resumable
+      ? Math.min(
+          capability.resumable.maxDurationSeconds,
+          VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS,
+        )
+      : Math.min(capability.maxDurationSeconds, VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS)
+    : null;
+  const maxRecordingSecondsRef = useRef(maxRecordingSeconds);
+  maxRecordingSecondsRef.current = maxRecordingSeconds;
+
+  /** Calls the latest recordings client, so a refreshed sign-in reaches running uploads. */
+  const transport = useMemo<RecordingTransport>(() => {
+    const current = () => {
+      const found = latest.current.recordings;
+      if (!found) throw new Error("Dictation needs a recordings client.");
+      return found;
+    };
+    return {
+      createRecording: (...args) => current().createRecording(...args),
+      createRecordingUploads: (...args) => current().createRecordingUploads(...args),
+      completeRecordingChunks: (...args) => current().completeRecordingChunks(...args),
+      finalizeRecording: (...args) => current().finalizeRecording(...args),
+      deleteRecording: (...args) => current().deleteRecording(...args),
+    };
   }, []);
 
-  const stopOwnerHeartbeat = useCallback(() => {
-    if (ownerHeartbeatTimerRef.current) clearInterval(ownerHeartbeatTimerRef.current);
-    ownerHeartbeatTimerRef.current = null;
-  }, []);
-
-  const clearCaptureRuntime = useCallback((expectedStream?: MediaStream) => {
-    const captureStream = expectedStream ?? streamRef.current;
-    captureStream?.getTracks().forEach((track) => track.stop());
-    if (expectedStream && streamRef.current !== expectedStream) return;
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = null;
-    streamRef.current = null;
-    recorderRef.current = null;
-    setStream(null);
-  }, []);
-
-  const clearVisibleRecording = useCallback(() => {
-    stopOwnerHeartbeat();
-    manifestRef.current = null;
-    setRecordingId(null);
-    setDurationSeconds(0);
-    setLocallySaved(false);
-    automaticRetryAttemptRef.current = 0;
-  }, [stopOwnerHeartbeat]);
-
-  const ensureStore = useCallback(async (): Promise<VoiceRecordingStore> => {
-    if (storeRef.current) return storeRef.current;
-    if (!storePromiseRef.current) {
-      storePromiseRef.current = Promise.resolve().then(() => {
-        const factory = createRecordingStoreRef.current;
-        const store = factory?.() ?? new IndexedDbVoiceRecordingStore();
-        ownsStoreRef.current = factory === undefined;
-        storeRef.current = store;
-        setStorageAvailable(true);
-        return store;
+  const uploader = useCallback((): RecordingUploader => {
+    if (!uploaderRef.current) {
+      const current = latest.current.platform;
+      const isCaptureActive = current.isCaptureActive;
+      uploaderRef.current = new RecordingUploader({
+        client: transport,
+        store: current.createStore(),
+        ...(current.fetch ? { fetch: current.fetch } : {}),
+        ...(isCaptureActive ? { isCaptureActive: (id: string) => isCaptureActive(id) } : {}),
       });
     }
-    try {
-      return await storePromiseRef.current;
-    } catch (reason) {
-      storePromiseRef.current = null;
-      if (reason instanceof VoiceRecordingStorageUnavailableError) setStorageAvailable(false);
-      throw reason;
-    }
+    return uploaderRef.current;
+  }, [transport]);
+
+  const clearStopTimer = () => {
+    if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+    stopTimerRef.current = null;
+  };
+
+  /** Nothing in hand: back to the microphone button. */
+  const settleIdle = useCallback(() => {
+    dictationRef.current = null;
+    recorderRef.current = null;
+    oneShotRef.current = null;
+    clearStopTimer();
+    setStatus("idle");
+    setError(null);
+    setStream(null);
+    setRecordingId(null);
+    setDurationSeconds(0);
+    setRecordingStartedAt(null);
+    setSavedTranscript(null);
+    setHeld(false);
   }, []);
 
-  const rememberManifest = useCallback((manifest: VoiceRecordingManifest) => {
-    manifestRef.current = manifest;
-    setRecordingId(manifest.recordingId);
-    setDurationSeconds(manifest.totalDurationMilliseconds / 1_000);
-    setLocallySaved(manifest.chunkCount > 0);
+  /**
+   * Keep a dictation to insert, retry or discard later. `autoInsert` stays on
+   * only for text that arrived while a send held the composer.
+   */
+  const hold = useCallback(
+    (
+      dictation: Dictation,
+      next: VoiceInputStatus,
+      code: string | null = null,
+      autoInsert = false,
+    ) => {
+      dictationRef.current = { ...dictation, autoInsert };
+      setRecordingId(dictation.recordingId);
+      setSavedTranscript(dictation.text);
+      setHeld(true);
+      setStatus(next);
+      setError(code);
+      setStream(null);
+      setRecordingStartedAt(null);
+    },
+    [],
+  );
+
+  const insertText = useCallback((text: string) => {
+    const { setValue: write, focusInput: focus } = latest.current;
+    write(appendFinalTranscript(latest.current.value, text));
+    focus();
   }, []);
 
-  const beginOwnerHeartbeat = useCallback(
-    (manifest: VoiceRecordingManifest) => {
-      stopOwnerHeartbeat();
-      ownerHeartbeatTimerRef.current = setInterval(() => {
-        if (
-          manifestRef.current?.recordingId !== manifest.recordingId ||
-          manifestRef.current.ownerId !== ownerIdRef.current
-        ) {
-          stopOwnerHeartbeat();
+  /** Look for a dictation an earlier page, tab or device left with this workspace. */
+  const loadSaved = useCallback(
+    async (generation: number): Promise<void> => {
+      const client = latest.current.recordings;
+      const workspace = latest.current.workspaceId;
+      if (!client || !latest.current.durable) return;
+      await uploader()
+        .resume({
+          only: (stored) =>
+            stored.create.purpose === "dictation" && stored.workspaceId === workspace,
+        })
+        .catch(() => undefined);
+      let listed;
+      try {
+        listed = await client.listRecordings(workspace, { purpose: "dictation", limit: 10 });
+      } catch {
+        return;
+      }
+      if (generation !== generationRef.current || dictationRef.current) return;
+      const taken = readTaken();
+      for (const recording of listed.recordings) {
+        if (taken.has(recording.id)) {
+          // Its text went into a draft while the delete couldn't reach the server.
+          void client.deleteRecording(workspace, recording.id).then(
+            () => forgetTaken(recording.id),
+            (cause: unknown) => {
+              if (httpStatus(cause) === 404) forgetTaken(recording.id);
+            },
+          );
+          continue;
+        }
+        // Still being spoken here or in another tab; that composer owns it.
+        if (recording.state === "capturing") continue;
+        const dictation: Dictation = { recordingId: recording.id, autoInsert: false, text: null };
+        if (recording.state === "failed") {
+          hold(
+            dictation,
+            "error",
+            voiceInputCode(recording.transcript?.errorCode ?? recording.errorCode),
+          );
           return;
         }
-        const updatedAt = readNow().toISOString();
-        void ensureStore()
-          .then((store) =>
-            store.updateManifest(
-              manifest.recordingId,
-              { ownerHeartbeatAt: updatedAt },
-              updatedAt,
-              ownerIdRef.current ?? undefined,
-            ),
-          )
-          .then((updated) => {
-            if (manifestRef.current?.recordingId === updated.recordingId) {
-              manifestRef.current = updated;
-            }
-          })
-          .catch(() => undefined);
-      }, VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS);
-    },
-    [ensureStore, readNow, stopOwnerHeartbeat],
-  );
-
-  const preserveForRetry = useCallback(
-    async (manifest: VoiceRecordingManifest, code: string | null, generation: number) => {
-      if (generation !== generationRef.current) return;
-      rememberManifest(manifest);
-      const transcriptReady =
-        manifest.finalizationState === "transcript-ready" && manifest.transcriptText !== null;
-      setStatus(transcriptReady ? "transcript-ready" : code ? "error" : "recovered");
-      setError(transcriptReady ? "handoff_uncertain" : code);
-      focusInput();
-    },
-    [focusInput, rememberManifest],
-  );
-
-  const updateManifestBestEffort = useCallback(
-    async (
-      manifest: VoiceRecordingManifest,
-      update: Parameters<VoiceRecordingStore["updateManifest"]>[1],
-    ): Promise<VoiceRecordingManifest> => {
-      try {
-        return await (
-          await ensureStore()
-        ).updateManifest(
-          manifest.recordingId,
-          update,
-          readNow().toISOString(),
-          ownerIdRef.current ?? undefined,
-        );
-      } catch {
-        return manifest;
+        hold(dictation, recording.state === "ready" ? "transcribing" : "retrying");
+        void watchRef.current(dictation, null, generation);
+        return;
       }
     },
-    [ensureStore, readNow],
+    [hold, uploader],
   );
 
-  const loadNextRecoverable = useCallback(
-    async (generation: number): Promise<void> => {
-      const active = () =>
-        generation === generationRef.current && workspaceIdRef.current === workspaceId;
-      const [store, ownerId] = await Promise.all([ensureStore(), ensureOwnerId()]);
-      if (!active()) return;
-      const heartbeatStaleBefore = new Date(
-        readNow().getTime() - VOICE_RECORDING_OWNER_STALE_MILLISECONDS,
-      ).toISOString();
-      await store
-        .cleanupHandedOffManifests({ ownerId, staleBefore: heartbeatStaleBefore })
-        .catch(() => undefined);
-      if (!active()) return;
-      // A closed or crashed tab releases its owner lock at once: recover its
-      // recording now rather than after the heartbeat window (the user who
-      // reopens the app right away must still see their dictation).
-      const liveOwners =
-        createOwnerIdRef.current === undefined ? await liveVoiceRecordingOwnerIds() : null;
-      if (!active()) return;
-      const staleBefore = liveOwners ? readNow().toISOString() : heartbeatStaleBefore;
-      const manifests = (
-        await store.listRecoverableManifests(workspaceId, { ownerId, staleBefore })
-      ).filter(
-        (manifest) =>
-          !liveOwners ||
-          !manifest.ownerId ||
-          manifest.ownerId === ownerId ||
-          !liveOwners.has(manifest.ownerId) ||
-          !manifest.ownerHeartbeatAt ||
-          manifest.ownerHeartbeatAt <= heartbeatStaleBefore,
-      );
-      if (!active()) return;
-      for (const candidate of manifests) {
+  /** Take the text: delete the dictation, then insert it once. */
+  const take = useCallback(
+    async (dictation: Dictation, text: string, generation: number): Promise<void> => {
+      const client = latest.current.recordings;
+      const workspace = latest.current.workspaceId;
+      let insert = true;
+      if (client) {
         try {
-          const claimedAt = readNow().toISOString();
-          const claimed = await store.claimManifest(
-            candidate.recordingId,
-            ownerId,
-            claimedAt,
-            staleBefore,
+          await client.deleteRecording(workspace, dictation.recordingId);
+        } catch (cause) {
+          if (httpStatus(cause) === 404) {
+            // Another tab took it, or it expired: never insert it twice.
+            insert = false;
+          } else {
+            // The server is out of reach: insert now and delete it later.
+            rememberTaken(dictation.recordingId);
+          }
+        }
+      }
+      if (generation !== generationRef.current) {
+        if (insert && text.trim()) rememberTaken(dictation.recordingId);
+        return;
+      }
+      if (insert && text.trim()) insertText(text);
+      settleIdle();
+      void loadSaved(generation);
+    },
+    [insertText, loadSaved, settleIdle],
+  );
+
+  /** Wait for the server to hear a dictation, then insert or hold its text. */
+  const watch = useCallback(
+    async (dictation: Dictation, versionId: string | null, generation: number): Promise<void> => {
+      const client = latest.current.recordings;
+      const workspace = latest.current.workspaceId;
+      if (!client) return;
+      let delay = latest.current.pollIntervalMilliseconds ?? DEFAULT_POLL_MILLISECONDS;
+      for (;;) {
+        if (generation !== generationRef.current) return;
+        let version: RecordingTranscriptVersion | undefined;
+        try {
+          const versions = await client.listRecordingTranscriptVersions(
+            workspace,
+            dictation.recordingId,
           );
-          if (!active()) {
-            await store
-              .updateManifest(
-                claimed.recordingId,
-                { ownerId: null, ownerHeartbeatAt: null },
-                readNow().toISOString(),
-                ownerId,
-              )
-              .catch(() => undefined);
+          version = versionId
+            ? versions.find((item) => item.id === versionId)
+            : [...versions].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+        } catch (cause) {
+          if (httpStatus(cause) === 404) {
+            if (generation === generationRef.current) settleIdle();
             return;
           }
-          rememberManifest(claimed);
-          beginOwnerHeartbeat(claimed);
-          const transcriptReady =
-            claimed.finalizationState === "transcript-ready" && claimed.transcriptText !== null;
-          setStatus(
-            transcriptReady
-              ? "transcript-ready"
-              : claimed.recoveryMode === "automatic"
-                ? "retrying"
-                : "recovered",
-          );
-          // An append-mode transcript may already be in the draft (the page
-          // closed between appending and recording the handoff).
-          setError(
-            transcriptReady && candidate.handoffMode === "append" ? "handoff_uncertain" : null,
-          );
-          return;
-        } catch (reason) {
-          if (reason instanceof VoiceRecordingOwnedError) continue;
-          throw reason;
+          // Offline or a server hiccup: keep the dictation and keep checking.
+          delay = Math.min(MAX_POLL_MILLISECONDS, delay * 2);
         }
-      }
-      if (active() && !manifestRef.current) {
-        setStatus("idle");
-        setError(null);
+        if (generation !== generationRef.current) return;
+        if (version?.state === "failed") {
+          hold(dictation, "error", voiceInputCode(version.errorCode));
+          return;
+        }
+        if (version?.state === "complete") {
+          const text = await transcriptText(client, workspace, dictation.recordingId, version.id);
+          if (generation !== generationRef.current) return;
+          if (text === null) {
+            delay = Math.min(MAX_POLL_MILLISECONDS, delay * 2);
+          } else {
+            const current = dictationRef.current;
+            const automatic =
+              current?.recordingId === dictation.recordingId &&
+              current.autoInsert &&
+              !latest.current.disabled;
+            if (automatic) {
+              await take(dictation, text, generation);
+            } else {
+              // Cancelled, recovered, or a send holds the composer: keep it,
+              // and insert it once the send is done unless it was cancelled.
+              const waitingForSend =
+                current?.recordingId === dictation.recordingId && current.autoInsert;
+              hold({ ...dictation, text }, "transcript-ready", null, waitingForSend);
+            }
+            return;
+          }
+        }
+        await sleep(delay);
       }
     },
-    [beginOwnerHeartbeat, ensureOwnerId, ensureStore, readNow, rememberManifest, workspaceId],
+    [hold, settleIdle, take],
   );
+  watchRef.current = watch;
 
-  const finalizePersistedRecording = useCallback(
-    async (generation: number): Promise<void> => {
-      const manifest = manifestRef.current;
-      const resumable =
-        capability?.resumable && isResumableVoiceInputClient(client) ? capability.resumable : null;
-      const maxSizeBytes = resumable?.maxSizeBytes ?? capability?.maxSizeBytes;
-      if (
-        !manifest ||
-        !client ||
-        !capability ||
-        !maxSizeBytes ||
-        manifest.workspaceId !== workspaceId
-      )
+  const finishOneShot = useCallback(
+    async (capture: OneShotCapture, generation: number, autoInsert: boolean) => {
+      const audio = await capture.stop();
+      oneShotRef.current = null;
+      if (generation !== generationRef.current) return;
+      if (!audio || audio.size === 0) {
+        settleIdle();
         return;
-      const controller = new AbortController();
-      controllerRef.current?.abort();
-      controllerRef.current = controller;
-      const active = () =>
-        generation === generationRef.current &&
-        workspaceIdRef.current === workspaceId &&
-        !controller.signal.aborted &&
-        manifestRef.current?.recordingId === manifest.recordingId &&
-        manifestRef.current.workspaceId === workspaceId;
-      let transcribing = manifest;
+      }
+      const maxBytes = latest.current.capability?.maxSizeBytes;
+      if (maxBytes !== undefined && audio.size > maxBytes) {
+        settleIdle();
+        setStatus("error");
+        setError("too_large");
+        return;
+      }
+      const client = latest.current.client;
+      if (!client) return;
+      setStatus("transcribing");
       try {
-        const store = await ensureStore();
-        if (!active()) return;
-        transcribing = await store.updateManifest(
-          manifest.recordingId,
-          {
-            captureState: "stopped",
-            uploadState: "syncing",
-            transcriptionState: "transcribing",
-            ownerHeartbeatAt: readNow().toISOString(),
-          },
-          readNow().toISOString(),
-          ownerIdRef.current ?? undefined,
-        );
-        if (!active()) return;
-        rememberManifest(transcribing);
-        setStatus("transcribing");
-        setError(null);
-        if (transcribing.totalBytes > maxSizeBytes) {
-          throw { code: "too_large" };
-        }
-        const chunks = await store.listChunks(transcribing.recordingId);
-        if (!active()) return;
-        if (chunks.length === 0) {
-          const retained = await store.updateManifest(
-            transcribing.recordingId,
-            {
-              uploadState: "retrying",
-              transcriptionState: "retrying",
-              recoveryMode: "manual",
-              handoffMode: "explicit",
-            },
-            readNow().toISOString(),
-            ownerIdRef.current ?? undefined,
-          );
-          if (!active()) return;
-          await preserveForRetry(retained, "invalid_audio", generation);
-          return;
-        }
-        const response = await transcribePersistedRecording({
-          client,
-          workspaceId,
-          capability,
-          manifest: transcribing,
-          chunks,
-          signal: controller.signal,
+        const response = await client.transcribeAudio(latest.current.workspaceId, {
+          audio,
+          mimeType: audio.type || capture.mimeType,
+          durationSeconds: capture.durationSeconds(),
         });
-        if (!active()) return;
-        const ready = await store.updateManifest(
-          transcribing.recordingId,
-          {
-            uploadState: "complete",
-            transcriptionState: "complete",
-            finalizationState: "transcript-ready",
-            transcriptText: response.text,
-            ownerHeartbeatAt: readNow().toISOString(),
-          },
-          readNow().toISOString(),
-          ownerIdRef.current ?? undefined,
-        );
-        if (!active()) return;
-        rememberManifest(ready);
-
-        automaticRetryAttemptRef.current = 0;
-        if (ready.handoffMode === "explicit") {
-          // Never appended: offer an explicit insert, not an "already inserted?" warning.
-          setStatus("transcript-ready");
-          setError(null);
-          focusInput();
-          return;
-        }
-
-        // Session creation can disable the composer while a recording is
-        // transcribing. Keep the durable transcript for explicit insertion
-        // later; never append text after Send captured its visible snapshot.
-        if (disabledRef.current) {
-          setStatus("transcript-ready");
-          return;
-        }
-
-        const next = appendFinalTranscript(valueRef.current, response.text);
-        if (next !== valueRef.current) {
-          valueRef.current = next;
-          setValue(next);
-        }
-
-        let handedOff: VoiceRecordingManifest;
-        try {
-          handedOff = await store.updateManifest(
-            ready.recordingId,
-            { finalizationState: "handed-off" },
-            readNow().toISOString(),
-            ownerIdRef.current ?? undefined,
-          );
-        } catch {
-          if (!active()) return;
-          rememberManifest(ready);
-          setStatus("transcript-ready");
-          setError("handoff_uncertain");
-          focusInput();
-          return;
-        }
-        if (!active()) return;
-        rememberManifest(handedOff);
-        if (resumable && isResumableVoiceInputClient(client)) {
-          await client
-            .discardTranscriptionRecording(workspaceId, handedOff.recordingId, {
-              signal: controller.signal,
-            })
-            .catch(() => undefined);
-        }
-        if (!active()) return;
-        await store
-          .discard(handedOff.recordingId, ownerIdRef.current ?? undefined)
-          .catch(() => undefined);
-        if (!active()) return;
-        clearVisibleRecording();
-        setStatus("idle");
-        setError(null);
-        focusInput();
-        await loadNextRecoverable(generation);
-      } catch (reason) {
-        if (!active()) return;
-        const code = controller.signal.aborted ? null : errorCode(reason);
-        const retryable = !controller.signal.aborted && isRetryableVoiceInputError(reason);
-        const retained = await updateManifestBestEffort(transcribing, {
-          uploadState: "retrying",
-          transcriptionState: "retrying",
-          recoveryMode: retryable ? "automatic" : "manual",
-          handoffMode: "explicit",
-        });
-        if (!active()) return;
-        if (retryable) {
-          rememberManifest(retained);
-          setStatus("retrying");
-          setError(code);
+        if (generation !== generationRef.current) return;
+        if (autoInsert && !latest.current.disabled) {
+          insertText(response.text);
+          settleIdle();
         } else {
-          await preserveForRetry(retained, code, generation);
+          // Kept in memory only: it is gone if the page closes.
+          oneShotText.current = response.text;
+          setSavedTranscript(response.text);
+          setHeld(true);
+          setStatus("transcript-ready");
         }
-      } finally {
-        if (controllerRef.current === controller) controllerRef.current = null;
+      } catch (cause) {
+        if (generation !== generationRef.current) return;
+        settleIdle();
+        setStatus("error");
+        setError(errorCode(cause));
       }
     },
-    [
-      capability,
-      clearVisibleRecording,
-      client,
-      ensureStore,
-      focusInput,
-      loadNextRecoverable,
-      readNow,
-      preserveForRetry,
-      rememberManifest,
-      setValue,
-      updateManifestBestEffort,
-      workspaceId,
-    ],
+    [insertText, settleIdle],
   );
-  // Live session renders must not postpone a durable retry deadline. Execute the
-  // latest finalizer without making its callback identity part of the timer key.
-  const finalizePersistedRecordingRef = useRef(finalizePersistedRecording);
-  finalizePersistedRecordingRef.current = finalizePersistedRecording;
-  const clientAvailable = client !== null && client !== undefined;
 
-  useEffect(() => {
-    if (
-      status !== "retrying" ||
-      !manifestRef.current ||
-      manifestRef.current.recoveryMode !== "automatic" ||
-      manifestRef.current.workspaceId !== workspaceId ||
-      !clientAvailable ||
-      disabled ||
-      !enabled
-    ) {
-      return;
-    }
-    const generation = generationRef.current;
-    let started = false;
-    const run = () => {
-      if (
-        started ||
-        generation !== generationRef.current ||
-        statusRef.current !== "retrying" ||
-        workspaceIdRef.current !== workspaceId
-      ) {
+  const finishCapture = useCallback(
+    async (autoInsert: boolean) => {
+      const generation = generationRef.current;
+      clearStopTimer();
+      const oneShot = oneShotRef.current;
+      if (oneShot) {
+        setStatus("saving");
+        setStream(null);
+        await finishOneShot(oneShot, generation, autoInsert);
         return;
       }
-      started = true;
-      if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
-      automaticRetryTimerRef.current = null;
-      automaticRetryAttemptRef.current += 1;
-      void finalizePersistedRecordingRef.current(generation);
-    };
-    const onOnline = () => run();
-    globalThis.addEventListener?.("online", onOnline);
-    if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return () => globalThis.removeEventListener?.("online", onOnline);
-    }
-    const delay = Math.max(
-      0,
-      automaticRetryDelayMilliseconds ??
-        transcriptionRecoveryMutationDelayMilliseconds(
-          TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS,
-          automaticRetryAttemptRef.current,
-        ),
-    );
-    automaticRetryTimerRef.current = setTimeout(run, delay);
-    return () => {
-      globalThis.removeEventListener?.("online", onOnline);
-      if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
-      automaticRetryTimerRef.current = null;
-    };
-  }, [automaticRetryDelayMilliseconds, clientAvailable, disabled, enabled, status, workspaceId]);
+      const recorder = recorderRef.current;
+      if (!recorder) return;
+      const id = recorder.snapshot.recordingId;
+      setStatus(autoInsert ? "saving" : "recovered");
+      setStream(null);
+      setRecordingStartedAt(null);
+      if (dictationRef.current) dictationRef.current.autoInsert = autoInsert;
+      let upload: RecordingUploadStatus | null;
+      try {
+        upload = await recorder.stop();
+      } catch {
+        upload = null;
+      }
+      recorderRef.current = null;
+      if (generation !== generationRef.current || !id) return;
+      if (!upload || upload.discarded) {
+        settleIdle();
+        return;
+      }
+      const dictation = dictationRef.current ?? { recordingId: id, autoInsert, text: null };
+      if (upload.failed) {
+        await uploader()
+          .discard(id)
+          .catch(() => undefined);
+        settleIdle();
+        setStatus("error");
+        setError(voiceInputCode(upload.failed.code));
+        return;
+      }
+      const versionId = uploader().finalized.get(id)?.transcript.id ?? null;
+      if (dictation.autoInsert) setStatus("transcribing");
+      else hold(dictation, "recovered");
+      await watch(dictation, versionId, generation);
+    },
+    [finishOneShot, hold, settleIdle, uploader, watch],
+  );
 
   const stop = useCallback(() => {
-    const recorder = recorderRef.current;
-    if (!recorder || recorder.state === "inactive") return;
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = null;
-    setStatus("saving");
-    recorder.stop();
-  }, []);
+    if (statusRef.current !== "recording") return;
+    void finishCapture(true);
+  }, [finishCapture]);
+
+  const beginCapture = useCallback(
+    (input: MediaStream | null, id: string | null) => {
+      startedAtRef.current = now().getTime();
+      setStream(input);
+      setRecordingId(id);
+      setDurationSeconds(0);
+      setRecordingStartedAt(startedAtRef.current);
+      setStatus("recording");
+      const limit = maxRecordingSecondsRef.current;
+      if (limit) {
+        stopTimerRef.current = setTimeout(() => {
+          if (statusRef.current === "recording") void finishCapture(true);
+        }, limit * 1_000);
+      }
+    },
+    [finishCapture, now],
+  );
 
   const start = useCallback(async (): Promise<boolean> => {
+    const current = latest.current;
     if (
-      disabled ||
-      !client ||
-      !enabled ||
-      !capability?.available ||
-      manifestRef.current !== null ||
-      status === "requesting-permission" ||
-      status === "recording" ||
-      status === "saving" ||
-      status === "transcribing" ||
-      status === "retrying" ||
-      !navigator.mediaDevices?.getUserMedia ||
-      typeof MediaRecorder === "undefined"
-    ) {
-      return false;
-    }
-    const prerequisiteGeneration = generationRef.current;
-    let store: VoiceRecordingStore;
-    let ownerId: string;
-    try {
-      [store, ownerId] = await Promise.all([ensureStore(), ensureOwnerId()]);
-    } catch (reason) {
-      setStatus("error");
-      setError(
-        reason instanceof VoiceRecordingStorageUnavailableError
-          ? "storage_unavailable"
-          : errorCode(reason),
-      );
-      return false;
-    }
-    if (
-      prerequisiteGeneration !== generationRef.current ||
-      workspaceIdRef.current !== workspaceId ||
-      ownerIdRef.current !== ownerId ||
-      manifestRef.current !== null ||
+      (!current.durable && !current.client) ||
+      !current.capability?.available ||
+      !current.enabled ||
+      current.disabled ||
       statusRef.current === "requesting-permission" ||
       statusRef.current === "recording" ||
       statusRef.current === "saving" ||
-      statusRef.current === "transcribing"
+      statusRef.current === "transcribing" ||
+      dictationRef.current
     ) {
       return false;
     }
     const generation = ++generationRef.current;
-    const startAttemptIsCurrent = () =>
-      generation === generationRef.current &&
-      workspaceIdRef.current === workspaceId &&
-      ownerIdRef.current === ownerId;
-    let attemptStream: MediaStream | null = null;
-    let attemptRecorder: MediaRecorder | null = null;
-    let attemptPersistenceQueue = Promise.resolve();
-    let attemptPersistenceError: unknown = null;
-    let attemptCaptureLimitError: string | null = null;
-    const attemptCaptureSettlement: { resolve: (() => void) | null } = { resolve: null };
-    const attemptManifest: { current: VoiceRecordingManifest | null } = { current: null };
-    let attemptNextChunkNumber = 0;
-    let attemptLastChunkEndMilliseconds = 0;
-    let attemptRecordingStartedAt = 0;
-    const attemptOwnsSharedCapture = () =>
-      startAttemptIsCurrent() &&
-      attemptStream !== null &&
-      streamRef.current === attemptStream &&
-      attemptRecorder !== null &&
-      recorderRef.current === attemptRecorder &&
-      attemptManifest.current !== null &&
-      manifestRef.current?.recordingId === attemptManifest.current.recordingId &&
-      manifestRef.current.workspaceId === workspaceId &&
-      manifestRef.current.ownerId === ownerId;
     setStatus("requesting-permission");
     setError(null);
-    let acquiredStream: MediaStream | null = null;
-    let recorderStarted = false;
-    try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      acquiredStream = mediaStream;
-      attemptStream = mediaStream;
-      if (!startAttemptIsCurrent()) {
-        mediaStream.getTracks().forEach((track) => track.stop());
+    if (!current.durable) {
+      const capture = await startOneShot(current.capability.acceptedMimeTypes);
+      if (generation !== generationRef.current) {
+        if (!(capture instanceof Error)) await capture.stop();
         return false;
       }
-      streamRef.current = mediaStream;
-      setStream(mediaStream);
-      const mimeType = chooseMimeType(capability.acceptedMimeTypes);
-      const recorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : undefined);
-      attemptRecorder = recorder;
-      const createdAt = readNow();
-      const manifest = createVoiceRecordingManifest({
-        recordingId: createRecordingId(),
-        workspaceId,
-        mimeType: recorder.mimeType || mimeType || "audio/webm",
-        createdAt: createdAt.toISOString(),
-        ownerId,
-      });
-      attemptManifest.current = manifest;
-      await store.createManifest(manifest);
-      if (!startAttemptIsCurrent()) {
-        await store.discard(manifest.recordingId, ownerId);
-        clearCaptureRuntime(mediaStream);
+      if (capture instanceof Error) {
+        setStatus("error");
+        setError(errorCode(capture));
         return false;
       }
-      rememberManifest(manifest);
-      beginOwnerHeartbeat(manifest);
-      persistenceQueueRef.current = attemptPersistenceQueue;
-      persistenceErrorRef.current = null;
-      captureLimitErrorRef.current = null;
-      recorderRef.current = recorder;
-      recorder.ondataavailable = (event) => {
-        if (event.data.size === 0 || attemptPersistenceError || attemptCaptureLimitError) {
-          return;
-        }
-        const chunkNumber = attemptNextChunkNumber++;
-        const elapsed = Math.max(0, readNow().getTime() - attemptRecordingStartedAt);
-        const eventTimecode = Number.isFinite(event.timecode) ? Math.max(0, event.timecode) : 0;
-        const endMilliseconds = Math.max(attemptLastChunkEndMilliseconds, eventTimecode, elapsed);
-        const startMilliseconds = attemptLastChunkEndMilliseconds;
-        const durationMilliseconds = Math.max(0, endMilliseconds - startMilliseconds);
-        attemptLastChunkEndMilliseconds = endMilliseconds;
-        attemptPersistenceQueue = attemptPersistenceQueue
-          .then(async () => {
-            const result = await store.persistChunk({
-              recordingId: manifest.recordingId,
-              ownerId,
-              chunkNumber,
-              capturedAt: readNow().toISOString(),
-              startMilliseconds,
-              durationMilliseconds,
-              mimeType: manifest.mimeType,
-              audio: event.data,
-            });
-            if (!startAttemptIsCurrent()) return;
-            rememberManifest(result.manifest);
-            const maxSizeBytes =
-              capability.resumable && isResumableVoiceInputClient(client)
-                ? capability.resumable.maxSizeBytes
-                : capability.maxSizeBytes;
-            if (result.manifest.totalBytes > maxSizeBytes) {
-              attemptCaptureLimitError = "too_large";
-              if (attemptOwnsSharedCapture()) captureLimitErrorRef.current = "too_large";
-              if (recorder.state !== "inactive") recorder.stop();
-            }
-          })
-          .catch((reason: unknown) => {
-            attemptPersistenceError = reason;
-            if (attemptOwnsSharedCapture()) persistenceErrorRef.current = reason;
-            if (recorder.state !== "inactive") recorder.stop();
-          });
-        if (attemptOwnsSharedCapture()) {
-          persistenceQueueRef.current = attemptPersistenceQueue;
-        }
-      };
-      recorder.onstop = () => {
-        if (attemptOwnsSharedCapture()) {
-          clearCaptureRuntime(mediaStream);
-        } else {
-          mediaStream.getTracks().forEach((track) => track.stop());
-        }
-        void attemptPersistenceQueue
-          .catch((reason: unknown) => {
-            attemptPersistenceError = reason;
-          })
-          .then(async () => {
-            const resolveSettled = attemptCaptureSettlement.resolve;
-            attemptCaptureSettlement.resolve = null;
-            resolveSettled?.();
-            if (resolveCaptureSettledRef.current === resolveSettled) {
-              resolveCaptureSettledRef.current = null;
-            }
-            const stoppedCaptureIsCurrent = () =>
-              generation === generationRef.current &&
-              workspaceIdRef.current === workspaceId &&
-              ownerIdRef.current === ownerId &&
-              manifestRef.current?.recordingId === manifest.recordingId &&
-              manifestRef.current.workspaceId === workspaceId &&
-              manifestRef.current.ownerId === ownerId;
-            if (!stoppedCaptureIsCurrent()) return;
-            const current = manifestRef.current;
-            if (!current) return;
-            const stopped = await updateManifestBestEffort(current, { captureState: "stopped" });
-            if (
-              !stoppedCaptureIsCurrent() ||
-              stopped.recordingId !== manifest.recordingId ||
-              stopped.workspaceId !== workspaceId ||
-              stopped.ownerId !== ownerId
-            ) {
-              return;
-            }
-            rememberManifest(stopped);
-            if (attemptPersistenceError) {
-              const retained = await updateManifestBestEffort(stopped, {
-                recoveryMode: "manual",
-                handoffMode: "explicit",
-              });
-              await preserveForRetry(retained, "storage_unavailable", generation);
-              return;
-            }
-            if (attemptCaptureLimitError) {
-              const retained = await updateManifestBestEffort(stopped, {
-                recoveryMode: "manual",
-                handoffMode: "explicit",
-              });
-              await preserveForRetry(retained, attemptCaptureLimitError, generation);
-              return;
-            }
-            if (holdOnStopRef.current) {
-              holdOnStopRef.current = false;
-              const retained = await updateManifestBestEffort(stopped, {
-                recoveryMode: "manual",
-                handoffMode: "explicit",
-              });
-              await preserveForRetry(retained, null, generation);
-              return;
-            }
-            await finalizePersistedRecording(generation);
-          });
-      };
-      captureSettledRef.current = new Promise<void>((resolve) => {
-        attemptCaptureSettlement.resolve = resolve;
-        resolveCaptureSettledRef.current = resolve;
-      });
-      attemptRecordingStartedAt = readNow().getTime();
-      recordingStartedAtRef.current = attemptRecordingStartedAt;
-      holdOnStopRef.current = false;
-      recorder.start(VOICE_RECORDING_TIMESLICE_MILLISECONDS);
-      recorderStarted = true;
-      setStatus("recording");
-      timerRef.current = setTimeout(
-        stop,
-        Math.min(
-          capability.resumable && isResumableVoiceInputClient(client)
-            ? capability.resumable.maxDurationSeconds
-            : capability.maxDurationSeconds,
-          capability.resumable && isResumableVoiceInputClient(client)
-            ? VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS
-            : VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
-        ) * 1_000,
-      );
+      oneShotRef.current = capture;
+      beginCapture(capture.stream, null);
       return true;
-    } catch (reason) {
-      const resolveSettled = attemptCaptureSettlement.resolve;
-      attemptCaptureSettlement.resolve = null;
-      resolveSettled?.();
-      if (resolveCaptureSettledRef.current === resolveSettled) {
-        resolveCaptureSettledRef.current = null;
-      }
-      if (acquiredStream) {
-        if (startAttemptIsCurrent() && streamRef.current === acquiredStream) {
-          clearCaptureRuntime(acquiredStream);
-        } else {
-          acquiredStream.getTracks().forEach((track) => track.stop());
+    }
+    const recorder = current.platform.createRecorder({
+      client: transport,
+      workspaceId: current.workspaceId,
+      purpose: "dictation",
+      microphone: true,
+      uploader: uploader(),
+      timesliceMilliseconds: VOICE_RECORDING_TIMESLICE_MILLISECONDS,
+      keepAwake: false,
+      onChange: (snapshot) => {
+        if (recorderRef.current !== recorder) return;
+        setDurationSeconds(snapshot.elapsedMilliseconds / 1_000);
+        // The server refused the dictation (voice input turned off, no credits).
+        if (snapshot.state === "recording" && snapshot.upload?.failed) {
+          const code = voiceInputCode(snapshot.upload.failed.code);
+          recorderRef.current = null;
+          dictationRef.current = null;
+          void recorder.discard().catch(() => undefined);
+          settleIdle();
+          setStatus("error");
+          setError(code);
         }
-      }
-      const failedManifest = attemptManifest.current;
-      if (failedManifest && !recorderStarted) {
-        const discarded = await store
-          .discard(failedManifest.recordingId, ownerId)
-          .then(() => true)
-          .catch(() => false);
-        if (!discarded) {
-          await store
-            .updateManifest(
-              failedManifest.recordingId,
-              { captureState: "stopped", ownerId: null, ownerHeartbeatAt: null },
-              readNow().toISOString(),
-              ownerId,
-            )
-            .catch(() => undefined);
-        }
-      }
-      if (generation !== generationRef.current) return false;
-      const visibleManifest = manifestRef.current as VoiceRecordingManifest | null;
-      if (failedManifest && visibleManifest?.recordingId === failedManifest.recordingId) {
-        clearVisibleRecording();
-      }
-      setStatus("error");
-      setError(
-        reason instanceof VoiceRecordingStorageUnavailableError
-          ? "storage_unavailable"
-          : errorCode(reason),
-      );
+      },
+    });
+    recorderRef.current = recorder;
+    await recorder.start();
+    if (generation !== generationRef.current) {
+      await recorder.discard().catch(() => undefined);
       return false;
     }
-  }, [
-    capability,
-    beginOwnerHeartbeat,
-    clearCaptureRuntime,
-    clearVisibleRecording,
-    client,
-    createRecordingId,
-    disabled,
-    enabled,
-    ensureOwnerId,
-    ensureStore,
-    finalizePersistedRecording,
-    readNow,
-    preserveForRetry,
-    rememberManifest,
-    status,
-    stop,
-    updateManifestBestEffort,
-    workspaceId,
-  ]);
-
-  const retry = useCallback(() => {
-    if (
-      !manifestRef.current ||
-      manifestRef.current.finalizationState === "transcript-ready" ||
-      manifestRef.current.workspaceId !== workspaceId ||
-      !client ||
-      disabled ||
-      !enabled ||
-      status === "saving" ||
-      status === "transcribing"
-    ) {
-      return;
+    const snapshot = recorder.snapshot;
+    if (snapshot.state !== "recording" || !snapshot.recordingId) {
+      recorderRef.current = null;
+      setStatus("error");
+      setError(captureCode(snapshot.error?.code ?? null));
+      return false;
     }
-    const generation = ++generationRef.current;
-    controllerRef.current?.abort();
-    if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
-    automaticRetryTimerRef.current = null;
-    automaticRetryAttemptRef.current = 0;
-    setError(null);
-    const manifest = manifestRef.current;
-    void updateManifestBestEffort(manifest, {
-      recoveryMode: "automatic",
-      handoffMode: "append",
-    }).then((retained) => {
-      if (generation !== generationRef.current) return;
-      rememberManifest(retained);
-      void finalizePersistedRecording(generation);
-    });
-  }, [
-    client,
-    disabled,
-    enabled,
-    finalizePersistedRecording,
-    rememberManifest,
-    status,
-    updateManifestBestEffort,
-    workspaceId,
-  ]);
-
-  const insertSavedTranscript = useCallback(async (): Promise<void> => {
-    const manifest = manifestRef.current;
-    if (
-      disabledRef.current ||
-      !manifest ||
-      manifest.workspaceId !== workspaceId ||
-      manifest.finalizationState !== "transcript-ready" ||
-      manifest.transcriptText === null
-    ) {
-      return;
-    }
-    const generation = ++generationRef.current;
-    controllerRef.current?.abort();
-    controllerRef.current = null;
-    const store = await ensureStore();
-    if (generation !== generationRef.current || disabledRef.current) return;
-    const next = appendFinalTranscript(valueRef.current, manifest.transcriptText);
-    if (next !== valueRef.current) {
-      valueRef.current = next;
-      setValue(next);
-    }
-    let handedOff: VoiceRecordingManifest;
-    try {
-      handedOff = await store.updateManifest(
-        manifest.recordingId,
-        { finalizationState: "handed-off" },
-        readNow().toISOString(),
-        ownerIdRef.current ?? undefined,
-      );
-    } catch {
-      if (generation !== generationRef.current) return;
-      rememberManifest(manifest);
-      setStatus("transcript-ready");
-      setError("handoff_uncertain");
-      focusInput();
-      return;
-    }
-    if (generation !== generationRef.current) return;
-    if (capability?.resumable && isResumableVoiceInputClient(client)) {
-      await client
-        .discardTranscriptionRecording(workspaceId, handedOff.recordingId)
-        .catch(() => undefined);
-    }
-    if (generation !== generationRef.current) return;
-    await store
-      .discard(handedOff.recordingId, ownerIdRef.current ?? undefined)
-      .catch(() => undefined);
-    if (generation !== generationRef.current) return;
-    clearVisibleRecording();
-    setStatus("idle");
-    setError(null);
-    focusInput();
-    await loadNextRecoverable(generation);
-  }, [
-    clearVisibleRecording,
-    capability?.resumable,
-    client,
-    ensureStore,
-    focusInput,
-    loadNextRecoverable,
-    readNow,
-    rememberManifest,
-    setValue,
-    workspaceId,
-  ]);
+    dictationRef.current = { recordingId: snapshot.recordingId, autoInsert: true, text: null };
+    beginCapture(recorder.inputStream?.(0) ?? null, snapshot.recordingId);
+    return true;
+  }, [beginCapture, settleIdle, transport, uploader]);
 
   const discard = useCallback(async (): Promise<void> => {
-    const manifest = manifestRef.current;
     const generation = ++generationRef.current;
-    controllerRef.current?.abort();
-    controllerRef.current = null;
     const recorder = recorderRef.current;
-    let captureSettled = persistenceQueueRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      captureSettled = captureSettledRef.current;
-      recorder.stop();
-    }
-    clearCaptureRuntime();
-    await captureSettled.catch(() => undefined);
-    if (generation !== generationRef.current) return;
-    if (manifest) {
-      if (capability?.resumable && isResumableVoiceInputClient(client)) {
-        await client
-          .discardTranscriptionRecording(workspaceId, manifest.recordingId)
-          .catch(() => undefined);
-      }
-      if (generation !== generationRef.current) return;
-      try {
-        await (await ensureStore()).discard(manifest.recordingId, ownerIdRef.current ?? undefined);
-      } catch {
-        if (generation !== generationRef.current) return;
-        rememberManifest(manifest);
-        setStatus("error");
-        setError("storage_unavailable");
-        focusInput();
-        return;
-      }
-    }
-    clearVisibleRecording();
-    persistenceErrorRef.current = null;
-    captureLimitErrorRef.current = null;
-    setStatus("idle");
-    setError(null);
-    focusInput();
-    await loadNextRecoverable(generation);
-  }, [
-    clearCaptureRuntime,
-    clearVisibleRecording,
-    capability?.resumable,
-    client,
-    ensureStore,
-    focusInput,
-    loadNextRecoverable,
-    rememberManifest,
-    workspaceId,
-  ]);
-
-  const cancel = useCallback(() => {
-    if (status === "recording") {
-      const recorder = recorderRef.current;
-      const elapsed = readNow().getTime() - recordingStartedAtRef.current;
-      if (
-        recorder &&
-        recorder.state !== "inactive" &&
-        elapsed >= VOICE_RECORDING_DISCARD_ON_CANCEL_MAX_MILLISECONDS
-      ) {
-        // Never delete real speech on Cancel/Escape: stop, keep it locally, and
-        // let the user transcribe or explicitly discard it.
-        if (timerRef.current) clearTimeout(timerRef.current);
-        timerRef.current = null;
-        holdOnStopRef.current = true;
-        setStatus("saving");
-        recorder.stop();
-        return;
-      }
-      void discard();
-      return;
-    }
-    if (status === "requesting-permission") {
-      void discard();
-      return;
-    }
-    if (status === "saving" || status === "transcribing" || status === "retrying") {
-      const generation = ++generationRef.current;
-      controllerRef.current?.abort();
-      controllerRef.current = null;
-      if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
-      automaticRetryTimerRef.current = null;
-      const captureSettled = status === "saving" ? captureSettledRef.current : Promise.resolve();
-      void captureSettled.then(async () => {
-        const manifest = manifestRef.current;
-        if (!manifest) return;
-        const retained = await updateManifestBestEffort(manifest, {
-          captureState: "stopped",
-          uploadState: "retrying",
-          transcriptionState: "retrying",
-          recoveryMode: "manual",
-          handoffMode: "explicit",
-        });
-        await preserveForRetry(retained, null, generation);
-      });
-    }
-  }, [discard, preserveForRetry, readNow, status, updateManifestBestEffort]);
-
-  useEffect(() => {
-    const current = manifestRef.current;
-    const generation = ++generationRef.current;
-    if (current && current.workspaceId !== workspaceId) {
-      controllerRef.current?.abort();
-      controllerRef.current = null;
-      const recorder = recorderRef.current;
-      let captureSettled = persistenceQueueRef.current;
-      if (recorder && recorder.state !== "inactive") {
-        captureSettled = captureSettledRef.current;
-        recorder.stop();
-      }
-      clearCaptureRuntime();
-      clearVisibleRecording();
-      setStatus("idle");
-      setError(null);
-      void captureSettled
-        .catch(() => undefined)
-        .then(async () => {
-          const store = await ensureStore();
-          const wasProcessing =
-            current.uploadState === "syncing" || current.transcriptionState === "transcribing";
-          await store.updateManifest(
-            current.recordingId,
-            {
-              ...(current.captureState === "capturing" ? { captureState: "stopped" as const } : {}),
-              ...(wasProcessing
-                ? {
-                    uploadState: "retrying" as const,
-                    transcriptionState: "retrying" as const,
-                    recoveryMode: "automatic" as const,
-                    handoffMode: "explicit" as const,
-                  }
-                : {}),
-              ownerId: null,
-              ownerHeartbeatAt: null,
-            },
-            readNow().toISOString(),
-            ownerIdRef.current ?? undefined,
-          );
-        })
+    const oneShot = oneShotRef.current;
+    const dictation = dictationRef.current;
+    settleIdle();
+    oneShotText.current = null;
+    if (oneShot) await oneShot.stop().catch(() => undefined);
+    if (recorder) {
+      await recorder.discard().catch(() => undefined);
+    } else if (dictation) {
+      await uploader()
+        .discard(dictation.recordingId)
+        .catch(() => undefined);
+      await latest.current.recordings
+        ?.deleteRecording(latest.current.workspaceId, dictation.recordingId)
         .catch(() => undefined);
     }
-    if (!manifestRef.current) {
-      void loadNextRecoverable(generation).catch((reason: unknown) => {
-        if (reason instanceof VoiceRecordingStorageUnavailableError) setStorageAvailable(false);
-      });
+    focusInput();
+    if (generation === generationRef.current) void loadSaved(generation);
+  }, [focusInput, loadSaved, settleIdle, uploader]);
+
+  const cancel = useCallback(() => {
+    const current = statusRef.current;
+    if (current === "requesting-permission") {
+      generationRef.current += 1;
+      settleIdle();
+      return;
     }
-  }, [
-    clearCaptureRuntime,
-    clearVisibleRecording,
-    ensureStore,
-    loadNextRecoverable,
-    readNow,
-    workspaceId,
-  ]);
+    if (current === "recording") {
+      const elapsed = now().getTime() - startedAtRef.current;
+      if (elapsed < DISCARD_ON_CANCEL_MAX_MILLISECONDS) {
+        void discard();
+        return;
+      }
+      // Never delete real speech on Cancel or Escape: keep it to insert later.
+      void finishCapture(false);
+      return;
+    }
+    if (current === "saving" || current === "transcribing" || current === "retrying") {
+      const dictation = dictationRef.current;
+      if (!dictation) return;
+      dictation.autoInsert = false;
+      setHeld(true);
+      setStatus("recovered");
+    }
+  }, [discard, finishCapture, now, settleIdle]);
+
+  const retry = useCallback(() => {
+    const dictation = dictationRef.current;
+    const client = latest.current.recordings;
+    if (!dictation || dictation.text !== null || !client || latest.current.disabled) return;
+    const generation = ++generationRef.current;
+    const failed = statusRef.current === "error" || errorRef.current !== null;
+    dictation.autoInsert = true;
+    setHeld(false);
+    setError(null);
+    setStatus("transcribing");
+    void (async () => {
+      let versionId: string | null = null;
+      if (failed) {
+        try {
+          versionId = (
+            await client.createRecordingTranscript(
+              latest.current.workspaceId,
+              dictation.recordingId,
+            )
+          ).id;
+        } catch (cause) {
+          if (generation !== generationRef.current) return;
+          if (httpStatus(cause) === 404) {
+            settleIdle();
+            return;
+          }
+          hold(dictation, "error", errorCode(cause));
+          return;
+        }
+      }
+      await watch(dictation, versionId, generation);
+    })();
+  }, [hold, settleIdle, watch]);
+
+  const insertSavedTranscript = useCallback(async (): Promise<void> => {
+    if (latest.current.disabled) return;
+    const generation = ++generationRef.current;
+    const dictation = dictationRef.current;
+    if (oneShotText.current !== null) {
+      insertText(oneShotText.current);
+      oneShotText.current = null;
+      settleIdle();
+      return;
+    }
+    if (!dictation || dictation.text === null) return;
+    await take(dictation, dictation.text, generation);
+  }, [insertText, settleIdle, take]);
+
+  // A transcript that arrived while a send held the composer goes in once it is free.
+  useEffect(() => {
+    const dictation = dictationRef.current;
+    if (disabled || status !== "transcript-ready" || !dictation?.autoInsert || !dictation.text)
+      return;
+    void take(dictation, dictation.text, ++generationRef.current);
+  }, [disabled, status, take]);
+
+  // A new workspace: let go of this one's dictation (it stays saved there) and
+  // look for one saved in the new one.
+  useEffect(() => {
+    const generation = ++generationRef.current;
+    const recorder = recorderRef.current;
+    if (recorder) {
+      // Capture ends with the workspace; the upload finishes in the background.
+      void recorder.stop().catch(() => undefined);
+    }
+    void oneShotRef.current?.stop().catch(() => undefined);
+    settleIdle();
+    oneShotText.current = null;
+    if (durable) void loadSaved(generation);
+  }, [workspaceId, durable, loadSaved, settleIdle]);
 
   useEffect(() => {
+    // No document (React Native): there is no Escape key to listen for.
+    if (typeof document === "undefined") return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (
         event.key === "Escape" &&
@@ -1239,103 +793,42 @@ export function useVoiceInput({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [cancel, status]);
 
+  const level = useCallback((): number | null => {
+    const levels = recorderRef.current?.levels();
+    const first = levels?.[0];
+    return typeof first === "number" ? first : null;
+  }, []);
+
   useEffect(
     () => () => {
       generationRef.current += 1;
-      controllerRef.current?.abort();
-      controllerRef.current = null;
-      if (automaticRetryTimerRef.current) clearTimeout(automaticRetryTimerRef.current);
-      automaticRetryTimerRef.current = null;
-      const manifest = manifestRef.current;
-      const ownerReady = ownerIdPromiseRef.current;
-      const knownOwnerId = ownerIdRef.current;
-      const ownerLease = ownerLeaseRef.current;
-      const closingStore = storeRef.current;
-      const ownsClosingStore = ownsStoreRef.current;
-      // Detach synchronously: a remount of this instance (React StrictMode,
-      // keyed re-render) must open a fresh store and owner instead of reusing
-      // the connection this cleanup is about to close.
-      storeRef.current = null;
-      storePromiseRef.current = null;
-      ownerIdRef.current = null;
-      ownerIdPromiseRef.current = null;
-      ownerLeaseRef.current = null;
-      manifestRef.current = null;
-      stopOwnerHeartbeat();
-      const recorder = recorderRef.current;
-      let captureSettled = persistenceQueueRef.current;
-      if (recorder && recorder.state !== "inactive") {
-        captureSettled = captureSettledRef.current;
-        recorder.stop();
-      }
-      clearCaptureRuntime();
-      void captureSettled
-        .catch(() => undefined)
-        .then(async () => {
-          const ownerId = knownOwnerId ?? (ownerReady ? await ownerReady.catch(() => null) : null);
-          const store = closingStore;
-          if (store && manifest && ownerId) {
-            const wasProcessing =
-              statusRef.current === "saving" ||
-              statusRef.current === "transcribing" ||
-              statusRef.current === "retrying";
-            await store
-              .updateManifest(
-                manifest.recordingId,
-                {
-                  ...(manifest.captureState === "capturing"
-                    ? { captureState: "stopped" as const }
-                    : {}),
-                  ...(wasProcessing
-                    ? {
-                        uploadState: "retrying" as const,
-                        transcriptionState: "retrying" as const,
-                        recoveryMode: "automatic" as const,
-                        handoffMode: "explicit" as const,
-                      }
-                    : {}),
-                  ownerId: null,
-                  ownerHeartbeatAt: null,
-                },
-                readNow().toISOString(),
-                ownerId,
-              )
-              .catch(() => undefined);
-          }
-          if (ownsClosingStore) await store?.close();
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          ownerLease?.release();
-        });
+      clearStopTimer();
+      // Unmounting while recording keeps the speech: capture stops and the
+      // dictation is uploaded and transcribed, for the next composer to offer.
+      void recorderRef.current?.stop().catch(() => undefined);
+      recorderRef.current = null;
+      void oneShotRef.current?.stop().catch(() => undefined);
+      oneShotRef.current = null;
+      uploaderRef.current = null;
     },
-    [clearCaptureRuntime, readNow, stopOwnerHeartbeat],
+    [],
   );
 
   return {
     status,
     error,
-    available: Boolean(capability?.available && enabled && !disabled && storageAvailable),
+    available: Boolean(
+      capability?.available && enabled && !disabled && (durable || canRecordInMemory()),
+    ),
     stream,
     recordingId,
     durationSeconds,
-    recordingStartedAt: status === "recording" ? recordingStartedAtRef.current || null : null,
-    maxRecordingSeconds: capability
-      ? Math.min(
-          capability.resumable && isResumableVoiceInputClient(client)
-            ? capability.resumable.maxDurationSeconds
-            : capability.maxDurationSeconds,
-          capability.resumable && isResumableVoiceInputClient(client)
-            ? VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS
-            : VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
-        )
-      : null,
-    locallySaved,
-    hasRecoverableRecording: manifestRef.current !== null && status !== "recording",
-    savedTranscript:
-      manifestRef.current?.finalizationState === "transcript-ready"
-        ? manifestRef.current.transcriptText
-        : null,
+    recordingStartedAt: status === "recording" ? recordingStartedAt : null,
+    maxRecordingSeconds,
+    locallySaved: durable && recordingId !== null,
+    hasRecoverableRecording: held && status !== "recording",
+    savedTranscript,
+    level,
     start,
     stop,
     retry,
@@ -1345,224 +838,89 @@ export function useVoiceInput({
   };
 }
 
-async function transcribePersistedRecording(input: {
-  client: VoiceInputClient;
-  workspaceId: string;
-  capability: ClientVoiceInputConfig;
-  manifest: VoiceRecordingManifest;
-  chunks: VoiceRecordingChunk[];
-  signal: AbortSignal;
-}): Promise<{ text: string; languages: string[] }> {
-  const client = input.client;
-  const resumable = input.capability.resumable;
-  const ordered = [...input.chunks].sort((left, right) => left.chunkNumber - right.chunkNumber);
-  if (!resumable || !isResumableVoiceInputClient(client)) {
-    const audio = new Blob(
-      ordered.map((chunk) => chunk.audio),
-      { type: input.manifest.mimeType },
-    );
-    if (audio.size > input.capability.maxSizeBytes) throw { code: "too_large" };
-    return await client.transcribeAudio(input.workspaceId, {
-      audio,
-      mimeType: audio.type,
-      durationSeconds: input.manifest.totalDurationMilliseconds / 1_000,
-      signal: input.signal,
-    });
-  }
-
-  if (
-    input.manifest.totalBytes > resumable.maxSizeBytes ||
-    input.manifest.totalDurationMilliseconds > resumable.maxDurationSeconds * 1_000
-  ) {
-    throw { code: "too_large" };
-  }
-  if (
-    ordered.some((chunk, index) => chunk.chunkNumber !== index) ||
-    ordered.length !== input.manifest.chunkCount
-  ) {
-    throw { code: "invalid_audio" };
-  }
-
-  const finalizeInput = {
-    chunkCount: input.manifest.chunkCount,
-    totalBytes: input.manifest.totalBytes,
-    totalDurationMilliseconds: input.manifest.totalDurationMilliseconds,
-    signal: input.signal,
-  };
-
-  let remote = await client.createTranscriptionRecording(input.workspaceId, {
-    recordingId: input.manifest.recordingId,
-    mimeType: input.manifest.mimeType,
-    signal: input.signal,
-  });
-  for (const chunk of ordered) {
-    if (chunk.chunkNumber < remote.recording.nextChunkNumber) continue;
-    if (chunk.chunkNumber !== remote.recording.nextChunkNumber) {
-      throw { code: "invalid_audio" };
+/** The whole transcript of one version, or null when it couldn't be read now. */
+async function transcriptText(
+  client: VoiceInputRecordingsClient,
+  workspaceId: string,
+  recordingId: string,
+  versionId: string,
+): Promise<string | null> {
+  const parts: string[] = [];
+  let after: number | undefined;
+  try {
+    for (;;) {
+      const page = await client.getRecordingTranscript(workspaceId, recordingId, {
+        versionId,
+        ...(after !== undefined ? { after } : {}),
+        limit: 500,
+      });
+      for (const segment of page.segments) parts.push(segment.text.trim());
+      if (page.nextAfter === null) break;
+      after = page.nextAfter;
     }
-    if (chunk.byteLength > resumable.maxChunkSizeBytes) throw { code: "too_large" };
-    const uploaded = await client.uploadTranscriptionRecordingChunk(
-      input.workspaceId,
-      input.manifest.recordingId,
-      chunk.chunkNumber,
-      {
-        audio: chunk.audio,
-        mimeType: input.manifest.mimeType,
-        sha256: chunk.sha256,
-        startMilliseconds: chunk.startMilliseconds,
-        durationMilliseconds: chunk.durationMilliseconds,
-        signal: input.signal,
-      },
-    );
-    remote = { recording: uploaded.recording, segments: remote.segments };
+  } catch {
+    return null;
   }
-  if (remote.recording.nextChunkNumber !== ordered.length) {
-    throw { code: "invalid_audio" };
-  }
-
-  remote = await client.finalizeTranscriptionRecording(
-    input.workspaceId,
-    input.manifest.recordingId,
-    finalizeInput,
-  );
-
-  let recoveryMutationAttempt = 0;
-  let recoveryMutationDueAt = 0;
-  const scheduleRecoveryMutation = (response: typeof remote): void => {
-    if (response.recording.state !== "segmenting" && response.recording.state !== "transcribing") {
-      return;
-    }
-    recoveryMutationDueAt =
-      Date.now() +
-      transcriptionRecoveryMutationDelayMilliseconds(
-        response.retryAfterMilliseconds,
-        recoveryMutationAttempt,
-      );
-    recoveryMutationAttempt += 1;
-  };
-  scheduleRecoveryMutation(remote);
-
-  for (;;) {
-    if (input.signal.aborted) throw new DOMException("Aborted", "AbortError");
-    switch (remote.recording.state) {
-      case "complete":
-        if (remote.recording.transcriptText === null) throw { code: "invalid_audio" };
-        return {
-          text: remote.recording.transcriptText,
-          languages: remote.recording.languages,
-        };
-      case "ready":
-        remote = await client.processNextTranscriptionRecordingSegment(
-          input.workspaceId,
-          input.manifest.recordingId,
-          { signal: input.signal },
-        );
-        scheduleRecoveryMutation(remote);
-        break;
-      case "failed": {
-        if (!remote.recording.retryable) {
-          throw { code: remote.recording.errorCode ?? "unknown", retryable: false };
-        }
-        const retried =
-          remote.recording.segmentCount === 0
-            ? await client.finalizeTranscriptionRecording(
-                input.workspaceId,
-                input.manifest.recordingId,
-                finalizeInput,
-              )
-            : await client.processNextTranscriptionRecordingSegment(
-                input.workspaceId,
-                input.manifest.recordingId,
-                { signal: input.signal },
-              );
-        if (retried.recording.state === "failed") {
-          throw {
-            code: retried.recording.errorCode ?? "unknown",
-            retryable: retried.recording.retryable,
-          };
-        }
-        remote = retried;
-        scheduleRecoveryMutation(remote);
-        break;
-      }
-      case "discarded":
-        throw { code: "invalid_audio" };
-      case "uploading":
-        remote = await client.finalizeTranscriptionRecording(
-          input.workspaceId,
-          input.manifest.recordingId,
-          finalizeInput,
-        );
-        scheduleRecoveryMutation(remote);
-        break;
-      case "segmenting":
-      case "transcribing":
-        if (Date.now() < recoveryMutationDueAt) {
-          await abortableDelay(
-            Math.min(
-              recoveryMutationDueAt - Date.now(),
-              VOICE_RECORDING_RECOVERY_STATUS_POLL_MILLISECONDS,
-            ),
-            input.signal,
-          );
-          remote = await client.getTranscriptionRecording(
-            input.workspaceId,
-            input.manifest.recordingId,
-            { signal: input.signal },
-          );
-          break;
-        }
-        if (remote.recording.state === "segmenting") {
-          // Re-enter the server-authoritative assembly claim only when its
-          // durable recovery schedule is due.
-          remote = await client.finalizeTranscriptionRecording(
-            input.workspaceId,
-            input.manifest.recordingId,
-            finalizeInput,
-          );
-        } else {
-          // Re-enter the server-authoritative segment claim only when its
-          // durable recovery schedule is due.
-          remote = await client.processNextTranscriptionRecordingSegment(
-            input.workspaceId,
-            input.manifest.recordingId,
-            { signal: input.signal },
-          );
-        }
-        scheduleRecoveryMutation(remote);
-        break;
-    }
-  }
+  return parts.filter(Boolean).join(" ");
 }
 
-function isResumableVoiceInputClient(
-  client: VoiceInputClient | null,
-): client is VoiceInputClient & ResumableVoiceInputClient {
-  return Boolean(
-    client &&
-    client.createTranscriptionRecording &&
-    client.getTranscriptionRecording &&
-    client.uploadTranscriptionRecordingChunk &&
-    client.finalizeTranscriptionRecording &&
-    client.processNextTranscriptionRecordingSegment &&
-    client.discardTranscriptionRecording,
+/** A short dictation recorded in memory, for clients that can only transcribe one request. */
+type OneShotCapture = {
+  stream: MediaStream;
+  mimeType: string;
+  durationSeconds: () => number;
+  /** Stop and return what was recorded; null if nothing was. */
+  stop: () => Promise<Blob | null>;
+};
+
+function canRecordInMemory(): boolean {
+  return (
+    typeof MediaRecorder !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    typeof navigator.mediaDevices?.getUserMedia === "function"
   );
 }
 
-async function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, milliseconds);
-    const onAbort = () => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
-      reject(new DOMException("Aborted", "AbortError"));
+async function startOneShot(accepted: string[]): Promise<OneShotCapture | Error> {
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (cause) {
+    return cause instanceof Error ? cause : new Error(String(cause));
+  }
+  try {
+    const preferred = chooseMimeType(accepted);
+    const recorder = new MediaRecorder(stream, preferred ? { mimeType: preferred } : undefined);
+    const parts: Blob[] = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) parts.push(event.data);
     };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
+    const startedAt = performance.now();
+    recorder.start(VOICE_RECORDING_TIMESLICE_MILLISECONDS);
+    let stopped: Promise<Blob | null> | null = null;
+    return {
+      stream,
+      mimeType: recorder.mimeType || preferred || "audio/webm",
+      durationSeconds: () => (performance.now() - startedAt) / 1_000,
+      stop: () =>
+        (stopped ??= new Promise<Blob | null>((resolve) => {
+          const done = () => {
+            for (const track of stream.getTracks()) track.stop();
+            resolve(
+              parts.length > 0
+                ? new Blob(parts, { type: recorder.mimeType || preferred || "audio/webm" })
+                : null,
+            );
+          };
+          if (recorder.state === "inactive") return done();
+          recorder.addEventListener("stop", done, { once: true });
+          recorder.stop();
+        })),
+    };
+  } catch (cause) {
+    for (const track of stream.getTracks()) track.stop();
+    return cause instanceof Error ? cause : new Error(String(cause));
+  }
 }
 
 function chooseMimeType(accepted: string[]): string | undefined {
@@ -1581,31 +939,94 @@ function chooseMimeType(accepted: string[]): string | undefined {
   });
 }
 
-function errorCode(error: unknown): string {
-  if (error instanceof OpenGeniApiError && typeof error.details?.transcriptionCode === "string") {
-    return error.details.transcriptionCode;
+/** A voice input error code the composer explains, from a recording or version code. */
+function voiceInputCode(code: string | null): string {
+  if (!code) return "unknown";
+  if (code.startsWith("voice_")) return voiceInputCode(code.slice("voice_".length));
+  if (code.startsWith("provider_")) return "provider";
+  switch (code) {
+    case "insufficient_credits":
+    case "allowance_exhausted":
+    case "monthly_model_cost_limit":
+    case "policy_blocked":
+    case "not_supported":
+    case "unavailable":
+    case "too_large":
+    case "invalid_audio":
+    case "network":
+    case "provider":
+    case "timeout":
+      return code;
+    case "upstream_unavailable":
+    case "storage_unavailable":
+      return "unavailable";
+    default:
+      return "unknown";
   }
+}
+
+function captureCode(code: string | null): string {
+  switch (code) {
+    case "microphone_denied":
+      return "permission_denied";
+    case "unsupported":
+    case "microphone_unavailable":
+      return "not_supported";
+    case "upload_failed":
+      return "unavailable";
+    default:
+      return "unknown";
+  }
+}
+
+function errorCode(error: unknown): string {
+  const details = (error as { details?: { transcriptionCode?: unknown; code?: unknown } }).details;
+  if (typeof details?.transcriptionCode === "string") return details.transcriptionCode;
+  if (typeof details?.code === "string") return voiceInputCode(details.code);
   if (error && typeof error === "object" && "code" in error && typeof error.code === "string") {
-    return error.code;
+    return voiceInputCode(error.code);
   }
   if (error instanceof DOMException && error.name === "NotAllowedError") return "permission_denied";
   if (error instanceof DOMException && error.name === "NotSupportedError") return "not_supported";
+  if (error instanceof TypeError) return "network";
   return "unknown";
 }
 
-function isRetryableVoiceInputError(error: unknown): boolean {
-  if (
-    ["insufficient_credits", "allowance_exhausted", "monthly_model_cost_limit"].includes(
-      errorCode(error),
-    )
-  )
-    return false;
-  if (error instanceof OpenGeniApiError) {
-    return error.retryable && error.status !== 409;
+function httpStatus(error: unknown): number | null {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : null;
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/** Dictations whose text is in a draft but whose delete hasn't reached the server. */
+function readTaken(): Set<string> {
+  try {
+    const raw = globalThis.localStorage?.getItem(TAKEN_STORAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : []);
+  } catch {
+    return new Set();
   }
-  if (error instanceof TypeError) return true;
-  if (error && typeof error === "object" && "retryable" in error) {
-    return error.retryable === true;
+}
+
+function writeTaken(ids: Set<string>): void {
+  try {
+    globalThis.localStorage?.setItem(TAKEN_STORAGE_KEY, JSON.stringify([...ids].slice(-50)));
+  } catch {
+    /* Private mode: the server deletes it within a day anyway. */
   }
-  return false;
+}
+
+function rememberTaken(recordingId: string): void {
+  const ids = readTaken();
+  ids.add(recordingId);
+  writeTaken(ids);
+}
+
+function forgetTaken(recordingId: string): void {
+  const ids = readTaken();
+  if (ids.delete(recordingId)) writeTaken(ids);
 }

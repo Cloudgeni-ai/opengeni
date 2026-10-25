@@ -2578,6 +2578,7 @@ export const englishMessages = {
   "native.timeline.messages.image": "Image",
   "native.timeline.messages.includesOverlappingSandboxStartupCustom":
     "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup shown below.",
+  "native.timeline.messages.insert": "Insert",
   "native.timeline.messages.inTheSandbox": "In the sandbox",
   "native.timeline.messages.jumpToLatest": "Jump to latest",
   "native.timeline.messages.knowledgeSaveFailed": "Knowledge save failed",
@@ -2635,6 +2636,8 @@ export const englishMessages = {
   "native.timeline.messages.workerDecision": "Worker decision",
   "native.timeline.messages.working": "Working",
   "native.timeline.messages.youAnswered": "You answered",
+  "native.timeline.messages.yourDictationIsReady":
+    "Your dictation is ready. Insert it into your draft?",
   "native.timeline.messages.yourRecordingIsSaved": "Your recording is saved.",
   "native.timeline.messageTimeline.agentAsked": "Agent asked",
   "native.timeline.messageTimeline.connectionNeeded": "Connection needed",

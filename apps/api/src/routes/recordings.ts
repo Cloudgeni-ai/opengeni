@@ -6,6 +6,7 @@ import {
   CreateRecordingRequest,
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
+  RecordingCapturePurpose,
   FinalizeRecordingRequest,
   RecordingNoteKind,
   RememberRecordingPersonVoiceRequest,
@@ -315,6 +316,9 @@ export function registerRecordingRoutes(
     const query = c.req.query("query")?.slice(0, 200);
     const externalRef = c.req.query("externalRef")?.slice(0, 512);
     const person = c.req.query("person")?.slice(0, 200);
+    // Dictations are private, so listing them shows the caller's own.
+    const purpose = RecordingCapturePurpose.safeParse(c.req.query("purpose") ?? "meeting");
+    if (!purpose.success) throw invalid("purpose must be meeting or dictation");
     const instant = (name: string): Date | undefined => {
       const value = c.req.query(name);
       if (!value) return undefined;
@@ -331,6 +335,7 @@ export function registerRecordingRoutes(
         startedFrom: instant("startedFrom"),
         startedTo: instant("startedTo"),
         externalRef: externalRef || undefined,
+        purpose: purpose.data,
         before,
         limit: Number.isFinite(limit) ? limit : 50,
       }),

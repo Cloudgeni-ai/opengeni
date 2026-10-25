@@ -38,6 +38,7 @@ import type {
   RecordingNote,
   RecordingNoteKind,
   RecordingPerson,
+  RecordingCapturePurpose,
   RecordingCaptureSource,
   RecordingTrackAudio,
   RecordingTranscriptPage,
@@ -93,6 +94,8 @@ export class OpenGeniRecordingsClient {
       /** Started before this ISO date and time. */
       startedTo?: string;
       externalRef?: string;
+      /** meeting (the default), or the caller's own dictations not yet deleted. */
+      purpose?: RecordingCapturePurpose;
       before?: { startedAt: string; id: string };
       limit?: number;
       signal?: AbortSignal;
@@ -108,6 +111,7 @@ export class OpenGeniRecordingsClient {
         ...(options.startedFrom ? { startedFrom: options.startedFrom } : {}),
         ...(options.startedTo ? { startedTo: options.startedTo } : {}),
         ...(options.externalRef ? { externalRef: options.externalRef } : {}),
+        ...(options.purpose ? { purpose: options.purpose } : {}),
         ...(options.before
           ? {
               beforeStartedAt: options.before.startedAt,
@@ -747,12 +751,16 @@ export class RecordingUploader {
   /**
    * Finish every recording an earlier page or app run left behind: upload its
    * stored chunks and finalize it with what was captured. Recordings a live
-   * recorder still owns are skipped.
+   * recorder still owns are skipped, and so are those `only` leaves out, such
+   * as another feature's recordings sharing the same store.
    */
-  async resume(): Promise<string[]> {
+  async resume(
+    options: { only?: (recording: StoredRecording) => boolean } = {},
+  ): Promise<string[]> {
     const store = this.options.store;
     const resumed: string[] = [];
     for (const recording of await store.listRecordings()) {
+      if (options.only && !options.only(recording)) continue;
       if (await this.captureActive(recording.recordingId)) continue;
       if (recording.phase === "capturing") {
         await this.mutate(recording.recordingId, (current) =>
@@ -1397,6 +1405,12 @@ export type RecorderErrorCode =
 export type RecorderOptions = {
   client: RecordingTransport;
   workspaceId: string;
+  /**
+   * meeting (the default), or dictation: speech recorded to type it, kept
+   * private, transcribed with the workspace's voice input and never listed
+   * in Meetings. A dictation records the microphone only.
+   */
+  purpose?: RecordingCapturePurpose;
   /** Defaults to IndexedDB, so nothing is lost on reload. */
   store?: RecordingChunkStore;
   /** Share one uploader between recorders; one is created otherwise. */
@@ -1449,6 +1463,11 @@ export type Recorder = {
   rename(title: string): Promise<void>;
   /** Current input level per track, 0 to 1, for a meter. */
   levels(): Record<number, number>;
+  /**
+   * The live audio of one track while recording, for a waveform; null when
+   * not recording, or on platforms that don't expose their capture.
+   */
+  inputStream?(trackNumber: number): MediaStream | null;
 };
 
 /**
@@ -1924,7 +1943,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           stream,
         });
       }
-      if (options.systemAudio) {
+      if (options.systemAudio && options.purpose !== "dictation") {
         const source =
           options.systemAudioSource ?? defaultSystemAudioSource() ?? displaySystemAudioSource();
         const shared = await source.open();
@@ -2034,6 +2053,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         recordingId,
         create: {
           recordingId,
+          ...(options.purpose ? { purpose: options.purpose } : {}),
           ...(options.title ? { title: options.title } : {}),
           ...(options.visibility ? { visibility: options.visibility } : {}),
           startedAt: new Date().toISOString(),
@@ -2187,6 +2207,11 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       if (!recordingId) throw new Error("Nothing is being recorded to rename.");
       await uploader.rename(options.workspaceId, recordingId, title);
       if (snapshot.recordingId === recordingId) emit({ title });
+    },
+
+    inputStream(trackNumber: number) {
+      if (snapshot.state !== "recording" && snapshot.state !== "paused") return null;
+      return captures.find((capture) => capture.trackNumber === trackNumber)?.stream ?? null;
     },
 
     levels() {

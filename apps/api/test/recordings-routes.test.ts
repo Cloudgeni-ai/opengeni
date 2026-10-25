@@ -397,6 +397,15 @@ describe("recording routes", () => {
       (await scope.owner.call("POST", "/recordings", { recordingId, tracks: mic })).body,
     ).toMatchObject({ error: { details: { code: "purpose_mismatch" } } });
     expect((await scope.owner.call("GET", "/recordings")).body.recordings).toEqual([]);
+    expect(
+      (await scope.owner.call("GET", "/recordings?purpose=dictation")).body.recordings.map(
+        (item: { id: string }) => item.id,
+      ),
+    ).toEqual([recordingId]);
+    expect(
+      (await scope.other.call("GET", "/recordings?purpose=dictation")).body.recordings,
+    ).toEqual([]);
+    expect((await scope.owner.call("GET", "/recordings?purpose=browser")).status).toBe(400);
     expect((await scope.other.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
     expect(
       (await scope.owner.call("PATCH", `/recordings/${recordingId}`, { visibility: "workspace" }))
