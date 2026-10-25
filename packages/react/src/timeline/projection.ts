@@ -3065,6 +3065,7 @@ const ROUTINE_MACHINE_INPUT_KINDS: ReadonlySet<MachineInputMember["kind"]> = new
   "child_paused",
   "child_waiting_capacity",
   "child_progress",
+  "capability_setup_completed",
 ]);
 
 /* --- helpers ---------------------------------------------------------------- */
@@ -3764,6 +3765,7 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
     "child_paused",
     "child_waiting_capacity",
     "child_progress",
+    "capability_setup_completed",
   ]);
   const classifications = new Set<MachineInputBatchItem["members"][number]["classification"]>([
     "success",

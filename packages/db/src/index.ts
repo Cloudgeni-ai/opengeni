@@ -120,6 +120,9 @@ export {
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
+  CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS,
+  capabilitySetupCompletedSummary,
+  type CapabilitySetupContinuationSkipReason,
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
   parseSecretReference,
@@ -2179,6 +2182,7 @@ export const allWorkspacePermissions: Permission[] = [
   "api_keys:manage",
   "connections:read",
   "connections:write",
+  "connections:personal",
   "capabilities:manage",
   "variable-sets:list",
   "variable-sets:read",
@@ -72680,7 +72684,8 @@ function systemUpdateCausalHumanTurnId(
     ? lineage?.parentTurnId
     : update.kind === "goal_continuation" ||
         update.kind === "background_command_result" ||
-        update.kind === "session_wait_timeout"
+        update.kind === "session_wait_timeout" ||
+        update.kind === "capability_setup_completed"
       ? lineage?.causalTurnId
       : null;
   if (typeof value !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value)) {
@@ -72734,7 +72739,8 @@ function systemUpdateCausalExecutionKey(
     isChildLifecycleSystemUpdateKind(update.kind) ||
     update.kind === "goal_continuation" ||
     update.kind === "background_command_result" ||
-    update.kind === "session_wait_timeout"
+    update.kind === "session_wait_timeout" ||
+    update.kind === "capability_setup_completed"
   ) {
     // Malformed historical authority-bearing rows still own distinct claims.
     // They may carry ordinary authority-neutral context, but they must never
@@ -73025,7 +73031,11 @@ async function planInboxBatch(
       loaded.context &&
       !loaded.context.externalLink &&
       (loaded.eligibleIds.has(updates[0].id) ||
-        (updates[0].kind === "goal_continuation" && compatible(updates[0])))),
+        // A setup continuation stands in for the person's own "done": like a
+        // goal continuation it runs in their receiving context.
+        ((updates[0].kind === "goal_continuation" ||
+          updates[0].kind === "capability_setup_completed") &&
+          compatible(updates[0])))),
   );
   const candidates = receiverOwned && updates[0] && !compatible(updates[0]) ? [] : updates;
   const selected = selectBoundedSystemUpdateBatch(
@@ -86518,6 +86528,259 @@ export async function addSessionSystemUpdate(
     throw new Error(`Internal update payload discriminator must equal kind ${input.kind}`);
   }
   return await addSessionSystemUpdateWithSourceMutation(db, input, async () => undefined);
+}
+
+export type EnqueueCapabilitySetupContinuationInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  capabilityId: string;
+  /** The live catalog's name for the capability, shown to the agent. */
+  capabilityName: string;
+  /**
+   * Whether the caller verified the capability's tools are in the chat (not
+   * only assumed because the chat's tool list was too long to check).
+   */
+  toolsVerified: boolean;
+  /** The authenticated person who finished setup. */
+  requesterSubjectId: string;
+};
+
+export type EnqueueCapabilitySetupContinuationResult =
+  | {
+      outcome: "queued" | "already_queued";
+      update: SessionSystemUpdate;
+      shouldWake: boolean;
+      workflowWakeRevision: number | null;
+      temporalWorkflowId: string | null;
+      events: SessionEvent[];
+    }
+  | {
+      outcome: "not_needed";
+      reason: Extract<
+        CapabilitySetupContinuationSkipReason,
+        "no_card" | "later_message" | "not_requester" | "session_closed"
+      >;
+    };
+
+class CapabilitySetupContinuationNotNeeded extends Error {
+  constructor(readonly reason: "later_message" | "not_requester") {
+    super(`capability setup continuation not needed: ${reason}`);
+  }
+}
+
+/** The card's dedupe key: at most one continuation per posted card. */
+export function capabilitySetupContinuationDedupeKey(cardEventId: string): string {
+  return `capability-setup-continuation:${cardEventId}`;
+}
+
+/**
+ * Wake the agent once after the person finished setup from the latest card it
+ * posted for `capabilityId`. The caller has already checked that the
+ * capability is usable in this chat. Nothing is sent when no such card exists,
+ * when the person has written since the card (their message carries on), or
+ * when the request the card belongs to is someone else's. The update runs in
+ * the person's receiving context, exactly as their own next message would.
+ */
+export async function enqueueCapabilitySetupContinuation(
+  db: Database,
+  input: EnqueueCapabilitySetupContinuationInput,
+): Promise<EnqueueCapabilitySetupContinuationResult> {
+  const read = await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const tx = scoped as unknown as Database;
+    const [card] = await tx
+      .select({ id: schema.sessionEvents.id, sequence: schema.sessionEvents.sequence })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.type, "tool.auth_needed"),
+          sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    if (!card) return { kind: "skip", reason: "no_card" } as const;
+    const [existing] = await tx
+      .select()
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          eq(schema.sessionSystemUpdates.dedupeKey, capabilitySetupContinuationDedupeKey(card.id)),
+        ),
+      )
+      .limit(1);
+    if (existing) return { kind: "existing", update: mapSessionSystemUpdate(existing) } as const;
+    const [session] = await tx
+      .select({
+        status: schema.sessions.status,
+        contentArchiveState: schema.sessions.contentArchiveState,
+        executionContextTurnId: schema.sessions.executionContextTurnId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    if (!session || session.status === "cancelled" || session.contentArchiveState !== null) {
+      return { kind: "skip", reason: "session_closed" } as const;
+    }
+    if (await userMessageAfterSequenceTx(tx, input, card.sequence)) {
+      return { kind: "skip", reason: "later_message" } as const;
+    }
+    if (!session.executionContextTurnId) return { kind: "skip", reason: "not_requester" } as const;
+    const [context] = await tx
+      .select()
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, session.executionContextTurnId),
+        ),
+      )
+      .limit(1);
+    // The continuation stands in for the requester's own "done", so it runs
+    // on their receiving context: the person who made the request, or for a
+    // request no person made (a host server's own key) that same principal.
+    // Someone else finishing setup in a shared chat can simply say so.
+    if (
+      !context ||
+      (turnHuman(context) ?? context.initiatorSubjectId) !== input.requesterSubjectId
+    ) {
+      return { kind: "skip", reason: "not_requester" } as const;
+    }
+    return { kind: "card", card, context } as const;
+  });
+  if (read.kind === "skip") return { outcome: "not_needed", reason: read.reason };
+  if (read.kind === "existing") {
+    return {
+      outcome: "already_queued",
+      update: read.update,
+      shouldWake: false,
+      workflowWakeRevision: null,
+      temporalWorkflowId: null,
+      events: [],
+    };
+  }
+  const { card, context } = read;
+  const human = turnHuman(context);
+  // The receiving context's exact authority, as a goal continuation copies
+  // its causal turn's: the claim then admits it into that context and
+  // resolves the person's current accounts, including the one just set up.
+  const personalConnectionDelegations = parsedPersonalConnectionDelegations(
+    context.personalConnectionDelegations,
+    `session_turns:${input.workspaceId}:${input.sessionId}:${context.id}`,
+  );
+  const xaiProviderAccountAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
+    context.xaiProviderAccountAuthoritySnapshot,
+  );
+  const claudeProviderAccountAuthoritySnapshot = ClaudeProviderAccountAuthoritySnapshotV1.parse(
+    context.claudeProviderAccountAuthoritySnapshot,
+  );
+  const name = input.capabilityName.trim().slice(0, CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS);
+  try {
+    const result = await addSessionSystemUpdateWithSourceMutation(
+      db,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        kind: "capability_setup_completed",
+        classification: "success",
+        sourceId: card.id,
+        dedupeKey: capabilitySetupContinuationDedupeKey(card.id),
+        summary: capabilitySetupCompletedSummary(name || input.capabilityId, input.toolsVerified),
+        payload: {
+          type: "capability_setup_completed",
+          capabilityId: input.capabilityId,
+          name: name || input.capabilityId.slice(0, CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS),
+          cardEventId: card.id,
+        },
+        lineage: {
+          causalTurnId: context.id,
+          ...(human && personalConnectionDelegations.length > 0
+            ? { connectionAuthoritySubjectId: human }
+            : {}),
+          ...(human && xaiProviderAccountAuthoritySnapshot.scope === "user"
+            ? { xaiAuthoritySubjectId: human }
+            : {}),
+          ...(human && claudeProviderAccountAuthoritySnapshot.scope === "user"
+            ? { claudeAuthoritySubjectId: human }
+            : {}),
+        },
+        personalConnectionDelegations,
+        mcpAccountBindings: parseAcceptedMcpAccountBindings(context.mcpAccountBindings),
+        xaiProviderAccountAuthoritySnapshot,
+        claudeProviderAccountAuthoritySnapshot,
+      },
+      async () => undefined,
+      {
+        // Re-check under the session lock: a message or a new receiving
+        // context committed since the read wins over this continuation.
+        prepareSource: async (tx) => {
+          const [locked] = await tx
+            .select({ executionContextTurnId: schema.sessions.executionContextTurnId })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .limit(1);
+          if (await userMessageAfterSequenceTx(tx, input, card.sequence)) {
+            throw new CapabilitySetupContinuationNotNeeded("later_message");
+          }
+          if (locked?.executionContextTurnId !== context.id) {
+            throw new CapabilitySetupContinuationNotNeeded("not_requester");
+          }
+        },
+      },
+    );
+    if (result.reason === "session_cancelled") {
+      return { outcome: "not_needed", reason: "session_closed" };
+    }
+    return {
+      outcome: result.added ? "queued" : "already_queued",
+      update: result.update,
+      shouldWake: result.shouldWake,
+      workflowWakeRevision: result.workflowWakeRevision,
+      temporalWorkflowId: result.temporalWorkflowId,
+      events: result.events,
+    };
+  } catch (error) {
+    if (error instanceof CapabilitySetupContinuationNotNeeded) {
+      return { outcome: "not_needed", reason: error.reason };
+    }
+    throw error;
+  }
+}
+
+async function userMessageAfterSequenceTx(
+  tx: Database,
+  input: Pick<EnqueueCapabilitySetupContinuationInput, "workspaceId" | "sessionId">,
+  sequence: number,
+): Promise<boolean> {
+  const [message] = await tx
+    .select({ id: schema.sessionEvents.id })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.message"),
+        gt(schema.sessionEvents.sequence, sequence),
+      ),
+    )
+    .limit(1);
+  return message !== undefined;
 }
 
 /**

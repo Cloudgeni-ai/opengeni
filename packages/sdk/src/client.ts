@@ -732,6 +732,8 @@ import type {
   ApplySessionGoalRevisionRequest,
   UpdateSessionRequest,
   UpdateSessionToolPolicyRequest,
+  ContinueAfterCapabilitySetupRequest,
+  ContinueAfterCapabilitySetupResponse,
   UpdateSessionAgentRequest,
   UpdateSessionSkillsRequest,
   UpdateRigRequest,
@@ -1926,6 +1928,26 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/tool-policy`,
+      request,
+    );
+  }
+
+  /**
+   * Tell the chat that the person finished setup from the capability card the
+   * agent posted (connect, add credentials, enable) so the agent continues the
+   * request that needed it. Call it after setup is verified, never on failure
+   * or cancel. Safe to repeat: the server wakes the agent at most once per
+   * card, and not at all once the person has written since the card or while
+   * the capability is not yet usable in this chat (`not_needed` with a reason).
+   */
+  async continueAfterCapabilitySetup(
+    workspaceId: string,
+    sessionId: string,
+    request: ContinueAfterCapabilitySetupRequest,
+  ): Promise<ContinueAfterCapabilitySetupResponse> {
+    return await this.requestJson<ContinueAfterCapabilitySetupResponse>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/capability-continuations`,
       request,
     );
   }

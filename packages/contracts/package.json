@@ -34,6 +34,10 @@
       "types": "./src/connection-account-label.ts",
       "default": "./src/connection-account-label.ts"
     },
+    "./personal-integration-setup": {
+      "types": "./src/personal-integration-setup.ts",
+      "default": "./src/personal-integration-setup.ts"
+    },
     "./modal-native-proof-v2": {
       "types": "./src/modal-native-proof-v2.ts",
       "default": "./src/modal-native-proof-v2.ts"

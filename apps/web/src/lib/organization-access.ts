@@ -55,6 +55,8 @@ export function presetPermissions(
 /** The preset these permissions match exactly, or custom. */
 export function presetFor(permissions: readonly string[]): OrganizationAccessPreset {
   const wanted = new Set(permissions);
+  // Connecting accounts includes connecting one's own (saved before it was separate).
+  if (wanted.has("connections:write")) wanted.add("connections:personal");
   for (const preset of ["full", "read_only"] as const) {
     const expected = presetPermissions(preset);
     if (expected.length === wanted.size && expected.every((permission) => wanted.has(permission)))

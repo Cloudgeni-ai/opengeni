@@ -138,12 +138,20 @@ export const organizationIntegrationPolicies = pgTable(
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     mode: text("mode").$type<"unrestricted" | "restricted">().notNull(),
     allowedIntegrationKeys: jsonb("allowed_integration_keys").$type<string[]>().notNull(),
+    personalIntegrationSetup: text("personal_integration_setup")
+      .$type<"members" | "admins">()
+      .notNull()
+      .default("members"),
     revision: bigint("revision", { mode: "number" }).notNull(),
   },
   (table) => ({
     modeCheck: check(
       "organization_integration_policies_mode_check",
       sql`${table.mode} in ('unrestricted', 'restricted')`,
+    ),
+    personalIntegrationSetupCheck: check(
+      "organization_integration_policies_personal_setup_check",
+      sql`${table.personalIntegrationSetup} in ('members', 'admins')`,
     ),
     keysCheck: check(
       "organization_integration_policies_allowed_integration_keys_check",
@@ -9257,7 +9265,7 @@ export const sessionSystemUpdates = pgTable(
   (table) => ({
     kindValid: check(
       "system_updates_kind_check",
-      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress', 'secret_use_approval_decided')`,
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress', 'secret_use_approval_decided', 'capability_setup_completed')`,
     ),
     payloadKindValid: check(
       "system_updates_payload_kind_check",

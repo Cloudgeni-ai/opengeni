@@ -551,7 +551,8 @@ export type MachineInputMember = {
     | "child_requires_action_resolved"
     | "child_paused"
     | "child_waiting_capacity"
-    | "child_progress";
+    | "child_progress"
+    | "capability_setup_completed";
   classification: "success" | "failure" | "action_required" | "info";
   sourceId: string;
   summary: string;

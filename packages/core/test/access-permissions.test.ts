@@ -15,6 +15,7 @@ import {
   requirePermission,
   requireExplicitPermissionDelegation,
 } from "../src/access";
+import { connectSetupPermission } from "../src/application/connect-authority";
 
 const grant = (permissions: AccessGrant["permissions"]): AccessGrant => ({
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -230,5 +231,56 @@ describe("secret permission aliases (AX-6)", () => {
     expect(hasPermission(["secrets:read"], "secrets:read")).toBe(true);
     expect(hasPermission(["workspace:admin"], "secrets:read")).toBe(false);
     expect(hasPermission(["workspace:admin"], "secrets:use")).toBe(true);
+  });
+});
+
+describe("personal integration setup permission", () => {
+  test("connections:write includes connections:personal; the narrow one grants nothing broader", () => {
+    expect(hasPermission(["connections:write"], "connections:personal")).toBe(true);
+    expect(hasPermission(["connections:write"], "connections:personal", "explicit")).toBe(true);
+    expect(hasPermission(["connections:personal"], "connections:personal", "explicit")).toBe(true);
+    for (const broader of ["connections:write", "connections:read", "capabilities:manage"] as const)
+      expect(hasPermission(["connections:personal"], broader, "explicit")).toBe(false);
+    expect(hasPermission(["connections:read"], "connections:personal", "explicit")).toBe(false);
+  });
+
+  test("an explicit key policy holding connections:write may delegate the narrow permission", () => {
+    expect(() =>
+      requireExplicitPermissionDelegation(
+        { ...grant(["connections:write"]), permissionMode: "explicit" },
+        ["connections:personal"],
+      ),
+    ).not.toThrow();
+    expect(() =>
+      requireExplicitPermissionDelegation(
+        { ...grant(["connections:personal"]), permissionMode: "explicit" },
+        ["connections:write"],
+      ),
+    ).toThrow();
+  });
+
+  test("only signing in to one's own account needs just the narrow permission", () => {
+    expect(connectSetupPermission({ providerId: "gmail", ownership: "personal" })).toBe(
+      "connections:personal",
+    );
+    expect(connectSetupPermission({ providerId: "mcp-oauth", ownership: "personal" })).toBe(
+      "connections:personal",
+    );
+    expect(connectSetupPermission({ providerId: "gmail", ownership: "workspace" })).toBe(
+      "connections:write",
+    );
+    expect(
+      connectSetupPermission({ providerId: "mcp-oauth", ownership: "personal", mcpSetup: {} }),
+    ).toBe("connections:write");
+    expect(
+      connectSetupPermission({
+        providerId: "gmail",
+        ownership: "personal",
+        installationTarget: { capabilityId: "mcp:gmail" },
+      }),
+    ).toBe("connections:write");
+    expect(connectSetupPermission({ providerId: "github-app", ownership: "personal" })).toBe(
+      "connections:write",
+    );
   });
 });

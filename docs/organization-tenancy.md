@@ -1133,7 +1133,7 @@ inline MCP servers stayed Admin-only after 0555.
 Migration 0865 makes Member a full teammate. It adds `stream:control`,
 `terminal:attach`, `codemode:call`, `files:write` (edit a session's live
 filesystem), `connections:write` (connect one's own Gmail, Slack, GitHub, Drive
-or model subscriptions), `mcp_servers:attach` (session MCP servers),
+or model subscriptions; it includes `connections:personal`, below), `mcp_servers:attach` (session MCP servers),
 `rigs:manage` (create and edit Sandbox Environments, which are versioned) and
 `enrollments:read` (see and pick Connected Machines). A Member also manages any
 Site they can see (Site Data, Site SQL, publication settings, takedown and

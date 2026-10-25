@@ -13,6 +13,34 @@ import {
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
+/** Connect providers whose personal setup is only a sign-in: no installation. */
+const PERSONAL_SIGN_IN_PROVIDERS = new Set([
+  "mcp-oauth",
+  "gmail",
+  "google-drive",
+  "slack-personal",
+]);
+
+/**
+ * The permission a Connect step needs. Signing in to one's own account
+ * (personal ownership, a sign-in-only provider, no MCP setup or installation
+ * target) needs only `connections:personal`; everything else keeps
+ * `connections:write`. `connections:write` includes `connections:personal`.
+ */
+export function connectSetupPermission(attempt: {
+  providerId: string;
+  ownership: string;
+  mcpSetup?: unknown;
+  installationTarget?: unknown;
+}): "connections:personal" | "connections:write" {
+  return attempt.ownership === "personal" &&
+    PERSONAL_SIGN_IN_PROVIDERS.has(attempt.providerId) &&
+    !attempt.mcpSetup &&
+    !attempt.installationTarget
+    ? "connections:personal"
+    : "connections:write";
+}
+
 /** Accept only a verified request owner or authenticated server-minted OAuth
  * state. The callback does not need a browser cookie: it rechecks the stored
  * principal against current authority before claiming and committing effects. */

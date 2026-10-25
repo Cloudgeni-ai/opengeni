@@ -1989,6 +1989,8 @@ export const englishMessages = {
   "machineInputDisplay.resultFromName": "Result from {name}",
   "machineInputDisplay.secretUseAnswered": "Secret use answered",
   "machineInputDisplay.secretUsesAnsweredCount_other": "{count} secret uses answered",
+  "machineInputDisplay.setupFinished": "Setup finished",
+  "machineInputDisplay.setupsFinishedCount_other": "{count} setups finished",
   "machineInputDisplay.updateFromName": "Update from {name}",
   "machineInputDisplay.updates": "Updates",
   "machineInputDisplay.updatesFromAgents_one": "{count} update from {agents} agents",
@@ -2299,6 +2301,8 @@ export const englishMessages = {
   "messageTimeline.retryLaterActivity": "Retry later activity",
   "messageTimeline.review": "Review",
   "messageTimeline.setUpProvider": "Set up {provider}",
+  "messageTimeline.setupUnavailableHere":
+    "{provider} can't be connected from here. Ask whoever manages this app to allow it.",
   "messageTimeline.skipped": "Skipped",
   "messageTimeline.theAgentRequestedStructuredInput": "The agent requested structured input.",
   "messageTimeline.thisAutomationWasNotGranted":
@@ -3494,6 +3498,7 @@ export const englishMessages = {
   "sessionChrome.running": "Running",
   "sessionChrome.secretUseAnswer": "Secret use",
   "sessionChrome.sessionActivity": "Session activity",
+  "sessionChrome.setupFinished": "Setup finished",
   "sessionChrome.singleSendDeleteThisMessage": "Delete this message",
   "sessionChrome.singleSendDismissUnconfirmed": "Dismiss unconfirmed message",
   "sessionChrome.singleSendEditMessageIndex": "Edit message {index}",

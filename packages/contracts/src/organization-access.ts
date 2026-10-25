@@ -92,6 +92,9 @@ export function normalizeOrganizationAccessPolicy(
   const requested = new Set(
     parsed.permissions.map((permission) => aliases[permission] ?? permission),
   );
+  // `connections:write` includes connecting one's own accounts, so a policy
+  // saved before the narrow permission existed keeps its exact meaning.
+  if (requested.has("connections:write")) requested.add("connections:personal");
   const { canonical, readOnly } = sets();
   const permissions = canonical.filter((permission) => requested.has(permission));
   const same = (candidate: readonly Permission[]) =>

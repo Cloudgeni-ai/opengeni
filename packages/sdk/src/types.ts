@@ -828,6 +828,28 @@ export type UpdateSessionToolPolicyRequest =
       expectedVersion: number;
     };
 
+/**
+ * The person finished setup from a capability card the agent posted in this
+ * chat. The server wakes the agent once per card so it continues the request
+ * that needed the capability.
+ */
+export type ContinueAfterCapabilitySetupRequest = {
+  capabilityId: string;
+};
+
+/** Why no continuation was sent. Each is a normal outcome, not an error. */
+export type CapabilitySetupContinuationSkipReason =
+  | "no_card"
+  | "later_message"
+  | "not_ready"
+  | "not_applicable"
+  | "not_requester"
+  | "session_closed";
+
+export type ContinueAfterCapabilitySetupResponse =
+  | { outcome: "queued" | "already_queued"; updateId: string }
+  | { outcome: "not_needed"; reason: CapabilitySetupContinuationSkipReason };
+
 export type SessionEffectiveToolPolicy = {
   mode: SessionToolPolicy["mode"];
   inheritedFromSessionId: string | null;
@@ -3967,6 +3989,7 @@ export const KNOWN_PERMISSIONS = [
   "usage_allowances:manage",
   "connections:read",
   "connections:write",
+  "connections:personal",
   "capabilities:manage",
   "environments:manage",
   "environments:use",
@@ -5455,6 +5478,13 @@ export type ClientConfig = {
    * choice (embedded stock UIs then show the picker). Opengeni itself omits it.
    */
   modelSelection?: boolean | undefined;
+  /**
+   * `false` when a host's session proxy owns chat setup (`createSession`), so
+   * the browser cannot add a newly connected capability to a chat and stock
+   * conversations leave the agent's capability cards to the host. Opengeni
+   * itself omits it.
+   */
+  chatConnections?: boolean | undefined;
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
   sandboxFiles?: boolean | undefined;
   /**
@@ -7268,7 +7298,8 @@ export type SessionSystemUpdateKind =
   | "child_paused"
   | "child_waiting_capacity"
   | "child_progress"
-  | "secret_use_approval_decided";
+  | "secret_use_approval_decided"
+  | "capability_setup_completed";
 
 export type SessionSystemUpdateState =
   | "pending"

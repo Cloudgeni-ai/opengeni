@@ -182,7 +182,8 @@ export async function applySessionCapabilityAccess(
 }
 
 /** Native OAuth callbacks have already saved the provider connection. Finish
- * the separate, version-fenced session tool selection before reporting success. */
+ * the separate, version-fenced session tool selection before reporting success,
+ * then let the agent continue the request that asked for this connection. */
 export async function completeSessionCapabilityOAuth(
   t: OpenGeniText,
   client: OpenGeniClient,
@@ -197,4 +198,23 @@ export async function completeSessionCapabilityOAuth(
   if (!connected?.enabled)
     throw new Error(t("sessionCapabilityPolicy.theConnectionWasAuthorizedBut"));
   await attachSessionCapability(t, client, workspaceId, sessionId, connected);
+  continueAfterCapabilitySetup(client, workspaceId, sessionId, capabilityId);
+}
+
+/**
+ * After setup from an agent's capability card is verified, let the agent
+ * continue the request that needed it, so the person does not have to say
+ * they are done. The server sends at most one continuation per card and none
+ * once the person has written since; a failure here never fails the setup the
+ * person just finished, so it is swallowed. Call only on verified success.
+ */
+export function continueAfterCapabilitySetup(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  capabilityId: string,
+): void {
+  void Promise.resolve()
+    .then(() => client.continueAfterCapabilitySetup(workspaceId, sessionId, { capabilityId }))
+    .catch(() => undefined);
 }

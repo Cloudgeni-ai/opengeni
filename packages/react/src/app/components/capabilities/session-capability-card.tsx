@@ -1,6 +1,7 @@
 import { t } from "../../lib/console-text";
 import {
   attachSessionCapability,
+  continueAfterCapabilitySetup,
   prepareSessionCapabilityAccess,
   applySessionCapabilityAccess,
   type SessionCapabilityAccessPlan,
@@ -26,6 +27,7 @@ import {
 } from "../../lib/capabilities";
 import { userErrorText } from "../../../ui/api-error";
 import { hasWorkspacePermission } from "../../lib/permissions";
+import { personalIntegrationSetupAccess } from "@opengeni/contracts/personal-integration-setup";
 import type { CapabilityCatalogItem, ResourceRef } from "../../types";
 import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
@@ -135,8 +137,15 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   }
   const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
   if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
+    const grant = context.accessContext?.workspaceGrants.find(
+      (entry) => entry.workspaceId === props.workspaceId,
+    );
     return (
       <SessionMcpCapabilityCard
+        // Members without integration admin rights connect their own account.
+        personalOnly={
+          grant !== undefined && personalIntegrationSetupAccess(grant, resolved) === "personal"
+        }
         client={context.client}
         workspaceId={props.workspaceId}
         sessionId={props.sessionId}
@@ -189,6 +198,14 @@ function ScopedSessionCapabilityCard({
   const close = () => {
     setExpanded(false);
   };
+  // Every in-card setup path (connect, API key, use an existing connection,
+  // Codex Apps) ends here only after it verified the capability is enabled
+  // and attached to this chat. Let the agent carry on with the request.
+  const finish = () => {
+    setComplete(true);
+    close();
+    continueAfterCapabilitySetup(context.client, workspaceId, sessionId, recommendation.id);
+  };
   const skill = recommendation.kind === "skill";
   const excel = recommendation.id === EXCEL_ADDIN_CAPABILITY_ID;
   const apiKey = catalogItem ? capabilityConnectPlan(catalogItem).mode === "api_key" : false;
@@ -237,10 +254,7 @@ function ScopedSessionCapabilityCard({
           workspaceId={workspaceId}
           sessionId={sessionId}
           onClose={close}
-          onComplete={() => {
-            setComplete(true);
-            close();
-          }}
+          onComplete={finish}
         />
       ) : (
         <SessionCapabilitySetup
@@ -253,10 +267,7 @@ function ScopedSessionCapabilityCard({
           workspaceId={workspaceId}
           sessionId={sessionId}
           onClose={close}
-          onComplete={() => {
-            setComplete(true);
-            close();
-          }}
+          onComplete={finish}
         />
       )}
     </SessionCapabilityFrame>
