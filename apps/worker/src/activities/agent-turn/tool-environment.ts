@@ -185,6 +185,7 @@ export type PrepareTurnToolRuntimeDeps = {
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   installedApiIntegrations: ClaimTurnOk["installedApiIntegrations"];
+  capabilityServerCategories?: ClaimTurnOk["capabilityServerCategories"];
   codexAppsCoreConnectionId?: ClaimTurnOk["codexAppsCoreConnectionId"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
@@ -310,6 +311,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     turn,
     session,
     installedApiIntegrations,
+    capabilityServerCategories,
     codexAppsCoreConnectionId,
     turnExecutionPolicy,
     trigger,
@@ -335,6 +337,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     settings: canonicalRunSettings,
     tools: canonicalTurnTools,
     bindings: turn.mcpAccountBindings,
+    ...(capabilityServerCategories ? { categories: capabilityServerCategories } : {}),
   });
   const runSettings = accountRoutes.settings;
   const turnTools = accountRoutes.tools;

@@ -3644,22 +3644,21 @@ function maybeInstallLazyToolTransport(
     () => options.unavailableMcpServers ?? new Map(),
     harnessControlServer ? catalogConnectableIntegrationLookup(harnessControlServer) : undefined,
     () => {
-      // A labelled account route is a connected account; its display metadata
-      // names the connector and, when there are several, the account.
+      // A labelled account route is a connected account: its connector, the
+      // account when the connector has several, and the kind of need it serves.
       const accounts = new Map<string, ConnectedToolAccount>();
       for (const server of mcpServers) {
         if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
           continue;
-        for (const name of server.modelToolNames()) {
-          const display = server.toolDisplayMetadata(name);
-          if (!display?.connector) continue;
-          accounts.set(name, {
-            source: server.registryId,
-            label: display.accountLabel
-              ? `${display.connector} (${display.accountLabel})`
-              : display.connector,
-          });
-        }
+        const route = server.connectedAccountRoute();
+        if (!route) continue;
+        const account: ConnectedToolAccount = {
+          source: server.registryId,
+          label: route.account ? `${route.connector} (${route.account})` : route.connector,
+          connector: route.connector,
+          ...(route.kind ? { kind: route.kind } : {}),
+        };
+        for (const name of server.modelToolNames()) accounts.set(name, account);
       }
       return accounts;
     },
@@ -5288,6 +5287,11 @@ class DeferredPreparedMcpServer implements MCPServer {
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.preparedTarget?.toolDisplayMetadata(name);
+  }
+
+  /** The connected account this server reaches, once prepared. */
+  connectedAccountRoute(): McpAccountRouteLabel | undefined {
+    return this.preparedTarget?.connectedAccountRoute();
   }
 
   async reviewContext(toolName: string, args: Record<string, unknown>) {
@@ -8827,6 +8831,11 @@ export class PrefixedMcpServer implements MCPServer {
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
+  }
+
+  /** The connected account this server reaches, when it is an account route. */
+  connectedAccountRoute(): McpAccountRouteLabel | undefined {
+    return this.accountLabel;
   }
   /** Exact attempt-local classification, including names too long for a prefix. */
   modelToolNames(): Iterable<string> {

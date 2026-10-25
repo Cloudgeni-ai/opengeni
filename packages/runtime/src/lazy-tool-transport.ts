@@ -214,10 +214,17 @@ export function connectableIntegrationNotice(
 }
 
 /**
- * The connected account a tool reaches: its source (one per account route)
- * and how the account is named, "Gmail" or "Gmail (alice@example.com)".
+ * The connected account a tool reaches: its source (one per account route),
+ * how the account is named ("Gmail" or "Gmail (alice@example.com)"), its
+ * connector, and the kind of need it serves (the connector's catalog
+ * category, such as "communication") when one is known.
  */
-export type ConnectedToolAccount = { source: string; label: string };
+export type ConnectedToolAccount = {
+  source: string;
+  label: string;
+  connector: string;
+  kind?: string;
+};
 
 /** At most this many other accounts are named; the rest are counted. */
 const CONNECTED_ACCOUNTS_NAMED = 10;
@@ -400,7 +407,7 @@ export class LazyToolRuntime {
   readonly controlTools: Tool[];
   private routerWasExposed: boolean;
   private searchIndex: ToolSearchIndex | undefined;
-  /** Whether a search this run already named the person's connected accounts. */
+  /** Whether a search this turn already named the person's connected accounts. */
   private connectedAccountsNamed = false;
 
   constructor(
@@ -804,11 +811,13 @@ export class LazyToolRuntime {
   }
 
   /**
-   * The first search this run whose result shows the model a tool reaching a
+   * The first search this turn whose result shows the model a tool reaching a
    * connected account (loaded, or as a compact candidate where the output
-   * carries those), while the person has other connected accounts, names
-   * them: a request for "my email" can mean several accounts that ranking
-   * cannot tell are alike.
+   * carries those) names the person's other accounts that serve the same
+   * need: other accounts of that connector, and accounts whose connector has
+   * the same kind. A request for "my email" can mean Gmail and Outlook Mail,
+   * which ranking cannot tell are alike. An account whose tools failed to
+   * load is reported as an unavailable source instead.
    */
   private connectedAccountsNotice(result: GenericSearchMarker): string | undefined {
     if (this.connectedAccountsNamed || !this.connectedAccounts) return undefined;
@@ -819,20 +828,26 @@ export class LazyToolRuntime {
       (this.transport === "generic_dispatch"
         ? (JSON.parse(result.output) as { tools?: { name?: unknown }[] }).tools
         : result.tools) ?? [];
-    const loaded = new Set(
-      listed.flatMap((tool) => {
-        const account = typeof tool.name === "string" ? accounts.get(tool.name) : undefined;
-        return account ? [account.source] : [];
-      }),
-    );
-    if (!loaded.size) return undefined;
+    const shown = new Map<string, ConnectedToolAccount>();
+    for (const tool of listed) {
+      const account = typeof tool.name === "string" ? accounts.get(tool.name) : undefined;
+      if (account) shown.set(account.source, account);
+    }
+    if (!shown.size) return undefined;
+    const connectors = new Set([...shown.values()].map((account) => account.connector));
+    const kinds = new Set([...shown.values()].flatMap((account) => account.kind ?? []));
     const reached: string[] = [];
     const others: string[] = [];
     const seen = new Set<string>();
     for (const account of accounts.values()) {
       if (seen.has(account.source)) continue;
       seen.add(account.source);
-      (loaded.has(account.source) ? reached : others).push(account.label);
+      if (shown.has(account.source)) reached.push(account.label);
+      else if (
+        connectors.has(account.connector) ||
+        (account.kind !== undefined && kinds.has(account.kind))
+      )
+        others.push(account.label);
     }
     if (!others.length) return undefined;
     this.connectedAccountsNamed = true;

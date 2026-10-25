@@ -286,6 +286,39 @@ describe("installed API Integration worker adapters", () => {
       expect(
         apiIntegrationAccountLabels({ integrations: [item], bindings: null, tools: routed.tools }),
       ).toEqual(new Map());
+      // A reviewed definition's catalog category names the need its accounts
+      // serve; a workspace definition's is unknown.
+      const outlook = apiIntegrationAccountLabels({
+        integrations: [
+          { ...item, definitionId: "microsoft-outlook-mail", definitionProvenance: "curated" },
+        ],
+        bindings,
+        tools: routed.tools,
+      });
+      expect(outlook.get(bindings[0]!.serverId)?.kind).toBe("communication");
+      expect(labels.get(bindings[0]!.serverId)).not.toHaveProperty("kind");
+      // Connector routes take their catalog category; the default says nothing.
+      for (const [category, kind] of [
+        ["files", "files"],
+        ["integrations", undefined],
+      ] as const) {
+        const categorized = expandMcpAccountRoutes({
+          settings: testSettings({
+            mcpServers: [
+              {
+                id: item.serverId,
+                name: item.name,
+                url: item.baseUrl,
+                connectionRef: item.connectionRef!,
+              },
+            ],
+          }),
+          tools: [{ kind: "mcp", id: item.serverId }],
+          bindings,
+          categories: new Map([[item.serverId, category]]),
+        });
+        expect(categorized.accountLabels.get(bindings[0]!.serverId)?.kind).toBe(kind);
+      }
       expect(() =>
         expandApiIntegrationAccountRoutes({
           integrations: [item],

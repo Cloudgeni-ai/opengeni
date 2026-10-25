@@ -1316,10 +1316,14 @@ describe("searches that reach one of several connected accounts", () => {
   const GMAIL_SEARCH = "mcp__gmail__search_messages";
   const GMAIL_SEND = "mcp__gmail__send_message";
   const OUTLOOK = "mcp__outlook__me_messages_list";
+  const LINEAR = "mcp__linear__list_issues";
+  const SLACK = "mcp__slack__post_message";
   const pool = () => [
     candidate(GMAIL_SEARCH, "Search the Gmail mailbox for new or matching email messages."),
     candidate(GMAIL_SEND, "Send an email message from the Gmail mailbox."),
     candidate(OUTLOOK, "Get me messages: list the messages in the signed-in user's mailbox."),
+    candidate(LINEAR, "List Linear issues in the workspace's projects and cycles."),
+    candidate(SLACK, "Post a message to a Slack channel or thread."),
     candidate(
       "opengeni__knowledge_search",
       "Find Knowledge by subject or entity name. Omit scope to search all authorized scopes.",
@@ -1329,14 +1333,27 @@ describe("searches that reach one of several connected accounts", () => {
       "Notify the person who owns this session: it goes to their inbox and, when new, to their phone.",
     ),
   ];
+  const gmail = { source: "gmail", label: "Gmail", connector: "Gmail", kind: "communication" };
+  const outlook = {
+    source: "outlook",
+    label: "Outlook Mail",
+    connector: "Outlook Mail",
+    kind: "communication",
+  };
+  const linear = {
+    source: "linear",
+    label: "Linear",
+    connector: "Linear",
+    kind: "project-management",
+  };
   const BOTH: ReadonlyMap<string, ConnectedToolAccount> = new Map([
-    [GMAIL_SEARCH, { source: "gmail", label: "Gmail" }],
-    [GMAIL_SEND, { source: "gmail", label: "Gmail" }],
-    [OUTLOOK, { source: "outlook", label: "Outlook Mail" }],
+    [GMAIL_SEARCH, gmail],
+    [GMAIL_SEND, gmail],
+    [OUTLOOK, outlook],
   ]);
   const ONLY_GMAIL: ReadonlyMap<string, ConnectedToolAccount> = new Map([
-    [GMAIL_SEARCH, { source: "gmail", label: "Gmail" }],
-    [GMAIL_SEND, { source: "gmail", label: "Gmail" }],
+    [GMAIL_SEARCH, gmail],
+    [GMAIL_SEND, gmail],
   ]);
   const NOTICE =
     "These tools reach Gmail. Also connected: Outlook Mail. If the request could mean those accounts too (the person's email, calendar or files), check each that fits, or say which account you checked and offer the others.";
@@ -1430,13 +1447,76 @@ describe("searches that reach one of several connected accounts", () => {
     });
   }
 
+  test("only accounts that serve the same need are named", async () => {
+    const slack = { source: "slack", label: "Slack", connector: "Slack", kind: "communication" };
+    const github = { source: "github", label: "GitHub", connector: "GitHub" };
+    const linearWork = { ...linear, source: "linear-work", label: "Linear (work@example.com)" };
+    const GITHUB = "mcp__github__list_repositories";
+    const notice = async (
+      accounts: ReadonlyArray<readonly [string, ConnectedToolAccount]>,
+      query: string,
+    ) => {
+      const runtime = runtimeWith("generic_dispatch", new Map(accounts));
+      runtime.refresh([
+        ...pool(),
+        candidate("mcp__linear_work__list_issues", "List Linear issues in the workspace."),
+        candidate(GITHUB, "List GitHub repositories the person can reach."),
+      ]);
+      const result = await runtime.prepareSearch({ query, limit: 1 });
+      return JSON.parse(result.output).connectedAccounts as string | undefined;
+    };
+    // Linear, Slack, Gmail and GitHub connected: a Linear search names none of them.
+    const team = [
+      [LINEAR, linear],
+      [SLACK, slack],
+      [GMAIL_SEARCH, gmail],
+      [GITHUB, github],
+    ] as const;
+    expect(await notice(team, "list linear issues in the projects and cycles")).toBeUndefined();
+    expect(
+      await notice(team.slice(0, 2), "list linear issues in the projects and cycles"),
+    ).toBeUndefined();
+    // Another account of the same connector always counts, kind or not.
+    expect(
+      await notice(
+        [
+          [LINEAR, linear],
+          ["mcp__linear_work__list_issues", linearWork],
+          [SLACK, slack],
+        ],
+        "list linear issues in the projects and cycles",
+      ),
+    ).toStartWith("These tools reach Linear. Also connected: Linear (work@example.com). If");
+    // Accounts of one kind are named together; an unknown kind never matches.
+    expect(
+      await notice(
+        [
+          [GMAIL_SEARCH, gmail],
+          [OUTLOOK, outlook],
+          [LINEAR, linear],
+          [GITHUB, github],
+        ],
+        "search gmail for new email",
+      ),
+    ).toBe(NOTICE);
+    expect(
+      await notice(
+        [
+          [GMAIL_SEARCH, { ...gmail, kind: undefined }],
+          [OUTLOOK, { ...outlook, kind: undefined }],
+        ],
+        "search gmail for new email",
+      ),
+    ).toBeUndefined();
+  });
+
   test("compact candidates count as reached only where the output shows them", async () => {
     // Two accounts' identical tools tie, so the search loads nothing and
     // lists compact candidates; native outputs cannot show those.
     const SECOND = "mcp__gmail_work__search_messages";
     const accounts: ReadonlyMap<string, ConnectedToolAccount> = new Map([
       ...BOTH,
-      [SECOND, { source: "gmail-work", label: "Gmail (work@example.com)" }],
+      [SECOND, { source: "gmail-work", label: "Gmail (work@example.com)", connector: "Gmail" }],
     ]);
     const tied = (transport: "generic_dispatch" | "openai_native") => {
       const runtime = runtimeWith(transport, accounts);

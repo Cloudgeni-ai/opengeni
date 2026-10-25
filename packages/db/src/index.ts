@@ -7657,6 +7657,8 @@ export type EnabledMcpCapabilityServer = {
   capabilityId: string;
   id: string;
   name: string;
+  /** The catalog item's category ("communication", "files"), naming the need it serves. */
+  category?: string;
   url: string;
   allowedTools?: string[];
   timeoutMs?: number;
@@ -11466,6 +11468,7 @@ export async function listEnabledMcpCapabilityServers(
         capabilityId: item.id,
         id: mcpServerIdForCapability(item.id, metadata),
         name: item.name,
+        ...(item.category ? { category: item.category } : {}),
         url: item.endpointUrl,
         ...(allowedTools ? { allowedTools } : {}),
         ...(timeoutMs ? { timeoutMs } : {}),

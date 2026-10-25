@@ -1996,6 +1996,11 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
   },
 };
 
+/** The catalog category of a reviewed integration definition, the same one its catalog entry shows. */
+export function integrationDefinitionCategory(definitionId: string): string {
+  return INTEGRATION_DEFINITION_DISCOVERY[definitionId]?.category ?? "productivity";
+}
+
 /**
  * Agent-facing entries for the reviewed API integration definitions this
  * deployment can connect. Like the GitHub App and Connected Machine entries,
@@ -2016,7 +2021,7 @@ export function integrationDefinitionCapabilityRecommendations(
       source: "built_in",
       name: definition.name,
       description: discovery?.description ?? definition.summary,
-      category: discovery?.category ?? "productivity",
+      category: integrationDefinitionCategory(definition.id),
       tags: [...(discovery?.tags ?? [definition.provider.id])],
       homepageUrl: null,
       providerDomain: definition.provider.id === "microsoft" ? "microsoft.com" : "google.com",

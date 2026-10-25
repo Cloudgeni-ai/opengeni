@@ -5,8 +5,17 @@ import type {
   ToolRef,
 } from "@opengeni/contracts";
 import type { ApiIntegrationRuntime } from "@opengeni/db";
+import { integrationDefinitionCategory } from "./capabilities";
 
 const ACCOUNT_SCOPE_SUFFIX = / · (?:Only me|This workspace)$/u;
+
+/**
+ * The kind of need an account serves: its connector's catalog category. The
+ * catalog's default category ("integrations") says nothing, so it is no kind.
+ */
+export function connectedAccountKind(category: string | null | undefined): string | undefined {
+  return category && category !== "integrations" ? category : undefined;
+}
 
 /** "alice@example.com · Only me" → "alice@example.com". */
 export function accountIdentity(binding: McpConnectionAccountBinding): string {
@@ -21,6 +30,7 @@ export function accountIdentity(binding: McpConnectionAccountBinding): string {
 function accountRouteLabels(
   connector: string,
   bindings: readonly McpConnectionAccountBinding[],
+  kind?: string,
 ): McpAccountRouteLabel[] {
   const identities = bindings.map(accountIdentity);
   return bindings.map((binding, index) => {
@@ -36,6 +46,7 @@ function accountRouteLabels(
       connector,
       providerDomain: binding.providerDomain,
       ...(account ? { account } : {}),
+      ...(kind ? { kind } : {}),
     };
   });
 }
@@ -46,6 +57,8 @@ export function expandMcpAccountRoutes(input: {
   settings: Settings;
   tools: ToolRef[];
   bindings: readonly McpConnectionAccountBinding[] | null | undefined;
+  /** Catalog categories by canonical server ID, naming the need each connector serves. */
+  categories?: ReadonlyMap<string, string>;
 }): {
   settings: Settings;
   tools: ToolRef[];
@@ -102,7 +115,11 @@ export function expandMcpAccountRoutes(input: {
         (!canonical.connectionRef!.kind || canonical.connectionRef!.kind === binding.kind),
     );
     const connector = canonical.name ?? canonical.id;
-    const labels = accountRouteLabels(connector, usable);
+    const labels = accountRouteLabels(
+      connector,
+      usable,
+      connectedAccountKind(input.categories?.get(canonical.id)),
+    );
     for (const [index, binding] of usable.entries()) {
       // Static headers can belong to the formerly selected account. Credentials
       // for account-qualified routes come exclusively from the native resolver.
@@ -181,7 +198,15 @@ export function apiIntegrationAccountLabels(input: {
       (binding) =>
         binding.canonicalServerId === integration.serverId && selected.has(binding.serverId),
     );
-    const routeLabels = accountRouteLabels(integration.name, usable);
+    const routeLabels = accountRouteLabels(
+      integration.name,
+      usable,
+      connectedAccountKind(
+        integration.definitionProvenance === "curated"
+          ? integrationDefinitionCategory(integration.definitionId)
+          : undefined,
+      ),
+    );
     for (const [index, binding] of usable.entries())
       labels.set(binding.serverId, routeLabels[index]!);
   }

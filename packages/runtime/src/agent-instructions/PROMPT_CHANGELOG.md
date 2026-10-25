@@ -2,24 +2,31 @@
 
 Several connected accounts. No prompt or tool description text changes for
 the common case. When the person has more than one connected account (for
-example Gmail and Outlook Mail), the first `tool_search` result in a run that
-shows the model a tool reaching one of them, but not all, now names the
-others, in a new `connectedAccounts` field (a developer message right after
-the result on native search routes, joined with any `notConnected` notice):
+example Gmail and Outlook Mail) that serve the same need, the first
+`tool_search` result in a turn that shows the model a tool reaching one of
+them, but not all, now names the others, in a new `connectedAccounts` field
+(a developer message right after the result on native search routes, joined
+with any `notConnected` notice):
 `These tools reach Gmail. Also connected: Outlook Mail. If the request could
 mean those accounts too (the person's email, calendar or files), check each
 that fits, or say which account you checked and offer the others.` That text
 is 200 bytes plus the account labels (217 bytes in that example), at most ten
-named and the rest counted, once per run and only in that one search result.
-Before, "Have I got any new emails?" loaded only Gmail's search tool and the
-answer silently covered Gmail alone. People with one connected account, or
-searches that load only first-party tools, see exactly what they did before;
-loads by exact name never carry it. API integration routes (Outlook Mail and
-other Microsoft 365 or OpenAPI integrations) are now labelled like connector
-routes, so with two or more accounts of one integration their tool
-descriptions gain the existing `Account: … Use only this account…` first line,
-a deploy-time description change in that case only. Earlier requests are
-unchanged.
+named and the rest counted, once per turn and only in that one search result.
+"The same need" means another account of the same connector, or a connector
+with the same catalog category (such as communication or files; the broad
+"integrations" category never counts), so Linear plus Slack, Gmail and GitHub
+says nothing for a Linear search. An account whose tools failed to load this
+turn is reported as an unavailable source and is not named. Before, "Have I
+got any new emails?" loaded only Gmail's search tool and the answer silently
+covered Gmail alone. People with one connected account, accounts of unrelated
+kinds, or searches that load only first-party tools see exactly what they did
+before; loads by exact name never carry it. API integration routes (Outlook
+Mail and other Microsoft 365 or OpenAPI integrations) are now labelled like
+connector routes, so with two or more accounts of one integration their tool
+descriptions gain the existing `Account: … Use only this account…` first line.
+That can happen from the next turn after a second account is connected in the
+middle of a session, as it already does for connectors; frozen disclosures
+(earlier search results and messages) are unchanged.
 
 Connect cards in fewer calls. No prompt or tool description text changes.
 `tool_search` now also covers integrations the person could connect: when no
