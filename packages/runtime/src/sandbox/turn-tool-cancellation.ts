@@ -1155,11 +1155,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   private routedCallScope(tool: FunctionTool, details: ToolCallDetails | undefined) {
-    const scope = newRoutedCallScope();
     const callId = details?.toolCall?.callId;
-    if (tool.name === "exec_command" && typeof callId === "string" && callId.length > 0) {
-      this.commandCallScopes.set(callId, scope);
+    if (tool.name !== "exec_command" || typeof callId !== "string" || callId.length === 0) {
+      return newRoutedCallScope();
     }
+    // A call id invoked again shares its scope: the id is settled as not
+    // started only if no invocation of it got past route resolution.
+    const existing = this.commandCallScopes.get(callId);
+    if (existing) return existing;
+    const scope = newRoutedCallScope();
+    this.commandCallScopes.set(callId, scope);
     return scope;
   }
 

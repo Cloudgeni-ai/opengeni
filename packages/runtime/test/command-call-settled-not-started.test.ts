@@ -13,7 +13,14 @@ import {
   type TurnToolCancellationFence,
   type RoutableBackendSession,
 } from "../src/sandbox";
-import { RoutedCallSettledNotStartedError } from "../src/sandbox/routing/routed-call-scope";
+import {
+  RoutedCallSettledNotStartedError,
+  newRoutedCallScope,
+  noteRoutedCallRouteResolved,
+  resolveRoutedCallRoute,
+  runRoutedToolCall,
+  settleRoutedCallNotStarted,
+} from "../src/sandbox/routing/routed-call-scope";
 
 function lazySandbox() {
   const sent: string[] = [];
@@ -34,13 +41,18 @@ function lazySandbox() {
     comeUp = resolve;
     fail = reject;
   });
+  // Every resolution reads the pointer first, a cached route's too.
+  let pointerRead: Promise<void> = Promise.resolve();
   const proxy = new RoutingSandboxSession({
     defaultResolved: {
       session: { state: { manifest: { root: "/workspace" } } } as RoutableBackendSession,
       sandboxId: null,
       kind: "unprovisioned",
     },
-    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    readPointer: async () => {
+      await pointerRead;
+      return { activeSandboxId: null, activeEpoch: 0 };
+    },
     resolveActiveBackend: async () => {
       await provisioning;
       return { session: home, sandboxId: null, kind: "modal" };
@@ -53,6 +65,14 @@ function lazySandbox() {
     fail: (error: Error) => fail(error),
     ready: () => {
       provisioning = Promise.resolve();
+    },
+    // The next resolutions, of a route resolved before too, wait until
+    // comeUp or fail.
+    stall: () => {
+      pointerRead = new Promise<void>((resolve, reject) => {
+        comeUp = resolve;
+        fail = reject;
+      });
     },
   };
 }
@@ -169,5 +189,86 @@ describe("a command call that ends waiting for its sandbox", () => {
     await Bun.sleep(0);
     expect(controller.settleCommandCallsNotStarted()).toEqual([]);
     sandbox.comeUp();
+  });
+
+  test("a call that reached its sandbox and is waiting for it again is not settled", async () => {
+    const sandbox = lazySandbox();
+    sandbox.ready();
+    const controller = createTurnToolCancellationController();
+    const [exec] = controller.wrapTools([
+      functionTool("exec_command", async () => {
+        await sandbox.proxy.exec({ cmd: "first" });
+        sandbox.stall();
+        return await sandbox.proxy.exec({ cmd: "second" });
+      }),
+    ]);
+    const running = exec!.invoke({}, "{}", call("call-again") as never);
+    await Bun.sleep(5);
+    expect(sandbox.sent).toEqual(["first"]);
+    expect(controller.settleCommandCallsNotStarted()).toEqual([]);
+    sandbox.comeUp();
+    await running;
+    expect(sandbox.sent).toEqual(["first", "second"]);
+  });
+
+  test("a call that reached its sandbox and then failed to reach it again is not settled", async () => {
+    const sandbox = lazySandbox();
+    sandbox.ready();
+    const controller = createTurnToolCancellationController();
+    const [exec] = controller.wrapTools([
+      functionTool("exec_command", async () => {
+        await sandbox.proxy.exec({ cmd: "first" });
+        sandbox.stall();
+        return await sandbox.proxy.exec({ cmd: "second" });
+      }),
+    ]);
+    const running = exec!.invoke({}, "{}", call("call-lost") as never);
+    await Bun.sleep(5);
+    sandbox.fail(new Error("the sandbox went away"));
+    await expect(running).rejects.toThrow("the sandbox went away");
+    expect(sandbox.sent).toEqual(["first"]);
+    expect(controller.settleCommandCallsNotStarted()).toEqual([]);
+  });
+
+  test("a call id invoked again is settled only if no invocation reached the sandbox", async () => {
+    const sandbox = lazySandbox();
+    sandbox.ready();
+    const controller = createTurnToolCancellationController();
+    let invocation = 0;
+    const [exec] = controller.wrapTools([
+      functionTool("exec_command", async () => {
+        invocation += 1;
+        if (invocation === 1) return await sandbox.proxy.exec({ cmd: "first" });
+        return await sandbox.proxy.exec({ cmd: "repeated" });
+      }),
+    ]);
+    await exec!.invoke({}, "{}", call("call-twice") as never);
+    sandbox.stall();
+    const again = exec!.invoke({}, "{}", call("call-twice") as never);
+    await Bun.sleep(5);
+    expect(controller.settleCommandCallsNotStarted()).toEqual([]);
+    sandbox.comeUp();
+    await again;
+    expect(sandbox.sent).toEqual(["first", "repeated"]);
+  });
+});
+
+describe("settling a routed call as not started", () => {
+  test("between a finished resolution and its dispatch, a call is left alone and sent", async () => {
+    const scope = newRoutedCallScope();
+    let settled: boolean | null = null;
+    await runRoutedToolCall(
+      async () => {
+        await resolveRoutedCallRoute(async () => "route");
+        settled = settleRoutedCallNotStarted(scope);
+        noteRoutedCallRouteResolved();
+      },
+      () => false,
+      () => undefined,
+      scope,
+    );
+    expect(settled).toBe(false);
+    expect(scope.routeResolved).toBe(true);
+    expect(scope.settledNotStarted).toBe(false);
   });
 });
