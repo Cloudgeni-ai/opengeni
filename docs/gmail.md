@@ -51,7 +51,8 @@ seam before the 1 MiB model limit:
 
 - `search_messages`, `search_threads`, `get_thread` and `list_drafts` return
   one card per message: `id`, `threadId` (and `draftId`/`messageId` for
-  drafts), `sender`, non-empty `toRecipients`/`ccRecipients`/`bccRecipients`,
+  drafts), `sender`, `replyTo` when the root Reply-To header names an address
+  the sender does not, non-empty `toRecipients`/`ccRecipients`/`bccRecipients`,
   `dateTime` (or the raw `date` when unparseable), `subject`, `labelIds` and
   attachment file names. Full-content views add `plaintextBody`: the plain-text
   part, or text extracted from the HTML part when there is none

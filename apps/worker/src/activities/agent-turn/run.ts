@@ -475,6 +475,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getSetupBoxSession: () => sandboxState.setupBoxSession,
       getSdkOwnedSandboxSession: () => media.sdkOwnedSandboxSession,
       getSandboxGroupId: () => sandboxState.sandboxGroupId,
+      getTurnSandboxProvisioner: () => sandboxState.turnSandboxProvisioner,
       runWorkspaceMutation: runWorkspaceMutationForSandbox,
     });
     const historySink = createTurnHistorySink({

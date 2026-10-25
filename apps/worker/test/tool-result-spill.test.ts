@@ -67,6 +67,7 @@ mock.module("@opengeni/db", () => ({
 
 const { ToolResultSpill, toolResultSpillIdentity } =
   await import("../src/activities/agent-turn/tool-result-spill");
+type SpillPort = InstanceType<typeof ToolResultSpill>;
 
 afterAll(() => {
   mock.restore();
@@ -97,6 +98,7 @@ function spill(
     resolved?: () => unknown;
     setupSession?: () => unknown;
     sdkOwnedSession?: () => unknown;
+    provisioner?: { get(): Promise<unknown> };
   } = {},
 ) {
   return new ToolResultSpill({
@@ -114,6 +116,7 @@ function spill(
     getSetupBoxSession: () => live.setupSession?.() ?? null,
     getSdkOwnedSandboxSession: () => live.sdkOwnedSession?.() ?? null,
     getSandboxGroupId: () => null,
+    getTurnSandboxProvisioner: () => live.provisioner ?? null,
     runWorkspaceMutation: async (_sandbox, _operation, mutation) => {
       mutationCalls += 1;
       return await mutation();
@@ -238,42 +241,81 @@ describe("tool result spill receipt path", () => {
     structuredContent: { tree: "x".repeat(64) },
   };
 
-  test("a sandbox route that has not started yet gets the path its first shell will have", async () => {
+  /** A lazy turn sandbox whose start runs the spill's deferred copy, as the real hook does. */
+  function lazySandbox(port: () => SpillPort, exitCode = 0, startError?: Error) {
+    const state: { live: ReturnType<typeof shellSession> | null; starts: number } = {
+      live: null,
+      starts: 0,
+    };
+    return {
+      state,
+      routes: {
+        resolved: () => (state.live ? resolvedSandbox(state.live.session) : null),
+        setupSession: () => state.live?.session ?? null,
+        provisioner: {
+          get: async () => {
+            state.starts += 1;
+            if (startError) throw startError;
+            state.live ??= shellSession("/workspace", exitCode);
+            await port().materializeDeferred();
+            return resolvedSandbox(state.live.session);
+          },
+        },
+      },
+    };
+  }
+
+  test("a spill before the lazy sandbox starts joins it and is copied before the receipt returns", async () => {
     filesById.clear();
     mutationCalls = 0;
-    let live: ReturnType<typeof shellSession> | null = null;
-    const port = spill("modal", objectStorage(), {
-      resolved: () => (live ? resolvedSandbox(live.session) : null),
-      setupSession: () => live?.session ?? null,
-    });
+    let port: SpillPort;
+    const sandbox = lazySandbox(() => port);
+    port = spill("modal", objectStorage(), sandbox.routes);
     const receipt = await port.spill({ operationId: OPERATION_ID, result });
     expect(receipt.structuredContent).toMatchObject({
       type: "tool_result_spilled",
       sandboxPath: shellPath,
     });
     expect(JSON.parse((receipt.content[0] as { text: string }).text).sandboxPath).toBe(shellPath);
-    expect(mutationCalls).toBe(0);
-
-    // The lazy sandbox start runs this before it releases the first sandbox
-    // operation, so the copy exists before the agent's next shell command.
-    live = shellSession("/workspace");
-    await port.materializeDeferred();
+    // The file is already in the shell's working directory, copied once by the
+    // sandbox start, so the path holds in this and any later shell command.
+    expect(sandbox.state.starts).toBe(1);
     expect(mutationCalls).toBe(1);
-    expect(live.calls).toHaveLength(1);
-    expect(live.calls[0]!.workdir).toBe("/workspace");
-    expect(live.calls[0]!.cmd).toContain(shellPath);
+    expect(sandbox.state.live!.calls).toHaveLength(1);
+    expect(sandbox.state.live!.calls[0]!.workdir).toBe("/workspace");
+    expect(sandbox.state.live!.calls[0]!.cmd).toContain(shellPath);
   });
 
-  test("the legacy SDK-owned sandbox also receives the deferred copy when it becomes ready", async () => {
+  test("a lazy sandbox that cannot start or copy gives no path", async () => {
+    filesById.clear();
+    let failingStart: SpillPort;
+    const unstartable = lazySandbox(() => failingStart, 0, new Error("provision failed"));
+    failingStart = spill("modal", objectStorage(), unstartable.routes);
+    const notStarted = await failingStart.spill({ operationId: OPERATION_ID, result });
+    expect((notStarted.structuredContent as { sandboxPath: string | null }).sandboxPath).toBeNull();
+
+    filesById.clear();
+    let failingCopy: SpillPort;
+    const broken = lazySandbox(() => failingCopy, 1);
+    failingCopy = spill("modal", objectStorage(), broken.routes);
+    const notCopied = await failingCopy.spill({ operationId: OPERATION_ID, result });
+    expect((notCopied.structuredContent as { sandboxPath: string | null }).sandboxPath).toBeNull();
+    // The start's copy failed, and the spill retried it once before saying null.
+    expect(broken.state.live!.calls).toHaveLength(2);
+  });
+
+  test("without a lazy sandbox boundary a not-yet-ready SDK-owned sandbox gives no path", async () => {
     filesById.clear();
     let owned: ReturnType<typeof shellSession> | null = null;
     const port = spill("docker", objectStorage(), { sdkOwnedSession: () => owned?.session });
     const receipt = await port.spill({ operationId: OPERATION_ID, result });
-    expect((receipt.structuredContent as { sandboxPath: string }).sandboxPath).toBe(shellPath);
+    expect((receipt.structuredContent as { sandboxPath: string | null }).sandboxPath).toBeNull();
+    // A ready SDK-owned sandbox gets the copy and the path.
     owned = shellSession("/workspace");
-    await port.materializeDeferred();
-    expect(owned.calls).toHaveLength(1);
-    expect(owned.calls[0]!.cmd).toContain(shellPath);
+    filesById.clear();
+    const ready = await port.spill({ operationId: OPERATION_ID, result });
+    expect((ready.structuredContent as { sandboxPath: string }).sandboxPath).toBe(shellPath);
+    expect(owned.calls.at(-1)!.cmd).toContain(shellPath);
   });
 
   test("no sandbox backend means no shell will ever have the file", async () => {

@@ -30,7 +30,8 @@ const MULTI_MESSAGE_TOOLS = new Set([
  * caller executing a new call, never when replaying stored results.
  *
  * Multi-message reads (`search_messages`, `search_threads`, `get_thread`,
- * `list_drafts`) become triage cards: ids, sender, recipients, date, subject,
+ * `list_drafts`) become triage cards: ids, sender, a Reply-To that differs
+ * from the sender, recipients, date, subject,
  * labels, attachment names and the start of the body. The raw root header
  * array, MIME part list, HTML body, attachment tokens, size and history fields
  * are dropped. The body is the plain-text part, or text extracted from the
@@ -180,6 +181,8 @@ function draftCard(message: JsonRecord): DraftCard {
   copyDefined(out, message, "messageId");
   copyDefined(out, message, "threadId");
   copyDefined(out, message, "sender");
+  const replyTo = distinctReplyTo(message);
+  if (replyTo) out.replyTo = replyTo;
   for (const key of ["toRecipients", "ccRecipients", "bccRecipients"]) {
     const recipients = message[key];
     if (Array.isArray(recipients) && recipients.length > 0) out[key] = recipients;
@@ -230,6 +233,41 @@ function compactSingleMessage(value: JsonRecord, maxTextBytes: number): JsonReco
   const text = htmlToText(htmlBody);
   if (!text) return null;
   return { ...kept, plaintextBody: text, bodyFromHtml: true, htmlBodyOmitted: true };
+}
+
+/**
+ * The root Reply-To header when it names an address the sender does not, so a
+ * reply drafted from a card goes where the sender asked. Read from the raw
+ * root header array, which the card itself drops.
+ */
+function distinctReplyTo(message: JsonRecord): string | null {
+  if (!Array.isArray(message.headers)) return null;
+  const header = message.headers.find(
+    (entry): entry is JsonRecord =>
+      isRecord(entry) &&
+      typeof entry.name === "string" &&
+      entry.name.toLowerCase() === "reply-to" &&
+      typeof entry.value === "string",
+  );
+  const value = typeof header?.value === "string" ? header.value.trim() : "";
+  if (!value) return null;
+  const senderAddresses = new Set(
+    emailAddresses(typeof message.sender === "string" ? message.sender : ""),
+  );
+  const replyAddresses = emailAddresses(value);
+  if (
+    replyAddresses.length > 0 &&
+    replyAddresses.every((address) => senderAddresses.has(address))
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function emailAddresses(value: string): string[] {
+  return (value.match(/[^\s<>(),;:"]+@[^\s<>(),;:"]+/gu) ?? []).map((address) =>
+    address.toLowerCase(),
+  );
 }
 
 function copyDefined(out: JsonRecord, source: JsonRecord, key: string): void {

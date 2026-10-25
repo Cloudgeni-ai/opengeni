@@ -123,6 +123,10 @@ describe("Gmail model-visible projection", () => {
     });
     expect(newsletter.toRecipients).toEqual(['"Owner" <owner@example.test>']);
     expect(newsletter.ccRecipients).toEqual(['"Team" <team@example.test>']);
+    // Bulk mail asks for replies elsewhere; personal mail has no Reply-To.
+    expect(newsletter.replyTo).toBe("Support <support@example.test>");
+    const personal = cards.find((card) => card.sender === "Alex Example <alex@example.test>")!;
+    expect(personal).not.toHaveProperty("replyTo");
     expect(typeof newsletter.subject).toBe("string");
     // The snippet is the start of the plain-text body already shown.
     expect(newsletter).not.toHaveProperty("snippet");
@@ -342,6 +346,39 @@ describe("Gmail model-visible projection", () => {
     expect(
       projectGmailToolResultForModel("get_message", htmlOnly, { maxTextBytes: 10_000_000 }),
     ).toBe(htmlOnly);
+  });
+
+  test("Reply-To is kept only when it names another address than the sender", () => {
+    const message = (id: string, sender: string, replyTo?: string) => ({
+      id,
+      sender,
+      headers: [
+        { name: "From", value: sender },
+        ...(replyTo === undefined ? [] : [{ name: "reply-to", value: replyTo }]),
+      ],
+    });
+    const value = {
+      messages: [
+        message("none", "Ann <ann@example.test>"),
+        message("same", "Ann <ann@example.test>", "ANN@example.test"),
+        message("other", "Ann <ann@example.test>", "Desk <desk@example.test>"),
+        message("partly", "Ann <ann@example.test>", "ann@example.test, bob@example.test"),
+        message("blank", "Ann <ann@example.test>", "  "),
+      ],
+    };
+    const cards = structured(
+      projectGmailToolResultForModel("search_messages", {
+        content: [{ type: "text", text: JSON.stringify(value) }],
+        structuredContent: value,
+      }),
+    ).messages as Card[];
+    expect(cards.map((card) => [card.id, card.replyTo ?? null])).toEqual([
+      ["none", null],
+      ["same", null],
+      ["other", "Desk <desk@example.test>"],
+      ["partly", "ann@example.test, bob@example.test"],
+      ["blank", null],
+    ]);
   });
 
   test("contentTruncated reports both the bridge cap and the model cap", () => {

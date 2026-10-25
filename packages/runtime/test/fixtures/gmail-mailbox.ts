@@ -166,6 +166,7 @@ function rootHeaders(
             value: `<https://example.test/unsubscribe/${token()}>, <mailto:unsubscribe@example.test?subject=${token().slice(0, 20)}>`,
           },
           { name: "List-Unsubscribe-Post", value: "List-Unsubscribe=One-Click" },
+          { name: "Reply-To", value: "Support <support@example.test>" },
           { name: "Precedence", value: "bulk" },
           { name: "X-Campaign-Id", value: token().slice(0, 40) },
           { name: "Feedback-ID", value: `${index}:campaign:example:${token().slice(0, 16)}` },

@@ -36,12 +36,9 @@ export type ToolResultSpillReceipt = ToolResultSpilledReceipt;
 
 /**
  * Where the spilled copy is for the shell of this attempt:
- * - `materialized`: copied into the live sandbox now;
- * - `deferred`: this attempt has a sandbox route but no live sandbox yet. Every
- *   sandbox start of the attempt runs `materializeDeferred` before it releases
- *   the first sandbox operation, so the copy lands before any shell command;
- * - `unavailable`: no shell can have it (no sandbox route, or the copy into
- *   the live sandbox failed).
+ * - `materialized`: copied into the live sandbox;
+ * - `deferred`: this attempt has a sandbox route but no live sandbox yet;
+ * - `unavailable`: no shell has it (no sandbox route, or the copy failed).
  */
 type SpillMaterialization = "materialized" | "deferred" | "unavailable";
 
@@ -62,6 +59,12 @@ export type ToolResultSpillDeps = {
   getSetupBoxSession: () => unknown;
   getSdkOwnedSandboxSession: () => unknown;
   getSandboxGroupId: () => string | null;
+  /**
+   * The turn's lazy sandbox boundary, when the attempt has one. A spill that
+   * finds no live sandbox joins it (as a shell command would), so the receipt
+   * names a path only once the copy is really there.
+   */
+  getTurnSandboxProvisioner: () => { get(): Promise<unknown> } | null;
   runWorkspaceMutation: <T>(
     sandbox: ResumedTurnSandbox,
     operation: string,
@@ -119,20 +122,51 @@ export class ToolResultSpill {
       }
       file = await completeFileUpload(this.deps.db, this.deps.workspaceId, identity.uploadId);
     }
-    const materialization = await this.materializeFile(file);
-    const receipt: ToolResultSpillReceipt = {
+    // Registered first so a sandbox start this spill triggers copies it too.
+    this.receiptsCreatedThisTurn.set(file.id, {
       type: "tool_result_spilled",
-      sandboxPath: materialization === "unavailable" ? null : intendedSandboxPath,
+      sandboxPath: intendedSandboxPath,
       fileId: file.id,
       byteSize: file.sizeBytes,
       mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
-    };
-    this.receiptsCreatedThisTurn.set(file.id, {
-      ...receipt,
-      sandboxPath: intendedSandboxPath,
     });
-    return spilledModelToolResult(receipt);
+    let materialization = await this.materializeFile(file);
+    if (materialization === "deferred") {
+      materialization = await this.materializeAfterSandboxStart(file);
+    }
+    return spilledModelToolResult({
+      type: "tool_result_spilled",
+      sandboxPath: materialization === "materialized" ? intendedSandboxPath : null,
+      fileId: file.id,
+      byteSize: file.sizeBytes,
+      mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
+    });
   };
+
+  /**
+   * The only model-readable copy of an oversized result is the sandbox file,
+   * so a spill joins the turn's lazy sandbox instead of promising a later copy
+   * that may never happen (no sandbox in this turn, or a failed copy). Without
+   * a lazy boundary (the SDK-owned session appears only with the first shell
+   * command) the receipt says `null`.
+   */
+  private async materializeAfterSandboxStart(file: FileAsset): Promise<SpillMaterialization> {
+    const provisioner = this.deps.getTurnSandboxProvisioner();
+    if (!provisioner) return "unavailable";
+    try {
+      await provisioner.get();
+    } catch (error) {
+      this.deps.observability.warn("Tool result spill could not start the turn sandbox", {
+        errorClass: error instanceof Error ? error.name : "UnknownError",
+        errorCode: "worker_operation_failed",
+        origin: "worker",
+      });
+      return "unavailable";
+    }
+    // The start already copied it (`materializeDeferred`); this is a cache hit
+    // or a retry of a failed copy.
+    return (await this.materializeFile(file)) === "materialized" ? "materialized" : "unavailable";
+  }
 
   materializeDeferred = async (): Promise<void> => {
     for (const receipt of this.receiptsCreatedThisTurn.values()) {
@@ -159,7 +193,7 @@ export class ToolResultSpill {
       }
       return "deferred";
     } catch (error) {
-      this.deps.observability.warn("Tool result spill sandbox materialization deferred", {
+      this.deps.observability.warn("Tool result spill sandbox materialization failed", {
         errorClass: error instanceof Error ? error.name : "UnknownError",
         errorCode: "worker_operation_failed",
         origin: "worker",
