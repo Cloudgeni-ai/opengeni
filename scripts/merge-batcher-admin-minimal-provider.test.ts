@@ -124,6 +124,28 @@ function fixture() {
     },
   };
 }
+test("consumed claim resume receives the pinned image contract and saved plan", async () => {
+  const f = fixture();
+  const originalRead = f.deps.read;
+  const contract = JSON.parse(await originalRead("/work/admin/stop-contract.json"));
+  contract.directory = "/opt/batcher-operator";
+  contract.receiptDirectory = "/work/operator";
+  const bytes = JSON.stringify(contract);
+  f.config.operatorDirectory = "/opt/batcher-operator";
+  f.config.contractSha256 = sha(bytes);
+  f.deps.read = async (path) => (path.endsWith("stop-contract.json") ? bytes : originalRead(path));
+  f.conflict(412);
+  f.deps.resumeOff = async (path, flag, pin, planPin) => {
+    expect(path).toBe("/work/admin");
+    expect(flag).toBe("--apply-after-go");
+    expect(pin).toBe(sha(bytes));
+    expect(planPin).toBe(f.config.planSha256);
+    f.calls.push("RESUME");
+  };
+  expect(await run(f.config, f.deps)).toBe("manual");
+  expect(f.calls).toContain("RESUME");
+  expect(f.calls).not.toContain("OFF");
+});
 test("real wrapper uses authenticated status and create-only claim before unchanged OFF", async () => {
   const f = fixture();
   expect(await run(f.config, f.deps)).toBe("manual");
