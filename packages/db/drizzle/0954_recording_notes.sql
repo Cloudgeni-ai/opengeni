@@ -58,11 +58,34 @@ END
 $recording_notes_grants$;
 
 -- Saving the notes is an event webhooks and automations can follow. Old
--- binaries never write it, so the wider check is safe before they are gone.
+-- binaries never write or subscribe to it, so the wider checks are safe
+-- before they are gone; 0955 validates them.
 ALTER TABLE recording_events DROP CONSTRAINT recording_events_type_chk;
 ALTER TABLE recording_events ADD CONSTRAINT recording_events_type_chk CHECK (type IN (
   'recording.started', 'recording.finished', 'recording.transcript.ready',
   'recording.transcript.failed', 'recording.transcript.current_changed',
   'recording.speakers.updated', 'recording.notes.updated', 'recording.deleted'
 )) NOT VALID;
-ALTER TABLE recording_events VALIDATE CONSTRAINT recording_events_type_chk;
+ALTER TABLE workspace_webhooks DROP CONSTRAINT workspace_webhooks_event_types_chk;
+ALTER TABLE workspace_webhooks ADD CONSTRAINT workspace_webhooks_event_types_chk CHECK (
+  cardinality(event_types) BETWEEN 1 AND 32 AND event_types <@ ARRAY[
+    'turn.completed','turn.failed','turn.cancelled','session.status.changed',
+    'session.requiresAction','session.humanInput.requested',
+    'session.notification.posted','session.notification.withdrawn',
+    'usage.threshold_reached','usage.exhausted','usage.period_reset',
+    'recording.started','recording.finished','recording.transcript.ready',
+    'recording.transcript.failed','recording.transcript.current_changed',
+    'recording.speakers.updated','recording.notes.updated','recording.deleted'
+  ]::text[]
+) NOT VALID;
+ALTER TABLE organization_webhooks DROP CONSTRAINT organization_webhooks_event_types_chk;
+ALTER TABLE organization_webhooks ADD CONSTRAINT organization_webhooks_event_types_chk CHECK (
+  cardinality(event_types) BETWEEN 1 AND 32 AND event_types <@ ARRAY[
+    'turn.completed', 'turn.failed', 'turn.cancelled', 'session.status.changed',
+    'session.requiresAction', 'session.humanInput.requested',
+    'session.notification.posted', 'session.notification.withdrawn',
+    'recording.started','recording.finished','recording.transcript.ready',
+    'recording.transcript.failed','recording.transcript.current_changed',
+    'recording.speakers.updated','recording.notes.updated','recording.deleted'
+  ]::text[]
+) NOT VALID;

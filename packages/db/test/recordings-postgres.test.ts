@@ -999,6 +999,11 @@ describe("recordings", () => {
     if (!client) return;
     const db = client.db;
     const scope = await workspace();
+    const [hook] = await shared!.admin<{ id: string }[]>`
+      insert into workspace_webhooks (account_id, workspace_id, url, secret_encrypted, event_types, enabled)
+      values (${scope.accountId}, ${scope.workspaceId}, 'https://hooks.example.test/notes', 'x',
+        array['recording.notes.updated'], true)
+      returning id`;
     const ours = await finalizedRecording(scope, "workspace");
     const mine = await finalizedRecording(scope, "private");
     const memberActor = { workspaceId: scope.workspaceId, subjectId: scope.member };
@@ -1077,6 +1082,9 @@ describe("recordings", () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.data).toMatchObject({ noteKind: "notes", noteRevision: 1, sessionId });
     expect(JSON.stringify(events[0]!.data)).not.toContain("Budget");
+    const deliveries = await shared!.admin<{ event_type: string }[]>`
+      select event_type from workspace_webhook_deliveries where webhook_id = ${hook!.id}`;
+    expect(deliveries.map((delivery) => delivery.event_type)).toEqual(["recording.notes.updated"]);
 
     // Deleting the meeting deletes its notes.
     await markRecordingDeleting(db, at);
