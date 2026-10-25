@@ -2052,7 +2052,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       nextId = 1;
       backoff.sleeps = [];
       const jobError = reader([...approvalMain(3), ...runs(1, "waiting", MAIN, "provider-error")]);
-      await expect(jobError.github.mainBusy()).rejects.toThrow();
+      await expect(jobError.github.mainBusy()).rejects.toThrow(
+        "GitHub read unavailable (502), 5 attempts",
+      );
       expect(jobError.requests.filter((url) => url.includes("/runs/4/jobs?")).length).toBe(5);
       expect(backoff.sleeps).toEqual([250, 500, 1000, 2000]);
       backoff.sleeps = [];
@@ -2066,7 +2068,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         }) as unknown as typeof fetch,
         retryClock,
       );
-      await expect(listError.mainBusy()).rejects.toThrow();
+      await expect(listError.mainBusy()).rejects.toThrow(
+        "GitHub read unavailable (503), 5 attempts",
+      );
       expect(listAttempts).toBe(5);
       expect(backoff.sleeps).toEqual([250, 500, 1000, 2000]);
     });
