@@ -23,7 +23,10 @@ import {
 } from "../src/sandbox/routing/routing-session";
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing/settings";
-import { markPendingCommandSupervised } from "../src/sandbox/provider-command-session";
+import {
+  markPendingCommandSupervised,
+  ProviderCommandObservationUnavailableError,
+} from "../src/sandbox/provider-command-session";
 import { ModalCommandStartNotDispatchedError } from "../src/sandbox/providers/modal-command-router-wire";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";
 import { synchronousNativeOutputFixture } from "./synchronous-output-fixture";
@@ -383,6 +386,48 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     ).rejects.toThrow("read unavailable");
     expect(adoptions).toBe(0);
   });
+
+  test.each(["adoption_failed", "turn_scoped"] as const)(
+    "unknown observation preserves the turn writer when %s",
+    async (mode) => {
+      const controller = createTurnToolCancellationController();
+      let settled = false;
+      let adoptions = 0;
+      const [exec] = controller.wrapTools(
+        [functionTool("exec_command", async () => running(118))],
+        {
+          hasRetainedProcess: () => !settled,
+          reconcileRetainedProcess: async () => settled,
+          canAdoptRetainedProcessAsBackgroundCommand: () => mode !== "turn_scoped",
+          writeStdinForProcessRead: async () => {
+            throw new ProviderCommandObservationUnavailableError(
+              {} as never,
+              new Error("unavailable"),
+              false,
+            );
+          },
+          adoptRetainedProcessAsBackgroundCommand: async () => {
+            adoptions++;
+            throw new Error("durable adoption failed");
+          },
+        },
+      ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+      try {
+        const result = exec!.invoke(
+          runContext,
+          JSON.stringify({ cmd: "work", yield_time_ms: 1_000 }),
+        );
+        if (mode === "adoption_failed")
+          await expect(result).rejects.toThrow("durable adoption failed");
+        else expect(await result).toContain("observation unavailable");
+        expect(adoptions).toBe(mode === "adoption_failed" ? 1 : 0);
+        expect(controller.outstandingWriters?.()).toEqual([{ kind: "shell_session", count: 1 }]);
+      } finally {
+        settled = true;
+        await controller.waitForQuiescence();
+      }
+    },
+  );
 
   test("OpenSandbox numeric handles stay observable in their owning context despite remote-op cancellation", async () => {
     const controller = createTurnToolCancellationController();
