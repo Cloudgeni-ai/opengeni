@@ -46,7 +46,8 @@ struct Compute {
     fail_resets: AtomicBool,
     /// Operations stay running while set.
     hold_operations: AtomicBool,
-    /// How long a read of an instance takes, by name, if not at once.
+    /// How long the next read of an instance takes, by name, if not at
+    /// once: it answers with the status the instance had when asked.
     slow_reads: Mutex<HashMap<String, Duration>>,
 }
 
@@ -107,11 +108,12 @@ async fn group_action(
 }
 
 async fn instance(State(compute): State<Arc<Compute>>, Path(name): Path<String>) -> Response {
-    let slow = compute.slow_reads.lock().unwrap().get(&name).copied();
+    let status = compute.instances.lock().unwrap().get(&name).cloned();
+    let slow = compute.slow_reads.lock().unwrap().remove(&name);
     if let Some(slow) = slow {
         tokio::time::sleep(slow).await;
     }
-    match compute.instances.lock().unwrap().get(&name) {
+    match status {
         Some(status) => Json(json!({ "name": name, "status": status })).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -420,6 +422,43 @@ async fn a_slow_answer_about_one_silent_host_holds_up_no_other() {
         "given up on while waited for"
     );
     assert!(!reset(&compute, "hosts-a1b2"), "{:?}", compute.asked());
+}
+
+/// An answer asked for in an earlier silence says nothing of a later one:
+/// an instance found stopped before its host came back and renewed does
+/// not end the wait once the host falls silent again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_from_an_earlier_silence_does_not_end_a_later_wait() {
+    let (fleet, compute) =
+        fleet_giving_up_after(&[("hosts-a1b2", "RUNNING")], Duration::from_secs(60)).await;
+    let host = fleet.host("hosts-a1b2").await;
+    holding_one(&host).await;
+    let set = |status: &str| {
+        compute
+            .instances
+            .lock()
+            .unwrap()
+            .insert("hosts-a1b2".into(), status.into());
+    };
+    // The first silence's read finds the instance stopped, and answers
+    // late.
+    compute
+        .slow_reads
+        .lock()
+        .unwrap()
+        .insert("hosts-a1b2".into(), Duration::from_secs(9));
+    set("TERMINATED");
+    host.renewing(false);
+    tokio::time::sleep(past_lapse(&fleet)).await;
+    // The host comes back and renews, then falls silent again, running.
+    set("RUNNING");
+    host.renewing(true);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    host.renewing(false);
+    // Past the late answer, inside the new wait.
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    assert!(!reset(&compute, "hosts-a1b2"), "{:?}", compute.asked());
+    assert!(counted(&fleet, &host).await, "given up on while waited for");
 }
 
 /// An instance on its way to running, as when it resumes from a suspend

@@ -209,8 +209,11 @@ pub struct Leading<L> {
     /// instance.
     waiting: HashMap<HostId, Look>,
     /// The asks about those instances under way, apart from the ticks so
-    /// that a slow answer holds up nothing else.
-    looks: JoinSet<(HostId, Option<bool>)>,
+    /// that a slow answer holds up nothing else: each answers for its
+    /// host and the ask it was.
+    looks: JoinSet<(HostId, u64, Option<bool>)>,
+    /// The number the next ask gets.
+    next_ask: u64,
     metrics: Arc<Metrics>,
 }
 
@@ -219,8 +222,9 @@ pub struct Leading<L> {
 struct Look {
     /// When it last asked the cloud about it.
     asked: Option<Instant>,
-    /// Whether an ask is under way.
-    asking: bool,
+    /// The ask under way, if one is. An answer to any other, such as one
+    /// asked before the host last renewed, says nothing of this wait.
+    asking: Option<u64>,
     /// Whether the instance may still hold its memory, as last answered;
     /// until the cloud says it does not, it may.
     holds: Option<bool>,
@@ -253,6 +257,7 @@ impl<L: Leases> Leading<L> {
             give_up_after: Duration::ZERO,
             waiting: HashMap::new(),
             looks: JoinSet::new(),
+            next_ask: 0,
             metrics: Arc::default(),
         }
     }
@@ -392,17 +397,19 @@ impl<L: Leases> Leading<L> {
         if look.holds == Some(false) {
             return false;
         }
-        if !look.asking && look.asked.is_none_or(|at| at.elapsed() >= LOOK_EVERY) {
-            look.asking = true;
+        if look.asking.is_none() && look.asked.is_none_or(|at| at.elapsed() >= LOOK_EVERY) {
+            let ask = self.next_ask;
+            self.next_ask += 1;
+            look.asking = Some(ask);
             look.asked = Some(Instant::now());
             let group = Arc::clone(group);
             let name = name.to_owned();
             self.looks.spawn(async move {
                 match group.may_hold_memory(&name).await {
-                    Ok(holds) => (host, Some(holds)),
+                    Ok(holds) => (host, ask, Some(holds)),
                     Err(error) => {
                         tracing::warn!(%error, %name, "reading a silent host's instance failed");
-                        (host, None)
+                        (host, ask, None)
                     }
                 }
             });
@@ -415,9 +422,15 @@ impl<L: Leases> Leading<L> {
         while let Some(joined) = self.looks.try_join_next() {
             // An ask that panicked leaves its host asking: it is then
             // given up on once the wait ends.
-            let Ok((host, holds)) = joined else { continue };
-            if let Some(look) = self.waiting.get_mut(&host) {
-                look.asking = false;
+            let Ok((host, ask, holds)) = joined else {
+                continue;
+            };
+            if let Some(look) = self
+                .waiting
+                .get_mut(&host)
+                .filter(|look| look.asking == Some(ask))
+            {
+                look.asking = None;
                 look.holds = holds.or(look.holds);
             }
         }
