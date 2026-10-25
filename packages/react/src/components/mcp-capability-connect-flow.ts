@@ -399,6 +399,9 @@ export function useMcpCapabilityConnect({
           providerId: mcpUrl === GOOGLE_DRIVE_MCP_URL ? "google-drive" : "mcp-oauth",
           ownership,
           returnUrl,
+          // A browser popup ends on a page that closes itself instead of
+          // loading this page a second time; a phone returns to the app.
+          ...(windowHost.current.finishInPopup ? { finishInPopup: true as const } : {}),
           idempotencyKey: startKey.current,
           ...(reconnectAccountId ? { reconnectAccountId } : {}),
         });

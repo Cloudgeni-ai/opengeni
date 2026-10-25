@@ -225,6 +225,14 @@ export const BeginConnectRequest = /* @__PURE__ */ defineSchema(() =>
       ownership: ConnectOwnership,
       // URL parsing validates separately; never transform this original string.
       returnUrl: z.string().min(1).max(4096),
+      /**
+       * Sign-in runs in a popup window the client opened for it. The provider
+       * then returns that window to a small Opengeni page that closes it (or
+       * says it can be closed) instead of loading `returnUrl`, so the popup
+       * never shows a second copy of the host page. The client follows the
+       * attempt's state as usual.
+       */
+      finishInPopup: z.literal(true).optional(),
       idempotencyKey: opaqueId,
       reconnectAccountId: opaqueId.optional(),
       installationTarget: ConnectInstallationTarget.optional(),

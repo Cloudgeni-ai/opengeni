@@ -142,7 +142,9 @@ export function inChatCapabilitySetup(
     item.connectionRef !== undefined &&
     item.connectionRef.subjectScope !== "subject";
   if (usesSharedAccount)
-    return can("connections:read") ? { kind: "card", personalOnly: false } : { kind: "unavailable" };
+    return can("connections:read")
+      ? { kind: "card", personalOnly: false }
+      : { kind: "unavailable" };
   const access = personalIntegrationSetupAccess(grant, item);
   return access ? { kind: "card", personalOnly: access === "personal" } : { kind: "unavailable" };
 }

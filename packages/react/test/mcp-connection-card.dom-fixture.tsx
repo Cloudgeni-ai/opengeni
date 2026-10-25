@@ -391,12 +391,17 @@ test("a failed authorization retries with a fresh attempt", async () => {
     connectionRef: null,
   } as CapabilityCatalogItem;
   const begins: string[] = [];
+  const popupFinishes: unknown[] = [];
   let recoveries = 0;
   const client = {
     listCapabilities: async () => ({ items: [disconnected] }),
     connectTransport: () => ({
-      begin: async (_workspace: string, input: { idempotencyKey: string }) => {
+      begin: async (
+        _workspace: string,
+        input: { idempotencyKey: string; finishInPopup?: true },
+      ) => {
         begins.push(input.idempotencyKey);
+        popupFinishes.push(input.finishInPopup);
         return {
           id: `attempt-${begins.length}`,
           workspaceId: "workspace",
@@ -480,6 +485,8 @@ test("a failed authorization retries with a fresh attempt", async () => {
     await click("Try signing in again");
     expect(begins).toHaveLength(2);
     expect(begins[1]).not.toBe(begins[0]);
+    // Sign-in runs in the card's popup, which ends on a closing page.
+    expect(popupFinishes).toEqual([true, true]);
   } finally {
     await view.unmount();
     window.open = previousOpen;
