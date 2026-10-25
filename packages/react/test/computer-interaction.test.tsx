@@ -5012,18 +5012,27 @@ describe("ComputerViewer input reliability", () => {
         );
       });
       await flush(60);
-      expect(fixture.actions.map((request) => request.action)).toEqual([
-        {
-          type: "pointer",
-          frameId: "frame-2",
-          action: "scroll",
-          x: 0,
-          y: 0,
-          deltaX: 0,
-          deltaY: 25,
-        },
-        { type: "keyboard", action: "press", value: "Enter" },
-      ]);
+      const scroll = (frameId: string, deltaY: number) => ({
+        type: "pointer" as const,
+        frameId,
+        action: "scroll" as const,
+        x: 0,
+        y: 0,
+        deltaX: 0,
+        deltaY,
+      });
+      const enter = { type: "keyboard" as const, action: "press" as const, value: "Enter" };
+      // Frame 2's hashing and decode are real asynchronous work. When they finish within the
+      // 45 ms wheel window, the first delta carries over and is sent with the second on
+      // frame 2. On a slow runner the window closes first and the first delta is sent on
+      // frame 1. Either way no delta may be lost or sent against the wrong frame, and every
+      // pending scroll must be sent before the key.
+      const actions = fixture.actions.map((request) => request.action);
+      expect(actions).toEqual(
+        actions.length === 2
+          ? [scroll("frame-2", 25), enter]
+          : [scroll("frame-1", 10), scroll("frame-2", 15), enter],
+      );
     } finally {
       await fixture.rendered.unmount();
       canvasMock.restore();
