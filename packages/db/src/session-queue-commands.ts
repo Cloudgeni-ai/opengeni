@@ -777,6 +777,7 @@ export async function supersedeSessionCurrentDirectionInTransaction(
         eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
         eq(schema.sessionHumanInputRequests.turnId, current.id),
         eq(schema.sessionHumanInputRequests.status, "pending"),
+        eq(schema.sessionHumanInputRequests.origin, "tool_call"),
       ),
     )
     .returning({

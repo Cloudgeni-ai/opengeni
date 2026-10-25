@@ -387,7 +387,10 @@ describe("0547 idle command containment", () => {
     }
   }, 180_000);
   test("the screen's turn-starting update kinds match the wake class map", async () => {
-    const source = await migrationSource();
+    // Later migrations extend the screen's literals, so pin the live function.
+    const [row] = await admin<{ definition: string }[]>`
+      select pg_get_functiondef(${FUNCTION}::regprocedure) as definition`;
+    const source = row!.definition;
     const lists = [...source.matchAll(/pending_update\.kind IN \(([^)]*)\)/g)].map((match) =>
       [...match[1]!.matchAll(/'([a-z_]+)'/g)].map((kind) => kind[1]).sort(),
     );

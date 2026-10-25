@@ -546,6 +546,7 @@ export type MachineInputMember = {
     | "agent_steer_instruction"
     | "child_terminal_result"
     | "media_generation_result"
+    | "secret_use_approval_decided"
     | "child_requires_action"
     | "child_requires_action_resolved"
     | "child_paused"

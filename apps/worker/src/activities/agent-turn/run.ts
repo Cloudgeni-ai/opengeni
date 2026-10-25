@@ -1782,6 +1782,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             mcpServers: toolRuntime.mcpServers,
             input,
             db,
+            bus,
             runtime,
             objectStorage,
             observability,

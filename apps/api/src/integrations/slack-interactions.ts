@@ -30,7 +30,6 @@ import {
   type SessionEvent,
   type WorkspaceSlackReactionSummonSettings,
   workspaceSlackReactionChannelAllowed,
-  secretUseApprovalIdFromQuestionId,
 } from "@opengeni/contracts";
 import {
   allowanceExhaustedMessage,
@@ -3876,12 +3875,15 @@ async function continueSlackSession(
     await showSlackStartMessageStopped(deps, grant, interaction, entry);
     return;
   }
-  const pending = await listSessionHumanInputRequests(
-    deps.db,
-    interaction.workspaceId,
-    interaction.sessionId,
-    { status: "pending", limit: 20 },
-  );
+  // Opengeni's own secret-use approval cards are answered only in the
+  // Opengeni card, by the signed-in person, and never block the thread: a
+  // reply while one is pending is an ordinary answer or message.
+  const pending = (
+    await listSessionHumanInputRequests(deps.db, interaction.workspaceId, interaction.sessionId, {
+      status: "pending",
+      limit: 20,
+    })
+  ).filter((request) => !isSecretUseApprovalCard(request));
   // A secret is answered only in the Opengeni card, which saves it to a vault.
   // While one is pending, a thread reply is neither an answer nor a message:
   // it may be the pasted secret itself (AC-5).
@@ -3897,25 +3899,6 @@ async function continueSlackSession(
       channelId: interaction.slackChannelId,
       threadTimestamp: interaction.slackThreadTs,
       text: slackSecretAnswerRefusalText(
-        slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId),
-      ),
-    });
-    return;
-  }
-  // Only the person, signed in to Opengeni, can allow an agent to use a
-  // secret; a thread reply can't answer that card.
-  if (pending.some((request) => hasSecretApprovalQuestion(request.questions))) {
-    const client = await createOpenGeniSlackBotInteractionClient(deps, {
-      accountId: entry.accountId,
-      workspaceId: entry.workspaceId,
-      connectionId: entry.connectionId,
-      subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
-    });
-    await client.postMessage({
-      operationId: deterministicUuid(`slack-secret-approval-reply-refused:${entry.id}`),
-      channelId: interaction.slackChannelId,
-      threadTimestamp: interaction.slackThreadTs,
-      text: slackSecretApprovalReplyRefusalText(
         slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId),
       ),
     });
@@ -5168,7 +5151,7 @@ async function slackHumanInputCard(
     slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:human-input`),
   );
   const secretQuestion = hasSecretQuestion(request.questions);
-  const approvalQuestion = hasSecretApprovalQuestion(request.questions);
+  const approvalQuestion = isSecretUseApprovalCard(request);
   const secretUrl =
     secretQuestion || approvalQuestion
       ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
@@ -6122,14 +6105,9 @@ function hasSecretQuestion(questions: readonly HumanInputQuestion[]): boolean {
   return questions.some((question) => question.kind === "secret");
 }
 
-function hasSecretApprovalQuestion(questions: readonly HumanInputQuestion[]): boolean {
-  return questions.some((question) => secretUseApprovalIdFromQuestionId(question.id) !== null);
-}
-
-export function slackSecretApprovalReplyRefusalText(sessionUrl: string | null): string {
-  return `Only you can allow an agent to use this secret, signed in to Opengeni: ${
-    sessionUrl ? `<${sessionUrl}|answer in Opengeni>` : "open the task in Opengeni"
-  }. Your reply was not sent to the agent.`;
+/** Opengeni's own approval card for a blocked secret use. */
+function isSecretUseApprovalCard(request: { origin?: string | undefined }): boolean {
+  return request.origin === "secret_use_approval";
 }
 
 export function slackSecretAnswerRefusalText(sessionUrl: string | null): string {

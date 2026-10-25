@@ -10195,6 +10195,7 @@ export const SessionSystemUpdateKind = /* @__PURE__ */ defineSchema(() =>
     "child_paused",
     "child_waiting_capacity",
     "child_progress",
+    "secret_use_approval_decided",
   ]),
 );
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
@@ -10225,6 +10226,7 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
   child_paused: "deferred",
   child_waiting_capacity: "deferred",
   child_progress: "deferred",
+  secret_use_approval_decided: "immediate",
 };
 
 /**
@@ -10675,6 +10677,23 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
     ChildPausedPayload,
     ChildWaitingCapacityPayload,
     ChildProgressPayload,
+    /**
+     * The person answered Opengeni's approval card for a blocked secret use.
+     * Names only, never values or subject ids.
+     */
+    z
+      .object({
+        type: z.literal("secret_use_approval_decided"),
+        approvalId: z.string().uuid(),
+        requestId: z.string().uuid(),
+        decision: z.enum(["once", "session", "window", "deny"]),
+        /** "Item › field" names the decision covers. */
+        secrets: z.array(boundedUtf8String(512)).max(20),
+        surface: boundedUtf8String(64),
+        toolName: boundedUtf8String(200),
+        destination: boundedUtf8String(500).nullable(),
+      })
+      .passthrough(),
   ]),
 );
 export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
@@ -20176,6 +20195,14 @@ export const SessionHumanInputRequest = /* @__PURE__ */ defineSkillContractSchem
     creationAttemptId: primitives.uuid,
     toolCallId: z.string().min(1).max(1024),
     status: HumanInputRequestStatus,
+    /**
+     * `tool_call`: the agent asked with `request_human_input` and its turn
+     * waits for the answer. `secret_use_approval`: Opengeni posted its own
+     * approval card for a blocked secret use; the turn did not wait, the
+     * card outlives it, and the answer reaches the agent as an update.
+     * Absent from older servers, meaning `tool_call`.
+     */
+    origin: z.enum(["tool_call", "secret_use_approval"]).optional(),
     questions: z.array(HumanInputQuestion).min(1).max(20),
     allowSkip: primitives.boolean,
     response: HumanInputResponse.nullable(),

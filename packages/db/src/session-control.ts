@@ -3491,6 +3491,7 @@ async function cancelSessionSubtreeInTransaction(
           eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
           inArray(schema.sessionHumanInputRequests.turnId, immediatelyCancelledTurnIds),
           eq(schema.sessionHumanInputRequests.status, "pending"),
+          eq(schema.sessionHumanInputRequests.origin, "tool_call"),
         ),
       )
       .returning({

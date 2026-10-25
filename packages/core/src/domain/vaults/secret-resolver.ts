@@ -17,8 +17,10 @@
  *
  * Items and fields a person marked "ask me each time" (0952) resolve for an
  * agent only under that person's grant: one use, the chat, or a time window.
- * Without one, nothing is read; the use is recorded as a request and the
- * failure carries a ready approval card. The check sits after every
+ * Without one, nothing is read; the use is recorded as a request, Opengeni
+ * posts its own approval card in the chat (which also reaches the person's
+ * inbox and phone), and the failure tells the agent the person was asked.
+ * Their answer reaches the agent as a machine input. The check sits after every
  * reference is chosen and before any provider read or decryption, so it is
  * the same for hosted and connected vaults and for every delivery surface.
  */
@@ -30,7 +32,6 @@ import {
   referenceKey,
   secretNameKey,
   SecretReferenceError,
-  secretUseApprovalHumanInput,
   VAULT_LIMITS,
   type ResolvedSecretValue,
   type SecretMaterial,
@@ -40,6 +41,7 @@ import {
   type SecretResolver,
   type SecretUseApprovalTarget,
   type SecretUseContext,
+  type SessionEvent,
   type VaultProviderFreshness,
 } from "@opengeni/contracts";
 import {
@@ -47,10 +49,10 @@ import {
   listSecretApprovalRules,
   listUsableSecretUseGrants,
   listVaultsForSubject,
+  postSecretUseApprovalCard,
   recordVaultSecretUse,
   requestSecretUseApproval,
   resolveSecretReferenceCandidates,
-  secretUseApprovalView,
   useSecretUseOnceGrants,
   type SecretReferenceCandidate,
   type SecretReferenceLookup,
@@ -83,6 +85,11 @@ export type SecretResolverOptions = {
    * 1Password connection tokens load for that subject. `deps.providers` wins.
    */
   providersForSubject?: (subjectId: string | null) => VaultProviderRegistry;
+  /**
+   * Live fan-out for events the resolver committed (an approval card's
+   * request). Best effort: readers catch up from the durable log anyway.
+   */
+  publishEvents?: (events: SessionEvent[]) => Promise<void>;
 };
 
 type Chosen = { reference: SecretReference; candidate: SecretReferenceCandidate };
@@ -424,8 +431,9 @@ export function createSecretResolver(
 
   /**
    * Check the chosen references against "ask me each time" rules. Returns
-   * the grants the use relies on; throws `approval_required` with a ready
-   * card, after recording the request, when a reference is not covered.
+   * the grants the use relies on; throws `approval_required`, after
+   * recording the request and posting its card, when a reference is not
+   * covered.
    */
   async function approvalsFor(
     chosen: readonly Chosen[],
@@ -505,6 +513,15 @@ export function createSecretResolver(
       toolName: use.toolName,
       destination,
     });
+    const card = await postSecretUseApprovalCard(deps.db, {
+      workspaceId: principal.workspaceId,
+      sessionId: principal.sessionId,
+      turnId: principal.turnId,
+      attemptId: principal.attemptId,
+      executionGeneration: principal.executionGeneration,
+      approval: request,
+    });
+    if (card.events.length > 0) await opts.publishEvents?.(card.events).catch(() => undefined);
     throw new SecretReferenceError(
       uncovered.map(({ reference, candidate }) => ({
         raw: reference.raw,
@@ -512,7 +529,7 @@ export function createSecretResolver(
         message: `${displayName(candidate)} needs the person's approval for each use; they have not allowed this one yet`,
       })),
       null,
-      secretUseApprovalHumanInput(secretUseApprovalView(request)),
+      { approvalId: request.id, asked: card.asked },
     );
   }
 
