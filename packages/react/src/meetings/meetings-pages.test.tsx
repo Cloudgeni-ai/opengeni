@@ -32,7 +32,7 @@ const {
   MeetingRecorderStoreProvider,
   useMeetingRecorder,
 } = await import("./recorder-context");
-const { createMeetingsFixture } = await import("../testing/meetings-fixture");
+const { createMeetingsFixture, FAILED_RECORDING_ID } = await import("../testing/meetings-fixture");
 
 async function render(node: React.ReactNode) {
   const container = document.createElement("div");
@@ -437,6 +437,31 @@ describe("Meeting page", () => {
         (button) => button.textContent?.trim() === "Transcribe again",
       );
       expect(again?.disabled).toBe(true);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a transcript that failed before the audio was prepared can be made again", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "The transcript failed");
+      await settle(300);
+      expect(view.container.textContent).not.toContain("isn't available anymore");
+      const again = [...view.container.querySelectorAll("button")].filter(
+        (button) => button.textContent?.trim() === "Transcribe again",
+      );
+      expect(again.length).toBeGreaterThan(0);
+      for (const button of again) expect(button.disabled).toBe(false);
     } finally {
       await view.unmount();
     }
