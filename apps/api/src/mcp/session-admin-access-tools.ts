@@ -26,6 +26,7 @@ import {
   describeAction,
   describeActionResult,
   searchActions,
+  type OrganizationActionContext,
 } from "../organization-mcp";
 
 /**
@@ -110,6 +111,90 @@ function confirmedCall(saved: string, args: CallArgs): boolean {
   return parsed.success && isDeepStrictEqual(parsed.data, args);
 }
 
+/** As whom an app action in this turn runs (see `resolveSessionAppActionAuthority`). */
+export type SessionAppActionAuthority = Awaited<
+  ReturnType<typeof resolveSessionAppActionAuthority>
+>;
+type ActingAuthority = Exclude<SessionAppActionAuthority, { kind: "unavailable" }>;
+
+/**
+ * The one authority path for what a session does as a person: the app-action
+ * tools, and the ordinary session tools when they reach a chat in another
+ * workspace. Everything is checked live, on every call.
+ */
+export type SessionAdminReach = {
+  /**
+   * As whom an app action in this turn runs right now: with full access, the
+   * person who gave it; otherwise the person who sent this turn's message,
+   * whose changes need their confirmation; or nobody.
+   */
+  authority(): Promise<SessionAppActionAuthority>;
+  /** How to run an organization action as that person, within what the authority allows. */
+  actAs(authority: ActingAuthority): OrganizationActionContext;
+  /**
+   * Only full access reaches another workspace: how to run an action as the
+   * person who gave it, or null when the session doesn't have full access
+   * right now (turned off, expired, or that person lost the workspace).
+   */
+  fullAccessPerson(): Promise<OrganizationActionContext | null>;
+};
+
+export function createSessionAdminReach(input: {
+  db: Database;
+  grant: AccessGrant;
+  sessionId: string;
+  turnId: string;
+  access: SessionAdminAccessDispatch;
+  authorize: () => Promise<void>;
+}): SessionAdminReach {
+  const { db, grant, sessionId, turnId, access, authorize } = input;
+  const authority = async (): Promise<SessionAppActionAuthority> => {
+    await authorize();
+    return await resolveSessionAppActionAuthority(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId,
+      turnId,
+    });
+  };
+  const actAs = (acting: ActingAuthority): OrganizationActionContext => ({
+    caller: {
+      kind: "person",
+      accountId: grant.accountId,
+      subjectId: acting.subjectId,
+      // Each route still resolves this person's live role and workspace
+      // access, exactly as in their browser. Full access reaches every
+      // workspace they can use, as before. Otherwise the cap is what the
+      // message itself could do when it was sent (frozen with the turn,
+      // so an embed's narrower token stays narrow) in this chat's
+      // workspace, so steps that widen an agent's access stay refused.
+      access:
+        acting.kind === "full_access"
+          ? {
+              preset: "full",
+              permissions: organizationAccessPresetPermissions("full"),
+              workspaceScope: { kind: "all" },
+            }
+          : normalizeOrganizationAccessPolicy({
+              preset: "custom",
+              permissions: acting.permissions,
+              workspaceScope: { kind: "selected", workspaceIds: [grant.workspaceId] },
+            }),
+    },
+    origin: access.origin,
+    dispatch: access.dispatch,
+    ...(access.signal ? { signal: access.signal } : {}),
+  });
+  return {
+    authority,
+    actAs,
+    async fullAccessPerson() {
+      const current = await authority();
+      return current.kind === "full_access" ? actAs(current) : null;
+    },
+  };
+}
+
 /**
  * Register the app-action tools. The server lists them in a chat a person
  * started (or one with full access); each call resolves, live, as whom it runs:
@@ -123,26 +208,17 @@ export function registerSessionAdminAccessTools(input: {
   grant: AccessGrant;
   sessionId: string;
   attempt: { turnId: string; attemptId: string };
-  access: SessionAdminAccessDispatch;
-  authorize: () => Promise<void>;
+  reach: SessionAdminReach;
 }): void {
-  const { server, db, grant, sessionId, attempt, access, authorize } = input;
-  const currentAuthority = async () => {
-    await authorize();
-    return await resolveSessionAppActionAuthority(db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId,
-      turnId: attempt.turnId,
-    });
-  };
+  const { server, db, grant, sessionId, attempt, reach } = input;
+  const currentAuthority = reach.authority;
 
   server.registerTool(
     "admin_actions_search",
     {
       title: "Find app actions",
       description:
-        "Find what the person could do themselves in the app's pages and settings, so you can do it for them here instead of sending them there: switch or set models, invite people and share chats, check their plan, credits and usage, change workspace and organization settings, and manage sessions, connections, schedules, files, knowledge and keys. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
+        "Find what the person could do themselves in the app's pages and settings, so you can do it for them here instead of sending them there: switch or set models, invite people and share chats, check their plan, credits and usage, change workspace and organization settings, and manage sessions, connections, schedules, files, knowledge and keys. With full access this reaches every workspace the person who gave it can use, including reading, messaging or managing chats and sessions in another workspace; the ordinary session tools also reach such a chat when given its workspaceId. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
       inputSchema: {
         query: z4
           .string()
@@ -217,42 +293,12 @@ export function registerSessionAdminAccessTools(input: {
         });
         if (!confirmed.some((saved) => confirmedCall(saved, args))) return failure(NOT_CONFIRMED);
       }
-      return await callOrganizationAction(
-        {
-          caller: {
-            kind: "person",
-            accountId: grant.accountId,
-            subjectId: authority.subjectId,
-            // Each route still resolves this person's live role and workspace
-            // access, exactly as in their browser. Full access reaches every
-            // workspace they can use, as before. Otherwise the cap is what the
-            // message itself could do when it was sent (frozen with the turn,
-            // so an embed's narrower token stays narrow) in this chat's
-            // workspace, so steps that widen an agent's access stay refused.
-            access:
-              authority.kind === "full_access"
-                ? {
-                    preset: "full",
-                    permissions: organizationAccessPresetPermissions("full"),
-                    workspaceScope: { kind: "all" },
-                  }
-                : normalizeOrganizationAccessPolicy({
-                    preset: "custom",
-                    permissions: authority.permissions,
-                    workspaceScope: { kind: "selected", workspaceIds: [grant.workspaceId] },
-                  }),
-          },
-          origin: access.origin,
-          dispatch: access.dispatch,
-          ...(access.signal ? { signal: access.signal } : {}),
-        },
-        {
-          id: args.id,
-          pathParameters: args.pathParameters,
-          query: args.query,
-          ...(args.body !== undefined ? { body: args.body } : {}),
-        },
-      );
+      return await callOrganizationAction(reach.actAs(authority), {
+        id: args.id,
+        pathParameters: args.pathParameters,
+        query: args.query,
+        ...(args.body !== undefined ? { body: args.body } : {}),
+      });
     },
   );
 }

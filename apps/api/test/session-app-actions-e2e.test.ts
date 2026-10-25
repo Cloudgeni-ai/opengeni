@@ -22,7 +22,10 @@ import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../src/app";
-import { registerSessionAdminAccessTools } from "../src/mcp/session-admin-access-tools";
+import {
+  createSessionAdminReach,
+  registerSessionAdminAccessTools,
+} from "../src/mcp/session-admin-access-tools";
 
 /* End to end through the real app and PostgreSQL, without full access: an
    ordinary chat a person started reads what they can see at once, and a change
@@ -149,6 +152,7 @@ describe("app actions in an ordinary chat end to end", () => {
         initiator: claim.turn.initiator,
       };
       const handlers = new Map<string, Handler>();
+      const grant = { accountId: organizationId, workspaceId } as AccessGrant;
       registerSessionAdminAccessTools({
         server: {
           registerTool: (name: string, _config: unknown, handler: Handler) => {
@@ -156,11 +160,17 @@ describe("app actions in an ordinary chat end to end", () => {
           },
         } as never,
         db,
-        grant: { accountId: organizationId, workspaceId } as AccessGrant,
+        grant,
         sessionId: session.id,
         attempt: { turnId: claim.turn.id, attemptId },
-        access: { origin, dispatch: async (request) => await app.fetch(request) },
-        authorize: async () => undefined,
+        reach: createSessionAdminReach({
+          db,
+          grant,
+          sessionId: session.id,
+          turnId: claim.turn.id,
+          access: { origin, dispatch: async (request) => await app.fetch(request) },
+          authorize: async () => undefined,
+        }),
       });
       /** The person allows exactly `args` in the chat, and the attempt starts running it. */
       const allow = async (approvalId: string, args: unknown, signedIn = true) => {
