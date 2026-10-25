@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/vaults-bitwarden",
-  "version": "5.2.1",
+  "version": "5.3.1",
   "description": "Bitwarden and Vaultwarden provider for Opengeni vaults. Talks to the server's client API with the account's personal API key and decrypts locally; the master password is used once at setup and never stored.",
   "license": "Apache-2.0",
   "repository": {
