@@ -26,9 +26,12 @@ import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
   nativeCuaSchema,
+  openComputerAppWindow,
   type UserSetupCardPoster,
 } from "../src/interaction-tools";
 import { computerObservationText } from "../src/computer-model-text";
+import { MCP_MAX_TOOL_RESULT_BYTES, mcpSerializedSizeBytes } from "../src/mcp-network";
+import { modelToolResultFits } from "../src/tool-result-spill";
 
 const accountId = randomUUID();
 const workspaceId = randomUUID();
@@ -204,6 +207,51 @@ describe("interaction attempt tools", () => {
       expect(JSON.stringify(result)).not.toContain("outcome_unknown");
     },
   );
+
+  test("browser_act passes on a wait that ended on a page whose network stayed busy", async () => {
+    const target = browserTarget();
+    const note = {
+      actionIndex: 1,
+      kind: "network_busy" as const,
+      message:
+        "page loaded; its network was still busy after 30 s (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there",
+    };
+    let dispatched: unknown = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, request) => {
+          dispatched = request.action;
+          return {
+            ...browserReceipt(request.operationId, browserObservation(target)),
+            notes: [note],
+          };
+        },
+      }),
+    });
+    const caller = { kind: "model" as const, subjectId: "model:test" };
+    const result = await definitions[0]!.execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: { type: "navigate", url: "https://example.test/", waitUntil: "network_idle" },
+      },
+      { operationId: randomUUID(), caller },
+    );
+    expect(dispatched).toEqual({
+      type: "batch",
+      actions: [
+        { type: "navigate", url: "https://example.test/" },
+        { type: "wait", condition: "network_idle" },
+      ],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ state: "completed", notes: [note] });
+    expect((result.content[0] as { text: string }).text).toContain(`\nNote: ${note.message}.\n`);
+  });
 
   test("browser_act tells the model where upload workspace File IDs come from", () => {
     const definitions = createInteractionAttemptToolDefinitions({
@@ -733,6 +781,255 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  test("discovery shows the model a compact, bounded inventory and Code Mode every record", async () => {
+    const otherSession = randomUUID();
+    const browsers = Array.from({ length: 60 }, (_, index) => {
+      const browser = discoveredBrowserSession(randomUUID(), otherSession);
+      browser.lifecycle = index % 3 === 0 ? "lost" : "active";
+      browser.lastUsedAt = new Date(Date.parse(now) - index * 60_000).toISOString();
+      return browser;
+    });
+    // An older session of this one still comes first.
+    const own = discoveredBrowserSession(randomUUID(), sessionId);
+    own.lifecycle = "suspended";
+    own.lastUsedAt = new Date(Date.parse(now) - 24 * 60 * 60_000).toISOString();
+    own.identityId = randomUUID();
+    const computer = discoveredComputerSession(randomUUID(), otherSession);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 3, sessions: [...browsers, own] }),
+          listComputerSessions: async () => ({ revision: 3, sessions: [computer] }),
+          listBrowserIdentities: async () => ({ revision: 3, identities: [] }) as never,
+          listAttachedBrowsers: async () => ({ revision: 3, bridges: [], devices: [] }),
+        }),
+        getSession: async () => ({ id: sessionId, sandboxGroupId: randomUUID() }) as never,
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const discover = async (caller: "model" | "codemode") =>
+      await definitions[0]!.execute(
+        { scope: "workspace" },
+        { operationId: randomUUID(), caller: { kind: caller, subjectId: `${caller}:test` } },
+      );
+
+    const model = await discover("model");
+    expect(model.isError).not.toBe(true);
+    const selected = (model.structuredContent as { browsers: BrowserSession[] }).browsers;
+    expect(selected).toHaveLength(50);
+    expect(selected[0]!.id).toBe(own.id);
+    // Usable sessions before lost ones, each most recently used first.
+    const lifecycles = selected.slice(1).map((browser) => browser.lifecycle);
+    expect(lifecycles.indexOf("lost")).toBe(40);
+    expect(lifecycles.slice(40).every((lifecycle) => lifecycle === "lost")).toBe(true);
+    expect(selected[0]).toEqual(own);
+    const [text, note] = model.content as Array<{ type: "text"; text: string }>;
+    expect(note?.text).toContain("Listed 50 of 61 BrowserSessions");
+    expect(note?.text).toContain("interaction.discover receives every record");
+    const compact = JSON.parse(text!.text) as {
+      browsers: Array<Record<string, unknown>>;
+      computers: Array<Record<string, unknown>>;
+    };
+    expect(compact.browsers).toHaveLength(50);
+    expect(compact.browsers[0]).toEqual({
+      id: own.id,
+      name: "Browser",
+      lifecycle: "suspended",
+      placement: own.placement,
+      engine: "chromium",
+      headless: false,
+      identityId: own.identityId,
+      lastUsedAt: own.lastUsedAt,
+      thisSession: true,
+      unsupported: ["rawCdp"],
+    });
+    expect(compact.computers).toEqual([
+      {
+        id: computer.id,
+        name: "Computer",
+        lifecycle: "starting",
+        placement: computer.placement,
+        lastUsedAt: computer.lastUsedAt,
+      },
+    ]);
+    expect(text!.text).not.toContain(accountId);
+    expect(text!.text.length).toBeLessThan(JSON.stringify(model.structuredContent).length / 3);
+
+    const codemode = await discover("codemode");
+    expect((codemode.structuredContent as { browsers: unknown[] }).browsers).toHaveLength(61);
+    expect(codemode.content).toHaveLength(1);
+    expect(JSON.parse((codemode.content[0] as { text: string }).text)).toEqual(
+      codemode.structuredContent,
+    );
+  });
+
+  test("discovery stays within its byte budget for sessions with long association histories", async () => {
+    const history = (associatedSessionId: string) =>
+      Array.from({ length: 1_000 }, (_, index) => ({
+        sessionId: index === 999 ? associatedSessionId : randomUUID(),
+        turnId: randomUUID(),
+        attemptId: randomUUID(),
+        relationship: "using" as const,
+        actorSubjectId: `model:${randomUUID()}`,
+        lastUsedAt: now,
+      }));
+    const browsers = Array.from({ length: 60 }, (_, index) => ({
+      ...discoveredBrowserSession(randomUUID(), sessionId),
+      name: `Browser ${index} ${"n".repeat(180)}`,
+      associations: history(index < 10 ? sessionId : randomUUID()),
+    }));
+    const computers = Array.from({ length: 60 }, () => ({
+      ...discoveredComputerSession(randomUUID(), randomUUID()),
+      associations: history(randomUUID()),
+    }));
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 1, sessions: browsers }) as never,
+          listComputerSessions: async () => ({ revision: 1, sessions: computers }) as never,
+          listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+          listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices: [] }),
+        }),
+        getSession: async () => ({ id: sessionId, sandboxGroupId: randomUUID() }) as never,
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const discover = async (caller: "model" | "codemode") =>
+      await definitions[0]!.execute(
+        { scope: "workspace" },
+        { operationId: randomUUID(), caller: { kind: caller, subjectId: `${caller}:test` } },
+      );
+    const codemode = await discover("codemode");
+    // Code Mode still receives every complete record, megabytes in all.
+    expect(mcpSerializedSizeBytes(codemode)).toBeGreaterThan(MCP_MAX_TOOL_RESULT_BYTES * 4);
+    expect(
+      (codemode.structuredContent as { browsers: BrowserSession[] }).browsers[0]!.associations,
+    ).toHaveLength(1_000);
+
+    const model = await discover("model");
+    expect(model.isError).not.toBe(true);
+    expect(mcpSerializedSizeBytes(model)).toBeLessThanOrEqual(768 * 1024);
+    expect(modelToolResultFits(model)).toBe(true);
+    const selected = model.structuredContent as {
+      browsers: BrowserSession[];
+      computers: ComputerSession[];
+    };
+    expect(selected.browsers).toHaveLength(50);
+    expect(selected.computers).toHaveLength(50);
+    // Only the association with this session remains, and only on its own browsers.
+    expect(
+      selected.browsers.slice(0, 10).every((browser) => browser.associations.length === 1),
+    ).toBe(true);
+    expect(selected.browsers.slice(0, 10)[0]!.associations[0]!.sessionId).toBe(sessionId);
+    expect(selected.browsers.slice(10).every((browser) => browser.associations.length === 0)).toBe(
+      true,
+    );
+    expect(selected.computers.every((computer) => computer.associations.length === 0)).toBe(true);
+    const compact = JSON.parse((model.content[0] as { text: string }).text) as {
+      browsers: Array<{ thisSession?: true }>;
+    };
+    expect(compact.browsers.filter((browser) => browser.thisSession)).toHaveLength(10);
+    expect((model.content[1] as { text: string }).text).toContain(
+      "Listed 50 of 60 BrowserSessions, 50 of 60 ComputerSessions",
+    );
+  });
+
+  test("discovery bounds even a huge attached-profile inventory by bytes", async () => {
+    const devices = Array.from({ length: 4_000 }, (_, index) => ({
+      id: randomUUID(),
+      accountId,
+      workspaceId,
+      enrollmentId: randomUUID(),
+      name: `Profile ${index} ${"p".repeat(180)}`,
+      profileLabel: "l".repeat(200),
+      browserName: "Google Chrome",
+      browserVersion: "150.0.0.0",
+      extensionVersion: "0.2.0",
+      platform: "macos" as const,
+      architecture: "arm64" as const,
+      state: "disconnected" as const,
+      connectionGeneration: `connection-${index}`,
+      inventoryRevision: 1,
+      tabCount: 1,
+      capabilities: {
+        tabInventory: true,
+        debuggerAttachment: true,
+        semanticObservation: true,
+        screenshots: true,
+        liveFrames: true,
+        humanInput: true,
+        diagnostics: true,
+        rawCdp: true,
+        linkedComputer: true,
+      },
+      lastSeenAt: now,
+      disconnectedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    }));
+    const browsers = Array.from({ length: 5 }, () =>
+      discoveredBrowserSession(randomUUID(), sessionId),
+    );
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 1, sessions: browsers }),
+          listComputerSessions: async () => ({ revision: 1, sessions: [] }),
+          listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+          listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices }),
+        }),
+        getSession: async () => ({ id: sessionId, sandboxGroupId: randomUUID() }) as never,
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const model = await definitions[0]!.execute(
+      { scope: "workspace" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(model.isError).not.toBe(true);
+    expect(mcpSerializedSizeBytes(model)).toBeLessThanOrEqual(768 * 1024);
+    const listed = (model.structuredContent as { attachedBrowsers: unknown[]; browsers: unknown[] })
+      .attachedBrowsers.length;
+    expect(listed).toBeGreaterThan(100);
+    expect(listed).toBeLessThan(4_000);
+    // Each kind gets its turn while the budget lasts, so the sessions still fit.
+    expect((model.structuredContent as { browsers: unknown[] }).browsers).toHaveLength(5);
+    expect((model.content[1] as { text: string }).text).toContain(
+      `Listed ${listed} of 4000 attached Chrome profiles`,
+    );
+  });
+
+  test("discovery leaves a small inventory complete for the model", async () => {
+    const browser = discoveredBrowserSession(randomUUID(), sessionId);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [browser] }),
+        listComputerSessions: async () => ({ revision: 1, sessions: [] }),
+        listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+        listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices: [] }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      {},
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect((result.structuredContent as { browsers: unknown[] }).browsers).toEqual([browser]);
+    expect(result.content).toHaveLength(1);
+  });
+
   test("browser_open, computer_open and discovery narrow inventories in the query", async () => {
     const requests: Array<{ kind: string; options: unknown }> = [];
     const record = (kind: string) => async (_workspace: string, options?: unknown) => {
@@ -959,6 +1256,7 @@ describe("interaction attempt tools", () => {
     const image = new Uint8Array([4, 5, 6]);
     const order: string[] = [];
     let captureFails = false;
+    let capturedDocument: string | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         getBrowserSession: async () => session,
@@ -980,7 +1278,7 @@ describe("interaction attempt tools", () => {
             controllerGeneration: target.controllerGeneration,
             targetId: target.id,
             targetGeneration: target.targetGeneration,
-            documentGeneration: target.documentGeneration!,
+            documentGeneration: capturedDocument ?? target.documentGeneration!,
             sequence: 1,
             mediaType: "image/jpeg",
             width: 1,
@@ -1036,6 +1334,21 @@ describe("interaction attempt tools", () => {
     expect((failed.content[1] as { text: string }).text).toBe(
       "The browser opened, but its screenshot could not be captured: synthetic capture failure",
     );
+
+    // A tab that committed another document after its outline was read would
+    // pair one page's outline with another page's picture: leave it out.
+    captureFails = false;
+    capturedDocument = "document-after-outline";
+    const moved = await definitions[0]!.execute(
+      { browserSessionId, includeScreenshot: true },
+      context(),
+    );
+    expect(moved.isError).toBeFalsy();
+    expect(moved.content).toHaveLength(2);
+    expect(moved.content[1]).toEqual({
+      type: "text",
+      text: "The browser opened, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.",
+    });
   });
 
   test.each([true, false])(
@@ -1364,6 +1677,325 @@ describe("interaction attempt tools", () => {
       structuredContent: {
         error: { message: expect.stringContaining("controller authority changed") },
       },
+    });
+  });
+
+  test.each([
+    ["browser_observe", { targetId: "tab-1" }],
+    ["browser_act", { targetId: "tab-1", action: { type: "scroll", deltaX: 0, deltaY: 400 } }],
+    ["browser_tabs", { operation: "list" }],
+  ] as const)(
+    "%s with a mistyped BrowserSession id lists this chat's open BrowserSessions",
+    async (tool, args) => {
+      const open = discoveredBrowserSession(browserSessionId, sessionId);
+      open.lifecycle = "active";
+      open.name = "Research\n  browser";
+      const older = discoveredBrowserSession(randomUUID(), sessionId);
+      older.lifecycle = "suspended";
+      older.name = "x".repeat(80);
+      older.lastUsedAt = new Date(Date.parse(open.lastUsedAt) - 60_000).toISOString();
+      // Never offered: another chat's browser, and one that has ended.
+      const otherChats = discoveredBrowserSession(randomUUID(), randomUUID());
+      otherChats.lifecycle = "active";
+      const ended = discoveredBrowserSession(randomUUID(), sessionId);
+      ended.lifecycle = "ended";
+      const mistyped = `${browserSessionId.slice(0, -1)}${browserSessionId.endsWith("0") ? "1" : "0"}`;
+      const missing = () =>
+        new OpenGeniApiError(
+          404,
+          JSON.stringify({
+            error: {
+              code: "not_found",
+              message: "BrowserSession not found",
+              requestId: "request-1",
+            },
+          }),
+        );
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () =>
+            ({ revision: 1, sessions: [older, otherChats, ended, open] }) as never,
+          observeBrowserTarget: async () => {
+            throw missing();
+          },
+          actInBrowser: async () => {
+            throw missing();
+          },
+          getBrowserTargetState: async () => {
+            throw missing();
+          },
+          listBrowserTargets: async () => {
+            throw missing();
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: [tool],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { browserSessionId: mistyped, ...args },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "not_found", retryable: false } },
+      });
+      const message = (result.structuredContent as { error: { message: string } }).error.message;
+      expect(message).toBe(
+        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${browserSessionId} "Research browser", ${older.id} "${"x".repeat(59)}…". Use one of these ids, or omit browserSessionId to use the one you used last. Reference: request-1.`,
+      );
+    },
+  );
+
+  test("a missing BrowserSession in a chat with no open browser says to open one", async () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [] }) as never,
+        observeBrowserTarget: async () => {
+          throw new OpenGeniApiError(404, "BrowserSession not found");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: "tab-1" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    const message = (result.structuredContent as { error: { message: string } }).error.message;
+    expect(message).toBe(
+      "API 404: BrowserSession not found. This chat has no open BrowserSession; call browser_open to start one.",
+    );
+  });
+
+  test("a missing-id hint lists at most five sessions and leaves other 404s alone", async () => {
+    const sessions = Array.from({ length: 7 }, (_, index) => {
+      const browser = discoveredBrowserSession(randomUUID(), sessionId);
+      browser.lifecycle = "active";
+      browser.name = `Browser ${index}`;
+      browser.lastUsedAt = new Date(Date.parse(now) - index * 60_000).toISOString();
+      return browser;
+    });
+    let refusal = new OpenGeniApiError(404, "BrowserSession not found");
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 1, sessions }) as never,
+        observeBrowserTarget: async () => {
+          throw refusal;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const run = async () =>
+      (
+        (
+          await definitions[0]!.execute(
+            { browserSessionId: randomUUID(), targetId: "tab-1" },
+            { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+          )
+        ).structuredContent as { error: { message: string } }
+      ).error.message;
+    const listed = await run();
+    for (const browser of sessions.slice(0, 5)) expect(listed).toContain(browser.id);
+    for (const browser of sessions.slice(5)) expect(listed).not.toContain(browser.id);
+    refusal = new OpenGeniApiError(404, "browser target does not exist");
+    expect(await run()).toBe("API 404: browser target does not exist");
+  });
+
+  test("computer tools with a mistyped ComputerSession id list this chat's open ComputerSessions", async () => {
+    const open = discoveredComputerSession(randomUUID(), sessionId);
+    open.lifecycle = "active";
+    open.name = "Desktop";
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+        observeComputerTarget: async () => {
+          throw new OpenGeniApiError(404, "ComputerSession not found");
+        },
+        captureComputerTarget: async () => {
+          throw new OpenGeniApiError(404, "ComputerSession not found");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId: randomUUID(), targetId: "window-1" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    const message = (result.structuredContent as { error: { message: string } }).error.message;
+    expect(message).toBe(
+      `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+    );
+  });
+
+  describe("tools that name a session directly give the same hint", () => {
+    const browserMissing = () => new OpenGeniApiError(404, "BrowserSession not found");
+    const computerMissing = () => new OpenGeniApiError(404, "ComputerSession not found");
+    const openBrowser = () => {
+      const browser = discoveredBrowserSession(randomUUID(), sessionId);
+      browser.lifecycle = "active";
+      browser.name = "Research";
+      return browser;
+    };
+    const openComputer = () => {
+      const computer = discoveredComputerSession(randomUUID(), sessionId);
+      computer.lifecycle = "active";
+      computer.name = "Desktop";
+      return computer;
+    };
+    const run = async (
+      tool: string,
+      args: Record<string, unknown>,
+      transport: Parameters<typeof partialTransport>[0],
+    ) => {
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport(transport),
+        workspaceId,
+        sessionId,
+        selectedTools: [
+          tool,
+          ...(tool.startsWith("interaction__cua_") ? ["computer_open", "computer_act"] : []),
+        ],
+        permissions: ["sessions:read", "sessions:control", "files:upload", "identities:write"],
+      });
+      const definition = definitions.find(
+        (candidate) => candidate.identity.toolName === tool || candidate.modelName === tool,
+      )!;
+      const result = await definition.execute(args, {
+        operationId: randomUUID(),
+        caller: { kind: "model", subjectId: "model:test" },
+      });
+      expect(result).toMatchObject({ isError: true });
+      return (result.structuredContent as { error: { message: string } }).error.message;
+    };
+
+    test.each([
+      ["browser_clipboard", {}],
+      ["browser_downloads", { operation: "list" }],
+      [
+        "browser_download_save",
+        { downloadId: randomUUID(), destinationPath: "downloads/report.pdf" },
+      ],
+      ["browser_publish", { identityId: randomUUID(), expectedHeadGeneration: 0 }],
+      ["browser_lifecycle", { action: "suspend" }],
+      ["browser_lifecycle", { action: "end" }],
+    ] as const)("%s %j lists the open BrowserSessions to use instead", async (tool, args) => {
+      const open = openBrowser();
+      const message = await run(
+        tool,
+        { browserSessionId: randomUUID(), ...args },
+        {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          readBrowserClipboard: async () => {
+            throw browserMissing();
+          },
+          listBrowserDownloads: async () => {
+            throw browserMissing();
+          },
+          saveBrowserDownload: async () => {
+            throw browserMissing();
+          },
+          publishBrowserRevision: async () => {
+            throw browserMissing();
+          },
+          suspendBrowserSession: async () => {
+            throw browserMissing();
+          },
+          endBrowserSession: async () => {
+            throw browserMissing();
+          },
+        },
+      );
+      // The id is required here, so there is no "omit it" alternative.
+      expect(message).toBe(
+        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${open.id} "Research". Use one of these ids.`,
+      );
+    });
+
+    test("browser_open attaching to a missing BrowserSession offers the open ones or a new one", async () => {
+      const open = openBrowser();
+      let sessions = [open];
+      const transport = {
+        listBrowserSessions: async () => ({ revision: 1, sessions }) as never,
+        getBrowserSession: async () => {
+          throw browserMissing();
+        },
+      };
+      expect(await run("browser_open", { browserSessionId: randomUUID() }, transport)).toBe(
+        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${open.id} "Research". Use one of these ids, or omit browserSessionId to open or reuse one.`,
+      );
+      sessions = [];
+      expect(await run("browser_open", { browserSessionId: randomUUID() }, transport)).toBe(
+        "API 404: BrowserSession not found. This chat has no open BrowserSession; omit browserSessionId to open one.",
+      );
+    });
+
+    test("computer_open and computer_lifecycle name the open ComputerSessions", async () => {
+      const open = openComputer();
+      const transport = {
+        listComputerSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+        getComputerSession: async () => {
+          throw computerMissing();
+        },
+        endComputerSession: async () => {
+          throw computerMissing();
+        },
+      };
+      const listed = `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids`;
+      expect(await run("computer_open", { computerSessionId: randomUUID() }, transport)).toBe(
+        `${listed}, or omit computerSessionId to open or reuse one.`,
+      );
+      expect(
+        await run(
+          "computer_lifecycle",
+          { computerSessionId: randomUUID(), action: "end" },
+          transport,
+        ),
+      ).toBe(`${listed}.`);
+    });
+
+    test("a native computer tool naming a missing ComputerSession lists the open ones", async () => {
+      const open = openComputer();
+      const message = await run(
+        "interaction__cua_list_windows",
+        { computerSessionId: randomUUID() },
+        {
+          listComputerSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          callNativeComputerTool: async () => {
+            throw computerMissing();
+          },
+        },
+      );
+      expect(message).toBe(
+        `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+      );
+    });
+
+    test("a long label is cut by character, never inside an emoji", async () => {
+      const open = openBrowser();
+      // The cut falls exactly where a surrogate pair starts in UTF-16.
+      open.name = `${"x".repeat(58)}🧭🧭 and more`;
+      const message = await run(
+        "browser_clipboard",
+        { browserSessionId: randomUUID() },
+        {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          readBrowserClipboard: async () => {
+            throw browserMissing();
+          },
+        },
+      );
+      expect(message).toContain(`${open.id} "${"x".repeat(58)}🧭…"`);
+      expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
     });
   });
 
@@ -2542,6 +3174,7 @@ describe("interaction attempt tools", () => {
     const image = new Uint8Array([1, 2, 3]);
     const order: string[] = [];
     let captureFails = false;
+    let capturedDocument: string | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         actInBrowser: async (_workspaceId, _browserSessionId, value) => {
@@ -2557,7 +3190,7 @@ describe("interaction attempt tools", () => {
             controllerGeneration: target.controllerGeneration,
             targetId: target.id,
             targetGeneration: target.targetGeneration,
-            documentGeneration: target.documentGeneration!,
+            documentGeneration: capturedDocument ?? target.documentGeneration!,
             sequence: 1,
             mediaType: "image/jpeg",
             width: 1,
@@ -2617,6 +3250,22 @@ describe("interaction attempt tools", () => {
     expect((failed.content[1] as { text: string }).text).toBe(
       "The action ran, but its screenshot could not be captured: synthetic capture failure",
     );
+
+    // A tab that committed another document after the receipt's outline was
+    // read would pair one page's outline with another page's picture.
+    captureFails = false;
+    capturedDocument = "document-after-outline";
+    const moved = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, action, includeScreenshot: true },
+      { ...context, operationId: randomUUID() },
+    );
+    expect(moved.isError).toBeFalsy();
+    expect(moved.structuredContent).toMatchObject({ targetId: target.id, state: "completed" });
+    expect(moved.content).toHaveLength(2);
+    expect(moved.content[1]).toEqual({
+      type: "text",
+      text: "The action ran, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.",
+    });
   });
 
   test("an open JavaScript dialog replaces a requested screenshot with what to do next", async () => {
@@ -4187,6 +4836,499 @@ describe("interaction attempt tools", () => {
     expect(observed).toBe(1);
   });
 
+  test("computer_open with applicationId launches the app and observes its window in one call", async () => {
+    const window = computerTarget();
+    const screen: ComputerTarget = { ...computerTarget(), id: "screen-1", kind: "screen" };
+    const appWindow = { ...computerTarget(), id: "window-calculator", title: "Calculator" };
+    const session = {
+      ...discoveredComputerSession(randomUUID(), sessionId),
+      lifecycle: "active" as const,
+      placement: { kind: "connected_machine" as const, sandboxId: randomUUID() },
+      controller: {
+        controllerId: "controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      },
+      platform: "macos" as const,
+      adapter: "opengeni.cua.macos.v1",
+      seatId: "seat-1",
+      displayId: "aqua",
+      capabilities: {
+        semanticObservation: true,
+        appDiscovery: true,
+        appLaunch: true,
+        windowCapture: true,
+        screenCapture: true,
+        semanticActions: true,
+        pointerInput: true,
+        keyboardInput: true,
+        clipboard: true,
+        backgroundActions: true,
+        parallelApps: true,
+      },
+    };
+    const requests: ComputerActionRequest[] = [];
+    let observed = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerSessions: async () => ({ revision: 0, sessions: [session] }),
+        listComputerTargets: async () => ({ computerSessionId, targets: [window, screen] }),
+        observeComputerTarget: async () => {
+          observed += 1;
+          return computerObservation(window);
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          return {
+            ...computerReceipt(value.operationId, computerObservation(appWindow)),
+            targetId: value.targetId,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 7 },
+      generation: 3,
+      definitions,
+    });
+    const operationId = randomUUID();
+    const open = (args: Record<string, unknown>, id = operationId) =>
+      environment.callModel({
+        operationId: id,
+        modelName: "interaction__computer_open",
+        subjectId: "model:test",
+        arguments: { placement: session.placement, ...args },
+      });
+    const result = await open({ applicationId: "com.apple.calculator" });
+    // The launch rides on the screen target, fenced from the target list.
+    expect(observed).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      targetId: "screen-1",
+      expectedTargetGeneration: screen.targetGeneration,
+      expectedObservationId: null,
+      expectedFrameId: null,
+      action: { type: "launch", applicationId: "com.apple.calculator" },
+    });
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("2 targets:");
+    expect(text).toContain(
+      "This action opened window-calculator; act on that target with the observation below.",
+    );
+    expect(result.structuredContent).toMatchObject({
+      launch: { state: "completed", observation: { target: { id: "window-calculator" } } },
+    });
+
+    // A retried call repeats the same launch operation; a plain open launches nothing.
+    await open({ applicationId: "com.apple.calculator" });
+    expect(requests[1]!.operationId).toBe(requests[0]!.operationId);
+    const plain = await open({}, randomUUID());
+    expect(requests).toHaveLength(2);
+    expect(plain.structuredContent).not.toHaveProperty("launch");
+  });
+
+  test("computer_open with applicationId and includeScreenshot captures the app's window, and a failed launch keeps the open", async () => {
+    const session: ComputerSession = {
+      ...discoveredComputerSession(computerSessionId, sessionId),
+      lifecycle: "active",
+      controller: {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      },
+      platform: "macos",
+      adapter: "opengeni.cua.macos.v1",
+      seatId: "seat-1",
+      displayId: "aqua",
+      capabilities: {
+        semanticObservation: true,
+        appDiscovery: true,
+        appLaunch: true,
+        windowCapture: true,
+        screenCapture: true,
+        semanticActions: true,
+        pointerInput: true,
+        keyboardInput: true,
+        clipboard: true,
+        backgroundActions: true,
+        parallelApps: true,
+      },
+    };
+    const screen: ComputerTarget = { ...computerTarget(), id: "screen-1", kind: "screen" };
+    const appWindow: ComputerTarget = {
+      ...computerTarget(),
+      id: "window-calculator",
+      title: "Calculator",
+    };
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const captures: Array<{ targetId: string; options: unknown }> = [];
+    let launchFails = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets: [screen, appWindow],
+        }),
+        observeComputerTarget: async (_w, _s, targetId) =>
+          computerObservation(targetId === appWindow.id ? appWindow : screen),
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          if (launchFails) throw new Error("This Mac is locked. Unlock it to use desktop capture.");
+          return { ...computerReceipt(value.operationId, computerObservation(appWindow)) };
+        },
+        captureComputerTarget: async (_workspaceId, _sessionId, targetId, _o, options) => {
+          captures.push({ targetId, options });
+          return {
+            frameId: `frame-${captures.length}`,
+            computerSessionId,
+            controllerGeneration: "controller-1",
+            targetId,
+            targetGeneration: appWindow.targetGeneration,
+            sequence: 0,
+            mediaType: "image/jpeg",
+            width: options?.region ? 400 : 640,
+            height: options?.region ? 300 : 400,
+            capturedAt: now,
+            sha256: "0".repeat(64),
+            ...(options?.region
+              ? {
+                  region: options.region,
+                  regionFrame: options.regionFrame ?? { width: 1, height: 1 },
+                }
+              : {}),
+            data: image,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const [open, observe] = definitions;
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+
+    const launched = await open!.execute(
+      { computerSessionId, applicationId: "com.apple.calculator", includeScreenshot: true },
+      context(),
+    );
+    expect(launched.isError).toBeFalsy();
+    // The launched app's window is photographed, not the screen.
+    expect(captures).toEqual([{ targetId: "window-calculator", options: undefined }]);
+    expect(launched.content[1]).toEqual({
+      type: "text",
+      text: "Screenshot of window-calculator: frameId frame-1, 640x400 pixels; use these pixels for pointer coordinates.",
+    });
+    expect(launched.structuredContent).toMatchObject({
+      launch: { state: "completed", observation: { target: { id: "window-calculator" } } },
+    });
+
+    // That screenshot is the full frame a zoom without a target is measured on.
+    await observe!.execute({ region: { x: 0, y: 0, width: 100, height: 100 } }, context());
+    expect(captures[1]).toEqual({
+      targetId: "window-calculator",
+      options: {
+        region: { x: 0, y: 0, width: 100, height: 100 },
+        regionFrame: { width: 640, height: 400 },
+      },
+    });
+
+    // A launch that cannot run says why on the opened computer, not as an error.
+    launchFails = true;
+    const failed = await open!.execute(
+      { computerSessionId, applicationId: "com.apple.calculator" },
+      context(),
+    );
+    expect(failed.isError).toBeFalsy();
+    expect(failed.structuredContent).toMatchObject({ session: { id: computerSessionId } });
+    expect(failed.structuredContent).not.toHaveProperty("launch");
+    expect(failed.content[1]).toEqual({
+      type: "text",
+      text: "The computer opened, but com.apple.calculator could not be launched: This Mac is locked. Unlock it to use desktop capture.",
+    });
+  });
+
+  test("finds an app's open window on each platform's target shape", () => {
+    const target = (fields: Partial<ComputerTarget>): ComputerTarget => ({
+      ...computerTarget(),
+      focused: false,
+      ...fields,
+    });
+    const screen = target({ id: "screen-1", kind: "screen", applicationId: null, title: "Screen" });
+    // macOS: windows carry the app's bundle ID.
+    const calculator = target({ id: "mac-window", applicationId: "com.apple.calculator" });
+    expect(openComputerAppWindow([screen, calculator], "com.apple.Calculator")?.id).toBe(
+      "mac-window",
+    );
+    expect(openComputerAppWindow([screen, calculator], "Calculator")?.id).toBe("mac-window");
+    // Reverse-DNS IDs name the same app only in full.
+    expect(openComputerAppWindow([screen, calculator], "com.example.calculator")).toBeNull();
+    // Windows (CUA): the window names its process's executable.
+    const notepad = target({
+      id: "win-notepad",
+      applicationId: "Notepad.exe",
+      title: "Untitled - Notepad",
+    });
+    const calc = target({
+      id: "win-calc",
+      applicationId: "CalculatorApp.exe",
+      title: "Calculator",
+      processId: 7,
+    });
+    for (const id of ["notepad", "Notepad.exe", "C:\\Windows\\System32\\notepad.exe"])
+      expect(openComputerAppWindow([screen, notepad, calc], id)?.id).toBe("win-notepad");
+    expect(
+      openComputerAppWindow(
+        [screen, notepad, calc],
+        "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+      ),
+    ).toBeNull();
+    // A window with an identity is never matched by its title.
+    expect(openComputerAppWindow([screen, notepad, calc], "calculator")).toBeNull();
+    expect(openComputerAppWindow([screen, notepad, calc], "calculatorapp")?.id).toBe("win-calc");
+    // A window with no identity is matched only by the app's name as its
+    // title, or its title's last part.
+    const untitled = target({ id: "win-untitled", applicationId: null, title: "Calculator" });
+    expect(openComputerAppWindow([screen, untitled], "calculator")?.id).toBe("win-untitled");
+    const page = target({ id: "page", applicationId: null, title: "Calculator help - Browser" });
+    expect(openComputerAppWindow([screen, page], "calculator")).toBeNull();
+    // Linux (AT-SPI): an app target names the app; its windows share its process.
+    const geditApp = target({
+      id: "app-gedit",
+      kind: "app",
+      applicationId: null,
+      title: "gedit",
+      processId: 51,
+    });
+    const geditWindow = target({
+      id: "linux-window",
+      applicationId: null,
+      title: "notes.txt (~/Documents)",
+      processId: 51,
+    });
+    expect(openComputerAppWindow([screen, geditApp, geditWindow], "org.gnome.gedit")?.id).toBe(
+      "linux-window",
+    );
+    expect(openComputerAppWindow([screen, geditApp, geditWindow], "gedit.desktop")?.id).toBe(
+      "linux-window",
+    );
+    // Linux (CUA): the window names its window class.
+    const cuaGedit = target({
+      id: "cua-gedit",
+      applicationId: "Gedit",
+      title: "Untitled Document 1 - gedit",
+    });
+    expect(openComputerAppWindow([screen, cuaGedit], "gedit")?.id).toBe("cua-gedit");
+    expect(openComputerAppWindow([screen, cuaGedit], "org.gnome.gedit")?.id).toBe("cua-gedit");
+    const textEditor = target({ id: "cua-text", applicationId: "org.gnome.TextEditor" });
+    expect(openComputerAppWindow([screen, textEditor], "org.gnome.TextEditor")?.id).toBe(
+      "cua-text",
+    );
+    expect(openComputerAppWindow([screen, textEditor], "org.kde.TextEditor")).toBeNull();
+    // A window of another app is never matched by its title, nor an unreadable one.
+    const other = target({ id: "other", applicationId: "com.example.editor", title: "Notepad" });
+    expect(openComputerAppWindow([screen, other], "notepad")).toBeNull();
+    const away = target({ id: "away", applicationId: "com.apple.calculator", offScreen: true });
+    expect(openComputerAppWindow([screen, away], "com.apple.calculator")).toBeNull();
+    // The window used last wins over the focused one.
+    const front = target({ id: "front", applicationId: "com.apple.calculator", focused: true });
+    const last = target({ id: "last", applicationId: "com.apple.calculator", current: true });
+    expect(openComputerAppWindow([front, last], "com.apple.calculator")?.id).toBe("last");
+    expect(openComputerAppWindow([screen, notepad], "TextEdit")).toBeNull();
+  });
+
+  test("computer_open with applicationId observes an already-open window instead of launching another copy", async () => {
+    const screen: ComputerTarget = {
+      ...computerTarget(),
+      id: "screen-1",
+      kind: "screen",
+      applicationId: null,
+    };
+    const notepad: ComputerTarget = {
+      ...computerTarget(),
+      id: "cua:window:7:1",
+      applicationId: null,
+      title: "Untitled - Notepad",
+      focused: false,
+    };
+    let session = activeComputerSession();
+    const launches: ComputerActionRequest[] = [];
+    const observed: string[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets: [screen, notepad],
+        }),
+        observeComputerTarget: async (_w, _s, targetId) => {
+          observed.push(targetId);
+          return computerObservation(targetId === notepad.id ? notepad : screen);
+        },
+        captureComputerTarget: async (_w, _s, targetId) => ({
+          frameId: "frame-1",
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targetId,
+          targetGeneration: notepad.targetGeneration,
+          sequence: 0,
+          mediaType: "image/jpeg" as const,
+          width: 640,
+          height: 400,
+          capturedAt: now,
+          sha256: "0".repeat(64),
+          data: Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+        }),
+        actInComputer: async (_w, _s, value) => {
+          launches.push(value);
+          return computerReceipt(value.operationId, computerObservation(notepad));
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId, applicationId: "notepad.exe" },
+      context(),
+    );
+    expect(launches).toHaveLength(0);
+    expect(observed).toEqual([notepad.id]);
+    expect(result.structuredContent).toMatchObject({ existing: { target: { id: notepad.id } } });
+    expect(result.structuredContent).not.toHaveProperty("launch");
+    expect((result.content[0] as { text: string }).text).toContain(
+      `Not launched: the app is already open in ${notepad.id}; act on that target with the observation below.`,
+    );
+    // The open window is the current target for the next read.
+    await definitions[1]!.execute({}, context());
+    expect(observed.at(-1)).toBe(notepad.id);
+
+    // A macOS launch finds the running app itself, so no window is guessed.
+    session = { ...session, platform: "macos" };
+    observed.length = 0;
+    const mac = await definitions[0]!.execute(
+      { computerSessionId, applicationId: "notepad.exe" },
+      context(),
+    );
+    expect(launches).toHaveLength(1);
+    expect(observed).toEqual([]);
+    expect(mac.structuredContent).toMatchObject({ launch: { state: "completed" } });
+    expect(mac.structuredContent).not.toHaveProperty("existing");
+  });
+
+  test("computer_open never reports a launch that ran, or may have run, as failed", async () => {
+    const screen: ComputerTarget = {
+      ...computerTarget(),
+      id: "screen-1",
+      kind: "screen",
+      applicationId: null,
+    };
+    const appWindow: ComputerTarget = {
+      ...computerTarget(),
+      id: "window-app",
+      applicationId: "com.example.app",
+    };
+    const session = activeComputerSession();
+    let act: () => Promise<ComputerActionReceipt> = async () => {
+      throw new Error("unset");
+    };
+    let recorded: () => Promise<ComputerActionReceipt> = async () => {
+      throw new OpenGeniApiError(404, "Not found");
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets: [screen],
+        }),
+        actInComputer: async () => await act(),
+        getComputerActionReceipt: async () => await recorded(),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const open = async () =>
+      await definitions[0]!.execute(
+        { computerSessionId, applicationId: "com.example.app" },
+        { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+      );
+    const unknownNote =
+      "The computer opened, but the launch of com.example.app has no known outcome: it may have started. Check computer_targets for its window before launching it again.";
+
+    // A retry whose fence changed is refused; the first try's receipt answers.
+    act = async () => {
+      throw new OpenGeniApiError(409, "operation ID reused with another request", {
+        code: "operation_conflict",
+      });
+    };
+    recorded = async () => computerReceipt(randomUUID(), computerObservation(appWindow));
+    const retried = await open();
+    expect(retried.isError).toBeFalsy();
+    expect(retried.structuredContent).toMatchObject({
+      launch: { state: "completed", observation: { target: { id: "window-app" } } },
+    });
+    expect(retried.content).toHaveLength(1);
+
+    // A lost reply with nothing recorded may still have launched the app.
+    act = async () => {
+      throw new OpenGeniApiError(504, "Gateway timeout", { outcomeUnknown: true });
+    };
+    recorded = async () => {
+      throw new OpenGeniApiError(404, "Not found");
+    };
+    const lost = await open();
+    expect(lost.isError).toBeFalsy();
+    expect((lost.content[1] as { text: string }).text.startsWith(unknownNote)).toBe(true);
+
+    // So may a launch the computer itself reports with an unknown outcome.
+    act = async () => ({
+      ...computerReceipt(randomUUID(), computerObservation(screen)),
+      state: "outcome_unknown",
+      observation: null,
+      error: { code: "outcome_unknown", message: "The action timed out", retryable: false },
+    });
+    const timedOut = await open();
+    expect(timedOut.content[1]).toEqual({ type: "text", text: unknownNote });
+
+    // A launch that completed but read no window says the app started.
+    act = async () => ({
+      ...computerReceipt(randomUUID(), computerObservation(screen)),
+      observation: null,
+    });
+    const unread = await open();
+    expect(unread.content[1]).toEqual({
+      type: "text",
+      text: "The computer opened and com.example.app started, but its window could not be read. Check computer_targets for its window.",
+    });
+
+    // A definite refusal still says it could not launch.
+    act = async () => {
+      throw new OpenGeniApiError(422, "no installed application has bundle id com.example.app");
+    };
+    const refused = await open();
+    expect((refused.content[1] as { text: string }).text).toContain(
+      "The computer opened, but com.example.app could not be launched:",
+    );
+  });
+
   test("an action naming its observation is fenced from the target list without a re-read", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
@@ -4553,6 +5695,123 @@ describe("interaction attempt tools", () => {
       },
       { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
     ]);
+  });
+
+  test("zooms into a region of the window as its own pointer frame", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const captures: unknown[] = [];
+    const zoomedFrameId = "native-frame:zoom.1600.0.960.1410.760.1116";
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => ({ ...observation, observationId: randomUUID() }),
+        captureComputerTarget: async (_workspaceId, _computerSessionId, _targetId, _o, options) => {
+          captures.push(options);
+          return {
+            frameId: options?.region ? zoomedFrameId : "regular-frame",
+            computerSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            sequence: 0,
+            mediaType: "image/jpeg" as const,
+            width: options?.region ? 760 : 1024,
+            height: options?.region ? 1116 : 564,
+            capturedAt: now,
+            sha256: "0".repeat(64),
+            ...(options?.region
+              ? {
+                  region: { x: 640, y: 0, width: 384, height: 564 },
+                  regionFrame: { width: 1024, height: 564 },
+                }
+              : {}),
+            data: image,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    const observe = definitions[0]!;
+    const model = { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } };
+    await observe.execute({ computerSessionId, targetId: target.id }, model as never);
+    const zoomed = await observe.execute(
+      { computerSessionId, targetId: target.id, region: { x: 640, y: 0, width: 384, height: 564 } },
+      { ...model, operationId: randomUUID() } as never,
+    );
+    // The region is measured on the last full screenshot this attempt saw.
+    expect(captures).toEqual([
+      {},
+      {
+        region: { x: 640, y: 0, width: 384, height: 564 },
+        regionFrame: { width: 1024, height: 564 },
+      },
+    ]);
+    expect(zoomed.structuredContent).toMatchObject({
+      frameId: zoomedFrameId,
+      capturedFrame: {
+        width: 760,
+        height: 1116,
+        region: { x: 640, y: 0, width: 384, height: 564 },
+        regionFrame: { width: 1024, height: 564 },
+      },
+    });
+    const text = (zoomed.content[0] as { text: string }).text;
+    expect(text).toContain(
+      `Zoomed screenshot 760x1116 pixels of the 1024x564 screenshot's region at 640,0 size 384x564 (2x); pointer x,y on frame ${zoomedFrameId} use these zoomed pixels.`,
+    );
+    // The elements were just read: the zoom lists only what changed.
+    expect(text).toContain("No element changed since");
+    expect(
+      (observe.inputSchema as { properties: Record<string, unknown> }).properties,
+    ).toHaveProperty("region");
+  });
+
+  test("says so when a server without zoom returns the full screenshot", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => ({ ...observation, observationId: randomUUID() }),
+        captureComputerTarget: async () => ({
+          frameId: "regular-frame",
+          computerSessionId,
+          controllerGeneration: target.controllerGeneration,
+          targetId: target.id,
+          targetGeneration: target.targetGeneration,
+          sequence: 0,
+          mediaType: "image/jpeg" as const,
+          width: 640,
+          height: 352,
+          capturedAt: now,
+          sha256: "0".repeat(64),
+          data: Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId, targetId: target.id, region: { x: 0, y: 0, width: 100, height: 100 } },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } } as never,
+    );
+    expect(result.structuredContent).toMatchObject({
+      frameId: "regular-frame",
+      capturedFrame: { width: 640, height: 352 },
+    });
+    expect((result.content[0] as { text: string }).text).toContain(
+      "Screenshot 640x352 pixels; pointer x,y use these pixels.",
+    );
+    expect(result.content[1]).toEqual({
+      type: "text",
+      text: "Not zoomed: this Opengeni server does not support region, so this is the full screenshot of the target.",
+    });
+    expect(result.content[2]).toMatchObject({ type: "image" });
   });
 
   test("computer_open returns the screen's screenshot in the same call when includeScreenshot is set", async () => {
@@ -5719,6 +6978,44 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  test("closing a tab that is already gone keeps the current browser", async () => {
+    const target = browserTarget();
+    let sessionLookups = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_tabs"],
+      permissions: ["sessions:read", "sessions:control"],
+      transport: partialTransport({
+        listBrowserSessions: async () => {
+          sessionLookups += 1;
+          return { revision: 1, sessions: [discoveredBrowserSession(browserSessionId, sessionId)] };
+        },
+        listBrowserTargets: async () =>
+          ({ browserSessionId, controllerGeneration: "generation-1", targets: [target] }) as never,
+        closeBrowserTarget: async () => {
+          throw new OpenGeniApiError(404, "browser target does not exist", {
+            code: "not_found",
+          });
+        },
+      }),
+    });
+    const tabs = definitions[0]!;
+    const call = async (args: Record<string, unknown>) =>
+      await tabs.execute(args, {
+        operationId: randomUUID(),
+        caller: { kind: "model", subjectId: "model:test" },
+      });
+    expect((await call({ operation: "list" })).isError).not.toBe(true);
+    const closed = await call({ operation: "close", targetId: "gone-tab" });
+    expect(closed.isError).toBe(true);
+    expect(JSON.stringify(closed.structuredContent)).toContain("browser target does not exist");
+    const listed = await call({ operation: "list" });
+    expect(listed.isError).not.toBe(true);
+    // The browser was remembered: no second session lookup.
+    expect(sessionLookups).toBe(1);
+  });
+
   test("an explicit tab becomes the current tab for later calls", async () => {
     const target = browserTarget();
     const other = randomUUID();
@@ -6065,6 +7362,35 @@ function externalAuthRun(): AuthRun {
 /** A controller that has nothing recorded under the operation ID asked for. */
 async function noRecordedReceipt(): Promise<never> {
   throw new OpenGeniApiError(404, "operation not found", { code: "resource_not_found" });
+}
+
+function activeComputerSession(): ComputerSession {
+  return {
+    ...discoveredComputerSession(computerSessionId, sessionId),
+    lifecycle: "active",
+    controller: {
+      controllerId: "synthetic-controller",
+      controllerGeneration: "controller-1",
+      placementInstanceId: "placement-1",
+    },
+    platform: "windows",
+    adapter: "opengeni.cua.windows.v1",
+    seatId: "seat-1",
+    displayId: "display-1",
+    capabilities: {
+      semanticObservation: true,
+      appDiscovery: true,
+      appLaunch: true,
+      windowCapture: true,
+      screenCapture: true,
+      semanticActions: true,
+      pointerInput: true,
+      keyboardInput: true,
+      clipboard: true,
+      backgroundActions: true,
+      parallelApps: true,
+    },
+  };
 }
 
 function partialTransport(value: Partial<InteractionTransport>): InteractionTransport {

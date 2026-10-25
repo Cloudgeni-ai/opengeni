@@ -473,7 +473,8 @@ describe("session proxy chats", () => {
         [...CONVERSATION, "connections:personal"],
         CONVERSATION,
       ]);
-      expect(calls[1]!.operationId).not.toBe(calls[0]!.operationId);
+      // The same keyed operation, so a cancelled grant stays fenced.
+      expect(calls[1]!.operationId).toBe(calls[0]!.operationId);
     });
 
     test("the chat facade forwards identities", async () => {

@@ -6346,6 +6346,8 @@ export type UpdateSlackChannelRoutesRequest = {
 
 export type VoiceInputProviderId =
   | "azure-mai"
+  | "azure-speech"
+  | "elevenlabs"
   | "supergrok-subscription"
   | "codex-subscription"
   | "openai"
@@ -7565,6 +7567,8 @@ export type SubmitComposerDraftResponse = {
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  /** As on `SteerMessageResult`. Older servers omit it. */
+  waitsForMachineOwner?: boolean | undefined;
   replay: boolean;
 };
 
@@ -9518,6 +9522,8 @@ export type ApiIntegrationInstallationSummary = {
   connected: boolean;
   requiresConnection: boolean;
   connectionId: string | null;
+  /** When the bound connection was last used, or null when never or unbound. */
+  connectionLastUsedAt?: string | null;
   ownership: "workspace" | "personal" | "none";
   allowedTools: string[];
   toolCount: number;
@@ -10614,6 +10620,19 @@ export type SessionMachineAccess = {
    *  messages) waiting because only the machine's owner may start work on it,
    *  grouped by whose work it is. Older servers omit it. */
   waitingWork?: SessionWaitingWork[] | undefined;
+  /** Messages other people sent here that wait because only the machine's
+   *  owner may start work on it, grouped by sender. The owner's next message
+   *  brings them to the agent; moving the chat to a machine the sender may
+   *  use runs them. Older servers omit it. */
+  waitingMessages?: SessionWaitingMessages[] | undefined;
+};
+
+export type SessionWaitingMessages = {
+  /** The sender's display name, when known. */
+  name: string | null;
+  /** The caller sent them. */
+  isYou: boolean;
+  messages: number;
 };
 
 export type SessionWaitingWork = {

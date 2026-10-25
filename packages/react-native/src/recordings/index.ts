@@ -39,6 +39,7 @@ export {
   type NativeAudioCapture,
   type NativeAudioChunkEvent,
   type NativeAudioErrorEvent,
+  type NativeAudioPcmEvent,
   type NativeAudioStateEvent,
   type NativeRecorderOptions,
 } from "./native-recorder";

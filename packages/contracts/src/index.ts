@@ -5,6 +5,7 @@ import {
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
 export * from "./secret-value";
+export * from "./integration-capability-id";
 import { defineSchema } from "./define-schema";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
@@ -895,6 +896,11 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "action_timeout",
     "tab_not_responding",
     "tab_crashed",
+    /**
+     * The resource or route no longer exists (HTTP 410). A retired route's
+     * details carry `code: "route_retired"` and the `replacement` to call.
+     */
+    "gone",
     "internal_error",
   ]),
 );
@@ -2486,11 +2492,20 @@ export const WorkspaceTranscriptionPolicy = /* @__PURE__ */ defineSchema(() =>
 export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
 
 /**
- * Workspace voice-input preferences. Public provider identifiers express the
- * preferred billing route; credentials and model configuration remain private.
+ * Speech-to-text provider identifiers. Every transcription use (dictation,
+ * meetings) chooses from the same providers. `azure-mai` is the older name
+ * of `azure-speech` and is read as it.
  */
 export const VoiceInputProviderId = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["supergrok-subscription", "codex-subscription", "openai", "azure-openai", "azure-mai"]),
+  z.enum([
+    "supergrok-subscription",
+    "codex-subscription",
+    "openai",
+    "azure-openai",
+    "azure-mai",
+    "azure-speech",
+    "elevenlabs",
+  ]),
 );
 export type VoiceInputProviderId = z.infer<typeof VoiceInputProviderId>;
 
@@ -2498,6 +2513,7 @@ export const WorkspaceVoiceInputSettings = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       enabled: primitives.boolean,
+      /** The provider dictation tries first; each provider runs one dictation model. */
       preferredProvider: VoiceInputProviderId.nullable().optional(),
       fallbackEnabled: primitives.optionalBoolean,
     })
@@ -15804,6 +15820,8 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
       connected: primitives.boolean,
       requiresConnection: primitives.boolean,
       connectionId: primitives.nullableUuid,
+      /** When the bound connection was last used, so a client can pick which account to reconnect. */
+      connectionLastUsedAt: primitives.nullableString.optional(),
       ownership: z.enum(["workspace", "personal", "none"]),
       allowedTools: z.array(z.string().min(1).max(200)).max(2000),
       toolCount: primitives.nonnegativeInteger,
@@ -20558,6 +20576,13 @@ export const SteerSessionMessageResponse = /* @__PURE__ */ defineSchema(() =>
     receipt: SessionCommandReceipt,
     routing: SessionPromptRouting,
     interruptionCount: primitives.nonnegativeInteger,
+    /**
+     * The chat runs on another person's personal machine, so the message
+     * waits for its owner instead of steering: the owner's next message
+     * brings it to the agent, or it runs once the chat moves to a machine
+     * the sender may use. Older servers omit it.
+     */
+    waitsForMachineOwner: primitives.boolean.optional(),
     replay: primitives.boolean,
   }),
 );
@@ -20571,6 +20596,8 @@ export const SubmitComposerDraftResponse = /* @__PURE__ */ defineSchema(() =>
     receipt: SessionCommandReceipt,
     routing: SessionPromptRouting,
     interruptionCount: primitives.nonnegativeInteger,
+    /** As on `SteerSessionMessageResponse`. Older servers omit it. */
+    waitsForMachineOwner: primitives.boolean.optional(),
     replay: primitives.boolean,
   }),
 );
@@ -21841,6 +21868,23 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
         }),
       )
       .optional(),
+    /**
+     * Messages other people sent here that wait because only the machine's
+     * owner may start work on it, grouped by sender. The owner's next message
+     * brings them to the agent; moving the chat to a machine the sender may
+     * use runs them. Older servers omit it.
+     */
+    waitingMessages: z
+      .array(
+        z.object({
+          /** The sender's display name, when known. */
+          name: z.string().nullable(),
+          /** The caller sent them. */
+          isYou: z.boolean(),
+          messages: z.number().int().positive(),
+        }),
+      )
+      .optional(),
   }),
 );
 export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
@@ -22834,6 +22878,8 @@ export * from "./session-mcp-tool-permissions";
 export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
+export * from "./workspace-governance-context";
+export * from "./prompt-cache-diagnostics";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";
 export { toolPolicyActionName, executableToolSchema } from "./tool-policy";

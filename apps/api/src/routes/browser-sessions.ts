@@ -1,3 +1,5 @@
+import type { z } from "zod";
+import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
 import {
   assertEphemeralBrowserCreateEnabled,
@@ -6168,16 +6170,14 @@ async function authorizeSourceSession(
   }
 }
 
-async function parseJsonBody<T>(
+async function parseJsonBody<Schema extends z.ZodType>(
   context: Context,
-  schema: {
-    safeParse(value: unknown): { success: true; data: T } | { success: false };
-  },
-): Promise<T> {
-  const value = await context.req.json().catch(() => undefined);
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new HTTPException(400, { message: "invalid request body" });
-  return parsed.data;
+  schema: Schema,
+): Promise<z.output<Schema>> {
+  return parseRequestBody(schema, await context.req.json().catch(() => undefined), {
+    status: 400,
+    message: "invalid request body",
+  });
 }
 
 async function parseEmptyJsonBody(context: Context): Promise<void> {
@@ -6961,7 +6961,7 @@ type PreservedWorkingCopyCallback<T> = (input: {
   authority: PlacementBrowserWorkingCopyAuthority;
 }) => Promise<T>;
 
-function browserRouteError(error: unknown): HTTPException {
+export function browserRouteError(error: unknown): HTTPException {
   const actionDeadline = interactionActionDeadlineApiError(error);
   if (actionDeadline) return actionDeadline;
   const tabDiagnosis = browserTabDiagnosisError(error);
@@ -6997,6 +6997,19 @@ function browserRouteError(error: unknown): HTTPException {
   }
   const legacyCapacity = legacyInteractionCapacityError(error, "browser");
   if (legacyCapacity) return legacyCapacity;
+  // A controller that cannot tell whether its change happened (a tab close
+  // whose browser connection ended first) keeps that uncertainty, so callers
+  // inspect the session instead of treating the 409 as a refusal to retry.
+  if (error instanceof BrowserControlRequestError && error.error.code === "outcome_unknown") {
+    const failure = new ApiHttpError(409, {
+      code: "conflict",
+      message: error.error.message,
+      retryable: false,
+      outcomeUnknown: true,
+    });
+    failure.cause = error;
+    return failure;
+  }
   if (error instanceof BrowserControlRequestError) {
     return new HTTPException(error.status as ContentfulStatusCode, {
       message: error.error.message,

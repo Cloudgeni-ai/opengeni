@@ -62,18 +62,18 @@ fn apply_verified_update(
 ) -> UpdateResult<PathBuf> {
     // Unix permits replacing the running file using the captured pathname.
     // Windows still needs self-replace's running-image lock handling.
-    // On Unix the candidate passes its startup check before it replaces the
-    // install (see `replace_running_exe_at`), and again once installed.
+    // On every platform the candidate passes its startup check, staged beside
+    // the install, before it replaces it, and again once installed: a binary
+    // this machine cannot start (a missing DLL on Windows) is never swapped in.
+    let preflight = |staged: &Path| verify_installed_binary(staged, &pending.version);
     #[cfg(unix)]
     {
-        pending.apply_running_at(install_path, |staged| {
-            verify_installed_binary(staged, &pending.version)
-        })
+        pending.apply_running_at(install_path, preflight)
     }
     #[cfg(not(unix))]
     {
         let _ = install_path;
-        pending.apply_running()
+        pending.apply_running(preflight)
     }
 }
 
@@ -510,8 +510,8 @@ fn managed_fetch_failure(
 }
 
 /// Executes the binary at `install_path` through the smallest stable startup
-/// surface: on Unix the candidate staged beside the install before it replaces
-/// it, then the newly-swapped binary. If the loader, executable bit, CLI
+/// surface: the candidate staged beside the install before it replaces it,
+/// then the newly-swapped binary. If the loader, executable bit, CLI
 /// wiring, or embedded version is wrong, the updater leaves or rolls back the
 /// install before reporting success.
 fn verify_installed_binary(install_path: &std::path::Path, version: &str) -> UpdateResult<()> {

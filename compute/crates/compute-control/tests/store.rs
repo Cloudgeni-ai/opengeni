@@ -15,7 +15,7 @@ use compute_control::store::{
 };
 use compute_fleet::{HostId, HostState, OwnerEpoch, Ownership, SandboxId, Sends};
 use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Verdict};
-use compute_protocol::host::{Id, SandboxConfig, SleepConfig};
+use compute_protocol::host::{Id, ImageId, SandboxConfig, SleepConfig};
 
 fn random() -> u64 {
     let mut bytes = [0u8; 8];
@@ -503,6 +503,164 @@ async fn a_host_back_after_being_forgotten_gets_back_what_nobody_took() {
     each(reclaim_forgotten, reclaim_forgotten).await;
 }
 
+fn image_id() -> ImageId {
+    let mut id = [0; 32];
+    for chunk in id.chunks_mut(8) {
+        chunk.copy_from_slice(&random().to_le_bytes());
+    }
+    ImageId(id)
+}
+
+async fn images<S: Store>(store: S) {
+    let name = format!("image-{:016x}", random());
+    let old = format!("registry.example/sandbox@sha256:{:064x}", random());
+    let new = format!("registry.example/sandbox@sha256:{:064x}", random());
+    assert_eq!(store.image_built(&old).await.unwrap(), None);
+    assert_eq!(store.latest_built(&name).await.unwrap(), None);
+
+    let first = image_id();
+    assert_eq!(
+        store.record_built(&old, &name, first, 1).await.unwrap(),
+        first
+    );
+    // Another host's build of the same OCI image is not the image recorded.
+    let again = image_id();
+    assert_eq!(
+        store.record_built(&old, &name, again, 2).await.unwrap(),
+        first
+    );
+    assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(first));
+
+    // A newer source under the name is its latest; the older one keeps its
+    // image, for a rollback to find.
+    let next = image_id();
+    assert_eq!(
+        store.record_built(&new, &name, next, 3).await.unwrap(),
+        next
+    );
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
+    assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
+    assert_eq!(store.image_built(&new).await.unwrap(), Some(next));
+
+    // A second name using the old source keeps it as its latest, with the
+    // image recorded first, while the first name moved on.
+    let alias = format!("{name}-alias");
+    assert_eq!(
+        store
+            .record_built(&old, &alias, image_id(), 4)
+            .await
+            .unwrap(),
+        first
+    );
+    assert_eq!(store.latest_built(&alias).await.unwrap(), Some(first));
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
+
+    // A rollback to the old source makes it the name's latest again.
+    assert_eq!(
+        store
+            .record_built(&old, &name, image_id(), 5)
+            .await
+            .unwrap(),
+        first
+    );
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(first));
+}
+
+#[tokio::test]
+async fn the_first_image_recorded_for_a_source_is_the_one_kept() {
+    each(images, images).await;
+}
+
+/// A use of a name's source that waited on its row while later uses were
+/// recorded does not undo them: a rollback to that source, recorded
+/// meanwhile, stays the name's latest.
+#[tokio::test]
+async fn a_delayed_use_does_not_undo_a_later_one() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let (watch, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let schema = format!("compute_uses_{:x}", random());
+    client
+        .batch_execute(&format!("create schema {schema}"))
+        .await
+        .unwrap();
+    // The store's connections carry the schema's name, so the wait below
+    // sees only this check's writes, not another run's on the same server.
+    let scoped = format!("{url} options='-c search_path={schema}' application_name={schema}");
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let name = "sandbox";
+    let old = "registry.example/sandbox@sha256:01";
+    let new = "registry.example/sandbox@sha256:02";
+    let first = image_id();
+    store.record_built(old, name, first, 1).await.unwrap();
+
+    // Another write of the old source draws its number, then waits on the
+    // row this transaction holds.
+    let holder = client.transaction().await.unwrap();
+    holder
+        .execute(
+            &format!(
+                "select 1 from {schema}.compute_image_names \
+                 where name = $1 and source = $2 for update"
+            ),
+            &[&name, &old],
+        )
+        .await
+        .unwrap();
+    let delayed = {
+        let store = store.clone();
+        tokio::spawn(async move { store.record_built(old, name, image_id(), 2).await })
+    };
+    let waiting = "select count(*) from pg_stat_activity where application_name = $1 \
+                   and wait_event_type = 'Lock' and query like 'insert into compute_image_names%'";
+    let mut waited = 0;
+    while watch
+        .query_one(waiting, &[&schema])
+        .await
+        .unwrap()
+        .get::<_, i64>(0)
+        == 0
+    {
+        assert!(waited < 500, "the delayed write never waited on the row");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        waited += 1;
+    }
+
+    // Meanwhile the name moves to a new source and rolls back to the old
+    // one: the rollback is recorded by the transaction holding the row.
+    let next = image_id();
+    assert_eq!(store.record_built(new, name, next, 3).await.unwrap(), next);
+    holder
+        .execute(
+            &format!(
+                "update {schema}.compute_image_names \
+                 set used = nextval('{schema}.compute_image_uses') \
+                 where name = $1 and source = $2"
+            ),
+            &[&name, &old],
+        )
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    assert_eq!(delayed.await.unwrap().unwrap(), first);
+    assert_eq!(store.latest_built(name).await.unwrap(), Some(first));
+
+    drop(store);
+    client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await
+        .unwrap();
+}
+
 async fn keys<S: Store>(store: S) {
     let digest = format!("{:x}", random());
     assert_eq!(store.team_of(&digest).await.unwrap(), None);
@@ -870,7 +1028,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))

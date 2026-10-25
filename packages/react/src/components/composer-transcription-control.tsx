@@ -18,7 +18,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useState, type MouseEvent, type ReactElement } from "react";
+import { forwardRef, useEffect, useState, type MouseEvent, type ReactElement } from "react";
 import { cn } from "../lib/cn";
 import { useComposerFooterSignal } from "../lib/composer-footer-signals";
 import { useVoiceInput, type VoiceInputRecordingsClient } from "../hooks/use-voice-input";
@@ -29,14 +29,20 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
 import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
-function Tip({ tip, children }: { tip: string; children: ReactElement }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent side="top">{tip}</TooltipContent>
-    </Tooltip>
-  );
-}
+// AnimatePresence's popLayout measures its children through a ref, so Tip
+// hands it on to the control it wraps.
+const Tip = /* @__PURE__ */ forwardRef<HTMLButtonElement, { tip: string; children: ReactElement }>(
+  function Tip({ tip, children }, ref) {
+    return (
+      <Tooltip>
+        <TooltipTrigger ref={ref} asChild>
+          {children}
+        </TooltipTrigger>
+        <TooltipContent side="top">{tip}</TooltipContent>
+      </Tooltip>
+    );
+  },
+);
 
 export type ComposerTranscriptionMessages = {
   start: string;

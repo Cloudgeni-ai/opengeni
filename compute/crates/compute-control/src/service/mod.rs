@@ -8,6 +8,7 @@
 //! another replica's decides again from the row as it is then.
 
 mod holds;
+mod images;
 mod moves;
 mod reach;
 mod requests;
@@ -114,11 +115,21 @@ pub struct Settings {
     /// The images creates may name, by the fleet's names for them: the id
     /// of each stored image (ADR 19), which hosts fetch by it, or `None`
     /// for the hosts' own base image. The default image is always known,
-    /// as the base image unless named here.
-    pub images: BTreeMap<String, Option<ImageId>>,
+    /// as the base image unless named here. Images built for a release
+    /// ([`crate::images`]) join it as they are built.
+    pub images: crate::images::Images,
     /// The agent link's keys and each team's gateway, if sandboxes may run
     /// Opengeni's agent.
     pub links: Option<Arc<Links>>,
+    /// How long the leader waits for a host whose renewals stopped while
+    /// it holds sandboxes, counted from its last renewal, before giving up
+    /// on it: giving up costs them their running programs and what they
+    /// wrote since their last archive, while a host cut off only by the
+    /// network keeps them, frozen, and runs them on once it renews again.
+    /// One that holds none, or whose instance its group finds stopped or
+    /// gone, is given up on as soon as its lease allows. Never shorter
+    /// than the lease's term and margin, which keep it safe.
+    pub give_up_after: Duration,
 }
 
 impl Settings {
@@ -127,7 +138,7 @@ impl Settings {
     #[must_use]
     pub fn image_named(&self, name: &str) -> Option<Option<ImageId>> {
         match self.images.get(name) {
-            Some(image) => Some(*image),
+            Some(image) => Some(image),
             None => (name == self.image).then_some(None),
         }
     }
@@ -141,8 +152,9 @@ impl Default for Settings {
             wake_within: Duration::from_secs(60),
             image: "base".into(),
             sleep: DEFAULT_SLEEP,
-            images: BTreeMap::new(),
+            images: crate::images::Images::default(),
             links: None,
+            give_up_after: Duration::from_secs(120),
         }
     }
 }

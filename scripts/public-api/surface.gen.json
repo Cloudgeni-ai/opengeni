@@ -9140,7 +9140,9 @@
       "sdk": [
         "OpenGeniClient.approveWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "ApplyWorkspaceSkillRevisionRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9151,7 +9153,9 @@
       "sdk": [
         "OpenGeniClient.rejectWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "ApplyWorkspaceSkillRevisionRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9162,7 +9166,9 @@
       "sdk": [
         "OpenGeniClient.removeWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "RemoveWorkspaceSkillRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9173,7 +9179,9 @@
       "sdk": [
         "OpenGeniClient.restoreWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "ApplyWorkspaceSkillRevisionRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9184,7 +9192,9 @@
       "sdk": [
         "OpenGeniClient.saveWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "SaveWorkspaceSkillRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -10909,6 +10919,7 @@
         "$.capabilityId": "string!",
         "$.connected": "boolean!",
         "$.connectionId": "string! null",
+        "$.connectionLastUsedAt": "string? null",
         "$.contentSha256": "string!",
         "$.definitionId": "string!",
         "$.definitionProvenance": "ref(IntegrationDefinitionProvenance)!",
@@ -11127,6 +11138,20 @@
         "$": "object",
         "$.expectedObjectiveRevision": "integer!",
         "$.rationale": "string?"
+      }
+    },
+    "ApplyWorkspaceSkillRevisionRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expectedRevisionId": "string! null",
+        "$.expectedScopeVersion": "integer!",
+        "$.operationId": "string!",
+        "$.reason": "string!",
+        "$.removalOperationId": "string?",
+        "$.revisionId": "string!"
       }
     },
     "ApproveSlackUserLinkAccessRequest": {
@@ -11960,6 +11985,17 @@
         "$.type": "const!=[\"\\\"batch\\\"\"]"
       }
     },
+    "BrowserActionNote": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.actionIndex": "integer!",
+        "$.kind": "enum!=[\"\\\"network_busy\\\"\"]",
+        "$.message": "string!"
+      }
+    },
     "BrowserActionReceipt": {
       "io": [
         "output"
@@ -11982,6 +12018,8 @@
         "$.error.details{}|4{}": "ref(__schema2)",
         "$.error.message": "string!",
         "$.error.retryable": "boolean!",
+        "$.notes": "array?",
+        "$.notes[]": "ref(BrowserActionNote)",
         "$.observation": "object! null",
         "$.observation.browserSessionId": "string!",
         "$.observation.changedRegions": "array!",
@@ -12343,9 +12381,11 @@
         "$|kind=role.name": "string?",
         "$|kind=role.role": "string!",
         "$|kind=label": "object",
+        "$|kind=label.exact": "boolean?",
         "$|kind=label.kind": "const!=[\"\\\"label\\\"\"]",
         "$|kind=label.text": "string!",
         "$|kind=text": "object",
+        "$|kind=text.exact": "boolean?",
         "$|kind=text.kind": "const!=[\"\\\"text\\\"\"]",
         "$|kind=text.text": "string!",
         "$|kind=placeholder": "object",
@@ -15095,7 +15135,10 @@
       "shape": {
         "$": "object",
         "$.comment": "string?",
+        "$.context": "ref(FeedbackContext)?",
         "$.idempotencyKey": "string!",
+        "$.screenshots": "array?",
+        "$.screenshots[]": "ref(FeedbackScreenshotUpload)",
         "$.sentiment": "ref(FeedbackSentiment)?",
         "$.sessionId": "string?",
         "$.turnId": "string?"
@@ -16792,14 +16835,84 @@
       "shape": {
         "$": "object",
         "$.comment": "string! null",
+        "$.context": "ref(FeedbackContext)! null",
         "$.createdAt": "string!",
         "$.id": "string!",
         "$.principalKind": "string! null",
+        "$.screenshots": "array!",
+        "$.screenshots[]": "ref(FeedbackScreenshot)",
         "$.sentiment": "ref(FeedbackSentiment)! null",
         "$.sessionId": "string! null",
         "$.subjectId": "string!",
         "$.turnId": "string! null",
         "$.workspaceId": "string!"
+      }
+    },
+    "FeedbackContext": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.appVersion": "string?",
+        "$.buildNumber": "string?",
+        "$.deviceModel": "string?",
+        "$.locale": "string?",
+        "$.online": "boolean?",
+        "$.osVersion": "string?",
+        "$.platform": "string?",
+        "$.recentErrors": "array?",
+        "$.recentErrors[]": "ref(FeedbackRecentError)",
+        "$.screen": "string?",
+        "$.source": "enum!=[\"\\\"desktop\\\"\",\"\\\"mobile\\\"\",\"\\\"web\\\"\"]",
+        "$.timeZone": "string?",
+        "$.trigger": "enum?=[\"\\\"menu\\\"\",\"\\\"shake\\\"\"]"
+      }
+    },
+    "FeedbackRecentError": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.at": "string!",
+        "$.code": "string?",
+        "$.message": "string!",
+        "$.screen": "string?",
+        "$.status": "integer?",
+        "$.title": "string?"
+      }
+    },
+    "FeedbackScreenshot": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.contentType": "ref(FeedbackScreenshotContentType)!",
+        "$.index": "integer!",
+        "$.sha256": "string!",
+        "$.sizeBytes": "integer!"
+      }
+    },
+    "FeedbackScreenshotContentType": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"image/jpeg\\\"\",\"\\\"image/png\\\"\"]"
+      }
+    },
+    "FeedbackScreenshotUpload": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.base64": "string!",
+        "$.contentType": "ref(FeedbackScreenshotContentType)!"
       }
     },
     "FeedbackSentiment": {
@@ -20366,8 +20479,12 @@
         "$.default": "object!",
         "$.default.model": "string!",
         "$.default.providerId": "string!",
+        "$.dictationDefault": "object! null",
+        "$.dictationDefault.model": "string!",
+        "$.dictationDefault.providerId": "string!",
         "$.models": "array!",
-        "$.models[]": "ref(RecordingTranscriptionModel)"
+        "$.models[]": "ref(RecordingTranscriptionModel)",
+        "$.pinned": "boolean!"
       }
     },
     "ListRecordingNotesResponse": {
@@ -24193,6 +24310,14 @@
         "$.wordTimestamps": "boolean!"
       }
     },
+    "RecordingTranscriptionFunding": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"deployment\\\"\",\"\\\"workspace_key\\\"\",\"\\\"workspace_subscription\\\"\"]"
+      }
+    },
     "RecordingTranscriptionModel": {
       "io": [
         "output"
@@ -24201,6 +24326,7 @@
         "$": "object",
         "$.available": "boolean!",
         "$.capabilities": "ref(RecordingTranscriptionCapabilities)!",
+        "$.funding": "ref(RecordingTranscriptionFunding)!",
         "$.model": "string!",
         "$.name": "string!",
         "$.providerId": "string!",
@@ -24299,6 +24425,18 @@
         "$": "object",
         "$.expectedUpdatedAt": "string?",
         "$.idempotencyKey": "string?"
+      }
+    },
+    "RemoveWorkspaceSkillRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expectedRevisionId": "string! null",
+        "$.expectedScopeVersion": "integer!",
+        "$.operationId": "string!",
+        "$.reason": "string!"
       }
     },
     "RenewSessionRealtimeRequest": {
@@ -25128,6 +25266,25 @@
         "$": "object",
         "$.body": "string!",
         "$.expectedRevision": "integer?"
+      }
+    },
+    "SaveWorkspaceSkillRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.deletions": "array?",
+        "$.deletions[]": "string",
+        "$.expectedRevisionId": "string! null",
+        "$.expectedScopeVersion": "integer!",
+        "$.files": "array!",
+        "$.files[]": "ref(SkillFile)",
+        "$.operationId": "string!",
+        "$.reason": "string!",
+        "$.scope": "enum?=[\"\\\"organization\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
+        "$.skillId": "string!",
+        "$.stableKey": "string!"
       }
     },
     "ScheduledTask": {
@@ -26421,6 +26578,11 @@
         "$.ownerName": "string! null",
         "$.queuedTurnBlocked": "boolean!",
         "$.sandboxId": "string!",
+        "$.waitingMessages": "array?",
+        "$.waitingMessages[]": "object",
+        "$.waitingMessages[].isYou": "boolean!",
+        "$.waitingMessages[].messages": "integer!",
+        "$.waitingMessages[].name": "string! null",
         "$.waitingWork": "array?",
         "$.waitingWork[]": "object",
         "$.waitingWork[].isYou": "boolean!",
@@ -27784,6 +27946,16 @@
         "$.path": "string!"
       }
     },
+    "SkillFile": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.content": "string!",
+        "$.path": "string!"
+      }
+    },
     "SkillImportFileSummary": {
       "io": [
         "output"
@@ -28232,7 +28404,8 @@
         "$.receipt": "ref(SessionCommandReceipt)!",
         "$.replay": "boolean!",
         "$.routing": "ref(SessionPromptRouting)!",
-        "$.turn": "ref(SessionTurn)!"
+        "$.turn": "ref(SessionTurn)!",
+        "$.waitsForMachineOwner": "boolean?"
       }
     },
     "SubscriptionAccountReach": {
@@ -31074,7 +31247,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"azure-mai\\\"\",\"\\\"azure-openai\\\"\",\"\\\"codex-subscription\\\"\",\"\\\"openai\\\"\",\"\\\"supergrok-subscription\\\"\"]"
+        "$": "enum=[\"\\\"azure-mai\\\"\",\"\\\"azure-openai\\\"\",\"\\\"azure-speech\\\"\",\"\\\"codex-subscription\\\"\",\"\\\"elevenlabs\\\"\",\"\\\"openai\\\"\",\"\\\"supergrok-subscription\\\"\"]"
       }
     },
     "WebhookEventAdapter": {
@@ -32875,6 +33048,7 @@
       "BROWSER_FRAME_MAX_PIXELS": "value",
       "BrowserAction": "type",
       "BrowserActionBatch": "type",
+      "BrowserActionNote": "type",
       "BrowserActionReceipt": "type",
       "BrowserActionRequest": "type",
       "BrowserActionResolvedTarget": "type",
@@ -33072,6 +33246,8 @@
       "ComputerClipboardResource": "value",
       "ComputerFrame": "type",
       "ComputerFrameMetadata": "type",
+      "ComputerFrameRegion": "type",
+      "ComputerFrameSize": "type",
       "computerFrameSocketUrl": "value",
       "ComputerFrameStreamAttachment": "type",
       "ComputerFrameStreamOptions": "type",
@@ -33080,6 +33256,7 @@
       "ComputerNativeReceipt": "type",
       "ComputerObservation": "type",
       "ComputerOperationReceipt": "type",
+      "ComputerScreenshotOptions": "type",
       "ComputerSession": "type",
       "ComputerSessionAttachment": "type",
       "ComputerSessionAttachmentRequest": "type",
@@ -33284,6 +33461,10 @@
       "ExternalIdentityLinkPreview": "type",
       "ExternalVaultProviderKind": "type",
       "Feedback": "type",
+      "FeedbackContext": "type",
+      "FeedbackRecentError": "type",
+      "FeedbackScreenshot": "type",
+      "FeedbackScreenshotUpload": "type",
       "FeedbackSentiment": "type",
       "FeedbackSubmissionResponse": "type",
       "FetchLike": "type",
@@ -35217,6 +35398,7 @@
       "BROWSER_FRAME_MAX_PIXELS": "value",
       "BrowserAction": "type",
       "BrowserActionBatch": "type",
+      "BrowserActionNote": "type",
       "BrowserActionReceipt": "type",
       "BrowserActionRequest": "type",
       "BrowserActionResolvedTarget": "type",
@@ -35296,6 +35478,8 @@
       "ComputerClipboardResource": "value",
       "ComputerFrame": "type",
       "ComputerFrameMetadata": "type",
+      "ComputerFrameRegion": "type",
+      "ComputerFrameSize": "type",
       "computerFrameSocketUrl": "value",
       "ComputerFrameStreamAttachment": "type",
       "ComputerFrameStreamOptions": "type",
@@ -35304,6 +35488,7 @@
       "ComputerNativeReceipt": "type",
       "ComputerObservation": "type",
       "ComputerOperationReceipt": "type",
+      "ComputerScreenshotOptions": "type",
       "ComputerSession": "type",
       "ComputerSessionAttachment": "type",
       "ComputerSessionAttachmentRequest": "type",
@@ -36481,6 +36666,8 @@
       "SessionDisplayStatus": "type",
       "sessionDisplayTitle": "value",
       "SessionEventsConnectionState": "type",
+      "SessionIntegrationCapabilityCard": "value",
+      "SessionIntegrationCapabilityCardProps": "type",
       "sessionLinkResolver": "value",
       "SessionList": "value",
       "SessionListLabels": "type",
@@ -36516,6 +36703,7 @@
       "stringifyPayload": "value",
       "stripExecBanner": "value",
       "SuperGrokAccountsClientLike": "type",
+      "supportsIntegrationCapabilityCard": "value",
       "tableElementToTsv": "value",
       "tailPeek": "value",
       "TermBlock": "value",
@@ -37510,6 +37698,46 @@
       "UseMachinesResult": "type",
       "WINDOW_LABEL": "value"
     },
+    "@opengeni/react/meetings": {
+      "createMeetingRecorderStore": "value",
+      "DeleteMeetingDialog": "value",
+      "DETECT_LANGUAGE": "value",
+      "LiveTranscript": "value",
+      "LiveTranscriptLine": "type",
+      "MEETING_LANGUAGES": "value",
+      "MeetingDefaultsView": "value",
+      "MeetingDetail": "type",
+      "MeetingDetailPage": "value",
+      "MeetingNotes": "value",
+      "MeetingPlayer": "value",
+      "MeetingPlayerHandle": "type",
+      "MeetingPlayerSource": "type",
+      "MeetingRecorder": "type",
+      "MeetingRecorderProvider": "value",
+      "MeetingRecorderStore": "type",
+      "MeetingRecorderStoreProvider": "value",
+      "MeetingSettingsViewer": "type",
+      "MeetingsListPage": "value",
+      "MeetingStartRequest": "type",
+      "MeetingTranscript": "value",
+      "RecorderPanel": "value",
+      "TranscriptActions": "type",
+      "useMeetingRecorder": "value",
+      "useMeetingRecorderState": "value",
+      "usePendingMeetingStart": "value",
+      "VoiceActions": "type"
+    },
+    "@opengeni/react/meetings-recorder": {
+      "createMeetingRecorderStore": "value",
+      "MeetingRecorder": "type",
+      "MeetingRecorderProvider": "value",
+      "MeetingRecorderStore": "type",
+      "MeetingRecorderStoreProvider": "value",
+      "MeetingStartRequest": "type",
+      "useMeetingRecorder": "value",
+      "useMeetingRecorderState": "value",
+      "usePendingMeetingStart": "value"
+    },
     "@opengeni/react/messages": {
       "createOpenGeniText": "value",
       "englishMessages": "value",
@@ -37676,8 +37904,11 @@
       "defaultSpeakerName": "value",
       "formatClock": "value",
       "formatDuration": "value",
+      "groupLiveTurns": "value",
       "groupTranscriptTurns": "value",
       "languageName": "value",
+      "LiveTranscriptLine": "type",
+      "LiveTranscriptTurn": "type",
       "meetingPhase": "value",
       "MeetingPhase": "type",
       "meetingStatusLabel": "value",
@@ -37686,6 +37917,8 @@
       "speakerColorSlots": "value",
       "speakerDisplayName": "value",
       "speakerIsNamed": "value",
+      "tidyLiveText": "value",
+      "tidyPartialText": "value",
       "transcriptErrorText": "value",
       "TranscriptTurn": "type",
       "useLiveTranscript": "value",
@@ -37696,6 +37929,9 @@
       "UseRecorderResult": "type",
       "useRecording": "value",
       "useRecordingModels": "value",
+      "useRecordingNotes": "value",
+      "UseRecordingNotesOptions": "type",
+      "UseRecordingNotesResult": "type",
       "UseRecordingOptions": "type",
       "useRecordingPeople": "value",
       "UseRecordingResult": "type",
@@ -37875,6 +38111,14 @@
       "UseTurnQueueResult": "type",
       "WorkerCompletionItem": "type",
       "WorkerItem": "type"
+    },
+    "@opengeni/react/session-admin-access-model": {
+      "ADMIN_ACCESS_DURATIONS": "value",
+      "ADMIN_ACCESS_GRANT_DESCRIPTION": "value",
+      "AdminAccessDuration": "type",
+      "adminAccessDurationHours": "value",
+      "adminAccessGrantedByText": "value",
+      "endsText": "value"
     },
     "@opengeni/react/session-agents-model": {
       "formatWaitingSince": "value",
@@ -38123,6 +38367,13 @@
       "LabScenario": "type",
       "LabScenarioId": "type",
       "labScenarios": "value"
+    },
+    "@opengeni/react/testing/meetings": {
+      "createMeetingsFixture": "value",
+      "FAILED_RECORDING_ID": "value",
+      "LIVE_LINES": "value",
+      "LIVE_RECORDING_ID": "value",
+      "MeetingsFixture": "type"
     },
     "@opengeni/react/this-computer": {
       "AppIcon": "value",
@@ -41947,7 +42198,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerNativeCallRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerNativeReceipt\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "capture": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "clipboard": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerClipboardResource\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -42248,7 +42499,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "captureComputerTarget": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "catalogAssetUrl": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
@@ -44777,7 +45028,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "captureComputerTarget": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "catalogAssetUrl": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
@@ -47112,7 +47363,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "captureComputerTarget": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "catalogAssetUrl": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
@@ -49577,7 +49828,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "captureComputerTarget": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "catalogAssetUrl": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
@@ -51866,7 +52117,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "captureComputerTarget": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "catalogAssetUrl": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
@@ -54256,7 +54507,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerNativeCallRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerNativeReceipt\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "capture": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerScreenshotOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerFrame\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "clipboard": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComputerClipboardResource\",\"optional\":false,\"type\":\"Identifier\"}}}"

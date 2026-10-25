@@ -1,4 +1,4 @@
-import type { ComponentProps, SVGProps } from "react";
+import { forwardRef, type ComponentPropsWithoutRef, type SVGProps } from "react";
 
 import { cn } from "../lib/utils";
 
@@ -37,13 +37,17 @@ export function BrandMark({ className, ...props }: SVGProps<SVGSVGElement>) {
  * height 1. Set the size for the context with a text utility; pair it with a
  * BrandMark about 1.35x the font size wide.
  */
-export function Wordmark({ className, ...props }: ComponentProps<"span">) {
+export const Wordmark = /* @__PURE__ */ forwardRef<
+  HTMLSpanElement,
+  ComponentPropsWithoutRef<"span">
+>(function Wordmark({ className, ...props }, ref) {
   return (
     <span
       className={cn("font-display leading-none font-[550] tracking-[-0.055em]", className)}
+      ref={ref}
       {...props}
     >
       Opengeni
     </span>
   );
-}
+});

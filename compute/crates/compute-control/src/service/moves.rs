@@ -1,7 +1,8 @@
 //! Moves while a sandbox sleeps: its owner hands it off through object
 //! storage, the service clears its owner, and the next wake, or the host
 //! asked for, adopts it. Draining a host moves everything nothing holds
-//! awake.
+//! awake, and asked to, what stays awake too: its owner saves it where
+//! it stands, memory and all, ending its open connections.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -27,8 +28,9 @@ const DRAIN_AT_ONCE: usize = 16;
 pub struct Drained {
     /// Sandboxes handed off.
     pub moved: usize,
-    /// Sandboxes still on the host: held awake, or their host did not
-    /// answer. Draining again tries them again.
+    /// Sandboxes still on the host: held awake (unless the drain moved
+    /// those too), or their host did not answer. Draining again tries
+    /// them again.
     pub left: usize,
 }
 
@@ -100,11 +102,13 @@ impl<S: Store> Service<S> {
     /// service clears its owner. With `to`, the host of that name adopts
     /// it at once, under its renewal as it stands once the hand-off is
     /// done (which can take minutes); otherwise its next wake places it.
+    /// With `awake`, it goes even while it is awake.
     pub async fn move_to(
         &self,
         team: &str,
         id: Id,
         to: Option<&str>,
+        awake: bool,
     ) -> Result<SandboxRow, Failure> {
         let to = to
             .map(|name| {
@@ -120,7 +124,7 @@ impl<S: Store> Service<S> {
             if to == Some(host) {
                 return Ok(row);
             }
-            self.hand_off(&row, host).await?;
+            self.hand_off(&row, host, awake).await?;
         }
         if let Some(to) = to {
             let row = self.get(team, id).await?;
@@ -131,9 +135,10 @@ impl<S: Store> Service<S> {
         self.get(team, id).await
     }
 
-    /// Has `host`, the owner, hand `row`'s sandbox off, and clears its
-    /// owner under a raised epoch once it has.
-    async fn hand_off(&self, row: &SandboxRow, host: HostId) -> Result<(), Failure> {
+    /// Has `host`, the owner, hand `row`'s sandbox off, even while it is
+    /// awake with `awake`, and clears its owner under a raised epoch once
+    /// it has.
+    async fn hand_off(&self, row: &SandboxRow, host: HostId, awake: bool) -> Result<(), Failure> {
         let epoch = row.ownership.epoch;
         let target = self
             .view
@@ -142,6 +147,7 @@ impl<S: Store> Service<S> {
         let request = Request::HandOff {
             id: row.id,
             owner_epoch: epoch.0,
+            awake,
         };
         let answered = self
             .hosts
@@ -168,8 +174,9 @@ impl<S: Store> Service<S> {
     }
 
     /// Drains the host named `name`: no new sandbox goes there, and each it
-    /// owns that nothing holds awake is handed off.
-    pub async fn drain(&self, name: &str) -> Result<Drained, Failure> {
+    /// owns that nothing holds awake is handed off; with `awake`, each it
+    /// owns at all.
+    pub async fn drain(&self, name: &str, awake: bool) -> Result<Drained, Failure> {
         let known = self.view.named(name).ok_or(Failure::NotFound)?;
         let host = known.target.host;
         if known.state == HostState::Lost {
@@ -180,7 +187,7 @@ impl<S: Store> Service<S> {
             .await?;
         let rows = self.store.owned_by(host).await?;
         let outcomes: Vec<Result<(), Failure>> = futures::stream::iter(rows)
-            .map(|row| async move { self.hand_off(&row, host).await })
+            .map(|row| async move { self.hand_off(&row, host, awake).await })
             .buffer_unordered(DRAIN_AT_ONCE)
             .collect()
             .await;

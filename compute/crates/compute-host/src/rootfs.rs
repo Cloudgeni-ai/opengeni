@@ -1,10 +1,13 @@
 //! Sandbox images built from OCI images (ADR 19): the `build-image`
-//! command, which builds one and stores it, and the host's copies of them
-//! ([`Cache`]).
+//! command, which builds one and stores it, the builds the control service
+//! asks hosts for ([`PrepareConfig`]), and the host's copies of them ([`Cache`]).
 
 mod cache;
+mod prepare;
 
 pub(crate) use cache::{Cache, Missing};
+pub(crate) use prepare::Preparer;
+pub use prepare::{PrepareConfig, PrepareError, Prepared, Progress};
 
 use std::path::PathBuf;
 
@@ -47,17 +50,7 @@ pub struct BuildArgs {
 /// built as JSON, with the image's id, which creates name it by.
 pub async fn build(args: BuildArgs) -> anyhow::Result<()> {
     let reference = Reference::parse(&args.reference).map_err(anyhow::Error::msg)?;
-    let secret = std::env::var("REGISTRY_TOKEN")
-        .ok()
-        .filter(|token| !token.is_empty());
-    let credentials = match (args.registry_user, secret) {
-        (user, Some(secret)) => Some(Credentials {
-            username: user.unwrap_or_else(|| "token".to_owned()),
-            secret,
-        }),
-        (Some(_), None) => anyhow::bail!("--registry-user needs REGISTRY_TOKEN"),
-        (None, None) => None,
-    };
+    let credentials = registry_credentials(args.registry_user)?;
     let (work, scratch) = match args.work {
         Some(work) => (work, false),
         None => (args.output.with_extension("work"), true),
@@ -88,4 +81,25 @@ pub async fn build(args: BuildArgs) -> anyhow::Result<()> {
     report["idOrStoreSeconds"] = started.elapsed().as_secs_f64().into();
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+/// The credentials for registries' token services: the token or password
+/// in the `REGISTRY_TOKEN` environment variable, for `user` (`token` when
+/// not given). `None`, for anonymous pulls, without a token.
+///
+/// # Errors
+///
+/// When a user is given without a token.
+pub fn registry_credentials(user: Option<String>) -> anyhow::Result<Option<Credentials>> {
+    let secret = std::env::var("REGISTRY_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+    Ok(match (user, secret) {
+        (user, Some(secret)) => Some(Credentials {
+            username: user.unwrap_or_else(|| "token".to_owned()),
+            secret,
+        }),
+        (Some(_), None) => anyhow::bail!("--registry-user needs REGISTRY_TOKEN"),
+        (None, None) => None,
+    })
 }

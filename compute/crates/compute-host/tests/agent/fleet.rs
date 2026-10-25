@@ -13,7 +13,7 @@ use compute_core::{DiskPolicy, DiskSpace, HostPolicy, Level, Priority};
 use compute_engine::{CancellationToken, EngineError};
 use compute_host::fleet::{Admission, LeaseGate, boot_now};
 use compute_host::protocol::{
-    DiskStatus, ErrorCode, Id, LevelName, Reply, Request, SandboxConfig, SleepConfig,
+    DiskStatus, ErrorCode, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
 };
 use compute_host::{
     Archive, Claimed, Directory, DiskGauge, FetchInto, FetchedMemory, HostError, Owned, OwnerEpoch,
@@ -63,7 +63,22 @@ fn ruling(id: Id, verdict: Verdict) -> Ruling {
 
 async fn hand_off(lab: &Lab, id: Id, owner_epoch: u64) -> Reply {
     lab.client
-        .call(&Request::HandOff { id, owner_epoch })
+        .call(&Request::HandOff {
+            id,
+            owner_epoch,
+            awake: false,
+        })
+        .await
+        .unwrap()
+}
+
+async fn hand_off_awake(lab: &Lab, id: Id, owner_epoch: u64) -> Reply {
+    lab.client
+        .call(&Request::HandOff {
+            id,
+            owner_epoch,
+            awake: true,
+        })
         .await
         .unwrap()
 }
@@ -127,6 +142,134 @@ async fn a_sandbox_handed_off_by_one_host_wakes_on_another_with_its_files_and_pr
         two.run(sandbox, &["get", "disk"]).await,
         ["kept", "on-disk"],
         "programs and files moved with it"
+    );
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A sandbox something keeps awake for good, as a desktop someone watches
+/// or a program that never stops working, still leaves a host being
+/// drained when asked to go awake: its holds end, it is saved where it
+/// stands, and it carries on, programs and all, on the host that adopts
+/// it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_held_awake_is_handed_off_with_its_programs_when_asked_to_go_awake() {
+    let (one, two, shelf) = hosts().await;
+    let sandbox = id(3);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept", "write on-disk"]).await;
+    let hold = Request::Hold {
+        id: sandbox,
+        generation: None,
+        hold: "watched".into(),
+        ttl_ms: None,
+        priority: PriorityName::default(),
+    };
+    assert_eq!(one.client.call(&hold).await.unwrap(), Reply::Done);
+    // A stream carrying traffic holds it too, under a lease of its own.
+    let lease = one
+        .handle
+        .acquire(sandbox, None, compute_core::Priority::Interactive)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        code(&hand_off(&one, sandbox, 1).await),
+        Some(ErrorCode::Busy),
+        "held awake, it stays unless asked to go awake"
+    );
+    assert_eq!(hand_off_awake(&one, sandbox, 1).await, Reply::Done);
+    assert_eq!(one.status().await.sandboxes, Vec::new());
+    assert!(shelf.join(sandbox.to_string()).exists());
+    // The stream's lease ends after the sandbox has gone, as a stream's
+    // does at its next write.
+    drop(lease);
+    assert_eq!(code(&one.wake(sandbox).await), Some(ErrorCode::NotFound));
+
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert!(
+        two.current(sandbox).await.memory_saved,
+        "it was saved with its memory"
+    );
+    assert_eq!(
+        two.run(sandbox, &["get", "disk"]).await,
+        ["kept", "on-disk"],
+        "programs and files moved with it"
+    );
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// Asked to go awake, a sandbox kept running by its own work and held by
+/// nothing is handed off too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_sandbox_is_handed_off_when_asked_to_go_awake() {
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(4);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept"]).await;
+    assert_eq!(
+        code(&hand_off(&one, sandbox, 1).await),
+        Some(ErrorCode::Busy)
+    );
+    assert_eq!(hand_off_awake(&one, sandbox, 1).await, Reply::Done);
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(two.run(sandbox, &["get"]).await, ["kept"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A sandbox asked to wake, whose wake keeps failing for now, is wanted
+/// awake though nothing holds it: a drain of what sleeps leaves it, and
+/// one asked to go awake ends the wake, tells whoever waits for it here
+/// that it is going, and saves it where it stands instead of waiting for
+/// a wake to get through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hand_off_asked_to_go_awake_ends_a_wake_still_retrying() {
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(5);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept"]).await;
+    assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    one.wait_level(sandbox, LevelName::Paused).await;
+    one.world.refuse_resumes.store(true, Ordering::SeqCst);
+    let touch = Request::Touch {
+        id: sandbox,
+        generation: None,
+        priority: PriorityName::Interactive,
+    };
+    assert_eq!(one.client.call(&touch).await.unwrap(), Reply::Done);
+    one.wait_until("a refused resume", |status| {
+        status
+            .steps
+            .iter()
+            .any(|(name, stats)| name == "resume" && stats.failed > 0)
+    })
+    .await;
+    assert_eq!(
+        code(&hand_off(&one, sandbox, 1).await),
+        Some(ErrorCode::Busy),
+        "wanted awake, it stays unless asked to go awake"
+    );
+
+    let (woken, handed) = tokio::join!(
+        one.handle.acquire(sandbox, None, Priority::Interactive),
+        async {
+            sleep(Duration::from_millis(50)).await;
+            hand_off_awake(&one, sandbox, 1).await
+        },
+    );
+    let Err(error) = woken else {
+        panic!("a wait for it to wake here got through");
+    };
+    assert!(matches!(error, HostError::HandingOff(_)), "{error:?}");
+    assert_eq!(handed, Reply::Done);
+    assert_eq!(one.status().await.sandboxes, Vec::new());
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(
+        two.run(sandbox, &["get"]).await,
+        ["kept"],
+        "its programs moved with it"
     );
     one.assert_clean();
     two.assert_clean();
@@ -234,7 +377,7 @@ async fn a_sandbox_being_handed_off_takes_no_wake() {
         one.wait_level(sandbox, LevelName::Paused).await;
         let handle = one.handle.clone();
         let handing =
-            tokio::spawn(async move { handle.hand_off(sandbox, OwnerEpoch::FIRST).await });
+            tokio::spawn(async move { handle.hand_off(sandbox, OwnerEpoch::FIRST, false).await });
         // A wake the agent takes before the hand-off wakes the sandbox and
         // turns the hand-off down, so probe only once the hand-off has
         // begun its sleep: nothing else would, with sleep left to requests.
@@ -705,7 +848,7 @@ async fn a_request_that_waited_past_its_admission_does_nothing() {
         Err(HostError::NotAdmitted)
     ));
     assert!(matches!(
-        stale.hand_off(sandbox, OwnerEpoch::FIRST).await,
+        stale.hand_off(sandbox, OwnerEpoch::FIRST, false).await,
         Err(HostError::NotAdmitted)
     ));
     assert!(
@@ -729,7 +872,9 @@ async fn a_request_that_waited_past_its_admission_does_nothing() {
         Err(HostError::NotAdmitted)
     ));
     assert!(matches!(
-        admitted(3, 13).hand_off(sandbox, OwnerEpoch::FIRST).await,
+        admitted(3, 13)
+            .hand_off(sandbox, OwnerEpoch::FIRST, false)
+            .await,
         Err(HostError::NotAdmitted)
     ));
     assert!(
@@ -961,7 +1106,7 @@ async fn a_hand_off_during_a_change_of_owner_is_never_answered_not_found() {
     let owned = one.handle.owned(later);
     let (created, handed) = tokio::join!(
         owned.create(sandbox, config(NEVER)),
-        one.handle.hand_off(sandbox, later),
+        one.handle.hand_off(sandbox, later, false),
     );
     created.unwrap();
     assert!(
@@ -969,7 +1114,7 @@ async fn a_hand_off_during_a_change_of_owner_is_never_answered_not_found() {
         "{handed:?}"
     );
     if handed.is_err() {
-        one.handle.hand_off(sandbox, later).await.unwrap();
+        one.handle.hand_off(sandbox, later, false).await.unwrap();
     }
     assert_eq!(one.status().await.sandboxes, Vec::new());
     assert!(shelf.join(sandbox.to_string()).exists());

@@ -165,7 +165,7 @@ describe("organization Azure OpenAI rail", () => {
     }
   });
 
-  test("capabilities are the conservative workspace direct-Azure definition", () => {
+  test("organization Azure enables reasoning without changing other workspace capabilities", () => {
     const settings = base();
     const organization = configuredModels(
       withOrganizationAzureOpenAICatalogProvider(settings, {
@@ -194,8 +194,13 @@ describe("organization Azure OpenAI rail", () => {
         },
       ]),
     ).find((model) => model.providerId === `workspace-azure-openai-${connectionId}`)!;
-    expect(organization.capabilities).toEqual(workspace.capabilities);
-    expect(organization.capabilities.reasoning.runnable).toBe(false);
+    expect(organization.capabilities).toEqual({
+      ...workspace.capabilities,
+      reasoning: organization.capabilities.reasoning,
+    });
+    expect(workspace.capabilities.reasoning.runnable).toBe(false);
+    expect(organization.capabilities.reasoning.runnable).toBe(true);
+    expect(organization.capabilities.reasoning.efforts).toContain("high");
     expect(organization.capabilities.hostedTools.webSearch.runnable).toBe(false);
   });
 

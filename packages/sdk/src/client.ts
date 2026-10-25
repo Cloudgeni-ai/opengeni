@@ -265,6 +265,7 @@ import {
   type ComputerClipboard,
   type ComputerFrame,
   type ComputerObservation,
+  type ComputerScreenshotOptions,
   type ComputerSession,
   type ComputerSessionAttachment,
   type ComputerSessionAttachmentRequest,
@@ -1213,6 +1214,13 @@ export type SteerMessageResult = {
   routing: SessionPromptRouting;
   /** Number of live attempts durably asked to stop by this atomic Steer. */
   interruptionCount: number;
+  /**
+   * The chat runs on another person's personal machine, so the message waits
+   * for its owner instead of steering: the owner's next message brings it to
+   * the agent, or it runs once the chat moves to a machine you may use. Older
+   * servers omit it.
+   */
+  waitsForMachineOwner?: boolean | undefined;
   /** True when this response came from the command's immutable idempotency receipt. */
   replay: boolean;
 };
@@ -5452,10 +5460,38 @@ export class OpenGeniClient {
     computerSessionId: string,
     targetId: string,
     options: OpenGeniRequestOptions = {},
+    captureOptions: ComputerScreenshotOptions = {},
   ): Promise<ComputerFrame> {
+    const query = new URLSearchParams();
+    if (captureOptions.region !== undefined) {
+      const { x, y, width, height } = captureOptions.region;
+      if (
+        ![x, y, width, height].every((value) => typeof value === "number" && Number.isFinite(value))
+      ) {
+        throw new TypeError("computer screenshot region must be four finite numbers");
+      }
+      if (x < 0 || y < 0 || width <= 0 || height <= 0) {
+        throw new RangeError(
+          "computer screenshot region needs a non-negative x and y and a positive width and height",
+        );
+      }
+      query.set("region", [x, y, width, height].join(","));
+      if (captureOptions.regionFrame !== undefined) {
+        const frame = captureOptions.regionFrame;
+        if (
+          ![frame.width, frame.height].every((value) => Number.isSafeInteger(value) && value > 0)
+        ) {
+          throw new RangeError(
+            "computer screenshot regionFrame must be a positive whole width and height",
+          );
+        }
+        query.set("regionFrame", [frame.width, frame.height].join(","));
+      }
+    }
+    const suffix = query.size > 0 ? `?${query}` : "";
     const response = await this.requestResponse(
       "GET",
-      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot`,
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot${suffix}`,
       {},
       options,
     );

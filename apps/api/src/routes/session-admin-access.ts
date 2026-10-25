@@ -36,6 +36,7 @@ import {
 } from "../http/acting-person";
 import { requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { parseRequestBody } from "../http/request-body";
 
 /* ----------------------------------------------------------------------------
    Full access for agent sessions (named "admin access" in the API).
@@ -127,18 +128,19 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
     requireSameOriginBrowserMutation(c, deps);
     const organizationId = parseOrganizationId(c.req.param("organizationId"));
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    const parsed = UpdateOrganizationAgentAdminAccessRequest.safeParse(
+    const parsed = parseRequestBody(
+      UpdateOrganizationAgentAdminAccessRequest,
       await c.req.json().catch(() => null),
+      { status: 422, message: "invalid agent access setting" },
     );
-    if (!parsed.success) throw new HTTPException(422, { message: "invalid agent access setting" });
     try {
       return c.json(
         OrganizationAgentAdminAccess.parse(
           await setOrganizationAgentAdminAccess(deps.db, {
             organizationId,
             actorSubjectId: human.subjectId,
-            sessionAdminAccessAllowed: parsed.data.sessionAdminAccessAllowed,
-            chatActionsAllowed: parsed.data.chatActionsAllowed,
+            sessionAdminAccessAllowed: parsed.sessionAdminAccessAllowed,
+            chatActionsAllowed: parsed.chatActionsAllowed,
           }),
         ),
       );

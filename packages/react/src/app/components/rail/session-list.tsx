@@ -60,6 +60,7 @@ import {
 import { toast } from "../../lib/toast";
 import {
   createContext,
+  forwardRef,
   useCallback,
   useContext,
   useEffect,
@@ -69,6 +70,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ComponentPropsWithoutRef,
   type MouseEvent,
   type DragEvent,
   type ReactNode,
@@ -277,38 +279,45 @@ function isModifiedNavigationClick(
   return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0;
 }
 
-/** Composer / sessions-index entry — real link so Cmd/Ctrl-click opens a new tab. */
-export function NewSessionLink(props: {
-  className?: string | undefined;
-  "aria-label"?: string | undefined;
-  channelId?: string | null | undefined;
-  children: ReactNode;
-}) {
+/**
+ * Composer / sessions-index entry — real link so Cmd/Ctrl-click opens a new tab.
+ * It takes anchor props and a ref, so a tooltip trigger or `Button asChild` can
+ * wrap it.
+ */
+export const NewSessionLink = /* @__PURE__ */ forwardRef<
+  HTMLAnchorElement,
+  Omit<ComponentPropsWithoutRef<"a">, "href" | "children"> & {
+    channelId?: string | null | undefined;
+    children: ReactNode;
+  }
+>(function NewSessionLink({ channelId, children, onClick, ...anchor }, ref) {
   const windowEvents = useUiEventTarget("window");
   const newChatShortcut = useActionShortcut("chat.new");
   const rail = useRail();
   const context = useAppContext();
   return (
     <Link
+      {...anchor}
+      ref={ref}
       to="/workspaces/$workspaceId/sessions"
       params={{ workspaceId: rail.workspaceId }}
-      search={props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }}
-      aria-label={props["aria-label"]}
+      search={channelId === undefined ? {} : { channelId: channelId ?? "default" }}
       aria-keyshortcuts={newChatShortcut?.ariaKeys}
-      className={props.className}
       {...analyticsAction("new_session")}
       onClick={(event) => {
+        onClick?.(event);
+        if (event.defaultPrevented) return;
         if (isModifiedNavigationClick(event)) return;
         context.resetSessionView();
         rail.setDrawerOpen(false);
         // Same-route Link may not remount the index or rerun search-keyed effects.
-        queueMicrotask(() => requestCreateComposerFocus(windowEvents, props.channelId));
+        queueMicrotask(() => requestCreateComposerFocus(windowEvents, channelId));
       }}
     >
-      {props.children}
+      {children}
     </Link>
   );
-}
+});
 
 type RenameFn = (
   workspaceId: string,

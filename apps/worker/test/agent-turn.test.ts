@@ -6200,7 +6200,7 @@ describe("transient provider error classifier", () => {
       agentRunFailurePayload(new ActiveSessionHistoryLimitExceededError(2_048, 1_024)),
     ).toEqual({
       error:
-        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
+        "The session's active context is too large to load safely, even with inline images and older items left out, so it cannot be compacted. Clear the session context (/clear in chat, or the clearSessionContext action) to restart the model from an empty context, then send the next message; earlier messages stay in the timeline. Alternatively, start a new session.",
       code: "active_history_too_large",
       retryable: false,
       detail:

@@ -283,4 +283,30 @@ describe("personal integration setup permission", () => {
       "connections:write",
     );
   });
+
+  test("your own account of a reviewed integration definition needs just the narrow permission", () => {
+    expect(
+      connectSetupPermission({ providerId: "microsoft-outlook-mail", ownership: "personal" }),
+    ).toBe("connections:personal");
+    expect(
+      connectSetupPermission({
+        providerId: "microsoft-onedrive",
+        ownership: "personal",
+        installationTarget: { instanceKey: "account-1" },
+      }),
+    ).toBe("connections:personal");
+    expect(
+      connectSetupPermission({ providerId: "microsoft-outlook-mail", ownership: "workspace" }),
+    ).toBe("connections:write");
+    expect(
+      connectSetupPermission({
+        providerId: "microsoft-outlook-mail",
+        ownership: "personal",
+        source: { url: "https://example.com/openapi.json" },
+      }),
+    ).toBe("connections:write");
+    expect(
+      connectSetupPermission({ providerId: "custom-api-definition", ownership: "personal" }),
+    ).toBe("connections:write");
+  });
 });

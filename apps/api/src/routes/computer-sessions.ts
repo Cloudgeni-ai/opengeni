@@ -1,3 +1,5 @@
+import type { z } from "zod";
+import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
@@ -112,6 +114,12 @@ import {
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
 import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
+import {
+  captureZoomedComputerFrame,
+  parseComputerFrameRegionQuery,
+  parseComputerFrameSizeQuery,
+  translateZoomedComputerAction,
+} from "../computer-frame-zoom";
 import {
   controllerCacheAllowsHostFetch,
   controllerCachedUrlIsUsable,
@@ -619,6 +627,10 @@ export function registerComputerSessionRoutes(
         "sessions:read",
       );
       const targetId = requireOpaqueParam(context, "targetId");
+      const region = parseComputerFrameRegionQuery(context.req.query("region"));
+      const regionFrame = region
+        ? parseComputerFrameSizeQuery(context.req.query("regionFrame"))
+        : null;
       const frame = await withActiveComputerController(
         context,
         grant,
@@ -627,12 +639,22 @@ export function registerComputerSessionRoutes(
         "session.read",
         "computer.read",
         async ({ sessionClient, binding }) => {
+          const expected = {
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId,
+          };
           try {
-            return await captureModelComputerFrame(sessionClient, {
-              computerSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              targetId,
-            });
+            return region
+              ? await captureZoomedComputerFrame(
+                  sessionClient,
+                  targetId,
+                  region,
+                  regionFrame,
+                  MODEL_COMPUTER_FRAME_MAX_BYTES,
+                  (captured) => validateComputerFrameForApi(captured, expected),
+                )
+              : await captureModelComputerFrame(sessionClient, expected);
           } catch (error) {
             if (error instanceof ComputerFrameEvidenceMismatchError) {
               observeComputerFrameEvidenceMismatch(deps.observability, error.reason);
@@ -756,6 +778,12 @@ export function registerComputerSessionRoutes(
               ) {
                 throw new HTTPException(403, { message: "Human desktop input is disabled" });
               }
+              // A pointer action on a zoomed frame acts on the native frame
+              // the zoom was cut from, in that frame's pixels.
+              const translated = translateZoomedComputerAction({
+                expectedFrameId: request.expectedFrameId,
+                action: request.action,
+              });
               const commandFields = {
                 protocolVersion: INTERACTION_PROTOCOL_VERSION,
                 operationId: request.operationId,
@@ -764,9 +792,9 @@ export function registerComputerSessionRoutes(
                 targetId: request.targetId,
                 expectedTargetGeneration: request.expectedTargetGeneration,
                 expectedObservationId: request.expectedObservationId,
-                expectedFrameId: request.expectedFrameId,
+                expectedFrameId: translated.expectedFrameId,
                 actor: interactionActorForGrant(grant),
-                action: request.action,
+                action: translated.action,
               };
               ComputerActionCommand.parse(commandFields);
               const secretValues = await resolveInteractionSecretValues({
@@ -1345,7 +1373,7 @@ export function registerComputerSessionRoutes(
         );
       }
       if (operation !== "computer.end") {
-        assertConnectedMachineComputerAccess(enrollment, operation);
+        await assertConnectedMachineComputerAccess(enrollment, operation);
       }
       const placementInstanceId = attachedEndPlacementInstanceId(
         operation,
@@ -1479,7 +1507,19 @@ export function registerComputerSessionRoutes(
             if (!enrollment?.connectionInstanceId) {
               throw new ComputerSessionStateError("Connected Machine is unavailable");
             }
-            assertConnectedMachineComputerAccess(enrollment, operation);
+            await assertConnectedMachineComputerAccess(enrollment, operation, async () => {
+              const sandbox = await getChannelAMachineSandbox(
+                deps.db,
+                {
+                  accountId: grant.accountId,
+                  workspaceId: sourceSession.workspaceId,
+                  sessionId: sourceSession.id,
+                },
+                await handle.machineAuthority(),
+                resolved.sandboxId!,
+              );
+              return sandbox?.name ?? null;
+            });
             screenControlAllowed = enrollment.allowScreenControl === true;
           }
           if (expectedPlacement?.kind === "connected_machine") {
@@ -2208,29 +2248,14 @@ async function authorizeSourceSession(
   }
 }
 
-async function parseJsonBody<T>(
+async function parseJsonBody<Schema extends z.ZodType>(
   context: Context,
-  schema: {
-    safeParse(value: unknown):
-      | { success: true; data: T }
-      | {
-          success: false;
-          error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] };
-        };
-  },
-): Promise<T> {
-  const value = await context.req.json().catch(() => undefined);
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) {
-    // Name the first rejected field, so a caller (often a model) can correct
-    // that one value instead of guessing which part of the body was wrong.
-    const issue = parsed.error.issues[0];
-    const detail = issue
-      ? `: ${issue.path.length ? `${issue.path.map(String).join(".")}: ` : ""}${issue.message}`
-      : "";
-    throw new HTTPException(400, { message: `invalid request body${detail}`.slice(0, 300) });
-  }
-  return parsed.data;
+  schema: Schema,
+): Promise<z.output<Schema>> {
+  return parseRequestBody(schema, await context.req.json().catch(() => undefined), {
+    status: 400,
+    message: "invalid request body",
+  });
 }
 
 async function parseEmptyJsonBody(context: Context): Promise<void> {
@@ -2306,18 +2331,21 @@ function attachedEndPlacementInstanceId(
   return liveGeneration;
 }
 
-function assertConnectedMachineComputerAccess(
+async function assertConnectedMachineComputerAccess(
   enrollment: {
     hasDisplay: boolean;
     desktopUnavailableReason: string | null;
     allowScreenControl: boolean;
+    os?: string | null;
   },
   operation: ChannelAOperation,
-): void {
-  const error = connectedMachineComputerAccessError(
-    enrollment,
-    operation === "computer.action" || operation === "computer.control",
-  );
+  /** The checked machine's name, read only when access fails. */
+  machineName: () => Promise<string | null> = async () => null,
+): Promise<void> {
+  const requiresControl = operation === "computer.action" || operation === "computer.control";
+  if (!connectedMachineComputerAccessError(enrollment, requiresControl)) return;
+  const name = await machineName().catch(() => null);
+  const error = connectedMachineComputerAccessError(enrollment, requiresControl, name);
   if (!error) return;
   if (error.status === 403) {
     throw new HTTPException(403, { message: error.message });

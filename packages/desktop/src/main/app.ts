@@ -444,8 +444,14 @@ export class DesktopShell {
     // which macOS would ask the person about (the app ships no Bluetooth
     // usage description; see web-permissions.ts).
     app.commandLine.appendSwitch("disable-blink-features", "WebBluetooth");
-    // Without it Windows shows no notifications for the installed app.
-    if (process.platform === "win32") app.setAppUserModelId(config.appId);
+    // Without it Windows shows no notifications for the installed app. A run
+    // from source gets its own ID: Electron then adds a Start-menu shortcut
+    // for its own binary, and two shortcuts with one ID make Windows show the
+    // installed app's notifications as "Electron" and open the development
+    // build when they are clicked.
+    if (process.platform === "win32") {
+      app.setAppUserModelId(app.isPackaged ? config.appId : `${config.appId}.dev`);
+    }
     if (process.defaultApp && process.argv[1]) {
       app.setAsDefaultProtocolClient(config.scheme, process.execPath, [process.argv[1]]);
     } else if (!appImagePath()) {
@@ -1252,6 +1258,20 @@ export class DesktopShell {
     );
     handle(DESKTOP_IPC.openExternal, (_account, url) => {
       if (typeof url === "string") openExternalSafely(url);
+    });
+    // A still of the asking page itself, for a feedback report: only the
+    // account page can ask, and it only ever gets its own pixels.
+    ipcMain.handle(DESKTOP_IPC.captureWindow, async (event) => {
+      this.senderAccount(event);
+      const image = await event.sender.capturePage();
+      if (image.isEmpty()) return null;
+      const { width, height } = image.getSize();
+      return {
+        contentType: "image/png",
+        base64: image.toPNG().toString("base64"),
+        width,
+        height,
+      };
     });
     handle(DESKTOP_IPC.appShotsStatus, () => this.appShots.status());
     handle(DESKTOP_IPC.updatesState, () => this.updates?.pageState ?? { kind: "none" });

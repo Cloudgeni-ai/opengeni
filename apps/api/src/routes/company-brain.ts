@@ -37,6 +37,8 @@ import { z } from "zod";
 import { createCompanyBrainOkfPackage, serializeCompanyBrainOkf } from "../company-brain-okf";
 import { projectWorkspaceState } from "../workspace-state-projection";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import { parseRequestQuery } from "../http/request-body";
+import { routeRetired } from "../http/deprecation";
 
 const inspectorQuery = z
   .object({
@@ -242,11 +244,11 @@ export function registerCompanyBrainRoutes(app: Hono, deps: ApiRouteDeps): void 
     return context.body(serializeCompanyBrainOkf(result));
   });
 
-  for (const path of [
-    `${base}/knowledge/search`,
-    `${base}/knowledge/record`,
-    `${base}/knowledge/browse`,
-  ]) {
+  for (const [path, replacement] of [
+    [`${base}/knowledge/search`, "POST /v1/workspaces/:workspaceId/knowledge/entries/search"],
+    [`${base}/knowledge/record`, "POST /v1/workspaces/:workspaceId/knowledge/entries"],
+    [`${base}/knowledge/browse`, "GET /v1/workspaces/:workspaceId/knowledge/entries"],
+  ] as const) {
     app.all(path, async (context) => {
       await requireAccessGrant(
         context,
@@ -254,10 +256,10 @@ export function registerCompanyBrainRoutes(app: Hono, deps: ApiRouteDeps): void 
         context.req.param("workspaceId")!,
         "documents:search",
       );
-      throw new HTTPException(410, {
-        message:
-          "Knowledge retrieval moved to /knowledge/entries. Use canonical entries, revisions and groups.",
-      });
+      throw routeRetired(
+        replacement,
+        "Knowledge retrieval moved to /knowledge/entries. Use canonical entries, revisions and groups.",
+      );
     });
   }
 
@@ -270,20 +272,22 @@ export function registerCompanyBrainRoutes(app: Hono, deps: ApiRouteDeps): void 
       "workspace:read",
     );
     const { grant } = access;
-    const parsed = inspectorQuery.safeParse(context.req.query());
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid context receipt query" });
-    const before = parsed.data.cursor
-      ? decodeReceiptCursor(parsed.data.cursor, workspaceId, grant.subjectId)
+    const parsed = parseRequestQuery(inspectorQuery, context.req.query(), {
+      status: 400,
+      message: "invalid context receipt query",
+    });
+    const before = parsed.cursor
+      ? decodeReceiptCursor(parsed.cursor, workspaceId, grant.subjectId)
       : undefined;
     const rows = await inspectCompanyBrainContextReceipts(deps.db, {
       workspaceId,
       subjectId: grant.subjectId,
-      ...(parsed.data.attemptId ? { attemptId: parsed.data.attemptId } : {}),
+      ...(parsed.attemptId ? { attemptId: parsed.attemptId } : {}),
       ...(before ? { before } : {}),
-      limit: parsed.data.attemptId ? 1 : parsed.data.limit + 1,
+      limit: parsed.attemptId ? 1 : parsed.limit + 1,
     });
-    const hasMore = !parsed.data.attemptId && rows.length > parsed.data.limit;
-    const receipts = rows.slice(0, parsed.data.limit);
+    const hasMore = !parsed.attemptId && rows.length > parsed.limit;
+    const receipts = rows.slice(0, parsed.limit);
     const tail = receipts.at(-1);
     const response = CompanyBrainContextReceiptPage.parse({
       receipts,
@@ -303,18 +307,20 @@ export function registerCompanyBrainRoutes(app: Hono, deps: ApiRouteDeps): void 
   app.get(`${base}/knowledge-proposals`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "documents:search");
-    const parsed = z.coerce
-      .number()
-      .int()
-      .positive()
-      .max(COMPANY_BRAIN_INSPECTOR_MAX_LIMIT)
-      .default(COMPANY_BRAIN_INSPECTOR_DEFAULT_LIMIT)
-      .safeParse(context.req.query("limit"));
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid proposal limit" });
+    const parsed = parseRequestQuery(
+      z.coerce
+        .number()
+        .int()
+        .positive()
+        .max(COMPANY_BRAIN_INSPECTOR_MAX_LIMIT)
+        .default(COMPANY_BRAIN_INSPECTOR_DEFAULT_LIMIT),
+      context.req.query("limit"),
+      { status: 400, message: "invalid proposal limit" },
+    );
     const response = await listCompanyBrainKnowledgeProposals(deps.db, {
       workspaceId,
       subjectId: grant.subjectId,
-      limit: parsed.data,
+      limit: parsed,
     });
     context.header("cache-control", "private, no-store");
     return context.json(CompanyBrainKnowledgeProposalPage.parse(response));

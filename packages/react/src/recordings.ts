@@ -11,6 +11,7 @@ export {
   useRecorder,
   useRecording,
   useRecordingModels,
+  useRecordingNotes,
   useRecordingPeople,
   useRecordings,
   useRecordingsClient,
@@ -25,6 +26,8 @@ export type {
   UseRecordingResult,
   UseRecordingsOptions,
   UseRecordingsResult,
+  UseRecordingNotesOptions,
+  UseRecordingNotesResult,
   UseTranscriptOptions,
   UseTranscriptResult,
 } from "./hooks/use-recordings";
@@ -43,6 +46,7 @@ export {
   defaultSpeakerName,
   formatClock,
   formatDuration,
+  groupLiveTurns,
   groupTranscriptTurns,
   languageName,
   meetingPhase,
@@ -50,7 +54,14 @@ export {
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
+  tidyLiveText,
+  tidyPartialText,
   transcriptErrorText,
   versionSummary,
 } from "./recordings-model";
-export type { MeetingPhase, TranscriptTurn } from "./recordings-model";
+export type {
+  LiveTranscriptLine,
+  LiveTranscriptTurn,
+  MeetingPhase,
+  TranscriptTurn,
+} from "./recordings-model";

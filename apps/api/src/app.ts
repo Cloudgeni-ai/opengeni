@@ -153,6 +153,7 @@ import {
 } from "./http/api-error";
 import {
   isRequestBodyValidationError,
+  parseRequestBody,
   requestBodyValidationHttpError,
   tagRequestJsonParseErrors,
 } from "./http/request-body";
@@ -206,6 +207,7 @@ import { createManagedAuthNewSignupsGate } from "./auth/new-signups-gate";
 import {
   createManagedAuth,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthRequiresEmailVerification,
   managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
@@ -398,7 +400,10 @@ import {
 } from "./routes/managed-auth-session-sets";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
 import { projectClientModel } from "./model-catalog";
-import { createTranscriptionService } from "@opengeni/core/transcription-service";
+import {
+  createSpeechToTextDeployment,
+  createTranscriptionService,
+} from "@opengeni/core/transcription-service";
 import { createFfmpegTranscriptionSegmenter } from "@opengeni/core/transcription-service";
 import { registerTeamsBotRoutes } from "./integrations/teams-bot";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
@@ -627,11 +632,18 @@ export function createAppComposition(deps: AppDependencies): {
       );
     }
   }
+  const speechToText =
+    deps.speechToText ??
+    createSpeechToTextDeployment(
+      { settings: deps.settings, db: deps.db },
+      deps.codexFetch ? { codexFetch: deps.codexFetch } : {},
+    );
   const transcription =
     deps.transcription === undefined
       ? createTranscriptionService({
           settings: deps.settings,
           db: deps.db,
+          deployment: speechToText,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
           log: (message, attributes) => observability.error(message, attributes),
         })
@@ -678,6 +690,7 @@ export function createAppComposition(deps: AppDependencies): {
     objectStorage,
     documentIndexer,
     getDocumentServices,
+    speechToText,
     transcription,
     transcriptionSegmenter,
     modelCalls,
@@ -2002,8 +2015,7 @@ export function createAppComposition(deps: AppDependencies): {
             : operation === "manifest"
               ? ToolGatewayManifestRequest
               : ToolGatewayTargetApprovalRequest;
-      if (!schema.safeParse(body).success)
-        throw new HTTPException(400, { message: "Invalid targeted tool request" });
+      parseRequestBody(schema, body, { status: 400, message: "Invalid targeted tool request" });
       c.header("cache-control", "no-store");
       const started = performance.now();
       let outcome: "ok" | "failed" = "failed";
@@ -2094,14 +2106,14 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
-    const parsed = ToolGatewayCallRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "Invalid tool gateway call" });
-    }
+    const parsed = parseRequestBody(ToolGatewayCallRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid tool gateway call",
+    });
     const { response, timing } = await callWorkspaceToolGatewayForCaller(
       routeDeps,
       authorization,
-      parsed.data,
+      parsed,
       {
         attestations: toolGatewayCatalogAttestations,
         ...(routeDeps.observability ? { observability: routeDeps.observability } : {}),
@@ -2126,10 +2138,11 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
-    const parsed = ToolGatewayApprovalRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "Invalid tool gateway approval" });
-    }
+    const parsed = parseRequestBody(
+      ToolGatewayApprovalRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "Invalid tool gateway approval" },
+    );
     const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
     try {
       return c.json(
@@ -2137,7 +2150,7 @@ export function createAppComposition(deps: AppDependencies): {
           prepared,
           authorization.grant,
           routeDeps.db,
-          parsed.data,
+          parsed,
           undefined,
           routeDeps.observability,
         ),
@@ -2211,15 +2224,15 @@ export function createAppComposition(deps: AppDependencies): {
     if (!isCodemodeGrant(grant)) {
       throw new HTTPException(403, { message: "Codemode access denied" });
     }
-    const parsed = CodemodeCallRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "Invalid Codemode call" });
-    }
+    const parsed = parseRequestBody(CodemodeCallRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid Codemode call",
+    });
     try {
       const submission = await submitAndDispatchCodemodeCall(
         routeDeps,
         grant,
-        parsed.data,
+        parsed,
         c.req.raw.signal,
       );
       const terminal = ["completed", "failed", "outcome_unknown", "cancelled"].includes(
@@ -2615,7 +2628,7 @@ function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabl
     return {
       mode: "managedSession" as const,
       session: "cookie" as const,
-      emailVerificationRequired: settings.environment !== "local",
+      emailVerificationRequired: managedAuthRequiresEmailVerification(settings),
       newSignupsEnabled,
       socialProviders: [
         ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
@@ -2938,6 +2951,7 @@ export function errorCodeForStatus(status: number): ErrorCode {
   if (status === 403) return "forbidden";
   if (status === 404 || status === 405) return "not_found";
   if (status === 409) return "conflict";
+  if (status === 410) return "gone";
   if (status === 413 || status === 422 || status === 400) return "validation_failed";
   if (status === 429) return "limit_exceeded";
   if (status === 502 || status === 503 || status === 504) return "upstream_unavailable";

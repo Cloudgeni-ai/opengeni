@@ -375,6 +375,34 @@ export function humanizeFailureReason(t: OpenGeniText, reason: string | null): s
   return reason;
 }
 
+/**
+ * Codes whose recorded text is an operator or runtime diagnostic, not copy
+ * written for people. The worker authors the text of the failures it
+ * classifies for the person reading the chat; these few record what an
+ * operator needs instead (internal state, identities, remedies only an
+ * operator can apply).
+ */
+const DIAGNOSTIC_FAILURE_CODES: ReadonlySet<string> = new Set([
+  // The raw admission error, or an operator's reason for retiring the turn.
+  "pre_claim_failure",
+  "interrupted_turn_retired",
+  "worker_death_redispatch_exhausted",
+  "sandbox_command_observation_unavailable",
+  "sandbox_command_start_outcome_unknown",
+  "sandbox_materialization_verification_failed",
+  "invalid_sse_terminal",
+]);
+
+/**
+ * Whether a failure with this recorded code carries diagnostic text rather
+ * than copy for people. An unclassified failure (no code) records the raw
+ * error message, which is never written for people. Such text belongs behind
+ * Details, under a plain outcome; the stored (and model-facing) event keeps it.
+ */
+export function isDiagnosticFailureCode(code: unknown): boolean {
+  return typeof code !== "string" || !code.trim() || DIAGNOSTIC_FAILURE_CODES.has(code);
+}
+
 /** Project failure diagnostics without changing the stored event, including legacy retry wrappers. */
 export function presentFailure(
   t: OpenGeniText,
@@ -382,6 +410,12 @@ export function presentFailure(
 ): {
   reason: string | null;
   safetyRefusal: boolean;
+  /**
+   * `reason` is the recorded text unchanged and that text is a diagnostic
+   * ({@link isDiagnosticFailureCode}): a surface that headlines the failure
+   * names the outcome instead and keeps `reason` behind Details.
+   */
+  diagnostic: boolean;
 } {
   const databaseFailure =
     payload.code === "db_deadlock" ||
@@ -393,12 +427,16 @@ export function presentFailure(
       typeof payload.database === "object" &&
       !Array.isArray(payload.database));
   if (databaseFailure) {
-    return { reason: t("lib.format.theServiceEncounteredADatabase"), safetyRefusal: false };
+    return {
+      reason: t("lib.format.theServiceEncounteredADatabase"),
+      safetyRefusal: false,
+      diagnostic: false,
+    };
   }
   // Failures the server identifies by code read in the host's language; the
   // stored (and model-facing) English text stays on the event.
   const coded = typeof payload.code === "string" ? CODED_FAILURE_TEXT[payload.code] : undefined;
-  if (coded) return { reason: coded(t), safetyRefusal: false };
+  if (coded) return { reason: coded(t), safetyRefusal: false, diagnostic: false };
   const text = (key: string): string | null => {
     const value = payload[key];
     return typeof value === "string" && value.trim() ? value : null;
@@ -418,22 +456,33 @@ export function presentFailure(
           ? t("lib.format.providerBlockedRequestDetail", { detail: detail ?? message })
           : t("lib.format.providerBlockedRequest"),
       safetyRefusal: true,
+      diagnostic: false,
     };
   }
   // Spent automatic retries: name the model and the remedy instead of the
   // recorded wrapper plus raw provider text (still in the stored event).
   const recovery = parseProviderRecovery(payload);
   if (recovery && payload.recoveryExhausted === true) {
-    return { reason: providerRecoveryExhaustedText(t, recovery), safetyRefusal: false };
+    return {
+      reason: providerRecoveryExhaustedText(t, recovery),
+      safetyRefusal: false,
+      diagnostic: false,
+    };
   }
+  const humanMessage = humanizeFailureReason(t, message);
+  const separateDetail = detail && detail !== message ? detail : null;
+  const humanDetail = separateDetail ? humanizeFailureReason(t, separateDetail) : null;
+  const reason = separateDetail
+    ? [humanMessage, humanDetail].filter(Boolean).join(" ")
+    : humanMessage;
   return {
-    reason:
-      detail && detail !== message
-        ? [humanizeFailureReason(t, message), humanizeFailureReason(t, detail)]
-            .filter(Boolean)
-            .join(" ")
-        : humanizeFailureReason(t, message),
+    reason,
     safetyRefusal: false,
+    diagnostic:
+      reason !== null &&
+      humanMessage === message &&
+      humanDetail === separateDetail &&
+      isDiagnosticFailureCode(payload.code),
   };
 }
 

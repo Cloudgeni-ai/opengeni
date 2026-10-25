@@ -61,6 +61,7 @@ import {
   recordModelTransportStarted,
 } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
+import { observePromptCacheRequestBody } from "./prompt-cache-fingerprint";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
@@ -123,6 +124,16 @@ export function buildOpenAIClientFromSettings(
 ): OpenAI {
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
+    const identityTokenSource =
+      settings.azureOpenaiAuthMode === "managed_identity"
+        ? sharedAzureEntraAccessTokenSource({
+            source: "managed_identity",
+            clientId: settings.azureClientId,
+          })
+        : settings.azureOpenaiAuthMode === "workload_identity" ||
+            settings.azureOpenaiAuthMode === "deployment_identity"
+          ? sharedAzureEntraAccessTokenSource(deploymentAzureEntraCredential(settings)!)
+          : null;
     const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
     return new ReplayableJsonOpenAI(
       {
@@ -142,7 +153,9 @@ export function buildOpenAIClientFromSettings(
             modelStreamIdlePolicy(settings),
             instrumentedModelFetch(
               providerId,
-              openAIResponsesFetch(settings),
+              identityTokenSource
+                ? azureEntraBearerFetch(openAIResponsesFetch(settings), identityTokenSource, false)
+                : openAIResponsesFetch(settings),
               settings.openaiResponsesWebSocketEnabled,
             ),
           ),
@@ -318,6 +331,16 @@ function providerClientCacheKey(
                 azureOpenaiDeployment: settings.azureOpenaiDeployment ?? null,
                 azureOpenaiApiVersion: settings.azureOpenaiApiVersion ?? null,
                 usesAdToken: Boolean(settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey),
+                azureOpenaiAuthMode: settings.azureOpenaiAuthMode,
+                azureIdentity: {
+                  tenantId: settings.azureTenantId,
+                  clientId: settings.azureClientId,
+                  federatedTokenFile: settings.azureFederatedTokenFile,
+                  authorityHost: settings.azureAuthorityHost,
+                  clientSecretDigest: settings.azureClientSecret
+                    ? createHash("sha256").update(settings.azureClientSecret).digest("hex")
+                    : null,
+                },
               }
             : null,
       }),
@@ -449,6 +472,7 @@ function organizationAzureEntraTokenSource(
 function azureEntraBearerFetch(
   inner: typeof fetch,
   tokenSource: AzureEntraAccessTokenSource,
+  organizationCredential = true,
 ): typeof fetch {
   const send = async (
     input: Parameters<typeof fetch>[0],
@@ -466,7 +490,7 @@ function azureEntraBearerFetch(
     try {
       token = await tokenSource();
     } catch (error) {
-      if (error instanceof AzureEntraTokenError && !error.retryable)
+      if (organizationCredential && error instanceof AzureEntraTokenError && !error.retryable)
         return azureEntraRefusedResponse();
       throw error;
     }
@@ -736,6 +760,7 @@ export function instrumentedModelFetch(
     // this process can place request bytes on the network.
     await recordModelTransportStarted();
     const capture = captureProviderRequestBody(provider, input, init);
+    observePromptCacheRequestBody(init?.body);
     const started = performance.now();
     // A request whose bearer a subscription core leased is admitted by its
     // custody as the last awaited step before the fetch, then settled from

@@ -80,6 +80,7 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../lib/cn";
+import { inertProps } from "../lib/inert";
 import {
   MessageSenderContext,
   MessageSenderSlot,
@@ -3357,7 +3358,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
           noteFolded !== undefined && group.kind === "item" ? group.item.id : undefined
         }
         aria-hidden={noteFolded || undefined}
-        inert={noteFolded || undefined}
+        {...inertProps(noteFolded)}
         className={
           noteFolded ? "-mt-5 h-0 overflow-hidden opacity-0 [overflow-anchor:none]" : undefined
         }
@@ -3594,6 +3595,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               )}
               outcome={group.outcome}
               failureText={group.failureText}
+              failureDetail={group.failureDetail}
               foldKey={group.id}
               defaultOpen={readableWorkDefaultOpen(group)}
               unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
@@ -3749,6 +3751,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={group.items}
           outcome={group.outcome}
           failureText={group.failureText}
+          failureDetail={group.failureDetail}
           defaultOpen={
             group.outcome === "failed" ||
             containsPresentedImage ||
@@ -3823,6 +3826,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={activityItems}
           outcome={group.outcome}
           failureText={insideTurn ? undefined : group.failureText}
+          failureDetail={insideTurn ? undefined : group.failureDetail}
           durationMs={durationMs}
           defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}

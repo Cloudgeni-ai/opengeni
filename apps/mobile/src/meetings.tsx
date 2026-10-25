@@ -181,6 +181,24 @@ export function phoneUploadLine(recorder: MeetingRecorder): string | null {
   return `Uploading ${upload.pendingChunks} ${upload.pendingChunks === 1 ? "piece" : "pieces"} of audio.`;
 }
 
+/** The live preview is billed on top of the transcript, so say so where it's switched on. */
+export function liveCostHint(usdPerHour: number | null): string {
+  return usdPerHour !== null
+    ? `It adds about $${usdPerHour.toFixed(2)} per hour of audio.`
+    : "It uses extra transcription credit.";
+}
+
+/** The live preview's status line, or null when it is streaming normally. */
+export function phoneLiveStatus(
+  tracks: readonly { state: string }[],
+  paused: boolean,
+): string | null {
+  if (paused) return "Paused";
+  if (tracks.some((track) => track.state === "reconnecting")) return "Reconnecting…";
+  if (tracks.every((track) => track.state === "connecting")) return "Connecting…";
+  return null;
+}
+
 /** "Today, 14:05", "Yesterday, 09:30", "Oct 3, 16:20" or "Oct 3, 2025". */
 export function meetingDateLabel(iso: string, now: Date = new Date()): string {
   const date = new Date(iso);

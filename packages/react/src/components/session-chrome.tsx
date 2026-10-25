@@ -82,6 +82,7 @@ import type { UseGoalResult } from "../hooks/use-goal";
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
 import type { ComposerQueuedRecall } from "../hooks/use-queued-prompt-recall";
 import { cn } from "../lib/cn";
+import { inertProps } from "../lib/inert";
 import { useErrorMessage } from "../lib/error-message";
 import { formatClockTime } from "../lib/format";
 import {
@@ -1416,7 +1417,7 @@ function SessionChromeView({
             id={panelId}
             data-og-session-chrome-panel-shell=""
             aria-hidden={!open}
-            inert={!open ? true : undefined}
+            {...inertProps(!open)}
             className="grid overflow-hidden motion-reduce:transition-none"
             style={{
               gridTemplateRows: open ? "1fr" : "0fr",

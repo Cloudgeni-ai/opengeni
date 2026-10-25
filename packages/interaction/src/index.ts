@@ -1,5 +1,6 @@
 import {
   BrowserActionCommand,
+  BrowserActionNote,
   BrowserActionReceipt,
   INTERACTION_MAX_RESOLVED_ACTION_TARGETS,
   BrowserObservation,
@@ -177,9 +178,23 @@ export class BrowserInteractionController {
             error: input.error,
           });
         },
-        maxDispatchTraceItems: INTERACTION_MAX_RESOLVED_ACTION_TARGETS,
+        // Resolved elements and per-action notes share one bounded trace.
+        maxDispatchTraceItems:
+          INTERACTION_MAX_RESOLVED_ACTION_TARGETS + INTERACTION_MAX_ACTIONS_PER_BATCH,
         attachDispatchTrace(receipt, items) {
-          return BrowserActionReceipt.parse({ ...receipt, targets: items });
+          const targets: unknown[] = [];
+          const notes: unknown[] = [];
+          for (const item of items)
+            (BrowserActionNote.safeParse(item).success ? notes : targets).push(item);
+          return BrowserActionReceipt.parse({
+            ...receipt,
+            ...(targets.length > 0
+              ? { targets: targets.slice(0, INTERACTION_MAX_RESOLVED_ACTION_TARGETS) }
+              : {}),
+            ...(notes.length > 0
+              ? { notes: notes.slice(0, INTERACTION_MAX_ACTIONS_PER_BATCH) }
+              : {}),
+          });
         },
         recoverReceipt(receipt, settledAt) {
           if (

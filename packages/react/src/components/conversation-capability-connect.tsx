@@ -1,4 +1,8 @@
-import { personalIntegrationSetupAccess } from "@opengeni/contracts/personal-integration-setup";
+import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
+import {
+  PERSONAL_INTEGRATION_SETUP_PERMISSION,
+  personalIntegrationSetupAccess,
+} from "@opengeni/contracts/personal-integration-setup";
 import type { AccessContext, CapabilityCatalogItem, Permission } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import type { AuthNeededItem } from "../timeline";
@@ -24,6 +28,12 @@ export type InChatConnectDecision =
    * `personalOnly`: the person can connect only their own account.
    */
   | { kind: "card"; item: CapabilityCatalogItem; personalOnly: boolean }
+  /**
+   * A deployment's reviewed integration (Outlook Mail, OneDrive, ...): the
+   * person signs in with their own account, which installs its reviewed tools
+   * for that account alone, adds them to this chat and continues.
+   */
+  | { kind: "integration"; capabilityId: string; name: string }
   /** An agent's card this person cannot act on here. */
   | { kind: "unavailable" }
   /** Not an in-chat connection: the default recovery row decides. */
@@ -73,14 +83,24 @@ export function inChatConnectDecision(
 ): InChatConnectDecision {
   if (!chatConnections || !isAgentCapabilityRequest(item)) return { kind: "default" };
   if (support.status !== "ready") return { kind: "default" };
-  const capability = support.catalog.get(item.capability!.id);
-  if (!capability || capability.kind !== "mcp" || capability.authKind !== "oauth2")
-    return { kind: "default" };
+  const requested = item.capability!;
   const permissions = [...support.permissions];
   const grant = { permissions, permissionMode: support.permissionMode };
   const can = (permission: Permission) =>
     permissions.includes(permission) ||
     (support.permissionMode !== "explicit" && permissions.includes("workspace:admin"));
+  if (integrationDefinitionIdFromCapabilityId(requested.id)) {
+    // Connecting your own account is the whole step: the integration's tools
+    // are installed for that account only, never for the workspace, so the
+    // personal setup permission (included in connections:write) is enough.
+    return can("sessions:control") &&
+      (can(PERSONAL_INTEGRATION_SETUP_PERMISSION) || can("connections:write"))
+      ? { kind: "integration", capabilityId: requested.id, name: requested.name }
+      : { kind: "unavailable" };
+  }
+  const capability = support.catalog.get(requested.id);
+  if (!capability || capability.kind !== "mcp" || capability.authKind !== "oauth2")
+    return { kind: "default" };
   if (!can("sessions:control")) return { kind: "unavailable" };
   const usesSharedAccount =
     capability.enabled &&

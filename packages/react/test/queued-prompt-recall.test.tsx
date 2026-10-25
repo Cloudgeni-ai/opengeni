@@ -681,8 +681,12 @@ describe("composer Up-arrow recall", () => {
     const textarea = await mountComposer("", value);
     await pressUp(textarea);
     await flush();
-    const notice = mounted?.container.querySelector('[role="status"]');
-    expect(notice?.textContent).toBe("Already sent");
+    // Announced exactly once: a second live region would be read twice.
+    const notices = [...(mounted?.container.querySelectorAll('[role="status"]') ?? [])].filter(
+      (node) => node.textContent === "Already sent",
+    );
+    expect(notices).toHaveLength(1);
+    expect(mounted?.container.textContent).toContain("Already sent");
     expect(textarea.value).toBe("");
   });
 

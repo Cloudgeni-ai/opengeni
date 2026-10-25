@@ -23,7 +23,8 @@ import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
 import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
 import { enqueueCapabilitySetupContinuation } from "@opengeni/db";
-import { buildCapabilityCatalog } from "@opengeni/core";
+import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
+import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
 import { capabilitySetupReadiness } from "../capability-setup-readiness";
 import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import {
@@ -111,6 +112,7 @@ import {
   PublishSandboxFileArtifactRequest,
   RenewSessionRealtimeRequest,
   SyncSessionRealtimeLedgerRequest,
+  SessionCodexAccountPinRequest,
   SessionControlRequest,
   SessionRetryRequest,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -423,7 +425,7 @@ import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import { ApiHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
-import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { measureSessionCreatePhase } from "../session-create-observability";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
@@ -992,18 +994,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw sessionAuthorizationHttpError(error);
     }
     const raw = c.req.query();
-    const parsed = SessionMessageSearchRequest.safeParse({
-      ...raw,
-      ...(raw.limit !== undefined ? { limit: Number(raw.limit) } : {}),
-    });
-    if (!parsed.success)
-      throw new HTTPException(400, { message: "Invalid session message search request" });
+    const parsed = parseRequestQuery(
+      SessionMessageSearchRequest,
+      { ...raw, ...(raw.limit !== undefined ? { limit: Number(raw.limit) } : {}) },
+      { status: 400, message: "Invalid session message search request" },
+    );
     try {
       return c.json(
         await searchSessionMessagesForSubject(
           db,
           workspaceId,
-          parsed.data,
+          parsed,
           {
             subjectId: grant.subjectId,
             ...(authorizationScope ? { authorizationScope } : {}),
@@ -1366,20 +1367,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-      const query = z
-        .object({
+      const query = parseRequestQuery(
+        z.object({
           actionDigest: z.string().regex(/^[0-9a-f]{64}$/),
           path: z.string().max(2048).default(""),
           offset: z.coerce.number().int().min(0).max(4_194_304).default(0),
-        })
-        .safeParse(c.req.query());
-      if (!query.success) throw new HTTPException(400, { message: "Invalid review page" });
+        }),
+        c.req.query(),
+        { status: 400, message: "Invalid review page" },
+      );
       const input = {
         accountId: grant.accountId,
         workspaceId,
         sessionId: c.req.param("sessionId"),
         approvalId: c.req.param("approvalId"),
-        ...query.data,
+        ...query,
       };
       const page = await getToolReviewDetailsPage(db, input);
       if (!page) throw new HTTPException(404, { message: "Review details unavailable" });
@@ -1645,17 +1647,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(400, { message: "invalid session id" });
     }
-    const parsed = BeginSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid session realtime request",
-      });
-    }
+    const parsed = parseRequestBody(
+      BeginSessionRealtimeRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid session realtime request" },
+    );
     try {
       await realtimeVoiceBilling.admit({
         accountId: grant.accountId,
         workspaceId,
-        model: parsed.data.model,
+        model: parsed.model,
         attribution: creditDebitAttributionForGrant(grant),
       });
     } catch (error) {
@@ -1677,7 +1678,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           workspaceId,
           sessionId,
           ownerSubjectId: grant.subjectId,
-          ...parsed.data,
+          ...parsed,
           ...accounts,
         });
       });
@@ -1704,12 +1705,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           message: "invalid realtime lifecycle id",
         });
       }
-      const parsed = RenewSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
-      if (!parsed.success) {
-        throw new HTTPException(400, {
-          message: "invalid realtime heartbeat request",
-        });
-      }
+      const parsed = parseRequestBody(
+        RenewSessionRealtimeRequest,
+        await c.req.json().catch(() => null),
+        { status: 400, message: "invalid realtime heartbeat request" },
+      );
       try {
         // Settle observed minutes before renewing; out of credits keeps the
         // current lease so the call drains and ends instead of running free.
@@ -1727,7 +1727,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             sessionId,
             realtimeId,
             ownerSubjectId: grant.subjectId,
-            ...parsed.data,
+            ...parsed,
             extendLease: stop === null,
           }),
         );
@@ -1759,12 +1759,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         message: "invalid realtime lifecycle id",
       });
     }
-    const parsed = EndSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid realtime end request",
-      });
-    }
+    const parsed = parseRequestBody(
+      EndSessionRealtimeRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid realtime end request" },
+    );
     try {
       const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
         endSessionRealtimeInTransaction(scopedDb, {
@@ -1773,7 +1772,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           realtimeId,
           ownerSubjectId: grant.subjectId,
           ownerSubjectLabel: grant.subjectLabel ?? null,
-          ...parsed.data,
+          ...parsed,
         }),
       );
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
@@ -1798,12 +1797,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = CodexRealtimeWebrtcRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(422, {
-        message: "invalid Codex realtime WebRTC request",
-      });
-    }
+    const parsed = parseRequestBody(
+      CodexRealtimeWebrtcRequest,
+      await c.req.json().catch(() => null),
+      { status: 422, message: "invalid Codex realtime WebRTC request" },
+    );
 
     c.header("cache-control", "private, no-store");
     try {
@@ -1817,7 +1815,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         rotate,
         browserActivation,
         ...providerRequest
-      } = parsed.data;
+      } = parsed;
       const claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
         scopedDb.transaction(async (tx) => {
           const claimed = await claimSessionRealtimeConnectionInTransaction(
@@ -2032,10 +2030,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = SessionRealtimeWebsocketRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid realtime WebSocket request" });
-    }
+    const parsed = parseRequestBody(
+      SessionRealtimeWebsocketRequest,
+      await c.req.json().catch(() => null),
+      { status: 422, message: "invalid realtime WebSocket request" },
+    );
     c.header("cache-control", "private, no-store");
     const {
       realtimeId,
@@ -2047,7 +2046,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       rotate,
       language,
       voiceSettings,
-    } = parsed.data;
+    } = parsed;
     let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
       null;
     let provider: ReturnType<typeof realtimeWebsocketProvider> = null;
@@ -2212,14 +2211,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           message: "invalid realtime connection id",
         });
       }
-      const parsed = ActivateCodexRealtimeConnectionRequest.safeParse(
+      const parsed = parseRequestBody(
+        ActivateCodexRealtimeConnectionRequest,
         await c.req.json().catch(() => null),
+        { status: 422, message: "invalid realtime connection activation" },
       );
-      if (!parsed.success) {
-        throw new HTTPException(422, {
-          message: "invalid realtime connection activation",
-        });
-      }
       try {
         const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
           scopedDb.transaction(async (tx) =>
@@ -2229,7 +2225,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               realtimeId,
               connectionId,
               ownerSubjectId: grant.subjectId,
-              ...parsed.data,
+              ...parsed,
             }),
           ),
         );
@@ -2262,14 +2258,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ) {
         throw new HTTPException(400, { message: "invalid realtime ledger id" });
       }
-      const parsed = SyncSessionRealtimeLedgerRequest.safeParse(
+      const parsed = parseRequestBody(
+        SyncSessionRealtimeLedgerRequest,
         await c.req.json().catch(() => null),
+        { status: 422, message: "invalid realtime ledger sync request" },
       );
-      if (!parsed.success) {
-        throw new HTTPException(422, {
-          message: "invalid realtime ledger sync request",
-        });
-      }
       try {
         const result = await withWorkspaceSessionActivityRls(
           db,
@@ -2287,7 +2280,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
                 realtimeId,
                 ownerSubjectId: grant.subjectId,
                 ownerSubjectLabel: grant.subjectLabel ?? null,
-                ...parsed.data,
+                ...parsed,
                 controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
               },
               captureLinked
@@ -2328,10 +2321,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = UpdateSessionPinRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid session pin request" });
-    }
+    const parsed = parseRequestBody(UpdateSessionPinRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "invalid session pin request",
+    });
     try {
       const session = await setSessionPin(db, {
         workspaceId,
@@ -2339,7 +2332,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         // Same owner-only personal-workspace fallback as the list above.
         personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
-        ...parsed.data,
+        ...parsed,
       });
       if (!session) {
         throw new HTTPException(404, { message: "session not found" });
@@ -2386,17 +2379,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = UpdateSessionAttentionRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid session attention request" });
-    }
+    const parsed = parseRequestBody(
+      UpdateSessionAttentionRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid session attention request" },
+    );
     try {
       const session = await setSessionAttention(db, {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
         personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
-        ...parsed.data,
+        ...parsed,
       });
       if (!session) throw new HTTPException(404, { message: "session not found" });
       return c.json(
@@ -2436,12 +2430,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
-    const parsed = UpdateSessionArchiveRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid session archive request" });
-    }
+    const parsed = parseRequestBody(
+      UpdateSessionArchiveRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid session archive request" },
+    );
     try {
-      const pause = parsed.data.archived && parsed.data.mode !== "hide_for_me";
+      const pause = parsed.archived && parsed.mode !== "hide_for_me";
       if (pause && !hasPermission(grant.permissions, "sessions:control")) {
         throw new HTTPException(403, {
           message:
@@ -2458,7 +2453,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           authorizationSurface: "http",
         },
         {
-          ...parsed.data,
+          ...parsed,
           pause,
           personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
         },
@@ -2587,13 +2582,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
-    const body = (await c.req.json()) as { target?: string };
-    const target = typeof body.target === "string" ? body.target : "";
-    if (!target) {
-      throw new HTTPException(400, {
-        message: 'target is required ("auto" or an account id)',
-      });
-    }
+    const { target } = await parseRequestJson(c, SessionCodexAccountPinRequest, {
+      status: 400,
+      message: 'target is required ("auto" or an account id)',
+    });
     if (!deps.sessionAuthorization) {
       try {
         await requireSessionAuthorization(deps, grant, {
@@ -2860,14 +2852,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
       const sessionId = c.req.param("sessionId");
       const parsedServerId = SessionMcpServerId.safeParse(c.req.param("serverId"));
-      const payload = UpdateSessionMcpApprovalPolicyRequest.safeParse(
-        await c.req.json().catch(() => null),
-      );
-      if (!parsedServerId.success || !payload.success) {
+      const rawPayload = await c.req.json().catch(() => null);
+      if (!parsedServerId.success) {
         throw new HTTPException(400, {
           message: "invalid MCP approval-policy request",
         });
       }
+      const payload = parseRequestBody(UpdateSessionMcpApprovalPolicyRequest, rawPayload, {
+        status: 400,
+        message: "invalid MCP approval-policy request",
+      });
       await assertSessionExists(db, workspaceId, sessionId);
       return c.json(
         await updateSessionMcpApprovalPolicy(
@@ -2875,7 +2869,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           grant,
           sessionId,
           parsedServerId.data,
-          payload.data.requireApproval,
+          payload.requireApproval,
         ),
       );
     },
@@ -2942,17 +2936,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         relatedSessionAccessFor(c),
       );
       if (!session) throw new HTTPException(404, { message: "session not found" });
-      const [catalog, withPolicy] = await Promise.all([
-        buildCapabilityCatalog({
-          db,
-          workspaceId,
-          settings,
-          subjectId: grant.subjectId,
-          accountId: grant.accountId,
-        }),
+      // A reviewed integration's card stands for the person's own connected
+      // instances of it, which the workspace catalog does not list.
+      const integration = integrationDefinitionIdFromCapabilityId(payload.capabilityId) !== null;
+      const [item, withPolicy] = await Promise.all([
+        integration
+          ? integrationDefinitionSetupItem(
+              db,
+              settings,
+              workspaceId,
+              grant.subjectId,
+              payload.capabilityId,
+            )
+          : buildCapabilityCatalog({
+              db,
+              workspaceId,
+              settings,
+              subjectId: grant.subjectId,
+              accountId: grant.accountId,
+            }).then((catalog) => catalog.items.find((entry) => entry.id === payload.capabilityId)),
         withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
       ]);
-      const item = catalog.items.find((entry) => entry.id === payload.capabilityId);
       const readiness = capabilitySetupReadiness(payload.capabilityId, item, withPolicy);
       if (!item || (readiness !== "ready" && readiness !== "assumed_ready")) {
         return c.json({
@@ -3083,14 +3087,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const parsedQuery = ListSessionGoalRevisionsQuery.safeParse({
-      limit: c.req.query("limit"),
-      before: c.req.query("before"),
-    });
-    if (!parsedQuery.success) {
-      throw new HTTPException(400, { message: "invalid goal revision page query" });
-    }
-    const query = parsedQuery.data;
+    const parsedQuery = parseRequestQuery(
+      ListSessionGoalRevisionsQuery,
+      {
+        limit: c.req.query("limit"),
+        before: c.req.query("before"),
+      },
+      { status: 400, message: "invalid goal revision page query" },
+    );
+    const query = parsedQuery;
     try {
       return c.json(
         await listSessionGoalRevisionPage(db, workspaceId, sessionId, {
@@ -3415,12 +3420,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // Explicit confirm on the wire (literal true) — an empty/accidental POST
     // cannot wipe context. Mirrors the client-side confirm affordance. A
     // missing/false confirm is a client error (400), not a server fault.
-    const clearBody = ClearSessionContextRequest.safeParse(await c.req.json().catch(() => ({})));
-    if (!clearBody.success) {
-      throw new HTTPException(400, {
-        message: "context clear requires an explicit { confirm: true }",
-      });
-    }
+    parseRequestBody(ClearSessionContextRequest, await c.req.json().catch(() => ({})), {
+      status: 400,
+      message: "context clear requires an explicit { confirm: true }",
+    });
     // The database checks this under workspace/session locks so a turn cannot
     // start between an API precheck and the history rewrite.
     const result = await clearSessionContext(db, {
@@ -4029,8 +4032,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
-    const parsed = SandboxRecoveryRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid checkpoint consent" });
+    const parsed = parseRequestBody(SandboxRecoveryRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "invalid checkpoint consent",
+    });
     let consentCommitted = false;
     try {
       const receipt = await consentManagedHumanSandboxRecovery(
@@ -4038,7 +4043,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         authorization,
         workspaceId,
         sessionId,
-        parsed.data,
+        parsed,
       );
       consentCommitted = true;
       const projection = await getManagedHumanSandboxRecovery(
@@ -4048,7 +4053,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
       );
       if (
-        ("action" in parsed.data && receipt.outcome === "accepted") ||
+        ("action" in parsed && receipt.outcome === "accepted") ||
         (projection.operationId === receipt.operationId && projection.status === "consent_accepted")
       ) {
         // Establish/verify only. No failed-turn Retry, Send, tool callback or
@@ -4102,11 +4107,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/retry", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    const parsed = SessionRetryRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid session retry request" });
+    const parsed = parseRequestBody(SessionRetryRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "invalid session retry request",
+    });
     try {
       return c.json(
-        await retryFailedSession(deps, grant, workspaceId, c.req.param("sessionId"), parsed.data),
+        await retryFailedSession(deps, grant, workspaceId, c.req.param("sessionId"), parsed),
       );
     } catch (error) {
       if (error instanceof SessionRetryConflictError)
@@ -4124,12 +4131,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
     }
     const sessionId = c.req.param("sessionId");
-    const parsed = SessionControlRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid session control request",
-      });
-    }
+    const parsed = parseRequestBody(SessionControlRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "invalid session control request",
+    });
     try {
       const response = await controlHumanSessionWorkstream(
         deps,
@@ -4139,7 +4144,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           subjectId: grant.subjectId,
         },
-        parsed.data,
+        parsed,
       );
       return c.json({
         ...response,
@@ -4165,7 +4170,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
+    const payload = parseRequestBody(
+      SteerSessionMessageRequest,
+      await c.req.json().catch(() => null),
+      { status: 422, message: "invalid steer request" },
+    );
     let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
     try {
       result = await withSiteCommandOrigin(c, grant, () =>
@@ -4239,7 +4248,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
-    const event = parseSessionEventAdmission(await c.req.json().catch(() => null));
+    const event = parseRequestBody(ClientSessionEvent, await c.req.json().catch(() => null), {
+      status: 422,
+      message: "invalid session event",
+    });
     const refinedOperation =
       event.type === "user.approvalDecision"
         ? "session.approval.write"
@@ -4752,19 +4764,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (!session) {
         throw new HTTPException(404, { message: "session not found" });
       }
-      const parsed = AcknowledgeStreamRequest.safeParse(await c.req.json().catch(() => ({})));
-      if (!parsed.success) {
-        throw new HTTPException(400, {
-          message: "invalid stream acknowledgment request",
-        });
-      }
+      const parsed = parseRequestBody(
+        AcknowledgeStreamRequest,
+        await c.req.json().catch(() => ({})),
+        { status: 400, message: "invalid stream acknowledgment request" },
+      );
       const recorded = await recordStreamAcknowledgment(db, {
         accountId: grant.accountId,
         workspaceId,
         sandboxGroupId: session.sandboxGroupId,
         subjectId: grant.subjectId,
-        acknowledgeUnredacted: parsed.data.acknowledgeUnredacted,
-        acknowledgeShared: parsed.data.acknowledgeShared,
+        acknowledgeUnredacted: parsed.acknowledgeUnredacted,
+        acknowledgeShared: parsed.acknowledgeShared,
       });
       return c.json({
         acknowledged: recorded.acknowledgedUnredacted,
@@ -4793,23 +4804,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = AttachViewerRequest.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid viewer attach request",
-      });
-    }
+    const parsed = parseRequestBody(AttachViewerRequest, await c.req.json().catch(() => ({})), {
+      status: 400,
+      message: "invalid viewer attach request",
+    });
     // Resolve exact requested planes before authorization. Empty and
     // `desktop:false` v1 bodies remain terminal-only during rolling upgrades;
     // either new plane flag selects exact semantics. This closes desktop→terminal
     // privilege bleed and lets file edits avoid unrelated terminal bearers.
-    const wantDesktop = parsed.data.desktop ?? false;
-    const wantFiles = parsed.data.files ?? false;
-    const hasExactPlaneSet = parsed.data.terminal !== undefined || parsed.data.files !== undefined;
+    const wantDesktop = parsed.desktop ?? false;
+    const wantFiles = parsed.files ?? false;
+    const hasExactPlaneSet = parsed.terminal !== undefined || parsed.files !== undefined;
     // v1 clients sent only `desktop:false` for both terminal and file warming;
     // retain its terminal-only grant during rolling upgrades. Presence of either
     // v2 flag switches to exact-plane semantics.
-    const wantTerminal = parsed.data.terminal ?? (!hasExactPlaneSet && !wantDesktop);
+    const wantTerminal = parsed.terminal ?? (!hasExactPlaneSet && !wantDesktop);
     if (!wantDesktop && !wantTerminal && !wantFiles) {
       throw new HTTPException(400, {
         message: "viewer attach requires a live plane",
@@ -4857,7 +4866,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
     let result: Awaited<ReturnType<typeof attachViewer>>;
     if (selfhostedActive) {
-      const viewerId = parsed.data.viewerId ?? crypto.randomUUID();
+      const viewerId = parsed.viewerId ?? crypto.randomUUID();
       result = {
         viewerId,
         liveness: "warm",
@@ -4905,7 +4914,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         viewerSubjectId: grant.subjectId,
         grant,
         waitSignal: c.req.raw.signal,
-        ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
+        ...(parsed.viewerId ? { viewerId: parsed.viewerId } : {}),
       });
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
@@ -4994,12 +5003,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (!session) {
         throw new HTTPException(404, { message: "session not found" });
       }
-      const parsed = ViewerHeartbeatRequest.safeParse(await c.req.json().catch(() => ({})));
-      if (!parsed.success) {
-        throw new HTTPException(400, {
-          message: "viewer heartbeat requires { leaseEpoch }",
-        });
-      }
+      const parsed = parseRequestBody(
+        ViewerHeartbeatRequest,
+        await c.req.json().catch(() => ({})),
+        { status: 400, message: "viewer heartbeat requires { leaseEpoch }" },
+      );
       const alive = await heartbeatViewer(
         { db, settings },
         {
@@ -5007,7 +5015,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           workspaceId,
           sandboxGroupId: session.sandboxGroupId,
           viewerId: c.req.param("viewerId"),
-          expectedEpoch: parsed.data.leaseEpoch,
+          expectedEpoch: parsed.leaseEpoch,
         },
       );
       return c.json({ alive });
@@ -5117,18 +5125,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     };
   }
 
-  async function parseChannelABody<T>(
+  async function parseChannelABody<Schema extends z.ZodType>(
     c: Context,
-    schema: {
-      safeParse: (v: unknown) => { success: true; data: T } | { success: false };
-    },
-  ): Promise<T> {
+    schema: Schema,
+  ): Promise<z.output<Schema>> {
     const raw = await c.req.json().catch(() => undefined);
-    const result = schema.safeParse(raw ?? {});
-    if (!result.success) {
-      throw new HTTPException(400, { message: "invalid request body" });
-    }
-    return result.data;
+    return parseRequestBody(schema, raw ?? {}, { status: 400, message: "invalid request body" });
   }
 
   // ── FileSystem ──────────────────────────────────────────────────────────
@@ -6840,22 +6842,6 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
     );
   }
   throw error;
-}
-
-export function parseSessionEventAdmission(raw: unknown): ClientSessionEvent {
-  const parsed = ClientSessionEvent.safeParse(raw);
-  if (!parsed.success) {
-    throw new HTTPException(422, { message: "invalid session event" });
-  }
-  return parsed.data;
-}
-
-export function parseSteerSessionAdmission(raw: unknown): SteerSessionMessageRequest {
-  const parsed = SteerSessionMessageRequest.safeParse(raw);
-  if (!parsed.success) {
-    throw new HTTPException(422, { message: "invalid steer request" });
-  }
-  return parsed.data;
 }
 
 function zodErrorFields(error: ZodError): string {

@@ -118,6 +118,7 @@ import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
+import { requestImageCompactionThreshold } from "./compaction-prep";
 import {
   interruptionCallIdsFromPause,
   settleOpenSuffixResumeIfNeeded,
@@ -199,7 +200,7 @@ import { createEagerOwnedSandboxSetup, type EagerOwnedSandboxSetup } from "./own
 import { finalReplyNudge, needsFinalReply } from "./final-reply";
 
 import type { CompactionSummarizer } from "../context-compaction";
-import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import type { PromptCacheRequestFingerprint, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
 import type {
@@ -630,6 +631,14 @@ export async function runTurnStreamAttempt(
       });
       runInput = prepared.input;
       historySink.providerArtifactCandidates = prepared.providerArtifactCandidates;
+      historySink.seedHistoryFootprint(prepared.historyFootprint, prepared.historyRecovery);
+      if (prepared.historyRecovery) {
+        observability.warn("active history exceeds the materialization guard; compacting", {
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          ...prepared.historyRecovery,
+        });
+      }
       // Slice index = the length of the model-facing (active) history this turn
       // is seeded from; new items beyond it (the trigger message + this turn's
       // generated items) are the ones to persist. After a compaction this is the
@@ -893,6 +902,10 @@ export async function runTurnStreamAttempt(
     const streamTiming = new StreamTimingMetrics(observability, {
       provider: streamProvider,
     });
+    // Wire fingerprint of the latest main request. The next model entry waits
+    // for the previous response's settlement, so the response being settled
+    // always belongs to the latest dispatched request (as for streamTiming).
+    let latestPromptCacheRequest: Promise<PromptCacheRequestFingerprint | null> | null = null;
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
@@ -1115,6 +1128,13 @@ export async function runTurnStreamAttempt(
             modelResponseContextSignal(modelResponseState, responseCountBeforeStream),
           contextCompactionRequested: () =>
             isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
+          contextHistoryFootprint: {
+            storedFootprint: historySink.historyFootprintCompactionSignal,
+            imageThreshold: requestImageCompactionThreshold(
+              resolvedModel?.provider,
+              eventing.modelRunSettings,
+            ),
+          },
           onModelPreparationPhase: (measurement) => {
             recordTurnStartupPhase(observability, {
               phase: `model_prepare_${measurement.phase}`,
@@ -1139,6 +1159,10 @@ export async function runTurnStreamAttempt(
               { provider: streamProvider, dispatchId },
               clock,
             );
+          },
+          onPromptCacheFingerprint: (fingerprint) => {
+            if (isAuxiliaryProviderDispatch()) return;
+            latestPromptCacheRequest = fingerprint;
           },
           ...(eventing.toolCancellationFenceRef.current
             ? {
@@ -1316,6 +1340,11 @@ export async function runTurnStreamAttempt(
           setLastInputTokens: setLastInputTokensFenced,
           contextContributions: eventing.companyBrainContextContributions,
           responseTiming: () => streamTiming.completeResponse(),
+          promptCacheRequest: () => {
+            const request = latestPromptCacheRequest;
+            latestPromptCacheRequest = null;
+            return request;
+          },
         });
         assertModelResponseLatencyMode({
           event: next.value,
@@ -2676,6 +2705,13 @@ export async function runTurnStreamAttempt(
           ...safeErrorDiagnostic(attemptError),
           signalTokens: compactionNeeded?.signalTokens,
           thresholdTokens: compactionNeeded?.thresholdTokens,
+          ...(compactionNeeded?.historyFootprint
+            ? {
+                historyFootprintDimension: compactionNeeded.historyFootprint.dimension,
+                historyFootprintActual: compactionNeeded.historyFootprint.actual,
+                historyFootprintThreshold: compactionNeeded.historyFootprint.threshold,
+              }
+            : {}),
           ...(requestSizeError ? { ...requestSizeError.requestSize } : {}),
         });
         // When compaction is needed before the turn's first model request,

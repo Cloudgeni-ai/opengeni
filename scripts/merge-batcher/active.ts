@@ -382,7 +382,7 @@ export class GitHubActiveExecutor implements Executor {
   }
   async transact(t: Transaction): Promise<void> {
     requireInitializedState(t.expectedState, t.expectedLedger);
-    requireInitializedState(t.nextState, t.nextLedger);
+    requireInitializedState(t.expectedState, t.nextLedger);
     if (digest(t.expectedLedger.initialization) !== digest(t.nextLedger.initialization))
       throw new Error("Initialization provenance must remain unchanged");
     if (
@@ -390,12 +390,8 @@ export class GitHubActiveExecutor implements Executor {
       Date.parse(t.expectedLedger.expiresAt) > Date.parse(this.now())
     )
       throw new Error("Cannot replace another controller's live lease");
-    if (
-      t.nextLedger.owner !== this.owner ||
-      t.nextLedger.epoch !== t.expectedLedger.epoch + 1 ||
-      Date.parse(t.nextLedger.expiresAt) <= Date.parse(this.now())
-    )
-      throw new Error("Expired or invalid prepared lease");
+    if (t.nextLedger.owner !== this.owner || t.nextLedger.epoch !== t.expectedLedger.epoch + 1)
+      throw new Error("Invalid prepared lease owner/epoch");
     await this.options.refreshAuth?.();
     const effect = t.effect;
     if (effect.kind === "publish" || effect.kind === "land") {
@@ -459,8 +455,18 @@ export class GitHubActiveExecutor implements Executor {
           throw new Error("Latest exact workflow attempt is not verified green");
       }
     }
+    // Observation and final provider validation do not hold a remote lease.
+    // Stamp the lease only after those reads, then atomically acquire it with
+    // the original expected-state CAS. A competing owner/state change still
+    // rejects the entire transaction, including main/candidate updates.
+    const preparedAt = this.now();
+    const nextLedger = structuredClone(t.nextLedger);
+    nextLedger.expiresAt = new Date(
+      Date.parse(preparedAt) + this.config.leaseSeconds * 1000,
+    ).toISOString();
+    const nextState = await this.git.stateCommit(nextLedger, t.expectedState, preparedAt);
     const updates: RefUpdate[] = [
-      { ref: this.writer.stateRef, expected: t.expectedState, next: t.nextState },
+      { ref: this.writer.stateRef, expected: t.expectedState, next: nextState },
     ];
     if (effect.kind === "publish") {
       if (effect.branch !== `${this.config.branchPrefix}${effect.manifest.batchId}`)

@@ -77,6 +77,8 @@ export type SessionFailureSummary = {
   detailsTruncated?: boolean | undefined;
   /** Typed sandbox evidence suppresses generic execution/model remedies, never grants recovery. */
   structuralSandboxFailure?: boolean | undefined;
+  /** The failed turn's sandbox didn't start; names an otherwise unclassified failure. */
+  sandboxStartFailed?: boolean | undefined;
   /** Exact recorded provider/engine text, before any humanizing. Shown only behind a details toggle. */
   recordedDetail?: string | null | undefined;
   /** Recorded failure code, when the worker classified the failure. */
@@ -156,9 +158,7 @@ export function summarizeSessionFailure(
       failureEventId: diagnostics?.eventId ?? null,
       consecutiveRecoveryCount: failureRecoveryStreak(payload),
       ...recordedFailureFacts(payload),
-      ...(structuralSandboxFailure(payload, events, diagnostics?.turnId, diagnostics?.sequence)
-        ? { structuralSandboxFailure: true }
-        : {}),
+      ...sandboxFailureFacts(payload, events, diagnostics?.turnId, diagnostics?.sequence),
       ...((payload.projection as { truncatedFields?: unknown[] | undefined } | undefined)
         ?.truncatedFields?.length
         ? { detailsTruncated: true }
@@ -172,7 +172,7 @@ export function summarizeSessionFailure(
   let failureEventId: string | null = null;
   let consecutiveRecoveryCount: number | null = null;
   let latestFailedTurnId: string | null = null;
-  let structuralFailure = false;
+  let sandboxFacts: SandboxFailureFacts = {};
   let recorded: ReturnType<typeof recordedFailureFacts> = {};
   for (const event of events) {
     if (event.type === "turn.failed") {
@@ -187,7 +187,7 @@ export function summarizeSessionFailure(
       safetyRefusal = presentation.safetyRefusal;
       failedAt = event.occurredAt;
       failureEventId = event.id;
-      structuralFailure = structuralSandboxFailure(payload, events, event.turnId, event.sequence);
+      sandboxFacts = sandboxFailureFacts(payload, events, event.turnId, event.sequence);
       recorded = recordedFailureFacts(payload);
     }
     if (event.type === "session.status.changed") {
@@ -208,7 +208,7 @@ export function summarizeSessionFailure(
         safetyRefusal = presentation.safetyRefusal;
         failedAt = event.occurredAt;
         failureEventId = event.id;
-        structuralFailure = structuralSandboxFailure(payload, events, event.turnId, event.sequence);
+        sandboxFacts = sandboxFailureFacts(payload, events, event.turnId, event.sequence);
         recorded = recordedFailureFacts(payload);
       }
     }
@@ -219,19 +219,24 @@ export function summarizeSessionFailure(
     failedAt,
     failureEventId,
     consecutiveRecoveryCount,
-    ...(structuralFailure ? { structuralSandboxFailure: true } : {}),
+    ...sandboxFacts,
     ...recorded,
   };
 }
 
-function structuralSandboxFailure(
+type SandboxFailureFacts = Pick<
+  SessionFailureSummary,
+  "structuralSandboxFailure" | "sandboxStartFailed"
+>;
+
+function sandboxFailureFacts(
   payload: Record<string, unknown>,
   events: SessionEvent[],
   turnId: string | null | undefined,
   sequence: number | undefined,
-): boolean {
-  if (isStructuralSandboxFailure(payload)) return true;
-  if (!turnId || sequence === undefined) return false;
+): SandboxFailureFacts {
+  if (isStructuralSandboxFailure(payload)) return { structuralSandboxFailure: true };
+  if (!turnId || sequence === undefined) return {};
   // A provisioning failure belongs only to its exact failed turn. A later
   // successful/new provision supersedes it; prose and unrelated history do not.
   for (let index = events.length - 1; index >= 0; index--) {
@@ -239,11 +244,15 @@ function structuralSandboxFailure(
     if (event.turnId !== turnId || event.sequence > sequence) continue;
     const detail = event.payload as Record<string, unknown> | null;
     if (detail?.name !== "sandbox.provision") continue;
-    if (event.type === "sandbox.operation.failed") return isStructuralSandboxFailure(detail);
+    if (event.type === "sandbox.operation.failed") {
+      if (isStructuralSandboxFailure(detail)) return { structuralSandboxFailure: true };
+      // An expected lifecycle transition (waiting for a checkpoint or rotation) is no failed start.
+      return detail.expectedTransition === true ? {} : { sandboxStartFailed: true };
+    }
     if (event.type === "sandbox.operation.started" || event.type === "sandbox.operation.completed")
-      return false;
+      return {};
   }
-  return false;
+  return {};
 }
 
 function failureRecoveryStreak(payload: Record<string, unknown>): number | null {

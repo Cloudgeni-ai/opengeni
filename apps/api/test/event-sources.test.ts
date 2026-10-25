@@ -1855,7 +1855,7 @@ describe("Gmail event sources", () => {
       ],
       eventSourceFetch: gmail.fetch,
     });
-    const connect = async (subjectId: string) =>
+    const connect = async (subjectId: string, mailbox = MAILBOX) =>
       await createConnection(db.db, {
         accountId: f.workspace.accountId,
         workspaceId: f.workspace.id,
@@ -1871,7 +1871,7 @@ describe("Gmail event sources", () => {
           Buffer.from(f.settings.environmentsEncryptionKey!, "base64"),
           JSON.stringify({ access_token: TOKEN, token_type: "Bearer", mcp_url: GMAIL_MCP }),
         ),
-        metadata: { gmailEmail: MAILBOX, mcpUrl: GMAIL_MCP },
+        metadata: { gmailEmail: mailbox, mcpUrl: GMAIL_MCP },
         createdBySubjectId: subjectId,
       });
     const createSource = async () =>
@@ -2032,6 +2032,41 @@ describe("Gmail event sources", () => {
     expect((await ready()).map((entry) => entry.key)).toEqual(["workspace"]);
     const again = await f.automation(key);
     expect(again.events.triggers[0].sourceId).toBe(sourceId);
+  });
+
+  test("a mailbox connected twice is one account: offered once, added without choosing", async () => {
+    const f = await gmailFixture();
+    const ready = async () =>
+      (await f.json(await f.app.request(`${f.sources}/ready`, { headers: f.owner.headers })))
+        .sources as Array<{ key: string; kind: string; name: string }>;
+    const first = await f.connect(f.owner.subjectId);
+    const second = await f.connect(f.owner.subjectId, MAILBOX.toUpperCase());
+    const offered = (await ready()).filter((entry) => entry.kind === "gmail");
+    expect(offered).toHaveLength(1);
+    expect(offered[0]!.name.toLowerCase()).toBe(`gmail (${MAILBOX})`);
+    expect([`gmail:${first.id}`, `gmail:${second.id}`]).toContain(offered[0]!.key);
+
+    const created = await f.createSource();
+    expect(created.status).toBe(201);
+    const { source } = await f.json(created);
+    expect(source).toMatchObject({ kind: "gmail", name: `Gmail (${MAILBOX})` });
+    const [{ connection_id: used }] = await shared.admin`select connection_id from event_sources
+      where id = ${source.id}`;
+
+    // Received through either connection, the mailbox is no longer offered.
+    expect((await ready()).map((entry) => entry.kind)).toEqual(["workspace"]);
+    const viaOther = await f.automation(`gmail:${used === first.id ? second.id : first.id}`);
+    expect(viaOther.events.triggers[0].sourceId).toBe(source.id);
+
+    // A different mailbox is its own account, and then a source needs a choice.
+    const other = await f.connect(f.owner.subjectId, "second@example.com");
+    expect(await ready()).toEqual([
+      { key: `gmail:${other.id}`, kind: "gmail", name: "Gmail (second@example.com)" },
+      { key: "workspace", kind: "workspace", name: "This workspace" },
+    ]);
+    const ambiguous = await f.createSource();
+    expect(ambiguous.status).toBe(422);
+    expect(await ambiguous.text()).toContain("more than one Gmail account");
   });
 
   test("new inbox mail wakes the automation once; Opengeni's own mail and earlier mail don't", async () => {

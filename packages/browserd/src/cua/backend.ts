@@ -1,7 +1,7 @@
 import { CuaNativeTools } from "./native-tools";
 import { COMPUTER_LOCATOR_WAIT_MS, type ComputerNativeCallRequest } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import type {
   ComputerLocator,
   ComputerSessionCapabilities,
@@ -47,7 +47,7 @@ import {
   type DateSegment,
   type UnindexedRow,
 } from "./projection";
-import type { MacWindowPresence, MacWindows } from "./macos-windows";
+import type { MacConsoleState, MacWindowPresence, MacWindows } from "./macos-windows";
 import type { WindowFronting } from "./windows-foreground";
 
 type Target = {
@@ -253,6 +253,7 @@ export class CuaComputerBackend implements ComputerBackend {
 
   validateNative(request: ComputerNativeCallRequest): Promise<void> {
     return this.run(async () => {
+      await this.assertOnScreen(true);
       this.nativeTools ??= new CuaNativeTools(
         this.runtime,
         this.nativeSession,
@@ -263,6 +264,9 @@ export class CuaComputerBackend implements ComputerBackend {
   }
   callNative(request: ComputerNativeCallRequest) {
     return this.run(async () => {
+      // Native tools send input and read windows directly, so they are
+      // checked in full before anything runs, like actions.
+      await this.assertOnScreen(true);
       this.nativeTools ??= new CuaNativeTools(
         this.runtime,
         this.nativeSession,
@@ -307,16 +311,27 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   targets(): Promise<ComputerBackendTarget[]> {
-    return this.run(() => this.discover());
+    return this.run(async () => {
+      await this.assertOnScreen(true);
+      return await this.discover();
+    });
   }
   observe(targetId: string): Promise<ComputerBackendObservation> {
-    return this.run(() => this.readOnScreen(targetId, () => this.observeTarget(targetId)));
+    return this.run(() =>
+      this.whileOnScreen(false, () =>
+        this.readOnScreen(targetId, () => this.observeTarget(targetId)),
+      ),
+    );
   }
   capture(
     targetId: string,
     options?: ComputerBackendCaptureOptions,
   ): Promise<ComputerBackendFrame> {
-    return this.run(() => this.readOnScreen(targetId, () => this.captureTarget(targetId, options)));
+    return this.run(() =>
+      this.whileOnScreen(false, () =>
+        this.readOnScreen(targetId, () => this.captureTarget(targetId, options)),
+      ),
+    );
   }
   captureStill(
     targetId: string,
@@ -338,17 +353,21 @@ export class CuaComputerBackend implements ComputerBackend {
     });
   }
   validate(command: ComputerBackendActionCommand): Promise<void> {
-    return this.run(async () => {
-      if (command.action.type === "launch") {
-        await this.target(command.targetId);
-        return;
-      }
-      if (command.action.type === "batch") {
-        await this.batchSteps(command);
-        return;
-      }
-      await this.operations(command);
-    });
+    // Input sent to a locked screen goes nowhere, and may still be reported
+    // delivered: every action is checked in full before it is sent.
+    return this.run(() =>
+      this.whileOnScreen(true, async () => {
+        if (command.action.type === "launch") {
+          await this.target(command.targetId);
+          return;
+        }
+        if (command.action.type === "batch") {
+          await this.batchSteps(command);
+          return;
+        }
+        await this.operations(command);
+      }),
+    );
   }
 
   dispatch(
@@ -826,6 +845,37 @@ export class CuaComputerBackend implements ComputerBackend {
     return result;
   }
 
+  /** Refuses to present or touch this login session's windows while they
+   * are not on the Mac's screen. macOS keeps listing them while the screen
+   * is locked or another user's session is on it, but reads of them come
+   * back empty and input never reaches them. The full check runs a native
+   * helper; the quick one only notices another user owning the console. */
+  private async assertOnScreen(full: boolean): Promise<void> {
+    if (!this.macWindows || (!full && !consoleHeldByAnotherUser())) return;
+    // A check that cannot run never blocks the computer.
+    const state = await this.macWindows.console().catch(() => "available" as const);
+    if (state !== "available")
+      throw new ComputerBackendError("machine_locked", CONSOLE_UNAVAILABLE[state], false, false);
+  }
+
+  /** Runs a read, or an action before its input is delivered. When it
+   * fails, a locked screen or another user's session on it is the reason
+   * given, not the empty read it caused. */
+  private async whileOnScreen<T>(full: boolean, operation: () => Promise<T>): Promise<T> {
+    await this.assertOnScreen(full);
+    try {
+      return await operation();
+    } catch (error) {
+      if (
+        !full &&
+        (!(error instanceof ComputerBackendError) ||
+          (!error.dispatched && error.code !== "machine_locked"))
+      )
+        await this.assertOnScreen(true);
+      throw error;
+    }
+  }
+
   /** Start or reassert a CUA session, setting its cursor motion once per
    * session and again whenever CUA revives it with defaults. */
   private async startSession(session: string): Promise<Record<string, unknown>> {
@@ -899,7 +949,10 @@ export class CuaComputerBackend implements ComputerBackend {
           id,
           targetGeneration: old?.native.targetGeneration ?? randomUUID(),
           kind: "window",
-          applicationId: null,
+          // The app that owns the window, as CUA names its process: the app's
+          // name on macOS, the executable (notepad.exe) on Windows, the window
+          // class (Gedit) on Linux.
+          applicationId: appIdentity(window.app_name),
           processId: window.pid,
           title: window.title || window.app_name,
           bounds: window.bounds,
@@ -2652,6 +2705,13 @@ type LaunchedApp = {
 /** A reverse-DNS bundle identifier such as com.apple.TextEdit; anything else is an app name. */
 const BUNDLE_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
 
+/** A listed window's owning app as a target's application ID, or null when
+ * CUA names none (or an implausibly long one). */
+function appIdentity(appName: string): string | null {
+  const name = appName.trim();
+  return name && name.length <= 1_024 ? name : null;
+}
+
 /** How CUA's launch_app names an app on each platform. */
 function launchArguments(
   platform: "macos" | "windows" | "linux",
@@ -2839,6 +2899,26 @@ function inputFailures(
 
 function unsupported(message: string): ComputerBackendError {
   return new ComputerBackendError("unsupported", message, false, false);
+}
+
+/** What a person must do before this login session's windows can be read or
+ * clicked again. */
+const CONSOLE_UNAVAILABLE: Record<Exclude<MacConsoleState, "available">, string> = {
+  locked:
+    "This Mac's screen is locked, so nothing on it can be read or clicked. Ask a person to unlock it, then try again.",
+  other_user:
+    "Another user's session is on this Mac's screen, so nothing in this user's session can be read or clicked. Ask a person to switch back to this user, then try again.",
+};
+
+/** Whether another user owns the console: at the login window root does,
+ * and the full check decides that case too. Microseconds, unlike the full
+ * check. */
+function consoleHeldByAnotherUser(): boolean {
+  try {
+    return statSync("/dev/console").uid !== process.getuid?.();
+  } catch {
+    return false;
+  }
 }
 
 /** Whether this CUA's run_steps can be told to stop at a stale element token

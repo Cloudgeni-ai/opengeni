@@ -583,18 +583,39 @@ pub enum Request {
     /// that got that far; one cut short earlier leaves the sandbox here,
     /// awake or asleep, and the service, which had no answer, sends it
     /// again. Refused with [`ErrorCode::Busy`] while something holds the
-    /// sandbox awake, with [`ErrorCode::Stale`] under an earlier owner
-    /// epoch than the one held, and with [`ErrorCode::NotFound`] under a
-    /// later one, which this host never held; once it is done the host no
-    /// longer has the sandbox ([`ErrorCode::NotFound`]).
+    /// sandbox awake, unless `awake`, with [`ErrorCode::Stale`] under an
+    /// earlier owner epoch than the one held, and with
+    /// [`ErrorCode::NotFound`] under a later one, which this host never
+    /// held; once it is done the host no longer has the sandbox
+    /// ([`ErrorCode::NotFound`]).
     HandOff {
         /// Its id.
         id: Id,
         /// The owner epoch the host holds it under.
         owner_epoch: u64,
+        /// Hand it off even while it is awake: every hold on it ends, and
+        /// it is paused, saved and archived where it stands, memory and
+        /// all, so its programs carry on on the host that adopts it, after
+        /// a pause, while its open connections end. A host from before
+        /// this field ignores it and refuses an awake sandbox as busy.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        awake: bool,
     },
     /// Report every sandbox and host counters.
     Status,
+    /// Build a sandbox image (ADR 19) from the OCI image `image` with this
+    /// host's guest programs and store it. Answered at once: with
+    /// [`Reply::Preparing`] while the build, which takes minutes, is under
+    /// way or waiting for the one before it (ask again to learn how it
+    /// went); with [`Reply::Prepared`] and the image's id once it is
+    /// stored, which every later ask gets too; and with the error of a
+    /// build that failed, after which asking again builds again. Refused
+    /// (`Unavailable`) by a host that cannot build or store images.
+    Prepare {
+        /// The OCI image, pinned by digest: `registry/repository@sha256:…`,
+        /// optionally with its tag before the digest.
+        image: String,
+    },
 }
 
 /// One reply.
@@ -628,6 +649,16 @@ pub enum Reply {
     },
     /// The host's state.
     Status(Box<HostStatus>),
+    /// The image [`Request::Prepare`] named is being built: ask again.
+    Preparing,
+    /// The stored sandbox image built from what [`Request::Prepare`] named.
+    Prepared {
+        /// Its id, which creates name it by.
+        image: ImageId,
+        /// The digest of the image manifest built, for an index the one
+        /// for this host's platform.
+        digest: String,
+    },
     /// The request failed.
     Error {
         /// What went wrong.
@@ -1023,7 +1054,24 @@ mod tests {
             r#"{"op":"hand_off","id":"0193f3c27a1b7cde8f00112233445566","owner_epoch":3}"#,
         )
         .unwrap();
-        assert!(matches!(request, Request::HandOff { owner_epoch: 3, .. }));
+        assert!(matches!(
+            request,
+            Request::HandOff {
+                owner_epoch: 3,
+                awake: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"op":"hand_off","id":"0193f3c27a1b7cde8f00112233445566","owner_epoch":3}"#,
+            "a hand-off of a sleeping sandbox reads as it always did"
+        );
+        let awake: Request = serde_json::from_str(
+            r#"{"op":"hand_off","id":"0193f3c27a1b7cde8f00112233445566","owner_epoch":3,"awake":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(awake, Request::HandOff { awake: true, .. }));
         assert!(
             serde_json::from_str::<Request>(
                 r#"{"op":"hand_off","id":"0193f3c27a1b7cde8f00112233445566"}"#

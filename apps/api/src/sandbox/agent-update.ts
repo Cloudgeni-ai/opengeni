@@ -57,6 +57,9 @@ export async function requestAgentUpdate(
   if (blockedReason) return refused(422, blockedReason);
   const channel = live.agentUpdateChannel ?? "stable";
   const targetVersion = promotedAgentVersion(settings, channel);
+  if (!targetVersion) {
+    return refused(409, `no ${channel} agent release is configured for this deployment`);
+  }
   const reusableRequest =
     live.agentUpdate?.status === "requested" &&
     live.agentUpdate.targetVersion === targetVersion &&
@@ -280,7 +283,7 @@ export function createAutomaticAgentUpdater(
   return {
     consider(enrollment) {
       const targetVersion = promotedAgentVersion(settings, enrollment.agentUpdateChannel);
-      if (inFlight.has(enrollment.id)) return;
+      if (!targetVersion || inFlight.has(enrollment.id)) return;
       if (!automaticAgentUpdateDue(enrollment, targetVersion, now())) return;
       inFlight.add(enrollment.id);
       const fields = {

@@ -362,8 +362,8 @@ recoveryE2e(
     });
     let relaunchedPid: number | undefined;
     try {
-      await supervisor.createSession(options);
-      await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/second`);
+      const first = await supervisor.createSession(options);
+      const second = await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/second`);
       const browserPid = await chromiumProfilePid(profile);
       clock += 61_000;
       expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
@@ -377,9 +377,24 @@ recoveryE2e(
       relaunchedPid = await chromiumProfilePid(profile);
       expect(relaunchedPid).not.toBe(browserPid);
       // Chrome restored both tabs from the profile it shut down cleanly.
-      const urls = (await supervisor.listTargets(options)).map((target) => target.url);
+      const reopened = await supervisor.listTargets(options);
+      const urls = reopened.map((target) => target.url);
       expect(urls).toEqual(
         expect.arrayContaining([initialUrl, `http://127.0.0.1:${server.port}/second`]),
+      );
+      // The tabs reopened with new IDs. A call still naming an old tab learns
+      // why it is gone and which reopened tab shows its page.
+      const reopenedSecond = reopened.find((target) => target.url.endsWith("/second"))!;
+      expect(reopenedSecond.id).not.toBe(second.target.id);
+      await expect(supervisor.targetState(options, second.target.id)).rejects.toMatchObject({
+        code: "target_not_found",
+        message:
+          "browser target does not exist: this browser was stopped after going unused for 1 minute and relaunched on its next call, so its tabs reopened with new IDs and unsaved page input may be lost; " +
+          `this tab's page is now tab ${reopenedSecond.id}`,
+      });
+      const reopenedFirst = reopened.find((target) => target.url === initialUrl)!;
+      await expect(supervisor.observe(options, first.observation.target.id)).rejects.toThrow(
+        `this tab's page is now tab ${reopenedFirst.id}`,
       );
       await supervisor.endSession(options, { removeState: true });
       await waitForProcessExit(relaunchedPid);
@@ -438,7 +453,7 @@ recoveryE2e(
     let relaunchedPid: number | undefined;
     try {
       await first.createSession(options);
-      await first.openTarget(options, `http://127.0.0.1:${server.port}/second`);
+      const secondTab = await first.openTarget(options, `http://127.0.0.1:${server.port}/second`);
       browserPid = await chromiumProfilePid(profile);
       await first.close();
       // Recently used, so the shutdown handed the live browser off.
@@ -458,9 +473,15 @@ recoveryE2e(
       await second.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
       relaunchedPid = await chromiumProfilePid(profile);
       expect(relaunchedPid).not.toBe(browserPid);
-      const urls = (await second.listTargets(options)).map((target) => target.url);
+      const reopened = await second.listTargets(options);
+      const urls = reopened.map((target) => target.url);
       expect(urls).toEqual(
         expect.arrayContaining([initialUrl, `http://127.0.0.1:${server.port}/second`]),
+      );
+      const reopenedSecond = reopened.find((target) => target.url.endsWith("/second"))!;
+      await expect(second.targetState(options, secondTab.target.id)).rejects.toThrow(
+        "browser target does not exist: this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call, so its tabs reopened with new IDs and unsaved page input may be lost; " +
+          `this tab's page is now tab ${reopenedSecond.id}`,
       );
       await second.endSession(options, { removeState: true });
       await waitForProcessExit(relaunchedPid);
@@ -698,6 +719,13 @@ e2e.each(["read", "capture"] as const)(
       const stale = await supervisor.action(clickCommand(created.observation));
       expect(stale.state).toBe("failed");
       expect(stale.error?.code).toBe("target_not_found");
+      if (operation === "read") {
+        // The action names why its tab is gone and where its page is now.
+        expect(stale.error?.message).toBe(
+          "browser target does not exist: this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched, so its tabs reopened with new IDs and unsaved page input may be lost; " +
+            `this tab's page is now tab ${recovered[0]!.id}`,
+        );
+      }
     } finally {
       await supervisor.close();
       await rm(directory, { recursive: true, force: true });

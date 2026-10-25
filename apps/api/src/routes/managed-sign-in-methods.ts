@@ -34,6 +34,7 @@ import { runManagedSignInConnect } from "../auth/managed-auth-attempt-context";
 import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifications";
 import { managedAuthSelectedProofHeaders } from "../auth/managed-auth-session-adapter";
 import { scrubManagedAuthProviderResponse } from "./managed-auth-session-sets";
+import { parseRequestBody } from "../http/request-body";
 
 const ConnectState = z.object({
   opengeniSignInMethod: z.object({
@@ -204,10 +205,11 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
         throw new HTTPException(409, { message: "Managed actor fence required" });
       const schema =
         kind === "password" ? ManagedSignInPasswordMutation : ManagedSignInProviderMutation;
-      const parsed = schema.safeParse(await context.req.json().catch(() => null));
-      if (!parsed.success)
-        throw new HTTPException(422, { message: "Invalid sign-in method request" });
-      const body = parsed.data;
+      const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+        status: 422,
+        message: "Invalid sign-in method request",
+      });
+      const body = parsed;
       const currentIdentity = await getCanonicalHumanIdentityProjection(deps.db, actor.authUserId);
       if (currentIdentity.activeIdentity.id !== body.expectedIdentityId)
         return context.json(

@@ -220,6 +220,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 
 ##### EP-N01 — Transcription service: provider selection and fallback
 - Consumer: voice input (one-shot and resumable recordings). Providers: Codex, SuperGrok (plus deployment-funded OpenAI/Azure, not subscriptions). No Claude.
+- Update: providers now come from the shared speech-to-text deployment (`packages/core/src/transcription-service/deployment.ts` `createSpeechToTextDeployment`), which meeting recordings also use, so the Codex and SuperGrok providers transcribe meetings too (worker `apps/worker/src/activities/recordings.ts`, one request per speaker span with a `${versionId}:${track}:${index}` request id). Line references below predate that change.
 - Refs: `packages/core/src/transcription-service/service.ts:29` `createTranscriptionService`; `:416` `orderedProviders`; `:434` `firstAvailable`; `:231` exact `providerId` path; `:327-343` fallback on `fallbackSafe`; registry `packages/config/src/index.ts:1909` `resolveVoiceInputProviderRegistry` (allowed ids: `openai`, `azure-openai`, `azure-mai`, `codex-subscription`, `supergrok-subscription`, `:1966-1972`).
 - Authority/pool: none at this layer; each provider's `available(context)` decides (live lookups, see N02/N03).
 - DB subject / private session: passes `workspaceId`, `subjectId`, `accountId` (Opengeni billing account) through; not session-bound.

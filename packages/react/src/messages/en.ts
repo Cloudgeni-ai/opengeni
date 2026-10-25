@@ -2225,6 +2225,545 @@ export const englishMessages = {
   "mcpConnectionStatus.connect": "Connect",
   "mcpConnectionStatus.connected": "Connected",
   "mcpConnectionStatus.reviewConnection": "Review connection",
+  "meetings.deleteDialog.couldnTDeleteThisMeeting": "Couldn't delete this meeting",
+  "meetings.deleteDialog.deleteMeeting": "Delete meeting?",
+  "meetings.deleteDialog.deleteMeeting2": "Delete meeting",
+  "meetings.deleteDialog.deleteTitle": "Delete “{title}”?",
+  "meetings.deleteDialog.deleting": "Deleting…",
+  "meetings.deleteDialog.meetingDeleted": "Meeting deleted",
+  "meetings.deleteDialog.thisDeletesTheAudioEvery":
+    "This deletes the audio, every transcript and the speaker names for this meeting. It can't be undone.",
+  "meetings.detailPage.aboutEstimateForThisDuration":
+    "About ${estimate} for this {duration} meeting.",
+  "meetings.detailPage.aboutLessThan001": "About less than $0.01 for this {duration} meeting.",
+  "meetings.detailPage.aboutThisTranscript": "About this transcript",
+  "meetings.detailPage.auto": "Auto",
+  "meetings.detailPage.backToMeetings": "Back to Meetings",
+  "meetings.detailPage.canTLoadThePreview": "Can't load the preview right now",
+  "meetings.detailPage.checkYourConnectionThenTry": "Check your connection, then try again.",
+  "meetings.detailPage.confirm": "Confirm",
+  "meetings.detailPage.connectProvidernameFirst": "Connect {providerName} first",
+  "meetings.detailPage.couldnTChangeWhoCan": "Couldn't change who can see this",
+  "meetings.detailPage.couldnTConfirmThisName": "Couldn't confirm this name",
+  "meetings.detailPage.couldnTLoadTheTranscript": "Couldn't load the transcript",
+  "meetings.detailPage.couldnTLoadThisMeeting": "Couldn't load this meeting",
+  "meetings.detailPage.couldnTNameThisSpeaker": "Couldn't name this speaker",
+  "meetings.detailPage.couldnTRememberThisVoice": "Couldn't remember this voice",
+  "meetings.detailPage.couldnTRememberYourVoice": "Couldn't remember your voice",
+  "meetings.detailPage.couldnTRenameThisMeeting": "Couldn't rename this meeting.",
+  "meetings.detailPage.couldnTRenameThisMeeting2": "Couldn't rename this meeting",
+  "meetings.detailPage.couldnTStartTranscribing": "Couldn't start transcribing.",
+  "meetings.detailPage.couldnTSwitchVersions": "Couldn't switch versions",
+  "meetings.detailPage.couldnTTurnDownThis": "Couldn't turn down this name",
+  "meetings.detailPage.countSpeakers_one": "{count} speaker",
+  "meetings.detailPage.countSpeakers_other": "{count} speakers",
+  "meetings.detailPage.deleteMeeting": "Delete meeting",
+  "meetings.detailPage.displaynameSVoiceIsForgotten": "{displayName}'s voice is forgotten",
+  "meetings.detailPage.displaynameSVoiceWillBe": "{displayName}'s voice will be remembered",
+  "meetings.detailPage.enterAWholeNumberFrom": "Enter a whole number from 1 to 32.",
+  "meetings.detailPage.error": "Error",
+  "meetings.detailPage.everyoneInThisWorkspaceCan":
+    "Everyone in this workspace can open it and name speakers.",
+  "meetings.detailPage.failed": "Failed",
+  "meetings.detailPage.inProgress": "In progress",
+  "meetings.detailPage.itMayHaveBeenDeleted":
+    "It may have been deleted, or it's private to the person who recorded it.",
+  "meetings.detailPage.itSStillBeingRecorded":
+    "It's still being recorded or uploaded, in another tab or on another device. What's said shows below as it comes in, and this page updates by itself. The transcript starts once all the audio is in.",
+  "meetings.detailPage.language": "Language",
+  "meetings.detailPage.leaveEmptyToLetThe": "Leave empty to let the model decide.",
+  "meetings.detailPage.leftUnnamed": "Left unnamed",
+  "meetings.detailPage.listeningWhatSSaidShows":
+    "Listening. What's said shows up here within a few seconds.",
+  "meetings.detailPage.loadingMeeting": "Loading meeting",
+  "meetings.detailPage.makesANewVersionFrom":
+    "Makes a new version from the full audio. Speaker names carry over; corrected words and moved turns stay with the current version, which you keep reading until the new one is ready.",
+  "meetings.detailPage.maximumNumberOfSpeakers": "Maximum number of speakers",
+  "meetings.detailPage.me": "Me",
+  "meetings.detailPage.meetings": "Meetings",
+  "meetings.detailPage.model": "Model",
+  "meetings.detailPage.moreActionsForTitle": "More actions for {title}",
+  "meetings.detailPage.nameChangeWhoThisIs": "{name}, change who this is",
+  "meetings.detailPage.namedYou": "Named you",
+  "meetings.detailPage.nameNameThisSpeaker": "{name}, name this speaker",
+  "meetings.detailPage.namesArenTSuggestedIn": "Names aren't suggested in later meetings",
+  "meetings.detailPage.nameSuggestedFromTheirVoice":
+    "{name}, suggested from their voice. Confirm or correct",
+  "meetings.detailPage.noLiveTextWasSaved": "No live text was saved for this meeting.",
+  "meetings.detailPage.noSpeechWasFoundIn": "No speech was found in this recording.",
+  "meetings.detailPage.notFinishedYet": "Not finished yet",
+  "meetings.detailPage.nothingSaidYetTextShows":
+    "Nothing said yet. Text shows up here a few seconds after it's said.",
+  "meetings.detailPage.notName": "Not {name}",
+  "meetings.detailPage.noTranscriptYet": "No transcript yet.",
+  "meetings.detailPage.notThem": "Not them",
+  "meetings.detailPage.onlyDoThisIfValue":
+    "Only do this if {value} agreed. Opengeni learns their voice from every meeting in this workspace where they're named as a speaker, earlier ones included, and suggests their name in later meetings. It keeps a voice summary, not audio, until someone forgets it in Settings or voice recognition is turned off.",
+  "meetings.detailPage.onlyMe": "Only me",
+  "meetings.detailPage.onlyYouCanOpenIt": "Only you can open it.",
+  "meetings.detailPage.onlyYouCanSeeThis": "Only you can see this now",
+  "meetings.detailPage.preview": "Preview",
+  "meetings.detailPage.rememberMyVoice": "Remember my voice",
+  "meetings.detailPage.rememberValueSVoice": "Remember {value}'s voice?",
+  "meetings.detailPage.rememberYourVoiceAndLater":
+    "Remember your voice and later meetings suggest your name when you speak.",
+  "meetings.detailPage.rename": "Rename",
+  "meetings.detailPage.renameMeeting": "Rename meeting",
+  "meetings.detailPage.reviewlineTapADashedName":
+    "{reviewLine} Tap a dashed name to say who it is.",
+  "meetings.detailPage.save": "Save",
+  "meetings.detailPage.saving": "Saving…",
+  "meetings.detailPage.setItWhenTheMeeting":
+    "Set it when the meeting is in one language the model mishears.",
+  "meetings.detailPage.settings": "Settings",
+  "meetings.detailPage.sharedWithTheWorkspace": "Shared with the workspace",
+  "meetings.detailPage.speakers": "Speakers",
+  "meetings.detailPage.speakersToReview": "Speakers to review",
+  "meetings.detailPage.starting": "Starting…",
+  "meetings.detailPage.stillUploading": "Still uploading",
+  "meetings.detailPage.suggestedFromTheirVoice": "Suggested from their voice",
+  "meetings.detailPage.suggestionDismissed": "Suggestion dismissed",
+  "meetings.detailPage.theAudioForThisMeeting":
+    "The audio for this meeting isn't available anymore, so it can't be played or transcribed again. The transcript stays.",
+  "meetings.detailPage.theAudioIsOnThe":
+    "The audio is on the device that recorded it. The transcript starts once it's uploaded.",
+  "meetings.detailPage.theAudioWasDeletedOn":
+    "The audio was deleted on {formatAbsoluteTime}, because this workspace keeps audio only for a set time. The transcript stays, but the meeting can't be played or transcribed again.",
+  "meetings.detailPage.their": "their",
+  "meetings.detailPage.theNewVersionReplacesThis":
+    "The new version replaces this one when it's ready.",
+  "meetings.detailPage.theTranscriptFailed": "The transcript failed",
+  "meetings.detailPage.theTranscriptShowsHereWhen": "The transcript shows here when it's ready.",
+  "meetings.detailPage.they": "they",
+  "meetings.detailPage.theyAgreedRemember": "They agreed. Remember",
+  "meetings.detailPage.thisMeetingDoesnTExist": "This meeting doesn't exist",
+  "meetings.detailPage.thisMeetingHasnTBeen": "This meeting hasn't been transcribed.",
+  "meetings.detailPage.thisSpeakerIsUnnamedAgain":
+    "This speaker is unnamed again. Pick a name from its menu.",
+  "meetings.detailPage.title": "Title",
+  "meetings.detailPage.transcribe": "Transcribe",
+  "meetings.detailPage.transcribeAgain": "Transcribe again",
+  "meetings.detailPage.transcribing": "Transcribing",
+  "meetings.detailPage.transcribingAgain": "Transcribing again…",
+  "meetings.detailPage.transcribingAgain2": "Transcribing again",
+  "meetings.detailPage.transcribingAgainFailed": "Transcribing again failed",
+  "meetings.detailPage.transcribingAgainWithModelnameThis":
+    "Transcribing again with {modelName}. This version stays until the new one is ready.",
+  "meetings.detailPage.transcribingThisUsuallyTakesA":
+    "Transcribing. This usually takes a minute or two, and the page updates when it's done.",
+  "meetings.detailPage.transcript": "Transcript",
+  "meetings.detailPage.transcripterrortextThisVersionIsUnchanged":
+    "{transcriptErrorText} This version is unchanged.",
+  "meetings.detailPage.tryAgain": "Try again",
+  "meetings.detailPage.undo": "Undo",
+  "meetings.detailPage.uploading": "Uploading",
+  "meetings.detailPage.uploadinghereKeepThisTabOpen":
+    "{uploadingHere} Keep this tab open, or come back later: the audio is saved in this browser until it's uploaded.",
+  "meetings.detailPage.uploadingTheAudio": "Uploading the audio",
+  "meetings.detailPage.valuePerHour": "${value} per hour",
+  "meetings.detailPage.versionVersionnumber": "Version {versionNumber}",
+  "meetings.detailPage.voiceRecognitionIsOffIn":
+    "Voice recognition is off in this workspace. An admin can turn it on in Meetings settings.",
+  "meetings.detailPage.whatSSaidSoFar":
+    "What's said so far, as it's heard. The transcript, with each speaker told apart, replaces it after the recording ends.",
+  "meetings.detailPage.whatWasSaidAsIt":
+    "What was said, as it was heard. The transcript, with each speaker told apart, replaces it in a minute or two.",
+  "meetings.detailPage.whoCanSeeThisValue": "Who can see this: {value}",
+  "meetings.detailPage.whoSpokeNamesWereSuggested_one":
+    "Who spoke? One name was suggested from a voice.",
+  "meetings.detailPage.whoSpokeNamesWereSuggested_other":
+    "Who spoke? {count} names were suggested from a voice.",
+  "meetings.detailPage.whoSpokeSpeakersHaveNoName_one": "Who spoke? One speaker has no name yet.",
+  "meetings.detailPage.whoSpokeSpeakersHaveNoName_other":
+    "Who spoke? {count} speakers have no name yet.",
+  "meetings.detailPage.whoSpokeSpeakersToNameNames_one":
+    "Who spoke? {count} speaker to name, {suggestedCount} names to confirm.",
+  "meetings.detailPage.whoSpokeSpeakersToNameNames_other":
+    "Who spoke? {count} speakers to name, {suggestedCount} names to confirm.",
+  "meetings.detailPage.whoSpokeSpeakersToNameOneName_one":
+    "Who spoke? {count} speaker to name, {suggestedCount} name to confirm.",
+  "meetings.detailPage.whoSpokeSpeakersToNameOneName_other":
+    "Who spoke? {count} speakers to name, {suggestedCount} name to confirm.",
+  "meetings.detailPage.workspace": "Workspace",
+  "meetings.detailPage.yesItSName": "Yes, it's {name}",
+  "meetings.detailPage.yourVoiceIsForgotten": "Your voice is forgotten",
+  "meetings.detailPage.yourVoiceWillBeRemembered": "Your voice will be remembered",
+  "meetings.languages.detectAutomatically": "Detect automatically",
+  "meetings.listPage.checkYourConnectionThenTry":
+    "Check your connection, then try again. Recordings in progress keep going either way.",
+  "meetings.listPage.couldnTLoadMeetings": "Couldn't load meetings",
+  "meetings.listPage.deleteMeeting": "Delete meeting",
+  "meetings.listPage.earlierRecordingsWereStillSaved_one":
+    "An earlier recording was still saved in this browser. It's uploading now.",
+  "meetings.listPage.earlierRecordingsWereStillSaved_other":
+    "{count} earlier recordings were still saved in this browser. They're uploading now.",
+  "meetings.listPage.error": "Error",
+  "meetings.listPage.length": "Length",
+  "meetings.listPage.loading": "Loading",
+  "meetings.listPage.meetings": "Meetings",
+  "meetings.listPage.moreActionsForTitle": "More actions for {title}",
+  "meetings.listPage.noMeetingsMatchQuery": "No meetings match “{query}”.",
+  "meetings.listPage.noMeetingsYet": "No meetings yet",
+  "meetings.listPage.onlyMe": "Only me",
+  "meetings.listPage.recordAMeetingAndGet":
+    "Record a meeting and get a transcript of who said what.",
+  "meetings.listPage.recorded": "Recorded",
+  "meetings.listPage.recording": "Recording",
+  "meetings.listPage.searchFindsWordsInMeeting":
+    "Search finds words in meeting titles and transcripts.",
+  "meetings.listPage.searchMeetings": "Search meetings",
+  "meetings.listPage.showOlderMeetings": "Show older meetings",
+  "meetings.listPage.startARecordingAboveWhen":
+    "Start a recording above. When you stop, Opengeni transcribes it and works out who said what.",
+  "meetings.listPage.tryAgain": "Try again",
+  "meetings.liveTranscript.connecting": "Connecting",
+  "meetings.liveTranscript.latest": "Latest",
+  "meetings.liveTranscript.livePreviewUnavailableTheRecording":
+    "Live preview unavailable. The recording is unaffected.",
+  "meetings.liveTranscript.liveTranscript": "Live transcript",
+  "meetings.liveTranscript.liveTranscriptText": "Live transcript text",
+  "meetings.liveTranscript.now": "now",
+  "meetings.liveTranscript.preview": "· preview",
+  "meetings.liveTranscript.reconnectingTheLiveTextThe":
+    "Reconnecting the live text. The recording itself is unaffected, and its full transcript comes after you stop.",
+  "meetings.notes.cancel": "Cancel",
+  "meetings.notes.changedMeanwhile":
+    "Someone saved these notes while you were editing. Saving now replaces their version with yours.",
+  "meetings.notes.couldNotSave": "Couldn't save the notes",
+  "meetings.notes.edit": "Edit",
+  "meetings.notes.edited": "Edited · {time}",
+  "meetings.notes.editorLabel": "Meeting notes",
+  "meetings.notes.editorPlaceholder":
+    "## Summary\n\n## Decisions\n\n## Action items\n- [ ] Who does what, by when",
+  "meetings.notes.empty":
+    "No notes yet. Write a summary yourself, or have an agent write one after every meeting with an automation.",
+  "meetings.notes.markdownHint": "Markdown works here.",
+  "meetings.notes.notepad": "Notepad",
+  "meetings.notes.notepadFailed": "Couldn't save",
+  "meetings.notes.notepadPlaceholder":
+    "Jot down what matters as you go. It's kept with the meeting, and agents read it with the transcript.",
+  "meetings.notes.notepadRetry": "Try saving again",
+  "meetings.notes.notepadSaved": "Saved",
+  "meetings.notes.notepadSaving": "Saving…",
+  "meetings.notes.openChat": "Open the chat",
+  "meetings.notes.save": "Save",
+  "meetings.notes.saveAnyway": "Save anyway",
+  "meetings.notes.saved": "Notes saved",
+  "meetings.notes.title": "Notes",
+  "meetings.notes.write": "Write notes",
+  "meetings.notes.writtenByAgent": "Written by an agent · {time}",
+  "meetings.player.backCountSeconds_one": "Back {count} second",
+  "meetings.player.backCountSeconds_other": "Back {count} seconds",
+  "meetings.player.formatclockOfFormatclock2": "{formatClock} of {formatClock2}",
+  "meetings.player.forwardCountSeconds_one": "Forward {count} second",
+  "meetings.player.forwardCountSeconds_other": "Forward {count} seconds",
+  "meetings.player.pause": "Pause",
+  "meetings.player.play": "Play",
+  "meetings.player.playbackSpeed": "Playback speed",
+  "meetings.player.playbackSpeedRate": "Playback speed {rate}×",
+  "meetings.player.position": "Position",
+  "meetings.player.rate": "{rate}×",
+  "meetings.recorderPanel.allowMicrophoneAccessForThis":
+    "Allow microphone access for this site in your browser's address bar or settings, then start again.",
+  "meetings.recorderPanel.allowThisAppToUse":
+    "Allow this app to use the microphone in your computer's privacy settings, then start again.",
+  "meetings.recorderPanel.aPieceOfTheAudio": "A piece of the audio was too large to upload.",
+  "meetings.recorderPanel.audio": "Audio",
+  "meetings.recorderPanel.cancel": "Cancel",
+  "meetings.recorderPanel.canTRecordATab": "Can't record a tab's audio here",
+  "meetings.recorderPanel.canTRecordComputerAudio": "Can't record computer audio",
+  "meetings.recorderPanel.capturingwhatValue": "{capturingWhat} {value}",
+  "meetings.recorderPanel.computerAudio": "Computer audio",
+  "meetings.recorderPanel.connectAMicrophoneOrCheck":
+    "Connect a microphone or check that no other app is holding it, then start again.",
+  "meetings.recorderPanel.couldnTRenameThisMeeting": "Couldn't rename this meeting",
+  "meetings.recorderPanel.detectLanguage": "Detect language",
+  "meetings.recorderPanel.finishing": "Finishing",
+  "meetings.recorderPanel.finishingTheUpload": "Finishing the upload.",
+  "meetings.recorderPanel.includeATabSAudio": "Include a tab's audio",
+  "meetings.recorderPanel.includeComputerAudio": "Include computer audio",
+  "meetings.recorderPanel.listeningWhatSSaidShows":
+    "Listening. What's said shows up here within a few seconds.",
+  "meetings.recorderPanel.liveTextIsnTAvailable":
+    "Live text isn't available for this recording.{value} Nothing is lost: the meeting is still recorded and transcribed after you stop.",
+  "meetings.recorderPanel.liveTranscript": "Live transcript",
+  "meetings.recorderPanel.meetingLanguage": "Meeting language",
+  "meetings.recorderPanel.meetingTitle": "Meeting title",
+  "meetings.recorderPanel.microphone": "Microphone",
+  "meetings.recorderPanel.microphoneBlocked": "Microphone blocked",
+  "meetings.recorderPanel.microphoneOnlySoPeopleOn":
+    "Microphone only, so people on the call won't be heard. Tell everyone on the call you're recording.",
+  "meetings.recorderPanel.nameIt": "Name it",
+  "meetings.recorderPanel.nameThisMeeting": "Name this meeting",
+  "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting (optional)",
+  "meetings.recorderPanel.newRecording": "New recording",
+  "meetings.recorderPanel.noLiveTranscriptionProviderIs":
+    "No live transcription provider is connected to this workspace, so ask an admin to connect one.",
+  "meetings.recorderPanel.noMicrophoneFound": "No microphone found",
+  "meetings.recorderPanel.noNameYet": "No name yet",
+  "meetings.recorderPanel.nothingIsRecordedWhilePaused": "Nothing is recorded while paused.",
+  "meetings.recorderPanel.nothingWasRecordedSoNo": "Nothing was recorded, so no meeting was saved.",
+  "meetings.recorderPanel.notUploadingNoConnectionRecording":
+    "Not uploading: no connection. Recording continues, and the audio is kept on this device until it uploads.",
+  "meetings.recorderPanel.notUploadingNoConnectionThe":
+    "Not uploading: no connection. The audio is kept on this device and uploads when you're back.",
+  "meetings.recorderPanel.pause": "Pause",
+  "meetings.recorderPanel.paused": "Paused",
+  "meetings.recorderPanel.pausedNothingIsHeardUntil": "Paused. Nothing is heard until you resume.",
+  "meetings.recorderPanel.recording": "Recording.",
+  "meetings.recorderPanel.recording2": "Recording",
+  "meetings.recorderPanel.recordingNotUploading": "Recording · not uploading",
+  "meetings.recorderPanel.recordingStopped": "Recording stopped",
+  "meetings.recorderPanel.recordingTheTabSAudio": "Recording the tab's audio.",
+  "meetings.recorderPanel.recordingYourComputerSAudio": "Recording your computer's audio.",
+  "meetings.recorderPanel.recordingYourMicrophoneAndComputerAudio":
+    "Recording your microphone and your computer's audio.",
+  "meetings.recorderPanel.recordingYourMicrophoneAndTabAudio":
+    "Recording your microphone and the tab's audio.",
+  "meetings.recorderPanel.recordingYourMicrophoneOnly": "Recording your microphone only.",
+  "meetings.recorderPanel.recordsTheOtherPeopleIn":
+    "Records the other people in a call in Zoom, Teams, Meet or any other app",
+  "meetings.recorderPanel.recordsTheOtherPeopleIn2":
+    "Records the other people in a browser call, such as Google Meet or Teams on the web",
+  "meetings.recorderPanel.recordsYourMicrophoneAndEverything":
+    "Records your microphone and everything your computer plays, including the call, music and alerts. Tell everyone on the call you're recording.",
+  "meetings.recorderPanel.recordsYourMicrophoneForA":
+    "Records your microphone. For a call in another browser tab, such as Meet, Teams or Zoom on the web, include its audio to hear everyone. Tell everyone on the call you're recording.",
+  "meetings.recorderPanel.recordsYourMicrophoneTellEveryone":
+    "Records your microphone. Tell everyone you're recording.",
+  "meetings.recorderPanel.rename": "Rename",
+  "meetings.recorderPanel.resume": "Resume",
+  "meetings.recorderPanel.save": "Save",
+  "meetings.recorderPanel.saving": "Saving…",
+  "meetings.recorderPanel.showsWhatSSaidAs":
+    "Shows what's said as it's said. The final transcript still comes after you stop.",
+  "meetings.recorderPanel.starting": "Starting",
+  "meetings.recorderPanel.startingAllowTheMicrophoneAnd":
+    "Starting. Allow the microphone, and recording computer audio, if your computer asks.",
+  "meetings.recorderPanel.startingAllowTheMicrophoneIf":
+    "Starting. Allow the microphone if your browser asks, then pick the meeting tab and turn on Share tab audio.",
+  "meetings.recorderPanel.startingAllowTheMicrophoneIf2":
+    "Starting. Allow the microphone if your browser asks.",
+  "meetings.recorderPanel.startRecording": "Start recording",
+  "meetings.recorderPanel.stop": "Stop",
+  "meetings.recorderPanel.tabAudio": "Tab audio",
+  "meetings.recorderPanel.takeNotes": "Take notes",
+  "meetings.recorderPanel.theLiveTranscriptAddsAbout":
+    "The live transcript adds about ${value} per hour of audio.",
+  "meetings.recorderPanel.theLiveTranscriptionAccountHas":
+    "The live transcription account has no credit left, so ask an admin to top it up.",
+  "meetings.recorderPanel.theLiveTranscriptionProviderIs":
+    "The live transcription provider is busy right now.",
+  "meetings.recorderPanel.theLiveTranscriptionProviderRefused":
+    "The live transcription provider refused this workspace's key, so ask an admin to check the connection.",
+  "meetings.recorderPanel.theLiveTranscriptUsesExtra":
+    "The live transcript uses extra transcription credit.",
+  "meetings.recorderPanel.theMeetingWasDeletedOr":
+    "The meeting was deleted, or you no longer have access to it.",
+  "meetings.recorderPanel.theServerRefusedTheAudio": "The server refused the audio.",
+  "meetings.recorderPanel.theServerRefusedTheAudio2": "The server refused the audio: {value}.",
+  "meetings.recorderPanel.theTabSAudioWasn": "The tab's audio wasn't shared",
+  "meetings.recorderPanel.thisBrowserCanTRecord": "This browser can't record",
+  "meetings.recorderPanel.thisBrowserCanTShare":
+    "This browser can't share a tab's audio. Record with the microphone only, or use Chrome or Edge on a computer.",
+  "meetings.recorderPanel.uploaded": "Uploaded",
+  "meetings.recorderPanel.uploadFailedMessage": "Upload failed: {message}",
+  "meetings.recorderPanel.uploadfailurereasonTheRecordingIsSaved":
+    "{uploadFailureReason} The recording is saved on this device. It uploads again when you reopen Meetings.",
+  "meetings.recorderPanel.uploadingCountPiecesOfAudio_one": "Uploading {count} piece of audio.",
+  "meetings.recorderPanel.uploadingCountPiecesOfAudio_other": "Uploading {count} pieces of audio.",
+  "meetings.recorderPanel.uploadStopped": "Upload stopped",
+  "meetings.recorderPanel.useACurrentVersionOf":
+    "Use a current version of Chrome, Edge, Safari or Firefox.",
+  "meetings.recorderPanel.useACurrentVersionOf2":
+    "Use a current version of Chrome, Edge, Safari or Firefox to record meetings.",
+  "meetings.recorderPanel.whenYourBrowserAsksWhat":
+    "When your browser asks what to share, pick the meeting tab and turn on Share tab audio. Or record without it.",
+  "meetings.recorderPanel.youCanKeepUsingOther":
+    "You can keep using other apps and pages. The audio is saved as you go.",
+  "meetings.recorderPanel.youCanUseOtherPages":
+    "You can use other pages while it records. Closing or reloading this tab stops it, and everything recorded until then is kept.",
+  "meetings.recorderPanel.youNoLongerHavePermission":
+    "You no longer have permission to add recordings to this workspace.",
+  "meetings.recorderPanel.theUsageAllowanceIsUsed":
+    "The usage allowance is used up, so new meetings can't be transcribed until it renews.",
+  "meetings.recorderPanel.yourBrowserAsksWhatTo":
+    "Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio.",
+  "meetings.settings.agreedForThemselves": "Agreed for themselves",
+  "meetings.settings.agreedForThemselvesNotHeard":
+    "Agreed for themselves · Not heard in a meeting yet",
+  "meetings.settings.anOrganizationAdminNeedsTo":
+    "An organization admin needs to connect a transcription provider before meetings are transcribed.",
+  "meetings.settings.anOrganizationAdminNeedsTo2":
+    "An organization admin needs to connect {providerName} first.",
+  "meetings.settings.asLongAsTheMeeting": "As long as the meeting",
+  "meetings.settings.audioIsDeletedAfterRetentionperiodname":
+    "Audio is deleted after {retentionPeriodName}",
+  "meetings.settings.audioIsDeletedOnceThe": "Audio is deleted once the transcript is ready",
+  "meetings.settings.audioIsKeptAsLong": "Audio is kept as long as its meeting",
+  "meetings.settings.connectATranscriptionProviderTo":
+    "Connect a transcription provider to transcribe meetings",
+  "meetings.settings.connectProvidernameFirst": "Connect {providerName} first",
+  "meetings.settings.connectProvidernameToShowA":
+    "Connect {providerName} to show a live transcript",
+  "meetings.settings.connectYourProvidernameFirst": "Connect your {providerName} first",
+  "meetings.settings.couldnTForgetThisVoice": "Couldn't forget this voice",
+  "meetings.settings.couldnTForgetYourVoice": "Couldn't forget your voice",
+  "meetings.settings.couldnTRememberYourVoice": "Couldn't remember your voice",
+  "meetings.settings.couldnTUpdateMeetingSettings": "Couldn't update meeting settings",
+  "meetings.settings.countDays_one": "{count} day",
+  "meetings.settings.countDays_other": "{count} days",
+  "meetings.settings.countedFromWhenAMeeting":
+    "Counted from when a meeting was recorded. After that the meeting is deleted with its audio and transcript, including meetings recorded before this was set.",
+  "meetings.settings.countYears_one": "{count} year",
+  "meetings.settings.countYears_other": "{count} years",
+  "meetings.settings.default": "Default",
+  "meetings.settings.defaultFallbackname": "Default ({fallbackName})",
+  "meetings.settings.defaultsForNewMeetingsAnd":
+    "Defaults for new meetings, and how long meetings are kept.",
+  "meetings.settings.deleteAudioAfterRetentionperiodname":
+    "Delete audio after {retentionPeriodName}?",
+  "meetings.settings.deleteAudioOnceTranscribed": "Delete audio once transcribed?",
+  "meetings.settings.deleteMeetingsAfterPeriod": "Delete meetings after {period}?",
+  "meetings.settings.deleteOldAudio": "Delete old audio",
+  "meetings.settings.deleteOldMeetings": "Delete old meetings",
+  "meetings.settings.deleteOnceTranscribed": "Delete once transcribed",
+  "meetings.settings.deleteTranscribedAudio": "Delete transcribed audio",
+  "meetings.settings.deletingTheAudioKeepsThe":
+    "Deleting the audio keeps the transcript, but the meeting can't be played or transcribed again.",
+  "meetings.settings.displaynameSVoiceIsForgotten": "{displayName}'s voice is forgotten",
+  "meetings.settings.everyoneInThisWorkspaceCan":
+    "Everyone in this workspace can open a new meeting. Whoever recorded it can make it private.",
+  "meetings.settings.everyVoiceRememberedInThis":
+    "Every voice remembered in this workspace is forgotten, and pending suggestions are removed. Names people already gave to speakers stay. Turning it back on starts from nothing.",
+  "meetings.settings.forget": "Forget",
+  "meetings.settings.forgetDisplaynameSVoice": "Forget {displayName}'s voice",
+  "meetings.settings.forgetMyVoice": "Forget my voice",
+  "meetings.settings.forgetting": "Forgetting…",
+  "meetings.settings.keepAudio": "Keep audio",
+  "meetings.settings.keepMeetings": "Keep meetings",
+  "meetings.settings.letsMeetingsSuggestYourName":
+    "Lets meetings suggest your name when you speak. Opengeni learns your voice from meetings where you're named as a speaker. Only you can agree for yourself.",
+  "meetings.settings.liveTranscript": "Live transcript",
+  "meetings.settings.meetingLanguage": "Meeting language",
+  "meetings.settings.meetings": "Meetings",
+  "meetings.settings.meetingsAreDeletedAfterRetentionperiodname":
+    "Meetings are deleted after {retentionPeriodName}",
+  "meetings.settings.meetingsAreKeptUntilSomeone": "Meetings are kept until someone deletes them",
+  "meetings.settings.meetingsRecordedMoreThanPeriod":
+    "Meetings recorded more than {period} ago, with their audio and transcripts, are deleted within a few minutes, and every meeting is deleted once it is {period} old. This can't be undone.",
+  "meetings.settings.newMeetingsArePrivate": "New meetings are private",
+  "meetings.settings.newMeetingsAreSharedWith": "New meetings are shared with the workspace",
+  "meetings.settings.newMeetingsAreTranscribedIn": "New meetings are transcribed in {languageName}",
+  "meetings.settings.newMeetingsAreTranscribedIn2":
+    "New meetings are transcribed in this language, and whoever records can pick another. Detecting it works for the final transcript, but the live transcript can drift between languages, so pick one if most meetings are in it.",
+  "meetings.settings.newMeetingsDetectTheirLanguage": "New meetings detect their language",
+  "meetings.settings.newMeetingsDonTShow": "New meetings don't show a live transcript",
+  "meetings.settings.newMeetingsShowALive": "New meetings show a live transcript",
+  "meetings.settings.newMeetingsUseName": "New meetings use {name}",
+  "meetings.settings.newMeetingsUseTheDefault": "New meetings use the default model",
+  "meetings.settings.nobodyElseYetPeopleCan":
+    "Nobody else yet. People can agree for themselves here, and you can remember someone from outside the workspace from a speaker's menu in a meeting, once they agree.",
+  "meetings.settings.onlyMe": "Only me",
+  "meetings.settings.onlyThePersonWhoRecorded":
+    "Only the person who recorded a meeting can open it, until they share it with the workspace.",
+  "meetings.settings.onlyTheyCanForgetIt": "Only they can forget it",
+  "meetings.settings.onlyWorkspaceAdminsCanChange": "Only workspace admins can change this.",
+  "meetings.settings.peopleAreRecognizedByVoice": "People are recognized by voice",
+  "meetings.settings.peopleWhoseVoicesSuggestNames":
+    "People whose voices suggest names in meetings. Members decide for themselves; anyone here can forget someone from outside the workspace.",
+  "meetings.settings.providernameChargesAboutValuePer":
+    " {providerName} charges about ${value} per hour of audio for it, on top of the transcript.",
+  "meetings.settings.providernameIsnTAvailableHere":
+    "{providerName} isn't available here right now",
+  "meetings.settings.recognizePeopleByVoice": "Recognize people by voice",
+  "meetings.settings.rememberedMeetingsSuggestYourName":
+    "Remembered. Meetings suggest your name when you speak. Forgetting it removes your voice right away.",
+  "meetings.settings.rememberedVoices": "Remembered voices",
+  "meetings.settings.rememberMyVoice": "Remember my voice",
+  "meetings.settings.saving": "Saving…",
+  "meetings.settings.showsWhatSSaidWhile":
+    "Shows what's said while recording, as a preview until the transcript is ready. Anyone recording can turn it on or off for their meeting.{value}",
+  "meetings.settings.someoneConfirmedTheyAgreed": "Someone confirmed they agreed",
+  "meetings.settings.someoneConfirmedTheyAgreedNot":
+    "Someone confirmed they agreed · Not heard in a meeting yet",
+  "meetings.settings.stopRecognizingPeopleByVoice": "Stop recognizing people by voice?",
+  "meetings.settings.suggestsNamesForSpeakersIt":
+    "Suggests names for speakers it has heard before. Only people who agreed are recognized, and someone confirms each suggestion. Turning this off forgets every voice.",
+  "meetings.settings.suggestsNamesForSpeakersIt2":
+    "Suggests names for speakers it has heard before. Only people who agreed are recognized.",
+  "meetings.settings.theAudioOfEveryTranscribed":
+    "The audio of every transcribed meeting is deleted within a few minutes, and from now on as soon as its transcript is ready. Transcripts stay, but meetings can't be played or transcribed again. This can't be undone.",
+  "meetings.settings.theAudioOfMeetingsRecorded":
+    "The audio of meetings recorded more than {retentionPeriodName} ago is deleted within a few minutes. Transcripts stay, but those meetings can't be played or transcribed again. This can't be undone.",
+  "meetings.settings.thisDeploymentUsesOneModel":
+    "This deployment uses one model for all transcription.",
+  "meetings.settings.transcriptionModel": "Transcription model",
+  "meetings.settings.turnOffAndForgetVoices": "Turn off and forget voices",
+  "meetings.settings.turnsAMeetingSAudio":
+    "Turns a meeting's audio into a transcript with speakers. A meeting can still be transcribed again with another model.",
+  "meetings.settings.turnsAMeetingSAudioPinned":
+    "Turns a meeting's audio into a transcript with speakers.",
+  "meetings.settings.untilSomeoneDeletesThem": "Until someone deletes them",
+  "meetings.settings.valuePerHour": "${value} per hour",
+  "meetings.settings.voicesForgottenPeopleArenT":
+    "Voices forgotten. People aren't recognized by voice anymore",
+  "meetings.settings.whoSeesNewMeetings": "Who sees new meetings",
+  "meetings.settings.workspace": "Workspace",
+  "meetings.settings.youAgreedOpengeniLearnsYour":
+    "You agreed. Opengeni learns your voice the next time you're named as a speaker in a meeting.",
+  "meetings.settings.yourSubscription": "Your subscription",
+  "meetings.settings.yourVoice": "Your voice",
+  "meetings.settings.yourVoiceIsForgotten": "Your voice is forgotten",
+  "meetings.settings.yourVoiceWillBeRemembered": "Your voice will be remembered",
+  "meetings.transcript.changeSpeaker": "Change speaker",
+  "meetings.transcript.corrected": " (corrected)",
+  "meetings.transcript.correctTheWords": "Correct the words",
+  "meetings.transcript.couldnTChangeTheSpeaker": "Couldn't change the speaker",
+  "meetings.transcript.couldnTClearThisName": "Couldn't clear this name",
+  "meetings.transcript.couldnTConfirmThisName": "Couldn't confirm this name",
+  "meetings.transcript.couldnTForgetThisVoice": "Couldn't forget this voice",
+  "meetings.transcript.couldnTNameThisSpeaker": "Couldn't name this speaker",
+  "meetings.transcript.couldnTSaveTheCorrection": "Couldn't save the correction",
+  "meetings.transcript.couldnTSaveThisName": "Couldn't save this name.",
+  "meetings.transcript.couldnTTurnDownThis": "Couldn't turn down this name",
+  "meetings.transcript.fixWhatTheTranscriptGot":
+    "Fix what the transcript got wrong. Everyone sees your correction in this version; the model's original words are kept, and clearing a line brings them back.",
+  "meetings.transcript.forExampleMajaBerg": "For example, Maja Berg",
+  "meetings.transcript.forgetDisplaynameSVoice": "Forget {displayName}'s voice",
+  "meetings.transcript.forgetMyVoice": "Forget my voice",
+  "meetings.transcript.isThisDisplayname": "Is this {displayName}?",
+  "meetings.transcript.itSMe": "It's me",
+  "meetings.transcript.moreActionsForNameAt": "More actions for {name} at {formatClock}",
+  "meetings.transcript.name": "Name",
+  "meetings.transcript.nameChangeWhoThisIs": "{name}, change who this is",
+  "meetings.transcript.nameNameThisSpeaker": "{name}, name this speaker",
+  "meetings.transcript.nameSuggestedFromTheirVoice":
+    "{name}, suggested from their voice. Confirm or correct",
+  "meetings.transcript.noLeaveUnnamed": "No, leave unnamed",
+  "meetings.transcript.orPickWhoItIs": "Or pick who it is",
+  "meetings.transcript.playFromFormatclock": "Play from {formatClock}",
+  "meetings.transcript.rememberDisplaynameSVoice": "Remember {displayName}'s voice…",
+  "meetings.transcript.rememberMyVoice": "Remember my voice",
+  "meetings.transcript.removeName": "Remove name",
+  "meetings.transcript.samePersonAsDisplayname": "Same person as {displayName}",
+  "meetings.transcript.save": "Save",
+  "meetings.transcript.saveName": "Save name",
+  "meetings.transcript.saving": "Saving…",
+  "meetings.transcript.someoneNew": "Someone new…",
+  "meetings.transcript.speakernameAtFormatclock": "{speakerName} at {formatClock}",
+  "meetings.transcript.suggested": "Suggested",
+  "meetings.transcript.suggestedBecauseTheVoiceSounds":
+    "Suggested because the voice sounds like theirs ({suggestionMatch})",
+  "meetings.transcript.suggestedBecauseTheVoiceSounds2":
+    "Suggested because the voice sounds like theirs",
+  "meetings.transcript.theNameIsAddedTo":
+    "The name is added to the people list your organization shares, so anyone can pick it in later meetings.",
+  "meetings.transcript.transcript": "Transcript",
+  "meetings.transcript.usedToSuggestNamesIn": "Used to suggest names in later meetings",
+  "meetings.transcript.valueMatch": "{value}% match",
+  "meetings.transcript.whoIsDisplayname": "Who is {displayName}?",
+  "meetings.transcript.yesItSDisplayname": "Yes, it's {displayName}",
   "messageTimeline.agentAnswered": "Agent answered",
   "messageTimeline.agentAsked": "Agent asked",
   "messageTimeline.agentSkipped": "Agent skipped",
@@ -3296,6 +3835,17 @@ export const englishMessages = {
   "sessionAdmission.membershipNext":
     "Ask a workspace admin to restore their access, then recheck to continue. It will not retry automatically.",
   "sessionAdmission.membershipTitle": "Workspace access needed",
+  "sessionAdmission.messagesWaitingExplanation":
+    "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start work there, so messages from other people wait for {owner}.",
+  "sessionAdmission.messagesWaitingForYouExplanation":
+    "This chat runs on your personal machine “{machine}”, so only your messages can start work there.",
+  "sessionAdmission.messagesWaitingForYouNext_one":
+    "Your next message brings it to the agent. Say what you want done with it.",
+  "sessionAdmission.messagesWaitingForYouNext_other":
+    "Your next message brings them to the agent. Say what you want done with them.",
+  "sessionAdmission.messagesWaitingForYouTitle_one": "A message from {people} is waiting for you",
+  "sessionAdmission.messagesWaitingForYouTitle_other":
+    "{count} messages from {people} are waiting for you",
   "sessionAdmission.moving": "Moving…",
   "sessionAdmission.needsDifferentMachineTitle": "This message needs a different machine",
   "sessionAdmission.noMachineChoices":
@@ -3308,6 +3858,14 @@ export const englishMessages = {
     "The queued message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. After changing machines or access, recheck to run the saved message.",
   "sessionAdmission.otherMachineWorkNote":
     "Updates from agents you start here also wait for {owner}.",
+  "sessionAdmission.othersMessagesWaitingNext_one":
+    "{owner}’s next message brings it to the agent.",
+  "sessionAdmission.othersMessagesWaitingNext_other":
+    "{owner}’s next message brings them to the agent.",
+  "sessionAdmission.othersMessagesWaitingTitle_one":
+    "A message from {people} is waiting for {owner}",
+  "sessionAdmission.othersMessagesWaitingTitle_other":
+    "{count} messages from {people} are waiting for {owner}",
   "sessionAdmission.othersUpdatesWaitingNext": "Only {owner} can let the agent continue with them.",
   "sessionAdmission.othersUpdatesWaitingTitle_one":
     "An update from {people}’s agents is waiting for {owner}",
@@ -3354,6 +3912,13 @@ export const englishMessages = {
   "sessionAdmission.waitingForYouTitle_one": "An update from {people}’s agents is waiting for you",
   "sessionAdmission.waitingForYouTitle_other":
     "{count} updates from {people}’s agents are waiting for you",
+  "sessionAdmission.yourMessagesWaitingNext_one":
+    "{owner}’s next message brings it to their agent. To run it yourself, move the chat to a machine you can use.",
+  "sessionAdmission.yourMessagesWaitingNext_other":
+    "{owner}’s next message brings them to their agent. To run them yourself, move the chat to a machine you can use.",
+  "sessionAdmission.yourMessagesWaitingTitle_one": "Your message is waiting for {owner}",
+  "sessionAdmission.yourMessagesWaitingTitle_other":
+    "{count} of your messages are waiting for {owner}",
   "sessionAdmission.yourUpdatesWaitingNext":
     "{owner} can continue with them from this chat. To run your own work now, move the chat to a machine you can use.",
   "sessionAdmission.yourUpdatesWaitingTitle_one":
@@ -3588,6 +4153,30 @@ export const englishMessages = {
   "sessionFeedbackModel.tellUsWhatCouldMake": "Tell us what could make {product} better.",
   "sessionFeedbackModel.thumbsDown": "Thumbs down",
   "sessionFeedbackModel.thumbsUp": "Thumbs up",
+  "sessionIntegrationCapabilityCard.chatAccessFailed":
+    "Connected, but it couldn't be added to this chat's tools. Choose it in this chat's tools.",
+  "sessionIntegrationCapabilityCard.connected": "Your account is connected",
+  "sessionIntegrationCapabilityCard.connectName": "Connect {name}",
+  "sessionIntegrationCapabilityCard.couldNotLoad": "Couldn't check this connection.",
+  "sessionIntegrationCapabilityCard.couldNotStart": "Couldn't start connecting. Try again.",
+  "sessionIntegrationCapabilityCard.finishSigningIn":
+    "Finish signing in to {name} in the window that opened.",
+  "sessionIntegrationCapabilityCard.integration": "Integration",
+  "sessionIntegrationCapabilityCard.noPermission":
+    "You can't connect {name} here. Ask a workspace admin for access.",
+  "sessionIntegrationCapabilityCard.note":
+    "You sign in with your own account in a new window. Only your chats use it.",
+  "sessionIntegrationCapabilityCard.notRequester":
+    "The agent continues once the person who asked connects their own account.",
+  "sessionIntegrationCapabilityCard.notSetUp":
+    "{name} isn't set up on this deployment yet. Ask its administrator to enable it.",
+  "sessionIntegrationCapabilityCard.personalUnavailable":
+    "{name} can only be connected to your own account, and this app can't do that here. Ask its administrator for help.",
+  "sessionIntegrationCapabilityCard.preparing": "Preparing sign-in…",
+  "sessionIntegrationCapabilityCard.retry": "Retry",
+  "sessionIntegrationCapabilityCard.signIn": "Sign in",
+  "sessionIntegrationCapabilityCard.stopWaiting": "Stop waiting",
+  "sessionIntegrationCapabilityCard.tryAgain": "Try again",
   "sessionList.archive": "Hide for me",
   "sessionList.cancel": "Cancel",
   "sessionList.chats": "Chats",
@@ -4208,6 +4797,7 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.workerStartupFailed": "Worker startup failed",
   "timeline.platformActivityPresentation.workerWaitInterrupted": "Worker wait interrupted",
   "timeline.platformActivityRow.command": "Command",
+  "timeline.platformActivityRow.details": "Details",
   "timeline.platformActivityRow.includesOverlappingSandboxStartupCustom":
     "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup shown below.",
   "timeline.platformActivityRow.output": "Output",
@@ -4224,6 +4814,7 @@ export const englishMessages = {
     "Switched to another subscription account.",
   "timeline.projection.theTurnFailed": "The turn failed.",
   "timeline.projection.theTurnFailedBeforeRetrying": "The turn failed before retrying.",
+  "timeline.projection.theTurnStoppedUnexpectedly": "The turn stopped unexpectedly",
   "timeline.projection.thisTaskSUsageLimit":
     "This task's usage limit is reached. A person can raise or remove the limit to continue.",
   "timeline.projection.tryAgainAfterYourQuota":

@@ -20,9 +20,7 @@ export const APP_ACTION_CALL_TOOL_NAME = "admin_action_call" as const;
  * its own read permission.
  */
 export const READ_ONLY_POST_ACTIONS: ReadonlySet<string> = new Set([
-  "/v1/workspaces/:workspaceId/knowledge/search",
   "/v1/workspaces/:workspaceId/knowledge/entries/search",
-  "/v1/workspaces/:workspaceId/document-bases/:baseId/search",
   "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read",
   "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff",
   "/v1/workspaces/:workspaceId/integrations/preview",
@@ -39,11 +37,16 @@ export function findAppAction(id: string): ActionCatalogEntry | undefined {
   );
 }
 
-/** Whether running the action can change anything. Only GET, HEAD and the read-only POSTs can't. */
+/**
+ * Whether running the action can change anything. Only GET, HEAD, the
+ * read-only POSTs and retired actions can't: a retired action runs nothing and
+ * only names its replacement, so it never needs a confirmation.
+ */
 export function appActionChangesState(entry: ActionCatalogEntry): boolean {
   return !(
     entry.method === "GET" ||
     entry.method === "HEAD" ||
+    entry.retired !== undefined ||
     READ_ONLY_POST_ACTIONS.has(entry.path)
   );
 }

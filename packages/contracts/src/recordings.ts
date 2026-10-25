@@ -781,14 +781,27 @@ export const RecordingTranscriptionCapabilities = /* @__PURE__ */ defineSchema((
 );
 export type RecordingTranscriptionCapabilities = z.infer<typeof RecordingTranscriptionCapabilities>;
 
+/**
+ * Who pays for a speech-to-text model: the workspace's own provider key
+ * (`workspace_key`), a subscription the workspace signed in to, which
+ * Opengeni never charges (`workspace_subscription`), or an account the
+ * deployment holds, charged in Opengeni credits where credit billing is on
+ * (`deployment`).
+ */
+export const RecordingTranscriptionFunding = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["workspace_key", "workspace_subscription", "deployment"]),
+);
+export type RecordingTranscriptionFunding = z.infer<typeof RecordingTranscriptionFunding>;
+
 export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
   z.object({
     providerId: z.string(),
     providerName: z.string(),
     model: z.string(),
     name: z.string(),
-    /** A credential for the provider is set up for this workspace. */
+    /** The provider can serve this workspace now (its key, sign-in or account is set up). */
     available: z.boolean(),
+    funding: RecordingTranscriptionFunding,
     capabilities: RecordingTranscriptionCapabilities,
     /** List price in USD per audio hour, when known. */
     usdPerHour: z.number().nullable(),
@@ -798,9 +811,17 @@ export type RecordingTranscriptionModel = z.infer<typeof RecordingTranscriptionM
 
 export const ListRecordingModelsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    /** Every speech-to-text model the deployment offers, for any use. */
     models: z.array(RecordingTranscriptionModel),
-    /** The model new transcripts use when a request names none. */
+    /** The model new meeting transcripts use when a request names none. */
     default: z.object({ providerId: z.string(), model: z.string() }),
+    /**
+     * The model dictation tries first; null when none is set, which tries
+     * the deployment's providers in order.
+     */
+    dictationDefault: z.object({ providerId: z.string(), model: z.string() }).nullable(),
+    /** The deployment uses one model for everything; workspaces cannot pick. */
+    pinned: z.boolean(),
   }),
 );
 export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResponse>;

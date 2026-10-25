@@ -1,4 +1,11 @@
-import { createContext, useContext, useMemo, type ComponentProps, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useMemo,
+  type ReactNode,
+  forwardRef,
+  type ComponentPropsWithoutRef,
+} from "react";
 
 import { cn } from "../lib/cn";
 
@@ -54,7 +61,7 @@ export function usePageHeaderStyle(): Required<PageHeaderStyle> {
   return { variant, icon: variant === "large" ? "hide" : (style.icon ?? "show") };
 }
 
-export interface PageHeaderProps extends Omit<ComponentProps<"header">, "title"> {
+export interface PageHeaderProps extends Omit<ComponentPropsWithoutRef<"header">, "title"> {
   /** The page name. Same noun as the rail entry and the route. */
   title: ReactNode;
   /** One line, 90 characters or less. */
@@ -77,102 +84,108 @@ export interface PageHeaderProps extends Omit<ComponentProps<"header">, "title">
   divider?: boolean | undefined;
 }
 
-export function PageHeader({
-  title,
-  description,
-  icon,
-  context,
-  meta,
-  actions,
-  tabs,
-  variant: variantProp,
-  showIcon,
-  divider = false,
-  className,
-  ...props
-}: PageHeaderProps) {
-  const style = useContext(PageHeaderStyleContext);
-  const variant = variantProp ?? style.variant ?? "default";
-  const large = variant === "large";
-  const iconVisible = Boolean(icon) && !large && (showIcon ?? style.icon !== "hide");
-  const ruled = divider && !tabs;
+export const PageHeader = /* @__PURE__ */ forwardRef<HTMLElement, PageHeaderProps>(
+  function PageHeader(
+    {
+      title,
+      description,
+      icon,
+      context,
+      meta,
+      actions,
+      tabs,
+      variant: variantProp,
+      showIcon,
+      divider = false,
+      className,
+      ...props
+    },
+    ref,
+  ) {
+    const style = useContext(PageHeaderStyleContext);
+    const variant = variantProp ?? style.variant ?? "default";
+    const large = variant === "large";
+    const iconVisible = Boolean(icon) && !large && (showIcon ?? style.icon !== "hide");
+    const ruled = divider && !tabs;
 
-  return (
-    <header
-      data-slot="page-header"
-      data-variant={variant}
-      // In the desktop app a page's title area moves the window, like a
-      // native title bar; its controls stay clickable.
-      data-window-drag
-      className={cn("@container/page-header min-w-0", className)}
-      {...props}
-    >
-      <div
-        className={cn(
-          "flex min-w-0 flex-col gap-3 @xl/page-header:flex-row @xl/page-header:items-center @xl/page-header:justify-between @xl/page-header:gap-6",
-          ruled && "border-b border-border",
-          !tabs && (large ? "pb-6" : "pb-4"),
-        )}
+    return (
+      <header
+        data-slot="page-header"
+        data-variant={variant}
+        // In the desktop app a page's title area moves the window, like a
+        // native title bar; its controls stay clickable.
+        data-window-drag
+        className={cn("@container/page-header min-w-0", className)}
+        ref={ref}
+        {...props}
       >
-        <div className="min-w-0 flex-1">
-          {context ? (
-            <div
-              data-slot="page-header-context"
-              className={cn(
-                "flex min-w-0 items-center gap-1.5 text-xs leading-4.5 font-medium text-fg-subtle",
-                large ? "mb-2" : "mb-1",
-              )}
-            >
-              {context}
-            </div>
-          ) : null}
-          <div className="flex min-w-0 items-start gap-2">
-            {iconVisible ? (
-              <span
-                aria-hidden="true"
-                className="flex h-7 shrink-0 items-center text-brand [&_svg]:size-4 [&_svg]:shrink-0"
-              >
-                {icon}
-              </span>
-            ) : null}
-            <h1
-              className={cn(
-                "min-w-0 font-semibold tracking-[-0.5px] break-words text-fg",
-                large ? "text-2xl leading-8" : "text-xl leading-7",
-              )}
-            >
-              {title}
-            </h1>
-            {meta ? (
-              <span
+        <div
+          className={cn(
+            "flex min-w-0 flex-col gap-3 @xl/page-header:flex-row @xl/page-header:items-center @xl/page-header:justify-between @xl/page-header:gap-6",
+            ruled && "border-b border-border",
+            !tabs && (large ? "pb-6" : "pb-4"),
+          )}
+        >
+          <div className="min-w-0 flex-1">
+            {context ? (
+              <div
+                data-slot="page-header-context"
                 className={cn(
-                  "flex shrink-0 items-center gap-1.5 self-start",
-                  large ? "h-8" : "h-7",
+                  "flex min-w-0 items-center gap-1.5 text-xs leading-4.5 font-medium text-fg-subtle",
+                  large ? "mb-2" : "mb-1",
                 )}
               >
-                {meta}
-              </span>
+                {context}
+              </div>
+            ) : null}
+            <div className="flex min-w-0 items-start gap-2">
+              {iconVisible ? (
+                <span
+                  aria-hidden="true"
+                  className="flex h-7 shrink-0 items-center text-brand [&_svg]:size-4 [&_svg]:shrink-0"
+                >
+                  {icon}
+                </span>
+              ) : null}
+              <h1
+                className={cn(
+                  "min-w-0 font-semibold tracking-[-0.5px] break-words text-fg",
+                  large ? "text-2xl leading-8" : "text-xl leading-7",
+                )}
+              >
+                {title}
+              </h1>
+              {meta ? (
+                <span
+                  className={cn(
+                    "flex shrink-0 items-center gap-1.5 self-start",
+                    large ? "h-8" : "h-7",
+                  )}
+                >
+                  {meta}
+                </span>
+              ) : null}
+            </div>
+            {description ? (
+              <p
+                data-slot="page-header-description"
+                className={cn("text-sm leading-5 text-fg-muted", large ? "mt-1.5" : "mt-1")}
+              >
+                {description}
+              </p>
             ) : null}
           </div>
-          {description ? (
-            <p
-              data-slot="page-header-description"
-              className={cn("text-sm leading-5 text-fg-muted", large ? "mt-1.5" : "mt-1")}
+          {actions ? (
+            <div
+              data-slot="page-header-actions"
+              className="flex min-w-0 shrink-0 flex-wrap items-center gap-2"
             >
-              {description}
-            </p>
+              {actions}
+            </div>
           ) : null}
         </div>
-        {actions ? (
-          <div
-            data-slot="page-header-actions"
-            className="flex min-w-0 shrink-0 flex-wrap items-center gap-2"
-          >
-            {actions}
-          </div>
-        ) : null}
-      </div>
-      {tabs ? <div className={cn("min-w-0", large ? "mt-4" : "mt-3")}>{tabs}</div> : null}
-    </header>
-  );
-}
+        {tabs ? <div className={cn("min-w-0", large ? "mt-4" : "mt-3")}>{tabs}</div> : null}
+      </header>
+    );
+  },
+);

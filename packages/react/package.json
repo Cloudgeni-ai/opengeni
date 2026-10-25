@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "5.2.1",
+  "version": "5.3.1",
   "description": "React hooks and styled components for Opengeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -140,6 +140,14 @@
       "types": "./src/recordings.ts",
       "default": "./src/recordings.ts"
     },
+    "./meetings": {
+      "types": "./src/meetings.ts",
+      "default": "./src/meetings.ts"
+    },
+    "./meetings-recorder": {
+      "types": "./src/meetings-recorder.ts",
+      "default": "./src/meetings-recorder.ts"
+    },
     "./artifacts": {
       "types": "./src/artifacts.ts",
       "default": "./src/artifacts.ts"
@@ -197,6 +205,10 @@
       "types": "./src/testing/session-scenarios.ts",
       "default": "./src/testing/session-scenarios.ts"
     },
+    "./testing/meetings": {
+      "types": "./src/testing/meetings-fixture.ts",
+      "default": "./src/testing/meetings-fixture.ts"
+    },
     "./timeline-model": {
       "types": "./src/timeline-model.ts",
       "default": "./src/timeline-model.ts"
@@ -224,6 +236,10 @@
     "./session-list-model": {
       "types": "./src/session-list-model.ts",
       "default": "./src/session-list-model.ts"
+    },
+    "./session-admin-access-model": {
+      "types": "./src/session-admin-access-model.ts",
+      "default": "./src/session-admin-access-model.ts"
     },
     "./model-mark-paths": {
       "types": "./src/model-mark-paths.ts",
@@ -306,7 +322,9 @@
     "postcss": "8.5.26",
     "postcss-selector-parser": "7.1.0",
     "react": "^19.2.5",
+    "react-18": "npm:react@18.3.1",
     "react-dom": "^19.2.5",
+    "react-dom-18": "npm:react-dom@18.3.1",
     "tailwindcss": "4.2.4",
     "tsup": "^8.5.0",
     "typescript": "7.0.2",

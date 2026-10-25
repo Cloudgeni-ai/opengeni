@@ -30,7 +30,7 @@ class OpenGeniAudioCaptureModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("OpenGeniAudioCapture")
 
-    Events("onChunk", "onState", "onError")
+    Events("onChunk", "onState", "onError", "onPcm")
 
     OnCreate { AudioCapture.emit = { name, body -> sendEvent(name, body) } }
 
@@ -59,5 +59,7 @@ class OpenGeniAudioCaptureModule : Module() {
     Function("level") { AudioCapture.level() }
 
     Function("activeRecordingId") { AudioCapture.recordingId() }
+
+    Function("setLivePcm") { enabled: Boolean -> AudioCapture.setLivePcm(enabled) }
   }
 }

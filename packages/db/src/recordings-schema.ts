@@ -188,6 +188,8 @@ export const recordingTranscriptVersions = pgTable(
     audioMilliseconds: integer("audio_milliseconds").notNull().default(0),
     segmentCount: integer("segment_count").notNull().default(0),
     costUsdMicros: bigint("cost_usd_micros", { mode: "number" }),
+    // Migration 0960. Credits charged for a deployment-funded model; null when not charged in credits.
+    creditCostMicros: bigint("credit_cost_micros", { mode: "number" }),
     requestedBySubjectId: text("requested_by_subject_id").notNull(),
     // Migration 0962. The credit debit attribution of the request that asked for this version.
     creditAttribution: jsonb("credit_attribution").$type<Record<string, unknown>>(),

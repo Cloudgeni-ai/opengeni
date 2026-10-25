@@ -41,6 +41,9 @@ mod ffi;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod window_presence;
 
+mod console_state;
+
+pub use console_state::{console_state, MacConsoleFacts, MacConsoleState};
 pub use window_presence::{MacWindowPresence, MacWindowQuery};
 
 /// Runs one synchronous native operation with a thread-local Cocoa pool.
@@ -1177,6 +1180,28 @@ pub fn machine_locked() -> Result<bool, MacFfiError> {
     {
         Err(MacFfiError::Unsupported(
             "macOS lock state is only available on macOS".to_string(),
+        ))
+    }
+}
+
+/// Reads whether this login session's windows are on the Mac's screen: not
+/// while the screen is locked or another user's session is on it. Read-only;
+/// it never unlocks or switches anything.
+///
+/// # Errors
+///
+/// Returns [`MacFfiError`] when CoreGraphics exposes no current GUI-session
+/// dictionary (no one is signed in, or the process runs outside the signed-in
+/// user's session).
+pub fn read_console_state() -> Result<MacConsoleState, MacFfiError> {
+    #[cfg(target_os = "macos")]
+    {
+        with_autorelease_pool(ffi::console_facts).map(|facts| console_state(&facts))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(MacFfiError::Unsupported(
+            "macOS console state is only available on macOS".to_string(),
         ))
     }
 }

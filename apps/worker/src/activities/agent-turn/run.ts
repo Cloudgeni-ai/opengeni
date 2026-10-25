@@ -120,7 +120,7 @@ import {
 } from "./codex-core-capacity";
 import { createCoreCodexRequests, providerRequestIdPrefix } from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
-import { preferenceSnapshotHumanSubjectId, prepareGovernanceAndModel } from "./governance-model";
+import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
 import {
@@ -873,7 +873,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     sessionId: input.sessionId,
                     cacheAffinityKey: codexCacheAffinityKey(
                       input.workspaceId,
-                      preferenceSnapshotHumanSubjectId(turn),
+                      session.scopeSubjectId,
                       input.sessionId,
                     ),
                     getToken: () => resolveTrackedToken(resolver.getToken),
@@ -1385,7 +1385,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             resolvedModel,
             workspaceAgentInstructions,
             workspaceAgentIdentity,
-            workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
             rigVersion,
@@ -1942,7 +1941,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             resolvedModel,
             workspaceAgentInstructions,
             workspaceAgentIdentity,
-            workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
             rigVersion,

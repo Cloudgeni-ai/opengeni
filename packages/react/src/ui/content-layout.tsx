@@ -1,4 +1,4 @@
-import type { ComponentProps, ReactNode } from "react";
+import { forwardRef, type ComponentPropsWithoutRef, type ReactNode } from "react";
 
 import { cn } from "../lib/cn";
 
@@ -17,17 +17,16 @@ import { cn } from "../lib/cn";
  * The `min-w-0` chain is intentional: pages live inside a flex shell and must
  * be allowed to shrink before a long untrusted name can widen the viewport.
  */
-export function ContentPage({
-  className,
-  width = "wide",
-  children,
-  ...props
-}: ComponentProps<"div"> & { width?: "standard" | "wide" }) {
+export const ContentPage = /* @__PURE__ */ forwardRef<
+  HTMLDivElement,
+  ComponentPropsWithoutRef<"div"> & { width?: "standard" | "wide" }
+>(function ContentPage({ className, width = "wide", children, ...props }, ref) {
   return (
     <div
       data-slot="content-page"
       data-workspace-scroll-owner="page"
       className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain"
+      ref={ref}
       {...props}
     >
       <div
@@ -42,18 +41,22 @@ export function ContentPage({
       </div>
     </div>
   );
-}
+});
 
 /** A bordered content region with consistent density and no implicit width. */
-export function ContentSurface({ className, ...props }: ComponentProps<"section">) {
+export const ContentSurface = /* @__PURE__ */ forwardRef<
+  HTMLElement,
+  ComponentPropsWithoutRef<"section">
+>(function ContentSurface({ className, ...props }, ref) {
   return (
     <section
       data-slot="content-surface"
       className={cn("min-w-0 rounded-xl border border-border bg-surface/45 p-3 sm:p-4", className)}
+      ref={ref}
       {...props}
     />
   );
-}
+});
 
 /** Compact title/description/action row used inside content surfaces. */
 export function ContentSurfaceHeader({
@@ -89,11 +92,10 @@ export function ContentSurfaceHeader({
 }
 
 /** Responsive form layout: one column first, opt-in columns as space permits. */
-export function FormGrid({
-  className,
-  columns = "two",
-  ...props
-}: ComponentProps<"div"> & { columns?: "two" | "three" }) {
+export const FormGrid = /* @__PURE__ */ forwardRef<
+  HTMLDivElement,
+  ComponentPropsWithoutRef<"div"> & { columns?: "two" | "three" }
+>(function FormGrid({ className, columns = "two", ...props }, ref) {
   return (
     <div
       data-slot="form-grid"
@@ -102,27 +104,26 @@ export function FormGrid({
         columns === "two" ? "sm:grid-cols-2" : "sm:grid-cols-2 xl:grid-cols-3",
         className,
       )}
+      ref={ref}
       {...props}
     />
   );
-}
+});
 
 /** Accessible form-field stack shared by native and custom form controls. */
-export function FormField({
-  label,
-  hint,
-  className,
-  children,
-  ...props
-}: Omit<ComponentProps<"label">, "children"> & {
-  label: ReactNode;
-  hint?: ReactNode | undefined;
-  children: ReactNode;
-}) {
+export const FormField = /* @__PURE__ */ forwardRef<
+  HTMLLabelElement,
+  Omit<ComponentPropsWithoutRef<"label">, "children"> & {
+    label: ReactNode;
+    hint?: ReactNode | undefined;
+    children: ReactNode;
+  }
+>(function FormField({ label, hint, className, children, ...props }, ref) {
   return (
     <label
       data-slot="form-field"
       className={cn("grid min-w-0 gap-1.5 text-sm font-medium text-fg", className)}
+      ref={ref}
       {...props}
     >
       <span>{label}</span>
@@ -130,13 +131,16 @@ export function FormField({
       {hint ? <span className="text-2xs font-normal leading-4 text-fg-subtle">{hint}</span> : null}
     </label>
   );
-}
+});
 
 /**
  * Contained horizontal overflow for genuinely tabular or wide data.
  * This is the only element that scrolls; it never widens the page itself.
  */
-export function DataScroller({ className, ...props }: ComponentProps<"div">) {
+export const DataScroller = /* @__PURE__ */ forwardRef<
+  HTMLDivElement,
+  ComponentPropsWithoutRef<"div">
+>(function DataScroller({ className, ...props }, ref) {
   return (
     <div
       data-slot="data-scroller"
@@ -146,7 +150,8 @@ export function DataScroller({ className, ...props }: ComponentProps<"div">) {
         "max-w-full min-w-0 overflow-x-auto overscroll-x-contain rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
         className,
       )}
+      ref={ref}
       {...props}
     />
   );
-}
+});

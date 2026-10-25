@@ -5,15 +5,15 @@ import { ScrollArea as ScrollAreaPrimitive } from "radix-ui";
 
 import { cn } from "../lib/cn";
 
-function ScrollArea({
-  className,
-  children,
-  ...props
-}: React.ComponentProps<typeof ScrollAreaPrimitive.Root>) {
+const ScrollArea = /* @__PURE__ */ React.forwardRef<
+  React.ComponentRef<typeof ScrollAreaPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Root>
+>(function ScrollArea({ className, children, ...props }, ref) {
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
       className={cn("relative", className)}
+      ref={ref}
       {...props}
     >
       <ScrollAreaPrimitive.Viewport
@@ -26,13 +26,12 @@ function ScrollArea({
       <ScrollAreaPrimitive.Corner />
     </ScrollAreaPrimitive.Root>
   );
-}
+});
 
-function ScrollBar({
-  className,
-  orientation = "vertical",
-  ...props
-}: React.ComponentProps<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>) {
+const ScrollBar = /* @__PURE__ */ React.forwardRef<
+  React.ComponentRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>,
+  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>
+>(function ScrollBar({ className, orientation = "vertical", ...props }, ref) {
   return (
     <ScrollAreaPrimitive.ScrollAreaScrollbar
       data-slot="scroll-area-scrollbar"
@@ -43,6 +42,7 @@ function ScrollBar({
         orientation === "horizontal" && "h-2.5 flex-col border-t border-t-transparent",
         className,
       )}
+      ref={ref}
       {...props}
     >
       <ScrollAreaPrimitive.ScrollAreaThumb
@@ -51,6 +51,6 @@ function ScrollBar({
       />
     </ScrollAreaPrimitive.ScrollAreaScrollbar>
   );
-}
+});
 
 export { ScrollArea, ScrollBar };

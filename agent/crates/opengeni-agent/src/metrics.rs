@@ -26,30 +26,37 @@
 //! from `sysctl hw.memsize` (used best-effort from `vm_stat`), and cpu% from
 //! `top -l 2` (its second sample reflects a real interval — the macOS analog of
 //! the `/proc/stat` delta). The macOS run-queue has no cheap source, so it stays
-//! zero == "not reported"; any other OS likewise degrades every rich field to
-//! zero (the honest-degradation rule the M6 seam used). **No `unsafe`** —
-//! `statvfs` goes through the safe `nix` crate and every macOS reading is a
-//! subprocess parse, never our own FFI.
+//! zero == "not reported". **Windows** reads memory (`GlobalMemoryStatusEx`),
+//! cpu% (the delta of two `GetSystemTimes` reads, like `/proc/stat`) and the
+//! workspace volume (`GetDiskFreeSpaceExW`) through the safe wrappers of
+//! `opengeni-agent-windows-ffi`, the one crate allowed to hold `unsafe`.
+//! Windows has no load average or run-queue, so those stay zero == "not
+//! reported"; any other OS likewise degrades every rich field to zero (the
+//! honest-degradation rule the M6 seam used). **No `unsafe` here** — `statvfs`
+//! goes through the safe `nix` crate, every macOS reading is a subprocess
+//! parse, and the Windows calls live behind the FFI crate's safe API.
 //!
 //! # Determinism / testing
 //!
 //! Every text/number reading is factored into pure functions
 //! (`parse_meminfo`, `parse_loadavg`, `cpu_busy_total_from_stat`, the macOS
-//! `parse_sysctl_loadavg` / `parse_vm_stat_used` / `parse_top_cpu_busy`, and the
-//! cross-platform `disk_used_total`) so the unit tests parse committed fixtures
-//! with NO live host dependency — bounds, the null-when-absent contract, the CPU
-//! delta, and the disk fragment-size unit are all deterministic.
+//! `parse_sysctl_loadavg` / `parse_vm_stat_used` / `parse_top_cpu_busy`, the
+//! Windows `cpu_busy_total_from_processor_times`, and the cross-platform
+//! `disk_used_total`) so the unit tests parse committed fixtures with NO live
+//! host dependency — bounds, the null-when-absent contract, the CPU delta, and
+//! the disk fragment-size unit are all deterministic.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use opengeni_agent_proto::v1::{GpuSample, MetricsSample};
 
-/// The minimum interval between the two `/proc/stat` reads a CPU% delta needs.
-/// A short window keeps the synchronous sample cheap while still being long
-/// enough to register a non-trivial busy fraction.
-#[cfg(target_os = "linux")]
+/// The minimum interval between the two `/proc/stat` (Linux) or
+/// `GetSystemTimes` (Windows) reads a CPU% delta needs. A short window keeps
+/// the synchronous sample cheap while still being long enough to register a
+/// non-trivial busy fraction.
+#[cfg(any(target_os = "linux", windows))]
 const CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Produces a best-effort point-in-time metrics sample.
@@ -166,6 +173,7 @@ fn parse_loadavg(text: &str) -> (f64, f64, f64, f64) {
 /// real sampling interval (the first is cumulative-since-boot, so a single read
 /// is meaningless — the same reason the Linux path needs a delta); `top`'s
 /// default interval is ~1s, so the macOS sample blocks ~1s rather than 200ms.
+/// Windows: the delta of two `GetSystemTimes` reads over [`CPU_SAMPLE_INTERVAL`].
 /// Returns 0.0 on any read failure or an unsupported OS (zero == "not reported").
 fn read_cpu_percent() -> f64 {
     #[cfg(target_os = "linux")]
@@ -184,7 +192,19 @@ fn read_cpu_percent() -> f64 {
     {
         run_capture("top", &["-l", "2", "-n", "0"]).map_or(0.0, |text| parse_top_cpu_busy(&text))
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        let read = || {
+            opengeni_agent_windows_ffi::system::processor_times().and_then(|times| {
+                cpu_busy_total_from_processor_times(times.idle, times.kernel, times.user)
+            })
+        };
+        let Some(first) = read() else { return 0.0 };
+        std::thread::sleep(CPU_SAMPLE_INTERVAL);
+        let Some(second) = read() else { return 0.0 };
+        cpu_percent_from_deltas(first, second)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         0.0
     }
@@ -213,9 +233,20 @@ fn cpu_busy_total_from_stat(text: &str) -> Option<(u64, u64)> {
     Some((busy, total))
 }
 
+/// Windows processor times (`GetSystemTimes` idle, kernel and user ticks) as
+/// `(busy, total)`. Windows counts idle time inside kernel time, so total is
+/// kernel + user and busy is total minus idle. `None` when the counters are
+/// inconsistent.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn cpu_busy_total_from_processor_times(idle: u64, kernel: u64, user: u64) -> Option<(u64, u64)> {
+    let total = kernel.checked_add(user)?;
+    let busy = total.checked_sub(idle)?;
+    Some((busy, total))
+}
+
 /// CPU% from two `(busy, total)` snapshots. A non-advancing or backwards `total`
 /// (counter reset) yields 0.0; the result is clamped to `0..=100`.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 fn cpu_percent_from_deltas(first: (u64, u64), second: (u64, u64)) -> f64 {
     let busy_delta = second.0.saturating_sub(first.0);
     let total_delta = second.1.saturating_sub(first.1);
@@ -231,7 +262,9 @@ fn cpu_percent_from_deltas(first: (u64, u64), second: (u64, u64)) -> f64 {
 
 /// Reads `(mem_used_bytes, mem_total_bytes)`. "Used" is `MemTotal -
 /// MemAvailable` (matching `free`'s used column — the figure a human reads as
-/// memory pressure). Returns `(0, 0)` on non-Linux or any read failure.
+/// memory pressure); on Windows it is total minus available physical memory
+/// (Task Manager's "In use"). Returns `(0, 0)` on an unsupported OS or any read
+/// failure.
 fn read_memory() -> (u64, u64) {
     #[cfg(target_os = "linux")]
     {
@@ -247,6 +280,15 @@ fn read_memory() -> (u64, u64) {
         if let Some(total) = run_sysctl("hw.memsize").and_then(|t| t.trim().parse::<u64>().ok()) {
             let used = run_capture("vm_stat", &[]).map_or(0, |t| parse_vm_stat_used(&t, total));
             return (used.min(total), total);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some(memory) = opengeni_agent_windows_ffi::system::memory() {
+            return (
+                memory.total_bytes.saturating_sub(memory.available_bytes),
+                memory.total_bytes,
+            );
         }
     }
     (0, 0)
@@ -285,7 +327,9 @@ fn parse_meminfo(text: &str) -> (u64, u64) {
 /// Reads `(disk_used_bytes, disk_total_bytes)` for the filesystem containing
 /// `root` via the SAFE `nix` `statvfs` binding. "Used" is `total - available`
 /// (available-to-unprivileged, matching `df`'s used column for the non-root
-/// user). Returns `(0, 0)` on any failure (non-unix or a statvfs error).
+/// user). Windows reads the volume holding `root` with `GetDiskFreeSpaceExW`,
+/// with the same `total - available-to-this-user` meaning. Returns `(0, 0)` on
+/// any failure or an unsupported OS.
 #[allow(clippy::unnecessary_cast, clippy::cast_lossless)] // statvfs counts are u64 on Linux, u32 on macOS
 fn read_disk(root: &str) -> (u64, u64) {
     #[cfg(unix)]
@@ -310,7 +354,19 @@ fn read_disk(root: &str) -> (u64, u64) {
             stat.blocks_available() as u64,
         )
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        opengeni_agent_windows_ffi::system::volume(std::path::Path::new(root)).map_or(
+            (0, 0),
+            |volume| {
+                (
+                    volume.total_bytes.saturating_sub(volume.available_bytes),
+                    volume.total_bytes,
+                )
+            },
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = root;
         (0, 0)
@@ -593,6 +649,34 @@ Buffers:          500000 kB
         assert_eq!(cpu_percent_from_deltas((100, 1000), (100, 1000)), 0.0);
         // A pathological busy>total delta clamps to 100, never overflows.
         assert_eq!(cpu_percent_from_deltas((0, 0), (1000, 100)), 100.0);
+    }
+
+    #[test]
+    fn windows_processor_times_count_idle_inside_kernel_time() {
+        // GetSystemTimes: kernel 900 already includes idle 800; user 100.
+        assert_eq!(
+            cpu_busy_total_from_processor_times(800, 900, 100),
+            Some((200, 1000))
+        );
+        // Two readings 100 ticks apart, 25 of them busy → 25%.
+        let first = cpu_busy_total_from_processor_times(800, 900, 100).unwrap();
+        let second = cpu_busy_total_from_processor_times(875, 990, 110).unwrap();
+        assert_eq!(cpu_percent_from_deltas(first, second), 25.0);
+        // Inconsistent counters are not reported rather than wrapped.
+        assert_eq!(cpu_busy_total_from_processor_times(2000, 900, 100), None);
+        assert_eq!(cpu_busy_total_from_processor_times(0, u64::MAX, 1), None);
+    }
+
+    /// Every platform with a native reader must report real memory and disk
+    /// figures; all-zero samples are what Windows used to send.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn live_sample_reports_memory_and_disk() {
+        let s = sample_with_root(".");
+        assert!(s.mem_total_bytes > 0, "memory total not reported: {s:?}");
+        assert!(s.mem_used_bytes > 0, "memory in use not reported: {s:?}");
+        assert!(s.disk_total_bytes > 0, "disk total not reported: {s:?}");
+        assert!(s.disk_used_bytes <= s.disk_total_bytes);
     }
 
     #[test]

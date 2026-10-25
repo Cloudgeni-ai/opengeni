@@ -3,6 +3,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   resolveAgentConfig,
+  sessionChatUrl,
   signDelegatedAccessToken,
   type Session,
   type SessionAuthorizationPort,
@@ -212,7 +213,16 @@ test("authenticated full MCP detail matches REST while reading projection metada
     const workspace = spyOn(db, "requireWorkspace");
     try {
       const response = await f.post({ sessionId: target.id, detail: "full" }, authorization);
-      expect(value(response)).toEqual(expected);
+      // REST's detail plus the chat's canonical link, which only MCP adds.
+      const { chatUrl, ...detail } = value(response);
+      expect(detail).toEqual(expected);
+      expect(chatUrl).toBe(
+        sessionChatUrl(
+          settings.webBaseUrl ?? settings.publicBaseUrl,
+          f.owner.workspaceId,
+          target.id,
+        ),
+      );
       expect(
         registry.mock.calls.every(
           ([, workspaceId, , options]) =>

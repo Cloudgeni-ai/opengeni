@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use compute_protocol::host::Request;
+use compute_protocol::host::{ErrorCode, Reply, Request};
 use serde_json::{Value, json};
 
 use super::support::{Act, Fleet, OPERATOR_KEY, id};
@@ -203,4 +203,58 @@ async fn a_draining_host_hands_its_sandboxes_off_and_gets_nothing_new_until_undr
         },
     )
     .await;
+}
+
+/// A sandbox something keeps awake stays on a draining host, counted
+/// left, until a drain asks for those too; then its owner hands it off
+/// awake, and its next wake places it elsewhere. A move can ask the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_asked_to_moves_the_sandboxes_that_stay_awake_too() {
+    let fleet = Fleet::start().await;
+    let a = fleet.host("host-a.example").await;
+    let kept = fleet.create(json!({})).await;
+    let watched = fleet.create(json!({})).await;
+    let b = fleet.host("host-b.example").await;
+    // As a host does for a sandbox held awake, unless told to go awake.
+    a.behave(|envelope| match envelope.request {
+        Request::HandOff { awake: false, .. } => Act::Reply(Reply::Error {
+            code: ErrorCode::Busy,
+            message: "awake".into(),
+        }),
+        _ => Act::Ordinary,
+    });
+    let drain = |body: Option<Value>| {
+        fleet.call(
+            reqwest::Method::POST,
+            "/v1/hosts/host-a.example/drain",
+            Some(OPERATOR_KEY),
+            body,
+        )
+    };
+    assert_eq!(drain(None).await, (200, json!({ "moved": 0, "left": 2 })));
+    assert_eq!(
+        drain(Some(json!({}))).await,
+        (200, json!({ "moved": 0, "left": 2 }))
+    );
+    assert!(a.holds(id(&kept)).is_some());
+
+    let (status, moved) = fleet
+        .post(
+            &format!("/v1/sandboxes/{kept}/move"),
+            json!({ "to": "host-b.example", "awake": true }),
+        )
+        .await;
+    assert_eq!((status, &moved["host"]), (200, &json!("host-b.example")));
+    assert_eq!(
+        drain(Some(json!({ "awake": true }))).await,
+        (200, json!({ "moved": 1, "left": 0 }))
+    );
+    assert_eq!((a.holds(id(&kept)), a.holds(id(&watched))), (None, None));
+    let (status, woken) = fleet
+        .post(&format!("/v1/sandboxes/{watched}/wake"), json!({}))
+        .await;
+    assert_eq!((status, &woken["host"]), (200, &json!("host-b.example")));
+    assert!(b.holds(id(&watched)).is_some());
+    let (status, refused) = drain(Some(json!({ "awake": "yes" }))).await;
+    assert_eq!(status, 422, "{refused}");
 }

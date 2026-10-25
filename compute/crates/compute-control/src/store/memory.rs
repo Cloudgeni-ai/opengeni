@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use compute_fleet::{HostEpoch, HostId, HostState};
 use compute_protocol::fleet::{Register, Renew, Report, Ruling};
-use compute_protocol::host::Id;
+use compute_protocol::host::{Id, ImageId};
 
 use super::{
     Admission, Admits, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow, Store, Write,
@@ -33,6 +33,10 @@ struct Inner {
     lifecycles: BTreeMap<Id, LifecycleRow>,
     /// By team, then request id.
     requests: BTreeMap<(String, String), RequestRow>,
+    /// The image built from each OCI image.
+    built: HashMap<String, ImageId>,
+    /// Which OCI image each name used, the latest last.
+    image_uses: Vec<(String, String)>,
     next_host: u64,
     next_host_epoch: u64,
     changes: u64,
@@ -652,5 +656,36 @@ impl Store for MemoryStore {
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
         ready(Ok(self.lifecycles_paused_now(after, limit)))
+    }
+
+    fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
+        ready(Ok(self.lock().built.get(source).copied()))
+    }
+
+    fn record_built(
+        &self,
+        source: &str,
+        name: &str,
+        image: ImageId,
+        _at_ms: u64,
+    ) -> impl Future<Output = Result<ImageId>> + Send {
+        let mut inner = self.lock();
+        let recorded = *inner.built.entry(source.to_owned()).or_insert(image);
+        inner
+            .image_uses
+            .retain(|(named, used)| named != name || used != source);
+        inner.image_uses.push((name.to_owned(), source.to_owned()));
+        ready(Ok(recorded))
+    }
+
+    fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
+        let inner = self.lock();
+        let latest = inner
+            .image_uses
+            .iter()
+            .rev()
+            .find_map(|(named, source)| (named == name).then(|| inner.built.get(source).copied()))
+            .flatten();
+        ready(Ok(latest))
     }
 }

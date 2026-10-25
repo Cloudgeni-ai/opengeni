@@ -502,13 +502,16 @@ const SettingsSchema = z.object({
     .string()
     .url()
     .default("https://github.com/Cloudgeni-ai/opengeni/releases"),
-  // Explicit operator-controlled promotion pointer for `/agent/latest/*`.
-  // Versioned agent releases are immutable; changing this setting promotes or
-  // rolls back the stable channel without moving or deleting a provider tag.
+  // Optional operator promotion pointer for `/agent/latest/*` and the stable
+  // update channel. Versioned agent releases are immutable; setting this pins,
+  // promotes or rolls back the stable channel without moving or deleting a
+  // provider tag. Unset, the API serves the agent release of its own source
+  // tree (agent/Cargo.toml), so the stable agent advances with the control
+  // plane instead of staying at whatever version a default once named.
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.54"),
+    .optional(),
   // Optional pin for the desktop app served by /desktop/latest/*. When unset,
   // the newest desktop-v release on the agent release repository is served.
   desktopStableVersion: z
@@ -992,10 +995,60 @@ const SettingsSchema = z.object({
    */
   recordingSpeakersBinaryPath: z.string().trim().min(1).max(1024).optional(),
   recordingSpeakerModelsDir: z.string().trim().min(1).max(1024).optional(),
+  /**
+   * Place a text-only model's words on the audio ourselves (forced alignment
+   * with `alignment.onnx` from the speaker models directory), so models
+   * that return only text can serve meetings. The API and the worker both
+   * read it; the worker also needs the model.
+   */
+  recordingWordAlignment: EnvBoolean.default(false),
+  /**
+   * The deployment's own Azure Speech account for meeting transcripts
+   * (MAI-Transcribe), as its HTTPS origin. Audio is processed in the
+   * account's region. It authenticates with the account key when one is set,
+   * otherwise with Microsoft Entra ID through the standard AZURE_TENANT_ID and
+   * AZURE_CLIENT_ID plus AZURE_FEDERATED_TOKEN_FILE (a workload identity) or
+   * AZURE_CLIENT_SECRET.
+   */
+  recordingAzureSpeechEndpoint: z
+    .string()
+    .trim()
+    .url()
+    .refine((value) => {
+      const url = new URL(value);
+      return url.protocol === "https:" && (url.pathname === "/" || url.pathname === "");
+    }, "OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT must be the HTTPS origin of an Azure Speech account")
+    .optional(),
+  recordingAzureSpeechApiKey: z.string().trim().min(1).optional(),
+  /**
+   * The transcription model recordings use unless a workspace or request
+   * picks one, as `provider/model`. Defaults to Azure Speech when its
+   * account is configured, else ElevenLabs Scribe v2.
+   */
+  recordingTranscriptionDefault: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u, "Use provider/model, such as elevenlabs/scribe_v2")
+    .optional(),
+  /**
+   * One speech-to-text model for every use (meetings, dictation), as
+   * `provider/model`. Workspaces then cannot pick another, and nothing else
+   * hears the audio. Unset lets each workspace choose.
+   */
+  speechToTextPinned: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u,
+      "Use provider/model, such as azure-speech/MAI-Transcribe-2",
+    )
+    .optional(),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Connected subscription STT is preferred by default; operators can put
   // openai/azure-openai first explicitly.
-  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai.
+  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai,
+  // azure-speech (also azure-mai) and elevenlabs. Speech-to-text providers
+  // not named here follow in the deployment's own order.
   voiceInputProviderOrder: z
     .string()
     .default("supergrok-subscription,codex-subscription,openai,azure-openai"),
@@ -1285,6 +1338,9 @@ const SettingsSchema = z.object({
   azureOpenaiApiVersion: z.string().optional(),
   azureOpenaiApiKey: z.string().optional(),
   azureOpenaiAdToken: z.string().optional(),
+  azureOpenaiAuthMode: z
+    .enum(["static", "deployment_identity", "workload_identity", "managed_identity"])
+    .default("static"),
   /**
    * Let organization admins connect Azure OpenAI as this deployment's own
    * Microsoft Entra identity instead of a key or their own app. Off by
@@ -2375,6 +2431,16 @@ export type VoiceInputProviderId =
   | "codex-subscription"
   | "supergrok-subscription";
 
+/** Every speech-to-text provider a deployment can offer, for any use. */
+export const SPEECH_TO_TEXT_PROVIDER_IDS: readonly string[] = [
+  "openai",
+  "azure-openai",
+  "azure-speech",
+  "codex-subscription",
+  "supergrok-subscription",
+  "elevenlabs",
+];
+
 export type VoiceInputProviderConfig =
   | {
       id: "azure-mai";
@@ -2580,6 +2646,8 @@ function voiceInputProviderRegistryWithIssues(settings: Settings): {
   const order = settings.voiceInputProviderOrder
     .split(",")
     .map((part) => part.trim())
+    // azure-speech is the shared name of the MAI provider.
+    .map((part) => (part === "azure-speech" ? "azure-mai" : part))
     .filter(
       (part): part is VoiceInputProviderId =>
         part === "openai" ||
@@ -5421,6 +5489,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     recordingSpeakersBinaryPath: optional("OPENGENI_RECORDING_SPEAKERS_BINARY_PATH"),
     recordingSpeakerModelsDir: optional("OPENGENI_RECORDING_SPEAKER_MODELS_DIR"),
+    recordingWordAlignment: optional("OPENGENI_RECORDING_WORD_ALIGNMENT"),
+    recordingAzureSpeechEndpoint: optional("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT"),
+    recordingAzureSpeechApiKey: optional("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY"),
+    recordingTranscriptionDefault: optional("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT"),
+    speechToTextPinned: optional("OPENGENI_SPEECH_TO_TEXT_PINNED"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
     voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),
@@ -5522,6 +5595,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     azureOpenaiApiVersion: optional("OPENGENI_AZURE_OPENAI_API_VERSION"),
     azureOpenaiApiKey: optional("OPENGENI_AZURE_OPENAI_API_KEY"),
     azureOpenaiAdToken: optional("OPENGENI_AZURE_OPENAI_AD_TOKEN"),
+    azureOpenaiAuthMode: optional("OPENGENI_AZURE_OPENAI_AUTH_MODE"),
     azureOpenaiDeploymentIdentityEnabled: optional(
       "OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED",
     ),
@@ -7246,7 +7320,7 @@ function organizationDirectRegistryProvider(
       aliases: [],
       label: model.label?.trim() || model.upstreamModelId,
       capabilities: legacyModelCapabilities(settings, {
-        reasoningEffort: false,
+        reasoningEffort: provider === "azure_openai",
         hostedWebSearch: false,
       }),
       toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
@@ -11078,6 +11152,38 @@ export function validateSitesDomain(
   }
 }
 
+/** A deployment's own transcription account must be usable, and the default must exist. */
+function validateRecordingTranscriptionSettings(settings: Settings): void {
+  if (
+    settings.recordingAzureSpeechEndpoint &&
+    !settings.recordingAzureSpeechApiKey &&
+    !deploymentAzureEntraCredential(settings)
+  ) {
+    throw new Error(
+      "OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT needs OPENGENI_RECORDING_AZURE_SPEECH_API_KEY, or AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET",
+    );
+  }
+  for (const [env, value] of [
+    ["OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT", settings.recordingTranscriptionDefault],
+    ["OPENGENI_SPEECH_TO_TEXT_PINNED", settings.speechToTextPinned],
+  ] as const) {
+    const provider = value?.split("/")[0];
+    if (!provider) continue;
+    if (!SPEECH_TO_TEXT_PROVIDER_IDS.includes(provider)) {
+      throw new Error(`${env} must name one of ${SPEECH_TO_TEXT_PROVIDER_IDS.join(", ")}`);
+    }
+    if (
+      provider === "azure-speech" &&
+      !settings.recordingAzureSpeechEndpoint &&
+      !settings.voiceInputMaiEndpoint
+    ) {
+      throw new Error(
+        `${env} names azure-speech but OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT is not set`,
+      );
+    }
+  }
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
@@ -11095,6 +11201,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       `OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS (${settings.goalIdleBackoffMaxMs})`,
     );
   }
+  validateRecordingTranscriptionSettings(settings);
   const allowedFirstPartyMcpTools = new Set(
     settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
   );
@@ -11476,8 +11583,35 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     if (!settings.azureOpenaiBaseUrl && !settings.azureOpenaiApiVersion) {
       throw new Error("Azure OpenAI endpoint mode requires OPENGENI_AZURE_OPENAI_API_VERSION");
     }
-    if (!settings.azureOpenaiApiKey && !settings.azureOpenaiAdToken) {
+    if (
+      settings.azureOpenaiAuthMode === "static" &&
+      !settings.azureOpenaiApiKey &&
+      !settings.azureOpenaiAdToken
+    ) {
       throw new Error("Azure OpenAI requires an API key or AD token");
+    }
+  }
+  if (settings.azureOpenaiAuthMode !== "static") {
+    if (settings.azureOpenaiApiKey || settings.azureOpenaiAdToken) {
+      throw new Error(
+        "Azure OpenAI identity authentication cannot be combined with an API key or AD token",
+      );
+    }
+    if (
+      settings.azureOpenaiAuthMode === "deployment_identity" &&
+      !deploymentAzureEntraCredential(settings)
+    ) {
+      throw new Error(
+        "Azure OpenAI deployment_identity needs AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET",
+      );
+    }
+    if (
+      settings.azureOpenaiAuthMode === "workload_identity" &&
+      !(settings.azureTenantId && settings.azureClientId && settings.azureFederatedTokenFile)
+    ) {
+      throw new Error(
+        "Azure OpenAI workload_identity needs AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_FEDERATED_TOKEN_FILE",
+      );
     }
   }
   if (settings.azureOpenaiDeploymentIdentityEnabled && !deploymentAzureEntraCredential(settings)) {

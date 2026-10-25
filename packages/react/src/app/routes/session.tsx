@@ -6,6 +6,7 @@ import {
   createWorkspaceRetainedVideoLoader,
 } from "../../timeline";
 import { isModelUnavailableSubmissionError } from "../../lib/format";
+import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
@@ -3500,7 +3501,7 @@ function SessionChatPane(props: {
     reviewDetailPane,
     createElement(
       "div",
-      { className: reviewDetails ? "hidden" : "contents", inert: reviewDetails ? true : undefined },
+      { className: reviewDetails ? "hidden" : "contents", ...inertProps(Boolean(reviewDetails)) },
       createElement(
         LightboxProvider,
         null,

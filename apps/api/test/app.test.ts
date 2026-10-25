@@ -869,6 +869,7 @@ describe("API helpers", () => {
     expect(errorCodeForStatus(401)).toBe("unauthenticated");
     expect(errorCodeForStatus(402)).toBe("payment_required");
     expect(errorCodeForStatus(409)).toBe("conflict");
+    expect(errorCodeForStatus(410)).toBe("gone");
     expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
   });
 
@@ -2116,6 +2117,21 @@ describe("GET /v1/config/client", () => {
       testSettings({ productAccessMode: "managed", managedAuthNewSignupsEnabled: false }),
     );
     expect(paused.auth).toMatchObject({ mode: "managedSession", newSignupsEnabled: false });
+  });
+
+  test("projects the server's own email verification requirement", async () => {
+    const required = await fetchClientConfig(testSettings({ productAccessMode: "managed" }));
+    expect(required.auth).toMatchObject({
+      mode: "managedSession",
+      emailVerificationRequired: true,
+    });
+    const optional = await fetchClientConfig(
+      testSettings({ productAccessMode: "managed", managedAuthRequireEmailVerification: false }),
+    );
+    expect(optional.auth).toMatchObject({
+      mode: "managedSession",
+      emailVerificationRequired: false,
+    });
   });
 
   test("keeps analytics off by default and exposes only configured public identifiers", async () => {

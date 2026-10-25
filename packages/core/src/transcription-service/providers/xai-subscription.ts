@@ -1,8 +1,11 @@
 import { type Settings } from "@opengeni/config";
+import type { RecordingTranscriptionProvider } from "../../recording-transcription";
 import {
-  type TranscriptionAvailabilityContext,
-  type TranscriptionProvider,
-} from "../../transcription";
+  requireScope,
+  textModelCapabilities,
+  textRequestAudio,
+  textTranscriptionResult,
+} from "../text-models";
 import {
   getWorkspace,
   readSubscriptionCoreProviderRouteForWorkspace,
@@ -22,17 +25,32 @@ import { coreTranscriptionUnavailable, transcribeOnSubscriptionCore } from "./su
 
 const TRANSCRIBE_URL = `${XAI_PUBLIC_API_BASE_URL}/stt`;
 
+/** The model the SuperGrok speech-to-text endpoint is offered as. */
+export const XAI_TRANSCRIPTION_MODEL = "grok-stt";
+
 export function createXaiSubscriptionTranscriptionProvider(input: {
   settings: Settings;
   db: Database;
   fetch?: typeof fetch;
-}): TranscriptionProvider {
+}): RecordingTranscriptionProvider {
   const fetchImpl = input.fetch ?? fetch;
   return {
     id: "supergrok-subscription",
-    supportsServerDeadline: true,
-    experimental: true,
-    async available(context?: TranscriptionAvailabilityContext) {
+    name: "SuperGrok subscription",
+    funding: "workspace_subscription",
+    models: [
+      {
+        model: XAI_TRANSCRIPTION_MODEL,
+        name: "Grok speech to text",
+        capabilities: textModelCapabilities({
+          maxDurationSeconds: 600,
+          maxFileBytes: 25 * 1024 * 1024,
+        }),
+        // Paid for by the workspace's own subscription; Opengeni charges nothing.
+        usdPerHour: 0,
+      },
+    ],
+    async available(context?: { accountId?: string; workspaceId?: string; subjectId?: string }) {
       if (!context?.workspaceId || !context.subjectId) {
         return input.settings.supergrokSubscriptionEnabled;
       }
@@ -46,16 +64,10 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
         subjectId: context.subjectId,
       });
     },
-    async transcribe({
-      audio,
-      mimeType,
-      filename,
-      workspaceId,
-      accountId,
-      subjectId,
-      requestId,
-      signal,
-    }) {
+    async transcribe(request) {
+      const { audio, mimeType, filename } = textRequestAudio(request);
+      const { workspaceId, accountId, subjectId, requestId } = requireScope(request);
+      const signal = request.signal;
       const send = async (fetcher: SubscriptionCoreFetch, accessToken: string) =>
         await sendXaiTranscription(fetcher, accessToken, {
           audio,
@@ -74,20 +86,22 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
       if (route !== "core") throw coreTranscriptionUnavailable();
       // Decision 3: shared organization- or workspace-scoped connections
       // only; personal SuperGrok accounts never transcribe on the core.
-      return await transcribeOnSubscriptionCore({
-        db: input.db,
-        settings: input.settings,
-        provider: SUBSCRIPTION_CORE_XAI,
-        fetch: fetchImpl,
-        accountId,
-        workspaceId,
-        subjectId,
-        requestId,
-        send: async (token, requestFetch) =>
-          await send(requestFetch, subscriptionCoreXaiBearer(token).accessToken),
-        unauthorized: async (response) =>
-          response.status === 401 || (await isXaiInvalidCredentialResponse(response)),
-      });
+      return textTranscriptionResult(
+        await transcribeOnSubscriptionCore({
+          db: input.db,
+          settings: input.settings,
+          provider: SUBSCRIPTION_CORE_XAI,
+          fetch: fetchImpl,
+          accountId,
+          workspaceId,
+          subjectId,
+          requestId,
+          send: async (token, requestFetch) =>
+            await send(requestFetch, subscriptionCoreXaiBearer(token).accessToken),
+          unauthorized: async (response) =>
+            response.status === 401 || (await isXaiInvalidCredentialResponse(response)),
+        }),
+      );
     },
   };
 }

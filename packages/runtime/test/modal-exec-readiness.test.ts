@@ -548,7 +548,11 @@ test("supervised cancellation uncertainty retains intent, writer and partial hel
   }
 }, 15_000);
 
-function foregroundTools(f: ReturnType<typeof fixture>, stdoutOffset = 0) {
+function foregroundTools(
+  f: ReturnType<typeof fixture>,
+  stdoutOffset = 0,
+  recoverDuringCleanup = true,
+) {
   let stored: ModalRouterProviderCommand;
   let adoptions = 0;
   let retained = true;
@@ -597,8 +601,10 @@ function foregroundTools(f: ReturnType<typeof fixture>, stdoutOffset = 0) {
       execCommandForProcessControl: async (handle) => {
         expect(handle).toBe(73);
         cleanupHelpers++;
-        foregroundPollPending = false;
-        foregroundPollFailure = false;
+        if (recoverDuringCleanup) {
+          foregroundPollPending = false;
+          foregroundPollFailure = false;
+        }
         // Physical helper behavior is independently exercised by the real
         // local-process cancellation suite; this fixture owns the RPC abort.
         return "Chunk ID: cleanup\nWall time: 0 seconds\nProcess exited with code 0\nOutput:\n";
@@ -677,7 +683,9 @@ test.each(["aggregate", "cause", "unreadable"] as const)(
       expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
       expect(tools.stored().streams.stdout.byteOffset).toBe(17);
       expect(tools.stored().streams.stdout.eof).toBe(false);
-      expect(tools.adoptions()).toBe(0);
+      expect(tools.adoptions()).toBe(1);
+      await tools.fence.waitForQuiescence();
+      expect(tools.cleanupHelpers()).toBe(0);
     } finally {
       await f.close();
     }
@@ -829,9 +837,9 @@ test("foreground cancellation aborts an already-in-flight exact poll", async () 
   }
 });
 
-test("post-start real gRPC poll exhaustion is an unknown tool result after the requested wait", async () => {
+test("post-start real gRPC poll exhaustion hands the unknown command off before finalization", async () => {
   const f = fixture();
-  const tools = foregroundTools(f);
+  const tools = foregroundTools(f, 0, false);
   foregroundPollFailure = true;
   const began = performance.now();
   try {
@@ -845,7 +853,47 @@ test("post-start real gRPC poll exhaustion is an unknown tool result after the r
     expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
     expect(tools.stored().streams.stdout.byteOffset).toBe(0);
     expect(tools.stored().streams.stdout.eof).toBe(false);
-    expect(tools.adoptions()).toBe(0);
+    expect(
+      await Promise.race([
+        tools.fence.waitForQuiescence().then(() => "drained"),
+        Bun.sleep(100).then(() => "stalled"),
+      ]),
+    ).toBe("drained");
+    expect(tools.adoptions()).toBe(1);
+    expect(tools.cleanupHelpers()).toBe(0);
+    expect(starts).toHaveLength(1);
+    expect(tools.stored().streams.stdout.eof).toBe(false);
+  } finally {
+    // Also let the old implementation's deliberately stalled fence recover
+    // after the regression assertion, so it cannot leak into later tests.
+    foregroundPollFailure = false;
+    await tools.fence.waitForQuiescence();
+    await f.close();
+  }
+});
+
+test("a forgotten acknowledged exec is retained and adopted, never replayed or treated as physical exit", async () => {
+  const f = fixture("forgotten-exec");
+  const tools = foregroundTools(f);
+  try {
+    const result = await tools.exec.invoke(
+      {},
+      JSON.stringify({ cmd: "work", yield_time_ms: 1_000 }),
+    );
+    expect(result).toContain("observation unavailable");
+    expect(result).toContain("Command ID:");
+    expect(result).not.toContain("Process exited");
+    const failure = await f.control.read(tools.stored(), 1_000).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ProviderCommandObservationUnavailableError);
+    expect(failure).toMatchObject({
+      readRetryAllowed: false,
+      cause: { code: status.FAILED_PRECONDITION },
+    });
+    expect(tools.adoptions()).toBe(1);
+    await tools.fence.waitForQuiescence();
+    expect(tools.cleanupHelpers()).toBe(0);
+    expect(starts).toHaveLength(1);
+    expect(tools.stored().streams.stdout.eof).toBe(false);
   } finally {
     await f.close();
   }

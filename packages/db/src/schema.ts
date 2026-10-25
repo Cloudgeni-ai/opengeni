@@ -25,6 +25,7 @@ import type {
   McpServerConnectionRef,
   ModelContextContributionSummary,
   ModelContextSnapshot,
+  PromptCacheDiagnostics,
   RigProviderImages,
   SessionMcpApprovalPolicy,
   SessionGoalChangeKind,
@@ -13294,6 +13295,9 @@ export const modelCallFacts = pgTable(
     timeToFirstTokenMs: integer("time_to_first_token_ms"),
     timeToFirstTextMs: integer("time_to_first_text_ms"),
     durationMs: integer("duration_ms"),
+    // Prompt-cache observation and warm-miss classification (see
+    // PromptCacheDiagnostics); null before 0979 and for repaired facts.
+    promptCacheDiagnostics: jsonb("prompt_cache_diagnostics").$type<PromptCacheDiagnostics>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -15673,6 +15677,10 @@ export const feedbackSubmissions = pgTable(
     sentiment: text("sentiment"),
     comment: losslessText("comment"),
     commentCodecVersion: losslessCodecVersion("comment_codec_version"),
+    /** App and device facts the report was sent with (FeedbackContext). */
+    context: jsonb("context").$type<Record<string, unknown>>(),
+    /** Screenshot metadata in send order (FeedbackScreenshot); bytes are in object storage. */
+    screenshots: jsonb("screenshots").$type<unknown[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

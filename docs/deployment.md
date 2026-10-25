@@ -3849,12 +3849,20 @@ and the self-update channel. Route these paths (and an optional `get.<domain>`
 host) to the `api` service in the ingress.
 
 `/agent/latest/<asset>` is a compatibility route backed by the immutable
-versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.54`).
-`OPENGENI_AGENT_RELEASES_BASE_URL` selects the archive origin. Promote or roll
-back the stable channel by changing the configured version only after the
-corresponding `agent-v<version>` release and its signed assets exist; never move
-or delete an agent release tag. A baked asset still takes precedence so a
-deployed control-plane image serves its release-coherent binary directly.
+versioned release selected by `OPENGENI_AGENT_STABLE_VERSION`. Unset, it is the
+agent release of the control plane's own source tree (the `agent/Cargo.toml`
+version it was built from), so Windows and macOS installs and the stable update
+channel advance with each control-plane deploy, matching the baked Linux agent.
+An image built from an agent release commit serves that release once its
+release workflow has published it. An API that runs without that file (for
+example from the published npm package) and without the setting has no stable
+release: `/agent/latest/<asset>` and the stable manifest answer 404 and no
+automatic update is requested. `OPENGENI_AGENT_RELEASES_BASE_URL` selects
+the archive origin. Pin, promote or roll back the stable channel by setting the
+version only after the corresponding `agent-v<version>` release and its signed
+assets exist; never move or delete an agent release tag. A baked asset still
+takes precedence so a deployed control-plane image serves its release-coherent
+binary directly.
 Explicit `/agent/v<version>/<asset>` binary and signature requests always use
 that immutable archive release; a baked canary cannot override a version pin.
 Linux canary builds use `scripts/bake-agent.sh` with the exact source commit as
@@ -4164,6 +4172,11 @@ Useful settings:
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
 - `OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT=true` makes each API request span a child of the caller's W3C `traceparent`, so a calling service sees Opengeni's spans inside its own trace. Leave it off (the default) when untrusted clients can reach the API: the request span then starts its own trace and carries a span link to the caller's context. See `docs/application-observability.md`.
+- For a private collector CA alongside compute-control TLS, the Helm chart's
+  `computeControl.apiTls.additionalCaConfigMaps` composes explicitly selected
+  public CA bundles with compute trust before API/control/turn startup. See the
+  [chart trust configuration](../deploy/helm/opengeni/README.md#additional-trust-beside-compute-control-tls).
+  CA changes require a normal pod rollout; never disable TLS verification.
 
 The Helm chart has optional Prometheus Operator wiring, off by default:
 
