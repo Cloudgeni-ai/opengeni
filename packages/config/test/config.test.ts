@@ -1136,8 +1136,10 @@ describe("Docker workspace materialization", () => {
 });
 
 describe("agent stable release selection", () => {
-  test("uses an exact stable version and supports an explicit operator promotion", () => {
-    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.54");
+  test("leaves the stable version to the build unless an operator pins an exact one", () => {
+    // Unset, the API serves the agent release of its own source tree; a fixed
+    // default here once kept every unconfigured deployment on an old release.
+    expect(withEnv({}, () => getSettings()).agentStableVersion).toBeUndefined();
     expect(
       withEnv({ OPENGENI_AGENT_STABLE_VERSION: "1.4.2" }, () => getSettings()).agentStableVersion,
     ).toBe("1.4.2");

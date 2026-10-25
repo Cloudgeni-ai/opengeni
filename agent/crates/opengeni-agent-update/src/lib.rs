@@ -349,18 +349,23 @@ impl PendingUpdate {
 
     /// Applies the verified update to the CURRENTLY-RUNNING executable (the live
     /// agent path; handles the running-exe lock on every OS).
+    /// `preflight` checks the staged binary before it replaces the running one
+    /// (see [`replace_running_exe`]).
     ///
     /// # Errors
     ///
-    /// [`UpdateError::Io`] if the swap fails.
-    pub fn apply_running(&self) -> UpdateResult<PathBuf> {
+    /// Returns `preflight`'s error, or [`UpdateError::Io`] if the swap fails.
+    pub fn apply_running(
+        &self,
+        preflight: impl FnOnce(&Path) -> UpdateResult<()>,
+    ) -> UpdateResult<PathBuf> {
         #[cfg(target_os = "macos")]
         {
             let path = std::env::current_exe()
                 .map_err(|error| UpdateError::io("current executable", error))?;
             reject_bundle_binary_replacement(&path)?;
         }
-        replace_running_exe(&self.bytes)
+        replace_running_exe(&self.bytes, preflight)
     }
 
     /// Installs the complete verified, signed macOS application. The callback
