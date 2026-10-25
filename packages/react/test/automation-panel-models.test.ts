@@ -427,7 +427,7 @@ describe("sessionAutomationWaitWords", () => {
     ).toEqual({ kind: "schedule", label: "On a schedule", short: "On a schedule" });
   });
 
-  test("an event names what it waits for and where from, then the next run", () => {
+  test("a server naming only the first event leaves the rest to a count", () => {
     expect(
       sessionAutomationWaitWords(
         t,
@@ -453,19 +453,75 @@ describe("sessionAutomationWaitWords", () => {
     });
   });
 
+  test("every source the chat's automations wait on is named, then the next run", () => {
+    const deploys = {
+      source: { kind: "mcp" as const, name: "Deploys" },
+      eventTypes: ["deploy.finished", "deploy.failed"],
+    };
+    const mail = { source: { kind: "gmail" as const, name: "Gmail" }, eventTypes: ["*"] };
+    expect(
+      sessionAutomationWaitWords(
+        t,
+        {
+          waitingForEvents: true,
+          hasUpcomingSchedules: true,
+          automationWait: {
+            nextRunAt: "2026-10-22T09:00:00.000Z",
+            event: deploys,
+            events: [deploys, mail],
+            automations: 3,
+          },
+        },
+        at,
+      ),
+    ).toEqual({
+      kind: "event",
+      label:
+        "Waiting for deploy.finished or deploy.failed from Deploys or every event from Gmail. Next run: Tomorrow, 09:00",
+      short: "Waiting on Deploys and Gmail",
+    });
+    const github = { source: { kind: "github" as const, name: "Acme" }, eventTypes: ["push"] };
+    const hidden = { source: null, eventTypes: ["message.received"] };
+    expect(
+      sessionAutomationWaitWords(
+        t,
+        {
+          waitingForEvents: true,
+          automationWait: {
+            nextRunAt: null,
+            event: deploys,
+            events: [deploys, mail, github, hidden],
+            automations: 4,
+          },
+        },
+        at,
+      ),
+    ).toEqual({
+      kind: "event",
+      label:
+        "Waiting for deploy.finished or deploy.failed from Deploys, every event from Gmail, push from Acme, or message.received from a source you can't see",
+      short: "Waiting on Deploys, Gmail, and 2 more",
+    });
+  });
+
   test("a schedule names its next run in the viewer's time zone", () => {
     expect(
       sessionAutomationWaitWords(
         t,
         {
           hasUpcomingSchedules: true,
-          automationWait: { nextRunAt: "2026-10-21T14:00:00.000Z", event: null, automations: 3 },
+          automationWait: {
+            nextRunAt: "2026-10-21T14:00:00.000Z",
+            event: null,
+            events: [],
+            automations: 3,
+          },
         },
         { now: NOW, timeZone: "Europe/Oslo" },
       ),
     ).toEqual({
       kind: "schedule",
-      label: "Next run: Today, 16:00. 2 more automations are waiting too.",
+      label: "Next run: Today, 16:00",
       short: "Next: Today, 16:00",
     });
   });

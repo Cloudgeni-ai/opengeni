@@ -25695,6 +25695,13 @@
         "$.event.source": "object! null",
         "$.event.source.kind": "ref(EventSourceKind)!",
         "$.event.source.name": "string!",
+        "$.events": "array?",
+        "$.events[]": "object",
+        "$.events[].eventTypes": "array!",
+        "$.events[].eventTypes[]": "string",
+        "$.events[].source": "object! null",
+        "$.events[].source.kind": "ref(EventSourceKind)!",
+        "$.events[].source.name": "string!",
         "$.nextRunAt": "string! null"
       }
     },

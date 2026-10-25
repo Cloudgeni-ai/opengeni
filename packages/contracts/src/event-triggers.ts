@@ -459,32 +459,40 @@ export type EventTrigger = z.infer<typeof EventTrigger>;
 
 /**
  * What the automations that continue a chat are waiting for, as the chat list
- * and header show it: the soonest scheduled run and the first event that can
- * start a run. Only automations the reader can see contribute; a chat that
- * waits only on someone else's private automation has none.
+ * and header show it: the soonest scheduled run and the events that can start
+ * a run. Only automations the reader can see contribute; a chat that waits
+ * only on someone else's private automation has none.
  */
-export const SessionAutomationWaitSummary = /* @__PURE__ */ defineSchema(() =>
-  z
+export const SessionAutomationWaitSummary = /* @__PURE__ */ defineSchema(() => {
+  const waitEvent = z
+    .object({
+      source: z.object({ kind: EventSourceKind, name: z.string() }).strict().nullable(),
+      eventTypes: z.array(z.string()),
+    })
+    .strict();
+  return z
     .object({
       /** The soonest scheduled run into the chat, or null when none is ahead. */
       nextRunAt: z.string().datetime({ offset: true }).nullable(),
       /**
        * The first active event trigger that can start a run: its event types
-       * (empty for every event) and its source, null when the reader can't
-       * see the source. Null when no event can start a run.
+       * and its source, null when the reader can't see the source. Null when
+       * no event can start a run. `events` names them all.
        */
-      event: z
-        .object({
-          source: z.object({ kind: EventSourceKind, name: z.string() }).strict().nullable(),
-          eventTypes: z.array(z.string()),
-        })
-        .strict()
-        .nullable(),
+      event: waitEvent.nullable(),
+      /**
+       * Every event that can start a run, one entry per source in the order
+       * the automations were made: the event types its active triggers wait
+       * for (just `*` when one takes every event). Sources the reader can't
+       * see share one entry with a null source. Empty when no event can start
+       * a run; absent from servers that only send `event`.
+       */
+      events: z.array(waitEvent).optional(),
       /** How many automations can still start a run in the chat, this one included. */
       automations: z.number().int().positive(),
     })
-    .strict(),
-);
+    .strict();
+});
 export type SessionAutomationWaitSummary = z.infer<typeof SessionAutomationWaitSummary>;
 
 /** Event triggers and the event run policy of an automation. */

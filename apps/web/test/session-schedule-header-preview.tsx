@@ -33,6 +33,19 @@ const base = {
 const nextRun = new Date(Date.now() + 20 * 60 * 60_000);
 nextRun.setMinutes(0, 0, 0);
 
+const checks = {
+  source: { kind: "github" as const, name: "GitHub" },
+  eventTypes: ["check_suite.completed"],
+};
+const mentions = {
+  source: { kind: "slack" as const, name: "Acme Slack" },
+  eventTypes: ["app_mention", "message"],
+};
+const mail = {
+  source: { kind: "gmail" as const, name: "Gmail (ada@acme.dev)" },
+  eventTypes: ["message.received"],
+};
+
 const states: { label: string; session: Session }[] = [
   {
     label: "Active schedule with a future run",
@@ -42,7 +55,12 @@ const states: { label: string; session: Session }[] = [
       title: "Quarterly cloud cost report",
       hasSchedules: true,
       hasUpcomingSchedules: true,
-      automationWait: { nextRunAt: nextRun.toISOString(), event: null, automations: 1 },
+      automationWait: {
+        nextRunAt: nextRun.toISOString(),
+        event: null,
+        events: [],
+        automations: 1,
+      },
     } as Session,
   },
   {
@@ -56,10 +74,24 @@ const states: { label: string; session: Session }[] = [
       waitingForEvents: true,
       automationWait: {
         nextRunAt: nextRun.toISOString(),
-        event: {
-          source: { kind: "github", name: "GitHub" },
-          eventTypes: ["check_suite.completed"],
-        },
+        event: checks,
+        events: [checks],
+        automations: 2,
+      },
+    } as Session,
+  },
+  {
+    label: "Two automations waiting on different apps",
+    session: {
+      ...base,
+      id: "00000000-0000-4000-9000-000000004006",
+      title: "Support inbox",
+      hasSchedules: true,
+      waitingForEvents: true,
+      automationWait: {
+        nextRunAt: null,
+        event: mentions,
+        events: [mentions, mail],
         automations: 2,
       },
     } as Session,
