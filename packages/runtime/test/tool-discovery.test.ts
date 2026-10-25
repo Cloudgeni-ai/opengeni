@@ -1069,6 +1069,26 @@ describe("searches that name an integration the person can connect", () => {
     }
   });
 
+  test("accepted residual: an ordinary word that is an integration's whole name still names it", async () => {
+    // Only operation words are excluded. Other ordinary words that happen to
+    // be a connectable integration's whole name (Box, Close, Front, Notion)
+    // still name it when nothing installed matches the search strongly. The
+    // notice says "if the task needs it", so the model can ignore it; a word
+    // list to filter these out was judged worse than this residual.
+    const box = { capabilityId: "registry:box", name: "Box" };
+    const close = { capabilityId: "registry:close", name: "Close" };
+    expect(connectableIntegrationsNamedIn("check the box", [box])).toEqual([box]);
+    expect(connectableIntegrationsNamedIn("close the browser tab", [close])).toEqual([close]);
+    for (const transport of ["generic_dispatch", "openai_native"] as const) {
+      const runtime = runtimeWith(transport, async () => [box]);
+      const result = await runtime.prepareSearch({ query: "check the box" });
+      expect(loaded(result)).toContain(CARD);
+      expect(JSON.parse(result.output).notConnected).toBe(
+        'Not connected yet: Box (capabilityId "registry:box"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.',
+      );
+    }
+  });
+
   test("only Connect cards the person completes are named, with wording for several", () => {
     const match = (capabilityId: string, name: string, action: string) => ({
       capabilityId,
