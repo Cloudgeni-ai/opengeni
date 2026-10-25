@@ -57,6 +57,7 @@ import {
   type InteractionDispatchTrace,
 } from "@opengeni/interaction";
 import {
+  NETWORK_BODY_STALL_MS,
   NETWORK_LONG_POLL_MS,
   requestIgnoredForIdle,
   requestLoad,
@@ -569,6 +570,9 @@ type TargetState = {
   /** Cross-origin iframes (out-of-process frames) by frame id. Each has its own
    * flattened CDP session, auto-attached from this page session. */
   oopifs: Map<string, OopifSession>;
+  /** Dedicated workers of the page and its cross-origin iframes, by session
+   * id, each with the listeners that feed its requests into the ledger. */
+  workers: Map<string, Array<() => void>>;
   /** Node-level CDP calls go to this OOPIF session while one operation acts on
    * a node inside it. Input always goes to the page session. */
   nodeRoute: OopifSession | null;
@@ -1385,7 +1389,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // would. A read still waiting on the tab ends by itself.
     abandoned = true;
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
-    if (!this.attaching.has(targetId)) this.removeState(targetId);
+    if (!this.attaching.has(targetId)) {
+      // The tab stays open but unread: detach its session too, so no frame
+      // or worker it starts waits for a listener that is gone.
+      const sessionId = this.states.get(targetId)?.sessionId;
+      this.removeState(targetId);
+      if (sessionId)
+        void connection
+          .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 1_000 })
+          .catch(() => undefined);
+    }
     return null;
   }
 
@@ -3174,6 +3187,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       tail: Promise.resolve(),
       unsubscribe: [],
       oopifs: new Map(),
+      workers: new Map(),
       nodeRoute: null,
       ...(viewport
         ? {
@@ -3457,11 +3471,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       "Target.setAutoAttach",
       {
         autoAttach: true,
-        // A new frame waits until its session listens, so the requests its
-        // first scripts start are seen (onFrameAttached always resumes it).
+        // A new frame or dedicated worker waits until its session listens, so
+        // the requests its first scripts start are seen. Chromium holds a
+        // page's dedicated workers whatever the filter says, so they are
+        // attached too; onFrameAttached always resumes what it attached.
         waitForDebuggerOnStart: true,
         flatten: true,
-        filter: [{ type: "iframe" }],
+        filter: [{ type: "iframe" }, { type: "worker" }],
       },
       { sessionId: parentSessionId },
     );
@@ -3487,6 +3503,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return;
     }
     try {
+      if (info.type === "worker" && this.states.get(state.targetId) === state) {
+        await this.onWorkerAttached(connection, state, sessionId);
+        return;
+      }
       if (info.type !== "iframe" || this.states.get(state.targetId) !== state) {
         if (waiting) await connection.send("Runtime.runIfWaitingForDebugger", {}, { sessionId });
         await connection.send(
@@ -3496,6 +3516,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
         return;
       }
+      // A frame that moved to another process can attach its new session
+      // before the old one detaches: retire the old one now.
+      const replaced = state.oopifs.get(info.targetId);
+      if (replaced && replaced.sessionId !== sessionId)
+        this.forgetFrameSession(state, replaced.sessionId);
       // A cross-origin iframe's target id is its frame id.
       const oopif: OopifSession = {
         frameId: info.targetId,
@@ -3552,24 +3577,47 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
+  /** A dedicated worker's requests count toward its page's network activity,
+   * and its own script request, begun on the page's session, finishes on the
+   * worker's. The caller resumes the worker. */
+  private async onWorkerAttached(
+    connection: BrowserCdpConnection,
+    state: TargetState,
+    sessionId: string,
+  ): Promise<void> {
+    state.workers.set(sessionId, this.trackNetwork(connection, state, sessionId, false));
+    await connection.send("Network.enable", {}, { sessionId, timeoutMs: 5_000 });
+  }
+
   private forgetFrameSession(state: TargetState, sessionId: string): void {
+    const worker = state.workers.get(sessionId);
+    if (worker) {
+      state.workers.delete(sessionId);
+      for (const stop of worker) stop();
+      this.forgetSessionRequests(state, sessionId);
+      return;
+    }
     for (const oopif of [...state.oopifs.values()]) {
       if (oopif.sessionId !== sessionId) continue;
       state.oopifs.delete(oopif.frameId);
       if (state.nodeRoute === oopif) state.nodeRoute = null;
       state.accessibility = null;
       for (const stop of oopif.unsubscribe.splice(0)) stop();
-      // Nothing reports the requests of a frame that is gone.
-      for (const requestId of [...state.inflightRequests]) {
-        if (state.requests.get(requestId)?.sessionId !== sessionId) continue;
-        state.inflightRequests.delete(requestId);
-        state.requests.delete(requestId);
-      }
+      this.forgetSessionRequests(state, sessionId);
       this.finishFrameDocuments(state, oopif.frameIds);
       // Nested frames went with their parent session.
       for (const nested of [...state.oopifs.values()]) {
         if (nested.parentSessionId === sessionId) this.forgetFrameSession(state, nested.sessionId);
       }
+    }
+  }
+
+  /** Nothing reports the requests of a frame or worker that is gone. */
+  private forgetSessionRequests(state: TargetState, sessionId: string): void {
+    for (const requestId of [...state.inflightRequests]) {
+      if (state.requests.get(requestId)?.sessionId !== sessionId) continue;
+      state.inflightRequests.delete(requestId);
+      state.requests.delete(requestId);
     }
   }
 
@@ -7320,6 +7368,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         const now = Date.now();
         let loading = false;
         let longPolls = 0;
+        let stalled = 0;
         for (const requestId of state.inflightRequests) {
           const load = requestLoad(state.requests.get(requestId), now);
           if (load === "loading") {
@@ -7327,6 +7376,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             break;
           }
           if (load === "long_poll") longPolls += 1;
+          if (load === "stalled") stalled += 1;
         }
         if (loading) loadingSeenAt = now;
         if (
@@ -7339,6 +7389,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               actionIndex: state.actionTrace.actionIndex,
               kind: "network_busy",
               message: `page loaded; its network went quiet except for ${longPolls === 1 ? "1 request" : `${longPolls} requests`} still waiting for a response after ${formatSeconds(NETWORK_LONG_POLL_MS)} (as long polls do), so the wait ended without ${longPolls === 1 ? "it" : "them"}`,
+            } satisfies BrowserActionNoteValue);
+          }
+          if (stalled > 0) {
+            state.actionTrace?.trace.record({
+              actionIndex: state.actionTrace.actionIndex,
+              kind: "network_busy",
+              message: `page loaded; its network went quiet except for ${stalled === 1 ? "1 response" : `${stalled} responses`} whose body has had no data for ${formatSeconds(NETWORK_BODY_STALL_MS)} (as paused streams do; more may still arrive), so the wait ended without ${stalled === 1 ? "it" : "them"}`,
             } satisfies BrowserActionNoteValue);
           }
           return;
@@ -8210,6 +8267,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const oopif of state.oopifs.values()) {
       for (const stop of oopif.unsubscribe.splice(0)) stop();
     }
+    for (const stop of [...state.workers.values()].flat()) stop();
+    state.workers.clear();
     this.states.delete(targetId);
     if (!preserveFirstSeen) {
       this.firstSeenAt.delete(targetId);

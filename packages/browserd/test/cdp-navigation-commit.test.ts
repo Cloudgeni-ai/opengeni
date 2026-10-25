@@ -354,6 +354,10 @@ function navigationFixture() {
     setReadyState(value: string) {
       readyState = value;
     },
+    /** Deliver a CDP event, as the browser would. */
+    event(data: Record<string, unknown>) {
+      emit(data);
+    },
     downloadOn(url: string) {
       downloads.add(url);
     },
@@ -771,6 +775,62 @@ test("a screenshot captured while a new document committed shows and names that 
     expect(fixture.calls.filter((call) => call.method === "Page.captureScreenshot")).toHaveLength(
       2,
     );
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a cross-site frame that moved process before its old session detached leaves nothing behind", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    const wait = await fixture.command({
+      type: "wait",
+      condition: "network_idle",
+      timeoutMs: 1_500,
+    });
+    const attach = (sessionId: string) =>
+      fixture.event({
+        method: "Target.attachedToTarget",
+        sessionId: "session-1",
+        params: {
+          sessionId,
+          waitingForDebugger: true,
+          targetInfo: { targetId: "frame-x", type: "iframe", url: "https://other.test/" },
+        },
+      });
+    const fetchOn = (sessionId: string, requestId: string) =>
+      fixture.event({
+        method: "Network.requestWillBeSent",
+        sessionId,
+        params: {
+          requestId,
+          frameId: "frame-x",
+          type: "Fetch",
+          request: { method: "GET", url: "https://other.test/data" },
+          initiator: { type: "script" },
+        },
+      });
+    attach("frame-session-old");
+    await Bun.sleep(50);
+    fetchOn("frame-session-old", "old-frame-fetch");
+    // The frame moves to another process: its new session attaches first,
+    // and the old one's detach has not arrived (nor ever needs to).
+    attach("frame-session-new");
+    await Bun.sleep(50);
+    fetchOn("frame-session-old", "late-old-frame-fetch");
+    await Bun.sleep(20);
+    const started = Date.now();
+    const receipt = await fixture.controller.run(wait);
+    expect(receipt.error ?? null).toBeNull();
+    expect(receipt.state).toBe("completed");
+    // Neither request of the retired session keeps the page loading.
+    expect(receipt.notes ?? []).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(1_400);
+    const resumed = fixture.calls
+      .filter((call) => call.method === "Runtime.runIfWaitingForDebugger")
+      .map((call) => call.sessionId);
+    expect(resumed).toEqual(expect.arrayContaining(["frame-session-old", "frame-session-new"]));
   } finally {
     await fixture.driver.close();
   }

@@ -65,14 +65,14 @@ describe("an open request's load state", () => {
     expect(requestLoad(streaming, 30_000 + NETWORK_BODY_STALL_MS - 1)).toBe("loading");
   });
 
-  test("a body with no data for the stall window is quiet", () => {
+  test("a body with no data for the stall window is stalled", () => {
     // Headers arrived, then nothing: an unread body or a held-open stream.
     expect(requestLoad(request({ respondedAt: 2_000 }), 2_000 + NETWORK_BODY_STALL_MS)).toBe(
-      "quiet",
+      "stalled",
     );
     expect(
       requestLoad(request({ respondedAt: 2_000, dataAt: 4_000 }), 4_000 + NETWORK_BODY_STALL_MS),
-    ).toBe("quiet");
+    ).toBe("stalled");
     // A long-answered request is judged by its body, not by its age.
     expect(requestLoad(request({ respondedAt: 20_000 }), 21_000)).toBe("loading");
   });

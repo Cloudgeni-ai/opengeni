@@ -207,6 +207,13 @@ e2e(
         const other = `http://localhost:${url.port}`;
         if (url.pathname === "/slow") return later(3_000, "loaded");
         if (url.pathname === "/beacon") return new Response(null, { status: 204 });
+        if (url.pathname === "/slow-worker.js" || url.pathname === "/quick-worker.js")
+          return new Response(
+            url.pathname === "/slow-worker.js"
+              ? 'fetch("/slow").then((r)=>r.text()).then((t)=>postMessage("worker "+t))'
+              : 'postMessage("worker ran")',
+            { headers: { "content-type": "text/javascript" } },
+          );
         if (url.pathname === "/poll") return new Promise<Response>(() => {});
         if (url.pathname === "/trickle") {
           // A streamed answer: a chunk every 800 ms, done after about 5 s.
@@ -256,6 +263,13 @@ e2e(
             '<script>fetch("/trickle").then(async(r)=>{const reader=r.body.getReader();const d=new TextDecoder();let text="";for(;;){const {done,value}=await reader.read();if(done)break;text+=d.decode(value);document.querySelector("output").textContent=text}})</script>',
           "/stalled":
             '<script>document.querySelector("output").textContent="ready";fetch("/stall").then((r)=>r.body.getReader().read())</script>',
+          "/worker-at-load":
+            '<script>new Worker("/slow-worker.js").onmessage=(e)=>{document.querySelector("output").textContent=e.data}</script>',
+          "/worker-later":
+            '<script>document.querySelector("output").textContent="ready";setTimeout(()=>{new Worker("/quick-worker.js").onmessage=(e)=>{document.querySelector("output").textContent=e.data}},2000)</script>',
+          "/framed-worker":
+            '<script>new Worker("/quick-worker.js").onmessage=(e)=>{document.querySelector("output").textContent="frame "+e.data}</script>',
+          "/frame-worker": `<iframe src="${other}/framed-worker"></iframe>`,
           "/long-poll":
             '<script>document.querySelector("output").textContent="ready";fetch("/poll")</script>',
         };
@@ -348,7 +362,27 @@ e2e(
       const stalled = await idleAfter("/stalled");
       expect(stalled.ms).toBeGreaterThanOrEqual(2_000);
       expect(stalled.ms).toBeLessThan(9_000);
-      expect(stalled.receipt.notes ?? []).toEqual([]);
+      expect(stalled.receipt.notes?.[0]?.kind).toBe("network_busy");
+      expect(stalled.receipt.notes?.[0]?.message).toBe(
+        "page loaded; its network went quiet except for 1 response whose body has had no data for 3 s (as paused streams do; more may still arrive), so the wait ended without it",
+      );
+
+      // Dedicated workers run, and their requests are the page loading: the
+      // worker's script ends on its own session, and its 3 s fetch counts.
+      const worker = await idleAfter("/worker-at-load");
+      expect(worker.ms).toBeGreaterThanOrEqual(2_000);
+      expect(worker.ms).toBeLessThan(8_000);
+      expect(worker.receipt.notes ?? []).toEqual([]);
+      expect(await output()).toContain("worker loaded");
+      // A worker started later, and one in a cross-site frame, run too.
+      await run({ type: "navigate", url: `${origin}/worker-later` });
+      await Bun.sleep(4_000);
+      expect(await output()).toContain("worker ran");
+      const frameWorker = await idleAfter("/frame-worker");
+      expect(frameWorker.ms).toBeLessThan(8_000);
+      expect(frameWorker.receipt.notes ?? []).toEqual([]);
+      await Bun.sleep(500);
+      expect(await output()).toContain("frame worker ran");
 
       // A request with no response for 10 s is taken for a long poll: the wait
       // ends after it and says so.

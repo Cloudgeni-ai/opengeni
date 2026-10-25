@@ -58,20 +58,20 @@ export function requestIgnoredForIdle(
 /**
  * Whether an open request keeps the page loading at `now`. Event streams and
  * ignored types never do. A response stops counting once its body has gone
- * without data for NETWORK_BODY_STALL_MS, so a slow download or a streamed
- * answer that keeps sending still counts. A request with no response yet
- * stops counting after NETWORK_LONG_POLL_MS, as a long poll. A request the
- * ledger no longer holds still counts.
+ * without data for NETWORK_BODY_STALL_MS ("stalled"), so a slow download or a
+ * streamed answer that keeps sending still counts. A request with no response
+ * yet stops counting after NETWORK_LONG_POLL_MS, as a long poll. A request
+ * the ledger no longer holds still counts.
  */
 export function requestLoad(
   request: TrackedRequest | undefined,
   now: number,
-): "loading" | "quiet" | "long_poll" {
+): "loading" | "quiet" | "stalled" | "long_poll" {
   if (!request) return "loading";
   if (request.stream || request.ignored) return "quiet";
   if (request.respondedAt !== null) {
     const lastData = Math.max(request.respondedAt, request.dataAt ?? 0);
-    return now - lastData >= NETWORK_BODY_STALL_MS ? "quiet" : "loading";
+    return now - lastData >= NETWORK_BODY_STALL_MS ? "stalled" : "loading";
   }
   return now - request.startedAt >= NETWORK_LONG_POLL_MS ? "long_poll" : "loading";
 }
