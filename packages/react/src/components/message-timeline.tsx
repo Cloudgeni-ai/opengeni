@@ -93,8 +93,7 @@ import {
   type OlderHistoryLoadReceipt,
   type OlderHistoryLoader,
 } from "../older-history";
-import { Markdown, type MarkdownProps } from "./markdown";
-import { linkifyText } from "./linkified-text";
+import { InlineMarkdown, Markdown, type MarkdownProps } from "./markdown";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
 import {
   TimelineBeforeLayout,
@@ -4547,7 +4546,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                       <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
                     ) : null}
                     {!question.label && multipleQuestions ? " " : null}
-                    {linkifyText(question.prompt)}
+                    <InlineMarkdown>{question.prompt}</InlineMarkdown>
                   </p>
                 </div>
               ))
@@ -4652,7 +4651,7 @@ function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
                 {!question.label && multipleQuestions ? (
                   <span className="mr-1.5 tabular-nums">{index + 1}.</span>
                 ) : null}
-                {linkifyText(question.prompt)}
+                <InlineMarkdown>{question.prompt}</InlineMarkdown>
               </p>
             </div>
           ))}

@@ -17,6 +17,7 @@ import {
   agentCapabilityEnabled,
   type SandboxBackend,
   CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
+  isSecretReferenceError,
   type SecretResolver,
 } from "@opengeni/contracts";
 import {
@@ -1267,6 +1268,9 @@ export async function executeRunOnSelfhostedMachine(
     });
     return { target, kind: "write", ok: true, bytesWritten };
   } catch (error) {
+    // Nothing was dispatched. Let the MCP boundary preserve the canonical
+    // secret error envelope and its missing/approval cards, as the gateway did.
+    if (isSecretReferenceError(error)) throw error;
     const reason = error instanceof Error ? error.message : String(error);
     return {
       target,

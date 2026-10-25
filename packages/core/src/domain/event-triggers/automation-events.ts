@@ -127,8 +127,8 @@ export async function validateScheduledTaskEvents(
         const found = offered.find((candidate) => candidate.name === type);
         const problem = !found
           ? `${source.name} doesn't offer "${type}" events`
-          : (mcpEventTypeUnavailableReason(found, mcpWebhookBaseUrl(input.settings) !== null) ??
-            mcpEventArgumentsProblem(found, args));
+          : (mcpEventTypeUnavailableReason(found, mcpWebhookBaseUrl(input.settings) !== null)
+              ?.text ?? mcpEventArgumentsProblem(found, args));
         if (problem) {
           throw new HTTPException(422, { message: `Trigger ${index + 1}: ${problem}` });
         }

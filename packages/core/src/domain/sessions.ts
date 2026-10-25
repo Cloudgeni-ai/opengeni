@@ -1,6 +1,11 @@
 import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
 import type { TeamsConversationProof } from "@opengeni/db";
-import { isDirectModelId, ModelUnavailableError } from "@opengeni/contracts";
+import {
+  isDirectModelId,
+  MESSAGE_TIME_ZONE_METADATA_KEY,
+  ModelUnavailableError,
+  normalizeMessageTimeZone,
+} from "@opengeni/contracts";
 import { requireExplicitPermissionDelegation } from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
@@ -996,6 +1001,8 @@ export async function createAndStartSessionWithOutcome(input: {
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
   modelContext?: string | null;
+  /** The IANA zone of the person sending the initial message; unresolvable names are ignored. */
+  timeZone?: string | null;
   resources: ResourceRef[];
   skills?: SessionSkill[];
   bundledSkillIds?: import("@opengeni/contracts").BundledSkillId[] | undefined;
@@ -1553,6 +1560,7 @@ async function finishStartSession(
     deferInitialTurn?: boolean;
     surface?: SessionTurnSurface | null;
     modelContext?: string | null;
+    timeZone?: string | null;
     resources: ResourceRef[];
     tools: ToolRef[];
     toolPolicy: SessionToolPolicy;
@@ -1632,6 +1640,7 @@ async function finishStartSession(
       });
     }
   }
+  const initialTimeZone = normalizeMessageTimeZone(input.timeZone);
   const started = await measureSessionStartPhase(input.startupObservability, "initialize", () =>
     initializeSessionStartAtomically(input.db, {
       accountId: session.accountId,
@@ -1646,6 +1655,7 @@ async function finishStartSession(
       ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
       reasoningEffortFallback: input.reasoningEffort,
       turnExecutionPolicy: input.turnExecutionPolicy,
+      ...(initialTimeZone ? { initialTimeZone } : {}),
       surface: input.surface ?? null,
       createdEventPayload: {
         toolPolicy: input.toolPolicy,
@@ -1936,6 +1946,8 @@ type PostUserMessageTurnInput = {
   text: string;
   annotations?: TimelineAnnotation[];
   modelContext?: string | null;
+  /** The sender's IANA zone, frozen in the accepted turn's metadata. */
+  timeZone?: string | null;
   resources: ResourceRef[];
   /** Actor-owned resources used only for the exact durable-draft fence. */
   composerDraftResources?: ResourceRef[];
@@ -2087,6 +2099,13 @@ export async function postUserMessageTurn(
   const requestedReasoningEffort = input.reasoningEffort ?? null;
   // A message sent from a Site page records which Site (and version) on its turn.
   const siteOrigin = currentSiteSessionOrigin();
+  // The sender's zone is frozen with the turn so claim renders its local time
+  // once, from durable data, and history replays it byte for byte.
+  const timeZone = normalizeMessageTimeZone(input.timeZone);
+  const turnMetadata = {
+    ...(siteOrigin ? { [SITE_ORIGIN_METADATA_KEY]: siteOrigin } : {}),
+    ...(timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {}),
+  };
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
@@ -2163,7 +2182,7 @@ export async function postUserMessageTurn(
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
               mcpAccountBindings: input.mcpAccountBindings ?? null,
               connectionAccountIntent: input.connectionAccountIntent ?? null,
-              ...(siteOrigin ? { turnMetadata: { [SITE_ORIGIN_METADATA_KEY]: siteOrigin } } : {}),
+              ...(Object.keys(turnMetadata).length > 0 ? { turnMetadata } : {}),
 
               ...(input.captureTurnAuthority
                 ? { captureTurnAuthority: input.captureTurnAuthority }
@@ -4052,6 +4071,7 @@ async function createSessionForRequestInFileScope(
         : {}),
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
+      timeZone: payload.timeZone ?? null,
       resources,
       skills,
       bundledSkillIds,
@@ -4343,6 +4363,8 @@ async function acceptSessionUserMessageInFileScope(
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     connectionAccounts?: McpConnectionAccountSelection[];
     delivery?: "send" | "steer";
+    /** The sender's IANA zone as the client reported it; unresolvable names are ignored. */
+    timeZone?: string | null;
     origin?: "human" | "operator";
     /**
      * Product surface when the entry point knows it (for example Slack or an
@@ -4401,6 +4423,7 @@ async function acceptSessionUserMessageInFileScope(
   const composerDraftResources = input.composerDraftResources
     ? normalizeResources(input.composerDraftResources)
     : undefined;
+  const timeZone = normalizeMessageTimeZone(input.timeZone);
   const boundaryRequestHash = input.clientEventId
     ? sessionPromptBoundaryRequestHash({
         delivery,
@@ -4420,6 +4443,8 @@ async function acceptSessionUserMessageInFileScope(
         ...(input.personalResourceAttachment
           ? { personalResourceAttachment: input.personalResourceAttachment }
           : {}),
+        // The sender's zone is deliberately not part of the request identity:
+        // a retry that names another zone (or none) replays the original turn.
         commandActor,
       })
     : null;
@@ -4698,6 +4723,7 @@ async function acceptSessionUserMessageInFileScope(
         personalConnectionDelegations,
         mcpAccountBindings,
         connectionAccountIntent,
+        ...(timeZone ? { timeZone } : {}),
 
         captureTurnAuthority: async (tx: Database, turnId: string) => {
           await teamsCommitAuthorizer?.(tx);

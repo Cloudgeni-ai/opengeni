@@ -19,6 +19,7 @@ import {
   setMcpEventSubscriptionServerId,
   wakeMcpEventSubscription,
   type EventSourceRecord,
+  type EventStatusReason,
   type McpEventSubscriptionRecord,
   type StoredEventInput,
 } from "@opengeni/db";
@@ -27,7 +28,6 @@ import type { Observability } from "@opengeni/observability";
 import type { McpStreamableHttpClient } from "../mcp-streamable-http-client";
 import {
   mcpServerDisplayName,
-  McpEventSourceUnavailableError,
   withMcpEventSourceClient,
   type McpEventSourceClientDeps,
 } from "./mcp-event-source-client";
@@ -35,9 +35,10 @@ import {
   forgetMcpSourceEventTypes,
   mcpDeliveryModeFor,
   mcpSourceEventTypes,
+  mcpEventTypeUnavailableReason,
   mcpWebhookBaseUrl,
-  McpServerWithoutEventsError,
 } from "./mcp-event-types";
+import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
 import {
   classifyMcpEventsError,
   classifyMcpEventsProtocolError,
@@ -156,9 +157,6 @@ export function mcpDeliveryEvents(
     ? storedOccurrences([read.occurrence], receivedAt, { refire: true, streamKey })
     : [];
 }
-
-/** A refusal a person has to fix: the triggers are blocked with this reason. */
-class StreamBlocked extends Error {}
 
 type StepOutcome = {
   mode?: "poll" | "webhook";
@@ -321,8 +319,11 @@ async function liveStep(context: StepContext): Promise<StepOutcome> {
   const types = await mcpSourceEventTypes(client, source, mcpServerDisplayName(server));
   const type = types.find((candidate) => candidate.name === subscription.eventName);
   if (!type) {
-    throw new StreamBlocked(
-      `${mcpServerDisplayName(server)} no longer offers "${subscription.eventName}" events`,
+    throw new EventSourceBlockedError(
+      eventStatusReason(
+        "event_type_gone",
+        `${mcpServerDisplayName(server)} no longer offers "${subscription.eventName}" events`,
+      ),
     );
   }
   const baseUrl = mcpWebhookBaseUrl(deps.settings);
@@ -331,8 +332,12 @@ async function liveStep(context: StepContext): Promise<StepOutcome> {
     current: subscription.mode,
   });
   if (mode === null) {
-    throw new StreamBlocked(
-      `${mcpServerDisplayName(server)} can't deliver "${subscription.eventName}" events to this Opengeni deployment`,
+    const unavailable = mcpEventTypeUnavailableReason(type, baseUrl !== null);
+    throw new EventSourceBlockedError(
+      eventStatusReason(
+        unavailable?.code ?? "delivery_mode_unsupported",
+        `${mcpServerDisplayName(server)} can't deliver "${subscription.eventName}" events to this Opengeni deployment`,
+      ),
     );
   }
   if (mode === "webhook") {
@@ -368,22 +373,40 @@ function blockedReason(
   failure: McpEventsFailure,
   serverName: string,
   eventName: string,
-): string | null {
+): EventStatusReason | null {
   switch (failure.kind) {
     case "event_type_gone":
-      return `${serverName} no longer offers "${eventName}" events`;
+      return eventStatusReason(
+        "event_type_gone",
+        `${serverName} no longer offers "${eventName}" events`,
+      );
     case "forbidden":
-      return `${serverName} doesn't let your account receive "${eventName}" events with these settings${failure.detail ? ` (${failure.detail})` : ""}`;
+      return eventStatusReason(
+        "forbidden",
+        `${serverName} doesn't let your account receive "${eventName}" events with these settings${failure.detail ? ` (${failure.detail})` : ""}`,
+        failure.detail,
+      );
     case "invalid_arguments":
-      return `${serverName} rejected this trigger's settings for "${eventName}"${failure.detail ? `: ${failure.detail}` : ""}`;
+      return eventStatusReason(
+        "invalid_arguments",
+        `${serverName} rejected this trigger's settings for "${eventName}"${failure.detail ? `: ${failure.detail}` : ""}`,
+        failure.detail,
+      );
     case "events_unsupported":
-      return `${serverName} no longer offers events`;
+      return eventStatusReason("events_unsupported", `${serverName} no longer offers events`);
     case "unauthorized":
-      return `Reconnect ${serverName} to keep its events coming`;
+      return eventStatusReason("reconnect", `Reconnect ${serverName} to keep its events coming`);
     case "callback_unreachable":
-      return `${serverName} can't reach Opengeni's webhook address (${failure.reason})`;
+      return eventStatusReason(
+        "callback_unreachable",
+        `${serverName} can't reach Opengeni's webhook address (${failure.reason})`,
+        failure.reason,
+      );
     case "delivery_mode_unsupported":
-      return `${serverName} won't deliver "${eventName}" events in a way Opengeni can receive`;
+      return eventStatusReason(
+        "delivery_mode_unsupported",
+        `${serverName} won't deliver "${eventName}" events in a way Opengeni can receive`,
+      );
     default:
       return null;
   }
@@ -400,7 +423,7 @@ function transientRetryAt(subscription: McpEventSubscriptionRecord, now: Date): 
 async function block(
   deps: McpEventSubscriptionPumpDeps,
   subscription: McpEventSubscriptionRecord,
-  reason: string,
+  reason: EventStatusReason,
 ): Promise<void> {
   const notices = await setEventStreamTriggerStatus(
     deps.db,
@@ -409,7 +432,10 @@ async function block(
     "blocked",
     reason,
   );
-  await postTriggerNotices(deps, subscription.workspaceId, notices, { blocked: true, reason });
+  await postTriggerNotices(deps, subscription.workspaceId, notices, {
+    blocked: true,
+    reason: reason.text,
+  });
 }
 
 /** Run the next step of one subscription, if it is due and no other pump holds it. */
@@ -473,11 +499,9 @@ async function handleStepFailure(
       nextActionAt,
       outcome: { kind: "failure", error: message },
     });
-  let reason: string | null = null;
-  if (error instanceof StreamBlocked || error instanceof McpEventSourceUnavailableError) {
-    reason = error.message;
-  } else if (error instanceof McpServerWithoutEventsError) {
-    reason = error.message;
+  let reason: EventStatusReason | null = null;
+  if (error instanceof EventSourceBlockedError) {
+    reason = error.reason;
   } else {
     const failure = classifyMcpEventsError(error);
     if (failure.kind === "event_type_gone" || failure.kind === "schema_changed") {
@@ -514,7 +538,7 @@ async function handleStepFailure(
         await finish(transientRetryAt(subscription, now));
         return;
       }
-      reason = `${serverName} hasn't answered for over an hour`;
+      reason = eventStatusReason("not_answering", `${serverName} hasn't answered for over an hour`);
     }
   }
   await finish(new Date(now.getTime() + BLOCKED_RETRY_MS));

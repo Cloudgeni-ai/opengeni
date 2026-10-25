@@ -122,6 +122,32 @@ describe("structured human-input projection", () => {
       ]).map((request) => request.id),
     ).toEqual(["request-2"]);
   });
+
+  test("Opengeni's secret approval card outlives its turn until it is answered", () => {
+    const card = event(1, "session.humanInput.requested", {
+      request: {
+        id: "request-approval",
+        questions,
+        allowSkip: false,
+        expiresAt: null,
+        origin: "secret_use_approval",
+      },
+    });
+    expect(humanInputRequestFromEvent(card)).toMatchObject({ origin: "secret_use_approval" });
+    const afterTurn = [card, event(2, "turn.completed", {}, "turn-1")];
+    expect(projectPendingHumanInputRequests(afterTurn).map((request) => request.id)).toEqual([
+      "request-approval",
+    ]);
+    expect(
+      projectPendingHumanInputRequests([
+        ...afterTurn,
+        event(3, "user.humanInputResponse", {
+          requestId: "request-approval",
+          response: { outcome: "answered", answers: [] },
+        }),
+      ]),
+    ).toEqual([]);
+  });
 });
 
 describe("answersFromDrafts", () => {

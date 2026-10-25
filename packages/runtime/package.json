@@ -41,6 +41,10 @@
       "types": "./src/gmail-rest-mcp.ts",
       "default": "./src/gmail-rest-mcp.ts"
     },
+    "./google-calendar-rest-mcp": {
+      "types": "./src/google-calendar-rest-mcp.ts",
+      "default": "./src/google-calendar-rest-mcp.ts"
+    },
     "./slack-rest-mcp": {
       "types": "./src/slack-rest-mcp.ts",
       "default": "./src/slack-rest-mcp.ts"

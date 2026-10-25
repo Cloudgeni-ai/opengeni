@@ -361,6 +361,7 @@ export {
 
 export {
   BROWSER_CONTROL_ADMIN_TOKEN_FILE,
+  BrowserControlActionDeadlineError,
   BrowserControlClient,
   BrowserControlProtocolError,
   BrowserControlRequestError,

@@ -584,6 +584,45 @@ describe("createSessionProxyHandler", () => {
     }
   });
 
+  test("a create hook passes on the person's time zone unless the server chose one", async () => {
+    for (const serverZone of [undefined, "Asia/Tokyo"]) {
+      const { upstream, browser } = setup({
+        createSession: ({ initialMessage }) => ({
+          initialMessage,
+          ...(serverZone ? { timeZone: serverZone } : {}),
+        }),
+      });
+      await browser.createSession(WORKSPACE_ID, {
+        initialMessage: "Remind me tomorrow at 9",
+        timeZone: "Europe/Oslo",
+      });
+      expect(upstream.requests[0]!.body).toMatchObject({
+        timeZone: serverZone ?? "Europe/Oslo",
+      });
+    }
+    // A malformed zone from the browser is dropped, not forwarded.
+    const { upstream, browser } = setup({
+      createSession: ({ initialMessage }) => ({ initialMessage }),
+    });
+    await browser.createSession(WORKSPACE_ID, {
+      initialMessage: "Hello",
+      timeZone: "Not/AZone",
+    });
+    expect(upstream.requests[0]!.body).not.toHaveProperty("timeZone");
+  });
+
+  test("follow-up messages forward the person's time zone", async () => {
+    const { upstream, browser } = setup();
+    await browser.sendMessage(WORKSPACE_ID, SESSION_ID, {
+      text: "And the day after?",
+      timeZone: "Europe/Oslo",
+    });
+    expect(upstream.requests[0]!.body).toMatchObject({
+      type: "user.message",
+      payload: { text: "And the day after?", timeZone: "Europe/Oslo" },
+    });
+  });
+
   test("first-message files and model choices reach the hook and the created session", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({

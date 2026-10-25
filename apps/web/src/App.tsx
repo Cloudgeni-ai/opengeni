@@ -24,6 +24,7 @@
 //   /workspaces/:id/automations/:automationId → one automation (overview + runs)
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
+//   /workspaces/:id/automations/templates    → templates: built in and saved in the workspace
 //   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
 //   /workspaces/:id/meetings                 → meetings list with the recorder
 //   /workspaces/:id/meetings/:recordingId    → one meeting (player, transcript, speakers)
@@ -247,6 +248,10 @@ const LazyEventSourceNewRoute = lazyRouteComponent(
 const LazyEventSourceDetailRoute = lazyRouteComponent(
   () => import("@/routes/automations"),
   "EventSourceDetailRoute",
+);
+const LazyAutomationTemplatesRoute = lazyRouteComponent(
+  () => import("@/routes/automations"),
+  "AutomationTemplatesRoute",
 );
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
@@ -703,7 +708,9 @@ type NewAutomationSearch = {
 };
 function newAutomationSearch(search: Record<string, unknown>): NewAutomationSearch {
   return {
-    ...(typeof search.template === "string" && AUTOMATIONS_SEARCH_SLUG.test(search.template)
+    // A built-in template's id, or the id of one saved in the workspace.
+    ...(typeof search.template === "string" &&
+    (AUTOMATIONS_SEARCH_SLUG.test(search.template) || AUTOMATIONS_SEARCH_UUID.test(search.template))
       ? { template: search.template }
       : {}),
     ...(typeof search.from === "string" && AUTOMATIONS_SEARCH_UUID.test(search.from)
@@ -758,6 +765,11 @@ const workspaceEventSourceDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "automations/sources/$sourceId",
   component: EventSourceDetail,
+});
+const workspaceAutomationTemplatesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "automations/templates",
+  component: AutomationTemplates,
 });
 // Automations were called Schedules; their links in old messages and
 // bookmarks still land on the same page.
@@ -1058,6 +1070,7 @@ const routeTree = rootRoute.addChildren([
     workspaceEventSourcesRoute,
     workspaceEventSourceNewRoute,
     workspaceEventSourceDetailRoute,
+    workspaceAutomationTemplatesRoute,
     workspaceLegacySchedulesRoute,
     workspaceLegacyScheduleNewRoute,
     workspaceLegacyScheduleDetailRoute,
@@ -1321,6 +1334,11 @@ function EventSourceNew() {
 function EventSourceDetail() {
   const { workspaceId, sourceId } = workspaceEventSourceDetailRoute.useParams();
   return <LazyEventSourceDetailRoute workspaceId={workspaceId} sourceId={sourceId} />;
+}
+
+function AutomationTemplates() {
+  const { workspaceId } = workspaceAutomationTemplatesRoute.useParams();
+  return <LazyAutomationTemplatesRoute workspaceId={workspaceId} />;
 }
 
 function LegacySchedulesRedirect() {

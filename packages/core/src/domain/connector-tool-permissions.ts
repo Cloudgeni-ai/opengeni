@@ -41,9 +41,12 @@ import {
 import { HTTPException } from "hono/http-exception";
 import {
   GMAIL_REST_MCP_TOOLS,
+  GOOGLE_CALENDAR_REST_MCP_TOOLS,
   gmailToolAvailableOnDeployment,
   gmailToolSupportsScopes,
+  googleCalendarToolSupportsScopes,
   isOfficialGmailMcpConfig,
+  isOfficialGoogleCalendarMcpConfig,
   isOfficialSlackMcpConfig,
   isOfficialDriveMcpConfig,
   mergeDriveMcpTools,
@@ -287,9 +290,13 @@ export function reviewedConnectorToolCatalog(
             watchTopicName: deployment.gmailWatchTopicName,
           }),
       )
-    : isOfficialSlackMcpConfig(server.url, server.connectionRef)
-      ? slackRestMcpToolsForScopes(grantedScopes)
-      : null;
+    : isOfficialGoogleCalendarMcpConfig(server.url, server.connectionRef)
+      ? GOOGLE_CALENDAR_REST_MCP_TOOLS.filter((tool) =>
+          googleCalendarToolSupportsScopes(tool.name, grantedScopes),
+        )
+      : isOfficialSlackMcpConfig(server.url, server.connectionRef)
+        ? slackRestMcpToolsForScopes(grantedScopes)
+        : null;
   return (
     tools?.filter((tool) => !server.allowedTools || server.allowedTools.includes(tool.name)) ?? null
   );

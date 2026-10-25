@@ -75,6 +75,7 @@ import {
   losslessText,
 } from "./lossless-columns";
 
+export * from "./automation-templates-schema";
 export * from "./editable-artifacts-schema";
 export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";
@@ -9205,7 +9206,7 @@ export const sessionSystemUpdates = pgTable(
   (table) => ({
     kindValid: check(
       "system_updates_kind_check",
-      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress')`,
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress', 'secret_use_approval_decided')`,
     ),
     payloadKindValid: check(
       "system_updates_payload_kind_check",
@@ -10007,6 +10008,13 @@ export const sessionHumanInputRequests = pgTable(
     turnGeneration: integer("turn_generation").notNull(),
     creationAttemptId: uuid("creation_attempt_id").notNull(),
     toolCallId: text("tool_call_id").notNull(),
+    /**
+     * `tool_call`: asked by the agent's `request_human_input`; its turn waits
+     * and ends with it. `secret_use_approval` (0961): Opengeni's own card for
+     * a blocked secret use (`tool_call_id` is `secret-approval:<approval>`);
+     * the turn does not wait, and the card outlives the turn until answered.
+     */
+    origin: text("origin").notNull().default("tool_call"),
     status: text("status").notNull().default("pending"),
     questions: jsonb("questions").$type<HumanInputQuestion[]>().notNull(),
     allowSkip: boolean("allow_skip").notNull().default(false),
@@ -10051,6 +10059,10 @@ export const sessionHumanInputRequests = pgTable(
     status: check(
       "session_human_input_requests_status_check",
       sql`${table.status} in ('pending','answered','skipped','expired','cancelled')`,
+    ),
+    origin: check(
+      "session_human_input_requests_origin_check",
+      sql`${table.origin} in ('tool_call','secret_use_approval')`,
     ),
     generation: check(
       "session_human_input_requests_generation_check",

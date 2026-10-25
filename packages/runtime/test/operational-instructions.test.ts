@@ -394,6 +394,11 @@ describe("proportional effort", () => {
     expect(guidance).toContain(
       "Skip the opening update when you expect to answer within about 20 seconds",
     );
+    // Hosted search runs inside one model response for 10 to 45 s; without this the
+    // person saw no text until every search had finished.
+    expect(guidance).toContain(
+      "Web searches take several seconds each, so before searching the web, write the opening update in a few words.",
+    );
     expect(guidance).not.toContain("at least every two minutes");
     expect(guidance).toContain("During active work, update at meaningful milestones");
     expect(guidance).toContain("including frequent updates when requested");
