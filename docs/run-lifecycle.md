@@ -4644,19 +4644,24 @@ recovery replays the stored bytes. The instructions never contain a clock.
    provider identity, signed URLs, object keys, or base64. See
    [`image-generation.md`](image-generation.md).
    Model-visible tool results stay at or below 1 MiB. Overflow is a successful
-   tool: exact serialized bytes become a workspace File, a current-turn copy
-   lands at `tool-results/<operationId>.json` relative to the shell cwd (the
-   durable rematerialization path remains the virtual
-   `/workspace/tool-results/<operationId>.json`), and history/events keep the
-   compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt whose
-   `sandboxPath` is that cwd-relative shell path. The path is given only once
-   the copy is in the sandbox: a spill that finds the turn's lazy sandbox not
-   started yet joins it (as a shell command would; the start copies the
-   attempt's spilled files before releasing its first operation, and the spill
-   retries a failed copy once), so the receipt never promises a later copy. It
-   is `null` without a sandbox route, when the sandbox cannot start or the copy
-   fails, and on the SDK-owned path before its session exists. Later turns do not
-   rematerialize; retrieve old bytes through Files MCP plus shell. Spill write
+   tool: exact serialized bytes become a workspace File and a current-turn copy
+   lands at `tool-results/<operationId>.json` under the placement's workspace
+   root (the durable rematerialization path remains the virtual
+   `/workspace/tool-results/<operationId>.json`). History/events keep the
+   compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt, followed by
+   one text block telling the model how to read it. `sandboxPath` is the
+   absolute path of the copy in the placement it was written to (a Connected
+   Machine's host-native root or a box's root), so the shell opens it from any
+   working directory; a root that is not an absolute POSIX path keeps the
+   cwd-relative form. The path is given only once the copy is in the sandbox:
+   a spill that finds the turn's lazy sandbox not started yet joins it (as a
+   shell command would; the start copies the attempt's spilled files before
+   releasing its first operation, and the spill retries a failed copy once), so
+   the receipt never promises a later copy. It is `null` without a sandbox
+   route, when the sandbox cannot start or the copy fails, and on the SDK-owned
+   path before its session exists. The text names the Files download tool
+   (`files__files_get_download_url` with the `fileId`) for a missing copy, as
+   attachment receipts do; later turns do not rematerialize. Spill write
    failure is a bounded `result_too_large` error and never puts the huge payload
    in history.
    Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on
