@@ -1,5 +1,22 @@
 # Modular prompt changelog
 
+Turns that search the web now open with a few words before the first
+search. The Progress updates guidance adds one sentence after "Skip the opening
+update when you expect to answer within about 20 seconds": "Web searches take
+several seconds each, so before searching the web, write the opening update in
+a few words." Hosted search runs inside one model response, and the model wrote
+nothing until every search had finished. On five everyday questions (a family
+trip plan, what is on this weekend, a rainy-day plan, a train trip, a product
+pick) the person saw only "Working" for a mean 15.0 s, and up to 30 s, after the
+model request started (0 of 35 turns showed text earlier). With the sentence,
+28 of 28 turns showed a note such as "I'll check the route and fares." after a
+median 1.9 s (at most 4.3 s). The answer itself starts about 1 s later on
+average, and model cost per turn stays within about 5% (noise level). A longer
+variant ("write the opening update before searching the web") produced fuller
+notes but made the agent search more (about 16% higher cost).
+Both compositions change identically; legacy prompt digests are refreshed for
+this reviewed change.
+
 macOS privacy folders. A Connected Mac's agent runs as the Opengeni app from
 the owner's home folder, so a recursive `find ~`, `grep -r` or `du` there reads
 Desktop, Documents, Downloads, Library, Music, Pictures and Movies, and macOS
