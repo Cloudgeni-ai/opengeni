@@ -4,7 +4,7 @@
   "cleanedAt": "2026-08-17T11:18:21.937Z",
   "cleaning": {
     "inputRows": 1334,
-    "outputRows": 644,
+    "outputRows": 645,
     "skippedRows": 687,
     "quarantinedRows": 4,
     "duplicateDomainNameRows": 109,
@@ -13,9 +13,9 @@
     "controlCharacterFields": 0
   },
   "probe": {
-    "kept": 644,
+    "kept": 645,
     "dropped": 143,
-    "real": 644,
+    "real": 645,
     "unverified": 111,
     "googleapisDropped": 2
   },

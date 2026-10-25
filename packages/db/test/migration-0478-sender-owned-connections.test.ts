@@ -154,6 +154,9 @@ const withheldMigrations = [
   // Patches the scheduled admission and live-authority routines that withheld
   // 0478/0534/0539 install by exact anchors; replay after them.
   "0906_scheduled_shared_slack_authority.sql",
+  // Redefines withheld 0759's predicate over the same session_system_updates
+  // columns; replay after it.
+  "0972_capability_setup_continuations.sql",
   // Rewrites the execution-context key withheld 0608 adds; replay after it.
   ...workspaceDeletionMigrationTail,
   // Redefines the exhausted-task predicate withheld 0761 creates; replay after it.
