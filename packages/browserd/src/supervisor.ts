@@ -306,6 +306,8 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
   readonly networkNotice?: string | null;
+  /** The load error of the page start() kept on the browser's error page. */
+  readonly startLoadError?: string | null;
   start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
@@ -1355,7 +1357,18 @@ export class BrowserSupervisor {
       this.sessions.set(options.browserSessionId, runtime);
       const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
       runtime.creationObservation = null;
-      const notice = runtime.driver.networkNotice;
+      // The browser opened even if its first page did not load; say why in
+      // plain words rather than leave the caller to infer it from the
+      // browser's error page.
+      const loadError = runtime.driver.startLoadError;
+      const notice = [
+        loadError
+          ? `initialUrl did not load (${loadError}); the tab shows the browser's error page.`
+          : null,
+        runtime.driver.networkNotice,
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join(" ");
       return {
         ...binding(runtime),
         observation,
@@ -2418,10 +2431,6 @@ export class BrowserSupervisor {
           recoveredReceipt?.operationId,
         );
       }
-      // The tabs the previous browser on this profile had when it was stopped
-      // or let go. Every launch takes the record, so it never outlives the
-      // launch right after the stop it describes.
-      const stoppedTabs = await takeStoppedBrowserTabs(sessionDirectory);
       driver = await this.createDriver(driverContext);
       const runtime: Runtime = {
         options: runtimeOptions(options),
@@ -2471,19 +2480,12 @@ export class BrowserSupervisor {
           runtime.lastTargets = await driver.listTargets();
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
         } else {
-          const observation = await driver.start(options.initialUrl);
+          // The browser opens even when its first page fails to load: the tab
+          // shows the browser's error page, which names the failure.
+          const observation = await driver.start(options.initialUrl, { keepTabOnLoadError: true });
           runtime.creationObservation = observation;
           runtime.lastTargets = [observation.target];
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
-        }
-        // A relaunch reopened the stopped browser's tabs with new IDs; a
-        // reattached browser kept them, so the record no longer applies.
-        if (stoppedTabs && relaunchesProfile && !restoredManifest) {
-          await noteRelaunchedTabs(driver, stoppedTabs.reason, stoppedTabs.tabs, {
-            ...(stoppedTabs.idleReleaseMinutes !== undefined
-              ? { idleReleaseMinutes: stoppedTabs.idleReleaseMinutes }
-              : {}),
-          });
         }
       } finally {
         startupPresence();
@@ -2505,6 +2507,20 @@ export class BrowserSupervisor {
         workingReceiptCompleted = true;
         if (recoveredReceipt)
           runtime.options.restoreAuthorityDigest = recoveredReceipt.restoreAuthorityDigest;
+      }
+      // The tabs the previous browser on this profile had when it was stopped
+      // or let go. Every successful launch takes the record, so it never
+      // outlives the launch right after the stop it describes, while a failed
+      // launch leaves it for its retry. A relaunch reopened those tabs with
+      // new IDs; a reattached browser kept them, so the record no longer
+      // applies.
+      const stoppedTabs = await takeStoppedBrowserTabs(sessionDirectory);
+      if (stoppedTabs && relaunchesProfile && !restoredManifest) {
+        await noteRelaunchedTabs(driver, stoppedTabs.reason, stoppedTabs.tabs, {
+          ...(stoppedTabs.idleReleaseMinutes !== undefined
+            ? { idleReleaseMinutes: stoppedTabs.idleReleaseMinutes }
+            : {}),
+        });
       }
       return runtime;
     } catch (error) {

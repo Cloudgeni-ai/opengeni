@@ -123,6 +123,8 @@ type FixtureOptions = {
   machineAttached?: boolean;
   /** The stored bundled selection; `"omit"` leaves it undefined. Default `[]`. */
   bundledSkillIds?: BundledSkillId[] | "omit";
+  /** Rendered workspace governance for this turn. */
+  workspaceGovernance?: string;
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -184,6 +186,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   context.attempt.executionGeneration = 1;
   context.eventing.publish = async () => {};
   const skillCatalogWrites: string[] = [];
+  const governanceWrites: Array<string | null> = [];
   let preparationPhase: "tool-preparation" | "agent-build" = "tool-preparation";
   const metadataReads = { skillDescriptors: 0, videoPolicy: 0 };
   const persistence = [
@@ -220,6 +223,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => {
       skillCatalogWrites.push(input.catalog);
       return input.catalog;
+    }),
+    spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(async (_db, input) => {
+      governanceWrites.push(input.governance);
+      return input.governance;
     }),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
     ...(typeof db.sessionHasToolRouterHistory === "function"
@@ -446,6 +453,9 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     const built = await buildTurnAgent({
       ...context,
       ...toolRuntime,
+      ...(options.workspaceGovernance !== undefined
+        ? { workspaceGovernance: options.workspaceGovernance }
+        : {}),
       input,
       db: {} as BuildTurnAgentDeps["db"],
       runtime: runtime as OpenGeniRuntime,
@@ -574,6 +584,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       } satisfies AgentMediaAttachment,
       skillCatalog: toolRuntime.skillCatalog,
       skillCatalogWrites,
+      governanceWrites,
       selectedServerIds: policy.turnTools.map((tool) => tool.id).sort(),
       settings,
       session,
@@ -774,6 +785,26 @@ describe("agent configuration reaches the production model request", () => {
       hosted: explicitNull.request.tools.filter((tool) => tool.type === "hosted_tool"),
     }).toMatchSnapshot();
   });
+
+  test.each(["legacy", "all"] as const)(
+    "workspace governance reaches durable history, never the system prompt (%s config)",
+    async (from) => {
+      const agent = from === "all" ? agentConfig("all") : null;
+      const governed = await captureWorkerRequest({
+        agent,
+        workspaceGovernance: "Workspace rule: answer in English.",
+      });
+      const other = await captureWorkerRequest({
+        agent,
+        workspaceGovernance: "Workspace rule: answer in Norwegian.",
+      });
+      // A different initiator or an edited policy must not rewrite the
+      // system prompt that every earlier request of the session sent.
+      expect(governed.request.systemInstructions).toBe(other.request.systemInstructions);
+      expect(governed.request.systemInstructions).not.toContain("Workspace rule");
+      expect(governed.governanceWrites).toEqual(["Workspace rule: answer in English."]);
+    },
+  );
 
   test.each([
     "foreign scope",

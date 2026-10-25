@@ -25,6 +25,7 @@ import type {
   McpServerConnectionRef,
   ModelContextContributionSummary,
   ModelContextSnapshot,
+  PromptCacheDiagnostics,
   RigProviderImages,
   SessionMcpApprovalPolicy,
   SessionGoalChangeKind,
@@ -13294,6 +13295,9 @@ export const modelCallFacts = pgTable(
     timeToFirstTokenMs: integer("time_to_first_token_ms"),
     timeToFirstTextMs: integer("time_to_first_text_ms"),
     durationMs: integer("duration_ms"),
+    // Prompt-cache observation and warm-miss classification (see
+    // PromptCacheDiagnostics); null before 0979 and for repaired facts.
+    promptCacheDiagnostics: jsonb("prompt_cache_diagnostics").$type<PromptCacheDiagnostics>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },

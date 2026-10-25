@@ -208,6 +208,51 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test("browser_act passes on a wait that ended on a page whose network stayed busy", async () => {
+    const target = browserTarget();
+    const note = {
+      actionIndex: 1,
+      kind: "network_busy" as const,
+      message:
+        "page loaded; its network was still busy after 30 s (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there",
+    };
+    let dispatched: unknown = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, request) => {
+          dispatched = request.action;
+          return {
+            ...browserReceipt(request.operationId, browserObservation(target)),
+            notes: [note],
+          };
+        },
+      }),
+    });
+    const caller = { kind: "model" as const, subjectId: "model:test" };
+    const result = await definitions[0]!.execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: { type: "navigate", url: "https://example.test/", waitUntil: "network_idle" },
+      },
+      { operationId: randomUUID(), caller },
+    );
+    expect(dispatched).toEqual({
+      type: "batch",
+      actions: [
+        { type: "navigate", url: "https://example.test/" },
+        { type: "wait", condition: "network_idle" },
+      ],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ state: "completed", notes: [note] });
+    expect((result.content[0] as { text: string }).text).toContain(`\nNote: ${note.message}.\n`);
+  });
+
   test("browser_act tells the model where upload workspace File IDs come from", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,
@@ -1211,6 +1256,7 @@ describe("interaction attempt tools", () => {
     const image = new Uint8Array([4, 5, 6]);
     const order: string[] = [];
     let captureFails = false;
+    let capturedDocument: string | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         getBrowserSession: async () => session,
@@ -1232,7 +1278,7 @@ describe("interaction attempt tools", () => {
             controllerGeneration: target.controllerGeneration,
             targetId: target.id,
             targetGeneration: target.targetGeneration,
-            documentGeneration: target.documentGeneration!,
+            documentGeneration: capturedDocument ?? target.documentGeneration!,
             sequence: 1,
             mediaType: "image/jpeg",
             width: 1,
@@ -1288,6 +1334,21 @@ describe("interaction attempt tools", () => {
     expect((failed.content[1] as { text: string }).text).toBe(
       "The browser opened, but its screenshot could not be captured: synthetic capture failure",
     );
+
+    // A tab that committed another document after its outline was read would
+    // pair one page's outline with another page's picture: leave it out.
+    captureFails = false;
+    capturedDocument = "document-after-outline";
+    const moved = await definitions[0]!.execute(
+      { browserSessionId, includeScreenshot: true },
+      context(),
+    );
+    expect(moved.isError).toBeFalsy();
+    expect(moved.content).toHaveLength(2);
+    expect(moved.content[1]).toEqual({
+      type: "text",
+      text: "The browser opened, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.",
+    });
   });
 
   test.each([true, false])(
@@ -1774,6 +1835,168 @@ describe("interaction attempt tools", () => {
     expect(message).toBe(
       `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
     );
+  });
+
+  describe("tools that name a session directly give the same hint", () => {
+    const browserMissing = () => new OpenGeniApiError(404, "BrowserSession not found");
+    const computerMissing = () => new OpenGeniApiError(404, "ComputerSession not found");
+    const openBrowser = () => {
+      const browser = discoveredBrowserSession(randomUUID(), sessionId);
+      browser.lifecycle = "active";
+      browser.name = "Research";
+      return browser;
+    };
+    const openComputer = () => {
+      const computer = discoveredComputerSession(randomUUID(), sessionId);
+      computer.lifecycle = "active";
+      computer.name = "Desktop";
+      return computer;
+    };
+    const run = async (
+      tool: string,
+      args: Record<string, unknown>,
+      transport: Parameters<typeof partialTransport>[0],
+    ) => {
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport(transport),
+        workspaceId,
+        sessionId,
+        selectedTools: [
+          tool,
+          ...(tool.startsWith("interaction__cua_") ? ["computer_open", "computer_act"] : []),
+        ],
+        permissions: ["sessions:read", "sessions:control", "files:upload", "identities:write"],
+      });
+      const definition = definitions.find(
+        (candidate) => candidate.identity.toolName === tool || candidate.modelName === tool,
+      )!;
+      const result = await definition.execute(args, {
+        operationId: randomUUID(),
+        caller: { kind: "model", subjectId: "model:test" },
+      });
+      expect(result).toMatchObject({ isError: true });
+      return (result.structuredContent as { error: { message: string } }).error.message;
+    };
+
+    test.each([
+      ["browser_clipboard", {}],
+      ["browser_downloads", { operation: "list" }],
+      [
+        "browser_download_save",
+        { downloadId: randomUUID(), destinationPath: "downloads/report.pdf" },
+      ],
+      ["browser_publish", { identityId: randomUUID(), expectedHeadGeneration: 0 }],
+      ["browser_lifecycle", { action: "suspend" }],
+      ["browser_lifecycle", { action: "end" }],
+    ] as const)("%s %j lists the open BrowserSessions to use instead", async (tool, args) => {
+      const open = openBrowser();
+      const message = await run(
+        tool,
+        { browserSessionId: randomUUID(), ...args },
+        {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          readBrowserClipboard: async () => {
+            throw browserMissing();
+          },
+          listBrowserDownloads: async () => {
+            throw browserMissing();
+          },
+          saveBrowserDownload: async () => {
+            throw browserMissing();
+          },
+          publishBrowserRevision: async () => {
+            throw browserMissing();
+          },
+          suspendBrowserSession: async () => {
+            throw browserMissing();
+          },
+          endBrowserSession: async () => {
+            throw browserMissing();
+          },
+        },
+      );
+      // The id is required here, so there is no "omit it" alternative.
+      expect(message).toBe(
+        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${open.id} "Research". Use one of these ids.`,
+      );
+    });
+
+    test("browser_open attaching to a missing BrowserSession offers the open ones or a new one", async () => {
+      const open = openBrowser();
+      let sessions = [open];
+      const transport = {
+        listBrowserSessions: async () => ({ revision: 1, sessions }) as never,
+        getBrowserSession: async () => {
+          throw browserMissing();
+        },
+      };
+      expect(await run("browser_open", { browserSessionId: randomUUID() }, transport)).toBe(
+        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${open.id} "Research". Use one of these ids, or omit browserSessionId to open or reuse one.`,
+      );
+      sessions = [];
+      expect(await run("browser_open", { browserSessionId: randomUUID() }, transport)).toBe(
+        "API 404: BrowserSession not found. This chat has no open BrowserSession; omit browserSessionId to open one.",
+      );
+    });
+
+    test("computer_open and computer_lifecycle name the open ComputerSessions", async () => {
+      const open = openComputer();
+      const transport = {
+        listComputerSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+        getComputerSession: async () => {
+          throw computerMissing();
+        },
+        endComputerSession: async () => {
+          throw computerMissing();
+        },
+      };
+      const listed = `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids`;
+      expect(await run("computer_open", { computerSessionId: randomUUID() }, transport)).toBe(
+        `${listed}, or omit computerSessionId to open or reuse one.`,
+      );
+      expect(
+        await run(
+          "computer_lifecycle",
+          { computerSessionId: randomUUID(), action: "end" },
+          transport,
+        ),
+      ).toBe(`${listed}.`);
+    });
+
+    test("a native computer tool naming a missing ComputerSession lists the open ones", async () => {
+      const open = openComputer();
+      const message = await run(
+        "interaction__cua_list_windows",
+        { computerSessionId: randomUUID() },
+        {
+          listComputerSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          callNativeComputerTool: async () => {
+            throw computerMissing();
+          },
+        },
+      );
+      expect(message).toBe(
+        `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+      );
+    });
+
+    test("a long label is cut by character, never inside an emoji", async () => {
+      const open = openBrowser();
+      // The cut falls exactly where a surrogate pair starts in UTF-16.
+      open.name = `${"x".repeat(58)}🧭🧭 and more`;
+      const message = await run(
+        "browser_clipboard",
+        { browserSessionId: randomUUID() },
+        {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          readBrowserClipboard: async () => {
+            throw browserMissing();
+          },
+        },
+      );
+      expect(message).toContain(`${open.id} "${"x".repeat(58)}🧭…"`);
+      expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+    });
   });
 
   test("an action never runs on a browser resumed while it was in flight", async () => {
@@ -2951,6 +3174,7 @@ describe("interaction attempt tools", () => {
     const image = new Uint8Array([1, 2, 3]);
     const order: string[] = [];
     let captureFails = false;
+    let capturedDocument: string | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         actInBrowser: async (_workspaceId, _browserSessionId, value) => {
@@ -2966,7 +3190,7 @@ describe("interaction attempt tools", () => {
             controllerGeneration: target.controllerGeneration,
             targetId: target.id,
             targetGeneration: target.targetGeneration,
-            documentGeneration: target.documentGeneration!,
+            documentGeneration: capturedDocument ?? target.documentGeneration!,
             sequence: 1,
             mediaType: "image/jpeg",
             width: 1,
@@ -3026,6 +3250,22 @@ describe("interaction attempt tools", () => {
     expect((failed.content[1] as { text: string }).text).toBe(
       "The action ran, but its screenshot could not be captured: synthetic capture failure",
     );
+
+    // A tab that committed another document after the receipt's outline was
+    // read would pair one page's outline with another page's picture.
+    captureFails = false;
+    capturedDocument = "document-after-outline";
+    const moved = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, action, includeScreenshot: true },
+      { ...context, operationId: randomUUID() },
+    );
+    expect(moved.isError).toBeFalsy();
+    expect(moved.structuredContent).toMatchObject({ targetId: target.id, state: "completed" });
+    expect(moved.content).toHaveLength(2);
+    expect(moved.content[1]).toEqual({
+      type: "text",
+      text: "The action ran, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.",
+    });
   });
 
   test("an open JavaScript dialog replaces a requested screenshot with what to do next", async () => {

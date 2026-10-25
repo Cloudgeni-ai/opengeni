@@ -342,6 +342,9 @@ async function buildWorkerAgent(settings: Settings, modelId: string, modelOverri
       defaultModelId: null,
     }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => input.catalog),
+    spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
+      async (_db, input) => input.governance,
+    ),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
   ];
   try {

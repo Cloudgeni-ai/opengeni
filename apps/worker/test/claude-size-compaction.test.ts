@@ -22,6 +22,7 @@ import {
   maybeCompactContext,
   type CompactionSummarizer,
 } from "../src/activities/context-compaction";
+import { buildCompactionPromptInput } from "@opengeni/runtime";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -300,4 +301,59 @@ test("cancellation during summarization fences the replacement and keeps the sou
       (row) => row.item,
     ),
   ).toEqual(items);
+}, 60_000);
+
+// The ordinary request inserts request-local items (here a tool disclosure)
+// that durable history does not hold. The checkpoint must send that exact
+// request plus its prompt so it extends the previous request byte for byte.
+const disclosure = {
+  type: "message",
+  role: "developer",
+  content: "These tools are now available: inspect_more.",
+};
+
+test("the checkpoint sends the withheld ordinary request when it covers durable history", async () => {
+  const { scope, items } = await fixture();
+  const withheld = [...items.slice(0, 4), disclosure, ...items.slice(4)];
+  const inputs: unknown[] = [];
+  const summarize: CompactionSummarizer = async (_settings, input) => {
+    inputs.push(input);
+    return "Inspected the evidence; continue with the next image.";
+  };
+  summarize.measureInputBytes = async (_settings, input) =>
+    Buffer.byteLength(JSON.stringify(input));
+  let taken = 0;
+  summarize.withheldWireHistory = () => {
+    taken++;
+    return withheld;
+  };
+  const result = await maybeCompactContext(client.db, testSettings(), scope, null, summarize, {
+    force: true,
+    trigger: "operator",
+  });
+  expect(result.compacted).toBe(true);
+  expect(taken).toBe(1);
+  expect(inputs).toEqual([buildCompactionPromptInput(withheld)]);
+}, 60_000);
+
+test("a withheld request that lacks durable items falls back to durable history", async () => {
+  const { scope, items } = await fixture();
+  // Missing the latest tool result: it was persisted after the request was prepared.
+  const stale = [...items.slice(0, 4), disclosure, ...items.slice(4, -1)];
+  const inputs: unknown[] = [];
+  const summarize: CompactionSummarizer = async (_settings, input) => {
+    inputs.push(input);
+    return "Inspected the evidence; continue with the next image.";
+  };
+  summarize.measureInputBytes = async (_settings, input) =>
+    Buffer.byteLength(JSON.stringify(input));
+  summarize.withheldWireHistory = () => stale;
+  const result = await maybeCompactContext(client.db, testSettings(), scope, null, summarize, {
+    force: true,
+    trigger: "operator",
+  });
+  expect(result.compacted).toBe(true);
+  expect(inputs).toHaveLength(1);
+  expect(JSON.stringify(inputs[0])).not.toContain("inspect_more");
+  expect(JSON.stringify(inputs[0])).toContain("Inspect the next image");
 }, 60_000);

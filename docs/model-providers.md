@@ -105,7 +105,7 @@ Responses; it does not become Chat Completions.
 
 |            | OpenAI                                                                                        | Azure                                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Credential | `OPENGENI_OPENAI_API_KEY` (`OPENAI_API_KEY`)                                                  | `OPENGENI_AZURE_OPENAI_API_KEY` or `OPENGENI_AZURE_OPENAI_AD_TOKEN`                                                  |
+| Credential | `OPENGENI_OPENAI_API_KEY` (`OPENAI_API_KEY`)                                                  | API key, static AD token, or deployment identity (below)                                                  |
 | URL        | optional `OPENGENI_OPENAI_BASE_URL` (`OPENAI_BASE_URL`); unset is `https://api.openai.com/v1` | `OPENGENI_AZURE_OPENAI_BASE_URL` (`…/openai/v1`), or `OPENGENI_AZURE_OPENAI_ENDPOINT` + `DEPLOYMENT` + `API_VERSION` |
 
 Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
@@ -113,6 +113,55 @@ Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
 `OPENGENI_OPENAI_RESPONSES_TRANSPORT` (`http` default, or `websocket`),
 `OPENGENI_OPENAI_PROVIDER_ITEM_IDS`, `OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT`,
 `OPENGENI_WEB_SEARCH_ENABLED`.
+
+**Keyless Azure OpenAI, without a console connection.** Set
+`OPENGENI_AZURE_OPENAI_AUTH_MODE` on the API and workers:
+
+- `static` (default): existing `OPENGENI_AZURE_OPENAI_API_KEY` or
+  `OPENGENI_AZURE_OPENAI_AD_TOKEN` behavior. A static token is not refreshed.
+- `workload_identity`: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and
+  `AZURE_FEDERATED_TOKEN_FILE` are required. The projected assertion is read
+  afresh on each token acquisition. `AZURE_AUTHORITY_HOST` optionally selects
+  the Entra authority. There is no client-secret or developer-login fallback.
+- `managed_identity`: Microsoft's MSAL SDK uses the host's managed identity
+  endpoint. Set `AZURE_CLIENT_ID` for a user-assigned identity; omit it for a
+  system-assigned identity. No tenant or projected token file is required.
+  The SDK requires Node.js 20+ when running on Node (the deployment runs Bun).
+
+Both identity modes reject a simultaneously configured Azure API key or static
+AD token at startup. They acquire `https://cognitiveservices.azure.com/.default`
+tokens and send only `Authorization: Bearer …`, never `api-key`. The identity
+needs the **Cognitive Services OpenAI User** role on the target resource.
+The shared token source coalesces concurrent acquisition, refreshes on the next
+request inside the five-minute expiry margin (half the lifetime for short-lived
+tokens), and honors earlier refresh hints. An idle deployment need not refresh;
+its next call acquires a current token. No restart is required. A refused token
+is discarded without replaying the model request. These paths cover agent
+turns, compaction, and titles; separate embedding, transcription, and voice
+providers retain their own credential settings.
+
+Example for Azure Workload Identity on Kubernetes (mount the projected token
+into every API/worker pod making model calls):
+
+```dotenv
+OPENGENI_OPENAI_PROVIDER=azure
+OPENGENI_AZURE_OPENAI_BASE_URL=https://RESOURCE.openai.azure.com/openai/v1
+OPENGENI_AZURE_OPENAI_AUTH_MODE=workload_identity
+AZURE_TENANT_ID=YOUR_TENANT_ID
+AZURE_CLIENT_ID=YOUR_IDENTITY_CLIENT_ID
+AZURE_FEDERATED_TOKEN_FILE=/var/run/secrets/azure/tokens/azure-identity-token
+OPENGENI_OPENAI_MODEL=reasoning-deployment
+OPENGENI_OPENAI_ALLOWED_MODELS=reasoning-deployment,small-deployment
+OPENGENI_OPENAI_REASONING_EFFORT=high
+OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS=low,medium,high
+```
+
+The model names are Azure **deployment names**, and the deployed models must
+support the configured reasoning efforts. The existing endpoint + deployment +
+API-version URL mode also works. This uses the built-in catalog and billing
+policy; it does not create or grant access to an organization connection.
+`OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED` is a separate opt-in for
+organization connections and is **not needed** for the built-in provider.
 
 ### Extra OpenAI-compatible servers — `OPENGENI_MODEL_PROVIDERS_JSON`
 
@@ -220,8 +269,8 @@ organization's endpoint and key; failures return a safe 422 (409 when Azure is
 not connected) and save nothing. Products are
 `organization-azure-openai/<deployment>` (provider `organization-azure-openai`,
 kind `direct-azure-organization`), use Responses with the `azure-openai` wire
-profile and the same conservative capabilities as workspace Azure (no reasoning
-control, no hosted web search), and send the key as Azure's `api-key` header on
+profile with reasoning controls (the same default and allowed efforts as the
+built-in provider), no hosted web search, and send the key as Azure's `api-key` header on
 `<endpoint>/responses`. They inherit into current and future shared workspaces
 only (Personal workspaces stay local, by the same RLS rule as the other
 organization API-key rails), are billed to the organization's Azure account with

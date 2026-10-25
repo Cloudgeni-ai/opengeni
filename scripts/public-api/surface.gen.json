@@ -11985,6 +11985,17 @@
         "$.type": "const!=[\"\\\"batch\\\"\"]"
       }
     },
+    "BrowserActionNote": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.actionIndex": "integer!",
+        "$.kind": "enum!=[\"\\\"network_busy\\\"\"]",
+        "$.message": "string!"
+      }
+    },
     "BrowserActionReceipt": {
       "io": [
         "output"
@@ -12007,6 +12018,8 @@
         "$.error.details{}|4{}": "ref(__schema2)",
         "$.error.message": "string!",
         "$.error.retryable": "boolean!",
+        "$.notes": "array?",
+        "$.notes[]": "ref(BrowserActionNote)",
         "$.observation": "object! null",
         "$.observation.browserSessionId": "string!",
         "$.observation.changedRegions": "array!",
@@ -33035,6 +33048,7 @@
       "BROWSER_FRAME_MAX_PIXELS": "value",
       "BrowserAction": "type",
       "BrowserActionBatch": "type",
+      "BrowserActionNote": "type",
       "BrowserActionReceipt": "type",
       "BrowserActionRequest": "type",
       "BrowserActionResolvedTarget": "type",
@@ -35384,6 +35398,7 @@
       "BROWSER_FRAME_MAX_PIXELS": "value",
       "BrowserAction": "type",
       "BrowserActionBatch": "type",
+      "BrowserActionNote": "type",
       "BrowserActionReceipt": "type",
       "BrowserActionRequest": "type",
       "BrowserActionResolvedTarget": "type",

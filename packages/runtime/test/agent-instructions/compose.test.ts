@@ -556,6 +556,18 @@ describe("modular composer: prompt-cache stability", () => {
       repositories: false,
       gitCredentials: false,
     });
+    expect(
+      agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {}),
+    ).toEqual(
+      agentPromptResourcesFor(
+        settings,
+        [
+          { kind: "repository", uri: "x" },
+          { kind: "file", fileId: "11111111-1111-4111-8111-111111111111" },
+        ] as never,
+        {},
+      ),
+    );
     expect(agentPromptResourcesFor(testSettings({ sandboxBackend: "none" }), [], {})).toEqual(
       NO_RESOURCES,
     );

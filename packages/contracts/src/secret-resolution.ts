@@ -151,7 +151,9 @@ function failureHint(
   const hints: string[] = [];
   if (askCard !== null) {
     hints.push(
-      "Nothing was run. A secret is missing: call request_human_input with askCard exactly as given, then retry with the returned references.",
+      failures.some((failure) => failure.code === "not_found")
+        ? "Nothing was run. A secret is missing. If the reference was meant to reach another workspace, chat or later work unresolved, write it as \\{{secret:…}} and retry. Otherwise call request_human_input with askCard exactly as given, then retry with the returned references."
+        : "Nothing was run. A secret is missing: call request_human_input with askCard exactly as given, then retry with the returned references.",
     );
   }
   if (approval?.asked === true) {

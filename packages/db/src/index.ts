@@ -136,6 +136,11 @@ import {
   workspaceSettingsAllowCreditModels,
   readTurnServingPolicyV1,
   AppShotCapture,
+  classifyPromptCacheWarmMiss,
+  parsePromptCacheObservation,
+  type PromptCacheCallSample,
+  type PromptCacheDiagnostics,
+  type PromptCacheObservation,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -349,6 +354,10 @@ import {
   ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
+  WORKSPACE_GOVERNANCE_CONTEXT_PREFIX,
+  WORKSPACE_GOVERNANCE_NONE,
+  readWorkspaceGovernanceContext,
+  workspaceGovernanceContextItem,
   sessionTurnSurfaceOrNull,
   type SessionTurnSurface,
 } from "@opengeni/contracts";
@@ -5983,6 +5992,8 @@ export type ModelCallFact = {
   equivalentCreditCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
   contextContributions: readonly ModelContextContributionSummary[] | null;
+  /** Prompt-cache observation and warm-miss classification, when recorded. */
+  promptCacheDiagnostics: PromptCacheDiagnostics | null;
   occurredAt: Date;
   recordedAt: Date;
 };
@@ -6022,6 +6033,7 @@ function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): Model
         ? row.pricingSource
         : null,
     contextContributions: row.contextContributions,
+    promptCacheDiagnostics: row.promptCacheDiagnostics ?? null,
     occurredAt: row.occurredAt,
     recordedAt: row.recordedAt,
   };
@@ -6102,6 +6114,12 @@ export async function recordModelCallFact(
     totalTokens?: number | null;
     /** Worker-measured timing of the call; absent for calls it did not stream. */
     timing?: ModelCallTiming | null;
+    /**
+     * What the worker observed about the call's prompt cache. When present
+     * (even null), the write classifies a warm-cache miss against the previous
+     * call of the same model in the session. Omitted by repair paths.
+     */
+    promptCache?: PromptCacheObservation | null;
     occurredAt?: Date;
     /**
      * The shared-core subscription connection that served the call (core
@@ -6185,6 +6203,22 @@ export async function recordModelCallFact(
           })
         : null;
       const occurredAt = input.occurredAt ?? new Date();
+      const promptCacheDiagnostics =
+        input.promptCache === undefined
+          ? null
+          : await promptCacheDiagnosticsForCall(scopedDb, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              model: input.model,
+              current: {
+                sourceKey: input.sourceKey,
+                inputTokens: input.inputTokens ?? null,
+                cachedTokens: input.cachedTokens ?? null,
+                connectionId: input.connectionId ?? null,
+                occurredAt,
+                observation: parsePromptCacheObservation(input.promptCache),
+              },
+            });
       const [row] = await scopedDb
         .insert(schema.modelCallFacts)
         .values({
@@ -6220,6 +6254,7 @@ export async function recordModelCallFact(
           contextContributions,
           connectionId: input.connectionId ?? null,
           ...modelCallTimingColumns(timing),
+          promptCacheDiagnostics,
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -6248,6 +6283,7 @@ export async function recordModelCallFact(
             timeToFirstTokenMs: sql`coalesce(${schema.modelCallFacts.timeToFirstTokenMs}, excluded.time_to_first_token_ms)`,
             timeToFirstTextMs: sql`coalesce(${schema.modelCallFacts.timeToFirstTextMs}, excluded.time_to_first_text_ms)`,
             durationMs: sql`coalesce(${schema.modelCallFacts.durationMs}, excluded.duration_ms)`,
+            promptCacheDiagnostics: sql`coalesce(${schema.modelCallFacts.promptCacheDiagnostics}, excluded.prompt_cache_diagnostics)`,
           },
         })
         .returning();
@@ -6257,6 +6293,58 @@ export async function recordModelCallFact(
       return mapModelCallFact(row);
     },
   );
+}
+
+/**
+ * The call's prompt-cache observation plus its warm-miss classification
+ * against the previous call of the same model in the same session.
+ */
+async function promptCacheDiagnosticsForCall(
+  scopedDb: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    model: string;
+    current: PromptCacheCallSample;
+  },
+): Promise<PromptCacheDiagnostics | null> {
+  const [previous] = await scopedDb
+    .select({
+      sourceKey: schema.modelCallFacts.sourceKey,
+      inputTokens: schema.modelCallFacts.inputTokens,
+      cachedTokens: schema.modelCallFacts.cachedTokens,
+      connectionId: schema.modelCallFacts.connectionId,
+      occurredAt: schema.modelCallFacts.occurredAt,
+      promptCacheDiagnostics: schema.modelCallFacts.promptCacheDiagnostics,
+    })
+    .from(schema.modelCallFacts)
+    .where(
+      and(
+        eq(schema.modelCallFacts.workspaceId, input.workspaceId),
+        eq(schema.modelCallFacts.sessionId, input.sessionId),
+        eq(schema.modelCallFacts.model, input.model),
+        lt(schema.modelCallFacts.occurredAt, input.current.occurredAt),
+        ne(schema.modelCallFacts.sourceKey, input.current.sourceKey),
+      ),
+    )
+    .orderBy(desc(schema.modelCallFacts.occurredAt))
+    .limit(1);
+  const warmMiss = classifyPromptCacheWarmMiss(
+    previous
+      ? {
+          sourceKey: previous.sourceKey,
+          inputTokens: previous.inputTokens,
+          cachedTokens: previous.cachedTokens,
+          connectionId: previous.connectionId,
+          occurredAt: previous.occurredAt,
+          observation: parsePromptCacheObservation(previous.promptCacheDiagnostics),
+        }
+      : null,
+    input.current,
+  );
+  const observation = input.current.observation;
+  if (!observation && !warmMiss) return null;
+  return { ...observation, ...(warmMiss ? { warmMiss } : {}) };
 }
 
 export {
@@ -41181,6 +41269,33 @@ export async function installOrReadTurnExecutionPolicyForAttempt(
   );
 }
 
+type SessionContextChannel = {
+  /** Error-message subject, for example "Skill catalog". */
+  label: string;
+  /** Turn metadata key freezing the snapshot for every attempt of the turn. */
+  metadataKey: string;
+  /** Literal content prefix that identifies this channel in stored history. */
+  contentPrefix: string;
+  read: (item: Record<string, unknown>) => string | null;
+  item: (text: string) => Record<string, unknown>;
+};
+
+const SKILL_CATALOG_CHANNEL: SessionContextChannel = {
+  label: "Skill catalog",
+  metadataKey: "opengeniSkillCatalogHistoryId",
+  contentPrefix: SKILL_CATALOG_CONTEXT_PREFIX,
+  read: readSkillCatalogContext,
+  item: skillCatalogContextItem,
+};
+
+const WORKSPACE_GOVERNANCE_CHANNEL: SessionContextChannel = {
+  label: "Workspace governance",
+  metadataKey: "opengeniWorkspaceGovernanceHistoryId",
+  contentPrefix: WORKSPACE_GOVERNANCE_CONTEXT_PREFIX,
+  read: readWorkspaceGovernanceContext,
+  item: workspaceGovernanceContextItem,
+};
+
 /** Persist the current catalog once per logical turn; retries reuse its exact snapshot. */
 export async function ensureSessionSkillCatalog(
   db: Database,
@@ -41194,6 +41309,62 @@ export async function ensureSessionSkillCatalog(
     catalog: string;
   },
 ): Promise<string> {
+  const { catalog, ...scope } = input;
+  return (await ensureSessionContextSnapshot(
+    db,
+    { ...scope, text: catalog },
+    SKILL_CATALOG_CHANNEL,
+  ))!;
+}
+
+/**
+ * Persist the rendered workspace governance once per logical turn, as a
+ * history item before the turn that first sees a new value. Retries reuse the
+ * turn snapshot. Null means no governance applies: nothing is written unless
+ * earlier governance must be explicitly withdrawn. Returns the model-visible
+ * governance, or null when none is visible.
+ */
+export async function ensureSessionWorkspaceGovernance(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    governance: string | null;
+  },
+): Promise<string | null> {
+  const { governance, ...scope } = input;
+  const visible = await ensureSessionContextSnapshot(
+    db,
+    {
+      ...scope,
+      text: governance ?? WORKSPACE_GOVERNANCE_NONE,
+      omitWhenAbsent: governance === null,
+    },
+    WORKSPACE_GOVERNANCE_CHANNEL,
+  );
+  return visible === null || visible === WORKSPACE_GOVERNANCE_NONE ? null : visible;
+}
+
+async function ensureSessionContextSnapshot(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    text: string;
+    /** Write nothing when the session has no earlier item of this channel. */
+    omitWhenAbsent?: boolean;
+  },
+  channel: SessionContextChannel,
+): Promise<string | null> {
+  const lower = channel.label.toLowerCase();
   return withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -41206,14 +41377,16 @@ export async function ensureSessionSkillCatalog(
           executionGeneration: input.expectedExecutionGeneration,
           attemptId: input.expectedAttemptId,
         });
-        if (!fence.allowed) throw new Error("Skill catalog attempt is fenced");
+        if (!fence.allowed) throw new Error(`${channel.label} attempt is fenced`);
         const scope = and(
           eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
           eq(schema.sessionHistoryItems.sessionId, input.sessionId),
         );
-        const frozen = fence.turn.metadata.opengeniSkillCatalogHistoryId;
-        if (frozen !== undefined && typeof frozen !== "string")
-          throw new Error("Invalid skill catalog receipt");
+        const frozen = fence.turn.metadata[channel.metadataKey];
+        if (frozen !== undefined && frozen !== false && typeof frozen !== "string")
+          throw new Error(`Invalid ${lower} receipt`);
+        // A turn frozen without any item of this channel keeps seeing none.
+        if (frozen === false) return null;
         const [previous] = await tx
           .select({
             id: schema.sessionHistoryItems.id,
@@ -41230,23 +41403,36 @@ export async function ensureSessionSkillCatalog(
                     eq(schema.sessionHistoryItems.active, true),
                     sql`${schema.sessionHistoryItems.item}->>'type' = 'message'`,
                     sql`${schema.sessionHistoryItems.item}->>'role' = 'developer'`,
-                    sql`starts_with(${schema.sessionHistoryItems.item}->>'content', ${SKILL_CATALOG_CONTEXT_PREFIX})`,
+                    sql`starts_with(${schema.sessionHistoryItems.item}->>'content', ${channel.contentPrefix})`,
                   ),
             ),
           )
           .orderBy(desc(schema.sessionHistoryItems.position))
           .limit(1);
-        const previousCatalog = previous
-          ? readSkillCatalogContext(
-              fromPostgresLosslessJson(previous.item, previous.itemCodecVersion),
-            )
+        const previousText = previous
+          ? channel.read(fromPostgresLosslessJson(previous.item, previous.itemCodecVersion))
           : null;
         if (frozen !== undefined) {
-          if (previousCatalog === null) throw new Error("Missing durable skill catalog snapshot");
-          return previousCatalog;
+          if (previousText === null) throw new Error(`Missing durable ${lower} snapshot`);
+          return previousText;
         }
         let historyId = previous?.id;
-        if (previousCatalog !== input.catalog) {
+        if (!previous && input.omitWhenAbsent) {
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: { ...fence.turn.metadata, [channel.metadataKey]: false },
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.id, input.turnId),
+              ),
+            );
+          return null;
+        }
+        if (previousText !== input.text) {
           const [boundary] = await tx
             .select({ position: schema.sessionHistoryItems.position })
             .from(schema.sessionHistoryItems)
@@ -41269,10 +41455,10 @@ export async function ensureSessionSkillCatalog(
               .limit(1);
             position = prior ? (prior.position + boundary.position) / 2 : boundary.position - 0.25;
             if (!(position < boundary.position) || (prior && !(position > prior.position)))
-              throw new Error("Skill catalog position exhausted");
+              throw new Error(`${channel.label} position exhausted`);
           } else {
             if (fence.turn.source !== "compaction")
-              throw new Error("Skill catalog requires durable accepted input");
+              throw new Error(`${channel.label} requires durable accepted input`);
             const [tail] = await tx
               .select({ position: schema.sessionHistoryItems.position })
               .from(schema.sessionHistoryItems)
@@ -41291,18 +41477,18 @@ export async function ensureSessionSkillCatalog(
                 sessionId: input.sessionId,
                 turnId: input.turnId,
                 position,
-                item: skillCatalogContextItem(input.catalog),
+                item: channel.item(input.text),
               },
               "item",
               "itemCodecVersion",
             ),
           );
         }
-        if (!historyId) throw new Error("Missing skill catalog history identity");
+        if (!historyId) throw new Error(`Missing ${lower} history identity`);
         await tx
           .update(schema.sessionTurns)
           .set({
-            metadata: { ...fence.turn.metadata, opengeniSkillCatalogHistoryId: historyId },
+            metadata: { ...fence.turn.metadata, [channel.metadataKey]: historyId },
             updatedAt: new Date(),
           })
           .where(
@@ -41311,7 +41497,7 @@ export async function ensureSessionSkillCatalog(
               eq(schema.sessionTurns.id, input.turnId),
             ),
           );
-        return input.catalog;
+        return input.text;
       }),
   );
 }
