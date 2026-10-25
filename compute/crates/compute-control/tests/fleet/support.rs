@@ -4,7 +4,7 @@
 //! adopted, archiving on a hand-off, claiming the archive on an adopt), or
 //! as a test tells them to.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,7 +22,7 @@ use compute_protocol::fleet::{
     Answer, Answered, Capacity, Envelope, Held, HostInfo, METRICS_PATH, REGISTER_PATH, RENEW_PATH,
     ReadyClones, Register, Registered, Renew, Renewed, Verdict,
 };
-use compute_protocol::host::{ErrorCode, Id, Reply, Request};
+use compute_protocol::host::{ErrorCode, Id, ImageId, Reply, Request};
 use compute_storage::store::{Begun, ChunkStore};
 use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use rustls::pki_types::pem::PemObject as _;
@@ -260,17 +260,31 @@ impl Fleet {
 
     /// A fleet whose leader sizes `scaling`, with `settings` adjusted.
     pub async fn start_with(scaling: Option<Scaling>, adjust: impl FnOnce(&mut Settings)) -> Self {
-        Self::start_full(scaling, None, adjust).await
+        Self::start_full(scaling, None, BTreeMap::new(), adjust).await
     }
 
     /// A fleet that passes hosts' metrics on to `store`.
     pub async fn start_passing_metrics_to(store: &str) -> Self {
-        Self::start_full(None, Some(store.to_owned()), |_| {}).await
+        Self::start_full(None, Some(store.to_owned()), BTreeMap::new(), |_| {}).await
+    }
+
+    /// A fleet whose release starts each image name in `sources` from the
+    /// OCI image it maps to, with `settings` adjusted.
+    pub async fn start_with_sources(
+        sources: &[(&str, &str)],
+        adjust: impl FnOnce(&mut Settings),
+    ) -> Self {
+        let sources = sources
+            .iter()
+            .map(|(name, source)| ((*name).to_owned(), (*source).to_owned()))
+            .collect();
+        Self::start_full(None, None, sources, adjust).await
     }
 
     async fn start_full(
         scaling: Option<Scaling>,
         host_metrics: Option<String>,
+        image_sources: BTreeMap<String, String>,
         adjust: impl FnOnce(&mut Settings),
     ) -> Self {
         let pki = Pki::new();
@@ -310,6 +324,7 @@ impl Fleet {
                 e2b: None,
                 metrics: Some(loopback),
                 host_metrics,
+                image_sources,
             },
         )
         .await
@@ -492,6 +507,8 @@ struct HostInner {
     seq: AtomicU64,
     /// Sandboxes it holds, by owner epoch.
     held: Mutex<HashMap<Id, u64>>,
+    /// How many times each OCI image was asked to be built.
+    prepares: Mutex<HashMap<String, u32>>,
     saves: AtomicU64,
     seen: Mutex<Vec<Seen>>,
     behaviour: Mutex<Behaviour>,
@@ -546,6 +563,7 @@ impl FakeHost {
             epoch: AtomicU64::new(0),
             seq: AtomicU64::new(0),
             held: Mutex::new(HashMap::new()),
+            prepares: Mutex::new(HashMap::new()),
             saves: AtomicU64::new(0),
             seen: Mutex::new(Vec::new()),
             behaviour: Mutex::new(Arc::new(|_| Act::Ordinary)),
@@ -1005,6 +1023,12 @@ fn status(inner: &HostInner) -> Reply {
     host_status(&sandboxes)
 }
 
+/// The stored image an ordinary host builds from the OCI image `source`.
+#[must_use]
+pub fn built_from(source: &str) -> ImageId {
+    ImageId(*blake3::hash(source.as_bytes()).as_bytes())
+}
+
 /// What an ordinary host answers.
 async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
     let owner_epoch = envelope.sent.owner_epoch.unwrap_or(0);
@@ -1026,6 +1050,23 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
         },
         Request::Sleep { id, .. } if holds(id) => Reply::Done,
         Request::Status => status(inner),
+        // The first ask starts the build; later ones find it stored.
+        Request::Prepare { image } => {
+            let mut prepares = inner.prepares.lock().unwrap();
+            let asked = prepares.entry(image.clone()).or_default();
+            *asked += 1;
+            if *asked == 1 {
+                Reply::Preparing
+            } else {
+                Reply::Prepared {
+                    image: built_from(image),
+                    digest: image
+                        .split_once('@')
+                        .map_or("", |(_, digest)| digest)
+                        .to_owned(),
+                }
+            }
+        }
         Request::Wake { .. } | Request::Connect { .. } | Request::Sleep { .. } => {
             error(ErrorCode::NotFound, "no such sandbox")
         }

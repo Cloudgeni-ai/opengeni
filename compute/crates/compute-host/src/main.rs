@@ -199,6 +199,15 @@ struct ServeArgs {
     /// Root disk image new sandboxes start from.
     #[arg(long)]
     base_image: PathBuf,
+    /// The guest programs (a bundle's `guest/`) to build the sandbox images
+    /// the control service asks for with; without them the host builds
+    /// none.
+    #[arg(long)]
+    guest: Option<PathBuf>,
+    /// The user name for registries' token services in those builds, with
+    /// the token in `REGISTRY_TOKEN`; without a token, pulls are anonymous.
+    #[arg(long)]
+    registry_user: Option<String>,
     /// Parent cgroup for VMs.
     #[arg(long, default_value = "/sys/fs/cgroup/compute")]
     cgroup: PathBuf,
@@ -741,10 +750,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .with_memory_profile(memory_profile)
     .with_context(|| format!("memory profile {memory_profile}"))?;
     let processor_share = guarantee_vm_processors(share, &mut policy)?;
-    readying::check_huge_pages(memory_profile)?;
-    readying::check_zswap(memory_profile.compress && !args.no_compress)?;
-    readying::raise_open_file_limit();
-    readying::protect_from_oom()?;
+    readying::ready(memory_profile, memory_profile.compress && !args.no_compress)?;
     let about = describe(memory_profile, &args.base_image);
     let budget = policy
         .admission
@@ -772,6 +778,8 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         "the canary runs on a host outside a fleet; a host in a fleet takes its sandboxes from \
          the control service only"
     );
+    let prepare =
+        compute_host::rootfs::PrepareConfig::of(&args.root, args.guest, args.registry_user)?;
     let config = HostConfig {
         root: args.root,
         kernel: args.kernel,
@@ -816,6 +824,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             .map(|fleet| compute_host::fleet::Freezes::beside(&fleet.guard_lock)),
         agent_link,
         processor_share,
+        prepare,
     };
     // Boxed: the agent and everything it was given are large.
     Box::pin(run_with_store(

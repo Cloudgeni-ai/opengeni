@@ -58,6 +58,9 @@ const enabled = {
     hostUrl: "https://compute-control.example.com:8443",
     archive: "gs://example-archive/archive",
     storedImages: { opengeni: "0123abcd" },
+    imageSources: {
+      opengeni: `registry.example/opengeni-sandbox@sha256:${"a".repeat(64)}`,
+    },
   },
 };
 
@@ -92,6 +95,9 @@ describe("computeControl", () => {
     );
     expect(container.args).toContain("--archive=gs://example-archive/archive");
     expect(container.args).toContain("--stored-image=opengeni=0123abcd");
+    expect(container.args).toContain(
+      `--image-source=opengeni=registry.example/opengeni-sandbox@sha256:${"a".repeat(64)}`,
+    );
     // The service is the hosts' authority, and issues its own certificate
     // for the name hosts dial.
     expect(container.args).toContain("--host-authority=/etc/compute/tls");
@@ -489,6 +495,17 @@ describe("computeControl", () => {
     });
     expect(localArchive.exitCode).not.toBe(0);
     expect(localArchive.stderr).toContain("computeControl.archive must be object storage");
+    const unpinned = await helmTemplate({
+      ...enabled,
+      computeControl: {
+        ...enabled.computeControl,
+        imageSources: { opengeni: "registry.example/opengeni-sandbox:latest" },
+      },
+    });
+    expect(unpinned.exitCode).not.toBe(0);
+    expect(unpinned.stderr).toContain(
+      "computeControl.imageSources.opengeni must be an OCI image pinned by digest",
+    );
   });
 
   test("grows a GCP group only knowing what a new host offers", async () => {

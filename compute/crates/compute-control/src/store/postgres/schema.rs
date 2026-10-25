@@ -8,7 +8,7 @@ use crate::store::Result;
 /// The schema, one migration for each version, applied in order by
 /// [`migrate`]. A released migration is never changed: a change to the
 /// schema is a new one at the end.
-const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3];
+const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4];
 
 /// Version 1: the tables, made if missing.
 const MIGRATION_1: &str = "
@@ -100,6 +100,19 @@ update compute_sandboxes set owner = null, epoch = epoch + 1, version = version 
     and not exists (select 1 from compute_hosts where id = compute_sandboxes.owner);
 alter table compute_sandboxes add constraint compute_sandboxes_owner_host
     foreign key (owner) references compute_hosts (id) deferrable initially deferred;
+";
+
+/// Version 4: the stored images built from OCI images (`Store::record_built`),
+/// in the order recorded (`seq`), by the fleet's name for each.
+const MIGRATION_4: &str = "
+create table if not exists compute_images (
+    source text primary key,
+    name text not null,
+    image text not null,
+    built_ms bigint not null,
+    seq bigint generated always as identity
+);
+create index if not exists compute_images_by_name on compute_images (name, seq);
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

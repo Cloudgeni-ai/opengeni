@@ -20,7 +20,7 @@ use std::future::Future;
 use compute_fleet::{Change, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends, Verdict};
 use compute_protocol::fleet::Verdict as Wire;
 use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Report, Ruling};
-use compute_protocol::host::{Id, SandboxConfig};
+use compute_protocol::host::{Id, ImageId, SandboxConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::e2b::lifecycle::Record;
@@ -428,6 +428,25 @@ pub trait Store: Send + Sync + 'static {
         after: Option<Id>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
+
+    /// The stored image recorded as built from the OCI image `source` (a
+    /// reference pinned by digest), if one was.
+    fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
+
+    /// Records `image` as built from `source`, under the fleet's name
+    /// `name` for it, at `at_ms`, unless an image was recorded for `source`
+    /// already. Answers the image recorded, which creates of `source` use:
+    /// builds are not byte for byte the same, so the first recorded wins.
+    fn record_built(
+        &self,
+        source: &str,
+        name: &str,
+        image: ImageId,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<ImageId>> + Send;
+
+    /// The image last recorded under the name `name`, from any source.
+    fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
 }
 
 /// How a conditional write of a sandbox's row went.

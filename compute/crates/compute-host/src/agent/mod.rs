@@ -622,6 +622,8 @@ pub struct Handle {
     observer: Observer,
     /// Trace context every command carries, if any.
     trace: Option<TraceContext>,
+    /// What builds the sandbox images asked for, if this host does.
+    preparer: Option<Arc<crate::rootfs::Preparer>>,
 }
 
 /// Who sends requests through a [`Handle`].
@@ -1020,13 +1022,25 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         // Boxed: recovery's future is large, and every caller awaits this one.
         Box::pin(agent.begin(held, strays, warm_shapes, began)).await;
-        let handle = Handle::new(
-            commands_tx,
-            config.stream_idle,
-            agent.lease.clone(),
-            agent.observer.clone(),
-        );
+        let handle = agent.handle(commands_tx, config.stream_idle, config.prepare);
         Ok((handle, tokio::spawn(agent.run())))
+    }
+
+    /// A handle sending commands on `commands`, that builds the images the
+    /// control service asks for as `prepare` says.
+    fn handle(
+        &self,
+        commands: mpsc::UnboundedSender<Command>,
+        stream_idle: Duration,
+        prepare: Option<crate::rootfs::PrepareConfig>,
+    ) -> Handle {
+        Handle::new(
+            commands,
+            stream_idle,
+            self.lease.clone(),
+            self.observer.clone(),
+            crate::rootfs::Preparer::of(prepare, &self.store),
+        )
     }
 
     /// Takes back what an earlier agent left, then takes a first reading

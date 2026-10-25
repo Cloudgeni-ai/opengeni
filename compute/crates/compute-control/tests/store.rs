@@ -15,7 +15,7 @@ use compute_control::store::{
 };
 use compute_fleet::{HostId, HostState, OwnerEpoch, Ownership, SandboxId, Sends};
 use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Verdict};
-use compute_protocol::host::{Id, SandboxConfig, SleepConfig};
+use compute_protocol::host::{Id, ImageId, SandboxConfig, SleepConfig};
 
 fn random() -> u64 {
     let mut bytes = [0u8; 8];
@@ -503,6 +503,52 @@ async fn a_host_back_after_being_forgotten_gets_back_what_nobody_took() {
     each(reclaim_forgotten, reclaim_forgotten).await;
 }
 
+fn image_id() -> ImageId {
+    let mut id = [0; 32];
+    for chunk in id.chunks_mut(8) {
+        chunk.copy_from_slice(&random().to_le_bytes());
+    }
+    ImageId(id)
+}
+
+async fn images<S: Store>(store: S) {
+    let name = format!("image-{:016x}", random());
+    let old = format!("registry.example/sandbox@sha256:{:064x}", random());
+    let new = format!("registry.example/sandbox@sha256:{:064x}", random());
+    assert_eq!(store.image_built(&old).await.unwrap(), None);
+    assert_eq!(store.latest_built(&name).await.unwrap(), None);
+
+    let first = image_id();
+    assert_eq!(
+        store.record_built(&old, &name, first, 1).await.unwrap(),
+        first
+    );
+    // Another host's build of the same OCI image is not the image recorded.
+    let again = image_id();
+    assert_eq!(
+        store.record_built(&old, &name, again, 2).await.unwrap(),
+        first
+    );
+    assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(first));
+
+    // A newer source under the name is its latest; the older one keeps its
+    // image, for a rollback to find.
+    let next = image_id();
+    assert_eq!(
+        store.record_built(&new, &name, next, 3).await.unwrap(),
+        next
+    );
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
+    assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
+    assert_eq!(store.image_built(&new).await.unwrap(), Some(next));
+}
+
+#[tokio::test]
+async fn the_first_image_recorded_for_a_source_is_the_one_kept() {
+    each(images, images).await;
+}
+
 async fn keys<S: Store>(store: S) {
     let digest = format!("{:x}", random());
     assert_eq!(store.team_of(&digest).await.unwrap(), None);
@@ -870,7 +916,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))

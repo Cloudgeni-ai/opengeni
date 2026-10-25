@@ -955,6 +955,10 @@ impl Store for Chunked {
         self.get_rootfs(image, path).await
     }
 
+    async fn put_image(&self, path: &Path) -> Result<Option<ImageId>, EngineError> {
+        self.put_rootfs(path).await.map(Some)
+    }
+
     /// Points the sandbox at its disk alone, without the memory image or
     /// the working-set pack of its pages. Their chunks stay until a sweep
     /// finds nothing names them. The new pointer lands only on the version

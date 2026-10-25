@@ -26,6 +26,7 @@ ExecStart=/opt/compute/current/compute-host --socket /run/compute-host.sock serv
   --root /var/lib/compute/state \
   --firecracker ${COMPUTE_FIRECRACKER} --jailer ${COMPUTE_JAILER} $COMPUTE_RETAINED_FIRECRACKER \
   --kernel ${COMPUTE_KERNEL} --base-image /var/lib/compute/base.ext4 \
+  --guest /opt/compute/current/guest \
   --store ${COMPUTE_STORE} \
   --restore-notice-port 53 --template-ready-port 54 \
   --network \

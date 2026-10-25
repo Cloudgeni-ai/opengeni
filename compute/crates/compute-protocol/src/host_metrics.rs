@@ -81,9 +81,9 @@ pub const STEP_OUTCOMES: [&str; 8] = [
 /// How a step ended, in classes: what step durations are kept by.
 pub const OUTCOME_CLASSES: [&str; 3] = ["done", "cancelled", "failed"];
 /// The kinds of request the host answers.
-pub const REQUESTS: [&str; 12] = [
+pub const REQUESTS: [&str; 13] = [
     "create", "remove", "touch", "wake", "connect", "sleep", "hold", "release", "status", "adopt",
-    "hand_off", "invalid",
+    "hand_off", "prepare", "invalid",
 ];
 /// What a request's answer was: `ok`, or its error code.
 pub const RESULTS: [&str; 14] = [

@@ -174,6 +174,7 @@ async fn restart_with<S: Store>(
         summary_every: HostConfig::SUMMARY_EVERY,
         agent_link: None,
         processor_share: None,
+        prepare: None,
     };
     let socket = root.join("agent.sock");
     let _ = std::fs::remove_file(&socket);

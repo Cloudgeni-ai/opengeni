@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use compute_fleet::{HostEpoch, HostId, HostState};
 use compute_protocol::fleet::{Register, Renew, Report, Ruling};
-use compute_protocol::host::Id;
+use compute_protocol::host::{Id, ImageId};
 
 use super::{
     Admission, Admits, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow, Store, Write,
@@ -33,6 +33,9 @@ struct Inner {
     lifecycles: BTreeMap<Id, LifecycleRow>,
     /// By team, then request id.
     requests: BTreeMap<(String, String), RequestRow>,
+    /// Each OCI image, the name recorded with it and the image built from
+    /// it, in the order recorded.
+    built: Vec<(String, String, ImageId)>,
     next_host: u64,
     next_host_epoch: u64,
     changes: u64,
@@ -652,5 +655,45 @@ impl Store for MemoryStore {
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
         ready(Ok(self.lifecycles_paused_now(after, limit)))
+    }
+
+    fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
+        let built = self
+            .lock()
+            .built
+            .iter()
+            .find_map(|(recorded, _, image)| (recorded == source).then_some(*image));
+        ready(Ok(built))
+    }
+
+    fn record_built(
+        &self,
+        source: &str,
+        name: &str,
+        image: ImageId,
+        _at_ms: u64,
+    ) -> impl Future<Output = Result<ImageId>> + Send {
+        let mut inner = self.lock();
+        let first = inner
+            .built
+            .iter()
+            .find_map(|(recorded, _, first)| (recorded == source).then_some(*first));
+        let recorded = first.unwrap_or_else(|| {
+            inner
+                .built
+                .push((source.to_owned(), name.to_owned(), image));
+            image
+        });
+        ready(Ok(recorded))
+    }
+
+    fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
+        let latest = self
+            .lock()
+            .built
+            .iter()
+            .rev()
+            .find_map(|(_, named, image)| (named == name).then_some(*image));
+        ready(Ok(latest))
     }
 }

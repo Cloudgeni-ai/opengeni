@@ -32,6 +32,7 @@ pub mod group;
 pub mod hostapi;
 pub mod hosts;
 pub mod identity;
+pub mod images;
 pub mod init;
 pub mod keys;
 pub mod leader;
@@ -42,6 +43,7 @@ pub mod store;
 pub mod tls;
 pub mod view;
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,6 +102,10 @@ pub struct Config {
     /// The OTLP/HTTP metrics endpoint hosts' metrics are passed on to;
     /// `None` takes none.
     pub host_metrics: Option<String>,
+    /// The OCI image, pinned by digest, each of these image names starts
+    /// from in this release, built into a stored image when none was
+    /// ([`images`]).
+    pub image_sources: BTreeMap<String, String>,
 }
 
 /// A running replica; dropping it stops it.
@@ -185,6 +191,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             "the public API",
         )),
         tokio::spawn(prune(Arc::clone(&service))),
+        tokio::spawn(images::follow(Arc::clone(&service), config.image_sources)),
     ];
     let metrics = match config.metrics {
         Some(address) => {
