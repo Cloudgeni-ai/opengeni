@@ -811,7 +811,7 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   it ended. A guard that cannot write the file logs `the guard could not
   write its freeze count` once, and until it can, no check counts.
   A guard from before the count keeps none, and then no check counts
-  until an upgrade hands the guard over to one that does. It also
+  until the host runs a guard that does. It also
   needs the host to be able to ask the VMM for the connection at all: a
   host that cannot reach a VM's vsock socket, as when it is out of
   descriptors, logs `could not check the guest` and counts nothing
@@ -855,20 +855,19 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   it installs the release beside the old ones, points
   `/opt/compute/current` at it and restarts the agent; VMs keep running.
   A guard running another binary (of another release, or one replaced
-  in this one) is handed over to this one's. Opening or closing the
-  watchdog feeds it (it stays armed), so `compute-host hand-over-guard`
-  asks the old guard to stop only at a moment it may feed it: at once
-  while the lease is valid for a while yet, and otherwise once it has
-  stopped the VMs; if that does not happen within a minute, `install.sh`
-  fails and leaves the old guard running. Then the service restarts. The
-  guard has systemd keep the watchdog open in the service's file
-  descriptor store (`systemd-analyze fdstore compute-guard.service` shows
-  it), so a guard that ends, however it ends, does not close it, and the
-  new guard takes it over from the store within milliseconds and goes on
-  from what the lease file and the freezer show (the watchdog resets the
+  in this one) is handed over to this one's by restarting its service.
+  Opening or closing the watchdog feeds it (it stays armed), so the guard
+  opens it only at a step that may feed it and has systemd keep it open
+  in the service's file descriptor store (`systemd-analyze fdstore
+  compute-guard.service` shows it); it is ready only once systemd does. A
+  guard that ends, however it ends, then does not close it, and the new
+  guard takes it over from the store within milliseconds and goes on from
+  what the lease file and the freezer show (the watchdog resets the
   machine if it does not within its 3 s). A guard of a release before
-  the store opened the watchdog itself; the first guard after it opens it
-  at its first step that may feed it, and stores it.
+  the store keeps the watchdog itself and would close it at whatever
+  moment it ended, so it is not handed over: it runs on until the host
+  starts again from a template naming a release with the store (see
+  below) or is replaced by a host made from one.
   Without that, a fix to the guard would reach a host only at its next
   boot. Old releases stay under `/opt/compute/releases`;
   remove one once no pager runs from it (`fuser

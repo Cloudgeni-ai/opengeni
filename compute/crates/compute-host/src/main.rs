@@ -100,18 +100,6 @@ enum Command {
     /// host's lease runs out, whatever happens to the agent. Run it as a
     /// service of its own, before the agent.
     Guard(fleet_cli::GuardArgs),
-    /// Hand the running guard over to this release's, as an upgrade does:
-    /// ask guard `--pid` to stop at a moment it may feed the watchdog, the
-    /// lease holding or the VMs stopped, then restart the guard's service.
-    /// Fails, leaving the guard running, if no such moment comes within a
-    /// minute.
-    HandOverGuard {
-        /// The running guard's process.
-        #[arg(long)]
-        pid: u32,
-        #[command(flatten)]
-        guard: fleet_cli::GuardArgs,
-    },
     /// Delete the chunks and manifests in object storage that no sandbox's
     /// stored copy names any more, on any host. Run on a schedule, such as
     /// daily; safe while agents archive. Without `--delete`, only reports.
@@ -634,13 +622,6 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
             });
             tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config, &stop))
                 .await?
-        }
-        Command::HandOverGuard { pid, guard } => {
-            let config = guard.config();
-            tokio::task::spawn_blocking(move || {
-                compute_host::fleet::hand_over(&config, pid, Duration::from_secs(60))
-            })
-            .await?
         }
         Command::Sweep { store, delete } => {
             let chunked = Chunked::from_url(&store)?

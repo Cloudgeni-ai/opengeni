@@ -12,16 +12,18 @@
 # descriptor store, which outlives the guard however it ends: the next
 # guard takes it over from the store without opening it. The store is
 # kept while the service is stopped or failed too, so a guard that crashed
-# never closes it.
+# never closes it. A guard is ready (and the agent joins) only once it sees
+# systemd hold the watchdog.
 #
-# An upgrade hands it over: install.sh asks a guard running another binary
-# to stop, at a moment it may feed the watchdog (compute-host
-# hand-over-guard), then restarts the service. Asked to stop, a guard ends
-# only at such a step all the same: at once while the lease is valid,
-# otherwise once the VMs have stopped (if they never do, the watchdog
-# resets the machine, well before the stop times out). The new guard goes
-# on from what the lease file and the freezer show, as any guard starting
-# does, well inside the watchdog's timeout.
+# An upgrade hands it over: install.sh restarts a guard running another
+# binary once systemd keeps its watchdog (a guard of a release before the
+# store runs on until the host starts again or is replaced). Asked to
+# stop, a guard ends only at a step that may feed the watchdog all the
+# same: at once while the lease is valid, otherwise once the VMs have
+# stopped (if they never do, the watchdog resets the machine, well before
+# the stop times out). The new guard goes on from what the lease file and
+# the freezer show, as any guard starting does, well inside the watchdog's
+# timeout.
 # Installed by install.sh.
 [Unit]
 Description=Opengeni compute host guard: stops the VMs when the fleet lease ends

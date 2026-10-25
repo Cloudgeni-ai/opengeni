@@ -8,12 +8,15 @@
 //! allows for. Kept by systemd too, the device stays open when the guard
 //! ends, and the next guard of the service takes it over from the store,
 //! without opening it, which would feed it too.
+//!
+//! A guard is ready only once it sees systemd keep the device
+//! ([`held_by_manager`]).
 
 use std::fs::File;
 use std::io::{self, IoSlice};
 use std::mem::MaybeUninit;
-use std::os::fd::{BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
-use std::path::Path;
+use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use compute_engine::watchdog::Watchdog;
@@ -122,6 +125,46 @@ pub fn keep(socket: &str, name: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether the service manager holds the file `fd` is open on: the user's
+/// manager (`MANAGERPID`) for a user's service, otherwise PID 1. For the
+/// watchdog, which opens once at a time, that is the guard's own open
+/// file, which the manager holds only in the service's store.
+///
+/// # Errors
+///
+/// When the manager's descriptors cannot be read.
+pub fn held_by_manager(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    let manager = std::env::var("MANAGERPID")
+        .ok()
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .unwrap_or(1);
+    held_by(manager, fd)
+}
+
+/// Whether process `pid` has a descriptor open on the file `fd` is open on.
+fn held_by(pid: u32, fd: BorrowedFd<'_>) -> io::Result<bool> {
+    let path = |of: PathBuf| std::fs::read_link(of).ok();
+    let ours = path(PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())));
+    let same = rustix::fs::fstat(fd)?;
+    for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
+        // A descriptor closed meanwhile is not the one.
+        let Ok(entry) = entry else { continue };
+        // Its path first, so only a likely one is looked at.
+        if path(entry.path()) != ours {
+            continue;
+        }
+        let Ok(theirs) = rustix::fs::stat(entry.path()) else {
+            continue;
+        };
+        if (theirs.st_dev, theirs.st_ino, theirs.st_rdev)
+            == (same.st_dev, same.st_ino, same.st_rdev)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::IoSliceMut;
@@ -198,5 +241,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// What tells a guard that systemd keeps its watchdog: another process
+    /// holding the same file.
+    #[test]
+    fn a_file_is_seen_held_only_by_a_process_that_holds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = File::create(dir.path().join("device")).unwrap();
+        let other = File::create(dir.path().join("other")).unwrap();
+        let holding = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(file.try_clone().unwrap())
+            .spawn()
+            .unwrap();
+        let not_holding = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(other.try_clone().unwrap())
+            .spawn()
+            .unwrap();
+        assert!(held_by(holding.id(), file.as_fd()).unwrap());
+        assert!(!held_by(not_holding.id(), file.as_fd()).unwrap());
+        assert!(held_by(not_holding.id(), other.as_fd()).unwrap());
+        for mut child in [holding, not_holding] {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        assert!(held_by(u32::MAX, file.as_fd()).is_err(), "no such process");
     }
 }
