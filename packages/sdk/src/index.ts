@@ -962,6 +962,8 @@ export type {
   ClaudeUsageWindow,
   ClaudeUsageRequestStatus,
   OrganizationModelProviderConnection,
+  OrganizationModelProviderAuthMethod,
+  OrganizationModelProviderEntraAuthentication,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
   OrganizationProviderCustomModel,

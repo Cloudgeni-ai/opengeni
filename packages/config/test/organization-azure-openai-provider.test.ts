@@ -12,6 +12,8 @@ import {
   withDirectModelProviders,
   withOrganizationAzureOpenAICatalogProvider,
   withOrganizationAzureOpenAICredential,
+  withOrganizationAzureOpenAIEntraCredential,
+  azureOpenAIDeploymentIdentityAvailable,
 } from "../src";
 
 const ENDPOINT = "https://contoso.openai.azure.com/openai/v1";
@@ -27,6 +29,76 @@ function provider(settings: ReturnType<typeof base>) {
 }
 
 describe("organization Azure OpenAI rail", () => {
+  test("an Entra app connection carries the app and no key", () => {
+    const app = {
+      source: "client_secret" as const,
+      tenantId: "11111111-2222-4333-8444-555555555555",
+      clientId: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      clientSecret: "fake-client-secret",
+    };
+    const catalog = withOrganizationAzureOpenAIEntraCredential(base(), app, {
+      endpoint: ENDPOINT,
+      models: [{ upstreamModelId: DEPLOYMENT }],
+    });
+    expect(provider(catalog)?.azureEntra).toEqual(app);
+    expect(provider(catalog)?.apiKey).toBeUndefined();
+  });
+
+  test("the deployment identity is installed only when the operator offers it", () => {
+    const input = { endpoint: ENDPOINT, models: [{ upstreamModelId: DEPLOYMENT }] };
+    const identity = {
+      AZURE_TENANT_ID: "99999999-8888-4777-8666-555555555555",
+      AZURE_CLIENT_ID: "44444444-3333-4222-8111-000000000000",
+      AZURE_FEDERATED_TOKEN_FILE: "/var/run/secrets/azure/tokens/azure-identity-token",
+    };
+    for (const settings of [base(), base(identity)]) {
+      expect(azureOpenAIDeploymentIdentityAvailable(settings)).toBe(false);
+      const catalog = withOrganizationAzureOpenAIEntraCredential(
+        settings,
+        { source: "deployment_identity" },
+        input,
+      );
+      expect(provider(catalog)?.azureEntra).toBeUndefined();
+      expect(provider(catalog)?.apiKey).toBeUndefined();
+    }
+    const offered = base({
+      ...identity,
+      OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED: "true",
+    });
+    expect(azureOpenAIDeploymentIdentityAvailable(offered)).toBe(true);
+    expect(
+      provider(
+        withOrganizationAzureOpenAIEntraCredential(
+          offered,
+          { source: "deployment_identity" },
+          input,
+        ),
+      )?.azureEntra,
+    ).toEqual({ source: "deployment_identity" });
+  });
+
+  test("offering the deployment identity without configuring one is a startup error", () => {
+    expect(() => base({ OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED: "true" })).toThrow(
+      /AZURE_TENANT_ID/u,
+    );
+  });
+
+  test("only organization Azure OpenAI providers sign in with Entra, and never with a key too", () => {
+    expect(() =>
+      base({
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+          {
+            id: "operator-azure",
+            baseUrl: ENDPOINT,
+            apiKey: "k",
+            azureEntra: { source: "deployment_identity" },
+            models: [{ id: DEPLOYMENT }],
+          },
+        ]),
+      }),
+    ).toThrow(/Microsoft Entra ID/u);
+  });
+
   test("uses the reserved organization id and model prefix", () => {
     expect(ORGANIZATION_AZURE_OPENAI_PROVIDER_ID).toBe("organization-azure-openai");
     expect(MODEL_ID).toBe("organization-azure-openai/gpt-6.1-sol");

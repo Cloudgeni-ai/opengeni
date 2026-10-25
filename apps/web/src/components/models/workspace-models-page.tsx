@@ -214,6 +214,7 @@ export function useOrganizationModelAccounts({
     organizationId: orgId,
     providerKind: ORGANIZATION_KIND[id],
     enabled: enabled && on,
+    azureDeploymentIdentity: clientConfig.azureOpenAIDeploymentIdentity === true,
   });
   const orgGateways: Record<GatewayId, ProviderConnection> = {
     vercel: useOrganizationProviderConnection(organizationGateway("vercel")),

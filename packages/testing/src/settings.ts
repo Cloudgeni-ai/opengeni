@@ -362,6 +362,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     azureOpenaiApiVersion: undefined,
     azureOpenaiApiKey: undefined,
     azureOpenaiAdToken: undefined,
+    azureOpenaiDeploymentIdentityEnabled: false,
     disableOpenaiTracing: true,
     sandboxBackend: "none",
     sandboxArtifactRuntimeEnabled: false,

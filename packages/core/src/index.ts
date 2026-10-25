@@ -1,8 +1,10 @@
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export {
+  organizationAzureEntraSetupToken,
   verifyDirectModelAccess,
   verifyOrganizationAzureOpenAIDeployment,
   verifyOrganizationDirectModel,
+  type DirectModelAccessCredential,
 } from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";

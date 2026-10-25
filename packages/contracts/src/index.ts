@@ -3602,6 +3602,55 @@ export const OrganizationModelProviderKind = /* @__PURE__ */ defineSchema(() =>
   ]),
 );
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
+/**
+ * How an organization model provider connection signs in. Every kind uses an
+ * API key; Azure OpenAI can instead use Microsoft Entra ID, either with the
+ * organization's own app registration (`entra_client_secret`) or, only when
+ * the deployment operator offers it, the deployment's own identity
+ * (`entra_deployment_identity`).
+ */
+export const OrganizationModelProviderAuthMethod = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["api_key", "entra_client_secret", "entra_deployment_identity"]),
+);
+export type OrganizationModelProviderAuthMethod = z.infer<
+  typeof OrganizationModelProviderAuthMethod
+>;
+const MicrosoftEntraGuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+/** A Microsoft Entra directory: its tenant ID, or a verified domain such as `contoso.onmicrosoft.com`. */
+const MicrosoftEntraTenant = /* @__PURE__ */ defineSchema(() =>
+  primitives.string
+    .trim()
+    .max(253)
+    .refine(
+      (value) =>
+        MicrosoftEntraGuid.test(value) ||
+        /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/iu.test(value),
+      "must be a Microsoft Entra tenant ID or domain",
+    ),
+);
+/**
+ * Azure OpenAI only: sign in with Microsoft Entra ID instead of an API key.
+ * The client secret is write-only, stored encrypted like a key, and never
+ * returned.
+ */
+export const OrganizationModelProviderEntraAuthentication = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("method", [
+    z
+      .object({
+        method: z.literal("entra_client_secret"),
+        /** Directory (tenant) ID of the app registration. */
+        tenantId: MicrosoftEntraTenant,
+        /** Application (client) ID of the app registration. */
+        clientId: primitives.string.trim().regex(MicrosoftEntraGuid, "must be an application ID"),
+        clientSecret: primitives.string.trim().min(1).max(8192),
+      })
+      .strict(),
+    z.object({ method: z.literal("entra_deployment_identity") }).strict(),
+  ]),
+);
+export type OrganizationModelProviderEntraAuthentication = z.infer<
+  typeof OrganizationModelProviderEntraAuthentication
+>;
 export const OrganizationModelProviderConnectionResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     providerKind: OrganizationModelProviderKind,
@@ -3612,6 +3661,8 @@ export const OrganizationModelProviderConnectionResponse = /* @__PURE__ */ defin
      * `https://<resource>.openai.azure.com/openai/v1`. Absent for other kinds.
      */
     endpoint: z.string().url().optional(),
+    /** Azure OpenAI only: how the connection signs in. Absent for other kinds. */
+    authMethod: OrganizationModelProviderAuthMethod.optional(),
     createdAt: primitives.dateTime,
     updatedAt: primitives.dateTime,
   }),
@@ -3624,7 +3675,13 @@ export const UpsertOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
     .object({
       operationId: primitives.uuid,
       expectedVersion: z.number().int().nonnegative().optional(),
-      apiKey: primitives.string.trim().min(1).max(8192),
+      /** The provider key. Required unless `authentication` signs in another way. */
+      apiKey: primitives.string.trim().min(1).max(8192).optional(),
+      /**
+       * Azure OpenAI only: sign in with Microsoft Entra ID instead of
+       * `apiKey`. Send exactly one of the two.
+       */
+      authentication: OrganizationModelProviderEntraAuthentication.optional(),
       /**
        * Required for `azure_openai` and refused for every other kind: the
        * official `https://<resource>.openai.azure.com` resource endpoint (or
@@ -3639,7 +3696,11 @@ export const UpsertOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
         .strict()
         .optional(),
     })
-    .strict(),
+    .strict()
+    .refine((value) => (value.apiKey === undefined) !== (value.authentication === undefined), {
+      message: "send an API key or another sign-in method, not both",
+      path: ["apiKey"],
+    }),
 );
 export type UpsertOrganizationModelProviderConnectionRequest = z.infer<
   typeof UpsertOrganizationModelProviderConnectionRequest
@@ -22239,6 +22300,10 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: primitives.optionalBoolean,
+    // Whether organization admins may connect Azure OpenAI as this
+    // deployment's own Microsoft Entra identity (the operator offers it).
+    // Absent on older servers and when not offered.
+    azureOpenAIDeploymentIdentity: primitives.optionalBoolean,
     // Whether people can connect their own computers to this deployment. Absent
     // on older servers: clients then treat it as unknown.
     connectedMachines: primitives.optionalBoolean,
