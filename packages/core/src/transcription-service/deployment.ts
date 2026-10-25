@@ -4,6 +4,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
+  getWorkspace,
   getWorkspaceProviderApiKeyConnectionMetadata,
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
@@ -236,11 +237,14 @@ export function createSpeechToTextDeployment(
                 })) !== null
               : false;
           }
+          // A caller without the account still finds the organization's key.
+          const accountId =
+            scope.accountId ?? (await getWorkspace(db, scope.workspaceId))?.accountId;
           const [own, organization] = await Promise.all([
             getWorkspaceProviderApiKeyConnectionMetadata(db, scope.workspaceId, kind),
-            scope.accountId
+            accountId
               ? organizationModelProviderConnectionActiveForWorkspace(db, {
-                  accountId: scope.accountId,
+                  accountId,
                   workspaceId: scope.workspaceId,
                   providerKind: kind,
                 })

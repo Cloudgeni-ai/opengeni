@@ -122,7 +122,8 @@ test("account hint removes only workspace hydration, not fresh provider queries"
   const previous = driver.options.debug;
   let statements: string[] = [];
   driver.options.debug = (_connection, query) => {
-    statements.push(query.replace(/\s+/g, " "));
+    // A new pooled connection first reads array types; that is not a readiness query.
+    if (!query.includes("pg_catalog.pg_type")) statements.push(query.replace(/\s+/g, " "));
   };
   try {
     const oldIds = await f.ids(f.fallback);
@@ -131,13 +132,18 @@ test("account hint removes only workspace hydration, not fresh provider queries"
     const newIds = await f.ids(f.context);
     const scopedQueries = statements;
     expect(newIds).toEqual(oldIds);
-    expect(fallbackQueries.length - scopedQueries.length).toBe(12);
+    // Codex, Grok and the workspace-key provider each hydrate the workspace once.
+    expect(fallbackQueries.length - scopedQueries.length).toBe(18);
     expect(scopedQueries.some((q) => q.includes('"workspace_inference_controls"'))).toBe(false);
     for (const queries of [fallbackQueries, scopedQueries]) {
       expect(
         queries.filter((q) => q.includes("select enabled from subscription_provider_cutovers")),
       ).toHaveLength(3);
       expect(queries.filter((q) => q.includes("select connection.id::text"))).toHaveLength(4);
+      // Both find an organization's key, whether or not the caller named the account.
+      expect(
+        queries.filter((q) => q.includes('from "organization_model_provider_connections"')),
+      ).toHaveLength(1);
     }
   } finally {
     driver.options.debug = previous;
