@@ -5,7 +5,6 @@ import { GitStore } from "../merge-batcher/git";
 import { readResultZip } from "../merge-batcher/github";
 import { canonical } from "../merge-batcher/model";
 import { retryRead } from "../merge-batcher/read-retry";
-import { discoverTestFiles } from "./workspace";
 import {
   BATCH_WORKFLOW,
   sameInventory,
@@ -123,7 +122,40 @@ export async function findBatchUnitProof(
   return null;
 }
 
-async function main(): Promise<void> {
+export function mainUnitInventory(raw: unknown): string[] {
+  const plan = raw as { schemaVersion?: number; mode?: string; unitTests?: unknown } | null;
+  if (
+    plan?.schemaVersion !== 1 ||
+    plan.mode !== "full" ||
+    !Array.isArray(plan.unitTests) ||
+    !sameInventory(plan.unitTests, plan.unitTests)
+  )
+    throw new Error("Main plan does not contain complete unit inventory");
+  return [...plan.unitTests];
+}
+
+// Every optional discovery, Git and filesystem operation belongs inside this
+// boundary. Failure to persist even the fallback file still leaves reuse false;
+// the unchanged impact plan is sufficient for the ordinary test path.
+export async function optionalUnitProof(
+  collect: () => Promise<BatchUnitProof | null>,
+  persist: (proof: BatchUnitProof | null) => void,
+): Promise<BatchUnitProof | null> {
+  try {
+    const proof = await collect();
+    persist(proof);
+    return proof;
+  } catch {
+    try {
+      persist(null);
+    } catch {
+      /* An unwritable optional artifact never grants reuse. */
+    }
+    return null;
+  }
+}
+
+async function readContext(): Promise<{ context: ProofContext; git: GitStore }> {
   const env = process.env;
   const gitDir = (await Bun.$`git rev-parse --absolute-git-dir`.text()).trim();
   const git = new GitStore(gitDir);
@@ -134,13 +166,19 @@ async function main(): Promise<void> {
     tree: await git.exec(["rev-parse", `${mainSha}^{tree}`]),
     runId: Number(env.GITHUB_RUN_ID),
     attempt: Number(env.GITHUB_RUN_ATTEMPT),
-    inventory: discoverTestFiles().unit,
+    inventory: mainUnitInventory(JSON.parse(readFileSync("impact-plan.json", "utf8"))),
   };
+  return { context, git };
+}
+
+async function main(): Promise<void> {
+  const env = process.env;
   if (process.argv[2] === "verify") {
+    const { context } = await readContext();
     if (
       env.GITHUB_EVENT_NAME !== "push" ||
       env.GITHUB_REF !== "refs/heads/main" ||
-      env.GITHUB_SHA !== mainSha
+      env.GITHUB_SHA !== context.mainSha
     )
       throw new Error("Unit proof is only valid for its exact main push");
     const proof = verifyBatchUnitProof(
@@ -152,14 +190,11 @@ async function main(): Promise<void> {
     );
     return;
   }
-  let proof: BatchUnitProof | null = null;
-  let reason = "Not a main push; running the ordinary unit suite";
-  if (
-    env.GITHUB_EVENT_NAME === "push" &&
-    env.GITHUB_REF === "refs/heads/main" &&
-    env.GITHUB_SHA === mainSha
-  ) {
-    try {
+  const proof = await optionalUnitProof(
+    async () => {
+      if (env.GITHUB_EVENT_NAME !== "push" || env.GITHUB_REF !== "refs/heads/main") return null;
+      const { context, git } = await readContext();
+      if (env.GITHUB_SHA !== context.mainSha) throw new Error("Main source changed");
       if (!/^[\w.-]+\/[\w.-]+$/.test(context.repository) || !env.GITHUB_TOKEN)
         throw new Error("Missing read identity");
       const deadline = AbortSignal.timeout(90_000);
@@ -178,7 +213,7 @@ async function main(): Promise<void> {
         if (!response.ok) throw new Error("Provider read unavailable");
         return response.json() as Promise<Wire>;
       };
-      proof = await findBatchUnitProof(
+      return await findBatchUnitProof(
         {
           get,
           archive: async (id) => {
@@ -199,17 +234,24 @@ async function main(): Promise<void> {
         },
         context,
       );
-      reason = proof
-        ? `Reused complete Batch unit coverage, run ${proof.batch.id}/${proof.batch.run_attempt}, tested head ${proof.batch.head_sha}, tree ${proof.testedTree}`
-        : "No complete identical-tree Batch proof; running full unit suite";
-    } catch {
-      // Read failures never waive a test. Do not print signed artifact URLs or credentials.
-      reason = "Batch proof unavailable or invalid; running full unit suite";
-    }
+    },
+    (value) => writeFileSync(resolve("unit-reuse.json"), JSON.stringify(value)),
+  );
+  const reason = proof
+    ? `Reused complete Batch unit coverage, run ${proof.batch.id}/${proof.batch.run_attempt}, tested head ${proof.batch.head_sha}, tree ${proof.testedTree}`
+    : "Batch proof unavailable, inapplicable or invalid; running ordinary unit suite";
+  // Missing outputs also select the ordinary matrix and test steps. Diagnostic
+  // filesystem failures must not turn an optional optimization into a CI veto.
+  try {
+    if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `reuse=${proof !== null}\n`);
+  } catch {
+    /* Default is no reuse. */
   }
-  writeFileSync(resolve("unit-reuse.json"), JSON.stringify(proof));
-  if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `reuse=${proof !== null}\n`);
-  if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `\n${reason}.\n`);
+  try {
+    if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `\n${reason}.\n`);
+  } catch {
+    /* Best-effort diagnostic. */
+  }
   console.log(reason);
 }
 if (import.meta.main) await main();

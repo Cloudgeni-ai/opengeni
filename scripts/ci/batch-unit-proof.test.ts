@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { digest, type BatchSpec } from "../merge-batcher/model";
 import { readResultZip } from "../merge-batcher/github";
 import {
@@ -9,7 +11,12 @@ import {
   verifyBatchUnitProof,
   type BatchUnitProof,
 } from "./batch-unit-proof";
-import { findBatchUnitProof, type ProofReads } from "./reuse-batch-units";
+import {
+  findBatchUnitProof,
+  mainUnitInventory,
+  optionalUnitProof,
+  type ProofReads,
+} from "./reuse-batch-units";
 
 function fixture() {
   const spec: BatchSpec = {
@@ -166,6 +173,94 @@ test("same tree permits different commit identity but preserves exact tested hea
   expect(proof.mainSha).not.toBe(proof.batch.head_sha);
   expect(verifyBatchUnitProof(proof, context)).toBe(proof);
 });
+test("rerun-failed-jobs can consume the same run's earlier successful plan attempt", () => {
+  const { proof, context } = fixture();
+  context.attempt = 2;
+  expect(verifyBatchUnitProof(proof, context)).toBe(proof);
+  proof.producer.runId++;
+  expect(() => verifyBatchUnitProof(proof, context)).toThrow("main attempt identity");
+});
+test.each([0, -1, 1.5, Number.NaN, 3])("rejects invalid/future producer attempt %s", (attempt) => {
+  const { proof, context } = fixture();
+  context.attempt = 2;
+  proof.producer.attempt = attempt;
+  expect(() => verifyBatchUnitProof(proof, context)).toThrow("main attempt identity");
+});
+test("main impact plan is the inventory authority and must be full", () => {
+  expect(mainUnitInventory({ schemaVersion: 1, mode: "full", unitTests: ["a.test.ts"] })).toEqual([
+    "a.test.ts",
+  ]);
+  for (const raw of [
+    null,
+    {},
+    { schemaVersion: 1, mode: "selected", unitTests: ["a.test.ts"] },
+    { schemaVersion: 1, mode: "full", unitTests: ["a", "a"] },
+    { schemaVersion: 1, mode: "full", unitTests: [] },
+  ])
+    expect(() => mainUnitInventory(raw)).toThrow();
+});
+test("optional Git/inventory/read errors persist null instead of failing the plan", async () => {
+  for (const kind of ["git", "inventory", "provider"]) {
+    const writes: unknown[] = [];
+    expect(
+      await optionalUnitProof(
+        async () => {
+          throw new Error(kind);
+        },
+        (p) => {
+          writes.push(p);
+        },
+      ),
+    ).toBeNull();
+    expect(writes).toEqual([null]);
+  }
+});
+test("proof persistence failure cannot emit reuse, including unwritable fallback", async () => {
+  const { proof } = fixture();
+  const writes: unknown[] = [];
+  expect(
+    await optionalUnitProof(
+      async () => proof,
+      (p) => {
+        writes.push(p);
+        throw new Error("disk");
+      },
+    ),
+  ).toBeNull();
+  expect(writes).toEqual([proof, null]);
+});
+test.each(["missing Git", "unwritable proof"])("CLI falls back for %s", async (kind) => {
+  const directory = mkdtempSync(join(tmpdir(), "e78-unit-reuse-"));
+  try {
+    if (kind === "unwritable proof") mkdirSync(join(directory, "unit-reuse.json"));
+    const child = Bun.spawn(
+      [process.execPath, new URL("./reuse-batch-units.ts", import.meta.url).pathname],
+      {
+        cwd: directory,
+        env: {
+          ...process.env,
+          GITHUB_EVENT_NAME: kind === "missing Git" ? "push" : "pull_request",
+          GITHUB_REF: "refs/heads/main",
+          GITHUB_OUTPUT: join(directory, "output"),
+          GITHUB_STEP_SUMMARY: join(directory, "summary"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [code] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code).toBe(0);
+    expect(readFileSync(join(directory, "output"), "utf8")).toBe("reuse=false\n");
+    if (kind === "missing Git")
+      expect(readFileSync(join(directory, "unit-reuse.json"), "utf8")).toBe("null");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 test.each([
   [
     "tree",
@@ -305,7 +400,7 @@ test.each(["running", "new attempt", "different head"])("final read rejects %s",
               : { head_sha: "a".repeat(40) }),
         }
       : original(path);
-    await expect(findBatchUnitProof(reads, context)).rejects.toThrow("attempt changed");
+  await expect(findBatchUnitProof(reads, context)).rejects.toThrow("attempt changed");
 });
 test("partial selected inventory is never reused even on an identical tree", async () => {
   const { proof, context } = fixture();
@@ -356,6 +451,7 @@ test("workflow preserves full-green mode and job results while gating only unit 
   const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const unit = workflow.split("  unit-shards:")[1]!.split("  integration-shards:")[0]!;
   expect(unit).toContain("reuse-batch-units.ts verify");
+  expect(unit).toContain('\'[{"index":0,"number":1,"total":1}]\'');
   expect(unit).toContain("if: ${{ needs.plan.outputs.unit_reuse != 'true' }}");
   expect(unit).toContain('OPENGENI_REQUIRE_REAL_DB: "1"');
   expect(workflow).toContain("bun scripts/ci/impact.ts --full");

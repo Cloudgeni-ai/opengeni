@@ -107,7 +107,9 @@ export function verifyBatchUnitProof(
   );
   requireProof(
     proof.producer?.runId === expected.runId &&
-      proof.producer.attempt === expected.attempt &&
+      Number.isSafeInteger(proof.producer.attempt) &&
+      proof.producer.attempt > 0 &&
+      proof.producer.attempt <= expected.attempt &&
       Number.isSafeInteger(expected.runId) &&
       expected.runId > 0 &&
       Number.isSafeInteger(expected.attempt) &&
