@@ -1,11 +1,14 @@
-import {
-  resolveVoiceInputProviderRegistry,
-  voiceInputCreditBillingActive,
-  type Settings,
-} from "@opengeni/config";
+import { voiceInputCreditBillingActive, type Settings } from "@opengeni/config";
 import { VOICE_INPUT_ACCEPTED_MIME_TYPES } from "@opengeni/contracts";
 import { voiceTranscriptionSettlementKeys } from "@opengeni/db";
 import { createVoiceInputBilling } from "../domain/voice-input-billing";
+import {
+  RecordingTranscriptionError,
+  type RecordingProviderAudioFormat,
+  type RecordingTranscriptionModelSpec,
+  type RecordingTranscriptionProvider,
+  type RecordingTranscriptionResult,
+} from "../recording-transcription";
 import {
   filenameForMimeType,
   isAcceptedMimeType,
@@ -14,24 +17,43 @@ import {
   type TranscriptionAvailabilityContext,
   type TranscriptionBilling,
   type TranscriptionBillingContext,
-  type TranscriptionProvider,
   type TranscriptionService,
   TranscriptionServiceError,
 } from "../transcription";
 import type { Database } from "@opengeni/db";
+import {
+  createSpeechToTextDeployment,
+  type SpeechToTextDeployment,
+  type SpeechToTextDeploymentOptions,
+} from "./deployment";
 import { createFfmpegAudioNormalizer, type TranscriptionAudioNormalizer } from "./normalize";
-import { createMaiTranscriptionProvider } from "./providers/azure-mai";
-import { createAzureOpenAiTranscriptionProvider } from "./providers/azure-openai";
-import { createCodexSubscriptionTranscriptionProvider } from "./providers/codex-subscription";
-import { createOpenAiTranscriptionProvider } from "./providers/openai";
-import { createXaiSubscriptionTranscriptionProvider } from "./providers/xai-subscription";
 
+/**
+ * Dictation's view of a provider: the provider and the one model dictation
+ * runs on it.
+ */
+export type DictationProvider = {
+  readonly id: string;
+  readonly provider: RecordingTranscriptionProvider;
+  readonly model: RecordingTranscriptionModelSpec;
+};
+
+/**
+ * Voice input (one-shot dictation and dictation recordings) over the
+ * deployment's speech-to-text providers: the same providers and models
+ * meetings use. The service picks a provider in the workspace's or the
+ * deployment's order, falls back only after an explicit refusal before any
+ * audio was transcribed, bounds every call with a deadline and charges
+ * credits for deployment-funded models.
+ */
 export function createTranscriptionService(input: {
   settings: Settings;
   db: Database;
+  /** The deployment's speech-to-text providers; built from settings when absent. */
+  deployment?: SpeechToTextDeployment;
   fetch?: typeof fetch;
   codexFetch?: typeof fetch;
-  probeCodex?: (context?: TranscriptionAvailabilityContext) => boolean | Promise<boolean>;
+  probeCodex?: SpeechToTextDeploymentOptions["probeCodex"];
   /** Test seam for exercising timeout and late-completion behavior quickly. */
   providerRequestTimeoutMilliseconds?: number;
   /** Test seam for evaluating persisted absolute deadlines after delayed setup. */
@@ -45,43 +67,17 @@ export function createTranscriptionService(input: {
   /** In-process settlement retry pacing after an inline failure. */
   settlementRetryDelaysMilliseconds?: readonly number[];
 }): TranscriptionService {
-  const providers: TranscriptionProvider[] = resolveVoiceInputProviderRegistry(input.settings).map(
-    (config) => {
-      switch (config.kind) {
-        case "openai":
-          return createOpenAiTranscriptionProvider({
-            ...config,
-            ...(input.fetch ? { fetch: input.fetch } : {}),
-          });
-        case "azure-mai":
-          return createMaiTranscriptionProvider({
-            ...config,
-            ffmpegPath: input.settings.voiceInputFfmpegPath,
-            ...(input.fetch ? { fetch: input.fetch } : {}),
-          });
-        case "azure-openai":
-          return createAzureOpenAiTranscriptionProvider({
-            ...config,
-            ...(input.fetch ? { fetch: input.fetch } : {}),
-          });
-        case "codex-subscription":
-          return createCodexSubscriptionTranscriptionProvider({
-            settings: input.settings,
-            db: input.db,
-            ...(input.codexFetch ? { fetch: input.codexFetch } : {}),
-            ...(input.probeCodex ? { probe: input.probeCodex } : {}),
-          });
-        case "supergrok-subscription":
-          return createXaiSubscriptionTranscriptionProvider({
-            settings: input.settings,
-            db: input.db,
-            ...(input.fetch ? { fetch: input.fetch } : {}),
-          });
-        default:
-          throw new Error("Unsupported voice-input provider.");
-      }
-    },
-  );
+  const deployment =
+    input.deployment ??
+    createSpeechToTextDeployment(
+      { settings: input.settings, db: input.db },
+      {
+        ...(input.fetch ? { fetch: input.fetch } : {}),
+        ...(input.codexFetch ? { codexFetch: input.codexFetch } : {}),
+        ...(input.probeCodex ? { probeCodex: input.probeCodex } : {}),
+      },
+    );
+  const providers = dictationProviders(deployment);
   const limits = {
     maxDurationSeconds: input.settings.voiceInputMaxDurationSeconds,
     maxSizeBytes: input.settings.voiceInputMaxSizeBytes,
@@ -171,32 +167,59 @@ export function createTranscriptionService(input: {
     );
   };
   const creditBillingActive = voiceInputCreditBillingActive(input.settings);
-  /** Deployment-funded calls are charged; the workspace's own subscriptions never are. */
-  const chargeable = (provider: TranscriptionProvider) =>
-    creditBillingActive && provider.deploymentFunded !== undefined;
+  /** Deployment-funded calls are charged; the workspace's own keys and subscriptions never are. */
+  const chargeable = (provider: DictationProvider) =>
+    creditBillingActive && provider.provider.funding === "deployment";
+  const isAvailable = async (
+    provider: DictationProvider,
+    context: TranscriptionAvailabilityContext,
+  ) =>
+    deployment.available(
+      provider.id,
+      context.workspaceId
+        ? {
+            workspaceId: context.workspaceId,
+            ...(context.accountId ? { accountId: context.accountId } : {}),
+            ...(context.subjectId ? { subjectId: context.subjectId } : {}),
+          }
+        : undefined,
+    );
+  const firstAvailable = async (
+    candidates: readonly DictationProvider[],
+    context: TranscriptionAvailabilityContext,
+  ) => {
+    for (const provider of candidates) {
+      if (await isAvailable(provider, context)) return provider;
+    }
+    return null;
+  };
+  const ordered = (context: TranscriptionAvailabilityContext) =>
+    orderedProviders(
+      providers,
+      deployment.pinned
+        ? { ...context, preferredProvider: deployment.pinned.providerId, fallbackEnabled: false }
+        : context,
+    );
   return {
     limits: () => limits,
     async available(context) {
-      return Boolean(
-        await firstAvailable(orderedProviders(providers, context ?? {}), context ?? {}),
-      );
+      return Boolean(await firstAvailable(ordered(context ?? {}), context ?? {}));
     },
     async availableProviderIds(context) {
       // Every ready provider, for the workspace provider picker. One failing
       // probe means that provider is not ready; it never fails the caller.
+      const candidates = deployment.pinned
+        ? providers.filter((provider) => provider.id === deployment.pinned?.providerId)
+        : providers;
       const available = await Promise.all(
-        providers.map(async (provider) => {
-          try {
-            return (await provider.available(context)) ? provider.id : null;
-          } catch {
-            return null;
-          }
-        }),
+        candidates.map(async (provider) =>
+          (await isAvailable(provider, context)) ? provider.id : null,
+        ),
       );
       return available.filter((id): id is string => id !== null);
     },
     async selectProvider(context) {
-      return (await firstAvailable(orderedProviders(providers, context), context))?.id ?? null;
+      return (await firstAvailable(ordered(context), context))?.id ?? null;
     },
     async admit({ providerId, accountId, workspaceId, attribution }) {
       const provider = providers.find((candidate) => candidate.id === providerId);
@@ -228,12 +251,19 @@ export function createTranscriptionService(input: {
           message: "Invalid audio duration.",
         });
       }
+      const scopeContext = {
+        workspaceId: request.workspaceId,
+        accountId: request.accountId,
+        subjectId: request.subjectId,
+      };
+      const exactId = preferredProviderId(request.providerId);
+      const pinnedAway = deployment.pinned && exactId && exactId !== deployment.pinned.providerId;
+      const exact = exactId ? providers.find((candidate) => candidate.id === exactId) : undefined;
       const provider = request.providerId
-        ? await exactAvailable(providers, request.providerId, {
-            workspaceId: request.workspaceId,
-            subjectId: request.subjectId,
-          })
-        : await firstAvailable(orderedProviders(providers, request), request);
+        ? !pinnedAway && exact && (await isAvailable(exact, scopeContext))
+          ? exact
+          : null
+        : await firstAvailable(ordered(request), request);
       if (!provider) {
         throw new TranscriptionServiceError({
           fallbackSafe: true,
@@ -241,16 +271,27 @@ export function createTranscriptionService(input: {
           message: "Transcription is unavailable.",
         });
       }
-      if (provider.supportsServerDeadline !== true) {
-        throw new TranscriptionServiceError({
-          code: "unavailable",
-          message: "Transcription provider does not support bounded requests.",
-        });
-      }
+      const fallBack = async (error: unknown) => {
+        if (
+          error instanceof TranscriptionServiceError &&
+          error.fallbackSafe &&
+          !request.providerId &&
+          request.fallbackEnabled !== false &&
+          !deployment.pinned &&
+          !request.signal?.aborted
+        ) {
+          const excludedProviders = [...(request.excludedProviders ?? []), provider.id];
+          if (await firstAvailable(ordered({ ...request, excludedProviders }), request)) {
+            return await this.transcribe({ ...request, excludedProviders });
+          }
+        }
+        throw error;
+      };
+      const pricing = provider.model.creditPricing ?? null;
       if (chargeable(provider)) {
         // Fail closed: a deployment-paid call is never sent without a price
         // and a trusted settlement identity.
-        if (!provider.deploymentFunded?.pricing || !request.billing) {
+        if (!pricing || !request.billing) {
           throw new TranscriptionServiceError({
             code: "unavailable",
             message: "Transcription billing is not configured.",
@@ -266,35 +307,34 @@ export function createTranscriptionService(input: {
           // Nothing was sent yet: a fallback-safe refusal (Opengeni credits
           // turned off here) lets the next provider, such as a connected
           // subscription, serve the request.
-          if (
-            error instanceof TranscriptionServiceError &&
-            error.fallbackSafe &&
-            !request.providerId &&
-            request.fallbackEnabled !== false &&
-            !request.signal?.aborted
-          ) {
-            const excludedProviders = [...(request.excludedProviders ?? []), provider.id];
-            if (
-              await firstAvailable(
-                orderedProviders(providers, { ...request, excludedProviders }),
-                request,
-              )
-            ) {
-              return await this.transcribe({ ...request, excludedProviders });
-            }
-          }
-          throw error;
+          return await fallBack(error);
         }
+      }
+      const credentials = await deployment.credentials(provider.id, {
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+      });
+      if (credentials === "missing") {
+        return await fallBack(
+          new TranscriptionServiceError({
+            fallbackSafe: true,
+            code: "unavailable",
+            message: "Transcription is unavailable.",
+          }),
+        );
       }
       let audio = request.audio;
       let providerMimeType = mimeType;
       let billingContext: TranscriptionBillingContext | undefined = request.billing;
       let audioSeconds = request.durationSeconds ?? 0;
-      if (chargeable(provider) && billingContext?.trustedDurationSeconds === undefined) {
+      const charged = chargeable(provider);
+      const needsTrustedDuration = charged && billingContext?.trustedDurationSeconds === undefined;
+      if (needsTrustedDuration || !acceptsMimeType(provider.model, mimeType)) {
         // A deployment-paid one-shot upload is decoded by the server first, so
         // the call always carries a duration the server measured from bytes it
         // produced. That bills any usage shape we cannot price, and bounds
         // what is sent upstream to the configured maximum recording length.
+        // Models that take only some containers get the same WAV.
         const normalized = await normalizeAudio({
           audio,
           mimeType,
@@ -304,7 +344,12 @@ export function createTranscriptionService(input: {
         audio = normalized.bytes;
         providerMimeType = "audio/wav";
         audioSeconds = normalized.durationSeconds;
-        billingContext = { ...billingContext!, trustedDurationSeconds: normalized.durationSeconds };
+        if (needsTrustedDuration) {
+          billingContext = {
+            ...billingContext!,
+            trustedDurationSeconds: normalized.durationSeconds,
+          };
+        }
       }
       const startedAt = performance.now();
       const remainingMilliseconds = request.providerDeadlineAt
@@ -321,18 +366,27 @@ export function createTranscriptionService(input: {
         });
       }
       const deadline = createProviderRequestDeadline(request.signal, remainingMilliseconds);
-      let result: Awaited<ReturnType<TranscriptionProvider["transcribe"]>>;
+      let result: RecordingTranscriptionResult;
       try {
-        result = await provider.transcribe({
-          audio,
-          mimeType: providerMimeType,
-          filename: filenameForMimeType(providerMimeType),
-          workspaceId: request.workspaceId,
-          accountId: request.accountId,
-          subjectId: request.subjectId,
-          requestId: request.requestId,
-          signal: deadline.signal,
-        });
+        result = await provider.provider.transcribe(
+          {
+            audio: {
+              bytes: audio,
+              mimeType: providerMimeType,
+              fileName: filenameForMimeType(providerMimeType),
+            },
+            model: provider.model.model,
+            diarize: false,
+            signal: deadline.signal,
+            scope: {
+              accountId: request.accountId,
+              workspaceId: request.workspaceId,
+              subjectId: request.subjectId,
+              requestId: request.requestId,
+            },
+          },
+          credentials.credentials,
+        );
         if (deadline.timedOut && !request.signal?.aborted) {
           throw new TranscriptionServiceError({
             code: "timeout",
@@ -348,37 +402,20 @@ export function createTranscriptionService(input: {
             retryable: true,
           });
         }
-        if (
-          error instanceof TranscriptionServiceError &&
-          error.fallbackSafe &&
-          !request.providerId &&
-          request.fallbackEnabled !== false &&
-          !request.signal?.aborted
-        ) {
-          const excludedProviders = [...(request.excludedProviders ?? []), provider.id];
-          if (
-            await firstAvailable(
-              orderedProviders(providers, { ...request, excludedProviders }),
-              request,
-            )
-          ) {
-            return await this.transcribe({ ...request, excludedProviders });
-          }
-        }
-        throw error;
+        return await fallBack(asTranscriptionServiceError(error));
       } finally {
         deadline.dispose();
       }
       const latencyMs = Math.round(performance.now() - startedAt);
       let creditCostMicros = 0;
       const settle = async () => {
-        if (chargeable(provider) && provider.deploymentFunded?.pricing && billingContext) {
+        if (charged && pricing && billingContext) {
           creditCostMicros = await settleWithoutFailing({
             accountId: request.accountId,
             workspaceId: request.workspaceId,
             providerId: provider.id,
-            model: provider.deploymentFunded.model,
-            pricing: provider.deploymentFunded.pricing,
+            model: provider.model.model,
+            pricing,
             usage: result.usage ?? null,
             billing: billingContext,
           });
@@ -386,7 +423,7 @@ export function createTranscriptionService(input: {
       };
       if (!request.deferBillingSettlement) await settle();
       return {
-        text: result.text,
+        text: transcriptText(result),
         languages: result.languages,
         providerId: provider.id,
         audioSeconds,
@@ -396,6 +433,131 @@ export function createTranscriptionService(input: {
       };
     },
   };
+}
+
+/**
+ * The providers dictation can use, in the deployment's order, each with the
+ * model it runs: the pinned model, else the provider's first file model.
+ */
+export function dictationProviders(deployment: SpeechToTextDeployment): DictationProvider[] {
+  return deployment.order.flatMap((id) => {
+    const provider = deployment.registry.get(id);
+    if (!provider) return [];
+    const model =
+      (deployment.pinned?.providerId === id
+        ? provider.models.find((candidate) => candidate.model === deployment.pinned?.model)
+        : undefined) ?? provider.models.find((candidate) => candidate.capabilities.batch);
+    return model ? [{ id, provider, model }] : [];
+  });
+}
+
+/** The text of a result: the model's own text, or its words joined. */
+export function transcriptText(result: RecordingTranscriptionResult): string {
+  if (result.text !== undefined) return result.text;
+  let text = "";
+  for (const word of result.words) {
+    if (word.text.length === 0) continue;
+    const joinsPrevious = /^[,.;:!?%)\]}]/u.test(word.text) || text.length === 0;
+    text += joinsPrevious ? word.text : ` ${word.text}`;
+  }
+  return text.trim();
+}
+
+const AUDIO_FORMAT_MIME_TYPES: Record<RecordingProviderAudioFormat, readonly string[]> = {
+  flac: ["audio/flac", "audio/x-flac"],
+  wav: ["audio/wav", "audio/x-wav", "audio/wave"],
+  mp3: ["audio/mpeg", "audio/mp3"],
+  webm: ["audio/webm"],
+  mp4: ["audio/mp4", "audio/m4a", "audio/x-m4a"],
+};
+
+function acceptsMimeType(model: RecordingTranscriptionModelSpec, mimeType: string): boolean {
+  if (!model.audioFormats) return true;
+  return model.audioFormats.some((format) => AUDIO_FORMAT_MIME_TYPES[format].includes(mimeType));
+}
+
+/**
+ * Errors from providers that speak the recording error vocabulary become
+ * voice input errors. Rejections that mean nothing was transcribed
+ * (unauthorized, quota, rate limits) are safe to try another provider with.
+ */
+export function asTranscriptionServiceError(error: unknown): unknown {
+  if (!(error instanceof RecordingTranscriptionError)) return error;
+  switch (error.code) {
+    case "unauthorized":
+    case "quota_exceeded":
+    case "rate_limited":
+      return new TranscriptionServiceError({
+        fallbackSafe: true,
+        code: "unavailable",
+        message: "Transcription is unavailable.",
+        retryable: error.retryable,
+      });
+    case "invalid_audio":
+      return new TranscriptionServiceError({
+        code: "invalid_audio",
+        message: "Audio could not be transcribed.",
+      });
+    case "too_large":
+      return new TranscriptionServiceError({ code: "too_large", message: "Audio is too large." });
+    case "not_supported":
+      return new TranscriptionServiceError({
+        code: "not_supported",
+        message: "Unsupported audio format.",
+      });
+    case "timeout":
+      return new TranscriptionServiceError({
+        code: "timeout",
+        message: "Transcription timed out.",
+        retryable: true,
+      });
+    case "network":
+      return new TranscriptionServiceError({
+        code: "network",
+        message: "Transcription provider is unreachable.",
+        retryable: true,
+      });
+    case "unavailable":
+      return new TranscriptionServiceError({
+        code: "unavailable",
+        message: "Transcription provider failed.",
+        retryable: true,
+      });
+    case "provider":
+    default:
+      return new TranscriptionServiceError({
+        code: "provider",
+        message: "Transcription provider failed.",
+        retryable: error.retryable,
+      });
+  }
+}
+
+/**
+ * Errors from the voice input adapters become recording errors, for the
+ * meeting pipeline, which speaks that vocabulary.
+ */
+export function asRecordingTranscriptionError(error: unknown): unknown {
+  if (!(error instanceof TranscriptionServiceError)) return error;
+  const code = ((): RecordingTranscriptionError["code"] => {
+    switch (error.code) {
+      case "invalid_audio":
+        return "invalid_audio";
+      case "too_large":
+        return "too_large";
+      case "not_supported":
+        return "not_supported";
+      case "timeout":
+        return "timeout";
+      case "network":
+        return "network";
+      case "unavailable":
+        return error.fallbackSafe ? "unauthorized" : "unavailable";
+      default:
+        return "provider";
+    }
+  })();
+  return new RecordingTranscriptionError(error.message, code, error.retryable);
 }
 
 export function remainingTranscriptionProviderRequestMilliseconds(
@@ -437,15 +599,16 @@ function createProviderRequestDeadline(
   };
 }
 
-export function orderedProviders(
-  providers: readonly TranscriptionProvider[],
+export function orderedProviders<Provider extends { readonly id: string }>(
+  providers: readonly Provider[],
   context: TranscriptionAvailabilityContext,
-): TranscriptionProvider[] {
-  const preferred = providers.filter((provider) => provider.id === context.preferredProvider);
-  const ordered = context.preferredProvider
+): Provider[] {
+  const preferredId = preferredProviderId(context.preferredProvider);
+  const preferred = providers.filter((provider) => provider.id === preferredId);
+  const ordered = preferredId
     ? context.fallbackEnabled === false
       ? preferred
-      : [...preferred, ...providers.filter((provider) => provider.id !== context.preferredProvider)]
+      : [...preferred, ...providers.filter((provider) => provider.id !== preferredId)]
     : context.fallbackEnabled === false
       ? providers.slice(0, 1)
       : [...providers];
@@ -455,27 +618,9 @@ export function orderedProviders(
   return remaining.filter((provider) => !context.excludedProviders?.includes(provider.id));
 }
 
-async function firstAvailable(
-  providers: readonly TranscriptionProvider[],
-  context: TranscriptionAvailabilityContext,
-) {
-  for (const provider of providers) {
-    try {
-      if (await provider.available(context)) return provider;
-    } catch {
-      /* No audio sent; another configured provider may be ready. */
-    }
-  }
-  return null;
-}
-
-async function exactAvailable(
-  providers: readonly TranscriptionProvider[],
-  providerId: string,
-  context: TranscriptionAvailabilityContext,
-) {
-  const provider = providers.find((candidate) => candidate.id === providerId);
-  return provider && (await provider.available(context)) ? provider : null;
+/** The voice input's MAI provider is now the Azure Speech provider. */
+function preferredProviderId(id: string | null | undefined): string | null | undefined {
+  return id === "azure-mai" ? "azure-speech" : id;
 }
 
 function settlementAttributes(settlement: {

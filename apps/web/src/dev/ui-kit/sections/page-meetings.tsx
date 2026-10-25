@@ -142,7 +142,9 @@ export default function PageMeetingsSection() {
   const [data, setData] = useState<"ready" | "empty">(
     initial.get("data") === "empty" ? "empty" : "ready",
   );
-  const fixture = useMemo(() => createMeetingsFixture({ state: data }), [data]);
+  // ?models=pinned previews a deployment that pins one speech-to-text model.
+  const pinned = initial.get("models") === "pinned";
+  const fixture = useMemo(() => createMeetingsFixture({ state: data, pinned }), [data, pinned]);
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
   // ?audio=desktop previews the desktop app, which records other apps' audio.

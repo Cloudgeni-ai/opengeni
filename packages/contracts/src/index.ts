@@ -2487,11 +2487,20 @@ export const WorkspaceTranscriptionPolicy = /* @__PURE__ */ defineSchema(() =>
 export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
 
 /**
- * Workspace voice-input preferences. Public provider identifiers express the
- * preferred billing route; credentials and model configuration remain private.
+ * Speech-to-text provider identifiers. Every transcription use (dictation,
+ * meetings) chooses from the same providers. `azure-mai` is the older name
+ * of `azure-speech` and is read as it.
  */
 export const VoiceInputProviderId = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["supergrok-subscription", "codex-subscription", "openai", "azure-openai", "azure-mai"]),
+  z.enum([
+    "supergrok-subscription",
+    "codex-subscription",
+    "openai",
+    "azure-openai",
+    "azure-mai",
+    "azure-speech",
+    "elevenlabs",
+  ]),
 );
 export type VoiceInputProviderId = z.infer<typeof VoiceInputProviderId>;
 
@@ -2499,6 +2508,7 @@ export const WorkspaceVoiceInputSettings = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       enabled: primitives.boolean,
+      /** The provider dictation tries first; each provider runs one dictation model. */
       preferredProvider: VoiceInputProviderId.nullable().optional(),
       fallbackEnabled: primitives.optionalBoolean,
     })

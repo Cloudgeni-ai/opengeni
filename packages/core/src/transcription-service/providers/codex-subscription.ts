@@ -1,11 +1,14 @@
 import { CODEX_CLIENT_VERSION, CODEX_ORIGINATOR } from "@opengeni/codex/constants";
 import type { CodexFetch } from "@opengeni/codex";
 import type { Settings } from "@opengeni/config";
+import type { RecordingTranscriptionProvider } from "../../recording-transcription";
+import { TranscriptionServiceError } from "../../transcription";
 import {
-  type TranscriptionAvailabilityContext,
-  type TranscriptionProvider,
-  TranscriptionServiceError,
-} from "../../transcription";
+  requireScope,
+  textModelCapabilities,
+  textRequestAudio,
+  textTranscriptionResult,
+} from "../text-models";
 import {
   acquireSubscriptionCoreCodexOperationLease,
   buildSubscriptionCoreCodexConnectionTokenResolver,
@@ -27,6 +30,11 @@ import {
 } from "./subscription-core";
 
 const TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe";
+
+/** The model the ChatGPT dictation endpoint is offered as. */
+export const CODEX_TRANSCRIPTION_MODEL = "chatgpt-dictation";
+
+type CodexAvailabilityScope = { accountId?: string; workspaceId?: string; subjectId?: string };
 
 /**
  * Codex transcription on the shared subscription core (M3 PR 2c, EP-N01..N04):
@@ -152,12 +160,12 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
   settings: Settings;
   db: Database;
   fetch?: typeof fetch;
-  probe?: (context?: TranscriptionAvailabilityContext) => boolean | Promise<boolean>;
-}): TranscriptionProvider {
+  probe?: (context?: CodexAvailabilityScope) => boolean | Promise<boolean>;
+}): RecordingTranscriptionProvider {
   const fetchImpl = input.fetch ?? fetch;
   const probe =
     input.probe ??
-    (async (context?: TranscriptionAvailabilityContext) => {
+    (async (context?: CodexAvailabilityScope) => {
       // Deployment-level readiness: registry construction already gated this
       // provider on OPENGENI_CODEX_SUBSCRIPTION_ENABLED. Request selection
       // passes workspaceId so we only claim Codex when a subscription is
@@ -187,40 +195,53 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
     });
   return {
     id: "codex-subscription",
-    supportsServerDeadline: true,
-    experimental: true,
+    name: "ChatGPT subscription",
+    funding: "workspace_subscription",
+    models: [
+      {
+        model: CODEX_TRANSCRIPTION_MODEL,
+        name: "ChatGPT dictation",
+        capabilities: textModelCapabilities({
+          maxDurationSeconds: 600,
+          maxFileBytes: 25 * 1024 * 1024,
+        }),
+        // Paid for by the workspace's own subscription; Opengeni charges nothing.
+        usdPerHour: 0,
+      },
+    ],
     available: probe,
-    async transcribe({
-      audio,
-      mimeType,
-      filename,
-      workspaceId,
-      accountId: organizationId,
-      subjectId,
-      requestId,
-      signal,
-    }) {
+    async transcribe(request) {
+      const { audio, mimeType, filename } = textRequestAudio(request);
+      const {
+        workspaceId,
+        accountId: organizationId,
+        subjectId,
+        requestId,
+      } = requireScope(request);
+      const signal = request.signal;
       const disposition = await readCodexCutoverDisposition(input.db, organizationId, workspaceId);
       if (disposition === "maintenance") throw coreTranscriptionUnavailable();
 
-      return await transcribeOnCore(
-        { settings: input.settings, db: input.db, fetch: fetchImpl },
-        {
-          accountId: organizationId,
-          workspaceId,
-          subjectId,
-          requestId,
-          send: async (accessToken, chatgptAccountId, requestFetch) =>
-            await sendTranscription(requestFetch, {
-              accessToken,
-              chatgptAccountId,
-              audio,
-              mimeType,
-              filename,
-              requestId,
-              signal,
-            }),
-        },
+      return textTranscriptionResult(
+        await transcribeOnCore(
+          { settings: input.settings, db: input.db, fetch: fetchImpl },
+          {
+            accountId: organizationId,
+            workspaceId,
+            subjectId,
+            requestId,
+            send: async (accessToken, chatgptAccountId, requestFetch) =>
+              await sendTranscription(requestFetch, {
+                accessToken,
+                chatgptAccountId,
+                audio,
+                mimeType,
+                filename,
+                requestId,
+                signal,
+              }),
+          },
+        ),
       );
     },
   };

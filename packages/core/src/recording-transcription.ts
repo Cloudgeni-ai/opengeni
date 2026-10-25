@@ -3,13 +3,16 @@ import type {
   RecordingLiveProtocol,
   RecordingTrackSource,
   RecordingTranscriptionCapabilities,
+  RecordingTranscriptionFunding,
 } from "@opengeni/contracts";
+import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 
 /**
- * Recording transcription: one interface for every speech-to-text provider
- * a recording can use, plus the pure pieces that turn per-track words into
- * a transcript. Providers declare what each model can do; callers only ask
- * for what the chosen model supports.
+ * Speech to text: one interface for every provider any transcription uses
+ * (meetings, dictation and whatever comes later), plus the pure pieces that
+ * turn per-track words into a transcript. Providers declare what each model
+ * can do and who pays for it; callers only ask for what the chosen model
+ * supports.
  */
 
 export type RecordingTranscriptionModelSpec = {
@@ -25,6 +28,12 @@ export type RecordingTranscriptionModelSpec = {
    * first one; absent means any format a recording is prepared in.
    */
   audioFormats?: readonly RecordingProviderAudioFormat[];
+  /**
+   * The Opengeni credit price of a deployment-funded model, from the
+   * deployment's voice pricing. Calls are charged in credits when credit
+   * billing is on; without a price such a call is refused.
+   */
+  creditPricing?: VoiceInputPricing | null;
 };
 
 /** Audio containers a transcription model can be sent. */
@@ -34,6 +43,17 @@ export type RecordingTranscriptionAudio = {
   bytes: Uint8Array;
   mimeType: string;
   fileName: string;
+};
+
+/**
+ * Who a call is for. Providers that sign in as the workspace (a connected
+ * subscription) use it to find that sign-in; the request id is for logs.
+ */
+export type RecordingTranscriptionScope = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  requestId: string;
 };
 
 export type RecordingTranscriptionRequest = {
@@ -47,6 +67,8 @@ export type RecordingTranscriptionRequest = {
   maxSpeakers?: number | undefined;
   keyterms?: readonly string[] | undefined;
   signal?: AbortSignal | undefined;
+  /** Required by providers funded by a workspace subscription. */
+  scope?: RecordingTranscriptionScope | undefined;
 };
 
 export type RecordingTranscribedWord = {
@@ -65,7 +87,12 @@ export type RecordingTranscriptionResult = {
   /** Audio length the provider measured, when it says. */
   audioMilliseconds: number | null;
   diarized: boolean;
+  /** Empty for models without word timestamps, which return `text` instead. */
   words: RecordingTranscribedWord[];
+  /** The whole text, from models that give no word timings. */
+  text?: string | undefined;
+  /** What the provider reports it billed, for credit settlement. */
+  usage?: VoiceInputUsage | null | undefined;
 };
 
 /** A provider key, or a short-lived token for providers that take one (Microsoft Entra ID). */
@@ -90,11 +117,31 @@ export type RecordingLiveSessionRequest = {
 export type RecordingTranscriptionProvider = {
   id: string;
   name: string;
+  /**
+   * Who pays: the workspace's own key from its model connections, a
+   * subscription the workspace signed in to (never charged by Opengeni), or
+   * an account the deployment holds.
+   */
+  funding: RecordingTranscriptionFunding;
   models: readonly RecordingTranscriptionModelSpec[];
-  /** Transcribe a whole file. Only called for models with `capabilities.batch`. */
+  /**
+   * Whether the provider can serve this workspace now, for providers whose
+   * credential is not a key (a subscription sign-in). Key and deployment
+   * providers are available when their credential resolves. Without a
+   * scope it answers whether the deployment offers the provider at all.
+   */
+  available?(scope?: {
+    accountId?: string;
+    workspaceId: string;
+    subjectId?: string;
+  }): boolean | Promise<boolean>;
+  /**
+   * Transcribe a whole file. Only called for models with `capabilities.batch`.
+   * `credentials` is null for subscription providers, which use `scope`.
+   */
   transcribe(
     request: RecordingTranscriptionRequest,
-    credentials: RecordingTranscriptionCredentials,
+    credentials: RecordingTranscriptionCredentials | null,
   ): Promise<RecordingTranscriptionResult>;
   /**
    * Grant a client one live session. Present when some model has
@@ -281,6 +328,125 @@ export function planRecordingTranscriptionPieces(
     });
   }
   return pieces;
+}
+
+/** One stretch of a track sent alone to a model that returns only text. */
+export type RecordingTextSpan = {
+  startMilliseconds: number;
+  endMilliseconds: number;
+  /** The diarizer's speaker for the whole span, when it split the track. */
+  speaker: string | null;
+};
+
+/** Same-speaker turns closer than this are sent as one span. */
+export const RECORDING_TEXT_SPAN_JOIN_GAP_MILLISECONDS = 1_500;
+/** Turns shorter than this join the span before them rather than being sent alone. */
+export const RECORDING_TEXT_SPAN_MIN_MILLISECONDS = 1_000;
+/** Speech just outside a turn is kept by padding each span this much. */
+export const RECORDING_TEXT_SPAN_PADDING_MILLISECONDS = 250;
+
+/**
+ * Plan the spans a text-only model hears. Such a model gives no timings or
+ * speakers, so with the diarizer's turns each span is one speaker's turn
+ * (nearby turns of the same speaker joined, very short ones folded into the
+ * one before) and silence between turns is not sent. Without turns the
+ * track is cut into equal spans the model can take. No span overlaps
+ * another, so no text is heard twice.
+ */
+export function planRecordingTextSpans(
+  durationMilliseconds: number,
+  turns: readonly SpeakerTurn[] | null,
+  maxSpanMilliseconds: number | null,
+): RecordingTextSpan[] {
+  const duration = Math.max(0, Math.ceil(durationMilliseconds));
+  const split = (span: RecordingTextSpan): RecordingTextSpan[] => {
+    const length = span.endMilliseconds - span.startMilliseconds;
+    if (maxSpanMilliseconds === null || length <= maxSpanMilliseconds) return [span];
+    const count = Math.ceil(length / maxSpanMilliseconds);
+    const each = length / count;
+    return Array.from({ length: count }, (_, index) => ({
+      startMilliseconds: Math.round(span.startMilliseconds + index * each),
+      endMilliseconds:
+        index === count - 1
+          ? span.endMilliseconds
+          : Math.round(span.startMilliseconds + (index + 1) * each),
+      speaker: span.speaker,
+    }));
+  };
+  if (duration === 0) return [];
+  if (!turns || turns.length === 0) {
+    return split({ startMilliseconds: 0, endMilliseconds: duration, speaker: null });
+  }
+  const ordered = turns
+    .map((turn) => ({
+      startMilliseconds: Math.max(0, Math.min(duration, turn.startMilliseconds)),
+      endMilliseconds: Math.max(0, Math.min(duration, turn.endMilliseconds)),
+      speaker: turn.speaker,
+    }))
+    .filter((turn) => turn.endMilliseconds > turn.startMilliseconds)
+    .sort((left, right) => left.startMilliseconds - right.startMilliseconds);
+  const joined: RecordingTextSpan[] = [];
+  for (const turn of ordered) {
+    const previous = joined.at(-1);
+    const short =
+      turn.endMilliseconds - turn.startMilliseconds < RECORDING_TEXT_SPAN_MIN_MILLISECONDS;
+    const gap = previous ? turn.startMilliseconds - previous.endMilliseconds : 0;
+    if (
+      previous &&
+      (gap <= 0 ||
+        (gap <= RECORDING_TEXT_SPAN_JOIN_GAP_MILLISECONDS &&
+          (short || previous.speaker === turn.speaker)))
+    ) {
+      // Overlapping speech is heard once, by the span already playing.
+      previous.endMilliseconds = Math.max(previous.endMilliseconds, turn.endMilliseconds);
+      continue;
+    }
+    joined.push({ ...turn });
+  }
+  // Padding never crosses the middle of the gap to a neighbour.
+  const middle = (index: number) =>
+    Math.round((joined[index]!.endMilliseconds + joined[index + 1]!.startMilliseconds) / 2);
+  const padded = joined.map((span, index) => ({
+    startMilliseconds: Math.max(
+      index > 0 ? middle(index - 1) : 0,
+      span.startMilliseconds - RECORDING_TEXT_SPAN_PADDING_MILLISECONDS,
+    ),
+    endMilliseconds: Math.min(
+      index < joined.length - 1 ? middle(index) : duration,
+      span.endMilliseconds + RECORDING_TEXT_SPAN_PADDING_MILLISECONDS,
+    ),
+    speaker: span.speaker,
+  }));
+  return padded.flatMap(split);
+}
+
+/**
+ * Words for a span's text, spread over the span in proportion to their
+ * length. The timings are estimates: good enough to place a word in the
+ * transcript and play near it, not to the exact word.
+ */
+export function recordingWordsFromText(
+  text: string,
+  span: RecordingTextSpan,
+): RecordingTranscribedWord[] {
+  const tokens = text.split(/\s+/u).filter((token) => token.length > 0);
+  if (tokens.length === 0) return [];
+  const weights = tokens.map((token) => token.length + 1);
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const length = span.endMilliseconds - span.startMilliseconds;
+  let elapsed = 0;
+  return tokens.map((token, index) => {
+    const startMilliseconds = span.startMilliseconds + Math.round((elapsed / total) * length);
+    elapsed += weights[index]!;
+    const endMilliseconds = span.startMilliseconds + Math.round((elapsed / total) * length);
+    return {
+      text: token,
+      startMilliseconds,
+      endMilliseconds: Math.max(startMilliseconds + 1, endMilliseconds),
+      speaker: span.speaker,
+      spaceBefore: true,
+    };
+  });
 }
 
 /**
@@ -645,8 +811,8 @@ function elevenLabsError(
 }
 
 /** ElevenLabs takes only its own API key. */
-function elevenLabsApiKey(credentials: RecordingTranscriptionCredentials): string {
-  if ("apiKey" in credentials && credentials.apiKey) return credentials.apiKey;
+function elevenLabsApiKey(credentials: RecordingTranscriptionCredentials | null): string {
+  if (credentials && "apiKey" in credentials && credentials.apiKey) return credentials.apiKey;
   throw new RecordingTranscriptionError("ElevenLabs needs an API key", "unauthorized", false);
 }
 
@@ -673,6 +839,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
   return {
     id: "elevenlabs",
     name: "ElevenLabs",
+    funding: "workspace_key",
     models: [
       {
         model: "scribe_v2",

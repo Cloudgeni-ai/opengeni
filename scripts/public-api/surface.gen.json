@@ -20440,8 +20440,12 @@
         "$.default": "object!",
         "$.default.model": "string!",
         "$.default.providerId": "string!",
+        "$.dictationDefault": "object! null",
+        "$.dictationDefault.model": "string!",
+        "$.dictationDefault.providerId": "string!",
         "$.models": "array!",
-        "$.models[]": "ref(RecordingTranscriptionModel)"
+        "$.models[]": "ref(RecordingTranscriptionModel)",
+        "$.pinned": "boolean!"
       }
     },
     "ListRecordingNotesResponse": {
@@ -24267,6 +24271,14 @@
         "$.wordTimestamps": "boolean!"
       }
     },
+    "RecordingTranscriptionFunding": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"deployment\\\"\",\"\\\"workspace_key\\\"\",\"\\\"workspace_subscription\\\"\"]"
+      }
+    },
     "RecordingTranscriptionModel": {
       "io": [
         "output"
@@ -24275,6 +24287,7 @@
         "$": "object",
         "$.available": "boolean!",
         "$.capabilities": "ref(RecordingTranscriptionCapabilities)!",
+        "$.funding": "ref(RecordingTranscriptionFunding)!",
         "$.model": "string!",
         "$.name": "string!",
         "$.providerId": "string!",
@@ -31148,7 +31161,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"azure-mai\\\"\",\"\\\"azure-openai\\\"\",\"\\\"codex-subscription\\\"\",\"\\\"openai\\\"\",\"\\\"supergrok-subscription\\\"\"]"
+        "$": "enum=[\"\\\"azure-mai\\\"\",\"\\\"azure-openai\\\"\",\"\\\"azure-speech\\\"\",\"\\\"codex-subscription\\\"\",\"\\\"elevenlabs\\\"\",\"\\\"openai\\\"\",\"\\\"supergrok-subscription\\\"\"]"
       }
     },
     "WebhookEventAdapter": {

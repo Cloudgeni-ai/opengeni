@@ -410,6 +410,49 @@ describe("Retention settings", () => {
   });
 });
 
+describe("Transcription model picker", () => {
+  test("says who pays for each model, and what makes an unavailable one pickable", async () => {
+    const { transcriptionModelMeta, transcriptionModelUnavailableReason } =
+      await import("./meeting-settings");
+    const entry = {
+      providerId: "codex-subscription",
+      providerName: "ChatGPT subscription",
+      model: "chatgpt-dictation",
+      name: "ChatGPT dictation",
+      available: false,
+      funding: "workspace_subscription" as const,
+      usdPerHour: 0,
+      capabilities: {
+        batch: true,
+        live: false,
+        diarization: false,
+        liveDiarization: false,
+        multichannel: false,
+        maxSpeakers: null,
+        wordTimestamps: false,
+        languages: [],
+        languageDetection: true,
+        keyterms: false,
+        speakerLibrary: false,
+        maxDurationSeconds: 600,
+        maxFileBytes: null,
+      },
+    };
+    expect(transcriptionModelMeta(entry)).toBe("Your subscription");
+    expect(transcriptionModelUnavailableReason(entry)).toBe(
+      "Connect your ChatGPT subscription first",
+    );
+    const scribe = { ...entry, providerName: "ElevenLabs", funding: "workspace_key" as const };
+    expect(transcriptionModelMeta({ ...scribe, usdPerHour: 0.22 })).toBe("$0.22 per hour");
+    expect(transcriptionModelUnavailableReason(scribe)).toBe("Connect ElevenLabs first");
+    const azure = { ...entry, providerName: "Azure Speech", funding: "deployment" as const };
+    expect(transcriptionModelMeta(azure)).toBe("Azure Speech");
+    expect(transcriptionModelUnavailableReason(azure)).toBe(
+      "Azure Speech isn't available here right now",
+    );
+  });
+});
+
 describe("Recorder errors", () => {
   test("the desktop app points to the computer's settings, not the browser's", async () => {
     const { recorderErrorText } = await import("./recorder-panel");

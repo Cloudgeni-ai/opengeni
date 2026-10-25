@@ -198,7 +198,7 @@ function silentWav(seconds: number): string {
 }
 
 export function createMeetingsFixture(
-  options: { state?: "ready" | "empty" } = {},
+  options: { state?: "ready" | "empty"; pinned?: boolean } = {},
 ): MeetingsFixture {
   const readyId = "5f2d1c4b-0a9e-4d8c-b7f6-e5d4c3b2a190";
   const people: RecordingPerson[] = [
@@ -324,7 +324,38 @@ export function createMeetingsFixture(
           ),
         ];
   let audioUrl: string | null = null;
-  const models: ListRecordingModelsResponse = {
+  const pinnedModels: ListRecordingModelsResponse = {
+    models: [
+      {
+        providerId: "azure-speech",
+        providerName: "Azure Speech",
+        model: "MAI-Transcribe-2",
+        name: "MAI-Transcribe-2",
+        available: true,
+        funding: "deployment",
+        usdPerHour: 0.1,
+        capabilities: {
+          batch: true,
+          live: false,
+          diarization: false,
+          liveDiarization: false,
+          multichannel: false,
+          maxSpeakers: null,
+          wordTimestamps: true,
+          languages: [],
+          languageDetection: true,
+          keyterms: true,
+          speakerLibrary: false,
+          maxDurationSeconds: 7_200,
+          maxFileBytes: 262_144_000,
+        },
+      },
+    ],
+    default: { providerId: "azure-speech", model: "MAI-Transcribe-2" },
+    dictationDefault: { providerId: "azure-speech", model: "MAI-Transcribe-2" },
+    pinned: true,
+  };
+  const unpinnedModels: ListRecordingModelsResponse = {
     models: [
       {
         providerId: "elevenlabs",
@@ -332,6 +363,7 @@ export function createMeetingsFixture(
         model: "scribe_v2",
         name: "Scribe v2",
         available: true,
+        funding: "workspace_key",
         usdPerHour: 0.4,
         capabilities: {
           batch: true,
@@ -355,6 +387,7 @@ export function createMeetingsFixture(
         model: "scribe_v2_realtime",
         name: "Scribe v2 Realtime",
         available: true,
+        funding: "workspace_key",
         usdPerHour: 0.39,
         capabilities: {
           batch: false,
@@ -372,9 +405,36 @@ export function createMeetingsFixture(
           maxFileBytes: null,
         },
       },
+      {
+        providerId: "codex-subscription",
+        providerName: "ChatGPT subscription",
+        model: "chatgpt-dictation",
+        name: "ChatGPT dictation",
+        available: true,
+        funding: "workspace_subscription",
+        usdPerHour: 0,
+        capabilities: {
+          batch: true,
+          live: false,
+          diarization: false,
+          liveDiarization: false,
+          multichannel: false,
+          maxSpeakers: null,
+          wordTimestamps: false,
+          languages: [],
+          languageDetection: true,
+          keyterms: false,
+          speakerLibrary: false,
+          maxDurationSeconds: 600,
+          maxFileBytes: null,
+        },
+      },
     ],
     default: { providerId: "elevenlabs", model: "scribe_v2" },
+    dictationDefault: null,
+    pinned: false,
   };
+  const models = options.pinned ? pinnedModels : unpinnedModels;
   const liveSegments: RecordingLiveSegment[] = LIVE_LINES.map(
     ([trackNumber, seconds, text], index) => ({
       trackNumber,

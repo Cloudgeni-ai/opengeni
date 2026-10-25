@@ -26,6 +26,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
+import { textModelCapabilities } from "@opengeni/core/transcription-service";
 import { createHash } from "node:crypto";
 import { createRecordingActivities } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -68,6 +70,7 @@ function fakeProvider(
   return {
     id: "elevenlabs",
     name: "Fake",
+    funding: "workspace_key",
     models: [
       {
         model: "scribe_v2",
@@ -94,7 +97,14 @@ function fakeProvider(
   };
 }
 
-async function capturedRecording(storage: ReturnType<typeof memoryStorage>) {
+async function capturedRecording(
+  storage: ReturnType<typeof memoryStorage>,
+  transcription: { providerId: string; model: string; options: Record<string, unknown> } = {
+    providerId: "elevenlabs",
+    model: "scribe_v2",
+    options: { language: "en" },
+  },
+) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
@@ -159,7 +169,7 @@ async function capturedRecording(storage: ReturnType<typeof memoryStorage>) {
       { trackNumber: 0, chunkCount: 2 },
       { trackNumber: 1, chunkCount: 2 },
     ],
-    transcription: { providerId: "elevenlabs", model: "scribe_v2", options: { language: "en" } },
+    transcription,
   });
   return {
     actor,
@@ -185,7 +195,7 @@ function activities(
     ({
       db: client!.db,
       objectStorage: storage.storage,
-      settings: { voiceInputFfmpegPath: ffmpegPath },
+      settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
       observability: { warn: (message: string) => warnings.push(message), info: () => undefined },
       startRecordingWorkflow: null,
     }) as unknown as ControlActivityServices;
@@ -450,6 +460,105 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(version).toMatchObject({ state: "failed", errorCode: "missing_provider_key" });
   });
 
+  test("a model that returns only text hears each of our diarizer's speakers on their own", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "codex-subscription",
+      model: "chatgpt-dictation",
+      options: {},
+    });
+    const heard: Array<{ fileName: string; scope: unknown }> = [];
+    let signedIn = true;
+    const texts: Record<string, string> = {
+      "track-0.webm": "Hello team.",
+      "track-1-0.webm": "Hi there.",
+      "track-1-1.webm": "Yes.",
+    };
+    const subscription: RecordingTranscriptionProvider = {
+      id: "codex-subscription",
+      name: "ChatGPT subscription",
+      funding: "workspace_subscription",
+      available: () => signedIn,
+      models: [
+        {
+          model: "chatgpt-dictation",
+          name: "ChatGPT dictation",
+          usdPerHour: 0,
+          capabilities: textModelCapabilities({ maxDurationSeconds: 600, maxFileBytes: null }),
+        },
+      ],
+      transcribe: async (request, credentials) => {
+        expect(credentials).toBeNull();
+        heard.push({ fileName: request.audio.fileName, scope: request.scope });
+        return {
+          languages: ["en"],
+          audioMilliseconds: null,
+          diarized: false,
+          words: [],
+          text: texts[request.audio.fileName] ?? "",
+        };
+      },
+    };
+    const ours: RecordingDiarizer = {
+      id: "test",
+      diarize: async () => ({
+        turns: [
+          { startMilliseconds: 0, endMilliseconds: 900, speaker: "S0" },
+          { startMilliseconds: 1_000, endMilliseconds: 2_000, speaker: "S1" },
+        ],
+        voices: [],
+        voiceModel: "test-voices",
+      }),
+    };
+    const version = async () => {
+      const versionId = crypto.randomUUID();
+      await createRecordingTranscriptVersion(client!.db, {
+        ...recording.actor,
+        recordingId: recording.input.recordingId,
+        versionId,
+        transcription: {
+          providerId: "codex-subscription",
+          model: "chatgpt-dictation",
+          options: {},
+        },
+      });
+      return { ...recording.input, versionId, processingOwner: versionId };
+    };
+    const run = activities(storage, subscription, null, ours).activities;
+    const first = recording.input;
+    expect(await run.transcribeRecordingVersion(first)).toEqual({ outcome: "complete" });
+    expect(heard.map((call) => call.fileName).sort()).toEqual([
+      "track-0.webm",
+      "track-1-0.webm",
+      "track-1-1.webm",
+    ]);
+    expect(heard[0]!.scope).toMatchObject({
+      accountId: recording.input.accountId,
+      workspaceId: recording.input.workspaceId,
+      subjectId: recording.input.ownerSubjectId,
+    });
+    const page = await getRecordingTranscriptPage(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      versionId: first.versionId,
+    });
+    expect(page.version.diarization).toBe("ours");
+    expect(page.segments.map((segment) => [segment.speakerLabel, segment.text]).sort()).toEqual([
+      ["speaker_0", "Hi there."],
+      ["speaker_1", "Yes."],
+      ["track-0", "Hello team."],
+    ]);
+    // Signed out of the subscription: the version fails without sending audio.
+    signedIn = false;
+    const second = await version();
+    expect(await run.transcribeRecordingVersion(second)).toEqual({
+      outcome: "failed",
+      errorCode: "missing_provider_key",
+    });
+    expect(heard).toHaveLength(3);
+  });
+
   test("deletion removes every object of the recording, then its rows", async () => {
     if (!client) return;
     const storage = memoryStorage();
@@ -556,7 +665,7 @@ function dictationActivities(
     ({
       db: client!.db,
       objectStorage: storage.storage,
-      settings: { voiceInputFfmpegPath: ffmpegPath },
+      settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
       observability: { warn: () => undefined, info: () => undefined },
       startRecordingWorkflow: null,
     }) as unknown as ControlActivityServices;

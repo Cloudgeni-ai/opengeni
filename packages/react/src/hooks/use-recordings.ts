@@ -968,6 +968,8 @@ export function useRecordingModels(
   models: ListRecordingModelsResponse["models"];
   liveModels: ListRecordingModelsResponse["models"];
   defaultModel: ListRecordingModelsResponse["default"] | null;
+  /** The deployment uses one model for every transcription; workspaces cannot pick. */
+  pinned: boolean;
   loading: boolean;
   error: Error | null;
 } {
@@ -988,6 +990,7 @@ export function useRecordingModels(
     models,
     liveModels,
     defaultModel: state.data?.default ?? null,
+    pinned: state.data?.pinned === true,
     loading: state.loading,
     error: state.error,
   };

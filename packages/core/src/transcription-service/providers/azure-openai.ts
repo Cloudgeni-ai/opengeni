@@ -1,6 +1,17 @@
 import { voiceInputModelReportsDurationOnly, type VoiceInputPricing } from "@opengeni/config";
-import type { TranscriptionProvider } from "../../transcription";
-import { fetchError, parseTranscriptionResponseBody, responseError } from "./openai";
+import type { RecordingTranscriptionProvider } from "../../recording-transcription";
+import {
+  deploymentTextModel,
+  requestIdOf,
+  textRequestAudio,
+  textTranscriptionResult,
+} from "../text-models";
+import {
+  fetchError,
+  OPENAI_TRANSCRIPTION_LIMITS,
+  parseTranscriptionResponseBody,
+  responseError,
+} from "./openai";
 
 export function createAzureOpenAiTranscriptionProvider(input: {
   endpoint: string;
@@ -12,19 +23,33 @@ export function createAzureOpenAiTranscriptionProvider(input: {
   model?: string;
   pricing?: VoiceInputPricing | null;
   fetch?: typeof fetch;
-}): TranscriptionProvider {
+}): RecordingTranscriptionProvider {
   const fetchImpl = input.fetch ?? fetch;
   const model = input.model ?? input.deployment;
   const endpoint = input.endpoint.replace(/\/+$/, "");
   const url = `${endpoint}/openai/deployments/${encodeURIComponent(input.deployment)}/audio/transcriptions?api-version=${encodeURIComponent(input.apiVersion)}`;
   return {
     id: "azure-openai",
-    supportsServerDeadline: true,
-    deploymentFunded: { model, pricing: input.pricing ?? null },
+    name: "Azure OpenAI",
+    funding: "deployment",
+    models: [
+      deploymentTextModel({
+        model,
+        name: model,
+        pricing: input.pricing ?? null,
+        ...OPENAI_TRANSCRIPTION_LIMITS,
+      }),
+    ],
     available: () => Boolean(input.apiKey || input.adToken),
-    async transcribe({ audio, mimeType, filename, requestId, signal }) {
+    async transcribe(request) {
+      const { audio, mimeType, filename } = textRequestAudio(request);
+      const requestId = requestIdOf(request);
+      const signal = request.signal;
       const form = new FormData();
       form.append("file", new Blob([Uint8Array.from(audio).buffer], { type: mimeType }), filename);
+      if (request.language && /^[a-z]{2}$/u.test(request.language)) {
+        form.append("language", request.language);
+      }
       // Whisper reports its billed audio duration only in verbose_json.
       if (voiceInputModelReportsDurationOnly(model)) {
         form.append("response_format", "verbose_json");
@@ -49,7 +74,7 @@ export function createAzureOpenAiTranscriptionProvider(input: {
       if (!parsed) {
         throw responseError(502);
       }
-      return parsed;
+      return textTranscriptionResult(parsed);
     },
   };
 }

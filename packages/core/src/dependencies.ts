@@ -22,6 +22,7 @@ import type { ManagedAuth } from "./managed-auth-type";
 import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
+import type { SpeechToTextDeployment } from "./transcription-service/deployment";
 import type { ModelCallService } from "./model-call";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
 import type { ResolvedCatalogSettings } from "./model-catalog";
@@ -298,6 +299,11 @@ export type AppDependencies = {
   oauthStartDeadlineMs?: number;
   /** Injectable MCP OAuth callback deadline for deterministic stalled-provider tests. */
   oauthCallbackDeadlineMs?: number;
+  /**
+   * The deployment's speech-to-text providers, shared by voice input and
+   * recordings; built from settings when omitted.
+   */
+  speechToText?: SpeechToTextDeployment;
   /** Optional host-owned voice-input transcription service. */
   transcription?: TranscriptionService | null;
   /** Optional host-owned long-form audio normalization/segmentation service. */

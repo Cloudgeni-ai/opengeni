@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import {
   type RecordingPerson,
   type RecordingRetention,
+  type RecordingTranscriptionModel,
   type RecordingVisibility,
   type WorkspaceRecordingSettings,
 } from "@opengeni/contracts";
@@ -35,6 +36,34 @@ const KEEP = "keep";
 
 const AUDIO_PERIODS = [0, 7, 30, 90, 365] as const;
 const MEETING_PERIODS = [30, 90, 180, 365, 730] as const;
+
+/** What a model costs and who pays, beside its name in the picker. */
+export function transcriptionModelMeta(
+  entry: RecordingTranscriptionModel,
+  msg: OpenGeniText = defaultText,
+): string {
+  if (entry.funding === "workspace_subscription") return msg("meetings.settings.yourSubscription");
+  if (entry.usdPerHour !== null && entry.usdPerHour > 0) {
+    return msg("meetings.settings.valuePerHour", { value: entry.usdPerHour.toFixed(2) });
+  }
+  return entry.providerName;
+}
+
+/** Why a model can't be picked yet, and what makes it pickable. */
+export function transcriptionModelUnavailableReason(
+  entry: RecordingTranscriptionModel,
+  msg: OpenGeniText = defaultText,
+): string {
+  const providerName = entry.providerName;
+  switch (entry.funding) {
+    case "workspace_subscription":
+      return msg("meetings.settings.connectYourProvidernameFirst", { providerName });
+    case "workspace_key":
+      return msg("meetings.settings.connectProvidernameFirst", { providerName });
+    case "deployment":
+      return msg("meetings.settings.providernameIsnTAvailableHere", { providerName });
+  }
+}
 
 /** "30 days", "1 year", "2 years". */
 export function retentionPeriodName(days: number, msg: OpenGeniText = defaultText): string {
@@ -154,23 +183,29 @@ export function MeetingDefaultsView({
   const modelOptions: SelectOption[] = [
     {
       value: DEFAULT,
+      // A pinned deployment has only that model, so it is not a default.
       label: fallbackName
-        ? msg("meetings.settings.defaultFallbackname", { fallbackName: fallbackName })
+        ? models.pinned
+          ? fallbackName
+          : msg("meetings.settings.defaultFallbackname", { fallbackName: fallbackName })
         : msg("meetings.settings.default"),
     },
     ...models.models.map((entry) => ({
       value: `${entry.providerId}/${entry.model}`,
       label: entry.name,
-      meta:
-        entry.usdPerHour !== null
-          ? msg("meetings.settings.valuePerHour", { value: entry.usdPerHour.toFixed(2) })
-          : entry.providerName,
+      meta: transcriptionModelMeta(entry, msg),
       disabled: !entry.available,
-      disabledReason: entry.available
-        ? undefined
-        : msg("meetings.settings.connectProvidernameFirst", { providerName: entry.providerName }),
+      disabledReason: entry.available ? undefined : transcriptionModelUnavailableReason(entry, msg),
     })),
   ];
+  const effective = current.transcription ?? fallback;
+  const effectiveModel = models.models.find(
+    (entry) => entry.providerId === effective?.providerId && entry.model === effective?.model,
+  );
+  const textOnlyNote =
+    effectiveModel && !effectiveModel.capabilities.wordTimestamps
+      ? msg("meetings.settings.valueHearsWordsButNot", { value: effectiveModel.name })
+      : null;
   const chooseModel = (value: string) => {
     if (value === chosen) return;
     const { transcription: _previous, ...rest } = current;
@@ -337,7 +372,11 @@ export function MeetingDefaultsView({
       )}
       <SettingRow
         label={msg("meetings.settings.transcriptionModel")}
-        description={msg("meetings.settings.turnsAMeetingSAudio")}
+        description={
+          models.pinned
+            ? msg("meetings.settings.turnsAMeetingSAudioPinned")
+            : msg("meetings.settings.turnsAMeetingSAudio")
+        }
         controlWidth="select"
         hint={
           noneAvailable ? (
@@ -348,7 +387,9 @@ export function MeetingDefaultsView({
             ) : (
               msg("meetings.settings.anOrganizationAdminNeedsTo")
             )
-          ) : undefined
+          ) : (
+            (textOnlyNote ?? undefined)
+          )
         }
         control={
           <NativeSelect
@@ -357,8 +398,12 @@ export function MeetingDefaultsView({
             value={chosen}
             onValueChange={chooseModel}
             loading={models.loading && models.models.length === 0}
-            disabled={saving || !canManage}
-            {...(reason ? { disabledReason: reason } : {})}
+            disabled={saving || !canManage || models.pinned}
+            {...(models.pinned
+              ? { disabledReason: msg("meetings.settings.thisDeploymentUsesOneModel") }
+              : reason
+                ? { disabledReason: reason }
+                : {})}
           />
         }
       />

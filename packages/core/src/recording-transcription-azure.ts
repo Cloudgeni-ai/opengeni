@@ -1,3 +1,4 @@
+import type { VoiceInputPricing } from "@opengeni/config";
 import type { RecordingTranscriptionCapabilities } from "@opengeni/contracts";
 import {
   canonicalLanguageTag,
@@ -69,7 +70,11 @@ export function parseAzureSpeechTranscript(body: unknown): RecordingTranscriptio
   if (!body || typeof body !== "object") {
     throw new RecordingTranscriptionError("Azure Speech returned no transcript", "provider", true);
   }
-  const response = body as { durationMilliseconds?: unknown; phrases?: unknown };
+  const response = body as {
+    durationMilliseconds?: unknown;
+    phrases?: unknown;
+    combinedPhrases?: unknown;
+  };
   const phrases = Array.isArray(response.phrases) ? (response.phrases as AzureSpeechPhrase[]) : [];
   const words: RecordingTranscribedWord[] = [];
   const languages = new Set<string>();
@@ -93,11 +98,22 @@ export function parseAzureSpeechTranscript(body: unknown): RecordingTranscriptio
     }
   }
   words.sort((left, right) => left.startMilliseconds - right.startMilliseconds);
+  // The whole text as the service punctuates it, which dictation uses.
+  const combined = Array.isArray(response.combinedPhrases)
+    ? (response.combinedPhrases as Array<{ text?: unknown }>)
+        .map((phrase) => (typeof phrase?.text === "string" ? phrase.text.trim() : ""))
+        .filter((text) => text.length > 0)
+        .join(" ")
+    : null;
+  const audioMilliseconds = milliseconds(response.durationMilliseconds);
   return {
     languages: [...languages],
-    audioMilliseconds: milliseconds(response.durationMilliseconds),
+    audioMilliseconds,
     diarized: false,
     words,
+    ...(combined !== null ? { text: combined } : {}),
+    usage:
+      audioMilliseconds === null ? null : { kind: "duration", seconds: audioMilliseconds / 1_000 },
   };
 }
 
@@ -147,14 +163,23 @@ function azureSpeechAuthorization(
 export function createAzureSpeechRecordingTranscriptionProvider(options: {
   /** The account's HTTPS origin, such as https://name.cognitiveservices.azure.com. */
   endpoint: string;
+  /**
+   * The account's key or Entra token, held by the deployment. When set it
+   * is used for every call; otherwise the caller passes one.
+   */
+  credentials?: () => Promise<RecordingTranscriptionCredentials>;
+  /** The deployment's credit price for this account, where credit billing is on. */
+  creditPricing?: VoiceInputPricing | null;
+  apiVersion?: string;
   fetch?: typeof fetch;
   timeoutMilliseconds?: number;
 }): RecordingTranscriptionProvider {
   const request = options.fetch ?? fetch;
-  const url = `${options.endpoint.replace(/\/+$/u, "")}/speechtotext/transcriptions:transcribe?api-version=${AZURE_SPEECH_API_VERSION}`;
+  const url = `${options.endpoint.replace(/\/+$/u, "")}/speechtotext/transcriptions:transcribe?api-version=${encodeURIComponent(options.apiVersion ?? AZURE_SPEECH_API_VERSION)}`;
   return {
     id: AZURE_SPEECH_PROVIDER_ID,
     name: "Azure Speech",
+    funding: "deployment",
     models: [
       {
         model: "MAI-Transcribe-2",
@@ -163,9 +188,18 @@ export function createAzureSpeechRecordingTranscriptionProvider(options: {
         // Launch price through 2026; Microsoft has not published the later one.
         usdPerHour: 0.1,
         audioFormats: ["flac", "wav", "mp3"],
+        ...(options.creditPricing !== undefined ? { creditPricing: options.creditPricing } : {}),
       },
     ],
     async transcribe(input, credentials) {
+      const auth = options.credentials ? await options.credentials() : credentials;
+      if (!auth) {
+        throw new RecordingTranscriptionError(
+          "Azure Speech has no credential",
+          "unauthorized",
+          false,
+        );
+      }
       const definition = {
         enhancedMode: {
           enabled: true,
@@ -192,7 +226,7 @@ export function createAzureSpeechRecordingTranscriptionProvider(options: {
       try {
         response = await request(url, {
           method: "POST",
-          headers: azureSpeechAuthorization(credentials),
+          headers: azureSpeechAuthorization(auth),
           body: form,
           signal,
         });
