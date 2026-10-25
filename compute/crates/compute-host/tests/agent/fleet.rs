@@ -219,6 +219,62 @@ async fn a_running_sandbox_is_handed_off_when_asked_to_go_awake() {
     two.assert_clean();
 }
 
+/// A sandbox asked to wake, whose wake keeps failing for now, is wanted
+/// awake though nothing holds it: a drain of what sleeps leaves it, and
+/// one asked to go awake ends the wake, tells whoever waits for it here
+/// that it is going, and saves it where it stands instead of waiting for
+/// a wake to get through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hand_off_asked_to_go_awake_ends_a_wake_still_retrying() {
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(5);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept"]).await;
+    assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    one.wait_level(sandbox, LevelName::Paused).await;
+    one.world.refuse_resumes.store(true, Ordering::SeqCst);
+    let touch = Request::Touch {
+        id: sandbox,
+        generation: None,
+        priority: PriorityName::Interactive,
+    };
+    assert_eq!(one.client.call(&touch).await.unwrap(), Reply::Done);
+    one.wait_until("a refused resume", |status| {
+        status
+            .steps
+            .iter()
+            .any(|(name, stats)| name == "resume" && stats.failed > 0)
+    })
+    .await;
+    assert_eq!(
+        code(&hand_off(&one, sandbox, 1).await),
+        Some(ErrorCode::Busy),
+        "wanted awake, it stays unless asked to go awake"
+    );
+
+    let (woken, handed) = tokio::join!(
+        one.handle.acquire(sandbox, None, Priority::Interactive),
+        async {
+            sleep(Duration::from_millis(50)).await;
+            hand_off_awake(&one, sandbox, 1).await
+        },
+    );
+    let Err(error) = woken else {
+        panic!("a wait for it to wake here got through");
+    };
+    assert!(matches!(error, HostError::HandingOff(_)), "{error:?}");
+    assert_eq!(handed, Reply::Done);
+    assert_eq!(one.status().await.sandboxes, Vec::new());
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(
+        two.run(sandbox, &["get"]).await,
+        ["kept"],
+        "its programs moved with it"
+    );
+    one.assert_clean();
+    two.assert_clean();
+}
+
 /// An adopted sandbox's record keeps the length of the disk it was handed
 /// off with, so what its wake books is its own disk's, never the adopting
 /// host's base image, however much shorter that is.

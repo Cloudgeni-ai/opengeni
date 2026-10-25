@@ -851,10 +851,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Notice::Retrying { step, failures } => {
                 tracing::warn!(%id, ?step, failures, "step failed; retrying");
             }
-            Notice::Unsavable => tracing::warn!(
-                %id,
-                "no copy of the VM can be trusted; it sleeps no deeper than compressed"
-            ),
+            Notice::Unsavable => {
+                tracing::warn!(
+                    %id,
+                    "no copy of the VM can be trusted; it sleeps no deeper than compressed"
+                );
+                // A hand-off needs a copy, so one under way ends.
+                self.continue_hand_off(id);
+            }
             Notice::Broken => {
                 tracing::error!(%id, "sandbox broken on this host");
                 self.alarm(id, Alarm::Broken, "sandbox broken on this host");

@@ -1034,6 +1034,39 @@ fn letting_go_ends_every_hold_so_a_sleep_request_goes_ahead_at_once() {
 }
 
 #[test]
+fn letting_go_ends_a_wake_still_retrying_so_a_sleep_request_goes_ahead() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, paused(Durability::Volatile), SleepPolicy::NEVER);
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Resume);
+    // The resume is refused for now: the wake waits to try again.
+    rig.finish(1, op, Outcome::Failed(Failure::Transient));
+    assert!(rig.host.sandbox(SandboxId(1)).unwrap().wants_awake);
+    rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Archived,
+    });
+    rig.send(Input::LetGo {
+        sandbox: SandboxId(1),
+    });
+    let view = rig.host.sandbox(SandboxId(1)).unwrap();
+    assert!(!view.wants_awake, "nothing wants it awake any more");
+    assert_eq!(view.requested, Level::Archived);
+    // Once the backoff ends it saves the paused VM instead of resuming it.
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Save);
+    let mut steps = vec![step];
+    let mut actions = rig.finish(1, op, Outcome::Done);
+    while let [(_, step, op)] = started(&actions)[..] {
+        steps.push(step);
+        actions = rig.finish(1, op, Outcome::Done);
+    }
+    assert_eq!(steps, [Step::Save, Step::Drop, Step::Archive]);
+    assert_eq!(rig.state(1).level, Level::Archived);
+    assert!(rig.state(1).memory_saved, "its programs go with it");
+}
+
+#[test]
 fn work_inside_a_running_sandbox_keeps_it_awake_but_never_wakes_it() {
     let mut rig = Rig::new(HostPolicy::default());
     rig.add(1, State::RUNNING, recommended());

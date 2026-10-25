@@ -391,12 +391,15 @@ authority alone for agent links.
   drain again until none are left. Some never let go: a desktop someone
   keeps open, a program that never stops working. Once the sandboxes
   that go to sleep have gone, drain with `{"awake": true}` as the body:
-  each sandbox still awake then has its holds ended and is paused, saved
-  and archived where it stands, memory and all, and carries on where its
-  next wake places it after a pause of seconds to a minute. Its open
-  connections end, as in any move; a command still running goes on, and
-  its output stays readable. A host from before this option ignores it
-  and leaves those sandboxes `left`. `POST /v1/sandboxes/<id>/move` takes
+  each sandbox still awake then has its holds and any wake asked of it
+  ended and is paused, saved and archived where it stands, memory and
+  all, and carries on where its next wake places it after a pause of
+  seconds to a minute. Its open connections end, as in any move; a
+  command still running goes on, and its output stays readable. One
+  whose VM cannot be saved (its disk may have lost writes) stays `left`:
+  deleting the host recovers it from its latest archive. A host from
+  before this option ignores it and leaves those sandboxes `left`.
+  `POST /v1/sandboxes/<id>/move` takes
   `"awake": true` too. `POST /v1/hosts/<name>/undrain` takes the host
   back.
 - **Removing a host.** Drain it to zero, then delete the machine (on GCP,

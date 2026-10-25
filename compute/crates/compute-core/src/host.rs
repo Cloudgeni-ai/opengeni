@@ -126,9 +126,11 @@ pub enum Input {
         /// The reason that ended.
         hold: HoldId,
     },
-    /// Every hold on the sandbox ended at once, whatever held it, as when
-    /// its host hands it off awake. Counts as activity, as a release does;
-    /// a hold released later, already ended here, changes nothing.
+    /// Nothing here wants the sandbox awake any more: every hold on it
+    /// ended at once, whatever held it, and so did any wake asked of it,
+    /// even one still retrying, as when its host hands it off awake.
+    /// Counts as activity, as a release does; a hold released later,
+    /// already ended here, changes nothing.
     LetGo {
         /// The sandbox.
         sandbox: SandboxId,
@@ -864,14 +866,14 @@ impl Host {
     }
 
     /// Takes in [`Input::Release`] of `hold`, or [`Input::LetGo`] for
-    /// every hold.
+    /// every hold and any wake asked.
     fn release(&mut self, now: At, sandbox: SandboxId, hold: Option<HoldId>) {
         if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
-            match hold {
-                Some(hold) => {
-                    slot.holds.remove(&hold);
-                }
-                None => slot.holds.clear(),
+            if let Some(hold) = hold {
+                slot.holds.remove(&hold);
+            } else {
+                slot.holds.clear();
+                slot.wake = None;
             }
             slot.touch(now);
             self.mark(sandbox);

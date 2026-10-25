@@ -412,10 +412,14 @@ can be built and tested.
   open, a program that never stops), and a drain that waits for them never
   ends, so the host could only be deleted, losing their programs. Asked
   to, a drain or move sends `hand_off` with `awake`: the host ends every
-  hold on the sandbox, refuses new ones as it refuses wakes, and pauses,
-  saves and archives it where it stands, memory and all, so it carries on
-  after a pause on the host that adopts it, its open connections ended.
-  A host that predates `awake` ignores it and refuses as before.
+  hold on the sandbox and any wake asked of it (whoever waits for that
+  wake asks again and finds it on its new host), refuses new ones as it
+  refuses wakes, and pauses, saves and archives it where it stands,
+  memory and all, so it carries on after a pause on the host that adopts
+  it, its open connections ended. A sandbox whose VM cannot be saved
+  (its disk may have lost writes) keeps its programs only while that VM
+  lives, so its hand-off fails and it stays. A host that predates
+  `awake` ignores it and refuses as before.
 - **Autoscaling.** The leader compares the fleet's spare memory (free
   above each host's buffer, per memory profile) with a target, the larger
   of a fraction of the fleet and room for a few of the largest shapes, and

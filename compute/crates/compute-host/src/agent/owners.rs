@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-use compute_core::{Input, Level, SandboxId};
+use compute_core::{Durability, Input, Level, SandboxId};
 use compute_engine::Engine;
 use compute_protocol::fleet::{Ruling, Verdict};
 use tokio::sync::oneshot;
@@ -588,8 +588,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
         };
-        let held = view.holds > 0;
-        if (held || view.runs()) && !awake {
+        // Held, or asked to wake (perhaps still retrying), it is wanted
+        // awake here: only a hand-off asked to go awake takes it.
+        let wanted = view.wants_awake;
+        if (wanted || view.runs()) && !awake {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
         }
@@ -597,7 +599,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(error));
             return;
         }
-        if held {
+        if wanted {
+            // Whoever waits for it to wake here asks again and finds it on
+            // the host it goes to.
+            if let Some(slot) = self.slots.get_mut(&id.0) {
+                for waiter in slot.waiters.drain(..) {
+                    let _ = waiter.reply.send(Err(HostError::HandingOff(id)));
+                }
+            }
             self.input(Input::LetGo { sandbox: id.0 });
         }
         self.handing_off.insert(id.0, vec![reply]);
@@ -616,18 +625,25 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Moves a hand-off of sandbox `id` on once its latest state is in the
     /// store and nothing of it runs: its removal begins, keeping the
     /// store's copy, and its waiters are answered once the removal ends.
+    /// One that cannot get there ends: a sandbox broken here, or one whose
+    /// VM process cannot be saved, which keeps its programs only while
+    /// that process lives, so it stays here and wakes again.
     pub(super) fn continue_hand_off(&mut self, id: Id) {
         if !self.handing_off.contains_key(&id.0) {
             return;
         }
-        if self.core.sandbox(id.0).is_some_and(|view| view.broken) {
+        let view = self.core.sandbox(id.0);
+        if view.is_some_and(|view| view.broken) {
             self.fail_hand_off(id, &HostError::Broken(id));
             return;
         }
-        let archived = self
-            .core
-            .sandbox(id.0)
-            .is_some_and(|view| view.step.is_none() && view.state.level >= Level::Archived);
+        if view.is_some_and(|view| view.unsavable && view.state.durability == Durability::Volatile)
+        {
+            self.fail_hand_off(id, &super::requests::cannot_save(id));
+            return;
+        }
+        let archived =
+            view.is_some_and(|view| view.step.is_none() && view.state.level >= Level::Archived);
         let Some(slot) = self.slots.get_mut(&id.0) else {
             return;
         };
