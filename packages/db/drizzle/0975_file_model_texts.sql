@@ -16,7 +16,8 @@ CREATE TABLE file_model_texts (
   -- What produced the row, for example anydoc@0.1.8 or utf8.
   extractor text NOT NULL CHECK (char_length(extractor) BETWEEN 1 AND 64),
   status text NOT NULL CHECK (status IN (
-    'extracted', 'unsupported', 'encrypted', 'malformed', 'too_large', 'failed', 'timeout'
+    'extracted', 'unsupported', 'encrypted', 'malformed', 'too_large', 'failed', 'timeout',
+    'unavailable'
   )),
   format text NOT NULL CHECK (format IN ('markdown', 'text')),
   -- The start of the extracted text; total_chars is the length of all of it.

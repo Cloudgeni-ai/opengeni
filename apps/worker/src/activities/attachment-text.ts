@@ -16,7 +16,8 @@ import { RetainedAttachmentUnavailableError, textHead } from "./run-input";
  * running a parser in the sandbox. Extraction runs in-process the first time a
  * message carrying the file is rendered for a model (a few milliseconds for
  * ordinary documents) and its result, success or failure, is stored once, so
- * every later request renders the same bytes.
+ * every later request renders the same bytes. Every eligible file gets a
+ * stored result on its first render, even when nothing could be extracted.
  */
 
 /** Must match the pinned `@firecrawl/anydoc` dependency of this package. */
@@ -200,56 +201,111 @@ function anyDocFailureStatus(error: unknown): Exclude<FileModelText["status"], "
   }
 }
 
+/** One extraction, for logs and metrics. */
+export type AttachmentTextExtractionEvent = {
+  kind: AttachmentTextKind;
+  status: FileModelText["status"];
+  durationMs: number;
+  /**
+   * "result" is the outcome the turn stored. "after_timeout" reports how a
+   * conversion that timed out eventually ended, which shows whether the
+   * timeout is too short; it never changes what was stored.
+   */
+  phase: "result" | "after_timeout";
+};
+
 /**
- * Extract the text a model is shown for one file's verified bytes. Returns
- * undefined when the extractor itself cannot run here (its native module is
- * missing), which says nothing about the file and so is not stored.
+ * Extract the text a model is shown for one file's verified bytes. Every call
+ * returns a result to store, including when the extractor itself cannot run
+ * on this worker: whatever a message shows the first time it is rendered is
+ * what it shows forever, so a later worker that can extract must not add text
+ * to a message a model has already seen without it.
  */
 export async function extractAttachmentText(
-  file: Pick<FileAsset, "id" | "contentType" | "filename">,
+  file: Pick<FileAsset, "id" | "contentType" | "filename" | "sizeBytes">,
   bytes: Uint8Array,
-  options: { timeoutMs?: number; loadExtractor?: () => Promise<AnyDocModule> } = {},
-): Promise<ExtractedAttachmentText | undefined> {
+  options: {
+    timeoutMs?: number;
+    loadExtractor?: () => Promise<AnyDocModule>;
+    observe?: ((event: AttachmentTextExtractionEvent) => void) | undefined;
+  } = {},
+): Promise<ExtractedAttachmentText> {
+  const startedAt = performance.now();
   const kind = attachmentTextKind(file);
-  if (kind === null) return undefined;
+  const finish = (result: ExtractedAttachmentText): ExtractedAttachmentText => {
+    if (kind !== null) {
+      options.observe?.({
+        kind,
+        status: result.status,
+        durationMs: performance.now() - startedAt,
+        phase: "result",
+      });
+    }
+    return result;
+  };
+  if (kind === null) return failure(UTF8_EXTRACTOR, "text", "unsupported");
   if (kind === "text") {
     try {
       const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      if (text.includes("\u0000")) return failure(UTF8_EXTRACTOR, "text", "unsupported");
-      return extracted(UTF8_EXTRACTOR, "text", text);
+      if (text.includes("\u0000")) return finish(failure(UTF8_EXTRACTOR, "text", "unsupported"));
+      return finish(extracted(UTF8_EXTRACTOR, "text", text));
     } catch {
-      return failure(UTF8_EXTRACTOR, "text", "unsupported");
+      return finish(failure(UTF8_EXTRACTOR, "text", "unsupported"));
     }
   }
   let anyDoc: AnyDocModule;
   try {
     anyDoc = await (options.loadExtractor ?? loadAnyDoc)();
   } catch (error) {
-    console.error("document text extractor is unavailable", {
+    console.error("document text extractor is unavailable on this worker", {
       fileId: file.id,
       errorType: error instanceof Error ? error.name : typeof error,
     });
-    return undefined;
+    return finish(failure(ANYDOC_EXTRACTOR, "markdown", "unavailable"));
   }
   const format = anyDoc.formatFromBytes(bytes) ?? anyDoc.formatFromPath(file.filename);
-  if (!format) return failure(ANYDOC_EXTRACTOR, "markdown", "unsupported");
+  if (!format) return finish(failure(ANYDOC_EXTRACTOR, "markdown", "unsupported"));
+  const timeoutMs = options.timeoutMs ?? ATTACHMENT_TEXT_EXTRACTION_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<"timeout">((resolve) => {
-    timer = setTimeout(
-      () => resolve("timeout"),
-      options.timeoutMs ?? ATTACHMENT_TEXT_EXTRACTION_TIMEOUT_MS,
-    );
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
   });
+  // The conversion runs on the native thread pool and cannot be cancelled;
+  // AnyDoc's own decompression, nesting and node limits bound it.
+  const conversion = anyDoc.toMarkdownBytes(bytes, format);
   try {
-    // The conversion runs on the native thread pool and cannot be cancelled;
-    // AnyDoc's own decompression, nesting and node limits bound it.
-    const result = await Promise.race([anyDoc.toMarkdownBytes(bytes, format), timeout]);
-    if (result === "timeout") return failure(ANYDOC_EXTRACTOR, "markdown", "timeout");
-    return extracted(ANYDOC_EXTRACTOR, "markdown", result);
+    const result = await Promise.race([conversion, timeout]);
+    if (result === "timeout") {
+      console.warn("document text extraction timed out", {
+        fileId: file.id,
+        contentType: file.contentType,
+        sizeBytes: file.sizeBytes,
+        timeoutMs,
+      });
+      // A timeout is final for the file, so its text stays the same on every
+      // request. Report how long the conversion really took.
+      conversion.then(
+        () => reportAfterTimeout("extracted"),
+        (error: unknown) => reportAfterTimeout(anyDocFailureStatus(error)),
+      );
+      return finish(failure(ANYDOC_EXTRACTOR, "markdown", "timeout"));
+    }
+    return finish(extracted(ANYDOC_EXTRACTOR, "markdown", result));
   } catch (error) {
-    return failure(ANYDOC_EXTRACTOR, "markdown", anyDocFailureStatus(error));
+    return finish(failure(ANYDOC_EXTRACTOR, "markdown", anyDocFailureStatus(error)));
   } finally {
     clearTimeout(timer);
+  }
+
+  function reportAfterTimeout(status: FileModelText["status"]): void {
+    const durationMs = performance.now() - startedAt;
+    console.warn("document text extraction finished after its timeout", {
+      fileId: file.id,
+      status,
+      durationMs: Math.round(durationMs),
+      timeoutMs,
+    });
+    options.observe?.({ kind: "document", status, durationMs, phase: "after_timeout" });
   }
 }
 
@@ -269,8 +325,11 @@ export function createAttachmentTextLoader(deps: {
   accountId: string;
   readFileBytes?: ((file: FileAsset) => Promise<Uint8Array>) | undefined;
   extract?: typeof extractAttachmentText;
+  observe?: (event: AttachmentTextExtractionEvent) => void;
 }): AttachmentTextLoader {
   const extract = deps.extract ?? extractAttachmentText;
+  const store = async (file: FileAsset, result: ExtractedAttachmentText) =>
+    await recordFileModelText(deps.db, { accountId: deps.accountId, fileId: file.id, ...result });
   return async (files) => {
     const eligible = files.filter(attachmentTextEligible);
     const texts = new Map<string, FileModelText>();
@@ -283,7 +342,18 @@ export function createAttachmentTextLoader(deps: {
     }
     const readFileBytes = deps.readFileBytes;
     const missing = eligible.filter((file) => !texts.has(file.id));
-    if (!readFileBytes || missing.length === 0) return texts;
+    if (missing.length === 0) return texts;
+    if (!readFileBytes) {
+      // Without file storage there is nothing to extract, now or later.
+      for (const file of missing) {
+        const unavailable =
+          attachmentTextKind(file) === "text"
+            ? failure(UTF8_EXTRACTOR, "text", "unavailable")
+            : failure(ANYDOC_EXTRACTOR, "markdown", "unavailable");
+        texts.set(file.id, await store(file, unavailable));
+      }
+      return texts;
+    }
     const unavailable: string[] = [];
     let cursor = 0;
     const worker = async () => {
@@ -306,15 +376,9 @@ export function createAttachmentTextLoader(deps: {
         ) {
           throw new Error(`Retained attachment bytes unavailable or invalid: ${file.id}`);
         }
-        const result = await extract(file, bytes);
-        if (!result) continue;
         texts.set(
           file.id,
-          await recordFileModelText(deps.db, {
-            accountId: deps.accountId,
-            fileId: file.id,
-            ...result,
-          }),
+          await store(file, await extract(file, bytes, { observe: deps.observe })),
         );
       }
     };

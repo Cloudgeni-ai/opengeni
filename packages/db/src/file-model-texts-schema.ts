@@ -11,6 +11,9 @@ export const FILE_MODEL_TEXT_STATUSES = [
   "too_large",
   "failed",
   "timeout",
+  // Nothing could be extracted where the file was first rendered, for
+  // example a worker without the document parser. Final like the others.
+  "unavailable",
 ] as const;
 export type FileModelTextStatus = (typeof FILE_MODEL_TEXT_STATUSES)[number];
 

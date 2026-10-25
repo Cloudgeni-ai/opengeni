@@ -474,9 +474,16 @@ function attachmentTextExcerpt(text: string, limit: number): string {
   return lineEnd >= head.length / 2 ? head.slice(0, lineEnd) : head;
 }
 
-/** Document text cannot close the element that carries it. */
+/**
+ * Document text can neither open nor close the element that carries it, in
+ * any case or spacing, nor start a line that reads like one of our own
+ * attachment headers. The `<` or `[` becomes a visible escape, so the text
+ * still reads naturally.
+ */
 function escapedAttachmentText(text: string): string {
-  return text.replace(/<\/(attachment_text)/gi, "<\\/$1");
+  return text
+    .replace(/<(\s*\/?\s*attachment_text)/gi, "&lt;$1")
+    .replace(/\[(\s*attachment(?:\s+text)?\s*:)/gi, "\\[$1");
 }
 
 function attachmentTextUnavailableReason(entry: FileModelText): string {
@@ -493,6 +500,8 @@ function attachmentTextUnavailableReason(entry: FileModelText): string {
       return "the file is too large or complex to extract automatically";
     case "timeout":
       return "extraction did not finish in time";
+    case "unavailable":
+      return "text extraction was not available for this file";
     default:
       return "extraction failed";
   }

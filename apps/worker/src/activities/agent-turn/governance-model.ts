@@ -412,6 +412,19 @@ export async function prepareGovernanceAndModel(
       db,
       accountId: input.accountId,
       readFileBytes: readAttachmentBytes,
+      observe: ({ kind, status, durationMs, phase }) => {
+        observability.incrementCounter({
+          name: "opengeni_attachment_text_extractions_total",
+          help: "Attachment text extractions by file kind, outcome, and phase (result or after_timeout).",
+          labels: { kind, status, phase },
+        });
+        observability.observeHistogram({
+          name: "opengeni_attachment_text_extraction_duration_seconds",
+          help: "Attachment text extraction time; after_timeout shows when a timed-out conversion really ended.",
+          labels: { kind, phase },
+          value: durationMs / 1000,
+        });
+      },
     }),
   );
   const useReasoningUpdates =
