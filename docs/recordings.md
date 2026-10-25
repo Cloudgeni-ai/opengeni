@@ -245,7 +245,21 @@ The worker image ships the model as `alignment.onnx` and
 `alignment-tokens.txt` (with its license) next to the speaker models,
 pinned by checksum.
 
-ALIGNER_NUMBERS
+Measured against ElevenLabs Scribe v2's own word timings, on a 16-core
+desktop CPU with 8 threads:
+
+| Audio | Words | Starts within 100 ms | Within 200 ms | Median start error |
+| --- | --- | --- | --- | --- |
+| English meeting, 5 min | 412 | 91.0% | 92.7% | 20 ms |
+| Norwegian read speech, 7 min | 649 | 99.4% | 99.8% | 20 ms |
+| English meeting, 36 min, much crosstalk | 7,094 | 76.9% | 82.6% | 24 ms |
+| English meeting, 1 h 55 min | 19,618 | 89.9% | 93.3% | 20 ms |
+
+Words spoken over another speaker align worst (63% within 100 ms on the
+36-minute meeting, against 89% for the rest), mostly where the transcript
+leaves the crosstalk out; their low `score` marks them. Alignment takes
+about 0.6 CPU-seconds per second of audio (about 70 CPU-minutes for a
+two-hour meeting) and about 0.95 GB of memory whatever the length.
 
 `opengeni-speakers align --words FILE` reads a JSON array of words and 16
 kHz mono f32 audio on stdin or from `--input`, and prints each word's
