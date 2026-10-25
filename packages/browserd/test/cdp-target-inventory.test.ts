@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { AgentBrowserDriver, type BrowserCdpConnection } from "../src";
+import { InteractionOutcomeUnknownDriverError } from "@opengeni/interaction";
+import { AgentBrowserDriver, CdpTransportError, type BrowserCdpConnection } from "../src";
 import type { OwnedTabsState } from "../src/attached-tab-ledger";
 
 test("metadata-only tab opening returns owned navigated inventory without scanning accessibility", async () => {
@@ -80,6 +81,19 @@ test("closing a tab returns inventory without it even while the browser still li
     ).toBeGreaterThan(3);
   } finally {
     await fixture.driver.detach();
+  }
+});
+
+test("a tab close whose connection ends before the tab list is an unknown outcome", async () => {
+  const fixture = inventoryFixture(false, 0, {}, true);
+  try {
+    const failure = await fixture.driver.closeTarget("prior").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(InteractionOutcomeUnknownDriverError);
+    expect(failure).toMatchObject({ code: "outcome_unknown", retryable: false });
+    expect((failure as Error).message).toStartWith("The tab closed, but");
+    expect(fixture.calls.filter((call) => call.method === "Target.closeTarget")).toHaveLength(1);
+  } finally {
+    await fixture.driver.detach().catch(() => undefined);
   }
 });
 
@@ -169,6 +183,7 @@ function inventoryFixture(
   failInventory = false,
   closedTabListings = 0,
   driverOptions: Partial<ConstructorParameters<typeof AgentBrowserDriver>[0]> = {},
+  connectionEndsAfterClose = false,
 ) {
   const browserSessionId = randomUUID();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -195,7 +210,8 @@ function inventoryFixture(
     ],
   ]);
   let created = 0,
-    navigated = false;
+    navigated = false,
+    closed = false;
   const closing = new Map<string, number>();
   const connection: BrowserCdpConnection = {
     async send<T>(
@@ -217,6 +233,7 @@ function inventoryFixture(
       }
       if (method === "Target.getTargets") {
         if (failInventory && navigated) throw new Error("synthetic inventory outcome unavailable");
+        if (connectionEndsAfterClose && closed) throw new CdpTransportError("connection closed");
         const targetInfos = [...pages.values()];
         for (const [targetId, remaining] of closing) {
           if (remaining <= 0) {
@@ -228,6 +245,7 @@ function inventoryFixture(
       }
       if (method === "Target.closeTarget") {
         const targetId = String(params.targetId);
+        closed = true;
         if (closedTabListings > 0) closing.set(targetId, closedTabListings - 1);
         else pages.delete(targetId);
         return { success: true } as T;

@@ -1482,7 +1482,9 @@ export function createInteractionAttemptToolDefinitions(
       markResumeShown(tab.browserSessionId);
       return output;
     } catch (error) {
-      if (tab && isGoneBrowserError(error)) currentTab.failed(tab);
+      if (tab && isGoneBrowserTabError(error))
+        currentTab.forgetTarget(tab.browserSessionId, tab.targetId);
+      else if (tab && isGoneBrowserError(error)) currentTab.failed(tab);
       if (!isBrowserNotRunningError(error) || resumeFailures.has(error as Error)) throw error;
       const browser = tab ?? (await currentTab.session(value.browserSessionId));
       const resumed = await resumePausedBrowser(
@@ -1507,7 +1509,11 @@ export function createInteractionAttemptToolDefinitions(
    * a tab, or opening one the browser refused to open, then runs again; select
    * and close name a tab from before the resume, whose ID no longer exists. */
   const onBrowser = async <T>(
-    value: { browserSessionId?: string | undefined; operation: string },
+    value: {
+      browserSessionId?: string | undefined;
+      operation: string;
+      targetId?: string | undefined;
+    },
     context: { operationId: string },
     run: (browser: ResolvedBrowserSession, progress: { changed: boolean }) => Promise<T>,
   ): Promise<T> => {
@@ -1521,7 +1527,10 @@ export function createInteractionAttemptToolDefinitions(
       markResumeShown(browser.browserSessionId);
       return output;
     } catch (error) {
-      if (isGoneBrowserError(error)) currentTab.failed(browser);
+      // A tab that is gone leaves its browser usable: forget only that tab.
+      if (value.targetId !== undefined && isGoneBrowserTabError(error)) {
+        currentTab.forgetTarget(browser.browserSessionId, value.targetId);
+      } else if (isGoneBrowserError(error)) currentTab.failed(browser);
       if (!isBrowserNotRunningError(error)) throw error;
       const resumed = await resumePausedBrowser(
         browser.browserSessionId,
@@ -1681,7 +1690,7 @@ export function createInteractionAttemptToolDefinitions(
           : { attachedBrowserBridges: [], attachedBrowsers: [] }),
       };
       // Code Mode programs receive every record. The model receives the most
-      // relevant ones, so a large workspace never yields a result too big to read.
+      // relevant ones within a byte budget, so its result never needs a spill.
       return context.caller.kind === "model"
         ? modelDiscoverySelection(discovered, input.sessionId)
         : discovered;
@@ -3021,6 +3030,12 @@ function filterDiscoveredSessions<
 
 /** The most records of each kind the model sees from one discovery. */
 const DISCOVERY_MODEL_LIST_LIMIT = 50;
+/** The most bytes a model caller's discovery result serializes to: its
+ * structured records, its compact text (as escaped JSON) and the note, well
+ * below the 1 MiB model-visible limit, so it is never spilled to a file. */
+const DISCOVERY_MODEL_RESULT_BUDGET_BYTES = 768 * 1024;
+/** Room kept for the content envelope and the note naming what was left out. */
+const DISCOVERY_MODEL_ENVELOPE_BYTES = 1024;
 /** Lifecycles of sessions that are not usable until repaired or restarted;
  * the model sees them after every usable one. */
 const DISCOVERY_UNUSABLE_LIFECYCLES = new Set(["lost", "repair_required", "ended", "failed"]);
@@ -3046,36 +3061,125 @@ function discoveryRank(
   );
 }
 
-/** A model caller's discovery: at most DISCOVERY_MODEL_LIST_LIMIT sessions and
- * identities of each kind, most relevant first, and how many were left out.
- * Each record keeps its exact contract shape. A workspace can retain hundreds
- * of sessions with their full association history, megabytes in all; the model
- * reuses one by id, and a Code Mode program still receives every record. */
+type DiscoveryListKind =
+  | "attachedBrowsers"
+  | "browsers"
+  | "computers"
+  | "identities"
+  | "attachedBrowserBridges";
+/** The order each kind gets its next record in while the budget lasts. */
+const DISCOVERY_LIST_KINDS: readonly DiscoveryListKind[] = [
+  "attachedBrowsers",
+  "browsers",
+  "computers",
+  "identities",
+  "attachedBrowserBridges",
+];
+const DISCOVERY_LIST_NAMES: Record<DiscoveryListKind, string> = {
+  attachedBrowsers: "attached Chrome profiles",
+  browsers: "BrowserSessions",
+  computers: "ComputerSessions",
+  identities: "browser identities",
+  attachedBrowserBridges: "attached browser bridges",
+};
+
+/** A model caller's discovery, bounded in bytes by construction: at most
+ * DISCOVERY_MODEL_LIST_LIMIT sessions and identities of each kind, most
+ * relevant first, taken in turn from each kind while the whole result stays
+ * within DISCOVERY_MODEL_RESULT_BUDGET_BYTES, and a note naming how many were
+ * left out. Each session keeps only its association with this agent session
+ * (up to 1,000 associations each are megabytes across a workspace); the
+ * records stay valid contract records. A Code Mode program still receives
+ * every complete record. */
 function modelDiscoverySelection(
   output: DiscoveryOutputValue,
   sessionId: string,
 ): InteractionExecutionResult<DiscoveryOutputValue> | DiscoveryOutputValue {
-  const limit = DISCOVERY_MODEL_LIST_LIMIT;
-  const browsers = discoveryRank(output.browsers as DiscoveredSession[], sessionId);
-  const computers = discoveryRank(output.computers as DiscoveredSession[], sessionId);
-  const identities = [...output.identities].sort((left, right) =>
-    String(right.updatedAt).localeCompare(String(left.updatedAt)),
-  );
-  const omitted = (
-    [
-      ["BrowserSessions", browsers.length],
-      ["ComputerSessions", computers.length],
-      ["browser identities", identities.length],
-    ] as const
-  ).filter(([, total]) => total > limit);
-  if (omitted.length === 0) return output;
+  const ownAssociationOnly = (session: DiscoveredSession): DiscoveredSession => ({
+    ...session,
+    associations: session.associations
+      .filter((association) => (association as { sessionId?: unknown }).sessionId === sessionId)
+      .slice(0, 1),
+  });
+  const ranked: Record<DiscoveryListKind, unknown[]> = {
+    browsers: discoveryRank(output.browsers as DiscoveredSession[], sessionId).map(
+      ownAssociationOnly,
+    ),
+    computers: discoveryRank(output.computers as DiscoveredSession[], sessionId).map(
+      ownAssociationOnly,
+    ),
+    identities: [...output.identities].sort((left, right) =>
+      String(right.updatedAt).localeCompare(String(left.updatedAt)),
+    ),
+    attachedBrowsers: output.attachedBrowsers,
+    attachedBrowserBridges: output.attachedBrowserBridges,
+  };
+  const empty = {
+    ...output,
+    browsers: [],
+    computers: [],
+    identities: [],
+    attachedBrowsers: [],
+    attachedBrowserBridges: [],
+  };
+  const compact = (value: DiscoveryOutputValue) =>
+    compactDiscoveryForModel(value as z.infer<typeof DiscoveryOutput>, sessionId);
+  const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+  // The compact text travels as a JSON string, so its quotes are escaped.
+  const textBytes = (value: unknown) => jsonBytes(JSON.stringify(value));
+  let used = jsonBytes(empty) + textBytes(compact(empty)) + DISCOVERY_MODEL_ENVELOPE_BYTES;
+  const selected: Record<DiscoveryListKind, unknown[]> = {
+    browsers: [],
+    computers: [],
+    identities: [],
+    attachedBrowsers: [],
+    attachedBrowserBridges: [],
+  };
+  const open = new Set(DISCOVERY_LIST_KINDS);
+  for (let index = 0; open.size > 0; index += 1) {
+    for (const kind of DISCOVERY_LIST_KINDS) {
+      // Attached profiles and bridges are the person's own few; only the
+      // byte budget bounds them.
+      const limited = kind !== "attachedBrowsers" && kind !== "attachedBrowserBridges";
+      const record =
+        open.has(kind) && (!limited || index < DISCOVERY_MODEL_LIST_LIMIT)
+          ? ranked[kind][index]
+          : undefined;
+      if (record === undefined) {
+        open.delete(kind);
+        continue;
+      }
+      const compactRecord = (compact({ ...empty, [kind]: [record] }) as Record<string, unknown[]>)[
+        kind
+      ]![0];
+      // Two separators, one in each serialized list.
+      const cost = jsonBytes(record) + textBytes(compactRecord) + 2;
+      if (used + cost > DISCOVERY_MODEL_RESULT_BUDGET_BYTES) {
+        open.delete(kind);
+        continue;
+      }
+      used += cost;
+      selected[kind].push(record);
+    }
+  }
   const selection = {
     ...output,
-    browsers: browsers.slice(0, limit) as DiscoveryOutputValue["browsers"],
-    computers: computers.slice(0, limit) as DiscoveryOutputValue["computers"],
-    identities: identities.slice(0, limit),
+    browsers: selected.browsers as DiscoveryOutputValue["browsers"],
+    computers: selected.computers as DiscoveryOutputValue["computers"],
+    identities: selected.identities as DiscoveryOutputValue["identities"],
+    attachedBrowsers: selected.attachedBrowsers as DiscoveryOutputValue["attachedBrowsers"],
+    attachedBrowserBridges:
+      selected.attachedBrowserBridges as DiscoveryOutputValue["attachedBrowserBridges"],
   };
-  const shown = omitted.map(([kind, total]) => `${limit} of ${total} ${kind}`).join(", ");
+  const omitted = DISCOVERY_LIST_KINDS.filter(
+    (kind) => selected[kind].length < ranked[kind].length,
+  );
+  if (omitted.length === 0) return selection;
+  const shown = omitted
+    .map(
+      (kind) => `${selected[kind].length} of ${ranked[kind].length} ${DISCOVERY_LIST_NAMES[kind]}`,
+    )
+    .join(", ");
   return new InteractionExecutionResult(selection, [
     {
       type: "text",
@@ -4931,6 +5035,17 @@ function browserToolImageContent(
 /** The remembered browser or tab no longer exists. */
 function isGoneBrowserError(error: unknown): boolean {
   return error instanceof OpenGeniApiError && (error.status === 404 || error.status === 410);
+}
+
+/** The named tab no longer exists, while its browser does: the controller's
+ * target_not_found, which the API publishes with the controller's message
+ * (the error reads "API 404: browser target does not exist…"). */
+function isGoneBrowserTabError(error: unknown): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 404 &&
+    /(?:^|: )browser target does not exist\b/u.test(error.message)
+  );
 }
 
 /** What a computer call's 404 or 410 found gone: the computer itself (a 410,

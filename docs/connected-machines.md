@@ -512,8 +512,11 @@ closes a profile's only tab without first opening a new tab page in its place
 Chrome has no window open it creates a requested tab in a new unfocused window.
 A tab close whose connection ends before the extension answers is reported as
 `outcome_unknown` (HTTP 409), because the tab may already be closed; a tab
-Chrome reports as gone is `target_not_found`. A profile whose last window the
-person closed stays disconnected until a window opens in it again.
+Chrome reports as gone is `target_not_found`, and the agent then forgets only
+that tab, not its current browser. A close the browser acknowledged whose
+connection ends before the remaining tabs are listed is also `outcome_unknown`.
+A profile whose last window the person closed stays disconnected until a
+window opens in it again.
 
 An accepted full inventory snapshot observes every connected profile once through
 `attached_browser_inventories.observed_at`. Unchanged profiles need neither a
