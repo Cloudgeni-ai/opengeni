@@ -3,6 +3,8 @@ import {
   type Recording,
   type RecordingDiarization,
   type RecordingPerson,
+  type RecordingNote,
+  type RecordingNoteKind,
   type RecordingSpeaker,
   type RecordingTrack,
   type RecordingTranscriptionOptions,
@@ -2712,6 +2714,123 @@ export async function setCurrentRecordingTranscriptVersion(
       previousVersionId: previous?.id ?? null,
     });
     return recordingTranscriptVersionView(current!);
+  });
+}
+
+type NoteRow = typeof schema.recordingNotes.$inferSelect;
+
+function noteView(row: NoteRow): RecordingNote {
+  return {
+    kind: row.kind,
+    body: row.body,
+    revision: row.revision,
+    updatedAt: row.updatedAt.toISOString(),
+    updatedBy: { subjectId: row.updatedBySubjectId, sessionId: row.updatedBySessionId },
+  };
+}
+
+/** A meeting's notepad and notes, for anyone who can see it. A kind nobody wrote is absent. */
+export async function listRecordingNotes(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<RecordingNote[]> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [recording] = await tx
+      .select({ state: schema.recordings.state })
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      );
+    if (!recording || recording.state === "deleting") throw new RecordingNotFoundError();
+    const rows = await tx
+      .select()
+      .from(schema.recordingNotes)
+      .where(
+        and(
+          eq(schema.recordingNotes.workspaceId, input.workspaceId),
+          eq(schema.recordingNotes.recordingId, input.recordingId),
+        ),
+      )
+      .orderBy(asc(schema.recordingNotes.kind));
+    return rows.map(noteView);
+  });
+}
+
+export type SaveRecordingNoteInput = RecordingActor & {
+  recordingId: string;
+  kind: RecordingNoteKind;
+  body: string;
+  /** Refuse the save unless the stored revision is this one (0: nobody has written it). */
+  expectedRevision?: number | undefined;
+  /** The chat whose agent saves it, when an agent does. */
+  sessionId?: string | null | undefined;
+};
+
+/**
+ * Replace one of a meeting's notes. Anyone who can see the meeting may, like
+ * its title and speakers. Saving the same text again changes nothing. Saving
+ * the notes (not the notepad, which saves as people type) is a
+ * `recording.notes.updated` event.
+ */
+export async function saveRecordingNote(
+  db: Database,
+  input: SaveRecordingNoteInput,
+): Promise<RecordingNote> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    // The recording's row lock also orders saves of its notes.
+    const recording = await lockRecording(tx, input.workspaceId, input.recordingId);
+    const where = and(
+      eq(schema.recordingNotes.workspaceId, input.workspaceId),
+      eq(schema.recordingNotes.recordingId, input.recordingId),
+      eq(schema.recordingNotes.kind, input.kind),
+    );
+    const [existing] = await tx.select().from(schema.recordingNotes).where(where);
+    if (
+      input.expectedRevision !== undefined &&
+      (existing?.revision ?? 0) !== input.expectedRevision
+    ) {
+      throw new RecordingConflictError(
+        "Someone saved newer notes. Load them and try again",
+        "notes_changed",
+      );
+    }
+    if (existing && existing.body === input.body) return noteView(existing);
+    const sessionId = input.sessionId ?? null;
+    const [saved] = existing
+      ? await tx
+          .update(schema.recordingNotes)
+          .set({
+            body: input.body,
+            revision: existing.revision + 1,
+            updatedBySubjectId: input.subjectId,
+            updatedBySessionId: sessionId,
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(where)
+          .returning()
+      : await tx
+          .insert(schema.recordingNotes)
+          .values({
+            accountId: recording.accountId,
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            kind: input.kind,
+            body: input.body,
+            updatedBySubjectId: input.subjectId,
+            updatedBySessionId: sessionId,
+          })
+          .returning();
+    if (input.kind === "notes") {
+      await insertEvent(tx, recording, "recording.notes.updated", {
+        noteKind: input.kind,
+        noteRevision: saved!.revision,
+        sessionId,
+      });
+    }
+    return noteView(saved!);
   });
 }
 

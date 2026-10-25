@@ -792,6 +792,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       // 0952 secret approval rules and requests are also withheld.
       "secret_approval_rules",
       "secret_use_approvals",
+      // 0954 meeting notes are also withheld.
+      "recording_notes",
     ].sort();
     // 0823 machine-consent tables are protected but not runtime-privileged.
     const protectedTables = [

@@ -120,6 +120,11 @@ export const WEBHOOK_EVENT_GROUPS: readonly WebhookEventGroup[] = [
         description: "Someone named, merged or moved speakers, or edited the text.",
       },
       {
+        type: "recording.notes.updated",
+        label: "Notes updated",
+        description: "Someone, or an agent, saved the meeting's written-up notes.",
+      },
+      {
         type: "recording.deleted",
         label: "Recording deleted",
         description: "A recording and its audio and transcripts were deleted.",

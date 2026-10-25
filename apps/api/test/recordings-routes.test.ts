@@ -313,6 +313,35 @@ describe("recording routes", () => {
     expect((await scope.owner.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
   });
 
+  test("notes: anyone who can see the meeting saves them; a stale revision is a 409", async () => {
+    const scope = await fixture();
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const path = `/recordings/${recordingId}/notes`;
+    expect(await scope.owner.call("GET", path)).toEqual({ status: 200, body: { notes: [] } });
+    const saved = await scope.owner.call("PUT", `${path}/notes`, {
+      body: "## Decisions\n\n- Ship it",
+      expectedRevision: 0,
+    });
+    expect(saved).toMatchObject({
+      status: 200,
+      body: { kind: "notes", revision: 1, updatedBy: { subjectId: scope.owner.subjectId } },
+    });
+    expect(
+      await scope.owner.call("PUT", `${path}/notes`, { body: "older", expectedRevision: 0 }),
+    ).toMatchObject({ status: 409, body: { error: { details: { code: "notes_changed" } } } });
+    expect((await scope.owner.call("PUT", `${path}/agenda`, { body: "x" })).status).toBe(404);
+    expect(
+      (await scope.owner.call("PUT", `${path}/notepad`, { body: "x".repeat(262_145) })).status,
+    ).toBe(400);
+    // A private meeting's notes are as hidden as the meeting.
+    expect((await scope.other.call("GET", path)).status).toBe(404);
+    expect((await scope.other.call("PUT", `${path}/notes`, { body: "mine now" })).status).toBe(404);
+  });
+
   test("the workspace's meeting language, unless a recording names one or asks to detect", async () => {
     const scope = await fixture();
     await shared.admin`

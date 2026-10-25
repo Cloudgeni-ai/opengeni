@@ -7,8 +7,10 @@ import {
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
   FinalizeRecordingRequest,
+  RecordingNoteKind,
   RememberRecordingPersonVoiceRequest,
   resolveWorkspaceRecordingSettings,
+  SaveRecordingNoteRequest,
   UpdateRecordingRequest,
   UpdateRecordingSegmentsRequest,
   UpdateRecordingSpeakersRequest,
@@ -44,6 +46,7 @@ import {
   getWorkspace,
   listRecordingChunks,
   listRecordingLiveSegments,
+  listRecordingNotes,
   listRecordingPeople,
   listRecordings,
   listRecordingTranscriptVersions,
@@ -55,6 +58,7 @@ import {
   RecordingForbiddenError,
   RecordingNotFoundError,
   reserveRecordingChunks,
+  saveRecordingNote,
   setCurrentRecordingTranscriptVersion,
   startRecordingLiveTrack,
   updateRecording,
@@ -545,6 +549,34 @@ export function registerRecordingRoutes(
         }),
       ),
     });
+  });
+
+  /** The meeting's notepad and written-up notes. */
+  app.get(`${base}/:recordingId/notes`, async (c) => {
+    const actor = await actorFor(c, "sessions:read");
+    const recordingId = recordingIdParam(c);
+    return c.json({
+      notes: await guard(() => listRecordingNotes(db, { ...actor, recordingId })),
+    });
+  });
+
+  app.put(`${base}/:recordingId/notes/:kind`, async (c) => {
+    const actor = await actorFor(c, "sessions:create");
+    const recordingId = recordingIdParam(c);
+    const kind = RecordingNoteKind.safeParse(c.req.param("kind"));
+    if (!kind.success) throw notFound("Notes not found");
+    const body = await parseRequestJson(c, SaveRecordingNoteRequest);
+    return c.json(
+      await guard(() =>
+        saveRecordingNote(db, {
+          ...actor,
+          recordingId,
+          kind: kind.data,
+          body: body.body,
+          expectedRevision: body.expectedRevision,
+        }),
+      ),
+    );
   });
 
   /** A short-lived link to a track's prepared audio, for playback. */

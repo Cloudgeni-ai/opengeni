@@ -1771,6 +1771,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 0954 recording notes: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1886,7 +1892,8 @@ describe("runtime database posture evaluator", () => {
         3 + // 0940 recording voiceprints: full-DML, FORCE-RLS.
         1 + // 0942 recording live transcript: full-DML, FORCE-RLS.
         1 + // 0949 personal Site sidebar states: full-DML, FORCE-RLS.
-        2; // 0952 secret approval rules and use approvals: full-DML, FORCE-RLS.
+        2 + // 0952 secret approval rules and use approvals: full-DML, FORCE-RLS.
+        1; // 0954 recording notes: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
