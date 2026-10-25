@@ -74,7 +74,10 @@ async function primary(ingress: Record<string, unknown>): Promise<Ingress> {
     const found = stdout
       .split(/^---$/m)
       .map((document) => Bun.YAML.parse(document) as Ingress | null)
-      .find((document) => document?.kind === "Ingress" && document.metadata.name === "body-test-opengeni");
+      .find(
+        (document) =>
+          document?.kind === "Ingress" && document.metadata.name === "body-test-opengeni",
+      );
     if (!found) throw new Error("no primary Ingress rendered");
     return found;
   } finally {

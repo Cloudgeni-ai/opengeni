@@ -170,7 +170,9 @@ export function registerFeedbackRoutes(app: Hono, deps: ApiRouteDeps): void {
       subjectId: grant.subjectId,
       ...params.data,
     });
-    const object = screenshot ? await deps.objectStorage?.getObjectBytes(screenshot.objectKey) : null;
+    const object = screenshot
+      ? await deps.objectStorage?.getObjectBytes(screenshot.objectKey)
+      : null;
     if (!screenshot || !object) throw new HTTPException(404, { message: "Screenshot not found" });
     return c.body(Uint8Array.from(object.bytes).buffer, 200, {
       "content-type": screenshot.contentType,

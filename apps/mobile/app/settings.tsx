@@ -183,7 +183,8 @@ function Settings() {
     sections.push({
       id: "feedback",
       title: "Feedback",
-      footer: "Shaking takes a screenshot of the screen you're on, which you can remove before sending.",
+      footer:
+        "Shaking takes a screenshot of the screen you're on, which you can remove before sending.",
       rows: [
         {
           kind: "action",

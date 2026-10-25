@@ -2611,13 +2611,6 @@ async function createSessionForRequestInFileScope(
     authorization,
     requested: requestOptions.surface,
   });
-  // What the first message may do through app actions, frozen with its turn.
-  const initialAppActionGrant = turnAppActionGrant({
-    grant,
-    authorization,
-    delegatedSignInChangesEnabled:
-      unresolvedDeps.settings.delegatedSignInAppActionChangesEnabled === true,
-  });
   payload.metadata = sessionCreationMetadata(payload.metadata);
   const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
   const externalCommitAuthorizer = externalContinuationCommitAuthorizer(authorization);
@@ -2648,6 +2641,14 @@ async function createSessionForRequestInFileScope(
       message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
     });
   }
+  // What the first message may do through app actions, frozen with its turn.
+  // A pure function of the request's own grant, computed once it is valid.
+  const initialAppActionGrant = turnAppActionGrant({
+    grant,
+    authorization,
+    delegatedSignInChangesEnabled:
+      unresolvedDeps.settings.delegatedSignInAppActionChangesEnabled === true,
+  });
   const db = unresolvedDeps.db;
   const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
   if (
