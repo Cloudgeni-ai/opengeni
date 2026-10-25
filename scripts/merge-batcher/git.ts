@@ -69,15 +69,27 @@ export class GitStore {
     refs: string[],
     cache: "state" | "candidate" | "objects" = "objects",
   ): Promise<void> {
-    // Keep each source distinct: fork reads must not replace the source needed
-    // for lazy retrieval of previously promised blobs. No wildcard fetch map.
+    if (!refs.length) {
+      await this.retireCacheSlots(cache, 0);
+      return;
+    }
+    // One persistent promisor only. Git can batch missing blobs from different
+    // forks into one lazy request which neither source can satisfy. Distinct
+    // sources therefore use a complete exact-head fetch, not another promisor.
     let source = this.promisors.get(remote);
     if (!source) {
       source = `batcher-${digest(remote).slice(0, 24)}`;
-      await this.exec(["config", `remote.${source}.url`, remote]);
-      await this.exec(["config", `remote.${source}.promisor`, "true"]);
-      await this.exec(["config", `remote.${source}.partialclonefilter`, "blob:none"]);
-      await this.exec(["config", `remote.${source}.tagOpt`, "--no-tags"]);
+      let primary = await this.exec(["config", "--default", "", "--get", "batcher.bloblessSource"]);
+      if (!primary) {
+        primary = source;
+        await this.exec(["config", "batcher.bloblessSource", primary]);
+      }
+      if (source === primary) {
+        await this.exec(["config", `remote.${source}.url`, remote]);
+        await this.exec(["config", `remote.${source}.promisor`, "true"]);
+        await this.exec(["config", `remote.${source}.partialclonefilter`, "blob:none"]);
+        await this.exec(["config", `remote.${source}.tagOpt`, "--no-tags"]);
+      } else source = remote;
       this.promisors.set(remote, source);
     }
     // Raw-SHA fetches without refs cannot advertise their existing history on
@@ -94,24 +106,49 @@ export class GitStore {
       "--atomic",
       "--no-tags",
       "--no-write-fetch-head",
-      "--filter=blob:none",
+      ...(source === remote ? ["--refetch", "--no-filter"] : ["--filter=blob:none"]),
       "--no-auto-maintenance",
       source,
       ...targets,
     ]);
+    await this.retireCacheSlots(cache, Math.min(refs.length, 64));
+  }
+  private async retireCacheSlots(cache: "state" | "candidate" | "objects", count: number) {
+    const prefix = `refs/batcher-cache/${cache}/`;
+    const rows = await this.exec(["for-each-ref", "--format=%(refname) %(objectname)", prefix]);
+    for (const row of rows.split("\n").filter(Boolean)) {
+      const [ref, sha] = row.split(" ");
+      const slot = ref!.slice(prefix.length);
+      if (/^(0|[1-9][0-9]*)$/.test(slot) && Number(slot) < 64 && Number(slot) >= count)
+        await this.exec(["update-ref", "-d", ref!, assertSha(sha!)]);
+    }
   }
   /** Local disposable pins only; called by the serialized active controller. */
   async maintainLocal(ledger: Ledger, now: string): Promise<void> {
     const at = Date.parse(now);
+    const retained = Number(
+      await this.exec(["config", "--default", "0", "--get", "batcher.lastMaintenance"]),
+    );
+    if (Number.isFinite(retained)) this.lastMaintenance = Math.max(this.lastMaintenance, retained);
     if (!Number.isFinite(at) || at - this.lastMaintenance < 3600_000) return;
     // Unknown effects and recovery keep every local root, including blocked
     // effects whose provider outcome may still be unknown. No pruning guesses.
     if (
       Object.values(ledger.effects).some((effect) => effect.status !== "done") ||
       Object.values(ledger.missingRuns).some((run) => run.status !== "released") ||
-      ledger.recovery.length
+      ledger.recovery.length ||
+      Object.values(ledger.landings).some(
+        (landing) =>
+          !["native-merged", "already-contained", "closed-unmerged", "closed-newer-head"].includes(
+            landing.status,
+          ),
+      )
     )
       return;
+    // Persist the attempt before work: a local GC timeout must not be repeated
+    // every cycle or after every short-lived controller process restart.
+    this.lastMaintenance = at;
+    await this.exec(["config", "batcher.lastMaintenance", String(at)]);
     const terminal = new Set([...ledger.landed, ...(ledger.parked ?? []).map((p) => p.batchId)]);
     const refs = await this.exec([
       "for-each-ref",
@@ -136,7 +173,6 @@ export class GitStore {
       "gc",
       "--prune=2.weeks.ago",
     ]);
-    this.lastMaintenance = at;
   }
   async ancestor(base: string, tip: string): Promise<boolean> {
     try {

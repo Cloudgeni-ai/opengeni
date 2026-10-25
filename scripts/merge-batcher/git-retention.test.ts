@@ -66,7 +66,7 @@ test("maintenance only retires proven terminal local pins and holds unknown outc
   expect(await f.local.exec(["rev-parse", `refs/batcher-local/${active}`])).toBe(f.right.sha);
 });
 
-test("distinct fork promisors survive restart and lazily produce the same merge tree", async () => {
+test("distinct forks use complete fallback and survive restart with canonical merge trees", async () => {
   const f = await setup();
   const fork = new GitStore(join(f.remote.dir, "..", "fork.git"));
   await fork.init();
@@ -82,7 +82,7 @@ test("distinct fork promisors survive restart and lazily produce the same merge 
   await f.local.fetch(f.url, [f.left.sha], "state");
   await f.local.fetch(`file://${fork.dir}`, [forkHead], "candidate");
   const missing = await f.local.exec(["rev-list", "--objects", "--missing=print", "--all"]);
-  expect(missing).toContain(`?${blob}`);
+  expect(missing).not.toContain(`?${blob}`);
   expect(missing).toContain(`?${f.left.blob}`);
   const restarted = new GitStore(f.local.dir);
   const merged = await restarted.mergeTree(f.left.sha, forkHead);
@@ -90,7 +90,9 @@ test("distinct fork promisors survive restart and lazily produce the same merge 
   expect(merged).toBe(await f.remote.mergeTree(f.left.sha, forkHead));
   expect(
     (await restarted.exec(["config", "--get-regexp", "remote.*.promisor"])).split("\n"),
-  ).toHaveLength(2);
+  ).toHaveLength(1);
+  await restarted.fetch(`file://${fork.dir}`, [forkHead], "candidate");
+  expect(await restarted.mergeTree(f.left.sha, forkHead)).toBe(merged);
   expect(await restarted.ancestor(f.base.sha, forkHead)).toBe(true);
 });
 
@@ -113,3 +115,76 @@ test("recovery preserves terminal pins and maintenance does not remove unrelated
   expect(await f.local.exec(["rev-parse", "refs/batcher-local/not-an-owned-id"])).toBe(f.left.sha);
   expect(await f.local.exec(["rev-parse", "refs/heads/operator-evidence"])).toBe(f.left.sha);
 });
+
+test("cache slots shrink only after a successful fetch and never remove foreign refs", async () => {
+  const f = await setup();
+  await f.local.fetch(f.url, [f.left.sha, f.right.sha], "candidate");
+  await f.local.exec(["update-ref", "refs/batcher-cache/candidate/operator", f.right.sha]);
+  await expect(f.local.fetch(f.url, ["f".repeat(40)], "candidate")).rejects.toThrow();
+  expect(await f.local.exec(["rev-parse", "refs/batcher-cache/candidate/1"])).toBe(f.right.sha);
+  await f.local.fetch(f.url, [f.left.sha], "candidate");
+  expect(
+    await f.local.exec(["for-each-ref", "--format=%(refname)", "refs/batcher-cache/candidate/1"]),
+  ).toBe("");
+  await f.local.fetch(f.url, [], "candidate");
+  expect(
+    await f.local.exec(["for-each-ref", "--format=%(refname)", "refs/batcher-cache/candidate/"]),
+  ).toBe("refs/batcher-cache/candidate/operator");
+});
+
+test("maintenance interval persists across process restart", async () => {
+  const f = await setup();
+  await f.local.fetch(f.url, [f.left.sha]);
+  const ledger = emptyLedger();
+  const done = "d".repeat(64);
+  ledger.landed.push(done);
+  await f.local.maintainLocal(ledger, "2026-10-24T01:00:00Z");
+  const ref = `refs/batcher-local/${done}`;
+  await f.local.exec(["update-ref", ref, f.left.sha]);
+  const restarted = new GitStore(f.local.dir);
+  await restarted.maintainLocal(ledger, "2026-10-24T01:01:00Z");
+  expect(await restarted.exec(["rev-parse", ref])).toBe(f.left.sha);
+  await restarted.maintainLocal(ledger, "2026-10-24T02:00:00Z");
+  expect(await restarted.exec(["for-each-ref", "--format=%(refname)", ref])).toBe("");
+});
+
+test("providers without filter support retain exact tree correctness", async () => {
+  const f = await setup();
+  await f.remote.exec(["config", "uploadpack.allowFilter", "false"]);
+  await f.local.fetch(f.url, [f.left.sha, f.right.sha]);
+  expect(await f.local.mergeTree(f.left.sha, f.right.sha)).toBe(
+    await f.remote.mergeTree(f.left.sha, f.right.sha),
+  );
+  expect(await f.local.exec(["rev-list", "--objects", "--missing=print", "--all"])).not.toContain(
+    "?",
+  );
+});
+
+for (const status of ["pending", "submitting", "uncertain", "blocked"] as const) {
+  test(`maintenance preserves terminal pins with ${status} effects`, async () => {
+    const f = await setup();
+    await f.local.fetch(f.url, [f.left.sha]);
+    const id = "e".repeat(64),
+      ref = `refs/batcher-local/${id}`;
+    await f.local.exec(["update-ref", ref, f.left.sha]);
+    const ledger = emptyLedger();
+    ledger.landed.push(id);
+    ledger.effects[id] = {
+      id,
+      status,
+      attempts: 1,
+      checks: 0,
+      nextAt: "2026-10-24T00:00:00Z",
+      lastError: null,
+      kind: "comment",
+      number: 1,
+      body: "retained evidence",
+      marker: id,
+    };
+    await f.local.maintainLocal(ledger, "2026-10-24T01:00:00Z");
+    expect(await f.local.exec(["rev-parse", ref])).toBe(f.left.sha);
+    expect(
+      await f.local.exec(["config", "--default", "0", "--get", "batcher.lastMaintenance"]),
+    ).toBe("0");
+  });
+}

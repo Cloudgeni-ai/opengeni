@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { GitHubActiveExecutor } from "./active";
 import { main } from "./main";
 import { Controller, LiveReader } from "./controller";
-import { AtomicGitWriter, GitStore, type RefUpdate } from "./git";
+import { AtomicGitWriter, GitFailure, GitStore, type RefUpdate } from "./git";
 import { proveHeadRefresh } from "./head-refresh";
 import {
   GitHubAuth,
@@ -33,6 +33,20 @@ import {
 
 const NOW = "2026-10-21T12:00:00.000Z";
 const roots: string[] = [];
+test("local cache GC failure is diagnostic, not unknown remote-write failure", async () => {
+  const f = await fixture();
+  await f.publish();
+  f.git.maintainLocal = async () => {
+    throw new GitFailure(128);
+  };
+  expect(await f.executor().maintain()).toContain(
+    "Local Git cache maintenance deferred (exit 128)",
+  );
+  f.git.maintainLocal = async () => {
+    throw new Error("unexpected implementation failure");
+  };
+  await expect(f.executor().maintain()).rejects.toThrow("unexpected implementation failure");
+});
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });

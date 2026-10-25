@@ -1,5 +1,5 @@
 import type { Effect, Executor, Transaction } from "./controller";
-import { AtomicGitWriter, GitStore, type RefUpdate } from "./git";
+import { AtomicGitWriter, GitFailure, GitStore, type RefUpdate } from "./git";
 import {
   githubCapabilities,
   ProviderError,
@@ -875,7 +875,16 @@ export class GitHubActiveExecutor implements Executor {
       .sort(([, a], [, b]) => Date.parse(a.nextCheckAt) - Date.parse(b.nextCheckAt))[0];
     if (entry) messages.push(await this.reconcile(entry[0], entry[1]));
     state = await this.load();
-    if (this.available(state)) await this.git.maintainLocal(state.ledger, this.now());
+    if (this.available(state)) {
+      try {
+        await this.git.maintainLocal(state.ledger, this.now());
+      } catch (error) {
+        // Only this local disposable-cache operation is optional. Never swallow
+        // remote mutation/reconciliation failures from the work above.
+        if (!(error instanceof GitFailure)) throw error;
+        messages.push(`Local Git cache maintenance deferred (exit ${error.exitCode})`);
+      }
+    }
     return messages.join("; ") || null;
   }
   async recoverMissingRun(

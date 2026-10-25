@@ -901,6 +901,28 @@ HTTP calls have 30-second bounds. Git fetch has a separately configurable
 Operators should allow termination grace for the current observation; forced
 termination loses only local cache/proposed shadow evidence, not remote truth.
 
+The disposable Git store fetches exact observed SHAs with no tags and retains
+commit/tree history (not shallow history). One persistent primary source uses
+`blob:none`; a distinct source, such as a fork, uses a complete exact-head
+`--refetch --no-filter` fallback. This avoids mixed-source missing-blob requests
+that neither promisor can satisfy. It deliberately gives up blobless savings for
+fork fetches. A provider that ignores filtering may send full objects instead.
+Merge content is retrieved lazily with the same authentication environment;
+canonical merge-tree reconstruction and parent/provenance checks are unchanged.
+
+Successful fetches retire surplus numbered local negotiation slots only; an
+empty complete readiness result clears the candidate slots. Failed fetches keep
+the old slots. Serialized active maintenance, at most once per hour including
+process restarts, retires only local constructed pins for landed or parked
+batches. Any unfinished/blocked effect, unreleased missing-run evidence, recovery
+cohort or unresolved native landing keeps all constructed pins. Other local refs,
+remote refs, durable ledger, manifest JSON and operator/failure evidence are never
+deleted. Foreground GC keeps Git's two-week grace period, disables partial-pack
+bitmaps, and uses the ordinary subprocess timeout. Local maintenance failure is
+reported and deferred, not treated as an ambiguous remote write. These rules are
+not a lifetime disk bound: retained history, unresolved evidence and forks can
+grow storage; operators still monitor actual volume usage.
+
 Portable placement options, without deployment by this task:
 
 - GCP VM: run the container under a service supervisor with `/data` on a writable

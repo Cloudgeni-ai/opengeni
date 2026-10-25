@@ -62,7 +62,7 @@ test("fetch anchors have a fixed bound and preserve exact requested object ident
   const git = new GitStore("unused");
   let args: string[] = [];
   git.exec = async (value) => {
-    args = value;
+    if (value[0] === "fetch") args = value;
     return "";
   };
   const refs = Array.from({ length: 70 }, (_, n) => n.toString(16).padStart(40, "0"));
