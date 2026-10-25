@@ -50,7 +50,9 @@ function failure(code: "not_found" | "approval_required") {
   return new SecretReferenceError(
     failures,
     code === "not_found" ? buildMissingSecretAskCard(failures, { hasActingHuman: true }) : null,
-    code === "approval_required" ? approvalCard("run_on") : null,
+    code === "approval_required"
+      ? { approvalId: "33333333-3333-4333-8333-333333333333", asked: true }
+      : null,
   );
 }
 
