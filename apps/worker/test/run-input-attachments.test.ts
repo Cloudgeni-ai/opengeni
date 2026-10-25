@@ -714,14 +714,15 @@ describe("turnInput attachment projection", () => {
             { kind: "file", fileId: supplied.id },
             { kind: "file", fileId: unreadable },
           ],
-          loadActiveHistory: async () => [
-            {
-              id: "00000000-0000-4000-8000-000000000066",
-              position: 0,
-              item: user("compare them"),
-              providerArtifactInvalidatedAt: null,
-            },
-          ],
+          loadActiveHistory: async () =>
+            activeHistoryRead([
+              {
+                id: "00000000-0000-4000-8000-000000000066",
+                position: 0,
+                item: user("compare them"),
+                providerArtifactInvalidatedAt: null,
+              },
+            ]),
         },
       );
     const expectedNotice =
