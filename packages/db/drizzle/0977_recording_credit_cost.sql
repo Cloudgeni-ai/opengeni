@@ -6,7 +6,7 @@
 -- records the credits it was charged in credit_cost_micros; its ledger debit
 -- already counts toward allowances. Every other version, a dictation on the
 -- workspace's own key or subscription included, counts its list-price cost
--- once when it completes, as meetings did since 0959.
+-- once when it completes, as meetings did since 0976.
 --
 -- The previous release never sets credit_cost_micros and records a
 -- dictation's credit charge as its cost under the model name voice-input,
