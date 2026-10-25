@@ -1,4 +1,5 @@
 import type { Permission } from "@opengeni/contracts";
+import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { hasPermission } from "../access";
 import { requireExternalContinuationAuthority } from "./external-continuation";
@@ -22,9 +23,21 @@ const PERSONAL_SIGN_IN_PROVIDERS = new Set([
 ]);
 
 /**
+ * Deployment-reviewed integration definitions (Outlook Mail, OneDrive, ...).
+ * Each personal account gets its own instance of the reviewed tools, which
+ * resolves credentials for that person alone, so connecting one's own
+ * account to one is personal setup too. The install step separately allows
+ * only a fresh instance or one already bound to that same account.
+ */
+const REVIEWED_INTEGRATION_DEFINITION_IDS: ReadonlySet<string> = new Set(
+  CORE_INTEGRATION_DEFINITIONS.map((definition) => definition.id),
+);
+
+/**
  * The permission a Connect step needs. Signing in to one's own account
- * (personal ownership, a sign-in-only provider, no MCP setup or installation
- * target) needs only `connections:personal`; everything else keeps
+ * (personal ownership and no MCP setup, with a sign-in-only provider and no
+ * installation target, or a reviewed integration definition and no custom
+ * source) needs only `connections:personal`; everything else keeps
  * `connections:write`. `connections:write` includes `connections:personal`.
  */
 export function connectSetupPermission(attempt: {
@@ -32,11 +45,11 @@ export function connectSetupPermission(attempt: {
   ownership: string;
   mcpSetup?: unknown;
   installationTarget?: unknown;
+  source?: unknown;
 }): "connections:personal" | "connections:write" {
-  return attempt.ownership === "personal" &&
-    PERSONAL_SIGN_IN_PROVIDERS.has(attempt.providerId) &&
-    !attempt.mcpSetup &&
-    !attempt.installationTarget
+  if (attempt.ownership !== "personal" || attempt.mcpSetup) return "connections:write";
+  return (PERSONAL_SIGN_IN_PROVIDERS.has(attempt.providerId) && !attempt.installationTarget) ||
+    (REVIEWED_INTEGRATION_DEFINITION_IDS.has(attempt.providerId) && !attempt.source)
     ? "connections:personal"
     : "connections:write";
 }

@@ -36,6 +36,7 @@ import {
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
   IntegrationFacetBindingVersionRequiredError,
+  apiIntegrationConnected,
   listInstalledApiIntegrations,
   uninstallApiIntegration,
   type ConnectionMetadataWithVerification,
@@ -251,9 +252,12 @@ export function registerApiIntegrationRoutes(
             providerDomain: integration.providerDomain,
             baseUrl: integration.baseUrl,
             sourceUrl: integration.sourceUrl,
-            connected: integration.connectionRef !== null,
+            // Signed in now; an expired or revoked account keeps its
+            // connectionId and ownership so it can be reconnected.
+            connected: apiIntegrationConnected(integration),
             requiresConnection: apiIntegrationRequiresConnection(integration.authScheme),
             connectionId: integration.connectionRef?.connectionId ?? null,
+            connectionLastUsedAt: integration.connectionLastUsedAt,
             ownership:
               integration.connectionRef?.subjectScope === "subject"
                 ? "personal"

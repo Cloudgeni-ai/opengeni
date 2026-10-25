@@ -621,6 +621,165 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
+  test("finds Outlook for a Hotmail request and posts its Connect card; respects availability gates", async () => {
+    if (!shared) return;
+    const microsoftSettings = (overrides: Parameters<typeof testSettings>[0] = {}) =>
+      testSettings({
+        environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+        integrationsEnabled: true,
+        integrationsStateSecret: "capability-discovery-integrations-state-secret",
+        integrationsOauthClientsJson: JSON.stringify({
+          "https://login.microsoftonline.com/common/v2.0": {
+            clientId: "microsoft-client",
+            clientSecret: "microsoft-secret",
+            tokenEndpointAuthMethod: "client_secret_post",
+          },
+        }),
+        ...overrides,
+      });
+    const connect = async (settings: ReturnType<typeof testSettings>) => {
+      const attempt = await seedAttempt();
+      const bus = new MemoryEventBus();
+      const server = buildOpenGeniMcpServer({ settings, db: client.db, bus } as ApiRouteDeps, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: {
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          executionGeneration: attempt.executionGeneration,
+          firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+        },
+      });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "capability-discovery-test", version: "1" });
+      await server.connect(serverTransport);
+      await mcp.connect(clientTransport);
+      const search = async (query: string) => {
+        const result = await mcp.callTool({
+          name: "capability_catalog_search",
+          arguments: { query },
+        });
+        expect(result.isError).not.toBe(true);
+        return (
+          mcpJson(result) as {
+            matches: Array<{ capabilityId: string; setup: { status: string; detail: string } }>;
+          }
+        ).matches;
+      };
+      return {
+        attempt,
+        bus,
+        mcp,
+        search,
+        close: async () => await Promise.all([mcp.close(), server.close()]),
+      };
+    };
+
+    const configured = await connect(microsoftSettings());
+    try {
+      const matches = await configured.search("Microsoft Outlook Hotmail email");
+      expect(matches[0]).toMatchObject({
+        capabilityId: "api:integration:microsoft-outlook-mail",
+        name: "Outlook Mail",
+        providerDomain: "microsoft.com",
+        authKind: "oauth2",
+        setup: {
+          status: "authorization_required",
+          action: "connect",
+          detail:
+            "Not connected. The person signs in with their own Microsoft account from the Connect card; if their organization requires admin approval, the card gives them an approval link for their admin.",
+          nextAction: {
+            toolName: "capability_authorization_request",
+            capabilityId: "api:integration:microsoft-outlook-mail",
+          },
+        },
+      });
+      expect((await configured.search("OneDrive"))[0]?.capabilityId).toBe(
+        "api:integration:microsoft-onedrive",
+      );
+      // The Teams rollout gate is off in these settings.
+      expect(
+        (await configured.search("Microsoft Teams")).map((match) => match.capabilityId),
+      ).not.toContain("api:integration:microsoft-teams");
+
+      const request = await configured.mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: {
+          capabilityId: "api:integration:microsoft-outlook-mail",
+          rationale: "Reading the newest emails needs access to the person's Hotmail inbox.",
+        },
+      });
+      expect(request.isError).not.toBe(true);
+      expect(mcpJson(request)).toEqual({
+        capabilityId: "api:integration:microsoft-outlook-mail",
+        status: "authorization_requested",
+        action: "connect",
+        eventId: expect.any(String),
+        message:
+          "The Outlook Mail Connect card was posted. It handles the Microsoft sign-in and any admin approval link, so do not repeat its steps; nothing is connected yet. When the person finishes connecting, you get an update and its tools are available then.",
+      });
+      const events = await listSessionEvents(
+        client.db,
+        workspace.workspaceId,
+        configured.attempt.sessionId,
+      );
+      expect(events.find((event) => event.type === "tool.auth_needed")).toMatchObject({
+        turnId: configured.attempt.turnId,
+        payload: {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          providerDomain: "microsoft.com",
+          reason: "missing_connection",
+          capability: {
+            id: "api:integration:microsoft-outlook-mail",
+            name: "Outlook Mail",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+          },
+        },
+      });
+      const [installationCount] = await shared.admin<{ count: number }[]>`
+        SELECT count(*)::int AS count
+        FROM capability_plugin_installations
+        WHERE workspace_id = ${workspace.workspaceId}`;
+      expect(installationCount?.count).toBe(0);
+    } finally {
+      await configured.close();
+    }
+
+    const teams = await connect(microsoftSettings({ microsoftTeamsToolsEnabled: true }));
+    try {
+      expect((await teams.search("Microsoft Teams"))[0]?.capabilityId).toBe(
+        "api:integration:microsoft-teams",
+      );
+    } finally {
+      await teams.close();
+    }
+
+    // Without the deployment's Microsoft OAuth client nobody could finish
+    // the card, so the entries are not offered at all.
+    const unconfigured = await connect(testSettings());
+    try {
+      expect(
+        (await unconfigured.search("Hotmail")).map((match) => match.capabilityId),
+      ).not.toContain("api:integration:microsoft-outlook-mail");
+      const request = await unconfigured.mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: {
+          capabilityId: "api:integration:microsoft-outlook-mail",
+          rationale: "Read the person's mail.",
+        },
+      });
+      expect(request.isError).toBe(true);
+    } finally {
+      await unconfigured.close();
+    }
+  }, 60_000);
   test("posts the Connected Machine card without a token, and keeps it useful once machines exist", async () => {
     if (!shared) return;
     const attempt = await seedAttempt(false, [

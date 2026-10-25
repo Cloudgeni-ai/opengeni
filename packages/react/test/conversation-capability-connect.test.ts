@@ -235,3 +235,46 @@ describe("inChatConnectDecision", () => {
     );
   });
 });
+
+describe("reviewed integrations (Outlook Mail, OneDrive, ...)", () => {
+  const outlook = request({
+    providerDomain: "graph.microsoft.com",
+    capability: {
+      id: "api:integration:microsoft-outlook-mail",
+      name: "Outlook Mail",
+      kind: "api",
+      source: "built_in",
+      action: "connect",
+      rationale: "Read the newest emails.",
+      requiredVariables: [],
+    },
+  });
+
+  test("connecting your own account is enough; no integration management needed", () => {
+    for (const own of [
+      ["sessions:control", "connections:read", "connections:write"],
+      // The per-user embed default: no connections:read or connections:write.
+      ["sessions:control", "connections:personal"],
+    ] satisfies Permission[][]) {
+      // Not in the workspace catalog: the card stands for the person's own account.
+      expect(inChatConnectDecision(outlook, ready(own, []), true)).toEqual({
+        kind: "integration",
+        capabilityId: "api:integration:microsoft-outlook-mail",
+        name: "Outlook Mail",
+      });
+    }
+  });
+
+  test("without the right to connect accounts here it says so instead of a dead end", () => {
+    const readOnly: Permission[] = ["sessions:control", "connections:read"];
+    expect(inChatConnectDecision(outlook, ready(readOnly), true).kind).toBe("unavailable");
+    // Connecting without chat control could not add the tools or continue.
+    expect(inChatConnectDecision(outlook, ready(["connections:personal"]), true).kind).toBe(
+      "unavailable",
+    );
+  });
+
+  test("hosts that own chat setup keep the default row", () => {
+    expect(inChatConnectDecision(outlook, ready(CONNECT), false).kind).toBe("default");
+  });
+});

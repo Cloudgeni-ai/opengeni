@@ -16,6 +16,7 @@ import {
   claimSessionWorkForAttempt,
   createConnection,
   createDb,
+  installApiIntegration,
   createOrganizationApiKey,
   encryptEnvironmentValue,
   listSessionSystemUpdatesForTurn,
@@ -108,6 +109,16 @@ async function fixture() {
       delegationSecret: SECRET,
       sandboxBackend: "none",
       environmentsEncryptionKey: ENCRYPTION_KEY,
+      // Microsoft sign-in configured, so reviewed Microsoft integrations are connectable.
+      integrationsEnabled: true,
+      integrationsStateSecret: "capability-continuation-integrations-state",
+      integrationsOauthClientsJson: JSON.stringify({
+        "https://login.microsoftonline.com/common/v2.0": {
+          clientId: "microsoft-client",
+          clientSecret: "microsoft-secret",
+          tokenEndpointAuthMethod: "client_secret_post",
+        },
+      }),
     }),
     db: client.db,
     bus: new MemoryEventBus(),
@@ -188,8 +199,21 @@ async function settle(
   expect(settled.action).toBe("settled");
 }
 
-/** The agent asks for Fiken with a connect card and ends its turn. */
-async function idleSessionWithFikenCard(f: Fixture) {
+const FIKEN_CARD = {
+  providerDomain: FIKEN_PROVIDER_DOMAIN,
+  capability: {
+    id: "api:fiken",
+    name: "Fiken",
+    kind: "api",
+    source: "built_in",
+    action: "connect",
+    rationale: "Sending the invoice needs Fiken.",
+    requiredVariables: [],
+  },
+};
+
+/** The agent asks for a capability (Fiken by default) with a connect card and ends its turn. */
+async function idleSessionWithFikenCard(f: Fixture, card: typeof FIKEN_CARD = FIKEN_CARD) {
   const created = await f.app.request(sessionsPath(f), {
     method: "POST",
     headers: f.host,
@@ -212,17 +236,9 @@ async function idleSessionWithFikenCard(f: Fixture) {
         payload: {
           serverId: "opengeni",
           toolName: "capability_authorization_request",
-          providerDomain: FIKEN_PROVIDER_DOMAIN,
+          providerDomain: card.providerDomain,
           reason: "missing_connection",
-          capability: {
-            id: "api:fiken",
-            name: "Fiken",
-            kind: "api",
-            source: "built_in",
-            action: "connect",
-            rationale: "Sending the invoice needs Fiken.",
-            requiredVariables: [],
-          },
+          capability: card.capability,
         },
       },
     ],
@@ -361,5 +377,137 @@ describe("capability continuation API", () => {
     expect(f.workflow.calls.filter((call) => call === "wakeSessionWorkflow")).toHaveLength(
       wakesBefore,
     );
+  });
+
+  test("a reviewed integration's card continues once the person's own account is connected", async () => {
+    const f = await fixture();
+    const session = await idleSessionWithFikenCard(f, {
+      providerDomain: "graph.microsoft.com",
+      capability: {
+        id: "api:integration:microsoft-outlook-mail",
+        name: "Outlook Mail",
+        kind: "api",
+        source: "built_in",
+        action: "connect",
+        rationale: "Reading your newest emails needs Outlook Mail.",
+        requiredVariables: [],
+      },
+    });
+    const capabilityId = "api:integration:microsoft-outlook-mail";
+    const subjectId = (session.createdBy as { subjectId: string }).subjectId;
+
+    // Nothing connected yet.
+    const early = await continueAfterSetup(f, session.id, capabilityId);
+    expect(await early.json()).toEqual({ outcome: "not_needed", reason: "not_ready" });
+
+    // What the card's sign-in leaves behind: the person's own Microsoft
+    // account and an instance of the reviewed definition bound to it.
+    const connection = await createConnection(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId,
+      providerDomain: "graph.microsoft.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        Buffer.from(ENCRYPTION_KEY, "base64"),
+        JSON.stringify({ accessToken: "microsoft-test" }),
+      ),
+      grantedScopes: [],
+      expiresAt: null,
+      metadata: {},
+      createdBySubjectId: subjectId,
+    });
+    await installApiIntegration(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId,
+      capabilityId: "api:microsoft-outlook-mail",
+      pluginKey: "integration/microsoft-outlook-mail",
+      serverId: "outlook_mail_test",
+      name: "Outlook Mail",
+      description: "Read mail.",
+      category: "integrations",
+      tags: ["openapi", "microsoft"],
+      definitionId: "microsoft-outlook-mail",
+      definitionProvenance: "curated",
+      providerDomain: "graph.microsoft.com",
+      protocol: "openapi",
+      baseUrl: "https://graph.microsoft.com/v1.0/",
+      sourceUrl: null,
+      authScheme: { kind: "oauth2" },
+      connectionId: connection.id,
+      requiredScopes: [],
+      ownership: "subject",
+      revision: {
+        id: "openapi:222222222222222222222222",
+        protocol: "openapi",
+        definitionId: "microsoft-outlook-mail",
+        contentSha256: "2".repeat(64),
+        source: { url: "https://graph.microsoft.com/v1.0/" },
+        title: "Outlook Mail",
+        tools: [
+          {
+            id: "list_messages",
+            operationKey: "listMessages",
+            name: "List messages",
+            description: "List messages.",
+            inputSchema: { type: "object", properties: {} },
+            safety: "read",
+            approvalMode: "never",
+            deprecated: false,
+          },
+        ],
+        bindings: {
+          list_messages: {
+            method: "get",
+            pathTemplate: "/me/messages",
+            serverUrl: "https://graph.microsoft.com/v1.0/",
+            parameters: [],
+          },
+        },
+      },
+    } as Parameters<typeof installApiIntegration>[1]);
+
+    const listed = async () =>
+      (
+        (await (
+          await f.app.request(`/v1/workspaces/${f.workspaceId}/integrations`, { headers: f.host })
+        ).json()) as {
+          integrations: Array<{
+            definitionId: string;
+            connected: boolean;
+            connectionId: string | null;
+            ownership: string;
+          }>;
+        }
+      ).integrations.find((instance) => instance.definitionId === "microsoft-outlook-mail");
+
+    // An expired or revoked sign-in is not connected: the card reconnects
+    // that same account, and the agent is not woken for it.
+    await shared.admin`UPDATE connections SET status = 'needs_reauth' WHERE id = ${connection.id}`;
+    expect(await listed()).toMatchObject({
+      connected: false,
+      connectionId: connection.id,
+      ownership: "personal",
+    });
+    const expired = await continueAfterSetup(f, session.id, capabilityId);
+    expect(await expired.json()).toEqual({ outcome: "not_needed", reason: "not_ready" });
+    await shared.admin`UPDATE connections SET status = 'active' WHERE id = ${connection.id}`;
+    expect(await listed()).toMatchObject({ connected: true, ownership: "personal" });
+
+    const queued = await continueAfterSetup(f, session.id, capabilityId);
+    expect(queued.status, await queued.clone().text()).toBe(200);
+    const body = (await queued.json()) as { outcome: string; updateId: string };
+    expect(body.outcome).toBe("queued");
+    const resumed = await claim(f, session.id);
+    const delivered = await listSessionSystemUpdatesForTurn(
+      client.db,
+      f.workspaceId,
+      session.id,
+      resumed.turn.id,
+    );
+    expect(delivered.map((update) => update.summary)).toEqual([
+      "The person finished setting up Outlook Mail from your request. Its tools are now available, so continue the request that needed it.",
+    ]);
   });
 });

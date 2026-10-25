@@ -5,6 +5,7 @@ import {
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
 export * from "./secret-value";
+export * from "./integration-capability-id";
 import { defineSchema } from "./define-schema";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
@@ -15804,6 +15805,8 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
       connected: primitives.boolean,
       requiresConnection: primitives.boolean,
       connectionId: primitives.nullableUuid,
+      /** When the bound connection was last used, so a client can pick which account to reconnect. */
+      connectionLastUsedAt: primitives.nullableString.optional(),
       ownership: z.enum(["workspace", "personal", "none"]),
       allowedTools: z.array(z.string().min(1).max(200)).max(2000),
       toolCount: primitives.nonnegativeInteger,

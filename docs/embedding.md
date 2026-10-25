@@ -317,6 +317,18 @@ these cards to the host. `timelineProps.renderAuthNeeded` still takes
 precedence, and host-managed connections (`authoritySource: "host"`) keep their
 own row.
 
+The agent's cards for the deployment's reviewed Microsoft integrations
+(Outlook Mail, Calendar and Contacts, OneDrive and Teams) render the same way,
+with `SessionIntegrationCapabilityCard`. Each person connects their own
+Microsoft account, which installs the integration's reviewed tools for that
+account alone, so these cards need `sessions:control` plus
+`connections:personal` (or `connections:write`), not `connections:read` or
+`capabilities:manage`. The per-user defaults above already include both, so
+the host does not pre-install anything; a shared identity without
+`connections:personal` sees the card as unavailable. The session proxy
+forwards the Connect, integration, tool-policy and continuation routes the
+card uses as the signed-in end user.
+
 ### Embedded defaults
 
 | Default in `SessionConversation` / `OpenGeniChat` | How the host changes it |

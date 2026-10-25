@@ -9518,6 +9518,8 @@ export type ApiIntegrationInstallationSummary = {
   connected: boolean;
   requiresConnection: boolean;
   connectionId: string | null;
+  /** When the bound connection was last used, or null when never or unbound. */
+  connectionLastUsedAt?: string | null;
   ownership: "workspace" | "personal" | "none";
   allowedTools: string[];
   toolCount: number;

@@ -50,6 +50,7 @@ import {
   type InChatConnectSource,
 } from "./conversation-capability-connect";
 import type { SessionMcpCapabilityCardProps } from "./session-mcp-capability-card";
+import type { SessionIntegrationCapabilityCardProps } from "./session-integration-capability-card";
 import type { AuthNeededItem } from "../timeline";
 import { ProviderRecoveryNotice } from "./provider-recovery-notice";
 import { currentProviderRecovery } from "../lib/provider-recovery";
@@ -562,6 +563,21 @@ function ConversationView({
     if (!sessionId || importedArchive) return undefined;
     const decision = inChatConnectDecision(item, connectSupport, config.chatConnections);
     if (decision.kind === "unavailable") return <AuthNeededRow item={item} setupUnavailable />;
+    if (decision.kind === "integration") {
+      return (
+        <Suspense fallback={<AuthNeededRow item={item} />}>
+          <LazySessionIntegrationCapabilityCard
+            client={context.client as unknown as SessionIntegrationCapabilityCardProps["client"]}
+            workspaceId={context.workspaceId}
+            sessionId={sessionId}
+            capabilityId={decision.capabilityId}
+            name={decision.name}
+            rationale={item.capability?.rationale ?? ""}
+            returnUrl={typeof window === "undefined" ? "" : window.location.href}
+          />
+        </Suspense>
+      );
+    }
     if (decision.kind !== "card") return undefined;
     return (
       <Suspense fallback={<AuthNeededRow item={item} />}>
@@ -928,8 +944,14 @@ function GoalChrome({
 }
 const LazyEmbeddedRealtimeVoice = lazy(() => import("../realtime/embedded-voice"));
 
+const LazySessionIntegrationCapabilityCard = lazy(() =>
+  import("./session-connect-cards").then((module) => ({
+    default: module.SessionIntegrationCapabilityCard,
+  })),
+);
+
 const LazySessionMcpCapabilityCard = lazy(() =>
-  import("./session-mcp-capability-card").then((module) => ({
+  import("./session-connect-cards").then((module) => ({
     default: module.SessionMcpCapabilityCard,
   })),
 );

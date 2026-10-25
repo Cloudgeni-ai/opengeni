@@ -17,6 +17,12 @@ import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
+import {
+  connectableIntegrationDefinitions,
+  integrationDefinitionCardPostedMessage,
+  integrationDefinitionSetupContext,
+  integrationDefinitionSetup,
+} from "./integration-definition-capabilities";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./user-setup-card";
 import {
@@ -6850,6 +6856,14 @@ function registerCapabilityDiscoveryTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
+  // Agent-only setup entries next to the workspace catalog: GitHub, Connected
+  // Machine and the reviewed integration definitions this workspace can connect.
+  const recommendations = () =>
+    nativeConnectionCapabilityRecommendations({
+      connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+      browserExtension: browserExtension(deps.settings),
+      integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
+    });
 
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
@@ -6861,7 +6875,9 @@ function registerCapabilityDiscoveryTools(
     let accountSelectionKnown = false;
     if (
       items.some(
-        (item) => item.enabled && (item.connectionRef || item.surfaceType === "first_party_fiken"),
+        (item) =>
+          (item.enabled && (item.connectionRef || item.surfaceType === "first_party_fiken")) ||
+          item.surfaceType === "integration_definition",
       )
     ) {
       const claims = exactAgentCommandContext(grant, sessionId);
@@ -6892,20 +6908,27 @@ function registerCapabilityDiscoveryTools(
         for (const id of readiness.accepted) acceptedServerIds.add(id);
       }
     }
+    // One read of the person's integration accounts and this chat's tool
+    // selection for every definition item.
+    const integrationContext = items.some((item) => item.surfaceType === "integration_definition")
+      ? await integrationDefinitionSetupContext(deps, grant, sessionId)
+      : null;
     return await Promise.all(
       items.map((item) =>
         item.id === EXCEL_ADDIN_CAPABILITY_ID
           ? excelAddinSetup(deps, grant, sessionId)
-          : capabilitySetupProjection(
-              deps,
-              grant.workspaceId,
-              item,
-              availableServerIds,
-              acceptedServerIds,
-              accountSelectionKnown,
-              availableFirstPartyTools,
-              new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
-            ),
+          : item.surfaceType === "integration_definition"
+            ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
+            : capabilitySetupProjection(
+                deps,
+                grant.workspaceId,
+                item,
+                availableServerIds,
+                acceptedServerIds,
+                accountSelectionKnown,
+                availableFirstPartyTools,
+                new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+              ),
       ),
     );
   };
@@ -6923,13 +6946,7 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const current = await catalog();
-      const candidates = [
-        ...current.items,
-        ...nativeConnectionCapabilityRecommendations({
-          connectedMachines: deps.settings.sandboxSelfhostedEnabled,
-          browserExtension: browserExtension(deps.settings),
-        }),
-      ];
+      const candidates = [...current.items, ...recommendations()];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       const setups = await setupProjections(ranked.map(({ item }) => item));
       const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
@@ -6997,13 +7014,9 @@ function registerCapabilityDiscoveryTools(
     async ({ capabilityId, rationale }) => {
       await authorize();
       const current = await catalog();
-      const item = [
-        ...current.items,
-        ...nativeConnectionCapabilityRecommendations({
-          connectedMachines: deps.settings.sandboxSelfhostedEnabled,
-          browserExtension: browserExtension(deps.settings),
-        }),
-      ].find((candidate) => candidate.id === capabilityId);
+      const item = [...current.items, ...recommendations()].find(
+        (candidate) => candidate.id === capabilityId,
+      );
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
@@ -7062,7 +7075,9 @@ function registerCapabilityDiscoveryTools(
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
-              : "The recommendation was posted for human confirmation. No access has been granted yet.",
+              : item.surfaceType === "integration_definition"
+                ? integrationDefinitionCardPostedMessage(item)
+                : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
   );
