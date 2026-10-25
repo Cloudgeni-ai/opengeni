@@ -278,7 +278,18 @@ service does not interpret an incomplete observation as an empty queue.
 The GitHub-only admission contract is an open, non-draft PR with `queue-ready` or a current native auto-merge request,
 and successful configured required GitHub-hosted checks on its exact current head.
 The admission workflow is fast lint, types and selected units, not the full PR
-suite; full main CI remains the independent post-merge backstop. These instructions
+suite; full main CI remains the post-merge backstop. A main push may reuse unit
+coverage only from a successful Batch attempt on the identical Git tree whose
+unit inventory exactly equals the complete current main unit inventory. Selected
+subsets are insufficient, even when their Batch is green. The proof binds the
+canonical per-PR Git manifest, run and attempt, archive SHA-256 digests and full
+shard receipts; same-tree/different-commit reuse preserves both commit identities.
+Missing, expired, ambiguous, partial or unavailable evidence runs the normal main
+unit suite. Discovery is bounded and can miss old proofs without weakening tests.
+Each main unit job verifies the current main attempt's retained proof instead of
+rerunning tests; service, e2e, image and release/full-green gates remain unchanged.
+`ci-impact-plan/unit-reuse.json` records the proof (or null for a normal run).
+These instructions
 apply to coding agents in Cursor and other workspaces without an owner-specific
 comment format or human-only intake step.
 Agent evidence comments, VM attestations and reviewer session UUIDs are not intake

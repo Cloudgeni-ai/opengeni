@@ -219,7 +219,11 @@ jobs:
     if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 17
+    permissions:
+      contents: read
+      actions: read # exact successful Batch attempt and immutable proof archives
     outputs:
+      unit_reuse: ${{ steps.unit_reuse.outputs.reuse }}
       mode: ${{ steps.plan.outputs.mode }}
       unit_count: ${{ steps.plan.outputs.unit_count }}
       integration_count: ${{ steps.plan.outputs.integration_count }}
@@ -372,6 +376,12 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Verify identical-tree complete Batch unit coverage
+        id: unit_reuse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/reuse-batch-units.ts
+
       - name: Record dependency cache outcome
         if: ${{ always() }}
         run: |
@@ -386,7 +396,9 @@ jobs:
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-impact-plan
-          path: impact-plan.json
+          path: |
+            impact-plan.json
+            unit-reuse.json
           if-no-files-found: error
           retention-days: 7
 
@@ -679,6 +691,7 @@ jobs:
             bun-${{ runner.os }}-
 
       - name: Install dependencies
+        if: ${{ needs.plan.outputs.unit_reuse != 'true' }}
         run: bun packages/testing/src/acquisition-diagnostics.ts -- bun install --frozen-lockfile
 
       - name: Download exact impact plan
@@ -686,7 +699,12 @@ jobs:
         with:
           name: ci-impact-plan
 
+      - name: Verify reused complete unit proof for this main attempt
+        if: ${{ needs.plan.outputs.unit_reuse == 'true' }}
+        run: bun scripts/ci/reuse-batch-units.ts verify
+
       - name: Unit test shard
+        if: ${{ needs.plan.outputs.unit_reuse != 'true' }}
         timeout-minutes: 21
         env:
           # The per-subject FORCE-RLS/OCC suite remains fail-closed on every shard.

@@ -1188,7 +1188,10 @@ export class GitHubReader {
 export function readResultZip(
   bytes: Uint8Array,
   allowedNames = ["batch-result.json", "result.json"],
+  maxEntryBytes = 65_536,
 ): string {
+  if (!Number.isSafeInteger(maxEntryBytes) || maxEntryBytes < 1 || maxEntryBytes > 1_000_000)
+    throw new Error("Invalid ZIP entry limit");
   if (bytes.byteLength > 1_000_000) throw new Error("Artifact too large");
   const b = Buffer.from(bytes);
   let end = -1;
@@ -1217,7 +1220,7 @@ export function readResultZip(
     if (!allowedNames.includes(name)) continue;
     if (
       flags & 1 ||
-      size > 65_536 ||
+      size > maxEntryBytes ||
       compressed > 1_000_000 ||
       b.readUInt32LE(offset) !== 0x04034b50
     )
@@ -1229,7 +1232,7 @@ export function readResultZip(
       compression === 0
         ? data
         : compression === 8
-          ? inflateRawSync(data, { maxOutputLength: 65_536 })
+          ? inflateRawSync(data, { maxOutputLength: maxEntryBytes })
           : null;
     if (!decoded || decoded.length !== size) throw new Error("Invalid compression");
     results.push(decoded.toString("utf8"));
