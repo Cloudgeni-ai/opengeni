@@ -54,6 +54,7 @@ type FixtureRow = Omit<(typeof rows)[number], "parentSessionId"> & {
 // Marks the root browse read issued synchronously by a test invalidation, so
 // the rail's own poll or retry reads cannot consume its gate.
 const INVALIDATION_READ_HEADER = "x-opengeni-test-invalidation-read";
+const readProbeModulePath = `/@fs${new URL("./fixtures/session-list-read-probe.ts", import.meta.url).pathname}`;
 const isRootBrowseRead = (rawUrl: string) => {
   const url = new URL(rawUrl);
   return (
@@ -111,7 +112,7 @@ describe("compact session view on the live local workspace route (API fixture)",
         childReadStarted?: ReturnType<typeof deferred>;
         failReads: boolean;
         failFirstPage?: boolean;
-        allowStaleFirstPage?: boolean;
+        allowStaleWindowFirstPage?: boolean;
         overlapRootOnContinuation?: boolean;
         staleFirstPageRoot?: FixtureRow;
         holdSearch?: ReturnType<typeof deferred>;
@@ -168,6 +169,16 @@ describe("compact session view on the live local workspace route (API fixture)",
       if (location.origin !== "null")
         localStorage.setItem("opengeni.accessKey", "configured-test-placeholder");
     });
+    // Install observation before mounting the real app. Native module imports
+    // preserve its loading path; do not proxy Vite through route.fetch(), whose
+    // separate keep-alive transport can reset between document navigations.
+    await page.route(`${baseUrl}/src/main.tsx`, (route) =>
+      route.fulfill({
+        contentType: "text/javascript",
+        headers: { "cache-control": "no-store" },
+        body: `await import(${JSON.stringify(readProbeModulePath)});\nawait import("/src/main.tsx?compact-session-fixture");`,
+      }),
+    );
     await page.route(`${baseUrl}/v1/**`, async (route) => {
       const url = new URL(route.request().url());
       const path = url.pathname;
@@ -401,8 +412,15 @@ describe("compact session view on the live local workspace route (API fixture)",
           const failedAtStart = fixture.failReads;
           await hold?.promise;
           const firstPage = !url.searchParams.has("cursor");
-          const allowStaleFirstPage = firstPage && fixture.allowStaleFirstPage;
-          if (firstPage) fixture.allowStaleFirstPage = false;
+          // Only the independently paged group window owns this permission.
+          // Discovery reads (including fallback polls) carry siteConversations
+          // and must keep failing without consuming the window's stale page.
+          const windowFirstPage =
+            firstPage &&
+            url.searchParams.get("includePinned") === "false" &&
+            !url.searchParams.has("siteConversations");
+          const allowStaleFirstPage = windowFirstPage && fixture.allowStaleWindowFirstPage;
+          if (allowStaleFirstPage) fixture.allowStaleWindowFirstPage = false;
           if (
             (hold ? failedAtStart : fixture.failReads) ||
             (fixture.failFirstPage && firstPage && !allowStaleFirstPage)
@@ -596,82 +614,45 @@ describe("compact session view on the live local workspace route (API fixture)",
       { targetWorkspaceId: workspaceId, moduleUrl: modulePath },
     );
   };
-  // The rail's fallback poll and failed-read retry can also start a root browse
-  // read, so arrival alone does not prove the invalidation caused it. The
-  // listener issues the read synchronously inside notifySessionListChanged and
-  // no timer can run within that call, so only a fetch issued during it is
-  // tagged; the fixture holds and counts only tagged reads. If a rail read is
-  // already in flight, the invalidation queues behind it untagged; let those
-  // reads finish, then invalidate again.
+  // Only a fetch issued inside this one notification may consume the gate;
+  // fallback polling and failed-read retries cannot make this proof pass.
+  // Wait for complete SDK reads, not requestfinished: the hook still owns a
+  // read while its response is being decoded/projected, and will queue refresh
+  // behind it. Repeatedly notifying in that gap perpetuates trailing reads.
   const invalidateBrowseRead = async () => {
-    const modulePath = `/@fs${new URL("../../packages/react/src/app/lib/session-list-invalidation.tsx", import.meta.url).pathname}`;
-    // The page itself cannot see reads it issued before this step, so the
-    // browser's request events decide when no root browse read is in flight.
-    // A read can still slip in between that check and the invalidation; the
-    // attempt then reports no tagged read and the next one waits again. The
-    // deadline bounds the whole retry, not how fast one invalidation reads:
-    // each queued read waits for a slower one on loaded CI runners.
-    let attempts = 0;
+    let observation:
+      | ReturnType<typeof import("./fixtures/session-list-read-probe").invalidateIdleRootBrowseRead>
+      | undefined;
+    let evaluationError: unknown;
     await waitFor(
       async () => {
-        if (rootBrowseReadsInFlight.size > 0) return false;
-        attempts += 1;
-        return page.evaluate(
-          async ({ targetWorkspaceId, moduleUrl, header }) => {
-            const { notifySessionListChanged } = await import(moduleUrl);
-            // This runs in the page. Bun's global fetch type adds members such
-            // as preconnect, so use the DOM's own fetch type for the page global.
-            const pageScope: WindowOrWorkerGlobalScope = window;
-            const originalFetch = pageScope.fetch;
-            const isPageRootBrowseRead = (input: RequestInfo | URL) => {
-              const url = new URL(
-                input instanceof Request ? input.url : String(input),
-                location.href,
-              );
-              return (
-                url.pathname.endsWith("/sessions") &&
-                url.searchParams.get("parentSessionId") === "null" &&
-                !url.searchParams.get("search")
-              );
-            };
-            let started = false;
-            const taggingFetch: WindowOrWorkerGlobalScope["fetch"] = function (
-              this: unknown,
-              input,
-              init,
-            ) {
-              if (!isPageRootBrowseRead(input)) return originalFetch.call(this, input, init);
-              started = true;
-              const headers = new Headers(input instanceof Request ? input.headers : undefined);
-              new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
-              headers.set(header, "1");
-              return originalFetch.call(this, input, { ...init, headers });
-            };
-            pageScope.fetch = taggingFetch;
-            try {
-              notifySessionListChanged({
-                workspaceId: targetWorkspaceId,
-                sessionId: "remote-change",
-              });
-            } finally {
-              pageScope.fetch = originalFetch;
-            }
-            return started;
-          },
-          {
-            targetWorkspaceId: workspaceId,
-            moduleUrl: modulePath,
-            header: INVALIDATION_READ_HEADER,
-          },
-        );
+        try {
+          observation = await page.evaluate(
+            async ({ targetWorkspaceId, moduleUrl, header }) => {
+              const probe = await import(moduleUrl);
+              return probe.invalidateIdleRootBrowseRead(targetWorkspaceId, header);
+            },
+            {
+              targetWorkspaceId: workspaceId,
+              moduleUrl: readProbeModulePath,
+              header: INVALIDATION_READ_HEADER,
+            },
+          );
+        } catch (error) {
+          evaluationError = error;
+          return true;
+        }
+        // Never retry a notification that failed to start its own read.
+        return observation?.started !== null;
       },
       {
         timeoutMs: 30_000,
         intervalMs: 25,
-        describe: () =>
-          `No invalidation started its own root browse read after ${attempts} attempts; ${rootBrowseReadsInFlight.size} root browse reads are still in flight.`,
+        describe: () => `Waiting for complete root SDK reads: ${JSON.stringify(observation)}`,
       },
     );
+    if (evaluationError) throw evaluationError;
+    expect(observation?.started).toBe(true);
     await waitFor(() => archiveFixture?.readStarted === true, {
       timeoutMs: 5_000,
       intervalMs: 10,
@@ -845,7 +826,25 @@ describe("compact session view on the live local workspace route (API fixture)",
       await page
         .getByRole("textbox", { name: "Message the agent", exact: true })
         .and(page.locator(":focus"))
-        .waitFor();
+        .waitFor()
+        .catch(async (error) => {
+          console.error(
+            "Initial composer focus diagnostic",
+            await page.evaluate(() => ({
+              url: location.href,
+              ready: document.readyState,
+              visibility: document.visibilityState,
+              active: document.activeElement?.outerHTML,
+              body: document.body.innerText.slice(0, 3000),
+            })),
+            web.logs(),
+          );
+          await page.screenshot({
+            path: "test-results/compact-composer-focus-failure.png",
+            fullPage: true,
+          });
+          throw error;
+        });
       await choose("Group by", "None");
       await choose("Sort by", "Last activity");
       await choose("Status", localArchived ? "Active" : "Archived");
@@ -989,7 +988,19 @@ describe("compact session view on the live local workspace route (API fixture)",
           // 50, just like discovery. Permit its one overlapping stale first
           // page; only the following cursor page carries revision 2.
           archiveFixture.staleFirstPageRoot = root;
-          archiveFixture.allowStaleFirstPage = true;
+          archiveFixture.allowStaleWindowFirstPage = true;
+          // A discovery poll/retry can land between arming this permission
+          // and clicking Show more. It must fail without consuming the
+          // independently requested continuation window's stale first page.
+          archiveFixture.readStarted = false;
+          const [discoveryResponse] = await Promise.all([
+            page.waitForResponse(
+              (response) => response.request().headers()[INVALIDATION_READ_HEADER] === "1",
+            ),
+            invalidateBrowseRead(),
+          ]);
+          expect(discoveryResponse.status()).toBe(500);
+          expect(archiveFixture.allowStaleWindowFirstPage).toBe(true);
         }
         const [continuationResponse] = await Promise.all([
           page.waitForResponse((response) => {
@@ -1004,6 +1015,7 @@ describe("compact session view on the live local workspace route (API fixture)",
           disclosure.click(),
         ]);
         const continuationPage = await continuationResponse.json();
+        if (localArchived) expect(archiveFixture.allowStaleWindowFirstPage).toBe(false);
         expect(
           continuationPage.sessions.find((row: FixtureRow) => row.id === root.id),
         ).toMatchObject({
@@ -1172,7 +1184,34 @@ describe("compact session view on the live local workspace route (API fixture)",
       const oldWorkspaceRead = deferred();
       archiveFixture.holdRead = oldWorkspaceRead;
       archiveFixture.readStarted = false;
-      await invalidateBrowseRead();
+      // Force the original failure window: the native request is finished,
+      // but the SDK promise (and therefore the hook's read) is still pending.
+      // The helper must wait, not send an invalidation that queues untagged.
+      await page.evaluate(async (moduleUrl) => {
+        (await import(moduleUrl)).holdNextRootReadCompletion();
+      }, readProbeModulePath);
+      await invalidate();
+      const probeSnapshot = () =>
+        page.evaluate(
+          async (moduleUrl) => (await import(moduleUrl)).snapshot(),
+          readProbeModulePath,
+        );
+      await waitFor(async () => (await probeSnapshot()).completionHeld);
+      await waitFor(() => rootBrowseReadsInFlight.size === 0);
+      const beforeInvalidation = await probeSnapshot();
+      const invalidatedRead = invalidateBrowseRead();
+      try {
+        await waitFor(
+          async () => (await probeSnapshot()).busyChecks > beforeInvalidation.busyChecks,
+        );
+        expect((await probeSnapshot()).notifications).toBe(beforeInvalidation.notifications);
+        expect(archiveFixture.readStarted).toBe(false);
+      } finally {
+        await page.evaluate(async (moduleUrl) => {
+          (await import(moduleUrl)).releaseRootReadCompletion();
+        }, readProbeModulePath);
+      }
+      await invalidatedRead;
       expect(archiveFixture.readStarted).toBe(true);
       await page.getByRole("button", { name: /Switch workspace or organization$/ }).click();
       await page.getByRole("menuitem", { name: /Other workspace/ }).click();
