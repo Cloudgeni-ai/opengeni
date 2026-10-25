@@ -422,6 +422,18 @@ describe("CUA desktop boundary", () => {
       // A minimized or unmapped window high in the stack is not in front.
       fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, is_on_screen: false })];
       expect(await focused()).toEqual(["cua:window:42:1"]);
+      // An untitled strip above a window (a status bubble, an emulator's
+      // toolbar) is part of that window; a small titled window is not.
+      const strip = { title: "", bounds: { x: 0, y: 0, width: 243, height: 22 } };
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, ...strip })];
+      expect(await focused()).toEqual(["cua:window:42:1"]);
+      const palette = { bounds: { x: 0, y: 0, width: 90, height: 60 } };
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, ...palette })];
+      expect(await focused()).toEqual(["cua:window:42:2"]);
+      // An untitled window of ordinary size, such as a message dialog, is.
+      const dialog = { title: "", bounds: { x: 0, y: 0, width: 300, height: 150 } };
+      fixture.windows = [window(1, { z_index: 3 }), window(2, { z_index: 8, ...dialog })];
+      expect(await focused()).toEqual(["cua:window:42:2"]);
       // A reading does not carry the mark, which only a listing keeps current.
       expect((await backend.observe("cua:window:42:1")).target.focused).toBe(false);
     } finally {

@@ -101,6 +101,11 @@ type Operation = {
  * but quick, without a pause after each click. */
 const CURSOR_MOTION = { timing: "fixed", glide_duration_ms: 150, dwell_after_click_ms: 0 };
 
+/** An untitled window with a side shorter than this is a strip attached to
+ * another window (Chrome's status bubble is 22 px tall, an Android
+ * emulator's toolbar 54 px wide), never the window in front. */
+const UNTITLED_STRIP_MAX_SIDE = 100;
+
 /** How long a field check waits before reading a window again, when the
  * reading straight after the input does not show it yet. */
 const INPUT_REREAD_MS = 150;
@@ -817,6 +822,9 @@ export class CuaComputerBackend implements ComputerBackend {
     // The frontmost ordinary window is the one the person has in front: CUA
     // reports stacking, not keyboard focus. Windows' listing also stacks
     // cloaked and always-on-top windows as ordinary ones, so it marks none.
+    // An untitled strip stacked above its app's window is part of that
+    // window, not one a person works in: Chrome's link status bubble, an
+    // emulator's side toolbar.
     let front: { id: string; z: number } | null = null;
     for (const window of this.identity.platform === "windows" ? [] : windows) {
       const id = `cua:window:${window.pid}:${window.window_id}`;
@@ -825,7 +833,9 @@ export class CuaComputerBackend implements ComputerBackend {
         (window.layer ?? 0) !== 0 ||
         presences.has(id) ||
         // Minimized, hidden or unmapped on every platform.
-        window.is_on_screen === false
+        window.is_on_screen === false ||
+        (!window.title.trim() &&
+          Math.min(window.bounds.width, window.bounds.height) < UNTITLED_STRIP_MAX_SIDE)
       )
         continue;
       if (!front || window.z_index > front.z) front = { id, z: window.z_index };
