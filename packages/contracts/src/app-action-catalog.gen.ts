@@ -778,6 +778,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "continueAfterCapabilitySetup",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations",
+    "request": [
+      "ContinueAfterCapabilitySetupRequest"
+    ],
+    "response": [
+      "ContinueAfterCapabilitySetupResponse"
+    ]
+  },
+  {
     "id": "continueSessionWaitingWork",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/waiting-work/continue",

@@ -115,7 +115,9 @@ test.each(["after", "before"] as const)(
           const args = captured!.params.map(literal).join(",");
           const rows = await tx.execute(sql.raw(`execute metadata_prefix(${args})`));
           expect(rows).toHaveLength(3); // two delivered rows and the first byte overflow
-          expect(rows.map((r: { sourceRowCount: number }) => r.sourceRowCount)).toEqual([256, 256, 256]);
+          expect(rows.map((r: { sourceRowCount: number }) => r.sourceRowCount)).toEqual([
+            256, 256, 256,
+          ]);
           const explain = await tx.execute(
             sql.raw(`explain(analyze,buffers,format json) execute metadata_prefix(${args})`),
           );

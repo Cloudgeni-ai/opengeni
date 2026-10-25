@@ -106,9 +106,9 @@ async function request(
   return app.request(
     `http://x/v1/workspaces/${workspaceId}/feedback${options.path ?? ""}${options.query ?? ""}`,
     {
-    method: payload === undefined ? "GET" : "POST",
-    headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
-    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+      method: payload === undefined ? "GET" : "POST",
+      headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+      ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
     },
   );
 }
@@ -427,8 +427,12 @@ test("feedback keeps its screenshots and app context, and replays only the same 
   expect(image.headers.get("content-type")).toBe("image/jpeg");
   expect(new Uint8Array(await image.arrayBuffer())).toEqual(jpeg);
   expect(
-    (await request(undefined, { path: `/${feedback.id}/screenshots/0`, actor: "user:someone-else" }))
-      .status,
+    (
+      await request(undefined, {
+        path: `/${feedback.id}/screenshots/0`,
+        actor: "user:someone-else",
+      })
+    ).status,
   ).toBe(404);
   expect((await request(undefined, { path: `/${feedback.id}/screenshots/1` })).status).toBe(404);
 });

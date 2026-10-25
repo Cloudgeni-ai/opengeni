@@ -148,15 +148,22 @@ export function createWorkspaceIdResolver(
     user: string,
     permissions: readonly Permission[],
   ) => {
-    const add = async (granted: readonly Permission[], operation: unknown[]) =>
+    // One operation per member, whatever it grants: a cancelled or reduced
+    // grant stays fenced, including against the conversation fallback. A
+    // refused grant records nothing, so the fallback may reuse it.
+    const operationId = await uuidV5(
+      JSON.stringify(["member", workspaceId, source, user]),
+      ISOLATION_NAMESPACE,
+    );
+    const add = async (granted: readonly Permission[]) =>
       await client.addExternalWorkspaceMember(workspaceId, {
         identity: { source, externalId: user },
         permissions: [...granted],
-        operationId: await uuidV5(JSON.stringify(operation), ISOLATION_NAMESPACE),
+        operationId,
       });
     try {
       try {
-        await add(permissions, ["member", workspaceId, source, user]);
+        await add(permissions);
       } catch (error) {
         if (
           !defaulted ||
@@ -165,7 +172,7 @@ export function createWorkspaceIdResolver(
           error.status !== 403
         )
           throw error;
-        await add(CONVERSATION_PERMISSIONS, ["member", workspaceId, source, user, "conversation"]);
+        await add(CONVERSATION_PERMISSIONS);
       }
     } catch (error) {
       // The member may exist already (added by the API on an earlier first

@@ -152,7 +152,7 @@ describe("workload image system package contract", () => {
     const control = await readFile(resolve(root, "apps/worker/src/activities-control.ts"), "utf8");
     expect(control).toContain("createDocumentActivities(services, resolveDocumentServices)");
     const segmenter = await readFile(
-      resolve(root, "apps/api/src/transcription/segmenter.ts"),
+      resolve(root, "packages/core/src/transcription-service/segmenter.ts"),
       "utf8",
     );
     expect(segmenter).toContain("input.ffmpegPath");

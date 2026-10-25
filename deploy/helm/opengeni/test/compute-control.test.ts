@@ -499,7 +499,7 @@ describe("computeControl", () => {
       ...enabled,
       computeControl: {
         ...enabled.computeControl,
-        imageSources: { opengeni: "registry.example/opengeni-sandbox:latest" },
+        imageSources: { opengeni: "registry.example/opengeni-sandbox:v1" },
       },
     });
     expect(unpinned.exitCode).not.toBe(0);

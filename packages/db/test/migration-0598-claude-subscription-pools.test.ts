@@ -123,6 +123,9 @@ const subscriptionCoreMigrations = [
   "0900_workspace_admin_predicate_privileges.sql",
   // Folds the pool rows and rewrites the auto-assignment routine 0713 creates.
   "0907_subscription_connection_one_owner.sql",
+  // Redefines 0759's predicate, which reads the subscription authority column
+  // from withheld 0688; replay after it.
+  "0972_capability_setup_continuations.sql",
   // Rewrites the withheld 0732 probes and claim bodies after their originals exist.
   ...strictOwnerMaintenanceMigrationTail,
   // Redefines the exhausted-task predicate withheld 0761 creates; replay after it.
