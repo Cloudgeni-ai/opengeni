@@ -18,7 +18,7 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
+import { ObjectBodyIncompleteError, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
@@ -29,11 +29,14 @@ import {
   compactRetainedScreenshotHistory,
   inlineImagesFromToolResultItem,
   materializeRetainedScreenshotHistory,
+  RETAINED_SCREENSHOT_INCOMPLETE_READ_RETRY_DELAYS_MS,
   RETAINED_SCREENSHOT_READ_CONCURRENCY,
   retainComputerScreenshot,
   retainSessionScreenshot,
   validateComputerScreenshot,
 } from "../src/activities/retained-screenshots";
+import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
+import { RetainedAttachmentUnavailableError } from "../src/activities/retained-image-unavailable";
 import type { ActivityServices } from "../src/activities/types";
 
 const PNG = Uint8Array.from(
@@ -1366,31 +1369,110 @@ describe("retained screenshot lifecycle fences", () => {
     expect(maxInFlight).toBe(Math.min(4, RETAINED_SCREENSHOT_READ_CONCURRENCY));
   }, 180_000);
 
-  test("a storage error while loading history images still fails the turn so it retries", async () => {
+  test("a storage error while loading history images fails the turn as a storage condition so it retries", async () => {
     if (!available) return;
     const fixture = await freshTurn();
     const memory = storageFixture();
     const receipts = await retainScreenshots(fixture, memory.storage, 3);
     let calls = 0;
+    const refused = Object.assign(new Error("storage temporarily unavailable"), {
+      code: "ECONNRESET",
+    });
     const failingStorage: ObjectStorage = {
       ...memory.storage,
       async getObjectBytes(key) {
         calls += 1;
-        if (calls === 2) throw new Error("storage temporarily unavailable");
+        if (calls === 2) throw refused;
         return await memory.storage.getObjectBytes(key);
       },
     };
-    await expect(
-      materializeRetainedScreenshotHistory({
-        db,
-        objectStorage: failingStorage,
-        workspaceId: fixture.workspaceId,
-        sessionId: fixture.sessionId,
-        history: receipts.map((receipt, index) =>
-          retainedOutputItem(`call-fail-${index}`, receipt),
-        ),
-      }),
-    ).rejects.toThrow("storage temporarily unavailable");
+    const failure = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: failingStorage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: receipts.map((receipt, index) => retainedOutputItem(`call-fail-${index}`, receipt)),
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(RetainedAttachmentUnavailableError);
+    expect((failure as Error).cause).toBe(refused);
+    // A connection reset from storage is never reported as the model provider failing.
+    expect(agentRunFailurePayload(failure)).toMatchObject({
+      code: "retained_attachment_unavailable",
+      retryable: true,
+    });
+  }, 180_000);
+
+  test("an image whose stored bytes never arrive intact becomes the neutral receipt instead of failing every turn", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const receipts = await retainScreenshots(fixture, memory.storage, 3);
+    const lost = await getRetainedScreenshotArtifact(
+      db,
+      fixture.workspaceId,
+      fixture.sessionId,
+      receipts[1]!.artifactId,
+    );
+    const lostKey = lost!.file.objectKey;
+    let lostReads = 0;
+    // The store still lists the object but lost its data: every read fails mid-body.
+    const damagedStorage: ObjectStorage = {
+      ...memory.storage,
+      async getObjectBytes(key) {
+        if (key !== lostKey) return await memory.storage.getObjectBytes(key);
+        lostReads += 1;
+        throw new ObjectBodyIncompleteError(key, {
+          cause: Object.assign(new Error("aborted"), { code: "ECONNRESET" }),
+        });
+      },
+    };
+    const history = receipts.map((receipt, index) =>
+      retainedOutputItem(`call-lost-${index}`, receipt),
+    );
+    const materialized = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: damagedStorage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history,
+    });
+
+    const pixels = `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`;
+    expect(materialized[0]!.output).toBe(pixels);
+    expect(materialized[2]!.output).toBe(pixels);
+    expect(materialized[1]!.output).toEqual(
+      expect.stringContaining(`Image: retained artifactId=${receipts[1]!.artifactId}`),
+    );
+    expect(String(materialized[1]!.output)).not.toContain("base64");
+    expect(materialized.map((item) => item.callId)).toEqual(history.map((item) => item.callId));
+    expect(lostReads).toBe(RETAINED_SCREENSHOT_INCOMPLETE_READ_RETRY_DELAYS_MS.length + 1);
+  }, 180_000);
+
+  test("a body that fails once and then reads intact keeps the image", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const [receipt] = await retainScreenshots(fixture, memory.storage, 1);
+    let reads = 0;
+    const flakyStorage: ObjectStorage = {
+      ...memory.storage,
+      async getObjectBytes(key) {
+        reads += 1;
+        if (reads === 1) throw new ObjectBodyIncompleteError(key);
+        return await memory.storage.getObjectBytes(key);
+      },
+    };
+    const [materialized] = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: flakyStorage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: [retainedOutputItem("call-flaky", receipt!)],
+    });
+    expect(materialized!.output).toBe(
+      `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+    );
+    expect(reads).toBe(2);
   }, 180_000);
 
   test("the batched row query returns only this session's own screenshots", async () => {

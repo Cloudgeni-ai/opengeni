@@ -33,6 +33,7 @@ import {
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
+import { RetainedAttachmentUnavailableError } from "./retained-image-unavailable";
 
 /** D-37 request-copy projection. C1 is deliberately not wired into turnInput;
  * C2 must supply scoped turn metadata and the D-43 deployment gate. The API
@@ -230,22 +231,9 @@ export class RetainedAttachmentTransportLimitError extends Error {
   }
 }
 
-/**
- * A retained image the conversation already sent could not be read from
- * object storage, for example while a storage replica catches up after an
- * outage. Its pixels are part of the accepted prompt, so the turn waits and
- * retries rather than continuing without them. Integrity mismatches are not
- * this error: retrying cannot repair different bytes.
- */
-export class RetainedAttachmentUnavailableError extends Error {
-  readonly fileIds: readonly string[];
-
-  constructor(fileIds: readonly string[]) {
-    super("An image attached earlier in this conversation can't be read from storage right now.");
-    this.name = "RetainedAttachmentUnavailableError";
-    this.fileIds = [...fileIds];
-  }
-}
+// A user attachment's pixels are part of the accepted prompt, so a read that
+// fails right now waits and retries rather than continuing without them.
+export { RetainedAttachmentUnavailableError };
 
 export type ModelAttachmentReadFailure = "unavailable" | "integrity_mismatch";
 
