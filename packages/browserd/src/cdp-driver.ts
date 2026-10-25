@@ -1664,30 +1664,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async domSelectorCount(state: TargetState, selector: string): Promise<number> {
-    const document = await this.sendTarget<{ root?: unknown }>(state, "DOM.getDocument", {
-      depth: 0,
-      pierce: true,
-    });
-    if (!isRecord(document.root) || typeof document.root.nodeId !== "number") {
-      throw new Error("CDP returned an invalid DOM root");
-    }
-    let result: { nodeIds?: unknown };
-    try {
-      result = await this.sendTarget(state, "DOM.querySelectorAll", {
-        nodeId: document.root.nodeId,
-        selector,
-      });
-    } catch (error) {
-      if (error instanceof CdpProtocolError) {
-        throw new InteractionDefiniteDriverError(
-          "invalid_action",
-          "browser CSS selector is invalid",
-        );
-      }
-      throw error;
-    }
-    if (!Array.isArray(result.nodeIds)) throw new Error("CDP returned an invalid DOM query result");
-    return result.nodeIds.length;
+    return (await this.domMatchNodeIds(state, selector)).length;
   }
 
   async debug(
@@ -5594,41 +5571,72 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser locator matched multiple elements",
       );
     }
-    return await this.describeBackendNode(state, nodeIds[0]!);
+    const backendNodeId = await this.describeBackendNode(state, nodeIds[0]!);
+    if (backendNodeId === null) {
+      throw new InteractionDefiniteDriverError(
+        "locator_not_found",
+        "browser locator found no element",
+      );
+    }
+    return backendNodeId;
   }
 
+  /**
+   * The node ids `selector` matches in the current main-frame document.
+   * DOM.getDocument and DOM.querySelectorAll are two calls, and a document
+   * that commits between them (a navigation while a locator waits) drops the
+   * root's node id. Chromium refuses that query with the same error code as
+   * an invalid selector, so only a refusal of a root it still holds reports
+   * the selector as invalid; a vanished root is read again from the new
+   * document, whose generation the caller's fence then sees.
+   */
   private async domMatchNodeIds(state: TargetState, selector: string): Promise<number[]> {
-    const document = await this.sendTarget<{ root?: unknown }>(state, "DOM.getDocument", {
-      depth: 0,
-      pierce: true,
-    });
-    if (!isRecord(document.root) || typeof document.root.nodeId !== "number") {
-      throw new Error("CDP returned an invalid DOM root");
+    for (let attempt = 1; ; attempt += 1) {
+      const document = await this.sendTarget<{ root?: unknown }>(state, "DOM.getDocument", {
+        depth: 0,
+        pierce: true,
+      });
+      if (!isRecord(document.root) || typeof document.root.nodeId !== "number") {
+        throw new Error("CDP returned an invalid DOM root");
+      }
+      let result: { nodeIds?: unknown };
+      try {
+        result = await this.sendTarget(state, "DOM.querySelectorAll", {
+          nodeId: document.root.nodeId,
+          selector,
+        });
+      } catch (error) {
+        if (cdpNodeGone(error)) {
+          if (attempt >= DOM_QUERY_ATTEMPTS) throw error;
+          await this.refreshFrame(state);
+          continue;
+        }
+        if (error instanceof CdpProtocolError) {
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "browser CSS selector is invalid",
+          );
+        }
+        throw error;
+      }
+      if (!Array.isArray(result.nodeIds)) {
+        throw new Error("CDP returned an invalid DOM query result");
+      }
+      return result.nodeIds.filter((value): value is number => typeof value === "number");
     }
-    let result: { nodeIds?: unknown };
+  }
+
+  /** A matched node's backend id, or null when its document has since gone. */
+  private async describeBackendNode(state: TargetState, nodeId: number): Promise<number | null> {
+    let described: { node?: unknown };
     try {
-      result = await this.sendTarget(state, "DOM.querySelectorAll", {
-        nodeId: document.root.nodeId,
-        selector,
+      described = await this.sendTarget<{ node?: unknown }>(state, "DOM.describeNode", {
+        nodeId,
       });
     } catch (error) {
-      if (error instanceof CdpProtocolError) {
-        throw new InteractionDefiniteDriverError(
-          "invalid_action",
-          "browser CSS selector is invalid",
-        );
-      }
+      if (cdpNodeGone(error)) return null;
       throw error;
     }
-    return Array.isArray(result.nodeIds)
-      ? result.nodeIds.filter((value): value is number => typeof value === "number")
-      : [];
-  }
-
-  private async describeBackendNode(state: TargetState, nodeId: number): Promise<number> {
-    const described = await this.sendTarget<{ node?: unknown }>(state, "DOM.describeNode", {
-      nodeId,
-    });
     if (!isRecord(described.node) || typeof described.node.backendNodeId !== "number") {
       throw new Error("CDP did not resolve the DOM locator");
     }
@@ -5651,7 +5659,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       const nodeIds = await this.domMatchNodeIds(state, domLocatorSelector(locator));
       const entries: CdpAccessibilityEntry[] = [];
       for (const nodeId of nodeIds.slice(0, WAIT_LOCATOR_CANDIDATE_LIMIT)) {
-        entries.push(syntheticEntry(await this.describeBackendNode(state, nodeId)));
+        const backendNodeId = await this.describeBackendNode(state, nodeId);
+        if (backendNodeId !== null) entries.push(syntheticEntry(backendNodeId));
       }
       return entries;
     }
@@ -8058,6 +8067,8 @@ function sameAccessibleName(name: string | null, requested: string): boolean {
 const AMBIGUOUS_LOCATOR_LISTED_MATCHES = 5;
 /** Bounds the per-poll work of a wait whose locator matches many elements. */
 const WAIT_LOCATOR_CANDIDATE_LIMIT = 50;
+/** Queries of a CSS locator when each finds its document root gone. */
+const DOM_QUERY_ATTEMPTS = 3;
 
 function domLocatorSelector(
   locator: Extract<BrowserLocator, { kind: "css" | "test_id" | "placeholder" }>,
@@ -9486,6 +9497,16 @@ function frameTreeFingerprint(frames: readonly MainFrame[]): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Chromium's refusal of a DOM node id its current document no longer holds,
+ * as after the page navigated. It shares its error code with an invalid
+ * selector's refusal ("DOM Error while querying"), so only the message tells
+ * them apart.
+ */
+function cdpNodeGone(error: unknown): boolean {
+  return error instanceof CdpProtocolError && /could not find node/i.test(error.message);
 }
 
 /** Answer an authenticating proxy for every page, worker and new tab of the
