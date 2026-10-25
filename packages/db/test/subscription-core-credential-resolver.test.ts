@@ -180,4 +180,55 @@ describe("shared credential resolver forced refresh", () => {
     expect(await resolver.refresh()).toBe(3);
     expect(rotations).toEqual([1, 2]);
   });
+
+  test("a forced refresh reuses another holder's newer rotation unless it is already stale", async () => {
+    const connectionId = crypto.randomUUID();
+    const store = { generation: 1, expiresAt: new Date(Date.now() + 3_600_000) };
+    const rotations: string[] = [];
+    const resolverFor = (holderKey: string) =>
+      buildSubscriptionCoreCredentialResolver({
+        flightNamespace: `resolver-test-${connectionId}`,
+        connectionId,
+        holderKey,
+        policy: () => ({ windowMs: 60_000, fallbackMs: 3_600_000 }),
+        load: async () => ({
+          kind: "loaded",
+          credential: {
+            token: `token-${store.generation}`,
+            refreshGeneration: store.generation,
+            planType: null,
+            expiresAt: store.expiresAt,
+            lastRefreshAt: null,
+          } satisfies Loaded,
+        }),
+        embeddedExpiry: () => null,
+        refresh: async (current) => {
+          rotations.push(`${holderKey}@${current.refreshGeneration}`);
+          if (current.refreshGeneration !== store.generation) return { kind: "superseded" };
+          store.generation += 1;
+          store.expiresAt = new Date(Date.now() + 3_600_000);
+          return { kind: "refreshed", refreshGeneration: store.generation };
+        },
+        snapshot: (current) => current.refreshGeneration,
+        refreshedSnapshot: (outcome) => outcome.refreshGeneration,
+        errors: {
+          relogin: (message) => new Relogin(message ?? "relogin"),
+          leaseLost: () => new Error("lease lost"),
+          accessLost: () => new Error("access lost"),
+        },
+      });
+    const mine = resolverFor("mine");
+    const other = resolverFor("other");
+    expect(await mine.getToken()).toBe(1);
+    // Another holder (turn, operation or replica) rotates after mine was issued.
+    expect(await other.refresh()).toBe(2);
+    expect(await mine.refresh()).toBe(2);
+    expect(rotations).toEqual(["other@1"]);
+    // Another rotation lands, but the stored credential is already inside its
+    // renewal window: the newer generation is still renewed, not reused.
+    expect(await other.refresh()).toBe(3);
+    store.expiresAt = new Date(Date.now() + 1_000);
+    expect(await mine.refresh()).toBe(4);
+    expect(rotations).toEqual(["other@1", "other@2", "mine@3"]);
+  });
 });
