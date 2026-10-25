@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
+import {
+  InteractionControllerError,
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import {
   AttachedBrowserBridgeClient,
   AttachedBrowserBridgeError,
@@ -853,7 +857,11 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       }
       case "Target.closeTarget": {
         const targetId = requireTargetId(params.targetId);
-        await this.bridge.request({ type: "tabs.close", tabId: targetId });
+        try {
+          await this.bridge.request({ type: "tabs.close", tabId: targetId });
+        } catch (error) {
+          throw closeTabFailure(error);
+        }
         this.removeTab(targetId);
         return { success: true };
       }
@@ -1332,6 +1340,7 @@ function tabUrl(value: unknown): string | null {
 function mapBridgeError(method: string, error: unknown, sessionId?: string): Error {
   if (error instanceof InteractionControllerError) return error;
   if (error instanceof InteractionDefiniteDriverError) return error;
+  if (error instanceof InteractionOutcomeUnknownDriverError) return error;
   if (
     error instanceof CdpProtocolError ||
     error instanceof CdpTransportError ||
@@ -1356,6 +1365,27 @@ function mapBridgeError(method: string, error: unknown, sessionId?: string): Err
       : new CdpProtocolError(method, -32_000, error.message);
   }
   return new CdpTransportError(error instanceof Error ? error.message : "attached Chrome failed");
+}
+
+/** Why closing a tab failed. Chrome names a tab that is already gone; a
+ * connection that ended before the extension answered leaves the close
+ * unknown, since the extension may have closed the tab first. */
+function closeTabFailure(error: unknown): unknown {
+  if (!(error instanceof AttachedBrowserBridgeError)) return error;
+  if (error.code === "driver_rejected" && /^No tab with id\b/u.test(error.message.trim()))
+    return new InteractionDefiniteDriverError("target_not_found", "browser target does not exist");
+  if (
+    error.code === "resource_unavailable" ||
+    error.code === "transport_failed" ||
+    error.code === "bridge_failed" ||
+    error.code === "timeout"
+  )
+    return new InteractionOutcomeUnknownDriverError(
+      "outcome_unknown",
+      "The browser profile's connection ended while closing this tab, so whether it closed is unknown; list the tabs again once the profile is connected",
+      false,
+    );
+  return error;
 }
 
 /** chrome.debugger rejects the commands it was still handling when Chrome

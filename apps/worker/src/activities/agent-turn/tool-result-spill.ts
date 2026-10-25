@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { posix as posixPath } from "node:path";
 import {
   TOOL_RESULT_SPILL_MEDIA_TYPE,
   TOOL_RESULT_SPILL_MOUNT_PATH,
+  sandboxShellPath,
   toolResultSpillFilename,
   toolResultSpillSandboxPath,
   type AttemptToolResult as AttemptToolResultValue,
@@ -136,7 +138,7 @@ export class ToolResultSpill {
     }
     return spilledModelToolResult({
       type: "tool_result_spilled",
-      sandboxPath: materialization === "materialized" ? intendedSandboxPath : null,
+      sandboxPath: materialization === "materialized" ? this.placedShellPath(filename) : null,
       fileId: file.id,
       byteSize: file.sizeBytes,
       mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
@@ -166,6 +168,19 @@ export class ToolResultSpill {
     // The start already copied it (`materializeDeferred`); this is a cache hit
     // or a retry of a failed copy.
     return (await this.materializeFile(file)) === "materialized" ? "materialized" : "unavailable";
+  }
+
+  /** The copy's absolute path in the placement it was just written to, so the
+   * shell opens it from any working directory. A placement whose root is not
+   * an absolute POSIX path keeps the cwd-relative form. */
+  private placedShellPath(filename: string): string {
+    const setupBoxSession = this.deps.getResolvedSandbox() ? this.deps.getSetupBoxSession() : null;
+    const session = setupBoxSession ?? this.deps.getSdkOwnedSandboxSession();
+    const root = (session as { state?: { manifest?: { root?: unknown } } } | null)?.state?.manifest
+      ?.root;
+    return typeof root === "string" && posixPath.isAbsolute(root)
+      ? posixPath.join(root, TOOL_RESULT_SPILL_MOUNT_PATH, filename)
+      : sandboxShellPath(toolResultSpillSandboxPath(filename));
   }
 
   materializeDeferred = async (): Promise<void> => {

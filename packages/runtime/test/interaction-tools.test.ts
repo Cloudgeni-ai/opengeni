@@ -29,6 +29,8 @@ import {
   type UserSetupCardPoster,
 } from "../src/interaction-tools";
 import { computerObservationText } from "../src/computer-model-text";
+import { MCP_MAX_TOOL_RESULT_BYTES, mcpSerializedSizeBytes } from "../src/mcp-network";
+import { modelToolResultFits } from "../src/tool-result-spill";
 
 const accountId = randomUUID();
 const workspaceId = randomUUID();
@@ -731,6 +733,255 @@ describe("interaction attempt tools", () => {
         },
       ],
     });
+  });
+
+  test("discovery shows the model a compact, bounded inventory and Code Mode every record", async () => {
+    const otherSession = randomUUID();
+    const browsers = Array.from({ length: 60 }, (_, index) => {
+      const browser = discoveredBrowserSession(randomUUID(), otherSession);
+      browser.lifecycle = index % 3 === 0 ? "lost" : "active";
+      browser.lastUsedAt = new Date(Date.parse(now) - index * 60_000).toISOString();
+      return browser;
+    });
+    // An older session of this one still comes first.
+    const own = discoveredBrowserSession(randomUUID(), sessionId);
+    own.lifecycle = "suspended";
+    own.lastUsedAt = new Date(Date.parse(now) - 24 * 60 * 60_000).toISOString();
+    own.identityId = randomUUID();
+    const computer = discoveredComputerSession(randomUUID(), otherSession);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 3, sessions: [...browsers, own] }),
+          listComputerSessions: async () => ({ revision: 3, sessions: [computer] }),
+          listBrowserIdentities: async () => ({ revision: 3, identities: [] }) as never,
+          listAttachedBrowsers: async () => ({ revision: 3, bridges: [], devices: [] }),
+        }),
+        getSession: async () => ({ id: sessionId, sandboxGroupId: randomUUID() }) as never,
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const discover = async (caller: "model" | "codemode") =>
+      await definitions[0]!.execute(
+        { scope: "workspace" },
+        { operationId: randomUUID(), caller: { kind: caller, subjectId: `${caller}:test` } },
+      );
+
+    const model = await discover("model");
+    expect(model.isError).not.toBe(true);
+    const selected = (model.structuredContent as { browsers: BrowserSession[] }).browsers;
+    expect(selected).toHaveLength(50);
+    expect(selected[0]!.id).toBe(own.id);
+    // Usable sessions before lost ones, each most recently used first.
+    const lifecycles = selected.slice(1).map((browser) => browser.lifecycle);
+    expect(lifecycles.indexOf("lost")).toBe(40);
+    expect(lifecycles.slice(40).every((lifecycle) => lifecycle === "lost")).toBe(true);
+    expect(selected[0]).toEqual(own);
+    const [text, note] = model.content as Array<{ type: "text"; text: string }>;
+    expect(note?.text).toContain("Listed 50 of 61 BrowserSessions");
+    expect(note?.text).toContain("interaction.discover receives every record");
+    const compact = JSON.parse(text!.text) as {
+      browsers: Array<Record<string, unknown>>;
+      computers: Array<Record<string, unknown>>;
+    };
+    expect(compact.browsers).toHaveLength(50);
+    expect(compact.browsers[0]).toEqual({
+      id: own.id,
+      name: "Browser",
+      lifecycle: "suspended",
+      placement: own.placement,
+      engine: "chromium",
+      headless: false,
+      identityId: own.identityId,
+      lastUsedAt: own.lastUsedAt,
+      thisSession: true,
+      unsupported: ["rawCdp"],
+    });
+    expect(compact.computers).toEqual([
+      {
+        id: computer.id,
+        name: "Computer",
+        lifecycle: "starting",
+        placement: computer.placement,
+        lastUsedAt: computer.lastUsedAt,
+      },
+    ]);
+    expect(text!.text).not.toContain(accountId);
+    expect(text!.text.length).toBeLessThan(JSON.stringify(model.structuredContent).length / 3);
+
+    const codemode = await discover("codemode");
+    expect((codemode.structuredContent as { browsers: unknown[] }).browsers).toHaveLength(61);
+    expect(codemode.content).toHaveLength(1);
+    expect(JSON.parse((codemode.content[0] as { text: string }).text)).toEqual(
+      codemode.structuredContent,
+    );
+  });
+
+  test("discovery stays within its byte budget for sessions with long association histories", async () => {
+    const history = (associatedSessionId: string) =>
+      Array.from({ length: 1_000 }, (_, index) => ({
+        sessionId: index === 999 ? associatedSessionId : randomUUID(),
+        turnId: randomUUID(),
+        attemptId: randomUUID(),
+        relationship: "using" as const,
+        actorSubjectId: `model:${randomUUID()}`,
+        lastUsedAt: now,
+      }));
+    const browsers = Array.from({ length: 60 }, (_, index) => ({
+      ...discoveredBrowserSession(randomUUID(), sessionId),
+      name: `Browser ${index} ${"n".repeat(180)}`,
+      associations: history(index < 10 ? sessionId : randomUUID()),
+    }));
+    const computers = Array.from({ length: 60 }, () => ({
+      ...discoveredComputerSession(randomUUID(), randomUUID()),
+      associations: history(randomUUID()),
+    }));
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 1, sessions: browsers }) as never,
+          listComputerSessions: async () => ({ revision: 1, sessions: computers }) as never,
+          listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+          listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices: [] }),
+        }),
+        getSession: async () => ({ id: sessionId, sandboxGroupId: randomUUID() }) as never,
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const discover = async (caller: "model" | "codemode") =>
+      await definitions[0]!.execute(
+        { scope: "workspace" },
+        { operationId: randomUUID(), caller: { kind: caller, subjectId: `${caller}:test` } },
+      );
+    const codemode = await discover("codemode");
+    // Code Mode still receives every complete record, megabytes in all.
+    expect(mcpSerializedSizeBytes(codemode)).toBeGreaterThan(MCP_MAX_TOOL_RESULT_BYTES * 4);
+    expect(
+      (codemode.structuredContent as { browsers: BrowserSession[] }).browsers[0]!.associations,
+    ).toHaveLength(1_000);
+
+    const model = await discover("model");
+    expect(model.isError).not.toBe(true);
+    expect(mcpSerializedSizeBytes(model)).toBeLessThanOrEqual(768 * 1024);
+    expect(modelToolResultFits(model)).toBe(true);
+    const selected = model.structuredContent as {
+      browsers: BrowserSession[];
+      computers: ComputerSession[];
+    };
+    expect(selected.browsers).toHaveLength(50);
+    expect(selected.computers).toHaveLength(50);
+    // Only the association with this session remains, and only on its own browsers.
+    expect(
+      selected.browsers.slice(0, 10).every((browser) => browser.associations.length === 1),
+    ).toBe(true);
+    expect(selected.browsers.slice(0, 10)[0]!.associations[0]!.sessionId).toBe(sessionId);
+    expect(selected.browsers.slice(10).every((browser) => browser.associations.length === 0)).toBe(
+      true,
+    );
+    expect(selected.computers.every((computer) => computer.associations.length === 0)).toBe(true);
+    const compact = JSON.parse((model.content[0] as { text: string }).text) as {
+      browsers: Array<{ thisSession?: true }>;
+    };
+    expect(compact.browsers.filter((browser) => browser.thisSession)).toHaveLength(10);
+    expect((model.content[1] as { text: string }).text).toContain(
+      "Listed 50 of 60 BrowserSessions, 50 of 60 ComputerSessions",
+    );
+  });
+
+  test("discovery bounds even a huge attached-profile inventory by bytes", async () => {
+    const devices = Array.from({ length: 4_000 }, (_, index) => ({
+      id: randomUUID(),
+      accountId,
+      workspaceId,
+      enrollmentId: randomUUID(),
+      name: `Profile ${index} ${"p".repeat(180)}`,
+      profileLabel: "l".repeat(200),
+      browserName: "Google Chrome",
+      browserVersion: "150.0.0.0",
+      extensionVersion: "0.2.0",
+      platform: "macos" as const,
+      architecture: "arm64" as const,
+      state: "disconnected" as const,
+      connectionGeneration: `connection-${index}`,
+      inventoryRevision: 1,
+      tabCount: 1,
+      capabilities: {
+        tabInventory: true,
+        debuggerAttachment: true,
+        semanticObservation: true,
+        screenshots: true,
+        liveFrames: true,
+        humanInput: true,
+        diagnostics: true,
+        rawCdp: true,
+        linkedComputer: true,
+      },
+      lastSeenAt: now,
+      disconnectedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    }));
+    const browsers = Array.from({ length: 5 }, () =>
+      discoveredBrowserSession(randomUUID(), sessionId),
+    );
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 1, sessions: browsers }),
+          listComputerSessions: async () => ({ revision: 1, sessions: [] }),
+          listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+          listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices }),
+        }),
+        getSession: async () => ({ id: sessionId, sandboxGroupId: randomUUID() }) as never,
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const model = await definitions[0]!.execute(
+      { scope: "workspace" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(model.isError).not.toBe(true);
+    expect(mcpSerializedSizeBytes(model)).toBeLessThanOrEqual(768 * 1024);
+    const listed = (model.structuredContent as { attachedBrowsers: unknown[]; browsers: unknown[] })
+      .attachedBrowsers.length;
+    expect(listed).toBeGreaterThan(100);
+    expect(listed).toBeLessThan(4_000);
+    // Each kind gets its turn while the budget lasts, so the sessions still fit.
+    expect((model.structuredContent as { browsers: unknown[] }).browsers).toHaveLength(5);
+    expect((model.content[1] as { text: string }).text).toContain(
+      `Listed ${listed} of 4000 attached Chrome profiles`,
+    );
+  });
+
+  test("discovery leaves a small inventory complete for the model", async () => {
+    const browser = discoveredBrowserSession(randomUUID(), sessionId);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [browser] }),
+        listComputerSessions: async () => ({ revision: 1, sessions: [] }),
+        listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+        listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices: [] }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      {},
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect((result.structuredContent as { browsers: unknown[] }).browsers).toEqual([browser]);
+    expect(result.content).toHaveLength(1);
   });
 
   test("browser_open, computer_open and discovery narrow inventories in the query", async () => {
@@ -5834,6 +6085,44 @@ describe("interaction attempt tools", () => {
         },
       ],
     });
+  });
+
+  test("closing a tab that is already gone keeps the current browser", async () => {
+    const target = browserTarget();
+    let sessionLookups = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_tabs"],
+      permissions: ["sessions:read", "sessions:control"],
+      transport: partialTransport({
+        listBrowserSessions: async () => {
+          sessionLookups += 1;
+          return { revision: 1, sessions: [discoveredBrowserSession(browserSessionId, sessionId)] };
+        },
+        listBrowserTargets: async () =>
+          ({ browserSessionId, controllerGeneration: "generation-1", targets: [target] }) as never,
+        closeBrowserTarget: async () => {
+          throw new OpenGeniApiError(404, "browser target does not exist", {
+            code: "not_found",
+          });
+        },
+      }),
+    });
+    const tabs = definitions[0]!;
+    const call = async (args: Record<string, unknown>) =>
+      await tabs.execute(args, {
+        operationId: randomUUID(),
+        caller: { kind: "model", subjectId: "model:test" },
+      });
+    expect((await call({ operation: "list" })).isError).not.toBe(true);
+    const closed = await call({ operation: "close", targetId: "gone-tab" });
+    expect(closed.isError).toBe(true);
+    expect(JSON.stringify(closed.structuredContent)).toContain("browser target does not exist");
+    const listed = await call({ operation: "list" });
+    expect(listed.isError).not.toBe(true);
+    // The browser was remembered: no second session lookup.
+    expect(sessionLookups).toBe(1);
   });
 
   test("an explicit tab becomes the current tab for later calls", async () => {

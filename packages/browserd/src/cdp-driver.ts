@@ -1038,6 +1038,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
   ): Promise<void> {
     await connection.send("Target.closeTarget", { targetId });
+    await this.settleClosedTarget(connection, targetId);
+  }
+
+  private async settleClosedTarget(
+    connection: BrowserCdpConnection,
+    targetId: string,
+  ): Promise<void> {
     const deadline = Date.now() + TARGET_CLOSE_SETTLE_TIMEOUT_MS;
     while ((await this.targetInfos(connection)).some((info) => info.targetId === targetId)) {
       if (Date.now() >= deadline) return;
@@ -1062,12 +1069,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
-    await this.closeTargetAndSettle(connection, targetId);
+    await connection.send("Target.closeTarget", { targetId });
+    // The browser closed the tab. Losing the connection before the tab list
+    // is read must not report the close as a failure (attached Chrome can
+    // end the connection right after the tab closes).
+    let settleFailure: unknown;
+    try {
+      await this.settleClosedTarget(connection, targetId);
+    } catch (error) {
+      settleFailure = error;
+    }
     this.removeState(targetId);
     this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     this.ownedTabsChanged();
-    return await this.listTargets();
+    try {
+      if (settleFailure !== undefined) throw settleFailure;
+      return await this.listTargets();
+    } catch (error) {
+      throw closedTargetListFailure(error);
+    }
   }
 
   /** Close the tabs this session opened in the person's browser that are
@@ -7377,6 +7398,20 @@ export function isBlankTabUrl(url: string): boolean {
     url === "data:text/html," ||
     url === "chrome://newtab/" ||
     url === "chrome://new-tab-page/"
+  );
+}
+
+/** Why the tab list after a completed close could not be read. A lost
+ * connection leaves the result unknown, not failed: the tab closed, but which
+ * tabs remain is unread. Other failures keep their own classification. */
+function closedTargetListFailure(error: unknown): unknown {
+  if (!(error instanceof CdpTransportError || error instanceof CdpCommandTimeoutError)) {
+    return error;
+  }
+  return new InteractionOutcomeUnknownDriverError(
+    "outcome_unknown",
+    "The tab closed, but the browser's connection ended before its remaining tabs could be listed; list the tabs again once the browser is connected",
+    false,
   );
 }
 

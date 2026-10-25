@@ -3,7 +3,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
-import { InteractionControllerError } from "@opengeni/interaction";
+import {
+  InteractionControllerError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -501,6 +504,29 @@ describe("BrowserControlServer", () => {
         expect(failure.error).toEqual({ code, message, retryable: true });
       },
       { screenshotError: new InteractionControllerError(code, message, true) },
+    );
+  });
+
+  test("reports a tab close the driver cannot confirm as an unknown outcome", async () => {
+    const message = "The browser profile's connection ended while closing this tab";
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const closed = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}`,
+          { method: "DELETE", token: controlToken },
+        );
+        expect(closed.status).toBe(409);
+        const failure = (await closed.json()) as { error: unknown };
+        expect(failure.error).toEqual({ code: "outcome_unknown", message, retryable: false });
+      },
+      { closeError: new InteractionOutcomeUnknownDriverError("outcome_unknown", message, false) },
     );
   });
 
@@ -1479,6 +1505,7 @@ async function withServer(
     focusedInputObservations?: boolean;
     failStart?: boolean;
     screenshotError?: Error;
+    closeError?: Error;
     beforeDriverOperation?: (
       operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
     ) => void;
@@ -1553,6 +1580,7 @@ function fakeDriver(
     focusedInputObservations?: boolean;
     failStart?: boolean;
     screenshotError?: Error;
+    closeError?: Error;
     beforeDriverOperation?: (
       operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
     ) => void;
@@ -1619,6 +1647,7 @@ function fakeDriver(
       return observation();
     },
     async closeTarget() {
+      if (options.closeError) throw options.closeError;
       return [];
     },
     async observe() {

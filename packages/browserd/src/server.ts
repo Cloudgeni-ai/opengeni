@@ -35,7 +35,11 @@ import {
   NetworkRouteConsistency,
   type InteractionError,
 } from "@opengeni/contracts";
-import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
+import {
+  InteractionControllerError,
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import {
   CdpCommandTimeoutError,
   CdpProtocolError,
@@ -2347,6 +2351,11 @@ function protocolResponse(
   }
   if (error instanceof InteractionDefiniteDriverError) {
     return fail(error.code, error.message, false, interactionStatus(error.code));
+  }
+  // A driver that cannot tell whether its change happened (a tab close whose
+  // browser connection ended) says so, so the caller checks before retrying.
+  if (error instanceof InteractionOutcomeUnknownDriverError) {
+    return fail(error.code, error.message, error.retryable, interactionStatus(error.code));
   }
   return fail("driver_failed", "interaction controller request failed", false, 500);
 }
