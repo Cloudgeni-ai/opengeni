@@ -1613,7 +1613,11 @@ export function createInteractionAttemptToolDefinitions(
     output: DiscoveryOutput,
     readOnly: true,
     idempotent: true,
-    execute: async (value) => {
+    modelText: (output, context) =>
+      context.caller.kind === "model"
+        ? JSON.stringify(compactDiscoveryForModel(output, input.sessionId))
+        : JSON.stringify(output),
+    execute: async (value, context) => {
       const scope = value.scope ?? "current_session";
       if (scope === "attached_browsers") {
         const [attached, thisMachine] = await Promise.all([
@@ -1654,7 +1658,7 @@ export function createInteractionAttemptToolDefinitions(
           ? readCurrentMachineSandboxId(input.transport, input.workspaceId, input.sessionId)
           : null,
       ]);
-      return {
+      const discovered = {
         browserRevision: browsers.revision,
         computerRevision: computers.revision,
         identityRevision: identities.revision,
@@ -1676,6 +1680,11 @@ export function createInteractionAttemptToolDefinitions(
           ? agentAttachedInventory(attached, thisMachine)
           : { attachedBrowserBridges: [], attachedBrowsers: [] }),
       };
+      // Code Mode programs receive every record. The model receives the most
+      // relevant ones, so a large workspace never yields a result too big to read.
+      return context.caller.kind === "model"
+        ? modelDiscoverySelection(discovered, input.sessionId)
+        : discovered;
     },
   });
 
@@ -3008,6 +3017,134 @@ function filterDiscoveredSessions<
       (scope === "workspace" ||
         session.associations.some((association) => association.sessionId === sessionId)),
   );
+}
+
+/** The most records of each kind the model sees from one discovery. */
+const DISCOVERY_MODEL_LIST_LIMIT = 50;
+/** Lifecycles of sessions that are not usable until repaired or restarted;
+ * the model sees them after every usable one. */
+const DISCOVERY_UNUSABLE_LIFECYCLES = new Set(["lost", "repair_required", "ended", "failed"]);
+
+type DiscoveryOutputValue = z.input<typeof DiscoveryOutput>;
+type DiscoveredSession = { lifecycle: string; lastUsedAt: string; associations: unknown[] };
+
+/** This session's own sessions first, then usable ones, each most recently used first. */
+function discoveryRank(
+  sessions: readonly DiscoveredSession[],
+  sessionId: string,
+): DiscoveredSession[] {
+  const own = (session: DiscoveredSession) =>
+    session.associations.some(
+      (association) => (association as { sessionId?: unknown }).sessionId === sessionId,
+    );
+  return [...sessions].sort(
+    (left, right) =>
+      Number(own(right)) - Number(own(left)) ||
+      Number(DISCOVERY_UNUSABLE_LIFECYCLES.has(left.lifecycle)) -
+        Number(DISCOVERY_UNUSABLE_LIFECYCLES.has(right.lifecycle)) ||
+      right.lastUsedAt.localeCompare(left.lastUsedAt),
+  );
+}
+
+/** A model caller's discovery: at most DISCOVERY_MODEL_LIST_LIMIT sessions and
+ * identities of each kind, most relevant first, and how many were left out.
+ * Each record keeps its exact contract shape. A workspace can retain hundreds
+ * of sessions with their full association history, megabytes in all; the model
+ * reuses one by id, and a Code Mode program still receives every record. */
+function modelDiscoverySelection(
+  output: DiscoveryOutputValue,
+  sessionId: string,
+): InteractionExecutionResult<DiscoveryOutputValue> | DiscoveryOutputValue {
+  const limit = DISCOVERY_MODEL_LIST_LIMIT;
+  const browsers = discoveryRank(output.browsers as DiscoveredSession[], sessionId);
+  const computers = discoveryRank(output.computers as DiscoveredSession[], sessionId);
+  const identities = [...output.identities].sort((left, right) =>
+    String(right.updatedAt).localeCompare(String(left.updatedAt)),
+  );
+  const omitted = (
+    [
+      ["BrowserSessions", browsers.length],
+      ["ComputerSessions", computers.length],
+      ["browser identities", identities.length],
+    ] as const
+  ).filter(([, total]) => total > limit);
+  if (omitted.length === 0) return output;
+  const selection = {
+    ...output,
+    browsers: browsers.slice(0, limit) as DiscoveryOutputValue["browsers"],
+    computers: computers.slice(0, limit) as DiscoveryOutputValue["computers"],
+    identities: identities.slice(0, limit),
+  };
+  const shown = omitted.map(([kind, total]) => `${limit} of ${total} ${kind}`).join(", ");
+  return new InteractionExecutionResult(selection, [
+    {
+      type: "text",
+      text: `Listed ${shown}: this session's own first, then usable ones, most recently used first. Reuse one by its id. A Code Mode program calling interaction.discover receives every record.`,
+    },
+  ]);
+}
+
+/** The model's view of a discovery: what it needs to pick a session or
+ * identity to reuse. Account and workspace ids, controller bindings,
+ * timestamps other than last use, association history and empty optional
+ * fields stay out; capabilities are reduced to the ones a session lacks, as
+ * for attached profiles. */
+function compactDiscoveryForModel(
+  output: z.infer<typeof DiscoveryOutput>,
+  sessionId: string,
+): Record<string, unknown> {
+  const own = (associations: ReadonlyArray<{ sessionId: string }>) =>
+    associations.some((association) => association.sessionId === sessionId)
+      ? { thisSession: true }
+      : {};
+  const unsupported = (capabilities: Record<string, boolean | undefined> | null) => {
+    const lacking = Object.entries(capabilities ?? {})
+      .filter(([, supported]) => supported === false)
+      .map(([capability]) => capability);
+    return lacking.length > 0 ? { unsupported: lacking } : {};
+  };
+  const present = <K extends string, V>(key: K, value: V | null) =>
+    value === null ? {} : ({ [key]: value } as Record<K, V>);
+  return {
+    browserRevision: output.browserRevision,
+    computerRevision: output.computerRevision,
+    identityRevision: output.identityRevision,
+    attachedBrowserRevision: output.attachedBrowserRevision,
+    browsers: output.browsers.map((browser) => ({
+      id: browser.id,
+      name: browser.name,
+      lifecycle: browser.lifecycle,
+      placement: browser.placement,
+      engine: browser.engine,
+      headless: browser.headless,
+      ...present("identityId", browser.identityId),
+      ...present("networkRouteId", browser.networkRouteId),
+      ...present("linkedComputerSessionId", browser.linkedComputerSessionId),
+      ...present("failureCode", browser.failureCode),
+      lastUsedAt: browser.lastUsedAt,
+      ...own(browser.associations),
+      ...unsupported(browser.capabilities),
+    })),
+    computers: output.computers.map((computer) => ({
+      id: computer.id,
+      name: computer.name,
+      lifecycle: computer.lifecycle,
+      placement: computer.placement,
+      ...present("platform", computer.platform),
+      ...present("failureCode", computer.failureCode),
+      lastUsedAt: computer.lastUsedAt,
+      ...own(computer.associations),
+      ...unsupported(computer.capabilities),
+    })),
+    identities: output.identities.map((identity) => ({
+      id: identity.id,
+      name: identity.name,
+      status: identity.status,
+      updatedAt: identity.updatedAt,
+    })),
+    attachedBrowserBridges: output.attachedBrowserBridges,
+    attachedBrowsers: output.attachedBrowsers,
+  };
 }
 
 export type CreateFirstPartyInteractionAttemptToolsInput = Omit<

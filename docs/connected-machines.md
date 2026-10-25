@@ -504,6 +504,17 @@ diagnostics are written to stderr because stdout carries Chrome frames.
 Oversized tab titles are truncated and oversized tab URLs make only that tab
 uncontrollable; neither ends the profile's connection.
 
+Chrome closes a profile together with its last window, which stops the
+extension and ends the profile's connection (`browser_closed_port`) even when
+Chrome itself keeps running, as it does on macOS. The extension therefore never
+closes a profile's only tab without first opening a new tab page in its place
+(a new unfocused window when that tab is in a popup or app window), and when
+Chrome has no window open it creates a requested tab in a new unfocused window.
+A tab close whose connection ends before the extension answers is reported as
+`outcome_unknown` (HTTP 409), because the tab may already be closed; a tab
+Chrome reports as gone is `target_not_found`. A profile whose last window the
+person closed stays disconnected until a window opens in it again.
+
 An accepted full inventory snapshot observes every connected profile once through
 `attached_browser_inventories.observed_at`. Unchanged profiles need neither a
 device update nor a device row lock; enrollment and inventory cursor locks still
