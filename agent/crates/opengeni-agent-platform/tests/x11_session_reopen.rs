@@ -11,7 +11,8 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use opengeni_agent_platform::{
-        DesktopBackend as _, LinuxDesktop, ReopeningDesktop, X11Display, XServerCheck,
+        linux_layout_text_keysyms, DesktopBackend as _, LinuxDesktop, ReopeningDesktop, X11Display,
+        XServerCheck,
     };
 
     fn xvfb() -> Option<PathBuf> {
@@ -41,10 +42,20 @@ mod linux {
 
     impl Server {
         fn start(binary: &Path, number: u32, authority: &Path) -> Self {
-            let child = Command::new(binary)
+            let mut command = Command::new(binary);
+            command.arg("-auth").arg(authority);
+            Self::spawn(command, number)
+        }
+
+        /// A server that admits every local client, as Xwayland admits its
+        /// own user.
+        fn start_open(binary: &Path, number: u32) -> Self {
+            Self::spawn(Command::new(binary), number)
+        }
+
+        fn spawn(mut command: Command, number: u32) -> Self {
+            let child = command
                 .arg(format!(":{number}"))
-                .args(["-auth"])
-                .arg(authority)
                 .args(["-nolisten", "tcp", "-screen", "0", "640x480x24"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -123,5 +134,25 @@ mod linux {
         std::thread::sleep(Duration::from_millis(1_100));
         assert!(desktop.probe().is_some());
         assert_eq!(desktop.capture_blocked_reason(), None);
+    }
+
+    #[test]
+    fn typing_reads_the_layout_display_through_the_checked_connect() {
+        let Some(binary) = xvfb() else {
+            eprintln!("SKIP: no Xvfb (set OPENGENI_XVFB or put Xvfb on PATH)");
+            return;
+        };
+        let number = 1_000 + std::process::id() % 600;
+        let _server = Server::start_open(&binary, number);
+        let display = format!(":{number}");
+        // The layout has Latin letters and no Cyrillic, which can only be
+        // known once its keymap was read.
+        assert_eq!(
+            linux_layout_text_keysyms(Some(&display), "a").unwrap(),
+            vec![0x61]
+        );
+        assert!(linux_layout_text_keysyms(Some(&display), "\u{416}").is_err());
+        // Without a layout display every character maps unchecked.
+        assert!(linux_layout_text_keysyms(None, "\u{416}").is_ok());
     }
 }
