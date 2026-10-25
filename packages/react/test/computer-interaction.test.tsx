@@ -5013,15 +5013,15 @@ describe("ComputerViewer input reliability", () => {
       });
       await flush(60);
       const scroll = (frameId: string, deltaY: number) => ({
-        type: "pointer",
+        type: "pointer" as const,
         frameId,
-        action: "scroll",
+        action: "scroll" as const,
         x: 0,
         y: 0,
         deltaX: 0,
         deltaY,
       });
-      const enter = { type: "keyboard", action: "press", value: "Enter" };
+      const enter = { type: "keyboard" as const, action: "press" as const, value: "Enter" };
       // Frame 2's hashing and decode are real asynchronous work. When they finish within the
       // 45 ms wheel window, the first delta carries over and is sent with the second on
       // frame 2. On a slow runner the window closes first and the first delta is sent on
