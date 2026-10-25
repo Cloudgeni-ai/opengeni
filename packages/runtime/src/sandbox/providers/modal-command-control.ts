@@ -830,6 +830,17 @@ export class ModalCommandControl {
           );
         } catch (error) {
           signal?.throwIfAborted();
+          if (isModalRouterExecNotFound(error)) {
+            // The router has discarded this invocation's observation state.
+            // That is not proof its process group stopped, nor authority to
+            // replay Start. Keep the locator/cursors for ordinary retained
+            // ownership and lifecycle containment, without a hot read retry.
+            throw new ProviderCommandObservationUnavailableError(
+              structuredClone(command),
+              error,
+              false,
+            );
+          }
           if (!budget.signal.aborted && !isModalCommandObservationTransportError(error)) {
             // Containment is not retry permission. A structural provider fault
             // dominates nested missing-handle prose, but mixed/unreadable

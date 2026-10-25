@@ -3,6 +3,7 @@ import {
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   type Settings,
 } from "@opengeni/config";
+import { WorkerForceStoppedError } from "./worker-service-lifecycle";
 
 /** Control workers keep their original short natural window. Their activities
  * are short DB/Temporal operations; a drain must not hold workflow tasks. */
@@ -152,7 +153,10 @@ export async function runWorkerProcessEntrypoint(
   try {
     await start();
   } catch (error) {
-    console.error("[worker] fatal", error);
+    console.error(
+      error instanceof WorkerForceStoppedError ? "[worker] force stop" : "[worker] fatal",
+      error,
+    );
     exitCode = 1;
   } finally {
     process.off("SIGINT", markInterrupted);
