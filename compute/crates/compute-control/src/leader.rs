@@ -12,6 +12,16 @@
 //! the lock, is as safe as one. A new leader starts with nothing seen and
 //! so waits a whole term and margin before giving up on anyone.
 //!
+//! The lease only says when giving up is safe, not when it is worth it.
+//! A host whose renewals stopped has frozen its VMs, but one cut off only
+//! by the network still has them, and runs them on once it renews again;
+//! giving up on it costs every sandbox it holds its running programs and
+//! what it wrote since its last archive, and resets the whole machine. So
+//! while a silent host holds sandboxes the leader waits for it, up to
+//! `give_up_after` from its last renewal, unless its group finds its
+//! instance stopped or gone, which leaves nothing to keep. One that holds
+//! none goes as soon as its lease allows.
+//!
 //! A host of the group it sizes is fenced before it is given up on: its
 //! instance is reset (or found stopped or gone) through the cloud's API,
 //! so nothing it ran can still run when its sandboxes go elsewhere. Fences
@@ -41,6 +51,9 @@ const TRY_EVERY: Duration = Duration::from_secs(1);
 const FENCE_WITHIN: Duration = Duration::from_secs(120);
 /// How long after a failed fence the next one starts.
 const FENCE_AGAIN: Duration = Duration::from_secs(5);
+/// How often the leader asks the cloud about the instance of a silent host
+/// it waits for.
+const LOOK_EVERY: Duration = Duration::from_secs(5);
 
 /// How the leader sizes a host group.
 #[derive(Debug)]
@@ -106,6 +119,7 @@ pub async fn lead<S: Store>(
     store: Arc<S>,
     view: Arc<View>,
     terms: LeaseTerms,
+    give_up_after: Duration,
     scaling: Option<Scaling>,
     metrics: Arc<Metrics>,
 ) {
@@ -124,7 +138,14 @@ pub async fn lead<S: Store>(
         };
         tracing::info!("this replica leads");
         metrics.leads(true);
-        led(&store, &view, terms, scaling.as_ref(), &metrics, lead).await;
+        let leading = Leading::new(
+            Arc::clone(&store),
+            terms,
+            scaling.as_ref().map(|scaling| Arc::clone(&scaling.group)),
+        )
+        .giving_up_after(give_up_after)
+        .reporting_to(Arc::clone(&metrics));
+        led(&store, &view, leading, scaling.as_ref(), &metrics, lead).await;
         metrics.leads(false);
         tracing::warn!("this replica no longer leads");
     }
@@ -133,14 +154,11 @@ pub async fn lead<S: Store>(
 async fn led<S: Store>(
     store: &Arc<S>,
     view: &View,
-    terms: LeaseTerms,
+    mut leading: Leading<S>,
     scaling: Option<&Scaling>,
     metrics: &Arc<Metrics>,
     mut lead: S::Lead,
 ) {
-    let group = scaling.map(|scaling| Arc::clone(&scaling.group));
-    let mut leading =
-        Leading::new(Arc::clone(store), terms, group).reporting_to(Arc::clone(metrics));
     let mut tick = tokio::time::interval(EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut scaled: Option<Instant> = None;
@@ -185,6 +203,11 @@ pub struct Leading<L> {
     fencing: HashMap<tokio::task::Id, (HostId, bool)>,
     /// Hosts whose last fence failed, and when the next may start.
     again_at: HashMap<HostId, Instant>,
+    /// How long a silent host holding sandboxes is waited for.
+    give_up_after: Duration,
+    /// The silent hosts it waits for, and when it last asked the cloud
+    /// about each one's instance.
+    waiting: HashMap<HostId, Option<Instant>>,
     metrics: Arc<Metrics>,
 }
 
@@ -200,7 +223,7 @@ enum Lapse {
 
 impl<L: Leases> Leading<L> {
     /// A leadership that has seen nothing yet, fencing the hosts of
-    /// `group`.
+    /// `group`, and giving up on a host as soon as its lease allows.
     #[must_use]
     pub fn new(leases: Arc<L>, terms: LeaseTerms, group: Option<Arc<GcpGroup>>) -> Self {
         Self {
@@ -212,8 +235,18 @@ impl<L: Leases> Leading<L> {
             fences: JoinSet::new(),
             fencing: HashMap::new(),
             again_at: HashMap::new(),
+            give_up_after: Duration::ZERO,
+            waiting: HashMap::new(),
             metrics: Arc::default(),
         }
+    }
+
+    /// Waits up to `give_up_after` from its last renewal for a silent host
+    /// that holds sandboxes; see the module's documentation.
+    #[must_use]
+    pub fn giving_up_after(mut self, give_up_after: Duration) -> Self {
+        self.give_up_after = give_up_after;
+        self
     }
 
     /// Counts what it gives up on and the fences that fail in `metrics`.
@@ -249,9 +282,19 @@ impl<L: Leases> Leading<L> {
         self.expiry.observe_all(renewals, now);
         self.again_at.retain(|host, _| self.expiry.watches(*host));
         let lapsed: Vec<_> = self.expiry.expired(now).collect();
+        let still: HashMap<HostId, Duration> = if lapsed.is_empty() {
+            HashMap::new()
+        } else {
+            self.expiry.still(now).collect()
+        };
+        // A host that renewed again, or is no longer watched, is no longer
+        // waited for.
+        self.waiting
+            .retain(|host, _| lapsed.iter().any(|(lapsed, _)| lapsed == host));
         for (host, renewals) in lapsed {
             let draining = view.draining(host);
-            match self.lapse(host, view).await {
+            let still = still.get(&host).copied().unwrap_or(Duration::MAX);
+            match self.lapse(host, view, still).await {
                 Lapse::GiveUp => {
                     let result = self.leases.give_up(host, renewals).await;
                     self.given_up(host, draining, result.map_err(|error| error.to_string()));
@@ -268,8 +311,9 @@ impl<L: Leases> Leading<L> {
         }
     }
 
-    /// Whether `host` is fenced first, given up on now, or decided later.
-    async fn lapse(&mut self, host: HostId, view: &View) -> Lapse {
+    /// Whether `host`, silent for `still`, is fenced first, given up on
+    /// now, or decided later.
+    async fn lapse(&mut self, host: HostId, view: &View, still: Duration) -> Lapse {
         if self.fencing.values().any(|(fenced, _)| *fenced == host)
             || self
                 .again_at
@@ -278,8 +322,18 @@ impl<L: Leases> Leading<L> {
         {
             return Lapse::Later;
         }
-        let Some(group) = &self.group else {
-            return Lapse::GiveUp;
+        let waits = still < self.give_up_after && view.holds_sandboxes(host);
+        if waits && !self.waiting.contains_key(&host) {
+            tracing::warn!(
+                host = host.0,
+                ?still,
+                give_up_after = ?self.give_up_after,
+                "a host holding sandboxes stopped renewing; waiting for it before giving up on it"
+            );
+            self.waiting.insert(host, None);
+        }
+        let Some(group) = self.group.clone() else {
+            return if waits { Lapse::Later } else { Lapse::GiveUp };
         };
         let Some(name) = view.name(host) else {
             // The view has not caught up with the store yet.
@@ -302,9 +356,32 @@ impl<L: Leases> Leading<L> {
             .as_deref()
             .is_some_and(|prefix| name.starts_with(prefix))
         {
-            Lapse::Fence(Arc::clone(group), name)
+            if waits && self.may_hold_memory(host, &group, &name).await {
+                return Lapse::Later;
+            }
+            Lapse::Fence(group, name)
+        } else if waits {
+            Lapse::Later
         } else {
             Lapse::GiveUp
+        }
+    }
+
+    /// Whether the instance `name` of silent host `host` may still hold
+    /// its memory, asking the cloud at most every [`LOOK_EVERY`]: until it
+    /// answers that the instance is stopped or gone, it may.
+    async fn may_hold_memory(&mut self, host: HostId, group: &GcpGroup, name: &str) -> bool {
+        let looked = self.waiting.entry(host).or_insert(None);
+        if looked.is_some_and(|at| at.elapsed() < LOOK_EVERY) {
+            return true;
+        }
+        *looked = Some(Instant::now());
+        match group.may_hold_memory(name).await {
+            Ok(holds) => holds,
+            Err(error) => {
+                tracing::warn!(%error, %name, "reading a silent host's instance failed");
+                true
+            }
         }
     }
 

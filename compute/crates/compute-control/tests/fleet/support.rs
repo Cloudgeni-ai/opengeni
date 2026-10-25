@@ -304,6 +304,9 @@ impl Fleet {
         let mut settings = Settings {
             terms,
             wake_within: Duration::from_secs(10),
+            // Most tests watch what follows a lapse: give up as soon as
+            // the lease allows, unless a test waits longer.
+            give_up_after: Duration::ZERO,
             ..Settings::default()
         };
         adjust(&mut settings);

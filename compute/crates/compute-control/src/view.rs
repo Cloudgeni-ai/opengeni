@@ -229,6 +229,15 @@ impl View {
             .is_some_and(|known| known.state == HostState::Draining)
     }
 
+    /// Whether host `host` held any sandbox when it last reported.
+    #[must_use]
+    pub fn holds_sandboxes(&self, host: HostId) -> bool {
+        self.read()
+            .hosts
+            .get(&host)
+            .is_some_and(|known| known.capacity.sandboxes > 0)
+    }
+
     /// The host named `name`.
     #[must_use]
     pub fn named(&self, name: &str) -> Option<Known> {
