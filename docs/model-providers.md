@@ -119,6 +119,14 @@ Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
 
 - `static` (default): existing `OPENGENI_AZURE_OPENAI_API_KEY` or
   `OPENGENI_AZURE_OPENAI_AD_TOKEN` behavior. A static token is not refreshed.
+- `deployment_identity`: the same deployment credential resolver as Azure
+  Speech and organization Azure OpenAI. Set `AZURE_TENANT_ID` and
+  `AZURE_CLIENT_ID`, plus either `AZURE_FEDERATED_TOKEN_FILE` or
+  `AZURE_CLIENT_SECRET`. The federated token file takes precedence when both
+  are configured. For an app registration on a host outside Azure, omit the
+  token-file setting and supply the app's client secret. `AZURE_AUTHORITY_HOST`
+  optionally selects the Entra authority. There is no managed-identity or
+  developer-login fallback when these credentials are missing or refused.
 - `workload_identity`: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and
   `AZURE_FEDERATED_TOKEN_FILE` are required. The projected assertion is read
   afresh on each token acquisition. `AZURE_AUTHORITY_HOST` optionally selects
@@ -128,7 +136,7 @@ Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
   system-assigned identity. No tenant or projected token file is required.
   The SDK requires Node.js 20+ when running on Node (the deployment runs Bun).
 
-Both identity modes reject a simultaneously configured Azure API key or static
+All identity modes reject a simultaneously configured Azure API key or static
 AD token at startup. They acquire `https://cognitiveservices.azure.com/.default`
 tokens and send only `Authorization: Bearer …`, never `api-key`. The identity
 needs the **Cognitive Services OpenAI User** role on the target resource.
@@ -162,6 +170,25 @@ API-version URL mode also works. This uses the built-in catalog and billing
 policy; it does not create or grant access to an organization connection.
 `OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED` is a separate opt-in for
 organization connections and is **not needed** for the built-in provider.
+
+For an Entra app registration on a host without a projected token file or
+managed identity, keep the provider, URL, model and reasoning settings above,
+and configure:
+
+```dotenv
+OPENGENI_AZURE_OPENAI_AUTH_MODE=deployment_identity
+AZURE_TENANT_ID=YOUR_TENANT_ID
+AZURE_CLIENT_ID=YOUR_APP_CLIENT_ID
+AZURE_CLIENT_SECRET=YOUR_APP_CLIENT_SECRET
+```
+
+Unset `AZURE_FEDERATED_TOKEN_FILE`, `OPENGENI_AZURE_OPENAI_API_KEY`, and
+`OPENGENI_AZURE_OPENAI_AD_TOKEN`. Supply the secret through your deployment's
+secret mechanism to every API/worker process making model calls. The existing
+shared helper exchanges it for short-lived Cognitive Services bearer tokens
+and refreshes them automatically; it is not a static AD token. Replacing the
+secret in loaded settings creates a new client and token source. Environment
+changes still require the process to reload its settings (normally a restart).
 
 ### Extra OpenAI-compatible servers — `OPENGENI_MODEL_PROVIDERS_JSON`
 

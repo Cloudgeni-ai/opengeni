@@ -38294,6 +38294,7 @@
     },
     "@opengeni/react/testing/meetings": {
       "createMeetingsFixture": "value",
+      "FAILED_RECORDING_ID": "value",
       "LIVE_LINES": "value",
       "LIVE_RECORDING_ID": "value",
       "MeetingsFixture": "type"
