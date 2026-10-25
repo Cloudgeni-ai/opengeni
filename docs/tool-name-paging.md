@@ -32,7 +32,7 @@ planner guarantee. An all-legacy history receives no promised speedup.
 
 ## Exact call IDs
 
-Migrations 0957 and 0958 add the corresponding call-ID indexes for created/output
+Migrations 0963 and 0964 add the corresponding call-ID indexes for created/output
 tool events: `(workspace_id, session_id, tool_call_id, sequence)` for non-NULL
 projections of at most 2048 bytes, and `(workspace_id, session_id, sequence)` for
 NULL/oversized fallbacks. The reader uses these branches only for ordinary IDs

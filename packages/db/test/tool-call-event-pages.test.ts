@@ -8,8 +8,8 @@ import { executeMigrationFile } from "../src/migrate";
 import { listSessionEventSlices, type SessionEventSliceOptions } from "../src/session-event-slices";
 
 const migrations = [
-  "0957_session_event_tool_call_pages.sql",
-  "0958_session_event_tool_call_fallback_pages.sql",
+  "0963_session_event_tool_call_pages.sql",
+  "0964_session_event_tool_call_fallback_pages.sql",
 ];
 const indexes = ["session_events_tool_call_page_idx", "session_events_tool_call_fallback_page_idx"];
 const toolTypes = ["agent.toolCall.created", "agent.toolCall.output"] as const;
