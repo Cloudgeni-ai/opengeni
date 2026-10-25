@@ -1744,6 +1744,9 @@
 :where(.og-root).max-h-\[40\%\],:where(.og-root) .max-h-\[40\%\] {
     max-height: 40%;
   }
+:where(.og-root).max-h-\[60vh\],:where(.og-root) .max-h-\[60vh\] {
+    max-height: 60vh;
+  }
 :where(.og-root).max-h-\[85dvh\],:where(.og-root) .max-h-\[85dvh\] {
     max-height: 85dvh;
   }
@@ -2760,6 +2763,9 @@
   }
 :where(.og-root).justify-items-center,:where(.og-root) .justify-items-center {
     justify-items: center;
+  }
+:where(.og-root).justify-items-start,:where(.og-root) .justify-items-start {
+    justify-items: start;
   }
 :where(.og-root).gap-0,:where(.og-root) .gap-0 {
     gap: calc(var(--spacing) * 0);

@@ -318,6 +318,56 @@ describe("Meeting page", () => {
     }
   });
 
+  test("notes an agent wrote show above the transcript, and the notepad saves as you type", async () => {
+    const fixture = createMeetingsFixture();
+    const opened: string[] = [];
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+        onOpenChat={(sessionId) => opened.push(sessionId)}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Tomas reviews the schema change today");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Written by an agent");
+      expect(text.indexOf("Action items")).toBeLessThan(text.indexOf("Tomas Eriksen"));
+      const openChat = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Open the chat",
+      )!;
+      await act(async () => openChat.click());
+      expect(opened).toEqual(["7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"]);
+
+      const notepad = view.container.querySelector<HTMLTextAreaElement>(
+        'textarea[placeholder^="Jot down"]',
+      )!;
+      expect(notepad.value).toContain("Tomas: schema review");
+      await act(async () => {
+        // react-dom watches the focused field for typing.
+        notepad.focus();
+        const setValue = Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype,
+          "value",
+        )!.set!;
+        setValue.call(notepad, `${notepad.value}\n- follow up on onboarding`);
+        notepad.dispatchEvent(new window.Event("input", { bubbles: true }));
+        // react-dom loads before the DOM here, so it reads typing from key events.
+        notepad.dispatchEvent(new window.KeyboardEvent("keyup", { bubbles: true }));
+      });
+      await waitForText(view.container, "Saved");
+      const saved = await fixture.client.listRecordingNotes(fixture.workspaceId, fixture.readyId);
+      expect(saved.notes.find((note) => note.kind === "notepad")?.body).toContain(
+        "follow up on onboarding",
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a voice suggestion is marked and can be turned down", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(

@@ -69,6 +69,12 @@ export function MeetingDetailRoute({
             search: { section: "general" },
           })
         }
+        onOpenChat={(sessionId) =>
+          void navigate({
+            to: "/workspaces/$workspaceId/sessions/$sessionId",
+            params: { workspaceId, sessionId },
+          })
+        }
       />
     </ContentPage>
   );
