@@ -843,9 +843,13 @@ export function MeetingDetailPage({
       entry.versionNumber > shownVersionNumber &&
       (entry.state === "queued" || entry.state === "processing"),
   );
+  // Gone once retention deleted it, or when none was ever uploaded. Uploaded
+  // audio without a playable copy yet (while it's transcribed, or after a
+  // failure before that step) can still be transcribed again.
   const audioGone =
     recording.audioDeletedAt !== null ||
-    (recording.state !== "capturing" && !recording.tracks.some((track) => track.playable));
+    (recording.state !== "capturing" &&
+      !recording.tracks.some((track) => track.playable || track.chunkCount > 0));
   const canRerun = recording.state !== "capturing" && !audioGone && !rerunPending;
   const unnamedCount = speakerLabels.filter(
     (label) => !speakerIsNamed(label, transcript.speakers),

@@ -33,6 +33,8 @@ export const LIVE_LINES: readonly [track: number, seconds: number, text: string]
 ];
 
 export const LIVE_RECORDING_ID = "3d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f60";
+/** A meeting whose transcript failed before its audio was prepared. */
+export const FAILED_RECORDING_ID = "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e";
 
 function version(
   recordingId: string,
@@ -117,6 +119,11 @@ function recording(
     updatedAt: iso(startedOffset - durationMilliseconds),
     ...extra,
   };
+}
+
+/** Its audio is uploaded, but the worker hasn't made a playable copy yet. */
+function unprepared(meeting: Recording): Recording {
+  return { ...meeting, tracks: meeting.tracks.map((track) => ({ ...track, playable: false })) };
 }
 
 const LINES: Array<[label: string, seconds: number, text: string]> = [
@@ -284,15 +291,17 @@ export function createMeetingsFixture(
               },
             })),
           }),
-          recording(
-            "0c1d2e3f-4a5b-4c6d-8e7f-a0b1c2d3e4f5",
-            "Customer call: Northwind",
-            minutes(8),
-            minutes(31),
-            {
-              state: "processing",
-              transcript: version("0c1d2e3f-4a5b-4c6d-8e7f-a0b1c2d3e4f5", 1, "processing"),
-            },
+          unprepared(
+            recording(
+              "0c1d2e3f-4a5b-4c6d-8e7f-a0b1c2d3e4f5",
+              "Customer call: Northwind",
+              minutes(8),
+              minutes(31),
+              {
+                state: "processing",
+                transcript: version("0c1d2e3f-4a5b-4c6d-8e7f-a0b1c2d3e4f5", 1, "processing"),
+              },
+            ),
           ),
           ready,
           recording(
@@ -301,17 +310,20 @@ export function createMeetingsFixture(
             minutes(60 * 26),
             minutes(47),
           ),
-          recording(
-            "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
-            "Interview: platform engineer",
-            minutes(60 * 50),
-            minutes(58),
-            {
-              state: "failed",
-              transcript: version("2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e", 1, "failed", {
-                errorCode: "provider_quota_exceeded",
-              }),
-            },
+          // It failed before the worker made a playable copy; the audio is kept.
+          unprepared(
+            recording(
+              FAILED_RECORDING_ID,
+              "Interview: platform engineer",
+              minutes(60 * 50),
+              minutes(58),
+              {
+                state: "failed",
+                transcript: version(FAILED_RECORDING_ID, 1, "failed", {
+                  errorCode: "provider_quota_exceeded",
+                }),
+              },
+            ),
           ),
           recording(
             "7f8a9b0c-1d2e-4f3a-8b4c-5d6e7f8a9b0c",
