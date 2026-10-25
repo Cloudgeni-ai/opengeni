@@ -169,19 +169,16 @@ describe("compact session view on the live local workspace route (API fixture)",
       if (location.origin !== "null")
         localStorage.setItem("opengeni.accessKey", "configured-test-placeholder");
     });
-    // Install observation before mounting the real app, not after the first
-    // requests have already escaped. This does not replace a hook or loader.
-    await page.route(`${baseUrl}/src/main.tsx`, async (route) => {
-      const headers = route.request().headers();
-      delete headers["if-none-match"];
-      const response = await route.fetch({ headers });
-      expect(response.ok()).toBe(true);
-      await route.fulfill({
+    // Install observation before mounting the real app. Native module imports
+    // preserve its loading path; do not proxy Vite through route.fetch(), whose
+    // separate keep-alive transport can reset between document navigations.
+    await page.route(`${baseUrl}/src/main.tsx`, (route) =>
+      route.fulfill({
         contentType: "text/javascript",
         headers: { "cache-control": "no-store" },
-        body: `import ${JSON.stringify(readProbeModulePath)};\n${await response.text()}`,
-      });
-    });
+        body: `await import(${JSON.stringify(readProbeModulePath)});\nawait import("/src/main.tsx?compact-session-fixture");`,
+      }),
+    );
     await page.route(`${baseUrl}/v1/**`, async (route) => {
       const url = new URL(route.request().url());
       const path = url.pathname;
@@ -822,7 +819,25 @@ describe("compact session view on the live local workspace route (API fixture)",
       await page
         .getByRole("textbox", { name: "Message the agent", exact: true })
         .and(page.locator(":focus"))
-        .waitFor();
+        .waitFor()
+        .catch(async (error) => {
+          console.error(
+            "Initial composer focus diagnostic",
+            await page.evaluate(() => ({
+              url: location.href,
+              ready: document.readyState,
+              visibility: document.visibilityState,
+              active: document.activeElement?.outerHTML,
+              body: document.body.innerText.slice(0, 3000),
+            })),
+            web.logs(),
+          );
+          await page.screenshot({
+            path: "test-results/compact-composer-focus-failure.png",
+            fullPage: true,
+          });
+          throw error;
+        });
       await choose("Group by", "None");
       await choose("Sort by", "Last activity");
       await choose("Status", localArchived ? "Active" : "Archived");
