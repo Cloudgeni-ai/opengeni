@@ -9,7 +9,7 @@
 
 use std::fs;
 use std::io;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
@@ -97,6 +97,34 @@ impl Process {
     /// number cannot pass to another before the pinned process exits.
     pub fn protect_from_oom(&self) -> io::Result<()> {
         let mut file = open_oom_score_adj(self.pid)?;
+        self.still_running()?;
+        file.write_all(OOM_SCORE_ADJ.to_string().as_bytes())
+    }
+
+    /// Names this process apart from every other the host has run or will
+    /// run: the boot it runs in, its number, and when it started in that
+    /// boot, which no later process with the same number shares. Its
+    /// procfs file is opened by number and read only if the pinned process
+    /// has not exited since, as in [`Self::protect_from_oom`]. Reads two
+    /// small kernel files.
+    pub fn identity(&self) -> io::Result<String> {
+        let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+        let mut file = fs::File::open(format!("/proc/{}/stat", self.pid.as_raw_pid()))?;
+        self.still_running()?;
+        let mut stat = String::new();
+        file.read_to_string(&mut stat)?;
+        let started =
+            start_time(&stat).ok_or_else(|| io::Error::other("unreadable process start time"))?;
+        Ok(format!(
+            "{}/{}/{started}",
+            boot.trim(),
+            self.pid.as_raw_pid()
+        ))
+    }
+
+    /// Fails if the pinned process has exited, so its number may name
+    /// another process by now.
+    fn still_running(&self) -> io::Result<()> {
         let mut ready = [rustix::event::PollFd::new(
             self.pidfd.get_ref(),
             rustix::event::PollFlags::IN,
@@ -110,7 +138,7 @@ impl Process {
                 rustix::io::Errno::SRCH.raw_os_error(),
             ));
         }
-        file.write_all(OOM_SCORE_ADJ.to_string().as_bytes())
+        Ok(())
     }
 
     /// Kills the process. Succeeds if it has already exited.
@@ -164,6 +192,15 @@ pub(crate) fn parse_pid(text: &str) -> Option<Pid> {
         .and_then(Pid::from_raw)
 }
 
+/// When a process started, in clock ticks since boot: field 22 of its
+/// `/proc/<pid>/stat`, `text`. The command name (field 2) is in
+/// parentheses and may hold spaces and parentheses itself, so fields are
+/// counted from the last closing one, after which field 3 comes.
+fn start_time(text: &str) -> Option<u64> {
+    let (_, after_name) = text.rsplit_once(')')?;
+    after_name.split_whitespace().nth(22 - 3)?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +243,47 @@ mod tests {
         // Signalling a reaped process through its pidfd never reaches a
         // process that reused the pid.
         process.kill().unwrap();
+    }
+
+    #[test]
+    fn a_start_time_is_read_past_any_command_name() {
+        let tail = "S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 19 20";
+        assert_eq!(
+            start_time(&format!("42 (firecracker) {tail}")),
+            Some(987_654)
+        );
+        assert_eq!(start_time(&format!("42 (a) b (c)) {tail}")), Some(987_654));
+        assert_eq!(start_time("42 (firecracker) S 1 2"), None);
+        assert_eq!(start_time("garbage"), None);
+    }
+
+    #[tokio::test]
+    async fn a_process_identity_is_its_own_and_ends_with_it() {
+        let spawn = || {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap()
+        };
+        let (mut first, mut second) = (spawn(), spawn());
+        let open = |child: &std::process::Child| {
+            Process::open(Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap()).unwrap()
+        };
+        let (one, two) = (open(&first), open(&second));
+        let identity = one.identity().unwrap();
+        assert_eq!(one.identity().unwrap(), identity, "an identity is stable");
+        assert_ne!(two.identity().unwrap(), identity);
+        let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+        assert!(identity.starts_with(&format!("{}/{}/", boot.trim(), first.id())));
+        for (process, child) in [(&one, &mut first), (&two, &mut second)] {
+            process.kill().unwrap();
+            process.exited().await;
+            let _ = child.wait();
+        }
+        assert!(
+            one.identity().is_err(),
+            "a process that exited is named no more"
+        );
     }
 
     #[test]

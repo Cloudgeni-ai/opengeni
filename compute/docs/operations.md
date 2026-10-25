@@ -776,10 +776,17 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   meanwhile
   ([ADR 18](adr/0018-the-control-service-leases-and-fences.md)). Its log
   lines `templates found`, `recovered` and `started` tell how long that
-  took and where. Template inputs' hashes are kept under
-  `templates/inputs/`, so a restart reads none of the large files the
-  templates depend on, such as the base image, unless they changed. Run
-  the new bundle's `install.sh` (without `--config`, the installed
+  took and where. A VM it takes back still saves only the pages that
+  changed: `memory-base.json` in the sandbox's directory records what
+  that VM process's memory is based on. A VM saves every page the first
+  time when that record cannot vouch for its base: it is missing,
+  unreadable or names another process, or its image is gone, changed
+  (other hashes) or not wholly on local disk
+  ([ADR 6](adr/0006-memory-images-and-disks.md)). Template inputs'
+  hashes are kept under `templates/inputs/`, so a restart reads none of
+  the large files the templates depend on, such as the base image,
+  unless they changed. Run the new bundle's `install.sh` (without
+  `--config`, the installed
   configuration stays):
   it installs the release beside the old ones, points
   `/opt/compute/current` at it and restarts the agent alone; the guard is

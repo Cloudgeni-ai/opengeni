@@ -35,8 +35,8 @@ use compute_engine::{Engine, EngineError, ErrorKind};
 use tokio::time::Instant;
 
 use super::{
-    After, Base, Job, Live, Meter, Reading, Taken, blocking, checkpoint_disk, failure, images_of,
-    state_failure, wake_profile,
+    After, Job, Live, Meter, Reading, Taken, blocking, checkpoint_disk, failure, images_of,
+    lose_base, state_failure, wake_profile,
 };
 use crate::image::Verified;
 use crate::layout::{clone_jailed, remove_if_present};
@@ -83,7 +83,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 return (Outcome::Cancelled, After::Kept(live));
             }
             Some(Err(error)) => {
-                live.memory.base = Base::Unknown;
+                lose_base(&self.paths, &mut live.memory.base).await;
                 return (failure(&error), After::Kept(live));
             }
             Some(Ok(())) => {}
@@ -232,7 +232,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         let taken = match self.take_snapshot(live).await {
             Ok(taken) => taken,
             Err(error) => {
-                live.memory.base = Base::Unknown;
+                lose_base(&self.paths, &mut live.memory.base).await;
                 return Err(error);
             }
         };
