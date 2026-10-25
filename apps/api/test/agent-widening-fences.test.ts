@@ -16,7 +16,10 @@ import {
   getScheduledTaskCreatorPolicy,
   getSession,
   initializeSessionStartAtomically,
+  applySessionTurnSettlement,
   persistAttemptToolCatalog,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
@@ -576,6 +579,74 @@ describe("agent-created scheduled tasks freeze the creator boundary (real Postgr
     const unzoned = await create(await zonedServer(), mondayAtNine);
     expect(unzoned.schedule.timeZone).toBe("UTC");
     expect(unzoned.facts).toMatchObject({ scheduleTimeZone: "UTC", scheduleTimeZoneSource: "utc" });
+
+    // A later turn no person's message started still uses the zone the
+    // person last wrote from in this chat.
+    const root = await narrowedRootSession(grant, tools, permissions);
+    const first = await liveAttempt(grant, root.id, "Europe/Oslo");
+    const [firstTurn] = await shared!.admin<{ trigger_event_id: string }[]>`
+      select trigger_event_id from session_turns where id = ${first.turnId}`;
+    const settled = await applySessionTurnSettlement(client.db, grant.workspaceId, {
+      sessionId: root.id,
+      turnId: first.turnId,
+      triggerEventId: firstTurn!.trigger_event_id,
+      attemptId: first.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed" as const, payload: { output: "Done." } }],
+    });
+    expect(settled.action).toBe("settled");
+    const service = "service:continuation";
+    await withWorkspaceSubjectSessionActivityRls(client.db, grant.workspaceId, service, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: root.id,
+          subjectId: service,
+          subjectLabel: "Continuation",
+          actor: { type: "service", subjectId: service, subjectLabel: "Continuation" },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Keep going",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "api",
+        }),
+      ),
+    );
+    const attemptId = crypto.randomUUID();
+    const continued = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: root.id,
+      workflowId: `session-${root.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (continued.action !== "claimed")
+      throw new Error(`continuation turn was not claimed: ${JSON.stringify(continued)}`);
+    expect(continued.turn.metadata.messageTimeZone).toBeUndefined();
+    const continuation = buildOpenGeniMcpServer(
+      routeDeps(),
+      agentGrant(
+        grant,
+        {
+          sessionId: root.id,
+          turnId: continued.turn.id,
+          attemptId,
+          executionGeneration: continued.turn.executionGeneration,
+        },
+        tools,
+      ),
+    );
+    const fromSession = await create(continuation, mondayAtNine);
+    expect(fromSession.schedule.timeZone).toBe("Europe/Oslo");
+    expect(fromSession.facts).toMatchObject({
+      scheduleTimeZone: "Europe/Oslo",
+      scheduleTimeZoneSource: "session",
+    });
   });
 
   test("a human create leaves the creator boundary empty", async () => {

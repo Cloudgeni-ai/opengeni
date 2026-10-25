@@ -3,12 +3,12 @@ import {
   type AccessGrant,
   type ScheduledTaskScheduleSpec,
 } from "@opengeni/contracts";
-import { getSessionTurn, type Database } from "@opengeni/db";
+import { getLatestSessionMessageTimeZone, getSessionTurn, type Database } from "@opengeni/db";
 
 /** Where the time zone of an agent-written schedule came from when the call omitted it. */
 export type ScheduleTimeZoneDefault = {
   timeZone: string;
-  source: "message" | "existing_schedule" | "utc";
+  source: "message" | "session" | "existing_schedule" | "utc";
 };
 
 /** Schedule types whose clock times are read in a time zone. */
@@ -25,26 +25,35 @@ function omitsTimeZone(schedule: unknown): schedule is Record<string, unknown> {
 }
 
 /**
- * The time zone frozen with the turn an agent is running, from the message
- * that started it. Only an agent attempt has a calling turn.
+ * The person's time zone for an agent's call: the one frozen with the turn
+ * the agent is running, from the message that started it, or else, for a turn
+ * no person's message started (a goal continuation, a turn woken by a child's
+ * result or another agent), the zone of the chat's latest message that had
+ * one. Only an agent attempt has a calling turn.
  */
 async function callingTurnMessageTimeZone(
   db: Database,
   grant: AccessGrant,
-): Promise<string | undefined> {
+): Promise<{ timeZone: string; source: "message" | "session" } | undefined> {
   if (grant.principalKind !== "agent_attempt") return undefined;
   const turnId = grant.metadata?.["turnId"];
   if (typeof turnId !== "string") return undefined;
   const turn = await getSessionTurn(db, grant.workspaceId, turnId);
-  return messageTimeZoneFromTurnMetadata(turn?.metadata);
+  const own = messageTimeZoneFromTurnMetadata(turn?.metadata);
+  if (own) return { timeZone: own, source: "message" };
+  const sessionId = turn?.sessionId ?? grant.metadata?.["sessionId"];
+  if (typeof sessionId !== "string") return undefined;
+  const latest = await getLatestSessionMessageTimeZone(db, grant.workspaceId, sessionId);
+  return latest ? { timeZone: latest, source: "session" } : undefined;
 }
 
 /**
  * Fill the time zone an agent left out of a clock-based schedule, before the
  * request is parsed (whose own default is UTC). People asking for "every
  * Monday at 9" mean their own 9, so a new schedule uses the zone of the
- * message that asked for it. An edited schedule keeps its current zone. UTC
- * applies only when there is neither. Calls from people (not agents) and
+ * message that asked for it (or the chat's latest zoned message when no
+ * person's message started this turn). An edited schedule keeps its current
+ * zone. UTC applies only when there is neither. Calls from people (not agents) and
  * schedules that name a zone are unchanged.
  */
 export async function withAgentScheduleTimeZone<T>(
@@ -63,9 +72,7 @@ export async function withAgentScheduleTimeZone<T>(
   const fromMessage = current ? undefined : await callingTurnMessageTimeZone(db, grant);
   const timeZoneDefault: ScheduleTimeZoneDefault = current
     ? { timeZone: current, source: "existing_schedule" }
-    : fromMessage
-      ? { timeZone: fromMessage, source: "message" }
-      : { timeZone: "UTC", source: "utc" };
+    : (fromMessage ?? { timeZone: "UTC", source: "utc" });
   return {
     input: { ...input, schedule: { ...schedule, timeZone: timeZoneDefault.timeZone } },
     timeZoneDefault,

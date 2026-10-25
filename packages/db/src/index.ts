@@ -84183,6 +84183,53 @@ export async function getSessionTurn(
   });
 }
 
+/** How many of a session's newest finished turns the message-zone lookup reads. */
+const LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW = 64;
+
+/**
+ * The time zone of the newest finished turn in a session whose message
+ * carried one, among its latest {@link LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW}
+ * finished turns. Walks the newest-finished-first index and stops there, so a
+ * long session costs one bounded index range.
+ */
+export async function getLatestSessionMessageTimeZone(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | undefined> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const recent = scopedDb
+      .select({
+        metadata: schema.sessionTurns.metadata,
+        finishedAt: schema.sessionTurns.finishedAt,
+        position: schema.sessionTurns.position,
+        createdAt: schema.sessionTurns.createdAt,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          isNotNull(schema.sessionTurns.finishedAt),
+        ),
+      )
+      .orderBy(
+        desc(schema.sessionTurns.finishedAt),
+        desc(schema.sessionTurns.position),
+        desc(schema.sessionTurns.createdAt),
+      )
+      .limit(LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW)
+      .as("recent");
+    const rows = await scopedDb
+      .select({ metadata: recent.metadata })
+      .from(recent)
+      .where(sql`${recent.metadata} ? ${MESSAGE_TIME_ZONE_METADATA_KEY}`)
+      .orderBy(desc(recent.finishedAt), desc(recent.position), desc(recent.createdAt))
+      .limit(1);
+    return messageTimeZoneFromTurnMetadata(rows[0]?.metadata);
+  });
+}
+
 /**
  * Read only the immutable causal human for one exact accepted turn. Public
  * SessionTurn projections intentionally omit this execution-authority field.
