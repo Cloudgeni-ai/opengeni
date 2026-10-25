@@ -229,7 +229,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
       "requireAccessGrantAuthorization(",
       '"sessions:read"',
       "requireSessionAuthorizationListScope(",
-      "SessionMessageSearchRequest.safeParse(",
+      "parseRequestQuery(\n      SessionMessageSearchRequest,",
       "searchSessionMessagesForSubject(",
       "subjectId: grant.subjectId",
       "authorizationScope",
