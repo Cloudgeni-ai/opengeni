@@ -5033,9 +5033,7 @@ lazy prerequisite block (optionally read from a Git revision) with real local
 credential writes, token signing, and client installation. It reports local and
 controlled 100 ms transport-delay cases, with cold and warm publication caches.
 It never calls a model or cloud provider; injected Git/storage/command latency
-is not a measurement of a particular provider. See
-[`post-provision-startup-measurements.md`](post-provision-startup-measurements.md)
-for the measured comparison and remaining limits.
+is not a measurement of a particular provider.
 
 Eager owned-box platform setup (rig setup, credential hooks and repository
 clones) needs nothing from file delivery or the model input, so the worker
