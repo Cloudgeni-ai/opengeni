@@ -14,8 +14,10 @@ is 200 bytes plus the account labels (217 bytes in that example), at most ten
 named and the rest counted, once per turn and only in that one search result.
 "The same need" means another account of the same connector, or a connector
 with the same catalog category (such as communication or files; the broad
-"integrations" category never counts), so Linear plus Slack, Gmail and GitHub
-says nothing for a Linear search. An account whose tools failed to load this
+"integrations" category, the "custom" one every custom server gets and a
+reviewed definition's fallback category never count), so Linear plus Slack,
+Gmail and GitHub says nothing for a Linear search, and two unrelated custom
+servers never name each other. An account whose tools failed to load this
 turn is reported as an unavailable source and is not named. Before, "Have I
 got any new emails?" loaded only Gmail's search tool and the answer silently
 covered Gmail alone. People with one connected account, accounts of unrelated

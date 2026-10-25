@@ -297,10 +297,22 @@ describe("installed API Integration worker adapters", () => {
       });
       expect(outlook.get(bindings[0]!.serverId)?.kind).toBe("communication");
       expect(labels.get(bindings[0]!.serverId)).not.toHaveProperty("kind");
-      // Connector routes take their catalog category; the default says nothing.
+      // A reviewed definition without a chosen category has no kind, though
+      // its catalog entry shows the "productivity" fallback.
+      const uncategorized = apiIntegrationAccountLabels({
+        integrations: [
+          { ...item, definitionId: "unlisted-definition", definitionProvenance: "curated" },
+        ],
+        bindings,
+        tools: routed.tools,
+      });
+      expect(uncategorized.get(bindings[0]!.serverId)).not.toHaveProperty("kind");
+      // Connector routes take their catalog category; the default and the
+      // custom-server category say nothing.
       for (const [category, kind] of [
         ["files", "files"],
         ["integrations", undefined],
+        ["custom", undefined],
       ] as const) {
         const categorized = expandMcpAccountRoutes({
           settings: testSettings({

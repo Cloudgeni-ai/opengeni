@@ -11,10 +11,12 @@ const ACCOUNT_SCOPE_SUFFIX = / · (?:Only me|This workspace)$/u;
 
 /**
  * The kind of need an account serves: its connector's catalog category. The
- * catalog's default category ("integrations") says nothing, so it is no kind.
+ * catalog's default category ("integrations") and the one every custom server
+ * gets ("custom") say where a server came from, not what it is for, so they
+ * are no kind.
  */
 export function connectedAccountKind(category: string | null | undefined): string | undefined {
-  return category && category !== "integrations" ? category : undefined;
+  return category && category !== "integrations" && category !== "custom" ? category : undefined;
 }
 
 /** "alice@example.com · Only me" → "alice@example.com". */

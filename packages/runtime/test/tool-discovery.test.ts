@@ -1508,6 +1508,35 @@ describe("searches that reach one of several connected accounts", () => {
         "search gmail for new email",
       ),
     ).toBeUndefined();
+    // Custom servers have no kind: two unrelated ones say nothing, while two
+    // accounts of the same custom server still name each other.
+    const home = { source: "home", label: "Home Hub", connector: "Home Hub" };
+    const company = { source: "company", label: "Company Wiki", connector: "Company Wiki" };
+    expect(
+      await notice(
+        [
+          [LINEAR, { ...linear, kind: undefined }],
+          [GITHUB, home],
+          [SLACK, company],
+        ],
+        "list linear issues in the projects and cycles",
+      ),
+    ).toBeUndefined();
+    expect(
+      await notice(
+        [
+          [LINEAR, { ...home, label: "Home Hub (a@example.com)" }],
+          [
+            "mcp__linear_work__list_issues",
+            { ...home, source: "home-2", label: "Home Hub (b@example.com)" },
+          ],
+          [SLACK, company],
+        ],
+        "list linear issues in the projects and cycles",
+      ),
+    ).toStartWith(
+      "These tools reach Home Hub (a@example.com). Also connected: Home Hub (b@example.com). If",
+    );
   });
 
   test("compact candidates count as reached only where the output shows them", async () => {

@@ -1996,9 +1996,12 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
   },
 };
 
-/** The catalog category of a reviewed integration definition, the same one its catalog entry shows. */
-export function integrationDefinitionCategory(definitionId: string): string {
-  return INTEGRATION_DEFINITION_DISCOVERY[definitionId]?.category ?? "productivity";
+/**
+ * The catalog category chosen for a reviewed integration definition, if one
+ * was. Its catalog entry shows "productivity" when none was chosen.
+ */
+export function integrationDefinitionCategory(definitionId: string): string | undefined {
+  return INTEGRATION_DEFINITION_DISCOVERY[definitionId]?.category;
 }
 
 /**
@@ -2021,7 +2024,7 @@ export function integrationDefinitionCapabilityRecommendations(
       source: "built_in",
       name: definition.name,
       description: discovery?.description ?? definition.summary,
-      category: integrationDefinitionCategory(definition.id),
+      category: integrationDefinitionCategory(definition.id) ?? "productivity",
       tags: [...(discovery?.tags ?? [definition.provider.id])],
       homepageUrl: null,
       providerDomain: definition.provider.id === "microsoft" ? "microsoft.com" : "google.com",
