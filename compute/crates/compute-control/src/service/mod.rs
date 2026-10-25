@@ -166,7 +166,8 @@ pub struct Service<S> {
     settings: Settings,
 }
 
-fn now_ms() -> u64 {
+/// The wall-clock time in milliseconds since the Unix epoch.
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {

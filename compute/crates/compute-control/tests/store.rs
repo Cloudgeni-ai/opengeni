@@ -23,6 +23,15 @@ fn random() -> u64 {
     u64::from_le_bytes(bytes)
 }
 
+/// The time now, which checks give up on hosts at: later than any time
+/// [`forgetting`] prunes before.
+fn now_ms() -> u64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    u64::try_from(since.as_millis()).unwrap()
+}
+
 fn capacity() -> Capacity {
     Capacity {
         memory_free_mib: 1024,
@@ -172,11 +181,11 @@ async fn registration<S: Store>(store: S) {
     );
     let count = renewals(&store, host).await.expect("counted");
     assert_eq!(
-        store.give_up(host, count - 1).await.unwrap(),
+        store.give_up(host, count - 1, now_ms()).await.unwrap(),
         None,
         "a renewal since saves it"
     );
-    assert_eq!(store.give_up(host, count).await.unwrap(), Some(0));
+    assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(0));
     assert_eq!(renewals(&store, host).await, None);
     assert!(
         !store
@@ -237,7 +246,7 @@ async fn owner_lost<S: Store>(store: S) {
     let mut owned = sandbox(lost);
     assert_eq!(store.insert(&owned).await.unwrap(), Write::Done);
     let count = renewals(&store, lost).await.unwrap();
-    assert_eq!(store.give_up(lost, count).await.unwrap(), Some(1));
+    assert_eq!(store.give_up(lost, count, now_ms()).await.unwrap(), Some(1));
 
     // Giving up cleared its owner under a raised epoch.
     let cleared = store.sandbox(owned.id).await.unwrap().unwrap();
@@ -252,10 +261,22 @@ async fn owner_lost<S: Store>(store: S) {
         store.insert(&sandbox(lost)).await.unwrap(),
         Write::OwnerLost
     );
+    // Nor a host the store never had.
+    let unknown = HostId((1 << 62) + random() % 1000);
+    assert_eq!(
+        store.insert(&sandbox(unknown)).await.unwrap(),
+        Write::OwnerLost
+    );
     owned = cleared;
     let mut back = owned.clone();
     back.ownership = owned.ownership.give(lost).set;
     assert_eq!(store.replace(&back).await.unwrap(), Write::OwnerLost);
+    let mut unknown_owner = owned.clone();
+    unknown_owner.ownership = owned.ownership.give(unknown).set;
+    assert_eq!(
+        store.replace(&unknown_owner).await.unwrap(),
+        Write::OwnerLost
+    );
     let mut elsewhere = owned.clone();
     elsewhere.ownership = owned.ownership.give(live).set;
     assert_eq!(store.replace(&elsewhere).await.unwrap(), Write::Done);
@@ -294,7 +315,7 @@ async fn racing_give_up<S: Store>(store: S) {
         let rows: Vec<SandboxRow> = (0..8).map(|_| sandbox(host)).collect();
         let (writes, given_up) = tokio::join!(
             futures::future::join_all(rows.iter().map(|row| store.insert(row))),
-            store.give_up(host, count),
+            store.give_up(host, count, now_ms()),
         );
         assert_eq!(
             given_up.unwrap(),
@@ -318,6 +339,68 @@ async fn writes_racing_a_give_up_never_leave_a_sandbox_with_the_lost_host() {
     each(racing_give_up, racing_give_up).await;
 }
 
+/// Whether the store lists `host`, in any state.
+async fn listed<S: Store>(store: &S, host: HostId) -> bool {
+    store
+        .hosts_changed(0)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.id == host)
+}
+
+async fn forgetting<S: Store>(store: S) {
+    let replaced = name();
+    let (host, _) = registered(&store, &register(&replaced, random(), Vec::new())).await;
+    let owned = sandbox(host);
+    assert_eq!(store.insert(&owned).await.unwrap(), Write::Done);
+    let (live, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    // Given up on long ago, before any other check's give-ups, so pruning
+    // before then forgets only hosts like this one.
+    let count = renewals(&store, host).await.unwrap();
+    assert_eq!(store.give_up(host, count, 10).await.unwrap(), Some(1));
+    store.prune_hosts(10).await.unwrap();
+    assert!(listed(&store, host).await, "kept until its time is up");
+    assert!(store.prune_hosts(11).await.unwrap() >= 1);
+    assert!(!listed(&store, host).await, "forgotten");
+    assert!(listed(&store, live).await, "a live host is kept");
+    assert_eq!(renewals(&store, host).await, None);
+
+    // A write naming the forgotten host is refused, as for any host given
+    // up on; one naming no owner, or a live one, is not.
+    assert_eq!(
+        store.insert(&sandbox(host)).await.unwrap(),
+        Write::OwnerLost
+    );
+    let cleared = store.sandbox(owned.id).await.unwrap().unwrap();
+    assert_eq!(cleared.ownership.owner, None);
+    let mut back = cleared.clone();
+    back.ownership = cleared.ownership.give(host).set;
+    assert_eq!(store.replace(&back).await.unwrap(), Write::OwnerLost);
+    let mut unowned = cleared.clone();
+    unowned.metadata.insert("step".into(), "unowned".into());
+    assert_eq!(store.replace(&unowned).await.unwrap(), Write::Done);
+    let mut unowned = store.sandbox(owned.id).await.unwrap().unwrap();
+    let mut elsewhere = unowned.clone();
+    elsewhere.ownership = unowned.ownership.give(live).set;
+    assert_eq!(store.replace(&elsewhere).await.unwrap(), Write::Done);
+    unowned = store.sandbox(owned.id).await.unwrap().unwrap();
+    assert_eq!(unowned.ownership.owner, Some(live));
+
+    // Its name registers afresh, as a new host that writes may name.
+    let (again, _) = registered(&store, &register(&replaced, random(), Vec::new())).await;
+    assert_ne!(again, host, "a new host");
+    assert!(renewals(&store, again).await.is_some());
+    assert_eq!(store.insert(&sandbox(again)).await.unwrap(), Write::Done);
+    store.prune_hosts(11).await.unwrap();
+    assert!(listed(&store, again).await, "a registered host is kept");
+}
+
+#[tokio::test]
+async fn hosts_given_up_on_are_forgotten_in_time_and_stay_refused() {
+    each(forgetting, forgetting).await;
+}
+
 async fn reclaim<S: Store>(store: S) {
     let returning = name();
     let (host, _) = registered(&store, &register(&returning, random(), Vec::new())).await;
@@ -327,7 +410,7 @@ async fn reclaim<S: Store>(store: S) {
         assert_eq!(store.insert(row).await.unwrap(), Write::Done);
     }
     let count = renewals(&store, host).await.unwrap();
-    store.give_up(host, count).await.unwrap();
+    store.give_up(host, count, now_ms()).await.unwrap();
     let (other, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
     let mut taken = store.sandbox(moved.id).await.unwrap().unwrap();
     taken.ownership = taken.ownership.give(other).set;
@@ -369,6 +452,55 @@ async fn reclaim<S: Store>(store: S) {
 #[tokio::test]
 async fn a_returning_host_gets_back_only_what_nobody_took() {
     each(reclaim, reclaim).await;
+}
+
+async fn reclaim_forgotten<S: Store>(store: S) {
+    let returning = name();
+    let (host, _) = registered(&store, &register(&returning, random(), Vec::new())).await;
+    let row = sandbox(host);
+    assert_eq!(store.insert(&row).await.unwrap(), Write::Done);
+    // Given up on long ago, before the give-ups other checks count on
+    // keeping, then forgotten.
+    let count = renewals(&store, host).await.unwrap();
+    assert_eq!(store.give_up(host, count, 5).await.unwrap(), Some(1));
+    store.prune_hosts(6).await.unwrap();
+    assert!(!listed(&store, host).await, "forgotten");
+
+    // Back after being forgotten, it registers as a new host and gets back
+    // what it still holds and nobody took.
+    let held = vec![Held {
+        id: row.id,
+        owner_epoch: row.ownership.epoch.0,
+    }];
+    let Admission::Registered {
+        host: again,
+        rulings,
+        ..
+    } = store
+        .register(&register(&returning, random(), held))
+        .await
+        .unwrap()
+    else {
+        panic!("a forgotten host registers afresh");
+    };
+    assert_ne!(again, host, "a new host");
+    let Some(Verdict::Keep { owner_epoch }) = rulings
+        .iter()
+        .find(|ruling| ruling.id == row.id)
+        .map(|ruling| ruling.verdict)
+    else {
+        panic!("{rulings:?}");
+    };
+    let back = store.sandbox(row.id).await.unwrap().unwrap();
+    assert_eq!(
+        (back.ownership.owner, back.ownership.epoch),
+        (Some(again), OwnerEpoch(owner_epoch))
+    );
+}
+
+#[tokio::test]
+async fn a_host_back_after_being_forgotten_gets_back_what_nobody_took() {
+    each(reclaim_forgotten, reclaim_forgotten).await;
 }
 
 async fn keys<S: Store>(store: S) {
@@ -727,7 +859,8 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
     for replica in replicas {
         stores.push(replica.await.unwrap().expect("every replica starts"));
     }
-    let row = sandbox(HostId(1));
+    let (host, _) = registered(&stores[0], &register(&name(), random(), Vec::new())).await;
+    let row = sandbox(host);
     assert_eq!(stores[0].insert(&row).await.unwrap(), Write::Done);
     drop(stores);
     let again = PostgresStore::connect(&scoped, None, 2).await.unwrap();
@@ -737,8 +870,119 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     drop(again);
+    client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await
+        .unwrap();
+}
+
+/// A replica of an older build, still running during a rollout, refuses
+/// only a sandbox write naming an owner listed as lost, so a host it does
+/// not find passes its check. The database itself refuses a write naming a
+/// host since forgotten: no build can leave a sandbox owned by a host that
+/// nothing can give up on.
+#[tokio::test]
+async fn the_database_refuses_an_older_builds_write_naming_a_forgotten_host() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let store = PostgresStore::connect(&url, None, 2).await.unwrap();
+    let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let (live, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let row = sandbox(live);
+    assert_eq!(store.insert(&row).await.unwrap(), Write::Done);
+    // Given up on before any other check's give-ups, then forgotten.
+    let count = renewals(&store, host).await.unwrap();
+    assert_eq!(store.give_up(host, count, 5).await.unwrap(), Some(0));
+    store.prune_hosts(6).await.unwrap();
+    assert!(!listed(&store, host).await, "forgotten");
+
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let forgotten = i64::try_from(host.0).unwrap();
+    let older = "with owner as (select state = 'lost' as lost from compute_hosts \
+                 where id = $1 for share) \
+                 update compute_sandboxes set owner = $1, epoch = epoch + 1, \
+                 version = version + 1 \
+                 where id = $2 and not exists (select 1 from owner where lost)";
+    let refused = client
+        .execute(older, &[&forgotten, &row.id.to_string()])
+        .await
+        .expect_err("refused by the database");
+    assert_eq!(
+        refused.code(),
+        Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION),
+        "{refused}"
+    );
+    let kept = store.sandbox(row.id).await.unwrap().unwrap();
+    assert_eq!(kept.ownership, row.ownership, "the sandbox is unchanged");
+}
+
+/// A database whose sandbox names a host it does not have (none should)
+/// still migrates: that sandbox is given up on, as giving up on its host
+/// would, before the owner must be a host the store has.
+#[tokio::test]
+async fn migrating_gives_up_on_a_sandbox_naming_a_host_the_store_lacks() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let schema = format!("compute_dangling_{:x}", random());
+    client
+        .batch_execute(&format!("create schema {schema}"))
+        .await
+        .unwrap();
+    let scoped = format!("{url} options='-c search_path={schema}'");
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let (live, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let dangling = sandbox(host);
+    let kept = sandbox(live);
+    for row in [&dangling, &kept] {
+        assert_eq!(store.insert(row).await.unwrap(), Write::Done);
+    }
+    drop(store);
+    // As the database was before this version: no constraint, and here a
+    // host row gone that a sandbox still names.
+    client
+        .batch_execute(&format!(
+            "alter table {schema}.compute_sandboxes drop constraint compute_sandboxes_owner_host; \
+             delete from {schema}.compute_hosts where id = {}; \
+             update {schema}.compute_schema set version = 2",
+            host.0
+        ))
+        .await
+        .unwrap();
+
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let given_up = store.sandbox(dangling.id).await.unwrap().unwrap();
+    assert_eq!(given_up.ownership.owner, None);
+    assert_eq!(given_up.ownership.epoch.0, dangling.ownership.epoch.0 + 1);
+    assert_eq!(
+        store.sandbox(kept.id).await.unwrap().unwrap().ownership,
+        kept.ownership,
+        "a sandbox naming a host the store has is unchanged"
+    );
+    let refused = client
+        .execute(
+            &format!("update {schema}.compute_sandboxes set owner = $1 where id = $2"),
+            &[&i64::try_from(host.0).unwrap(), &kept.id.to_string()],
+        )
+        .await
+        .expect_err("the owner must be a host the store has");
+    assert_eq!(
+        refused.code(),
+        Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION),
+        "{refused}"
+    );
+    drop(store);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))
         .await

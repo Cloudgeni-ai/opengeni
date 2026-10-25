@@ -4,9 +4,10 @@
 //! ms ([`follow`]). Change numbers come from a sequence, and a transaction
 //! can commit after one that took a later number, so each read starts from
 //! the highest number seen two seconds earlier, and every ten seconds the
-//! replica reads every row. The view is a hint: a request sent under a
-//! registration that has since changed is refused by the host and sent
-//! again, and ownership is always read from the store.
+//! replica reads every row, which also forgets the hosts whose rows are
+//! gone (given up on, then forgotten). The view is a hint: a request sent
+//! under a registration that has since changed is refused by the host and
+//! sent again, and ownership is always read from the store.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -181,6 +182,25 @@ impl View {
         }
     }
 
+    /// As [`View::apply`], from a read of every row: a host without one is
+    /// forgotten.
+    pub fn apply_all(&self, rows: &[HostRow]) {
+        self.apply(rows);
+        let present: HashSet<HostId> = rows.iter().map(|row| row.id).collect();
+        let mut inner = self.write();
+        let inner = &mut *inner;
+        let gone: Vec<HostId> = inner
+            .hosts
+            .keys()
+            .filter(|host| !present.contains(host))
+            .copied()
+            .collect();
+        for host in gone {
+            inner.hosts.remove(&host);
+            inner.fleet.remove(host);
+        }
+    }
+
     /// Where a request to `host` goes, while it is not given up on.
     #[must_use]
     pub fn target(&self, host: HostId) -> Option<Target> {
@@ -321,7 +341,11 @@ pub async fn follow<S: Store>(view: Arc<View>, store: Arc<S>) {
                     .max()
                     .unwrap_or(after)
                     .max(seen.back().map_or(0, |&(_, highest)| highest));
-                view.apply(&rows);
+                if after == 0 {
+                    view.apply_all(&rows);
+                } else {
+                    view.apply(&rows);
+                }
                 seen.push_back((now, highest));
             }
             Err(error) => tracing::warn!(%error, "reading the hosts failed"),
