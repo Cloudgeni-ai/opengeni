@@ -81,6 +81,7 @@ import {
   SessionChrome,
   KnowledgeActivityProvider,
   LearningRefusalActionsProvider,
+  OpenGeniLinkProvider,
   type LearningRefusalPlace,
   type TimelineSearchTarget,
 } from "../../session-ui";
@@ -252,7 +253,7 @@ import {
   sessionDockLayoutStorageId,
   updateSessionDockNavigation,
 } from "../lib/session-dock-preferences";
-import { useAppLinkResolver } from "../lib/session-artifact-navigation";
+import { useWorkspaceAppLinkResolver } from "../lib/session-artifact-navigation";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
@@ -2004,7 +2005,7 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
-  const resolveLink = useAppLinkResolver();
+  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId);
   const hostMessageContext = useHostMessageContext();
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
@@ -3816,19 +3817,22 @@ function SessionChatPane(props: {
               />
               {waitingSubSessions.length > 0 ? (
                 <Suspense fallback={null}>
-                  <DescendantRequests
-                    client={context.client}
-                    workspaceId={props.session.workspaceId}
-                    parentSessionId={props.session.id}
-                    waiting={waitingSubSessions}
-                    onResolved={props.onDescendantResolved}
-                    refreshSignal={props.descendantRefreshSignal}
-                    loadSkillReview={loadSkillReview}
-                    allowedSaveTo={secretSaveTargets(
-                      context.accessContext,
-                      props.session.workspaceId,
-                    )}
-                  />
+                  {/* Links in sub-session questions resolve like links in the timeline. */}
+                  <OpenGeniLinkProvider resolveLink={resolveLink}>
+                    <DescendantRequests
+                      client={context.client}
+                      workspaceId={props.session.workspaceId}
+                      parentSessionId={props.session.id}
+                      waiting={waitingSubSessions}
+                      onResolved={props.onDescendantResolved}
+                      refreshSignal={props.descendantRefreshSignal}
+                      loadSkillReview={loadSkillReview}
+                      allowedSaveTo={secretSaveTargets(
+                        context.accessContext,
+                        props.session.workspaceId,
+                      )}
+                    />
+                  </OpenGeniLinkProvider>
                 </Suspense>
               ) : null}
               <SessionChrome
