@@ -161,10 +161,104 @@ release is required for this presentation and desktop-host change.
 
 ## This computer
 
-Revised 2026-10-20. New installs remain app-hosted. A working standalone
-installation is service-backed instead: changing its responsible process would
-discard the usefulness of its existing macOS grants. Launch and status reads
-are non-mutating; only explicit signed-in setup enables desktop management.
+Revised 2026-10-23. New installs are app-hosted. A status read takes over a
+standalone installation only when it is already registered to the open
+workspace and the server lists that registration (for example, set up earlier
+from the web app's install command): the app records it as its own, asks the
+server to allow the person's agents if that is still missing, and shows
+computer use on with nothing for the person to do.
+
+On macOS the app then moves that agent into the app (`hostServiceAgent`), so
+one set of permissions, the app's, covers app-shots and computer use. It moves
+it only when that loses nothing: on its own (once per launch, in the
+background) when a check run by the app shows the app already holds every
+screen permission the service has and its own access to the protected
+folders, and otherwise as the first step of asking
+for a missing permission, so macOS gives that grant to Opengeni.app instead of
+"Opengeni Agent". A move turns the service off (kept installed, also off at
+login) and starts the same binary as the app's helper with the same config
+folder, so the connections and registration are unchanged: no new enrollment
+and no new machine. Actions such as turning computer use off wait for a move
+in progress, so they apply to the agent as it then is.
+
+The computer never has two agents or none:
+
+- The helper must keep running, with the same process, for the whole settle
+  time; otherwise the app stops it and turns the service back on, and doesn't
+  try again in that launch.
+- Quitting the app hands the agent back to its service (Off stays off), so the
+  computer stays available while the app is closed and quitting doesn't ask.
+  When the app ends without asking (log out, restart), it turns the service
+  back on as it goes; the next launch finds the service enabled and leaves the
+  agent there. While permissions are being asked for, quitting doesn't hand
+  back: macOS quits and reopens the app to apply a grant, and the reopened app
+  takes the agent straight back and goes on asking.
+- At launch, a moved agent starts as the helper again; if its program is gone
+  or the helper doesn't stay up, the service runs it again.
+
+Each move and hand-back restarts the agent, so work an agent is doing on this
+computer at that moment is interrupted, as with any agent restart.
+
+Hosting was chosen over keeping the service because the app can keep its
+helper running: it opens hidden at login while this computer is in use and
+keeps running in the menu bar with the window closed, and handing back on quit
+covers the time it isn't running. While the service runs the agent, grants
+given only to Opengeni.app don't apply, so screen control waits for the app;
+files and commands keep working. An agent that stays a service (another
+platform, a move not made or failed) keeps working as before, and System
+Settings guidance names "Opengeni Agent".
+
+In the app this is **Computer use**: one switch (`ComputerUseRow` in
+`packages/react/src/app/components/desktop/computer-use.tsx`, state from
+`useComputerUse`/`computerUseState` in `@opengeni/react/this-computer`). The app
+never asks the person to connect, disconnect or reconnect the computer it runs
+on. The switch shows one state at a time:
+
+| State | Switch | What shows |
+| --- | --- | --- |
+| Off | off | "Let agents use {computer}." The same whether never set up, turned off, or removed on the server. |
+| Turning on | on | "Turning on…", no buttons. Includes asking macOS for a missing permission. |
+| On | on | "Agents can use {computer}" with a green dot. |
+| Needs permission | on | Calm, not an error: "To let agents see and control the screen, allow {app} in System Settings." and **Open System Settings**. Files and commands work meanwhile. |
+| Problem | on | In red text: the problem and exactly one fix: **Sign in** (signed out) or **Try again** (server unreachable, or the server's or agent's own error). |
+
+Off is pause: it persists across restarts and log-ins and keeps the
+installation and registration, so turning on is instant. Turning on is the
+whole step and does what is needed without asking: resumes a paused agent,
+registers this computer afresh when it never was or its registration is gone,
+starts the agent, then asks macOS for each missing permission in turn
+(`useThisComputer().asking`): the system prompt the first time, else the exact
+System Settings list with the app's floating guide. As each grant is detected
+the next missing one is asked for, and with none left it is on. When the person
+comes back to the app without allowing one, asking stops there and the switch
+shows **Needs permission**; nothing is asked again until they choose **Open
+System Settings** or turn the switch on again. If macOS quits and reopens the
+app to apply a grant, asking continues once for the next missing permission,
+unless that one was already asked for (`requestedPermissions`); only an ask from
+the last few minutes continues (`setupPending`). Asking also ends when no
+system window comes up (macOS already decided) and the app keeps focus. Removing the
+computer from the workspace stays on its entry in the Machines list. The sidebar
+shows a small notice only while computer use turns on, needs a permission (same
+calm tone) or has a problem, with the same one fix.
+
+The server decides whether the local connection is still valid. Status reads
+the account's Machines view (`readMachine`): a machine the server no longer
+lists was removed there, so it shows as off, and turning it on mints a fresh
+token and runs `connect --non-interactive` again (the agent replaces that
+deployment/workspace connection in place and a running service reloads it). A
+failed read keeps its own meaning (offline, signed out, or the server's error)
+and is never shown as a network failure when the server answered. A just-made
+enrollment the server doesn't list yet is still turning on, not removed. Only
+the view of the account that owns the enrollment (the one that made it, or the
+first whose view listed it) can say it was removed: enrollments are the
+person's own, so another account signed in to the same workspace doesn't see
+it. A removed enrollment's agent keeps running without access until turning on
+enrolls the computer again. The
+setup dialog shows one state at a time and follows the computer's own status, so
+"You're all set" only stands while it is ready. Inside the app, **Connect a
+machine** shows the same computer-use switch for this computer instead of
+downloads and the app hand-off; other computers and servers still connect with a
+command or a code.
 
 ### What the agent needs
 
@@ -176,6 +270,29 @@ are non-mutating; only explicit signed-in setup enables desktop management.
   *responsible* process: the app that started the process tree. A launchd job
   is its own responsible process, so a separate agent service is always asked
   about under its own name.
+- Nothing else from macOS's privacy list. Because the hosted agent and every
+  shell it starts run as the app, any read of a guarded folder in the home
+  folder (Desktop, Documents, Downloads, Library, Music, Pictures, Movies, the
+  Trash) asks the person in the app's name. Code search from a Mac's home
+  folder skips those folders unless a path names them. Each of Desktop,
+  Documents and Downloads comes back once the app finds it opens, after the
+  person allowed it in setup or later in System Settings: the app passes
+  `OPENGENI_MAC_FOLDERS_ALLOWED`, a directory with one file per such folder,
+  and takes a file back when its folder stops opening.
+  Repository discovery does the same, though turn-end capture, its only
+  caller, doesn't run on Connected Machines today. The agent instructions say
+  not to scan those folders unasked. The app declares only the microphone
+  and system-audio recording usage descriptions and the `audio-input`
+  entitlement (dictation, voice chats and meeting recordings; macOS asks about
+  system audio only when a recording first includes the computer's audio);
+  account windows refuse the camera, screen sharing, Bluetooth, USB,
+  serial and HID devices and location, and the app's own local pages in the
+  default session get no permissions
+  (`packages/desktop/src/main/web-permissions.ts`,
+  `apps/desktop/test/mac-privacy.test.ts`). The agent's shells count as the
+  app for these checks too, so a task that needs the camera or Bluetooth
+  (for example `ffmpeg -f avfoundation`) is refused without a prompt; no
+  Opengeni feature needs them.
 - On Windows, the person's interactive desktop session, where CUA sees and
   drives their windows.
 - To stay compatible with every server it serves, which may run different
@@ -233,6 +350,53 @@ lifecycle and launch identity.
 
 Screen control is a switch in the Connect dialog.
 
+### Settings → Computer use
+
+One page (desktop only) shows what Opengeni may do on this computer. The
+Computer use switch (`ComputerUseRow`) comes first; the screen, Chrome and
+folders rows under it apply only while it is on and are shown disabled while
+it is off. One row per capability, each with one switch or one action. A
+permission the system hasn't given is a calm line naming it, never an error;
+its one action is the Computer use row's "Open System Settings", which asks
+for each missing permission in turn (`allowPermissions`, the same asking as
+turning Computer use on):
+
+- **Control the screen.** On asks for Screen Recording, Accessibility and
+  Input Monitoring one at a time in the same step (the system prompt the first
+  time, then the exact System Settings pane), and reconnects with
+  screen-control consent if the connection lacks it. Off restarts the hosted agent with
+  `OPENGENI_AGENT_SCREEN_CONTROL=off`: the agent's desktop is
+  `TurnedOffDesktop`, which offers no display, captures nothing and injects
+  nothing, and says why, whatever the connection's consent says. It also
+  reports no screen-control consent or macOS permission states, starts its
+  browser controllers with no computer backend (so no ComputerSession can
+  reach the screen), and asks for no grants at startup or enrollment. The
+  agent's `permissions` answer carries `screenControlSwitch: true`; with an
+  older agent the row is unavailable rather than pretending to be off.
+- **Google Chrome.** Off restarts the agent with
+  `OPENGENI_AGENT_BROWSER_EXTENSION=off`, so it releases its Chrome
+  native-messaging host and starts no attached-browser bridge. The row shows
+  whether the Opengeni Browser extension is connected and links to it.
+- **Desktop, Documents and Downloads** (from the screen list, or from the
+  status's `folders` while screen control is off; macOS only, with its own
+  Allow only when the Computer use row doesn't already offer the fix),
+  **Microsoft Excel** (the add-in's setup page), **App-shots** (moved here
+  from Settings → Machines) and the **Microphone**, which when off makes the
+  app refuse every new microphone request (a recording already running keeps
+  its microphone until it stops).
+
+The switches are on by default, so nothing changes for people who already use
+these features, and persist in `computer-capabilities.json` in the app's data
+folder. A file that can't be read counts as everything off until a save
+replaces it (a damaged one is also copied to `.corrupt`), and a save or agent
+restart that fails shows on its row. While another agent holds this computer,
+the rows say so. Changing the screen or Chrome switch restarts the agent, which stops
+its running work; the page says so. Rows refresh when the window regains
+focus or the computer's state changes, so a grant made in System Settings
+shows as Allowed on return. Screen control and Chrome switches apply to an
+agent the app runs; for an existing service, or while another agent serves
+this computer, they are shown disabled and the app ignores changes to them.
+
 The menu bar / tray item shows whether the computer is connected and offers
 Open, Pause this computer, Resume and Quit.
 On macOS it also lists any permission the agent still lacks and opens that
@@ -259,7 +423,7 @@ composer of the chat they are using: a screenshot plus the window's app,
 title and accessibility text, including text scrolled out of view. They add a
 sentence and send. Nothing is sent by itself.
 
-- **Off by default.** Settings → Machines → App-shots turns it on, picks the
+- **Off by default.** Settings → Computer use → App-shots turns it on, picks the
   shortcut and shows the Screen Recording and Accessibility permissions. On
   macOS the default is both Command keys pressed together; any modifier pair
   or an ordinary key combination works. Without Accessibility only the

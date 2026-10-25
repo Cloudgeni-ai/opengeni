@@ -54,7 +54,7 @@ const BLOCKER_COPY = {
   active_goal: "Pause or complete the active goal first.",
   capacity_waiter: "Wait for or cancel the capacity hold first.",
   active_realtime: "End the live voice session first.",
-  active_scheduled_task: "Pause the scheduled task that targets this session first.",
+  active_scheduled_task: "Pause the automation that posts into this chat first.",
   workspace_mutation_admission: "Wait for the current workspace file operation to finish.",
   retained_process: "Stop the retained terminal process first.",
   active_sandbox_access: "Close active Files, Terminal, Desktop, and viewer access first.",

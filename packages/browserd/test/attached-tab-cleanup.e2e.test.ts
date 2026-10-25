@@ -151,7 +151,16 @@ e2e(
       });
       const successor = await open();
       supervisors.push(successor);
-      expect(await successor.releaseAttachedLeftovers()).toEqual([crashed.browserSessionId]);
+      // The successor's startup sweep is already running, and a sweep that
+      // could not finish (Chromium slow to close the tab) leaves the record
+      // for the next one, as the periodic sweep does; whichever sweep
+      // settles it reports this session.
+      const released: string[] = [];
+      await waitFor(async () => {
+        released.push(...(await successor.releaseAttachedLeftovers()));
+        return readAttachedTabLedger(crashedDirectory)?.settled === true;
+      });
+      expect(released.every((id) => id === crashed.browserSessionId)).toBe(true);
       expect((await bridge.pages()).map((page) => page.id)).not.toContain(leftover.tab.id);
       expect(bridge.attachedTabs()).toEqual([]);
       expect(readAttachedTabLedger(crashedDirectory)?.settled).toBe(true);

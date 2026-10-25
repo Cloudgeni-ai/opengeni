@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import {
   Client,
   Server,
@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
+import { promises as dns, type LookupOptions } from "node:dns";
 import { Sandbox } from "modal";
 import { ModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/modal-command-start-errors";
 import {
@@ -771,8 +772,36 @@ test("both pinned SDK distributions dispatch ambiguous Start once without transi
   }
 });
 
-test("real no-port DNS target never dispatches Start; the client readiness gate proves it", async () => {
+test("real gRPC no-port DNS failure never dispatches Start; the readiness gate proves it", async () => {
   const host = "task-notarealtask2707.w.modal.host";
+  // Keep the real gRPC resolver and channel, but do not depend on public DNS
+  // answering before the RPC deadline. Only this fake host is intercepted.
+  const originalLookup = dns.lookup;
+  const originalResolveTxt = dns.resolveTxt;
+  let dnsLookups = 0;
+  const notFound = () =>
+    Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), {
+      code: "ENOTFOUND",
+      syscall: "getaddrinfo",
+      hostname: host,
+    });
+  const lookup = spyOn(dns, "lookup").mockImplementation((async (
+    hostname: string,
+    options: number | LookupOptions = {},
+  ) => {
+    if (hostname === host) {
+      dnsLookups++;
+      throw notFound();
+    }
+    return typeof options === "number"
+      ? originalLookup(hostname, options)
+      : originalLookup(hostname, options);
+  }) as typeof dns.lookup);
+  const resolveTxt = spyOn(dns, "resolveTxt").mockImplementation(async (hostname) => {
+    if (hostname === `_grpc_config.${host}`) throw notFound();
+    return originalResolveTxt(hostname);
+  });
+  let client: ModalCommandRouterWire | undefined;
   // grpc-js accepts a no-port authority and reports a resolver error without
   // :443; server-shaped error fields are therefore not useful dispatch proof.
   const raw = new Client(host, credentials.createInsecure());
@@ -787,14 +816,14 @@ test("real no-port DNS target never dispatches Start; the client readiness gate 
         (error) => resolve(error),
       ),
     );
+    expect(native).toMatchObject({ code: status.UNAVAILABLE });
     expect((native as { details: string }).details).toContain(`dns:${host}`);
     expect((native as { details: string }).details).not.toContain(`${host}:443`);
-  } finally {
+    expect(dnsLookups).toBeGreaterThan(0);
     raw.close();
-  }
 
-  const client = new ModalCommandRouterWire({ url: `https://${host}`, jwt: "test-token" });
-  try {
+    const beforeReadiness = dnsLookups;
+    client = new ModalCommandRouterWire({ url: `https://${host}`, jwt: "test-token" });
     expect((client as any).client.getChannel().getTarget()).toBe(`dns:${host}:443`);
     let dispatched = 0;
     Object.defineProperty(client, "unary", {
@@ -805,9 +834,13 @@ test("real no-port DNS target never dispatches Start; the client readiness gate 
     await expect(
       client.start({ ...identity(), commandArgs: ["true"], workdir: "/tmp", env: {} }),
     ).rejects.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+    expect(dnsLookups).toBeGreaterThan(beforeReadiness);
     expect(dispatched).toBe(0);
   } finally {
-    client.close();
+    raw.close();
+    client?.close();
+    lookup.mockRestore();
+    resolveTxt.mockRestore();
   }
 }, 15_000);
 

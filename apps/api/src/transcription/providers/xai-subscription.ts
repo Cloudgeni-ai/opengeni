@@ -33,7 +33,8 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
       if (!context?.workspaceId || !context.subjectId) {
         return input.settings.supergrokSubscriptionEnabled;
       }
-      const accountId = (await getWorkspace(input.db, context.workspaceId))?.accountId;
+      const accountId =
+        context.accountId ?? (await getWorkspace(input.db, context.workspaceId))?.accountId;
       // An unresolvable account fails closed rather than guessing a path.
       if (!accountId) return false;
       return await workspaceXaiOperationAvailable(input.db, input.settings, {

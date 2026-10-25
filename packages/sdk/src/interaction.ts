@@ -748,6 +748,15 @@ export type BrowserRecordingSaveResponse = {
   actionLogPath: string;
 };
 
+/** A save still in progress (HTTP 202): `uploading` while the recording
+ * moves off its browser host, `encoding` while its video is made. The SDK
+ * repeats the request with the same operationId after `retryAfterMs`. */
+export type BrowserRecordingSaveProgress = {
+  state: "uploading" | "encoding";
+  recording: BrowserRecordingSummary;
+  retryAfterMs: number;
+};
+
 export type InteractionRect = {
   x: number;
   y: number;
@@ -1260,6 +1269,12 @@ export type ComputerTarget = {
   title: string;
   bounds: InteractionRect | null;
   focused: boolean;
+  /** Present on a window the platform cannot capture or read while it is off
+   * screen. */
+  offScreen?: true | undefined;
+  /** Present on the target this computer was last observed or acted on in,
+   * which a call that omits targetId works in. */
+  current?: true | undefined;
 };
 
 export type ComputerObservation = {
@@ -1417,6 +1432,18 @@ export type ComputerActionReceipt = {
   settledAt: string | null;
   observation: ComputerObservation | null;
   error: InteractionError | null;
+  /** Actions that acted on an element of another role than the one named. */
+  roleStandIns?: ComputerActionRoleStandIn[] | undefined;
+};
+
+/** An action that named a button or link by role and name, when nothing of
+ * that role had the name and the one element of the other of the two roles
+ * with that exact name was used instead. */
+export type ComputerActionRoleStandIn = {
+  actionIndex: number;
+  requestedRole: string;
+  role: string;
+  name: string;
 };
 
 export type ComputerSessionHeartbeatResponse = {

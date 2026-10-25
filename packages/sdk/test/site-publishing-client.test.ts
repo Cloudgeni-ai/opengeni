@@ -62,6 +62,18 @@ function fakeClient(respond: (seen: Seen) => { status?: number; body: unknown })
 }
 
 describe("published Site management client", () => {
+  test("reads where a Site is published at its publication link route", async () => {
+    const link = {
+      siteId: SITE,
+      hostname: publication.hostname,
+      url: publication.url,
+      status: "active" as const,
+    };
+    const { client, seen } = fakeClient(() => ({ body: link }));
+    expect(await client.getSitePublicationLink(WS, SITE)).toEqual(link);
+    expect(seen.map(({ method, url }) => `${method} ${url}`)).toEqual([`GET ${BASE}/link`]);
+  });
+
   test("reads, publishes, changes and unpublishes a Site at its publication route", async () => {
     const { client, seen } = fakeClient(() => ({ body: publication }));
     expect(await client.getSitePublication(WS, SITE)).toEqual(publication);

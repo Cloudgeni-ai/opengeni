@@ -6,6 +6,11 @@ an organization, workspace, or organization user and driven by the agent directl
 primary compute target**, not a backend variant layered on top of a managed
 box.
 
+The program that runs on the machine is **Opengeni Runner** (command
+`opengeni-agent`, source in [`../agent`](../agent)). In this document, "native
+agent", "machine agent" and "Connected Machine agent" mean the Runner; "the
+agent" in the context of a session means the AI agent driving it.
+
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
@@ -1559,6 +1564,11 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   workspace access and confirms locally before connecting. The link carries only
   the origin, workspace/chat destination and subject, never an enrollment token.
   Mobile browsers direct the person to the computer they want to connect;
+- inside the desktop app, the same dialog is **Connect a machine**: for the
+  computer the app runs on it shows the **Computer use** switch (off, turning
+  on, on, waiting on a macOS permission, or a problem with one fix), and never
+  offers a download or **Open app and connect** for it. **Connect another computer or server** holds the
+  command and code flows below;
 - **Connect a server instead** explicitly reveals the advanced terminal flow.
   Only then is a token minted. The person chooses **Who can use it?** (**Only me** by
   default, or **This workspace**) and screen control (off by default); both are

@@ -66,6 +66,20 @@ test("viewport protocol failures remain errors rather than unavailable metrics",
   }
 });
 
+test("a page with no JavaScript context yet is observed without viewport metrics", async () => {
+  // A tab a relaunched browser restored can still be between documents.
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.failViewport("Cannot find default execution context");
+    const observation = await fixture.driver.observe("target-1");
+    expect(observation.viewport).toBeNull();
+    expect(observation.semantic?.kind).toBe("snapshot");
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
 test("bounded mobile frames keep one scale across rounded raster captures and viewport changes", async () => {
   const fixture = await captureFixture();
   let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
@@ -536,7 +550,7 @@ async function captureFixture(
   // Surfaces Chromium still presents from before a viewport change.
   const staleRasters: Array<{ width: number; height: number; density: number }> = [];
   let viewport: unknown = "complete";
-  let viewportFailure = false;
+  let viewportFailure: string | null = null;
   let stalledMethod: string | null = null;
   let stalled: { id: number; method: string; sessionId?: string } | null = null;
   let reachedStall = () => {};
@@ -580,7 +594,7 @@ async function captureFixture(
               new MessageEvent("message", {
                 data: JSON.stringify({
                   id: command.id,
-                  error: { code: -32000, message: "synthetic viewport failure" },
+                  error: { code: -32000, message: viewportFailure },
                 }),
               }),
             ),
@@ -674,8 +688,8 @@ async function captureFixture(
     setViewport(value: unknown) {
       viewport = value;
     },
-    failViewport() {
-      viewportFailure = true;
+    failViewport(message = "synthetic viewport failure") {
+      viewportFailure = message;
     },
     disconnect: () => socket.close(),
     delayNext(method: string, delayMs: number) {

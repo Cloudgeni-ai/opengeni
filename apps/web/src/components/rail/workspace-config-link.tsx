@@ -2,9 +2,9 @@
 // rail Workspace menu and the settings Browse strip.
 import { Link } from "@tanstack/react-router";
 import {
+  AudioLinesIcon,
   BoxIcon,
   BrainCircuitIcon,
-  CalendarClockIcon,
   GaugeIcon,
   LaptopIcon,
   LockKeyholeIcon,
@@ -12,6 +12,7 @@ import {
   PlugIcon,
   ServerCogIcon,
   SettingsIcon,
+  ZapIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -29,7 +30,8 @@ const WORKSPACE_CONFIG_ICONS = {
   laptop: LaptopIcon,
   "brain-circuit": BrainCircuitIcon,
   plug: PlugIcon,
-  "calendar-clock": CalendarClockIcon,
+  zap: ZapIcon,
+  "audio-lines": AudioLinesIcon,
   "panels-top-left": PanelsTopLeftIcon,
   settings: SettingsIcon,
 } as const satisfies Record<WorkspaceConfigIcon, LucideIcon>;
@@ -49,13 +51,15 @@ export function WorkspaceConfigLink(props: {
   needsReview?: boolean;
   /** A schedule's latest run could not use a connector and its owner has not looked yet. */
   needsAttention?: boolean;
+  /** A meeting is being recorded in this tab. */
+  recording?: boolean;
   onNavigate?: () => void;
 }) {
   const { item, workspaceId, variant, active, collapsed, onNavigate } = props;
   const attentionTitle = props.needsReview
     ? "Knowledge needs review"
     : props.needsAttention
-      ? "A schedule needs your attention"
+      ? "An automation needs your attention"
       : null;
 
   if (variant === "rail") {
@@ -72,15 +76,19 @@ export function WorkspaceConfigLink(props: {
             ? `${item.label}, needs review`
             : props.needsAttention
               ? `${item.label}, needs attention`
-              : collapsed
-                ? item.label
-                : undefined
+              : props.recording
+                ? `${item.label}, recording`
+                : collapsed
+                  ? item.label
+                  : undefined
         }
         title={
           attentionTitle ??
-          (collapsed
-            ? [item.label, item.description].filter(Boolean).join(" — ")
-            : item.description)
+          (props.recording
+            ? "Recording a meeting"
+            : collapsed
+              ? [item.label, item.description].filter(Boolean).join(" — ")
+              : item.description)
         }
         className={cn(
           "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10",
@@ -101,6 +109,22 @@ export function WorkspaceConfigLink(props: {
               collapsed ? "absolute right-1 top-1 size-2 ring-2 ring-surface" : "ml-auto size-2",
             )}
           />
+        ) : props.recording ? (
+          <span
+            aria-hidden="true"
+            className={cn(
+              "flex shrink-0",
+              collapsed ? "absolute right-1 top-1 size-2" : "relative ml-auto size-2",
+            )}
+          >
+            <span className="absolute inset-0 animate-ping rounded-full bg-status-failed/60 motion-reduce:animate-none" />
+            <span
+              className={cn(
+                "relative size-2 rounded-full bg-status-failed",
+                collapsed && "ring-2 ring-surface",
+              )}
+            />
+          </span>
         ) : null}
       </Link>
     );

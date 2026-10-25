@@ -36,6 +36,19 @@ import type {
 } from "./artifact-catalog";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
+  CreateEventSourceRequest,
+  CreateEventSourceResponse,
+  EventDelivery,
+  EventSource,
+  EventTypeDescriptor,
+  ListEventDeliveriesResponse,
+  ListInboundEventsResponse,
+  RotateEventSourceSecretResponse,
+  SendTestEventRequest,
+  SendTestEventResponse,
+  UpdateEventSourceRequest,
+} from "@opengeni/contracts";
+import type {
   SiteDataCollectionDefinitionRequest,
   SiteDataCollectionResponse,
   SiteDataDescribeResponse,
@@ -72,6 +85,7 @@ import type {
   SiteLimitProfile,
   SitePlatformUsage,
   SitePublication,
+  SitePublicationLink,
   SitePublishWarningFix,
   SiteTakedownRequest,
   UpsertSitePublicationRequest,
@@ -105,10 +119,13 @@ import type {
 import type {
   DuplicateWorkspaceArtifactRequest,
   SiteOpenedResponse,
+  SiteSidebarStateResponse,
+  UpdateSiteSidebarStateRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
@@ -208,6 +225,7 @@ import {
   type BrowserDownloadListResponse,
   type BrowserDownloadSaveRequest,
   type BrowserDownloadSaveResponse,
+  type BrowserRecordingSaveProgress,
   type BrowserRecordingSaveRequest,
   type BrowserRecordingSaveResponse,
   type BrowserRecordingSummary,
@@ -1171,6 +1189,13 @@ function normalizeScheduledTaskMachineTarget<
   };
 }
 
+function eventPageQuery(options: { limit?: number; cursor?: string }): Record<string, string> {
+  return {
+    ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+    ...(options.cursor ? { cursor: options.cursor } : {}),
+  };
+}
+
 /**
  * Typed client for the Opengeni public API. Framework-agnostic: only needs
  * WHATWG `fetch` + streams, so it runs in Node 18+, Bun, Deno, browsers, and
@@ -1957,7 +1982,10 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
       undefined,
-      { view: "running_commands", ...(options.cursor ? { cursor: options.cursor } : {}) },
+      {
+        view: "running_commands",
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+      },
       options,
     );
     // An older server ignores the view and returns ordinary sessions. Never
@@ -2019,7 +2047,10 @@ export class OpenGeniClient {
     const search = options.search?.trim();
     let result: SessionListResponse | SessionListEntryResponse | Session[];
     try {
-      const query: Record<string, string> = { view: "page", ...sessionListQuery(options) };
+      const query: Record<string, string> = {
+        view: "page",
+        ...sessionListQuery(options),
+      };
       if (summary) query.projection = "summary";
       if (options.cursor !== undefined) query.cursor = options.cursor;
       if (search) query.search = search;
@@ -2121,13 +2152,30 @@ export class OpenGeniClient {
   }
 
   /**
-   * Record that this person opened a Site, which orders its sidebar row like
-   * session activity. Personal; needs `artifacts:read`.
+   * Record that this person opened a Site, which lists it in their sidebar.
+   * Opening is not activity, so it does not move the row. Personal; needs
+   * `artifacts:read`.
    */
   async recordSiteOpened(workspaceId: string, siteId: string): Promise<SiteOpenedResponse> {
     return this.requestJson(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/opened`,
+    );
+  }
+  /**
+   * Pin or archive a Site row in this person's own sidebar. Personal like a
+   * session pin; archive never unpublishes the Site. Opening the Site again
+   * restores an archived row. Needs `artifacts:read`.
+   */
+  async updateSiteSidebarState(
+    workspaceId: string,
+    siteId: string,
+    request: UpdateSiteSidebarStateRequest,
+  ): Promise<SiteSidebarStateResponse> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/sidebar`,
+      request,
     );
   }
 
@@ -3640,7 +3688,10 @@ export class OpenGeniClient {
     const query = { absent: "null" };
     return await this.sharedRead(
       `${path}?absent=null`,
-      (signal) => this.requestJson<SessionGoal | null>("GET", path, undefined, query, { signal }),
+      (signal) =>
+        this.requestJson<SessionGoal | null>("GET", path, undefined, query, {
+          signal,
+        }),
       options,
     );
   }
@@ -4706,7 +4757,10 @@ export class OpenGeniClient {
   }
 
   /** Stops a recording and saves it as an MP4 plus an action log in the
-   * browser's source session workspace; the MP4 is also a retained artifact. */
+   * browser's source session workspace; the MP4 is also a retained artifact.
+   * While the recording is still moving off a slow browser host, or its
+   * video is being made, the request is repeated with the same operationId
+   * until the save completes or `options.signal` aborts. */
   async saveBrowserRecording(
     workspaceId: string,
     browserSessionId: string,
@@ -4714,13 +4768,19 @@ export class OpenGeniClient {
     request: BrowserRecordingSaveRequest,
     options: OpenGeniRequestOptions = {},
   ): Promise<BrowserRecordingSaveResponse> {
-    return await this.requestJson<BrowserRecordingSaveResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/recordings/${encodeURIComponent(recordingId)}/save`,
-      request,
-      {},
-      options,
-    );
+    for (;;) {
+      const response = await this.requestJson<
+        BrowserRecordingSaveResponse | BrowserRecordingSaveProgress
+      >(
+        "POST",
+        `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/recordings/${encodeURIComponent(recordingId)}/save`,
+        request,
+        {},
+        options,
+      );
+      if (!("state" in response)) return response;
+      await abortableReadRetryDelay(response.retryAfterMs, options.signal);
+    }
   }
 
   async createBrowserSession(
@@ -5373,7 +5433,10 @@ export class OpenGeniClient {
     if (attachment.stream.kind === "direct_rfb") {
       return {
         ...attachment,
-        stream: { ...attachment.stream, inputAllowed: attachment.stream.inputAllowed === true },
+        stream: {
+          ...attachment.stream,
+          inputAllowed: attachment.stream.inputAllowed === true,
+        },
       };
     }
     return attachment;
@@ -5752,7 +5815,9 @@ export class OpenGeniClient {
 
   async connectClaudeSubscriptionSetupToken(
     workspaceId: string,
-    request: Omit<ClaudeSubscriptionSetupTokenRequest, "scope"> & { scope?: "workspace" | "user" },
+    request: Omit<ClaudeSubscriptionSetupTokenRequest, "scope"> & {
+      scope?: "workspace" | "user";
+    },
   ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
     return this.requestJson(
       "POST",
@@ -7424,6 +7489,132 @@ export class OpenGeniClient {
     return response.tasks;
   }
 
+  // --- Event sources (what automations' event triggers listen to) ------------
+  // A webhook source gets its own URL; its signing secret is returned once, on
+  // create and on rotate. Automations name sources in their `events` triggers.
+
+  async listEventSources(workspaceId: string): Promise<EventSource[]> {
+    const response = await this.requestJson<{ sources: EventSource[] }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/event-sources`,
+    );
+    return response.sources;
+  }
+
+  async createEventSource(
+    workspaceId: string,
+    request: CreateEventSourceRequest,
+  ): Promise<CreateEventSourceResponse> {
+    return await this.requestJson<CreateEventSourceResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/event-sources`,
+      request,
+    );
+  }
+
+  async getEventSource(workspaceId: string, sourceId: string): Promise<EventSource> {
+    return await this.requestJson<EventSource>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/event-sources/${sourceId}`,
+    );
+  }
+
+  async updateEventSource(
+    workspaceId: string,
+    sourceId: string,
+    request: UpdateEventSourceRequest,
+  ): Promise<EventSource> {
+    return await this.requestJson<EventSource>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/event-sources/${sourceId}`,
+      request,
+    );
+  }
+
+  /** Refused with 409 while an automation still listens to the source. */
+  async deleteEventSource(workspaceId: string, sourceId: string): Promise<void> {
+    await this.requestJson<unknown>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/event-sources/${sourceId}`,
+    );
+  }
+
+  /** A new signing secret for a Standard Webhooks source, shown once. */
+  async rotateEventSourceSecret(
+    workspaceId: string,
+    sourceId: string,
+  ): Promise<RotateEventSourceSecretResponse> {
+    return await this.requestJson<RotateEventSourceSecretResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/event-sources/${sourceId}/rotate-secret`,
+    );
+  }
+
+  /** Send a test event through the source, as if its app had sent it. */
+  async sendTestEvent(
+    workspaceId: string,
+    sourceId: string,
+    request: SendTestEventRequest = {},
+  ): Promise<SendTestEventResponse> {
+    return await this.requestJson<SendTestEventResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/event-sources/${sourceId}/test`,
+      request,
+    );
+  }
+
+  /** The source's delivery log, newest first. */
+  async listEventDeliveries(
+    workspaceId: string,
+    sourceId: string,
+    options: { limit?: number; cursor?: string } = {},
+  ): Promise<ListEventDeliveriesResponse> {
+    return await this.requestJson<ListEventDeliveriesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/event-sources/${sourceId}/deliveries`,
+      undefined,
+      eventPageQuery(options),
+    );
+  }
+
+  /** Process a stored delivery again; its events fire triggers again. */
+  async replayEventDelivery(
+    workspaceId: string,
+    sourceId: string,
+    deliveryId: string,
+  ): Promise<EventDelivery> {
+    const response = await this.requestJson<{ delivery: EventDelivery }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/event-sources/${sourceId}/deliveries/${deliveryId}/replay`,
+    );
+    return response.delivery;
+  }
+
+  /** The source's normalized events, newest first. */
+  async listInboundEvents(
+    workspaceId: string,
+    sourceId: string,
+    options: { limit?: number; cursor?: string } = {},
+  ): Promise<ListInboundEventsResponse> {
+    return await this.requestJson<ListInboundEventsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/event-sources/${sourceId}/events`,
+      undefined,
+      eventPageQuery(options),
+    );
+  }
+
+  /** Event types a trigger can listen to on this source, known and recently seen. */
+  async listEventSourceTypes(
+    workspaceId: string,
+    sourceId: string,
+  ): Promise<EventTypeDescriptor[]> {
+    const response = await this.requestJson<{
+      eventTypes: EventTypeDescriptor[];
+    }>("GET", `/v1/workspaces/${workspaceId}/event-sources/${sourceId}/event-types`);
+    return response.eventTypes;
+  }
+
   // --- Vaults ---------------------------------------------------------------
   // Metadata reads never carry values; `revealField` is the one audited
   // plaintext route. `{{secret:…}}` references resolve at execution time.
@@ -8389,12 +8580,20 @@ export class OpenGeniClient {
   getConnectorToolPermissions(
     workspaceId: string,
     capabilityId: string,
-    options?: { signal?: AbortSignal; connectionId?: string; instanceKey?: string },
+    options?: {
+      signal?: AbortSignal;
+      connectionId?: string;
+      instanceKey?: string;
+    },
   ): Promise<ConnectorToolPermissionsResponse>;
   async getConnectorToolPermissions(
     workspaceId: string,
     capabilityId: string,
-    options: { signal?: AbortSignal; connectionId?: string; instanceKey?: string } = {},
+    options: {
+      signal?: AbortSignal;
+      connectionId?: string;
+      instanceKey?: string;
+    } = {},
   ): Promise<ConnectorToolPermissionsResponse> {
     const query = new URLSearchParams();
     if (options.connectionId) query.set("connectionId", options.connectionId);
@@ -8432,7 +8631,10 @@ export class OpenGeniClient {
     server: { serverId: string; url: string },
     options: { signal?: AbortSignal } = {},
   ): Promise<SessionMcpToolPermissionsResponse> {
-    const query = new URLSearchParams({ serverId: server.serverId, url: server.url });
+    const query = new URLSearchParams({
+      serverId: server.serverId,
+      url: server.url,
+    });
     return await this.requestJson(
       "GET",
       `/v1/workspaces/${workspaceId}/session-mcp-tool-permissions?${query}`,
@@ -8554,6 +8756,24 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactDetailResponse>(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * The Site and its current version without its history: a cheap check for
+   * whether a new version is live. Read `getWorkspaceArtifact` for history.
+   */
+  async getWorkspaceArtifactCurrent(
+    workspaceId: string,
+    artifactId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactCurrentResponse> {
+    return await this.requestJson<WorkspaceArtifactCurrentResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/current`,
       undefined,
       undefined,
       options,
@@ -8762,7 +8982,10 @@ export class OpenGeniClient {
       "GET",
       `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}/export`,
       { format },
-      { ...options, accept: format === "csv" ? "text/csv" : "application/json" },
+      {
+        ...options,
+        accept: format === "csv" ? "text/csv" : "application/json",
+      },
     );
     return {
       content: await response.text(),
@@ -9041,8 +9264,9 @@ export class OpenGeniClient {
 
   /**
    * A Site's web publication: hostname, access, embedded agent, limits,
-   * status and moderation. 404 when the Site was never published; 503
-   * `sites_publishing_disabled` when the deployment has no Sites domain.
+   * status and moderation. 404 `site_not_published` when the Site was never
+   * published; 404 `sites_publishing_disabled` when the deployment has no
+   * Sites domain.
    */
   async getSitePublication(
     workspaceId: string,
@@ -9052,6 +9276,27 @@ export class OpenGeniClient {
     return await this.requestJson<SitePublication>(
       "GET",
       sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Where a Site is published: its primary public URL, hostname and status.
+   * Anyone who can open the Site reads it; the publication's settings need
+   * `getSitePublication`. 404 `site_not_published` when the Site was never
+   * published; 404 `sites_publishing_disabled` when the deployment has no
+   * Sites domain.
+   */
+  async getSitePublicationLink(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublicationLink> {
+    return await this.requestJson<SitePublicationLink>(
+      "GET",
+      `${sitePublicationPath(workspaceId, siteId)}/link`,
       undefined,
       undefined,
       options,
@@ -10515,10 +10760,9 @@ export class OpenGeniClient {
 
   /** The caller's open workbooks in this workspace, newest first. */
   async listOfficeWorkbooks(workspaceId: string): Promise<OfficeWorkbook[]> {
-    const { workbooks } = await this.requestJson<{ workbooks: OfficeWorkbook[] }>(
-      "GET",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/office/workbooks`,
-    );
+    const { workbooks } = await this.requestJson<{
+      workbooks: OfficeWorkbook[];
+    }>("GET", `/v1/workspaces/${encodeURIComponent(workspaceId)}/office/workbooks`);
     return workbooks;
   }
 
@@ -10529,10 +10773,9 @@ export class OpenGeniClient {
 
   /** This app credential's push registration, or null when it gets no pushes. */
   async getNativePushDevice(): Promise<NativePushDevice | null> {
-    const { device } = await this.requestJson<{ device: NativePushDevice | null }>(
-      "GET",
-      "/v1/native-app/push-device",
-    );
+    const { device } = await this.requestJson<{
+      device: NativePushDevice | null;
+    }>("GET", "/v1/native-app/push-device");
     return device;
   }
 
@@ -10592,7 +10835,10 @@ export class OpenGeniClient {
     do {
       const page: OrganizationSessionListResponse = await this.listOrganizationSessions(
         organizationId,
-        { ...options, ...(cursor === undefined ? {} : { cursor }) },
+        {
+          ...options,
+          ...(cursor === undefined ? {} : { cursor }),
+        },
       );
       for (const session of page.sessions) {
         yield session;
@@ -10886,7 +11132,10 @@ export class OpenGeniClient {
     const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
     const client = new Client({
       ...this.options,
-      headers: () => ({ ...(typeof base === "function" ? base() : base), ...extra }),
+      headers: () => ({
+        ...(typeof base === "function" ? base() : base),
+        ...extra,
+      }),
     });
     if (this.externalActorHeader !== undefined) {
       client.externalActorHeader = this.externalActorHeader;
@@ -10914,7 +11163,10 @@ export class OpenGeniClient {
     for (const [name, value] of Object.entries(this.headers())) {
       if (!headers.has(name)) headers.set(name, value);
     }
-    return (await this.fetchImpl(target.href, { ...init, headers })) as Response;
+    return (await this.fetchImpl(target.href, {
+      ...init,
+      headers,
+    })) as Response;
   }
 
   // --- Internals -------------------------------------------------------------
@@ -11163,7 +11415,9 @@ export class OpenGeniClient {
     return await this.requestJson<{
       pinned: string;
       appliedTo?: "waiting_turn" | "next_turn";
-    }>("POST", `${sessionPath(workspaceId, sessionId)}/codex-account`, { target });
+    }>("POST", `${sessionPath(workspaceId, sessionId)}/codex-account`, {
+      target,
+    });
   }
 
   // --- SuperGrok/xAI connected subscriptions ------------------------------------------------------

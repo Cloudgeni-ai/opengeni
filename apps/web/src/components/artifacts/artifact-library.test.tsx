@@ -511,3 +511,46 @@ test("Only me files and images are marked in the gallery and the list; shared on
     container.remove();
   }
 });
+
+test("a Site in the Artifacts list opens in the Site view; other artifacts keep their page", async () => {
+  localStorage.setItem("opengeni:artifact-library:view:v1", "list");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const router = createRouter({
+    routeTree: createRootRoute({
+      component: () => (
+        <ArtifactLibrary
+          workspaceId="workspace"
+          items={items}
+          filters={defaultArtifactFilters}
+          onFiltersChange={() => {}}
+          loading={false}
+          onRetry={() => {}}
+          browseSearch={{ browse: true, q: "plan" }}
+        />
+      ),
+    }),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  try {
+    await act(async () => {
+      await router.load();
+      root.render(<RouterProvider router={router} />);
+    });
+    const link = (title: string) =>
+      [...container.querySelectorAll<HTMLAnchorElement>("a[href]")].find((anchor) =>
+        anchor.textContent?.includes(title),
+      )!;
+    expect(link("Status board").getAttribute("href")).toBe("/workspaces/workspace/sites/same");
+    expect(link("Project brief").getAttribute("href")).toContain(
+      "/workspaces/workspace/artifacts/editable/same?",
+    );
+    await act(async () => link("Status board").click());
+    expect(router.state.location.pathname).toBe("/workspaces/workspace/sites/same");
+  } finally {
+    localStorage.removeItem("opengeni:artifact-library:view:v1");
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

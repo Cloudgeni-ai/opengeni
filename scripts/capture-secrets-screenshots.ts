@@ -376,8 +376,9 @@ const connection = (ids: Ids, provider: string, view?: string) =>
     ? secrets(ids, `?connection=${ids.connections[provider]}${view ? `&view=${view}` : ""}`)
     : null;
 const connectPage = (provider: string) => (ids: Ids) => secrets(ids, `?view=connect-${provider}`);
-/** Fills a credential field by its form name: secret, endpoint or label. */
-const fill = (name: "secret" | "endpoint" | "label", value: string) => async (page: Page) => {
+/** Fills a credential field by its form name. */
+type FieldName = "secret" | "endpoint" | "label" | "clientId" | "masterPassword" | "serverUrl";
+const fill = (name: FieldName, value: string) => async (page: Page) => {
   await page.locator(`input[name="${name}"]`).first().fill(value);
 };
 /** Sets one chooser row's access: "Read-only" or "Read & write". */
@@ -423,6 +424,7 @@ const focusRole = (role: "button" | "combobox" | "link", name: RegExp) => async 
   await page.waitForTimeout(250);
 };
 const SECRET_32 = "f598-mock-signing-secret-0123456789abcdef";
+const BITWARDEN_CLIENT_ID = "user.6f1c3c1e-2b1a-4c55-9d1e-0a0b0c0d0e0f";
 /** In the open Move or Copy dialog: a vault that takes the item (else the first), then submit. */
 const moveTo = (target?: RegExp) => async (page: Page) => {
   const dialog = page.getByRole("dialog").last();
@@ -537,40 +539,28 @@ const PROVIDER_STATES: CaptureState[] = [
   s(
     "S18",
     "bitwarden-empty",
-    "Connect Bitwarden: bridge address + signing secret, no master password",
+    "Connect Bitwarden: server, API key and master password",
     connectPage("bitwarden"),
   ),
   s(
     "S18",
     "bitwarden-validation",
-    "Bitwarden bridge: bad address and short secret",
+    "Bitwarden: an organization key and missing fields",
     connectPage("bitwarden"),
     {
-      steps: steps(fill("endpoint", "bridge.local"), fill("secret", "short"), submit(/^Connect$/u)),
+      steps: steps(fill("clientId", "organization.0123"), submit(/^Connect$/u)),
     },
   ),
   s(
     "S18",
-    "bitwarden-offline",
-    "Bitwarden bridge unreachable (address error)",
+    "bitwarden-wrong-password",
+    "Bitwarden: the master password does not open the account (field error)",
     connectPage("bitwarden"),
     {
       steps: steps(
-        fill("endpoint", "https://offline.bridge.example"),
+        fill("clientId", BITWARDEN_CLIENT_ID),
         fill("secret", SECRET_32),
-        submit(/^Connect$/u),
-      ),
-    },
-  ),
-  s(
-    "S18",
-    "bitwarden-locked",
-    "Bitwarden locked on the bridge (form error)",
-    connectPage("bitwarden"),
-    {
-      steps: steps(
-        fill("endpoint", "https://bridge.example"),
-        fill("secret", `locked-${SECRET_32}`),
+        fill("masterPassword", "wrong-password"),
         submit(/^Connect$/u),
       ),
     },
@@ -637,8 +627,9 @@ const PROVIDER_STATES: CaptureState[] = [
   ),
   s("S19", "bitwarden-done", "Bitwarden connected and a vault linked", connectPage("bitwarden"), {
     steps: steps(
-      fill("endpoint", "https://bridge.example"),
+      fill("clientId", BITWARDEN_CLIENT_ID),
       fill("secret", SECRET_32),
+      fill("masterPassword", "correct horse battery staple"),
       submit(/^Connect$/u),
       access("Operations", /^Read & write/u),
       submit(/^(Done|Link \d)/u),
@@ -794,7 +785,7 @@ const PROVIDER_STATES: CaptureState[] = [
   ),
   s("S20", "protonpass", "Proton Pass connection page", (ids) => connection(ids, "protonpass")),
   s("S20", "keeper", "Keeper connection page (organization)", (ids) => connection(ids, "keeper")),
-  s("S20", "bitwarden", "Bitwarden bridge connection page (Only me, label)", (ids) =>
+  s("S20", "bitwarden", "Bitwarden connection page (Only me)", (ids) =>
     connection(ids, "bitwarden"),
   ),
   s("S20", "external", "Your vault service connection page", (ids) => connection(ids, "external")),
@@ -805,15 +796,6 @@ const PROVIDER_STATES: CaptureState[] = [
     (ids) => connection(ids, "protonpass"),
     {
       mock: { scenario: "provider-expired" },
-    },
-  ),
-  s(
-    "S20",
-    "bitwarden-locked",
-    "Bitwarden locked on the bridge",
-    (ids) => connection(ids, "bitwarden"),
-    {
-      mock: { scenario: "provider-locked" },
     },
   ),
   s("S20", "external-offline", "Your vault service offline", (ids) => connection(ids, "external"), {
@@ -846,7 +828,7 @@ const PROVIDER_STATES: CaptureState[] = [
   s("S20", "keeper-renew", "Reconnect Keeper with a new one-time token", (ids) =>
     connection(ids, "keeper", "replace-token"),
   ),
-  s("S20", "bitwarden-renew", "Update the Bitwarden bridge", (ids) =>
+  s("S20", "bitwarden-renew", "Reconnect Bitwarden", (ids) =>
     connection(ids, "bitwarden", "replace-token"),
   ),
   s(
@@ -914,22 +896,13 @@ const PROVIDER_STATES: CaptureState[] = [
       mock: { scenario: "provider-rate-limited" },
     },
   ),
-  s("S21", "bitwarden-healthy", "Bitwarden Personal: bridge cache synced time", (ids) =>
+  s("S21", "bitwarden-healthy", "Bitwarden Personal: read live", (ids) =>
     vault(ids, "Bitwarden Personal"),
   ),
   s(
     "S21",
-    "bitwarden-locked",
-    "Bitwarden Personal: locked, showing last sync",
-    (ids) => vault(ids, "Bitwarden Personal"),
-    {
-      mock: { scenario: "provider-locked" },
-    },
-  ),
-  s(
-    "S21",
     "bitwarden-offline",
-    "Bitwarden Personal: bridge offline",
+    "Bitwarden Personal: server unreachable",
     (ids) => vault(ids, "Bitwarden Personal"),
     {
       mock: { scenario: "provider-offline" },
@@ -1126,7 +1099,7 @@ const PROVIDER_STATES: CaptureState[] = [
   s(
     "S23",
     "bitwarden-connection-long",
-    "Bitwarden bridge connection with a long label",
+    "Bitwarden connection with a long label",
     (ids) => connection(ids, "bitwarden"),
     { mock: { scenario: "long-names" } },
   ),

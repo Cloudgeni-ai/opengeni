@@ -29,11 +29,12 @@ import {
 
 import { apiBaseUrl } from "@/api";
 import { DesktopThisComputerPanel } from "@opengeni/react/app/components/desktop/this-computer";
-import { AppShotsSettings } from "@/components/desktop/app-shots-settings";
+import { thisComputerSettingsAvailable } from "@/lib/this-computer-page";
 import { ConnectMachineDialog } from "@opengeni/react/app/components/machines/connect-machine-dialog";
 import { WorkspaceCommandsSection } from "@/components/machines/workspace-commands";
 import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { Button } from "@opengeni/react/ui/button";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { TechnicalDetails } from "@opengeni/react/ui/error-message";
 import { Notice } from "@opengeni/react/ui/notice";
@@ -224,7 +225,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       if (result?.accepted) {
         toast.success(`Updating ${machine.name} to v${result.targetVersion}`, {
           description:
-            "The agent installs it once the machine is idle. If work is running, the update is postponed and you can start it again later.",
+            "Opengeni Runner installs it once the machine is idle. If work is running, the update is postponed and you can start it again later.",
         });
       }
     });
@@ -235,14 +236,14 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<LaptopIcon className="size-4" />}
         title="Machines"
-        description="Your own computers, connected as agent sandboxes. One agent can serve this workspace alongside any other Opengeni workspaces or deployments already connected to the machine."
+        description="Your own computers, connected so agents can work on them. Opengeni Runner on a machine can serve this workspace alongside any other Opengeni workspaces or deployments it is already connected to."
       />
 
       <div className="pt-6">
         {!machines.canRead ? (
           <>
-            {/* App-shots are this app's own setting, so they never depend on machine access. */}
-            <AppShotsSettings className="mb-6" />
+            {/* Computer use settings are the app's own, so they never depend on machine access. */}
+            <ThisComputerPointer workspaceId={workspaceId} />
             <Notice tone="muted" title="Machines are managed by your workspace admin">
               You do not have permission to view connected machines in this workspace. Ask a
               workspace admin for access.
@@ -250,7 +251,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           </>
         ) : featureUnavailable ? (
           <>
-            <AppShotsSettings className="mb-6" />
+            <ThisComputerPointer workspaceId={workspaceId} />
             <Notice tone="muted">
               Connected machines aren't enabled on this deployment. Sessions run on the managed
               sandbox.
@@ -310,7 +311,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           <>
             {/* Inside the desktop app: this computer, ahead of the rest. */}
             <DesktopThisComputerPanel className="mb-6" />
-            <AppShotsSettings className="mb-6" />
+            <ThisComputerPointer workspaceId={workspaceId} />
             <MachinesDashboard
               machines={machines.machines}
               activeSandboxId={machines.activeSandboxId}
@@ -476,6 +477,26 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         />
       ) : null}
     </ContentPage>
+  );
+}
+
+/** Inside the desktop app: where screen control, App-shots and the rest moved. */
+function ThisComputerPointer({ workspaceId }: { workspaceId: string }) {
+  if (!thisComputerSettingsAvailable()) return null;
+  return (
+    <Notice
+      tone="muted"
+      className="mb-6"
+      action={
+        <Button size="sm" variant="outline" asChild>
+          <Link to="/workspaces/$workspaceId/computer-use" params={{ workspaceId }}>
+            Open
+          </Link>
+        </Button>
+      }
+    >
+      Screen control, App-shots and the other permissions on this computer are in Computer use.
+    </Notice>
   );
 }
 

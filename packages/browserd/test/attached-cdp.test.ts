@@ -718,16 +718,15 @@ describe("attached Chrome event stream recovery", () => {
     });
     try {
       await connection.send("Target.attachToTarget", { targetId: "7" });
+      const polls = () => bridge.commands.filter((command) => command.type === "debugger.poll");
+      const before = polls().length;
       bridge.pollFailure = new AttachedBrowserBridgeError(
         "fenced",
         "attached browser connection changed",
         true,
       );
       bridge.failingPolls = Number.POSITIVE_INFINITY;
-      await eventually(
-        () => bridge.commands.filter((command) => command.type === "debugger.poll").length > 2,
-        "the fenced poll",
-      );
+      await eventually(() => polls().length > before, "the fenced poll");
       await new Promise((resolve) => setTimeout(resolve, 20));
       const failure = await connection.send("Target.getTargets").catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(InteractionControllerError);

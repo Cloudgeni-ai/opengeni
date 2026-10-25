@@ -6,6 +6,8 @@ import {
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
+import { workspaceDeletionMigrationTail } from "./workspace-deletion-migration-tail";
+import { eventTriggerMigrationTail } from "./event-trigger-migration-tail";
 
 const migration = "0478_sender_owned_connections.sql";
 // 0494 patches the installed 0478 resolver, so it must wait until this fixture
@@ -152,6 +154,10 @@ const withheldMigrations = [
   // Patches the scheduled admission and live-authority routines that withheld
   // 0478/0534/0539 install by exact anchors; replay after them.
   "0906_scheduled_shared_slack_authority.sql",
+  // Rewrites the execution-context key withheld 0608 adds; replay after it.
+  ...workspaceDeletionMigrationTail,
+  // Redefines the exhausted-task predicate withheld 0761 creates; replay after it.
+  ...eventTriggerMigrationTail,
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

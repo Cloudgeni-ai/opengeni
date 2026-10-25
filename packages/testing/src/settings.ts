@@ -9,6 +9,12 @@ import type { Settings } from "@opengeni/config";
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     slackAccessMode: "limited",
+    microsoftTeamsToolsEnabled: false,
+    microsoftTeamsAllowedWorkspaceIds: [],
+    teamsBotEnabled: false,
+    teamsBotAllowedTenantIds: [],
+    teamsBotAllowedChannelIds: [],
+    teamsBotSetupAdminIds: [],
     serviceName: "opengeni",
     officeAddinName: "Opengeni",
     browserExtensionName: "Opengeni Browser",
@@ -45,6 +51,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     observabilityMetricsEnabled: true,
     observabilityOtlpEndpoint: undefined,
     observabilityOtlpHeaders: "",
+    observabilityTrustIncomingTraceContext: false,
     observabilityDiagnosticsEndpoint: undefined,
     observabilityDiagnosticsHeaders: "",
     analyticsEnabled: false,
@@ -158,6 +165,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     usageLimitsMode: "none",
     usageAllowancesEnabled: false,
     sessionUsageLimitsEnabled: false,
+    eventTriggersEnabled: false,
     staticEntitlementsJson: "{}",
     staticUsageLimitsJson: "{}",
     delegationSecret: "test-delegation-secret",

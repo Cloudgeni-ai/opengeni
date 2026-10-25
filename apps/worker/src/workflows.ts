@@ -1,6 +1,10 @@
 export { knowledgeIndexingWorkflow } from "./workflows/knowledge-indexing";
 export { documentIndexWorkflow, type DocumentIndexWorkflowInput } from "./workflows/document-index";
 export {
+  transientObjectDeletionWorkflow,
+  type TransientObjectDeletionWorkflowInput,
+} from "./workflows/transient-object-deletion";
+export {
   approvalDecision,
   codexCapacityChanged,
   sessionControl,
@@ -42,6 +46,17 @@ export {
   type VideoGenerationWorkflowInput,
 } from "./workflows/video-generation";
 export { sessionTitleWorkflow } from "./workflows/session-title";
+export {
+  browserRecordingVideoWorkflow,
+  browserRecordingVideoWorkflowId,
+  recordingDeletionWorkflow,
+  recordingDeletionWorkflowId,
+  recordingTranscriptWorkflow,
+  recordingTranscriptWorkflowId,
+  type BrowserRecordingVideoWorkflowInput,
+  type RecordingDeletionWorkflowInput,
+  type RecordingTranscriptWorkflowInput,
+} from "./workflows/recordings";
 export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
 export {
   rigVerificationWorkflow,

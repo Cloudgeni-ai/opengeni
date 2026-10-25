@@ -1,17 +1,10 @@
 import { t } from "../lib/console-text";
 import { ArtifactSessionPage } from "../components/session/artifact-session-page";
 import type {
-  ToolGatewayIdentity,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
 } from "@opengeni/sdk";
-import {
-  ArtifactSandbox,
-  SiteView,
-  artifactLoadErrorMessage,
-  artifactLoadErrorView,
-  type PublishedHtmlArtifactToolBridge,
-} from "../../artifacts";
+import { SiteView, artifactLoadErrorMessage, artifactLoadErrorView } from "../../artifacts";
 import { loadSiteSnapshot } from "../../sites";
 import { SiteConversations } from "../components/artifacts/site-conversations";
 import { SiteData } from "../components/artifacts/site-data";
@@ -30,7 +23,7 @@ import {
   RotateCcwIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "../lib/toast";
 
 import { ArtifactLibrary } from "../components/artifacts/artifact-library";
@@ -38,7 +31,6 @@ import {
   ARTIFACT_DETAIL_FRAME,
   ArtifactKindTile,
   useArtifactsBackLink,
-  useArtifactFullView,
 } from "../components/artifacts/artifact-page-chrome";
 import { artifactKinds, type ArtifactKind } from "../lib/artifact-catalog";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "../lib/use-artifact-catalog";
@@ -58,12 +50,10 @@ import { Skeleton } from "../../ui/skeleton";
 import { StatusBadge } from "../../ui/status-badge";
 import { useAppContext } from "../app-context";
 import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "../lib/artifact-access";
-import { useAppApi } from "../lib/app-api";
-import { createSiteToolBridge } from "../lib/site-tool-bridge";
 import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
 import { readyNewChat } from "../lib/ready-new-chat";
 import { userErrorText } from "../../ui/api-error";
-import { newArtifactPrompt, siteEditPrompt } from "../lib/site-edit-prompt";
+import { newArtifactPrompt } from "../lib/site-edit-prompt";
 import { hasWorkspacePermission, lacksWorkspacePermission } from "../lib/permissions";
 import {
   artifactLibraryFilters,
@@ -74,8 +64,6 @@ import {
 } from "../lib/artifact-library-navigation";
 import type { ArtifactCatalogFilters } from "../lib/artifact-catalog";
 import type { ArtifactReturnSearch, SiteDetailTab } from "../lib/routes";
-
-const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -124,6 +112,10 @@ export function ArtifactsRoute({
   artifactId?: string | undefined;
   fromSession?: string | undefined;
 }) {
+  const search = useSearch({ strict: false }) as ArtifactReturnSearch;
+  // Straight to the Site view, without this page's chrome first.
+  if (artifactId && opensSiteView(search))
+    return <OpenSiteView workspaceId={workspaceId} artifactId={artifactId} />;
   return artifactId ? (
     <ArtifactSessionPage
       workspaceId={workspaceId}
@@ -306,7 +298,7 @@ export function ArtifactDetailRoute({
   embeddedControls?: EmbeddedSiteControls | undefined;
 }) {
   const { embeddedControls, ...route } = props;
-  if (!embedded) return <ArtifactDetailPage {...route} />;
+  if (!embedded) return <ArtifactDetailOrSite {...route} />;
   return embeddedView === "settings" ? (
     <EmbeddedSiteSettings {...route} />
   ) : (
@@ -430,6 +422,41 @@ function EmbeddedSiteDetail({
   );
 }
 
+/**
+ * A Site opens in the Site view, with its chat beside it: a link, a copied
+ * address or a notification naming `/artifacts/:id` lands there. Its details
+ * (Versions, Conversations, Data, Settings) stay here, by tab.
+ */
+function ArtifactDetailOrSite(props: {
+  workspaceId: string;
+  artifactId: string;
+  fromSession?: string | undefined;
+}) {
+  const search = useSearch({ strict: false }) as ArtifactReturnSearch;
+  return opensSiteView(search) ? <OpenSiteView {...props} /> : <ArtifactDetailPage {...props} />;
+}
+
+/** `/artifacts/:id` without a tab (or the publish view) is the Site itself. */
+function opensSiteView(search: ArtifactReturnSearch): boolean {
+  return search.view !== "publish" && search.tab === undefined;
+}
+
+function OpenSiteView({ workspaceId, artifactId }: { workspaceId: string; artifactId: string }) {
+  const navigate = useNavigate();
+  useEffect(() => {
+    void navigate({
+      to: "/workspaces/$workspaceId/sites/$siteId",
+      params: { workspaceId, siteId: artifactId },
+      replace: true,
+    });
+  }, [artifactId, navigate, workspaceId]);
+  return (
+    <span className="sr-only" role="status">
+      Opening Site
+    </span>
+  );
+}
+
 function ArtifactDetailPage({
   workspaceId,
   artifactId,
@@ -440,7 +467,6 @@ function ArtifactDetailPage({
   fromSession?: string | undefined;
 }) {
   const context = useAppContext();
-  const api = useAppApi();
   const canPublish = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
@@ -449,24 +475,26 @@ function ArtifactDetailPage({
   const navigate = useNavigate();
   const back = useArtifactsBackLink(workspaceId, fromSession);
   const search = useSearch({ strict: false }) as ArtifactReturnSearch;
-  const [fullView, setFullView] = useArtifactFullView();
-  const viewer = useConsoleSiteViewer();
   // The tab is in the address, so Settings (from the workbench or the old
   // Publish link) and the other tabs can be linked to and survive a reload.
-  const tab: SiteTab = search.view === "publish" ? "settings" : (search.tab ?? "site");
-  const setTab = (next: SiteTab) =>
+  // The Site itself is the Site view, with its chat beside it.
+  const tab: SiteDetailTab = search.view === "publish" ? "settings" : (search.tab ?? "versions");
+  const openSiteView = (startNew = false) =>
     void navigate({
-      to: "/workspaces/$workspaceId/artifacts/$artifactId",
-      params: { workspaceId, artifactId },
-      search: {
-        ...search,
-        view: undefined,
-        browse: true,
-        tab: next === "site" ? undefined : next,
-      },
-      replace: true,
-      resetScroll: false,
+      to: "/workspaces/$workspaceId/sites/$siteId",
+      params: { workspaceId, siteId: artifactId },
+      ...(startNew ? { search: { new: true } } : {}),
     });
+  const setTab = (next: SiteTab) =>
+    next === "site"
+      ? openSiteView()
+      : void navigate({
+          to: "/workspaces/$workspaceId/artifacts/$artifactId",
+          params: { workspaceId, artifactId },
+          search: { ...search, view: undefined, tab: next },
+          replace: true,
+          resetScroll: false,
+        });
   const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
   const [content, setContent] = useState<Pick<
     WorkspaceArtifactContentResponse,
@@ -501,32 +529,12 @@ function ArtifactDetailPage({
     void load();
     return () => readAbort.current?.abort();
   }, [load]);
-  const requestedTools = content?.requestedTools ?? NO_SITE_TOOLS;
-  const siteVersionId = content?.versionId;
-  const siteToolBridge = useMemo<PublishedHtmlArtifactToolBridge | undefined>(() => {
-    if (!siteVersionId) return undefined;
-    return createSiteToolBridge(api, {
-      workspaceTools: context.client.tools.forWorkspace(workspaceId),
-      workspaceId,
-      artifactId,
-      siteVersionId,
-      requestedTools,
-    });
-  }, [api, artifactId, context.client, requestedTools, siteVersionId, workspaceId]);
-  // Edit with Opengeni readies a new chat about the Site without sending it,
-  // so the person says what to change instead of waiting to be asked.
-  const [preparingEdit, setPreparingEdit] = useState(false);
-  const startEditSession = async () => {
-    if (!canPublish || !detail || detail.artifact.status === "archived" || preparingEdit) return;
-    setPreparingEdit(true);
-    try {
-      await readyNewChat(context.client, workspaceId, siteEditPrompt(workspaceId, detail.artifact));
-      await navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } });
-    } catch (nextError) {
-      toast.error("Couldn't open a new chat", { description: userErrorText(nextError) });
-    } finally {
-      setPreparingEdit(false);
-    }
+  // Edit with Opengeni opens the Site view with a new conversation beside
+  // the Site, its composer focused: the person says what to change and it
+  // goes live there.
+  const startEditSession = () => {
+    if (!canPublish || !detail || detail.artifact.status === "archived") return;
+    openSiteView(true);
   };
   const rollback = async (versionId: string) => {
     const current = detail?.artifact.currentVersion;
@@ -606,11 +614,17 @@ function ArtifactDetailPage({
   const publicationHeader = sitePublicationHeader(publication.load);
   const showSettings = hasSiteSettings(management);
   const shownTab: SiteTab =
-    (tab === "settings" && !showSettings) || (tab === "data" && !manageData) ? "site" : tab;
+    (tab === "settings" && !showSettings) || (tab === "data" && !manageData) ? "versions" : tab;
   return (
     <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
       <DetailPage back={back}>
-        <LineTabs value={shownTab} onValueChange={(value) => setTab(value as SiteTab)}>
+        <LineTabs
+          value={shownTab}
+          onValueChange={(value) => setTab(value as SiteTab)}
+          // Site leaves the page for the Site view: arrowing past it must
+          // not, so a tab opens on Enter, Space or a click.
+          activationMode="manual"
+        >
           <DetailPageHeader
             leading={<ArtifactKindTile kind="site" />}
             title={artifact.title}
@@ -655,8 +669,8 @@ function ArtifactDetailPage({
                     <Button
                       type="button"
                       size="sm"
-                      onClick={() => void startEditSession()}
-                      disabled={context.busy || preparingEdit}
+                      onClick={startEditSession}
+                      disabled={context.busy}
                       className="rounded-[10px] pointer-coarse:h-11"
                     >
                       <SparklesIcon aria-hidden="true" />
@@ -678,8 +692,8 @@ function ArtifactDetailPage({
               </LineTabsList>
             }
           />
-          <LineTabsContent value="site" className="pt-6">
-            <div className="flex min-w-0 flex-col gap-4">
+          {artifact.description || archived ? (
+            <div className="flex min-w-0 flex-col gap-4 pt-6">
               {artifact.description ? (
                 <p className="text-sm leading-5 text-fg-muted">{artifact.description}</p>
               ) : null}
@@ -689,41 +703,8 @@ function ArtifactDetailPage({
                   back an earlier version.
                 </Notice>
               ) : null}
-              {content ? (
-                <ArtifactSandbox
-                  html={content.html}
-                  title={artifact.title}
-                  versionLabel={
-                    artifact.currentVersion ? `v${artifact.currentVersion.revision}` : undefined
-                  }
-                  editDisabled={context.busy || preparingEdit || archived}
-                  onEdit={canPublish ? () => void startEditSession() : undefined}
-                  toolBridge={archived ? undefined : siteToolBridge}
-                  viewer={viewer}
-                  connectedToolCount={toolCount}
-                  // Links open the Site full screen; an archived one opens on
-                  // its page, which says so, and expands only on request.
-                  fullScreen={archived ? undefined : fullView}
-                  onFullScreenChange={archived ? undefined : setFullView}
-                />
-              ) : (
-                <Notice
-                  tone="failed"
-                  title="There's nothing to show for this Site"
-                  actionLayout="responsive"
-                  action={
-                    <Button type="button" size="sm" variant="outline" onClick={() => void load()}>
-                      <RotateCcwIcon aria-hidden="true" />
-                      Retry
-                    </Button>
-                  }
-                >
-                  It has no published version you can open. Try again, or ask whoever published it
-                  to publish it again.
-                </Notice>
-              )}
             </div>
-          </LineTabsContent>
+          ) : null}
           <LineTabsContent value="versions">
             <DetailPageBody>
               <DetailSection

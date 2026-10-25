@@ -662,6 +662,58 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("asks for a bounded recording upload and reports a controller without it", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const recordingId = randomUUID();
+    const sha256 = "a".repeat(64);
+    const bodies: unknown[] = [];
+    let legacy = false;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        expect(request.headers.get("authorization")).toBe(`Bearer ${controlToken}`);
+        expect(path).toBe(
+          `/v1/browser-sessions/${reference.browserSessionId}/recordings/${recordingId}/uploads`,
+        );
+        if (legacy) return failure(404, "resource_not_found", "route not found");
+        bodies.push(await request.json());
+        return success({ recordingId, state: "uploading", sizeBytes: 42, sha256 });
+      },
+    });
+    const client = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+        exec: async () => {
+          throw new Error("must preserve the existing controller");
+        },
+      },
+      { adminToken },
+    );
+    const browser = client.sessionClient({ reference, controlToken, viewToken });
+    const upload = {
+      url: "https://storage.example/bundle?X-Signature=1",
+      requiredHeaders: { "content-type": "application/octet-stream" },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    try {
+      expect(await browser.uploadRecording({ recordingId, upload, waitMs: 1_000 })).toEqual({
+        recordingId,
+        state: "uploading",
+        sizeBytes: 42,
+        sha256,
+      });
+      expect(bodies).toEqual([{ recordingId, upload, waitMs: 1_000 }]);
+      // A controller that predates resumable uploads: the caller falls back.
+      legacy = true;
+      expect(
+        await browser.uploadRecording({ recordingId, upload, waitMs: 1_000, replace: true }),
+      ).toBeNull();
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("uses the old observation route only when an active controller lacks target state", async () => {
     const browserSessionId = randomUUID();
     const controllerGeneration = "controller-1";

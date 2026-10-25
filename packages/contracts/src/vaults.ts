@@ -601,11 +601,18 @@ export const VaultProviderCredentials = /* @__PURE__ */ defineSchema(() =>
         signingSecret: z.string().min(32).max(4_096),
       })
       .strict(),
+    /**
+     * Bitwarden or Vaultwarden: the server address, the account's personal
+     * API key (Settings, Security, Keys) and the master password. The master
+     * password opens the account once during setup and is never stored.
+     */
     z
       .object({
         provider: z.literal("bitwarden"),
-        endpoint: z.string().url().max(2_048),
-        signingSecret: z.string().min(32).max(4_096),
+        serverUrl: z.string().trim().min(1).max(2_048),
+        clientId: z.string().trim().min(1).max(200),
+        clientSecret: z.string().trim().min(1).max(1_024),
+        masterPassword: z.string().min(1).max(1_024),
       })
       .strict(),
     z

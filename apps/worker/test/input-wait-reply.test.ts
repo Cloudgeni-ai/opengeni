@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionTurn } from "@opengeni/contracts";
 import {
+  INPUT_WAIT_PROGRESS_UPDATE_REFUSAL,
   INPUT_WAIT_REPLY_REFUSAL,
   MAX_INPUT_WAIT_REPLY_REFUSALS,
+  WAIT_REPLY_MESSAGE_ID,
   inputWaitReply,
+  inputWaitReplyMessage,
   inputWaitReplyRefusal,
 } from "../src/activities/agent-turn/input-wait-reply";
 
@@ -125,10 +128,67 @@ describe("a wait cannot end a person's turn without a visible reply", () => {
     expect(INPUT_WAIT_REPLY_REFUSAL).toContain("reasoning is not shown");
   });
 
-  test("the refusal says a reply drafted in thinking does not count", () => {
+  test("the refusal says a reply drafted in thinking does not count and names the reply argument", () => {
     expect(INPUT_WAIT_REPLY_REFUSAL).toContain("thinking or reasoning block does not count");
-    expect(INPUT_WAIT_REPLY_REFUSAL).toContain("normal assistant text block");
-    expect(INPUT_WAIT_REPLY_REFUSAL).toContain("same response");
+    expect(INPUT_WAIT_REPLY_REFUSAL).toContain("note written before a tool call");
+    for (const text of [INPUT_WAIT_REPLY_REFUSAL, INPUT_WAIT_PROGRESS_UPDATE_REFUSAL]) {
+      expect(text).toContain("in its `reply` argument");
+      expect(text).toContain("exactly as written");
+      expect(text).toContain("time remaining on its deadline");
+    }
+  });
+
+  test("a wait that carries its own reply always proceeds", async () => {
+    for (const hasProgressUpdate of [false, true]) {
+      expect(
+        await inputWaitReplyRefusal({
+          turn: human,
+          refusalsSoFar: 0,
+          reply: "Here are the pictures.",
+          hasVisibleReply: async () => false,
+          hasProgressUpdate: () => hasProgressUpdate,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  test("a summarized progress update before the wait asks for the reply argument, even beside text", async () => {
+    for (const hasVisibleReply of [false, true]) {
+      expect(
+        await inputWaitReplyRefusal({
+          turn: human,
+          refusalsSoFar: 0,
+          reply: null,
+          hasVisibleReply: async () => hasVisibleReply,
+          hasProgressUpdate: () => true,
+        }),
+      ).toBe(INPUT_WAIT_PROGRESS_UPDATE_REFUSAL);
+    }
+    // An empty reply is no reply.
+    expect(
+      await inputWaitReplyRefusal({
+        turn: human,
+        refusalsSoFar: 0,
+        reply: "  \n",
+        hasVisibleReply: async () => true,
+        hasProgressUpdate: () => true,
+      }),
+    ).toBe(INPUT_WAIT_PROGRESS_UPDATE_REFUSAL);
+    // Machine-started turns and the refusal bound are unchanged.
+    for (const [turn, refusalsSoFar] of [
+      [{ ...human, source: "goal" } as Turn, 0],
+      [human, MAX_INPUT_WAIT_REPLY_REFUSALS],
+    ] as const) {
+      expect(
+        await inputWaitReplyRefusal({
+          turn,
+          refusalsSoFar,
+          reply: null,
+          hasVisibleReply: async () => false,
+          hasProgressUpdate: () => true,
+        }),
+      ).toBeNull();
+    }
   });
 
   test("machine-started and agent-relayed turns may wait silently", async () => {
@@ -151,5 +211,72 @@ describe("a wait cannot end a person's turn without a visible reply", () => {
       INPUT_WAIT_REPLY_REFUSAL,
     );
     expect(await refusal(human, false, MAX_INPUT_WAIT_REPLY_REFUSALS)).toBeNull();
+  });
+});
+
+describe("a wait's reply argument is the verbatim answer", () => {
+  const verbatim = "Here they are:\n\n![Phone](artifact:a3dba521-b585-4f43-9cf6-46cbac6c25a9)";
+
+  test("it is recorded as the person's reply ahead of any earlier message", async () => {
+    expect(
+      await inputWaitReply({
+        inputWaitYielded: true,
+        waitReply: verbatim,
+        turn: human,
+        latestAssistantMessageText: "Here are the pictures.",
+        readLatestDurableTurnMessage: async () => null,
+      }),
+    ).toBe(verbatim);
+    // Machine-started turns still record none.
+    expect(
+      await inputWaitReply({
+        inputWaitYielded: true,
+        waitReply: verbatim,
+        turn: { ...human, source: "goal" },
+        latestAssistantMessageText: null,
+        readLatestDurableTurnMessage: async () => null,
+      }),
+    ).toBeNull();
+  });
+
+  test("it becomes its own final message, unless that text was already shown", () => {
+    expect(
+      inputWaitReplyMessage({
+        waitAccepted: true,
+        waitReply: verbatim,
+        latestAssistantMessageText: "Here are the pictures.",
+        attemptId: "attempt-1",
+      }),
+    ).toEqual({
+      text: verbatim,
+      messageId: `${WAIT_REPLY_MESSAGE_ID}:attempt-1`,
+      phase: "final_answer",
+    });
+    expect(
+      inputWaitReplyMessage({
+        waitAccepted: true,
+        waitReply: verbatim,
+        latestAssistantMessageText: `${verbatim}\n`,
+        attemptId: "attempt-1",
+      }),
+    ).toBeNull();
+    for (const waitReply of [null, "", " \n"]) {
+      expect(
+        inputWaitReplyMessage({
+          waitAccepted: true,
+          waitReply,
+          latestAssistantMessageText: null,
+          attemptId: "attempt-1",
+        }),
+      ).toBeNull();
+    }
+    expect(
+      inputWaitReplyMessage({
+        waitAccepted: false,
+        waitReply: verbatim,
+        latestAssistantMessageText: null,
+        attemptId: "attempt-1",
+      }),
+    ).toBeNull();
   });
 });

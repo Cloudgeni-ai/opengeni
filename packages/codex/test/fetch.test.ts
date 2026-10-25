@@ -53,6 +53,11 @@ function expectExactlyOneTerminalPerAttempt(
     })),
   );
   for (const [index, expectation] of expected.entries()) {
+    if (expectation.phase === "failed") {
+      expect(terminalEvents[index]?.failureCause).toBeDefined();
+    } else {
+      expect(terminalEvents[index]?.failureCause).toBeUndefined();
+    }
     if (expectation.requestId !== undefined) {
       expect(terminalEvents[index]?.requestId).toBe(expectation.requestId);
     }
@@ -101,6 +106,238 @@ function ctx(overrides: Partial<CodexRequestContext> = {}): CodexRequestContext 
     ...overrides,
   };
 }
+
+describe("Codex request failure causes", () => {
+  function capture() {
+    const events: CodexModelRequestEvent[] = [];
+    const diagnostics: CodexModelRequestEvent[] = [];
+    const failureObserved = Promise.withResolvers<void>();
+    return {
+      events,
+      diagnostics,
+      failureObserved: failureObserved.promise,
+      send: (base: FetchLike, signal?: AbortSignal, stream = true) =>
+        codexRequestStorage.run(
+          ctx({
+            onModelRequestEvent: (event) => {
+              events.push(event);
+              if (event.phase === "failed") failureObserved.resolve();
+            },
+            onModelRequestDiagnostic: (event) => diagnostics.push(event),
+          }),
+          () =>
+            codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+              method: "POST",
+              ...(signal ? { signal } : {}),
+              body: JSON.stringify({ stream }),
+            }),
+        ),
+      failure: () => {
+        expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "failed" }]);
+        expect(diagnostics).toEqual(events);
+        expect(JSON.stringify(events)).not.toContain("private");
+        expect(
+          events.filter((event) => event.phase !== "failed").every((event) => !event.failureCause),
+        ).toBe(true);
+        return events.find((event) => event.phase === "failed")?.failureCause;
+      },
+    };
+  }
+
+  test.each(["before dispatch", "before headers", "after headers"])(
+    "records caller abort %s with the abort reason name",
+    async (when) => {
+      const audit = capture();
+      const controller = new AbortController();
+      const reason = Object.assign(new Error("private abort message"), { name: "StopRequested" });
+      const transportError = Object.assign(new Error("private transport message"), {
+        name: "AbortError",
+        code: "ABORT_ERR",
+      });
+      if (when === "before dispatch") controller.abort(reason);
+      if (when === "after headers") {
+        const response = await audit.send(
+          async () => new Response(new ReadableStream<Uint8Array>({})),
+          controller.signal,
+        );
+        controller.abort(reason);
+        await expect(response.text()).rejects.toBe(reason);
+      } else {
+        await expect(
+          audit.send(async () => {
+            controller.abort(reason);
+            throw transportError;
+          }, controller.signal),
+        ).rejects.toBe(when === "before dispatch" ? reason : transportError);
+      }
+      expect(audit.failure()).toEqual({
+        kind: "caller_abort",
+        errorName: when === "before headers" ? "AbortError" : "StopRequested",
+        ...(when === "before headers" ? { errorCode: "ABORT_ERR" } : {}),
+        abortReasonName: "StopRequested",
+      });
+      expect(JSON.stringify(audit.events)).not.toContain("private");
+    },
+  );
+
+  test("records a pre-headers transport error, not an unproven caller abort", async () => {
+    const audit = capture();
+    const error = Object.assign(new Error("private connection details"), {
+      name: "AbortError",
+      code: "ECONNRESET",
+    });
+    await expect(
+      audit.send(async () => {
+        throw error;
+      }),
+    ).rejects.toBe(error);
+    expect(audit.failure()).toEqual({
+      kind: "transport_error",
+      errorName: "AbortError",
+      errorCode: "ECONNRESET",
+    });
+  });
+
+  test("records the original response-body reset before error translation", async () => {
+    const audit = capture();
+    const error = Object.assign(new Error("private stream details"), { code: "ECONNRESET" });
+    const response = await audit.send(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.error(error);
+            },
+          }),
+        ),
+    );
+    await expect(response.text()).rejects.toMatchObject({
+      code: "invalid_sse_terminal",
+      cause: error,
+    });
+    expect(audit.failure()).toEqual({
+      kind: "stream_reset",
+      errorName: "Error",
+      errorCode: "ECONNRESET",
+    });
+  });
+
+  test("records consumer cancellation without treating its reason as a caller abort", async () => {
+    const audit = capture();
+    const reason = Object.assign(new Error("private cancellation details"), {
+      name: "AbortError",
+      code: "CANCELLED",
+    });
+    const response = await audit.send(async () => new Response(new ReadableStream<Uint8Array>({})));
+    await response.body!.cancel(reason);
+    await audit.failureObserved;
+    expect(audit.failure()).toEqual({
+      kind: "consumer_cancel",
+      errorName: "AbortError",
+      errorCode: "CANCELLED",
+    });
+  });
+
+  test("bounds metadata and never serializes messages or other error content", async () => {
+    const audit = capture();
+    const secret = "sensitive-message-token-body-header-url-id";
+    const reason = Object.assign(new Error(secret), { name: "R".repeat(100) });
+    const error = Object.assign(new Error(secret), {
+      name: "N".repeat(100),
+      code: "C".repeat(100),
+      cause: new Error(secret),
+      body: secret,
+      headers: { authorization: secret },
+      url: secret,
+      token: secret,
+      id: secret,
+      toJSON() {
+        throw new Error("must not serialize the error");
+      },
+    });
+    const controller = new AbortController();
+    await expect(
+      audit.send(async () => {
+        controller.abort(reason);
+        throw error;
+      }, controller.signal),
+    ).rejects.toBe(error);
+    expect(audit.failure()).toEqual({
+      kind: "caller_abort",
+      errorName: "N".repeat(64),
+      errorCode: "C".repeat(64),
+      abortReasonName: "R".repeat(64),
+    });
+    expect(JSON.stringify(audit.events)).not.toContain(secret);
+    expect(JSON.stringify(audit.diagnostics)).not.toContain(secret);
+  });
+
+  test.each(["private primitive reason", null, { name: 123, code: {} }])(
+    "ignores non-string metadata: %#",
+    async (error) => {
+      const audit = capture();
+      await expect(
+        audit.send(async () => {
+          throw error;
+        }),
+      ).rejects.toBe(error);
+      expect(audit.failure()).toEqual({ kind: "transport_error" });
+    },
+  );
+
+  test("diagnostics tolerate throwing cancellation-reason getters", async () => {
+    const audit = capture();
+    const reason = {
+      get name() {
+        throw new Error("private getter failure");
+      },
+      get code() {
+        throw new Error("private getter failure");
+      },
+    };
+    const response = await audit.send(async () => new Response(new ReadableStream<Uint8Array>({})));
+    await response.body!.cancel(reason);
+    await audit.failureObserved;
+    expect(audit.failure()).toEqual({ kind: "consumer_cancel" });
+  });
+
+  test.each([true, false])(
+    "records missing SSE terminals as stream resets (stream=%s)",
+    async (stream) => {
+      const audit = capture();
+      const response = await audit.send(
+        async () => new Response(": keepalive\n\n"),
+        undefined,
+        stream,
+      );
+      if (stream)
+        await expect(response.text()).rejects.toMatchObject({ code: "invalid_sse_terminal" });
+      else await response.text();
+      expect(audit.failure()?.kind).toBe("stream_reset");
+    },
+  );
+
+  test.each([true, false])(
+    "records HTTP refusals without response body content (body=%s)",
+    async (body) => {
+      const audit = capture();
+      const response = await audit.send(
+        async () => new Response(body ? "private provider error" : null, { status: 403 }),
+      );
+      await response.text();
+      expect(audit.failure()).toEqual({ kind: "transport_error" });
+      expect(JSON.stringify(audit.events)).not.toContain("private provider error");
+    },
+  );
+
+  test("successful events have no failure cause", async () => {
+    const audit = capture();
+    const response = await audit.send(baseRecorder().base);
+    await response.text();
+    expectExactlyOneTerminalPerAttempt(audit.events, [{ transportAttempt: 1, phase: "completed" }]);
+    expect(audit.events.every((event) => !("failureCause" in event))).toBe(true);
+  });
+});
 
 describe("Codex streaming EOF audit", () => {
   test.each(["\n\n", "\n", "", "\r", "\r\n"])(

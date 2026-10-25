@@ -1,5 +1,37 @@
 # Modular prompt changelog
 
+macOS privacy folders. A Connected Mac's agent runs as the Opengeni app from
+the owner's home folder, so a recursive `find ~`, `grep -r` or `du` there reads
+Desktop, Documents, Downloads, Library, Music, Pictures and Movies, and macOS
+asks the owner about each one (Files and Folders, Photos, Apple Music and the
+media library, Contacts, Calendars and other apps' data) in the app's name.
+People saw that cascade and took the app for asking far more than it needs.
+The module now says to open those folders only when the task needs them. Code
+search also skips them on its own: always Library, Music, Pictures, Movies and
+the Trash, and each of Desktop, Documents and Downloads until the owner has
+allowed the app to open it (see `MAC_HOME_PRIVACY_GUARDED_DIRS` in
+`sandbox/channel-a.ts`). Only the modular
+composition has a Connected Machine module; legacy bytes are unchanged.
+
+```diff
++ On macOS, the home folder's Desktop, Documents, Downloads, Library, Music, Pictures and Movies folders are privacy-protected: the first read of each shows the owner a macOS permission prompt.
++ Open them only when the task needs them, and never scan the whole home folder recursively.
++ Code search from the home folder may skip them; to search inside one, name it as the path.
+```
+
+An answer the agent gives in a turn that ends on `wait_for_input` now goes in
+the call's new `reply` argument, which the person sees exactly as written. The
+Progress updates guidance no longer allows posting a status right before
+`wait_for_input` when it answers the user: it says to put the whole answer in
+`reply` instead of writing it before the call, and the final-response sentence
+says `reply` carries any answer. The message-while-working rule now says to
+call `wait_for_input` with the answer in its `reply`, rather than to give the
+answer and then call it. Before, Claude Opus 5.5 and Sonnet 5.5 returned such
+an answer as a progress-update thinking block, so the person saw only
+Anthropic's one-paragraph summary of it, without its images or tables (session
+df030716, 13:13 UTC on 2026-10-23). Both compositions change identically;
+legacy prompt digests are refreshed for this reviewed change.
+
 A sub-session's question to the person now also reaches its parent agent, and
 the first answer wins. The Session coordination guidance gains one paragraph,
 shown when `session_human_input_respond` is available: the parent answers a

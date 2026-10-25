@@ -6,6 +6,7 @@ import {
   journeyOperation,
   journeyOutcome,
   journeyPage,
+  journeyPageLabels,
 } from "./analytics-journey";
 import {
   LEGACY_ORGANIZATION_SECTIONS,
@@ -67,6 +68,12 @@ describe("content-free customer journey", () => {
     expect(journeyPage("/reset-password", "?token=private")).toEqual({ page: "reset-password" });
     expect(journeyPage("/billing", "?checkout=success")).toEqual({ page: "checkout-return" });
     expect(journeyPage("/integrations")).toEqual({ page: "integration-return" });
+    const teams = new URL(
+      "https://app.example.test/teams/connect?setupToken=private&tenantId=private#teams_setup=private",
+    );
+    expect(journeyPage(teams.pathname, teams.search)).toEqual({ page: "teams-connect" });
+    expect(journeyPageLabels().has("teams-connect")).toBe(true);
+    expect(journeyPage("/teams/connect/private")).toEqual({ page: "other" });
     expect(journeyPage("/settings/security")).toEqual({ page: "personal-security" });
     // Ids in top-level paths are never reported.
     expect(journeyPage(`/sessions/${session}`)).toEqual({ page: "session-link" });

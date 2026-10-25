@@ -103,12 +103,19 @@ import {
 } from "@opengeni/sdk";
 import { z } from "zod";
 import {
+  BROWSER_LOCATOR_KIND_WORDS,
   BrowserTargetResolutionError,
   CurrentBrowserTab,
   expandRefShorthand,
   type ResolvedBrowserSession,
   type ResolvedBrowserTarget,
 } from "./browser-current-tab";
+import {
+  ComputerTargetResolutionError,
+  CurrentComputerWindow,
+  type ResolvedComputerSession,
+  type ResolvedComputerTarget,
+} from "./computer-current-window";
 import {
   describeInvalidToolArguments,
   interactionToolInputJsonSchema,
@@ -701,7 +708,7 @@ const BrowserActInput = z
     view: z.enum(["compact", "full", "none"]).optional(),
     includeScreenshot: z.boolean().optional(),
     action: z.preprocess(
-      expandRefShorthand,
+      (action) => expandRefShorthand(action, BROWSER_LOCATOR_KIND_WORDS),
       z.union([AgentBrowserAction, AgentBrowserActionBatch]),
     ),
   })
@@ -870,11 +877,24 @@ const ComputerOpenInput = z
 const ComputerOpenOutput = z
   .object({ session: ComputerSession, targets: z.array(ComputerTarget) })
   .strict();
-const ComputerTargetsInput = z.object({ computerSessionId: z.string().uuid() }).strict();
+const CurrentComputerSessionId = z
+  .string()
+  .uuid()
+  .optional()
+  .describe("Omit to use the computer you used last.");
+const CurrentComputerTargetId = z
+  .string()
+  .min(1)
+  .max(512)
+  .optional()
+  .describe("Omit to use the window you used last.");
+const ComputerTargetsInput = z.object({ computerSessionId: CurrentComputerSessionId }).strict();
 const ComputerObserveInput = z
   .object({
-    computerSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    computerSessionId: CurrentComputerSessionId,
+    targetId: CurrentComputerTargetId.describe(
+      "Omit to use the window you used last, or at first the focused window (the screen when none is).",
+    ),
   })
   .strict();
 const ComputerObserveOutput = ComputerObservation.extend({
@@ -883,7 +903,7 @@ const ComputerObserveOutput = ComputerObservation.extend({
     .strict()
     .optional(),
 }).strict();
-const ComputerClipboardInput = z.object({ computerSessionId: z.string().uuid() }).strict();
+const ComputerClipboardInput = z.object({ computerSessionId: CurrentComputerSessionId }).strict();
 /** Action types a computer_act batch runs. Each acts on the state the one
  * before it left; a pointer action needs the pixels of one exact screenshot,
  * so it is not batched. */
@@ -913,14 +933,38 @@ const ComputerActionBatch = z
   .strict();
 const ComputerActInput = z
   .object({
-    computerSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    computerSessionId: CurrentComputerSessionId,
+    targetId: CurrentComputerTargetId,
     expectedTargetGeneration: z.string().min(1).max(256).optional(),
     expectedObservationId: ComputerObservation.shape.observationId.nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
-    action: z.union([ComputerAction, ComputerActionBatch]),
+    action: z.preprocess(
+      (action) => withComputerActionTypes(expandRefShorthand(action)),
+      z.union([ComputerAction, ComputerActionBatch]),
+    ),
   })
   .strict();
+/** A computer action may leave out its type where its fields say it: an
+ * action with a locator is semantic, one with actions is a batch. */
+function withComputerActionTypes(action: unknown): unknown {
+  if (!action || typeof action !== "object" || Array.isArray(action)) return action;
+  const record = action as Record<string, unknown>;
+  const typed =
+    record.type !== undefined
+      ? record
+      : "locator" in record
+        ? { type: "semantic", ...record }
+        : Array.isArray(record.actions)
+          ? { type: "batch", ...record }
+          : record;
+  if (!Array.isArray(typed.actions)) return typed;
+  return { ...typed, actions: typed.actions.map(withComputerActionTypes) };
+}
+/** computer_act input with the computer and window it resolved to. */
+type ResolvedComputerActInput = Omit<
+  z.output<typeof ComputerActInput>,
+  "computerSessionId" | "targetId"
+> & { computerSessionId: string; targetId: string };
 /** What a computer_act batch did: each action's settled operation, in order,
  * up to the first one that did not complete, and the latest observation of
  * the target. */
@@ -942,6 +986,9 @@ const ComputerActionBatchReceipt = z
     /** The observation was read before the action the batch stopped at, and
      * a fresh read after it failed. */
     observationPrecedesStop: z.boolean(),
+    /** Actions that acted on an element of another role than the one named,
+     * by their index in the batch. */
+    roleStandIns: ComputerActionReceipt.shape.roleStandIns,
   })
   .strict();
 const ComputerActOutput = z.union([ComputerActionReceipt, ComputerActionBatchReceipt]);
@@ -1133,22 +1180,113 @@ export function createInteractionAttemptToolDefinitions(
     }
     return known;
   };
+  /** The sessions on the placement this chat runs on now. One left on a
+   * machine the chat has since moved away from is used only when named, as
+   * computer_open and browser_open reuse. The person's own Chrome and an
+   * external provider's session are on neither machine. */
+  const onCurrentPlacement = async <T extends { placement: z.infer<typeof InteractionPlacement> }>(
+    listed: Promise<T[]>,
+  ): Promise<T[]> => {
+    const [sessions, current] = await Promise.all([
+      listed,
+      readCurrentInteractionPlacement(input.transport, input.workspaceId, input.sessionId),
+    ]);
+    return sessions.filter(
+      (session) =>
+        current === null ||
+        (session.placement.kind !== "sandbox_group" &&
+          session.placement.kind !== "connected_machine") ||
+        placementFieldsMatch(session.placement, current),
+    );
+  };
   const currentTab = new CurrentBrowserTab({
     listLiveSessions: async () =>
-      filterDiscoveredSessions(
-        (
-          await input.transport.listBrowserSessions(input.workspaceId, {
+      await onCurrentPlacement<
+        Awaited<ReturnType<InteractionTransport["listBrowserSessions"]>>["sessions"][number]
+      >(
+        input.transport
+          .listBrowserSessions(input.workspaceId, {
             associatedSessionId: input.sessionId,
             includeTerminal: false,
           })
-        ).sessions,
-        input.sessionId,
-        "current_session",
-        false,
+          .then(({ sessions }) =>
+            filterDiscoveredSessions(sessions, input.sessionId, "current_session", false),
+          ),
       ),
     listTargets: async (browserSessionId) =>
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
   });
+  const currentComputer = new CurrentComputerWindow({
+    latestLiveSession: async () =>
+      newestRelevant(
+        await onCurrentPlacement(
+          input.transport
+            .listComputerSessions(input.workspaceId, {
+              associatedSessionId: input.sessionId,
+              includeTerminal: false,
+            })
+            .then(({ sessions }) => sessions),
+        ),
+        input.sessionId,
+      )?.id ?? null,
+    currentTarget: async (computerSessionId, reading) => {
+      try {
+        const { targets } = await input.transport.listComputerTargets(
+          input.workspaceId,
+          computerSessionId,
+        );
+        const current = targets.find((target) => target.current);
+        if (current || !reading) return current?.id ?? null;
+        // A first read without a window starts where the person would look:
+        // the focused window, or the only screen when no window is focused.
+        const only = (found: typeof targets) => (found.length === 1 ? found[0]!.id : null);
+        return (
+          only(targets.filter((target) => target.kind === "window" && target.focused)) ??
+          only(targets.filter((target) => target.kind === "screen"))
+        );
+      } catch (error) {
+        // The computer itself is gone: resolve afresh next time.
+        if (isGoneBrowserError(error)) currentComputer.forgetSession(computerSessionId);
+        throw error;
+      }
+    },
+  });
+  /** Run one call on the requested or current computer and remember it on
+   * success. */
+  const onComputer = async <T>(
+    computerSessionId: string | undefined,
+    run: (computer: ResolvedComputerSession) => Promise<T>,
+  ): Promise<T> => {
+    const computer = await currentComputer.session(computerSessionId);
+    try {
+      const output = await run(computer);
+      currentComputer.use(computer.computerSessionId);
+      return output;
+    } catch (error) {
+      if (isGoneBrowserError(error)) currentComputer.failed(computer, goneComputerPart(error));
+      throw error;
+    }
+  };
+  /** Run one call on the requested or current window and remember, on
+   * success, the window it leaves the agent in: the one it acted on, or the
+   * one the action opened. A read may start in a window the agent has not
+   * used yet. */
+  const onComputerWindow = async <T>(
+    value: { computerSessionId?: string | undefined; targetId?: string | undefined },
+    run: (window: ResolvedComputerTarget) => Promise<T>,
+    leftIn: (output: T) => string | null | undefined = () => null,
+    reading = false,
+  ): Promise<T> => {
+    const window = await currentComputer.target(value, reading);
+    try {
+      const output = await run(window);
+      currentComputer.use(window.computerSessionId, leftIn(output) ?? window.targetId);
+      return output;
+    } catch (error) {
+      if (isGoneBrowserError(error)) currentComputer.failed(window, goneComputerPart(error));
+      throw error;
+    }
+  };
   // Every call notes the event count when it starts. A browser resumed after
   // that, or whose resume no result had shown by then, has new tab IDs and
   // reloaded pages the call's caller had not seen when it chose the call.
@@ -1838,7 +1976,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Role, label, text, placeholder, test id and CSS locators wait up to 10 s for their element to appear, and input actions wait while it is disabled, so a known sequence across page changes (open a record, open its edit form, fill it, save) can run as one batch without fenceEachAction; use those locators there, because a ref only names an element you have already seen. When a procedure repeats for many records, do the first step by step, then run each remaining record as one such batch, or loop over them in Code Mode. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Role, label, text, placeholder, test id and CSS locators wait up to 10 s for their element to appear, and input actions wait while it is disabled, so a known sequence across page changes (open a record, open its edit form, fill it, save) can run as one batch without fenceEachAction; use those locators there, because a ref only names an element you have already seen. When a procedure repeats for many records, do the first step by step, then run the rest together: as many whole records per batch as fit in its 32 actions, each record ending with a wait (condition 'visible', timeoutMs 10000) for what its successful save shows so that a failed record stops the batch, or one Code Mode loop over all of them that checks each result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
@@ -2336,8 +2474,17 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: true,
     modelText: computerOpenText,
-    execute: async (value, context) =>
-      await openComputer(input.transport, input.workspaceId, input.sessionId, value, context),
+    execute: async (value, context) => {
+      const opened = await openComputer(
+        input.transport,
+        input.workspaceId,
+        input.sessionId,
+        value,
+        context,
+      );
+      currentComputer.use(opened.session.id);
+      return opened;
+    },
   });
 
   add({
@@ -2352,7 +2499,11 @@ export function createInteractionAttemptToolDefinitions(
     idempotent: true,
     modelText: (output) => computerTargetsText(output.targets),
     execute: async (value) =>
-      await input.transport.listComputerTargets(input.workspaceId, value.computerSessionId),
+      await onComputer(
+        value.computerSessionId,
+        async ({ computerSessionId }) =>
+          await input.transport.listComputerTargets(input.workspaceId, computerSessionId),
+      ),
   });
 
   add({
@@ -2371,53 +2522,59 @@ export function createInteractionAttemptToolDefinitions(
         ? computerObservationText(output)
         : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`;
     },
-    execute: async (value) => {
-      // The tree and the pixels are independent reads of the same target;
-      // a generation mismatch below re-reads the tree once. An app target
-      // spans several windows, so most adapters cannot photograph it; its
-      // tree is then the whole observation instead of a failed read.
-      const capture = input.transport
-        .captureComputerTarget(input.workspaceId, value.computerSessionId, value.targetId)
-        .then(
-          (frame) => ({ frame, error: null as unknown }),
-          (error: unknown) => ({ frame: null, error }),
-        );
-      let observation = await input.transport.observeComputerTarget(
-        input.workspaceId,
-        value.computerSessionId,
-        value.targetId,
-      );
-      const { frame, error } = await capture;
-      if (frame === null) {
-        if (observation.target.kind === "app") return observation;
-        throw error;
-      }
-      if (observation.target.targetGeneration !== frame.targetGeneration) {
-        observation = await input.transport.observeComputerTarget(
-          input.workspaceId,
-          value.computerSessionId,
-          value.targetId,
-        );
-      }
-      if (observation.target.targetGeneration !== frame.targetGeneration) {
-        throw new Error("computer target changed while its visual observation was captured");
-      }
-      const image = await compactComputerImage(frame.data, frame.mediaType);
-      return new InteractionExecutionResult(
-        {
-          ...observation,
-          frameId: frame.frameId,
-          capturedFrame: { width: frame.width, height: frame.height },
+    execute: async (requested) =>
+      await onComputerWindow(
+        requested,
+        async (value) => {
+          // The tree and the pixels are independent reads of the same target;
+          // a generation mismatch below re-reads the tree once. An app target
+          // spans several windows, so most adapters cannot photograph it; its
+          // tree is then the whole observation instead of a failed read.
+          const capture = input.transport
+            .captureComputerTarget(input.workspaceId, value.computerSessionId, value.targetId)
+            .then(
+              (frame) => ({ frame, error: null as unknown }),
+              (error: unknown) => ({ frame: null, error }),
+            );
+          let observation = await input.transport.observeComputerTarget(
+            input.workspaceId,
+            value.computerSessionId,
+            value.targetId,
+          );
+          const { frame, error } = await capture;
+          if (frame === null) {
+            if (observation.target.kind === "app") return observation;
+            throw error;
+          }
+          if (observation.target.targetGeneration !== frame.targetGeneration) {
+            observation = await input.transport.observeComputerTarget(
+              input.workspaceId,
+              value.computerSessionId,
+              value.targetId,
+            );
+          }
+          if (observation.target.targetGeneration !== frame.targetGeneration) {
+            throw new Error("computer target changed while its visual observation was captured");
+          }
+          const image = await compactComputerImage(frame.data, frame.mediaType);
+          return new InteractionExecutionResult(
+            {
+              ...observation,
+              frameId: frame.frameId,
+              capturedFrame: { width: frame.width, height: frame.height },
+            },
+            [
+              {
+                type: "image",
+                data: Buffer.from(image.data).toString("base64"),
+                mimeType: image.mimeType,
+              },
+            ],
+          );
         },
-        [
-          {
-            type: "image",
-            data: Buffer.from(image.data).toString("base64"),
-            mimeType: image.mimeType,
-          },
-        ],
-      );
-    },
+        () => null,
+        true,
+      ),
   });
 
   add({
@@ -2431,7 +2588,11 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     execute: async (value) =>
-      await input.transport.readComputerClipboard(input.workspaceId, value.computerSessionId),
+      await onComputer(
+        value.computerSessionId,
+        async ({ computerSessionId }) =>
+          await input.transport.readComputerClipboard(input.workspaceId, computerSessionId),
+      ),
   });
 
   add({
@@ -2439,7 +2600,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. When you already know several steps in the same target, such as pressing a run of buttons or filling known fields, send them in one call with action={type:'batch',actions:[...]} (semantic and keyboard actions): they run in order, stop at the first failure, and return the target's state after the last one. A later action may name, by role and name instead of ref, an element that an earlier one brings up, such as the next page or a form that is still loading; on macOS and in Linux sandboxes it waits up to 10 seconds for it to appear and enable. So when you repeat a procedure for many records, do each record in one batch. Pause for new state only when the next step depends on what you will see. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. When you already know several steps in the same target, such as pressing a run of buttons or filling known fields, send them in one call with action={type:'batch',actions:[...]} (semantic and keyboard actions): they run in order, stop at the first failure, and return the target's state after the last one. A later action may name, by role and name instead of ref (\"button:Save\"), an element that an earlier one brings up, such as the next page or a form that is still loading; on macOS and in Linux sandboxes it waits up to 10 seconds for it to appear and enable. set_value true or false on a checkbox or switch leaves it in that state and presses it only when needed, so a batch can set one without reading it first. So when you repeat a procedure for many records, do each record in one batch; once one record has worked, you can instead loop over the rest in one Code Mode program that sends the same batches with interaction.computer.act and stops at the first one that does not complete. Pause for new state only when the next step depends on what you will see. Returns the durable causal receipt.",
     input: ComputerActInput,
     output: ComputerActOutput,
     readOnly: false,
@@ -2453,71 +2614,89 @@ export function createInteractionAttemptToolDefinitions(
       const shown = base ? computerObservationDiff(base, observation) : null;
       return computerActionText(shown ? { ...receipt, observation: shown } : receipt);
     },
-    execute: async (value, context) => {
-      const action = value.action;
-      if (action.type === "batch") {
-        return await actInComputerBatch(
-          input.transport,
-          input.workspaceId,
-          value,
-          action.actions,
-          context.operationId,
-          () => supportsActionBatches(value.computerSessionId),
-        );
-      }
-      // A launch acts on no window's contents, and an action that names the
-      // observation it was read from has its content fence already: both need
-      // only the target's generation, which the target list gives without
-      // reading the window again (a fresh read would retire the refs the
-      // caller holds). A target missing from the list is read below, which
-      // explains why.
-      const listedGeneration =
-        action.type !== "launch" &&
-        (action.type === "pointer" || value.expectedObservationId == null)
-          ? undefined
-          : (value.expectedTargetGeneration ??
-            (
-              await input.transport.listComputerTargets(input.workspaceId, value.computerSessionId)
-            ).targets.find((target) => target.id === value.targetId)?.targetGeneration);
-      if (listedGeneration !== undefined) {
-        return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
-          operationId: context.operationId,
-          targetId: value.targetId,
-          expectedTargetGeneration: listedGeneration,
-          expectedObservationId: value.expectedObservationId ?? null,
-          expectedFrameId: null,
-          action,
-        });
-      }
-      const current =
-        value.expectedTargetGeneration !== undefined &&
-        (action.type === "pointer"
-          ? (value.expectedFrameId ?? action.frameId) != null
-          : value.expectedObservationId != null)
-          ? null
-          : await input.transport.observeComputerTarget(
+    execute: async (requested, context) =>
+      await onComputerWindow(
+        requested,
+        async (window) => {
+          const value: ResolvedComputerActInput = {
+            ...requested,
+            computerSessionId: window.computerSessionId,
+            targetId: window.targetId,
+          };
+          const action = value.action;
+          if (action.type === "batch") {
+            return await actInComputerBatch(
+              input.transport,
               input.workspaceId,
-              value.computerSessionId,
-              value.targetId,
+              value,
+              action.actions,
+              context.operationId,
+              () => supportsActionBatches(value.computerSessionId),
             );
-      return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
-        operationId: context.operationId,
-        targetId: value.targetId,
-        expectedTargetGeneration:
-          value.expectedTargetGeneration ?? current!.target.targetGeneration,
-        expectedObservationId:
-          value.expectedObservationId === undefined
-            ? (current?.observationId ?? null)
-            : value.expectedObservationId,
-        expectedFrameId:
-          action.type === "pointer"
-            ? value.expectedFrameId === undefined
-              ? action.frameId
-              : value.expectedFrameId
-            : null,
-        action,
-      });
-    },
+          }
+          // A launch acts on no window's contents, and an action that names the
+          // observation it was read from has its content fence already: both need
+          // only the target's generation, which the target list gives without
+          // reading the window again (a fresh read would retire the refs the
+          // caller holds). A target missing from the list is read below, which
+          // explains why.
+          const listedGeneration =
+            action.type !== "launch" &&
+            (action.type === "pointer" || value.expectedObservationId == null)
+              ? undefined
+              : (value.expectedTargetGeneration ??
+                (
+                  await input.transport.listComputerTargets(
+                    input.workspaceId,
+                    value.computerSessionId,
+                  )
+                ).targets.find((target) => target.id === value.targetId)?.targetGeneration);
+          if (listedGeneration !== undefined) {
+            return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
+              operationId: context.operationId,
+              targetId: value.targetId,
+              expectedTargetGeneration: listedGeneration,
+              expectedObservationId: value.expectedObservationId ?? null,
+              expectedFrameId: null,
+              action,
+            });
+          }
+          const current =
+            value.expectedTargetGeneration !== undefined &&
+            (action.type === "pointer"
+              ? (value.expectedFrameId ?? action.frameId) != null
+              : value.expectedObservationId != null)
+              ? null
+              : await input.transport.observeComputerTarget(
+                  input.workspaceId,
+                  value.computerSessionId,
+                  value.targetId,
+                );
+          return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
+            operationId: context.operationId,
+            targetId: value.targetId,
+            expectedTargetGeneration:
+              value.expectedTargetGeneration ?? current!.target.targetGeneration,
+            expectedObservationId:
+              value.expectedObservationId === undefined
+                ? (current?.observationId ?? null)
+                : value.expectedObservationId,
+            expectedFrameId:
+              action.type === "pointer"
+                ? value.expectedFrameId === undefined
+                  ? action.frameId
+                  : value.expectedFrameId
+                : null,
+            action,
+          });
+        },
+        // The window an action opened, when the receipt says so: a batch
+        // says it only when its last action completed.
+        (receipt) =>
+          "steps" in receipt && receipt.steps.at(-1)?.state !== "completed"
+            ? null
+            : receipt.observation?.target.id,
+      ),
   });
 
   add({
@@ -2530,10 +2709,15 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerSessionMutationResponse,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) =>
-      await input.transport.endComputerSession(input.workspaceId, value.computerSessionId, {
-        operationId: context.operationId,
-      }),
+    execute: async (value, context) => {
+      const ended = await input.transport.endComputerSession(
+        input.workspaceId,
+        value.computerSessionId,
+        { operationId: context.operationId },
+      );
+      currentComputer.forgetSession(value.computerSessionId);
+      return ended;
+    },
   });
 
   if (
@@ -2551,17 +2735,15 @@ export function createInteractionAttemptToolDefinitions(
           properties.computerSessionId = {
             type: "string",
             format: "uuid",
-            description: "CUA ComputerSession from computer_open",
+            description:
+              "CUA ComputerSession from computer_open. Omit to use the computer you used last.",
           };
           return {
             ...variantInputSchema,
             properties,
-            required: [
-              ...((variantInputSchema.required as string[] | undefined) ?? []).filter(
-                (name) => name !== "session",
-              ),
-              "computerSessionId",
-            ],
+            required: ((variantInputSchema.required as string[] | undefined) ?? []).filter(
+              (name) => name !== "session",
+            ),
           };
         }),
       );
@@ -2585,7 +2767,18 @@ export function createInteractionAttemptToolDefinitions(
         approval: "none",
         execute: async (raw, context) => {
           const { computerSessionId, ...args } = raw;
-          const id = z.string().uuid().parse(computerSessionId);
+          let computer: ResolvedComputerSession;
+          try {
+            computer = await currentComputer.session(
+              z.string().uuid().optional().parse(computerSessionId),
+            );
+          } catch (error) {
+            if (error instanceof ComputerTargetResolutionError) {
+              return interactionErrorResult(error.code, error.message);
+            }
+            throw error;
+          }
+          const id = computer.computerSessionId;
           let response: unknown;
           try {
             response = await input.transport.callNativeComputerTool!(input.workspaceId, id, {
@@ -2593,7 +2786,10 @@ export function createInteractionAttemptToolDefinitions(
               tool: tool.name,
               arguments: args,
             });
+            currentComputer.use(id);
           } catch (error) {
+            if (isGoneBrowserError(error))
+              currentComputer.failed(computer, goneComputerPart(error));
             // The API refused the call before dispatching it (a retired or
             // ended ComputerSession, a missing permission, invalid
             // arguments): a definite failure the model can act on, not an
@@ -2645,32 +2841,15 @@ export function createInteractionAttemptToolDefinitions(
  * (a top-level anyOf is rejected or ignored, so the model loses every argument
  * type). Properties are the union across platforms; a property whose platform
  * schemas differ in more than wording keeps those alternatives at property
- * level. Only properties every platform requires stay required. The session's
- * CUA worker still validates arguments against its own exact platform schema.
+ * level, unless they differ only in their nested properties (a step field one
+ * platform lacks), which merge the same way. Only properties every platform
+ * requires stay required. The session's CUA worker still validates arguments
+ * against its own exact platform schema.
  */
 export function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
   const unique = [...new Map(variants.map((schema) => [JSON.stringify(schema), schema])).values()];
   if (unique.length === 1) return unique[0] as AttemptToolJsonSchema;
-  const properties: Record<string, unknown> = {};
-  const names = [...new Set(unique.flatMap((schema) => Object.keys(objectProperties(schema))))];
-  for (const name of names) {
-    const alternatives = unique
-      .map((schema) => objectProperties(schema)[name])
-      .filter((value): value is Record<string, unknown> => isJsonObject(value));
-    // The first platform's wording wins for constraint-identical schemas.
-    const distinct = new Map<string, Record<string, unknown>>();
-    for (const schema of alternatives) {
-      const key = JSON.stringify(withoutWording(schema));
-      if (!distinct.has(key)) distinct.set(key, schema);
-    }
-    const options = [...distinct.values()];
-    properties[name] = options.length === 1 ? options[0] : { anyOf: options };
-  }
-  const required = names.filter((name) =>
-    unique.every((schema) =>
-      Array.isArray(schema.required) ? schema.required.includes(name) : false,
-    ),
-  );
+  const { properties, required } = mergedProperties(unique);
   return {
     type: "object",
     properties,
@@ -2679,6 +2858,70 @@ export function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToo
       ? { additionalProperties: false }
       : {}),
   } as AttemptToolJsonSchema;
+}
+
+/** The union of the schemas' properties; required only where all require it. */
+function mergedProperties(schemas: Record<string, unknown>[]): {
+  properties: Record<string, unknown>;
+  required: string[];
+} {
+  const properties: Record<string, unknown> = {};
+  const names = [...new Set(schemas.flatMap((schema) => Object.keys(objectProperties(schema))))];
+  for (const name of names)
+    properties[name] = mergedProperty(
+      schemas
+        .map((schema) => objectProperties(schema)[name])
+        .filter((value): value is Record<string, unknown> => isJsonObject(value)),
+    );
+  const required = names.filter((name) =>
+    schemas.every((schema) =>
+      Array.isArray(schema.required) ? schema.required.includes(name) : false,
+    ),
+  );
+  return { properties, required };
+}
+
+function mergedProperty(alternatives: Record<string, unknown>[]): Record<string, unknown> {
+  // The first platform's wording wins for constraint-identical schemas.
+  const distinct = new Map<string, Record<string, unknown>>();
+  for (const schema of alternatives) {
+    const key = JSON.stringify(withoutWording(schema));
+    if (!distinct.has(key)) distinct.set(key, schema);
+  }
+  const options = [...distinct.values()];
+  if (options.length === 1) return options[0]!;
+  return mergedShape(options) ?? { anyOf: options };
+}
+
+const NESTED_KEYS = new Set(["properties", "required", "items"]);
+
+/**
+ * One schema for alternatives that agree on everything but their nested
+ * properties or items, or undefined when they differ anywhere else.
+ */
+function mergedShape(options: Record<string, unknown>[]): Record<string, unknown> | undefined {
+  const shell = (schema: Record<string, unknown>) =>
+    JSON.stringify(
+      withoutWording(
+        Object.fromEntries(Object.entries(schema).filter(([key]) => !NESTED_KEYS.has(key))),
+      ),
+    );
+  const first = options[0]!;
+  if (options.some((schema) => shell(schema) !== shell(first))) return undefined;
+  const merged: Record<string, unknown> = { ...first };
+  if (options.some((schema) => "items" in schema)) {
+    const items = options.map((schema) => schema.items);
+    if (!items.every(isJsonObject)) return undefined;
+    merged.items = mergedProperty(items);
+  }
+  if (options.some((schema) => "properties" in schema || "required" in schema)) {
+    if (!options.every((schema) => isJsonObject(schema.properties))) return undefined;
+    const { properties, required } = mergedProperties(options);
+    merged.properties = properties;
+    if (required.length > 0) merged.required = required;
+    else delete merged.required;
+  }
+  return merged;
 }
 
 function objectProperties(schema: Record<string, unknown>): Record<string, unknown> {
@@ -2827,18 +3070,20 @@ function derivedOperationId(purpose: string, operationId: string, subject: strin
 }
 
 /**
- * Run a computer_act batch: each action is its own durable operation, fenced
- * by the observation the action before it returned, so it acts on the state
- * that action left. Stops at the first action that does not complete. A
- * retried call derives the same operation IDs; an action that already ran
- * under its ID returns its recorded receipt, whatever fence it ran with.
- * Before reading a fresh fence, the step's recorded receipt is read alongside
- * it, so a retry reuses what already ran even when the window is gone.
+ * Run a computer_act batch. A computer that supports it runs the batch as one
+ * operation (see actInComputerNativeBatch). Otherwise each action is its own
+ * durable operation, fenced by the observation the action before it
+ * returned, so it acts on the state that action left, and the batch stops at
+ * the first action that does not complete. A retried call derives the same
+ * operation IDs; an action that already ran under its ID returns its
+ * recorded receipt, whatever fence it ran with. One action at a time, a
+ * step's recorded receipt is read before a fresh fence, so a retry reuses
+ * what already ran even when the window is gone.
  */
 async function actInComputerBatch(
   transport: InteractionTransport,
   workspaceId: string,
-  value: z.output<typeof ComputerActInput>,
+  value: ResolvedComputerActInput,
   actions: ComputerAction[],
   operationId: string,
   /** Whether the computer runs the whole batch as one operation. */
@@ -2864,37 +3109,22 @@ async function actInComputerBatch(
   const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
   // The two ways derive different operation IDs. The computer fixes its
   // answer for the session's life, so every try of one batch picks the same
-  // way. A recorded receipt still decides first: both first receipts are read
-  // before anything is sent, and running the other way would send the actions
-  // again.
-  const nativeOperationId = derivedOperationId("computer-batch", operationId, "all");
-  const firstStepOperationId = derivedOperationId("computer-batch", operationId, "0");
-  const [nativePrior, firstStepPrior] = await Promise.all([
-    recorded(nativeOperationId),
-    recorded(firstStepOperationId),
-  ]);
-  let nativeBatch: boolean;
-  if (typeof nativePrior === "object") nativeBatch = true;
-  else if (typeof firstStepPrior === "object") nativeBatch = false;
-  else {
-    nativeBatch = await runsNatively();
-    if ((nativeBatch ? firstStepPrior : nativePrior) === "unknown")
-      throw new Error(
-        "whether an earlier try of this batch already ran could not be read, so it was not sent; retry the call",
-      );
-  }
-  if (nativeBatch)
+  // way and cannot send its actions under both ways' IDs. Run as one
+  // operation, a retry sends the same ID and the computer's journal answers
+  // it, so nothing is read first.
+  if (await runsNatively())
     return await actInComputerNativeBatch(transport, workspaceId, value, actions, {
-      operationId: nativeOperationId,
-      prior: nativePrior,
+      operationId: derivedOperationId("computer-batch", operationId, "all"),
       observe,
       recorded,
     });
+  const firstStepPrior = await recorded(derivedOperationId("computer-batch", operationId, "0"));
   let generation = value.expectedTargetGeneration;
   let observationId = value.expectedObservationId;
   let observation: Observation | null = null;
   let observedAfterLastAction = true;
   const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
+  const roleStandIns: NonNullable<z.output<typeof ComputerActionBatchReceipt>["roleStandIns"]> = [];
   for (const [index, action] of actions.entries()) {
     const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
     let receipt: Receipt | null = null;
@@ -2985,6 +3215,8 @@ async function actInComputerBatch(
       }
     }
     steps.push({ operationId: receipt.operationId, state: receipt.state, error: receipt.error });
+    for (const standIn of receipt.roleStandIns ?? [])
+      roleStandIns.push({ ...standIn, actionIndex: index });
     if (receipt.observation) observation = receipt.observation;
     if (receipt.state !== "completed") {
       observedAfterLastAction = receipt.observation !== null;
@@ -3012,6 +3244,7 @@ async function actInComputerBatch(
     steps,
     observation,
     observationPrecedesStop: !observedAfterLastAction && observation !== null,
+    ...(roleStandIns.length ? { roleStandIns } : {}),
   };
 }
 
@@ -3025,13 +3258,13 @@ async function actInComputerBatch(
 async function actInComputerNativeBatch(
   transport: InteractionTransport,
   workspaceId: string,
-  value: z.output<typeof ComputerActInput>,
+  value: ResolvedComputerActInput,
   actions: ComputerAction[],
   batch: {
     operationId: string;
-    /** The batch's recorded receipt, read before this call sends anything. */
-    prior: z.output<typeof ComputerActionReceipt> | "absent" | "unknown";
     observe: () => Promise<z.output<typeof ComputerObservation>>;
+    /** The batch's recorded receipt, read only when this call cannot tell
+     * from its own requests whether an earlier try ran it. */
     recorded: (
       operationId: string,
     ) => Promise<z.output<typeof ComputerActionReceipt> | "absent" | "unknown">;
@@ -3042,24 +3275,30 @@ async function actInComputerNativeBatch(
       throw new Error(`a batch runs semantic and keyboard actions, not ${action.type}`);
     return action;
   });
-  let receipt = typeof batch.prior === "object" ? batch.prior : null;
+  let receipt: z.output<typeof ComputerActionReceipt> | null = null;
   let generation = value.expectedTargetGeneration;
   let observationId = value.expectedObservationId ?? null;
-  if (!receipt && (generation === undefined || observationId === null)) {
-    // The recorded receipt was read first: a fresh read replaces the latest
-    // observation, which would make a recovered receipt's fence stale.
-    if (observationId !== null) {
-      // The batch names its observation: the target list gives the
-      // generation without reading the window again, which would retire the
-      // refs the caller holds.
-      generation = (
-        await transport.listComputerTargets(workspaceId, value.computerSessionId)
-      ).targets.find((target) => target.id === value.targetId)?.targetGeneration;
-    }
-    if (generation === undefined || observationId === null) {
-      const current = await batch.observe();
-      generation ??= current.target.targetGeneration;
-      observationId ??= current.observationId;
+  if (generation === undefined || observationId === null) {
+    try {
+      if (observationId !== null) {
+        // The batch names its observation: the target list gives the
+        // generation without reading the window again, which would retire
+        // the refs the caller holds.
+        generation = (
+          await transport.listComputerTargets(workspaceId, value.computerSessionId)
+        ).targets.find((target) => target.id === value.targetId)?.targetGeneration;
+      }
+      if (generation === undefined || observationId === null) {
+        const current = await batch.observe();
+        generation ??= current.target.targetGeneration;
+        observationId ??= current.observationId;
+      }
+    } catch (error) {
+      // An earlier try may have run the batch, closing the window: its
+      // recorded receipt says what ran.
+      const prior = await batch.recorded(batch.operationId);
+      if (typeof prior !== "object") throw error;
+      receipt = prior;
     }
   }
   if (!receipt) {
@@ -3119,6 +3358,7 @@ async function actInComputerNativeBatch(
     steps,
     observation,
     observationPrecedesStop: false,
+    ...(receipt.roleStandIns?.length ? { roleStandIns: receipt.roleStandIns } : {}),
   };
 }
 
@@ -3157,13 +3397,11 @@ async function openBrowser(
       resolveProfile
         ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
         : null,
-      (value.mode === "new" || value.placement) && !resolveProfile
-        ? null
-        : resolveProfile
-          ? // Only a preference here: a failed read must not fail the open.
-            readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
-              () => null,
-            )
+      resolveProfile || (value.mode !== "new" && value.placement?.kind === "connected_machine")
+        ? // Only a preference here: a failed read must not fail the open.
+          readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(() => null)
+        : value.mode === "new" || value.placement
+          ? null
           : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
     ]);
     // The agent-facing browser is human-capable by default. A headless session
@@ -3526,9 +3764,16 @@ async function openComputer(
             associatedSessionId: sourceSessionId,
             includeTerminal: false,
           }),
-      value.mode === "new" || value.placement
+      value.mode === "new"
         ? null
-        : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
+        : value.placement?.kind === "connected_machine"
+          ? // Only a preference here: a failed read must not fail the open.
+            readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
+              () => null,
+            )
+          : value.placement
+            ? null
+            : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
     ]);
     const reusable = newestRelevant(
       listed.sessions.filter((candidate) =>
@@ -3586,6 +3831,17 @@ function compatibleInteractionPlacement(
     // Without a placement only a session on the chat's current machine is
     // reused, never one left on a machine the chat has since swapped away from.
     return current === null || placementFieldsMatch(candidate, current);
+  }
+  // A session on a Connected Machine the chat is not routed to cannot be used
+  // from here: the server retires it on contact. Opening a new one instead
+  // returns the error that says how to move the chat to that machine. The
+  // chat's own sandbox group stays usable from any route.
+  if (
+    requested.kind === "connected_machine" &&
+    current !== null &&
+    !placementFieldsMatch(current, requested)
+  ) {
+    return false;
   }
   return placementFieldsMatch(candidate, requested);
 }
@@ -4326,7 +4582,10 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     if (error instanceof z.ZodError) {
       return interactionErrorResult("invalid_arguments", describeInvalidToolArguments(error));
     }
-    if (error instanceof BrowserTargetResolutionError) {
+    if (
+      error instanceof BrowserTargetResolutionError ||
+      error instanceof ComputerTargetResolutionError
+    ) {
       return interactionErrorResult(error.code, error.message);
     }
     // A failed read is still a useful tool result. Preserve the API's public
@@ -4444,6 +4703,18 @@ function browserToolImageContent(
 /** The remembered browser or tab no longer exists. */
 function isGoneBrowserError(error: unknown): boolean {
   return error instanceof OpenGeniApiError && (error.status === 404 || error.status === 410);
+}
+
+/** What a computer call's 404 or 410 found gone: the computer itself (a 410,
+ * or a 404 saying its session was not found or is not active) or else the
+ * window it named, which the controller reports in many words ("computer
+ * target … does not exist", "CUA window is no longer present"). */
+function goneComputerPart(error: unknown): "window" | "computer" {
+  return error instanceof OpenGeniApiError &&
+    error.status === 404 &&
+    !/session (?:operation )?(?:not found|is not active)/iu.test(error.message)
+    ? "window"
+    : "computer";
 }
 
 /** The API refused the call before running it, possibly because its browser

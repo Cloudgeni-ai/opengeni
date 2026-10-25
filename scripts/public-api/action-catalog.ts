@@ -41,7 +41,8 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     reason: "a provider's browser redirect back to Opengeni",
   },
   {
-    pattern: /^\/v1\/webhooks\/|^\/v1\/integrations\/slack\/(commands|events|interactions)$/,
+    pattern:
+      /^\/v1\/webhooks\/|^\/v1\/integrations\/(slack\/(commands|events|interactions)|teams\/messages)$/,
     reason: "calls from other services, signed by them",
   },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },
@@ -52,6 +53,11 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
+  {
+    pattern:
+      /^\/v1\/workspaces\/:workspaceId\/(recordings|recording-people|recording-models)(\/|$)/,
+    reason: "meeting recordings reach agents through the meetings_search and meeting_read tools",
+  },
 ];
 
 export function isActionCatalogExempt(path: string): boolean {
@@ -69,6 +75,12 @@ export function isActionCatalogExempt(path: string): boolean {
  * full access can do as them. Matched against "METHOD /path".
  */
 export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
+  {
+    pattern:
+      /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
+    reason:
+      "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
+  },
   {
     pattern:
       /^(POST \/v1\/organizations(\/additional)?|GET \/v1\/organization-(memberships|invitations)|POST \/v1\/organization-invitations\/:invitationId\/accept)$/,
@@ -89,6 +101,12 @@ export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reaso
     pattern: /^PUT \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/usage-limit$/,
     reason:
       "a task's usage limit bounds what agents may spend, so only a person in the Opengeni app or the embedding product's server can change it, never an agent",
+  },
+  {
+    pattern:
+      /^(PUT \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/approval|POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/approval\/grants\/:grantId\/revoke)$/,
+    reason:
+      "which secrets need the person's approval each time, and the approvals they gave, guard what agents may use, so only the person signed in to Opengeni themselves can change them, never an agent",
   },
 ];
 

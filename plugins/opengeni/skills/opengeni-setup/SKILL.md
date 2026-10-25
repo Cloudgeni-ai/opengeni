@@ -122,8 +122,8 @@ unrequested business mutation as a test.
 
 Only when requested. Schedules use an installed workspace server id, not an
 inline `mcpServers` entry; create them paused, check prompt, tool ids, model,
-time zone and status, then activate. For inbound product events, use an
-automation source and a paused trigger. For outbound notifications, create a
+time zone and status, then activate. For inbound product events, use an event
+source and a paused schedule with event triggers. For outbound notifications, create a
 workspace webhook, keep its signing secret (returned once) in the product's
 config, and send a signed test delivery.
 

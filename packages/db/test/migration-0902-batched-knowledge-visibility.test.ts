@@ -150,7 +150,11 @@ test("the canonical batch helper is private and retains hardened volatile metada
       FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE p.oid=to_regprocedure(${signature})`;
     expect(row!.prosecdef).toBe(false);
     expect(row!.provolatile).toBe("v");
-    expect(row!.proconfig).toEqual([row!.expected]);
+    expect(row!.proconfig).toEqual(
+      signature.startsWith("knowledge_revisions_visible(")
+        ? [row!.expected, "plan_cache_mode=force_generic_plan"]
+        : [row!.expected],
+    );
     expect(row!.allowed).toBe(false);
   }
 });

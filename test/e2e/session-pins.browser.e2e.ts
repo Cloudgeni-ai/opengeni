@@ -4902,10 +4902,26 @@ async function expectRowPrompt(
   }
 }
 
+// A 44px target is either a 44px box or a slimmer box with an invisible hit
+// area (::before); for the latter, hit-test points 22px either side of the centre.
 async function expectTouchTarget(locator: ReturnType<Page["getByRole"]>): Promise<void> {
-  const box = await locator.boundingBox();
-  expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-  expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+  const hits = await locator.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    if (box.width >= 44 && box.height >= 44) return [true, true, true, true];
+    const x = box.left + box.width / 2;
+    const y = box.top + box.height / 2;
+    const reach = 21.5;
+    return [
+      [x - reach, y],
+      [x + reach, y],
+      [x, y - reach],
+      [x, y + reach],
+    ].map(([px, py]) => {
+      const hit = document.elementFromPoint(px!, py!);
+      return hit !== null && element.contains(hit);
+    });
+  });
+  expect(hits).toEqual([true, true, true, true]);
 }
 
 async function expectContainedInViewport(

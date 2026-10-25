@@ -22,6 +22,15 @@ export type IntegrationDefinitionSource =
       kind: "openapi";
       url: string;
       operationPathPrefixes?: readonly string[];
+      /** Exact reviewed operations; never admit newly added provider methods implicitly. */
+      operationAllowlist?: readonly Readonly<{
+        path: string;
+        method: "get" | "post";
+        /** Provider metadata often omits delegated scopes; bind the reviewed requirement. */
+        requiredScopes?: readonly string[];
+        /** Support the opaque continuation token without accepting arbitrary URLs. */
+        odataSkipToken?: boolean;
+      }>[];
       excludedOperationPathPrefixes?: readonly string[];
       /** Expose JSON bodies without expanding the provider entity graph. */
       schemaMode?: "provider_validated_json";
@@ -343,11 +352,124 @@ export const MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = 
   facets: [driveKnowledgeFacet("microsoft-onedrive"), accountIdentityFacet("microsoft")],
 };
 
+/** Delegated work/school account access. Message sends use the connected human. */
+export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
+  id: "microsoft-teams",
+  name: "Microsoft Teams",
+  summary: "Read teams, channels and chats, and send messages as your connected Microsoft account.",
+  protocol: "openapi",
+  provider: { id: "microsoft", domain: "graph.microsoft.com" },
+  source: {
+    kind: "openapi",
+    url: MICROSOFT_GRAPH_OPENAPI_URL,
+    schemaMode: "provider_validated_json",
+    // No tenant-wide export, membership/admin changes, app installation, or beta search.
+    operationAllowlist: [
+      {
+        path: "/me/joinedTeams",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: ["Team.ReadBasic.All"],
+      },
+      { path: "/teams/{team-id}", method: "get", requiredScopes: ["Team.ReadBasic.All"] },
+      {
+        path: "/teams/{team-id}/channels",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: ["Channel.ReadBasic.All"],
+      },
+      {
+        path: "/teams/{team-id}/channels/{channel-id}",
+        method: "get",
+        requiredScopes: ["Channel.ReadBasic.All"],
+      },
+      {
+        path: "/teams/{team-id}/channels/{channel-id}/messages",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: ["ChannelMessage.Read.All"],
+      },
+      {
+        path: "/teams/{team-id}/channels/{channel-id}/messages",
+        method: "post",
+        requiredScopes: ["ChannelMessage.Send"],
+      },
+      {
+        path: "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}",
+        method: "get",
+        requiredScopes: ["ChannelMessage.Read.All"],
+      },
+      {
+        path: "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/replies",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: ["ChannelMessage.Read.All"],
+      },
+      {
+        path: "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/replies",
+        method: "post",
+        requiredScopes: ["ChannelMessage.Send"],
+      },
+      {
+        path: "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/replies/{chatMessage-id1}",
+        method: "get",
+        requiredScopes: ["ChannelMessage.Read.All"],
+      },
+      { path: "/chats", method: "get", odataSkipToken: true, requiredScopes: ["Chat.Read"] },
+      { path: "/chats/{chat-id}", method: "get", requiredScopes: ["Chat.Read"] },
+      {
+        path: "/chats/{chat-id}/messages",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: ["Chat.Read"],
+      },
+      { path: "/chats/{chat-id}/messages", method: "post", requiredScopes: ["ChatMessage.Send"] },
+      {
+        path: "/chats/{chat-id}/messages/{chatMessage-id}",
+        method: "get",
+        requiredScopes: ["Chat.Read"],
+      },
+    ],
+  },
+  baseUrl: MICROSOFT_GRAPH_BASE_URL,
+  authentication: {
+    ...microsoftOAuth([
+      "Team.ReadBasic.All",
+      "Channel.ReadBasic.All",
+      "ChannelMessage.Read.All",
+      "ChannelMessage.Send",
+      "Chat.Read",
+      "ChatMessage.Send",
+    ]),
+    authorizationUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize",
+    tokenUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
+  },
+  facets: [accountIdentityFacet("microsoft")],
+};
+
+/** Rollout never grants provider authority; the normal connection fences still apply. */
+export function isIntegrationDefinitionEnabled(
+  definitionId: string,
+  rollout: {
+    teamsEnabled?: boolean;
+    teamsAllowedWorkspaceIds?: readonly string[];
+    workspaceId?: string;
+  } = {},
+): boolean {
+  return (
+    definitionId !== "microsoft-teams" ||
+    rollout.teamsEnabled === true ||
+    (!!rollout.workspaceId &&
+      rollout.teamsAllowedWorkspaceIds?.includes(rollout.workspaceId) === true)
+  );
+}
+
 export const CORE_INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = [
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
   MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+  MICROSOFT_TEAMS_INTEGRATION_DEFINITION,
 ];
 
 export function integrationDefinitionById(id: string): IntegrationDefinition | undefined {
@@ -368,22 +490,84 @@ export function filterOpenApiDocumentForDefinition(
   document: Record<string, unknown>,
   definition: IntegrationDefinition,
 ): Record<string, unknown> {
-  if (definition.source.kind !== "openapi" || !definition.source.operationPathPrefixes?.length) {
+  if (
+    definition.source.kind !== "openapi" ||
+    (!definition.source.operationPathPrefixes?.length && !definition.source.operationAllowlist)
+  ) {
     return document;
   }
   const operationPathPrefixes = definition.source.operationPathPrefixes;
+  const operationAllowlist = definition.source.operationAllowlist;
   const excludedOperationPathPrefixes = definition.source.excludedOperationPathPrefixes ?? [];
   if (!isRecord(document.paths)) {
     throw new IntegrationProtocolError("openapi_paths", "OpenAPI document has no paths object");
   }
   const paths = Object.fromEntries(
-    Object.entries(document.paths).filter(
-      ([path]) =>
-        operationPathPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`)) &&
-        !excludedOperationPathPrefixes.some(
-          (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-        ),
-    ),
+    Object.entries(document.paths)
+      .filter(
+        ([path]) =>
+          (!operationPathPrefixes?.length ||
+            operationPathPrefixes.some(
+              (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+            )) &&
+          !excludedOperationPathPrefixes.some(
+            (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+          ),
+      )
+      .flatMap(([path, item]) => {
+        if (!operationAllowlist) return [[path, item]];
+        if (!isRecord(item)) return [];
+        const selected = operationAllowlist.filter((entry) => entry.path === path);
+        const operations = Object.fromEntries(
+          selected
+            .filter(({ method }) => isRecord(item[method]))
+            .map(({ method, requiredScopes, odataSkipToken }) => {
+              const operation = item[method] as Record<string, unknown>;
+              if (operation.$ref)
+                throw new IntegrationProtocolError(
+                  "integration_definition_reference",
+                  "Reviewed operations must be inline OpenAPI operations",
+                );
+              const { servers: _servers, ...reviewed } = operation;
+              return [
+                method,
+                {
+                  ...reviewed,
+                  ...(odataSkipToken
+                    ? {
+                        parameters: [
+                          ...(Array.isArray(reviewed.parameters) ? reviewed.parameters : []),
+                          {
+                            name: "$skiptoken",
+                            in: "query",
+                            required: false,
+                            description:
+                              "Opaque $skiptoken from the previous response @odata.nextLink, URL-decoded once. Keep the same resource and other query values. Never supply the full URL.",
+                            schema: { type: "string", minLength: 1, maxLength: 16384 },
+                          },
+                        ],
+                      }
+                    : {}),
+                  ...(requiredScopes ? { security: [{ delegated: [...requiredScopes] }] } : {}),
+                },
+              ];
+            }),
+        );
+        if (Object.keys(operations).length === 0) return [];
+        // Preserve shared parameters and descriptions, but do not allow a path $ref
+        // to reintroduce unreviewed methods or a provider override of the API origin.
+        return [
+          [
+            path,
+            {
+              ...(item.parameters ? { parameters: item.parameters } : {}),
+              ...(item.summary ? { summary: item.summary } : {}),
+              ...(item.description ? { description: item.description } : {}),
+              ...operations,
+            },
+          ],
+        ];
+      }),
   );
   if (Object.keys(paths).length === 0) {
     throw new IntegrationProtocolError(

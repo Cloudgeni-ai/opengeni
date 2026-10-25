@@ -92,10 +92,10 @@ function switchFor(container: HTMLElement, label: string) {
   return container.querySelector<HTMLButtonElement>(`[role="switch"][aria-label="${label}"]`);
 }
 
-test("owners pick the default audience and whether admins see Only me schedules", async () => {
+test("owners pick the default audience and whether admins see Only me automations", async () => {
   const { container, root } = await render();
-  expect(container.textContent).toContain("Only me chats and schedules");
-  expect(container.textContent).toContain("New chats and schedules");
+  expect(container.textContent).toContain("Only me chats and automations");
+  expect(container.textContent).toContain("New chats and automations");
   expect(radio(container, "Workspace")!.getAttribute("aria-checked")).toBe("true");
   await act(async () => {
     radio(container, "Only me")!.click();
@@ -108,14 +108,14 @@ test("owners pick the default audience and whether admins see Only me schedules"
 
   expect(container.textContent).toContain("Never its name, message or chats.");
   await act(async () => {
-    switchFor(container, "Admins see Only me schedules")!.click();
+    switchFor(container, "Admins see Only me automations")!.click();
     await new Promise((resolve) => setTimeout(resolve, 20));
   });
   expect(updatePrivacy).toHaveBeenLastCalledWith(identity.organizationId, {
     adminsSeePrivateSchedules: false,
   });
   expect(container.textContent).toContain(
-    "Admins can't see other people's Only me schedules at all, like Only me chats.",
+    "Admins can't see other people's Only me automations at all, like Only me chats.",
   );
   await act(async () => root.unmount());
 });
@@ -132,15 +132,15 @@ test("choices this app fixes are shown locked, with the reason", async () => {
     },
   };
   const { container, root } = await render();
-  const onlyMeSwitch = switchFor(container, "Only me chats and schedules")!;
+  const onlyMeSwitch = switchFor(container, "Only me chats and automations")!;
   expect(onlyMeSwitch.getAttribute("aria-checked")).toBe("false");
   expect(onlyMeSwitch.disabled).toBe(true);
   expect(container.textContent).toContain(
     "Only me is off. This is set for everyone using this app.",
   );
   // The default only matters while Only me is on.
-  expect(container.textContent).not.toContain("New chats and schedules");
-  expect(switchFor(container, "Admins see Only me schedules")!.disabled).toBe(true);
+  expect(container.textContent).not.toContain("New chats and automations");
+  expect(switchFor(container, "Admins see Only me automations")!.disabled).toBe(true);
   await act(async () => root.unmount());
 });
 
@@ -175,7 +175,7 @@ test("other privacy choices do not reload access", async () => {
   const accessChanged = mock(() => undefined);
   const { container, root } = await render(accessChanged);
   await act(async () => {
-    switchFor(container, "Admins see Only me schedules")!.click();
+    switchFor(container, "Admins see Only me automations")!.click();
     await new Promise((resolve) => setTimeout(resolve, 20));
   });
   expect(accessChanged).not.toHaveBeenCalled();

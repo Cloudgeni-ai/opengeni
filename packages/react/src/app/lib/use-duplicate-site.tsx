@@ -9,7 +9,7 @@ import { invalidateArtifactCatalog } from "./use-artifact-catalog";
 
 /**
  * Copies a Site's current version into a new Site the person owns. The copy
- * opens on its own page unless the caller keeps the person where they are
+ * opens in the Site view unless the caller keeps the person where they are
  * (`open: false`), when a toast offers to open it.
  */
 export function useDuplicateSite(workspaceId: string) {
@@ -19,8 +19,8 @@ export function useDuplicateSite(workspaceId: string) {
   const inFlight = useRef(false);
   const openCopy = (copy: WorkspaceArtifact) =>
     void navigate({
-      to: "/workspaces/$workspaceId/artifacts/$artifactId",
-      params: { workspaceId, artifactId: copy.id },
+      to: "/workspaces/$workspaceId/sites/$siteId",
+      params: { workspaceId, siteId: copy.id },
     });
   const duplicate = async (
     site: Readonly<{ id: string; title: string }>,

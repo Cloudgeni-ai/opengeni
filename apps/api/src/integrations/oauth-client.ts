@@ -13,7 +13,6 @@ import {
 } from "@opengeni/config";
 import {
   OAuthStartResponse,
-  selectCanonicalPersonalSlackConnection,
   type ConnectionOwnership,
   type OAuthStartRequest,
 } from "@opengeni/contracts";
@@ -94,6 +93,7 @@ import {
   type PinnableAuthorizationServer,
 } from "./oauth-profiles";
 import { canonicalProviderDomain } from "./provider-domain";
+import { decideOAuthAccountConnection, oauthAccountFailureMessage } from "./oauth-account-identity";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
 
@@ -572,12 +572,9 @@ async function startMcpOAuthWithinDeadline(
       subjectId: context.subjectId,
       providerDomain,
       mcpUrl,
-      connectionSelection: profile.connectionSelection,
-      exactMcpBinding: profile.exactMcpBinding,
       connectionId: context.payload.connectionId,
       newAccount: context.payload.newAccount === true,
       requestedOwnership: context.payload.ownership,
-      newConnectionOwnership: requestedOwnership,
     }),
   );
   if (context.payload.connectionId && !existing) {
@@ -1081,66 +1078,38 @@ async function completeMcpOAuthCallbackWithinDeadline(
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
     const persist = async (scopedDb: Database) => {
       await requireOAuthCallbackGrant(scopedDb, state!);
-      if (profile?.connectionSelection === "canonical_personal") {
-        const identity = slackOAuthIdentity(metadata);
-        if (identity) {
-          // Serialize callbacks for one exact provider identity, including two
-          // simultaneous Add requests. Different Slack workspaces remain independent.
-          const identityLockKey = JSON.stringify([
-            state.accountId,
-            state.workspaceId,
-            ownerSubjectId,
-            state.mcpUrl,
-            identity,
-          ]);
-          await scopedDb.execute(
-            sql`select pg_advisory_xact_lock(hashtextextended(${`oauth-identity:${identityLockKey}`}, 0))`,
-          );
-        }
-        if (state!.connectionId) {
-          const existing = await getConnectionMetadata(
-            scopedDb,
-            state.workspaceId,
-            state.connectionId!,
-            state.subjectId,
-          );
-          const expected = existing ? slackOAuthIdentity(existing.metadata) : null;
-          if (expected && identity !== expected) {
-            throw new OAuthCallbackStageError(
-              "persist",
-              "account_mismatch",
-              new Error(
-                "Sign in to the same Slack account and workspace to reconnect. Use Add account for a different identity.",
-              ),
-            );
-          }
-        } else if (identity) {
-          const existing = await listConnectionsMetadata(
-            scopedDb,
-            state.workspaceId,
-            state.subjectId,
-          );
-          if (
-            existing.some(
-              (connection) =>
-                connection.subjectId === ownerSubjectId &&
-                connection.providerDomain === state.providerDomain &&
-                connection.kind === "oauth2" &&
-                connection.status !== "revoked" &&
-                connection.metadata.mcpUrl === state.mcpUrl &&
-                slackOAuthIdentity(connection.metadata) === identity,
-            )
-          ) {
-            throw new OAuthCallbackStageError(
-              "persist",
-              "account_already_connected",
-              new Error(
-                "This Slack account is already connected. Reconnect the existing account instead.",
-              ),
-            );
-          }
-        }
+      // Serialize the entire owner/resource bucket, including providers with no
+      // identity proof. Locking only a known identity lets unknown callbacks race it.
+      const bucket = JSON.stringify([
+        state.accountId,
+        state.workspaceId,
+        ownerSubjectId,
+        state.mcpUrl,
+      ]);
+      await scopedDb.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`oauth-account:${bucket}`}, 0))`,
+      );
+      const accounts = await listConnectionsMetadata(scopedDb, state.workspaceId, state.subjectId);
+      const decision = decideOAuthAccountConnection({
+        accounts,
+        ownerSubjectId,
+        providerDomain: state.providerDomain,
+        mcpUrl: state.mcpUrl,
+        metadata,
+        grantedScopes: scopes,
+        identityKeys: profile?.accountIdentityMetadataKeys,
+        requestedConnectionId: state.connectionId,
+      });
+      if (decision.kind === "reject") {
+        throw new OAuthCallbackStageError(
+          "persist",
+          decision.reason,
+          new Error(oauthAccountFailureMessage(decision.reason)),
+        );
       }
+      // A repeated Add is a successful no-op. Do not rotate credentials, reset
+      // approvals or invalidate accepted work just because OAuth ran again.
+      if (decision.kind === "reuse") return decision.connection;
       return state!.connectionId
         ? await updateConnection(scopedDb, {
             workspaceId: state.workspaceId,
@@ -1253,14 +1222,16 @@ async function completeMcpOAuthCallbackWithinDeadline(
                   staged.reason === "setup_unavailable"
                     ? "Google connector setup is currently unavailable. Your previous connection is unchanged. Try a new connection attempt after setup is enabled."
                     : staged.reason === "account_mismatch"
-                      ? "Sign in to the same Slack account and workspace to reconnect. Use Add account for a different identity."
+                      ? oauthAccountFailureMessage("account_mismatch")
                       : staged.reason === "account_already_connected"
-                        ? "This Slack account is already connected. Reconnect the existing account instead."
-                        : staged.reason === "offline_access_unavailable"
-                          ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Google connection attempt."
-                          : staged.reason === "insufficient_scope"
-                            ? "Google did not grant all required Google connector permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
-                            : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+                        ? oauthAccountFailureMessage("account_already_connected")
+                        : staged.reason === "account_identity_unavailable"
+                          ? oauthAccountFailureMessage("account_identity_unavailable")
+                          : staged.reason === "offline_access_unavailable"
+                            ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Google connection attempt."
+                            : staged.reason === "insufficient_scope"
+                              ? "Google did not grant all required Google connector permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
+                              : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
                 retryable: true,
               },
             }),
@@ -2040,16 +2011,6 @@ async function dynamicClientRegistration(
   };
 }
 
-/** Slack user IDs are scoped to the Slack workspace, not globally unique. */
-function slackOAuthIdentity(metadata: Record<string, unknown>): string | null {
-  return typeof metadata.slackTeamId === "string" &&
-    metadata.slackTeamId &&
-    typeof metadata.slackUserId === "string" &&
-    metadata.slackUserId
-    ? JSON.stringify([metadata.slackTeamId, metadata.slackUserId])
-    : null;
-}
-
 async function existingOAuthConnectionForStart(
   db: Database,
   input: {
@@ -2057,17 +2018,14 @@ async function existingOAuthConnectionForStart(
     subjectId: string;
     providerDomain: string;
     mcpUrl: string;
-    connectionSelection: OAuthProviderProfile["connectionSelection"];
-    exactMcpBinding: boolean;
     connectionId?: string | undefined;
     newAccount?: boolean;
     requestedOwnership?: ConnectionOwnership | undefined;
-    newConnectionOwnership: ConnectionOwnership;
   },
 ) {
   if (input.newAccount) {
-    // A further account always mints its own row; it never refreshes (and so
-    // never replaces) an account the caller already holds for this provider.
+    // Resolve account identity after authorization; never choose credentials
+    // based only on the provider before we know who signed in.
     return null;
   }
   if (input.connectionId) {
@@ -2087,31 +2045,13 @@ async function existingOAuthConnectionForStart(
       });
     }
     return connection.providerDomain === input.providerDomain &&
-      (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl)
+      connection.metadata.mcpUrl === input.mcpUrl
       ? connection
       : null;
   }
-  const visible = await listConnectionsMetadata(db, input.workspaceId, input.subjectId);
-  const ownerSubjectId = input.newConnectionOwnership === "personal" ? input.subjectId : null;
-  const matching = visible.filter(
-    (connection) =>
-      connection.subjectId === ownerSubjectId &&
-      connection.kind === "oauth2" &&
-      connection.providerDomain === input.providerDomain &&
-      (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl),
-  );
-  if (input.connectionSelection === "canonical_personal") {
-    const identities = new Set(
-      matching.map((connection) => slackOAuthIdentity(connection.metadata) ?? connection.id),
-    );
-    if (identities.size > 1) {
-      throw new HTTPException(409, {
-        message: "Choose the Slack account to reconnect, or add a new account",
-      });
-    }
-    return selectCanonicalPersonalSlackConnection(matching);
-  }
-  return matching.find((connection) => connection.status === "active") ?? null;
+  // Only explicit Reconnect may replace a credential. Plain Connect and Add
+  // resolve the returned identity through the same atomic persistence policy.
+  return null;
 }
 
 function ownershipForConnection(

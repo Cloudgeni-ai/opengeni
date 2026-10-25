@@ -156,6 +156,7 @@ import {
 } from "./http/request-body";
 import { invalidPathIdentifierHttpError } from "./http/path-identifier";
 import { replaceTrustedClientAddressHeader } from "./http/request-source";
+import { HTTP_REQUEST_CHILD_SPAN_LIMIT, requestSpanTraceParent } from "./http/request-trace";
 import { unmatchedRoute } from "./http/unmatched-route";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { bearerApiContractHeaderCompatibility } from "./http/api-contract-compat";
@@ -165,7 +166,11 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
-import { PersonalWorkspacesOffError, sessionUsageLimitsProducerEnabled } from "@opengeni/core";
+import {
+  eventTriggersEnabled,
+  PersonalWorkspacesOffError,
+  sessionUsageLimitsProducerEnabled,
+} from "@opengeni/core";
 import {
   CodexCompactionV2ProviderLockedError,
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -338,6 +343,8 @@ import { registerSkillRoutes } from "./routes/skills";
 import { registerChannelRoutes } from "./routes/channels";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
+import { registerEventSourceRoutes } from "./routes/event-sources";
+import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
 import {
   archivedSessionImportErrorResponse,
@@ -390,6 +397,7 @@ import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-auth
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
+import { registerTeamsBotRoutes } from "./integrations/teams-bot";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
 import { resolveSignedStateSecret } from "./signed-state-secret";
 
@@ -934,7 +942,14 @@ export function createAppComposition(deps: AppDependencies): {
         "http.request.method": c.req.method,
         "opengeni.route": route,
       },
-      { parent: null },
+      {
+        ...requestSpanTraceParent(
+          c.req.header("traceparent"),
+          deps.settings.observabilityTrustIncomingTraceContext === true,
+        ),
+        kind: "server",
+        childSpanLimit: HTTP_REQUEST_CHILD_SPAN_LIMIT,
+      },
     );
     return await withMcpTelemetry(observability, span.traceId, () =>
       withTraceContext(span, async () => {
@@ -1464,6 +1479,7 @@ export function createAppComposition(deps: AppDependencies): {
             workspace?.settings.voiceInput,
           ).data;
           const voiceContext = {
+            accountId: grant.accountId,
             workspaceId,
             subjectId: grant.subjectId,
             preferredProvider: voicePreferences?.preferredProvider,
@@ -1552,6 +1568,7 @@ export function createAppComposition(deps: AppDependencies): {
         sessionUsageLimits: {
           enabled: sessionUsageLimitsProducerEnabled(deps.settings),
         },
+        eventTriggers: { enabled: eventTriggersEnabled(deps.settings) },
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -2311,6 +2328,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceIntegrationRoutes(app, routeDeps);
   registerOrganizationIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
+  registerEventSourceRoutes(app, routeDeps);
+  registerRecordingRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
   registerOrganizationModelDefaultsRoutes(app, routeDeps);
@@ -2334,6 +2353,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
+  registerTeamsBotRoutes(app, routeDeps);
 
   app.notFound((c) => {
     if (!new URL(c.req.url).pathname.startsWith("/v1/")) return c.text("Not Found", 404);
@@ -3154,6 +3174,8 @@ const routeLabelPatterns: Array<{
     label: "/v1/billing/entitlements",
   },
   { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
+  { pattern: /^\/v1\/webhooks\/events\/[^/]+$/, label: "/v1/webhooks/events/:routeId" },
+  { pattern: /^\/v1\/webhooks\/github$/, label: "/v1/webhooks/github" },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/(registrations|repositories)(?:\/[^/]+)?$/,
     label: (match) => `/v1/workspaces/:workspaceId/pr-review/${match[1]}`,
@@ -4097,6 +4119,7 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname.startsWith("/v1/webhooks/") ||
     pathname.startsWith("/v1/integrations/oauth/") ||
     isPersonalGitHubGitBrokerRequest(method, pathname) ||
+    pathname === "/v1/integrations/teams/messages" ||
     pathname === "/v1/integrations/slack/events" ||
     pathname === "/v1/integrations/slack/commands" ||
     pathname === "/v1/integrations/slack/interactions" ||

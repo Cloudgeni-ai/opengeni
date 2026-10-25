@@ -106,6 +106,15 @@ describe("Docker sandbox route selection", () => {
     ).toEqual({ reason: "could not inspect Docker network missing" });
   });
 
+  test("refuses a bindable address absent from the host interface snapshot", async () => {
+    expect(await canListenOn("127.0.0.1")).toBe(true);
+    // Models a gateway owned by another namespace even when the OS permits
+    // binding nonlocal addresses; does not depend on changing host sysctls.
+    expect(await canListenOn("127.0.0.1", {})).toBe(false);
+    expect(await canListenOn("0.0.0.0")).toBe(false);
+    expect(await canListenOn("localhost")).toBe(false);
+  });
+
   test("probes host addresses by listening on them", async () => {
     expect(await canListenOn("127.0.0.1")).toBe(true);
     // TEST-NET-1 is never assigned to a host interface.

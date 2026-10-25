@@ -1,4 +1,4 @@
-import { SessionWaitStatus } from "@opengeni/react/app/components/session/session-wait-status";
+import { SessionChrome, type UseTurnQueueResult } from "@opengeni/react";
 import { SessionBrowseOrderControls } from "@opengeni/react/app/components/rail/session-browse-order-controls";
 import type {
   SessionBrowseGroupBy,
@@ -15,7 +15,7 @@ import { createRoot } from "react-dom/client";
 
 import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
-import { sessionStateLabel } from "@opengeni/react/app/lib/session-rail";
+import { sessionInputWait, sessionStateLabel } from "@opengeni/react/app/lib/session-rail";
 import { RowQuickActions } from "@opengeni/react/app/components/rail/session-list";
 import { SessionRowContent } from "@opengeni/react/app/components/rail/session-row-content";
 import { SessionRowHoverDetails } from "@opengeni/react/app/components/rail/session-row-hover-details";
@@ -25,27 +25,36 @@ import type { Session } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
+const emptyQueue = {
+  queue: [],
+  pendingInputs: [],
+  mutationFor: () => null,
+} as unknown as UseTurnQueueResult;
 
 // The header and rows only render inside the app shell, which always provides
 // the app context; their chat actions (copy link, pin) run through it. The
-// fixture runs none of them, so any other read of the context fails loudly.
-// Rows read the viewer's workspace grants to label their archive action
-// (#5711); this viewer can control the chats, so rows offer Archive.
-const appContext = new Proxy(
-  {
-    accessContext: {
-      subjectId: "rail-fixture",
-      workspaceGrants: [{ workspaceId: "workspace", permissions: ["sessions:control"] }],
-      accountGrants: [],
-    },
-  } as unknown as AppContextValue,
-  {
-    get(target, key) {
-      if (key in target) return target[key as keyof AppContextValue];
-      throw new Error(`The session rail fixture's app context has no ${String(key)}`);
-    },
+// fixture supplies the read-only workspace grant used to label archive actions.
+// All unexpected context reads and action calls still fail loudly.
+const appContext = new Proxy({} as AppContextValue, {
+  get(_target, key) {
+    if (key === "accessContext") {
+      return {
+        subjectId: "rail-preview-user",
+        workspaceGrants: [
+          {
+            accountId: "rail-preview-organization",
+            workspaceId: "workspace",
+            subjectId: "rail-preview-user",
+            permissionMode: "explicit",
+            permissions: ["sessions:control"],
+          },
+        ],
+        accountGrants: [],
+      } satisfies AppContextValue["accessContext"];
+    }
+    throw new Error(`The session rail fixture's app context has no ${String(key)}`);
   },
-);
+});
 const active = { kind: "active", count: 1, total: 1, label: "Running" } as const;
 const longTitle =
   "Now I am testing your workspace rail and this title should use every available pixel";
@@ -58,8 +67,16 @@ const cases = [
     active: false,
     depth: 0,
     summary: neutral,
-    scheduled: true,
+    automationWait: "schedule" as const,
     relativeTime: "12 Aug",
+  },
+  {
+    id: "event-wait",
+    active: false,
+    depth: 0,
+    summary: neutral,
+    automationWait: "event" as const,
+    relativeTime: "3h",
   },
   { id: "no-metadata", active: false, depth: 0, summary: neutral },
   { id: "selected-child", active: true, depth: 1, summary: neutral, relativeTime: "1h" },
@@ -148,16 +165,14 @@ function SessionRailRowMetadataFixture() {
                     className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none"
                   >
                     <SessionRowContent
-                      quickActionSlots={
-                        Number(!quickActionSession.archived) + Number(scenario.depth === 0)
-                      }
+                      quickActionSlots={Number(!quickActionSession.archived) + 1}
                       title={longTitle}
                       stateLabel="Idle"
                       depthLabel={scenario.depth > 0 ? `Level ${scenario.depth + 1}` : null}
                       descendantLabel={null}
                       mobile={false}
                       summary={scenario.summary}
-                      scheduled={"scheduled" in scenario ? scenario.scheduled : false}
+                      automationWait={"automationWait" in scenario ? scenario.automationWait : null}
                       relativeTime={"relativeTime" in scenario ? scenario.relativeTime : undefined}
                       creator={
                         scenario.depth > 0
@@ -229,7 +244,12 @@ function SessionRailRowMetadataFixture() {
           onRename={async () => null}
           onPin={async () => null}
         />
-        <SessionWaitStatus session={waitSession} />
+        {/* The wait chip in the status row above the composer, as in the session route. */}
+        <SessionChrome
+          queue={emptyQueue}
+          sessionStatus={waitSession.status}
+          wait={sessionInputWait(waitSession)}
+        />
         <div data-testid="waiting-row" className="flex h-8 w-[244px] items-center px-3">
           <SessionRowContent
             title={waitSession.title!}
@@ -238,7 +258,7 @@ function SessionRailRowMetadataFixture() {
             depthLabel={null}
             descendantLabel={null}
             summary={waitSession.inputWait ? active : neutral}
-            scheduled={false}
+            automationWait={null}
           />
         </div>
         <div className="flex flex-wrap gap-3 p-4">

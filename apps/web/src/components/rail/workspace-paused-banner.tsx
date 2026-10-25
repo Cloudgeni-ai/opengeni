@@ -77,7 +77,7 @@ function PausedBanner({ workspaceId }: { workspaceId: string }) {
     >
       <span className="text-fg">Agent work is paused in {workspace.name}.</span>{" "}
       <span className="text-fg-muted">
-        New sessions and scheduled runs wait{timer ? ` · ${timer}` : " until someone resumes it"}.
+        New sessions and automation runs wait{timer ? ` · ${timer}` : " until someone resumes it"}.
       </span>
     </Notice>
   );

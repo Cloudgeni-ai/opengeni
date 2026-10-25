@@ -1,5 +1,13 @@
 # Opengeni Review Bot
 
+> **Deprecated.** Pull-request review is an automation now: in the web app,
+> **Automations › New › Review new pull requests** creates one with a GitHub
+> `pull_request` trigger and the repositories to review. This setup, its
+> `/v1/workspaces/:workspaceId/pr-review/*` routes and `@opengeni/sdk/pr-review`
+> keep working until January 25, 2027 and are removed in the next major SDK.
+> Existing setups are not migrated, because the automation uses the deployment's
+> GitHub App rather than Opengeni Lens.
+
 Opengeni Review Bot provides a provider-neutral pull-request adapter, a
 reviewed `pr-review` Skill, and setup
 for narrowly scoped provider credentials. It does not add another execution

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/connect",
-  "version": "5.1.2",
+  "version": "5.2.1",
   "description": "Framework-neutral Opengeni connection setup and recovery controller.",
   "license": "Apache-2.0",
   "repository": {

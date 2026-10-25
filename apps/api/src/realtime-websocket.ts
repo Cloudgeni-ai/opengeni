@@ -523,7 +523,7 @@ const ELEVENLABS_REALTIME_VOICES = voiceChoices([
  * The ElevenLabs key a workspace's voice sessions use: the workspace's own
  * key when it has one, else its organization's key.
  */
-async function loadElevenLabsApiKey(
+export async function loadElevenLabsApiKey(
   db: Database,
   settings: Settings,
   scope: { accountId: string; workspaceId: string },

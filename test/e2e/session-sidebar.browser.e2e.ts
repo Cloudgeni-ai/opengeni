@@ -352,11 +352,12 @@ test("Archived filter opens only the archive folder; restore retains the origina
       workspaceId,
       sessionId: "00000000-0000-4000-9000-000000000401",
       archived: false,
-      clientEventId: expect.any(String),
       expectedVersion: 1,
-      // This viewer cannot pause the chat, so the request is personal.
       mode: "hide_for_me",
       confirmPause: false,
+      clientEventId: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
       previousChannelId: redesignId,
       returnedChannelId: redesignId,
     },
@@ -671,7 +672,8 @@ async function openKeyboardFocus(visibleCount: number) {
     return date.getTime();
   });
   await page.clock.setFixedTime(noon);
-  await page.goto(`${url}?scenario=keyboard-focus`);
+  // Control hints isolate keyboard disclosure from the unrelated 15-second fallback poll.
+  await page.goto(`${url}?scenario=keyboard-focus&hints=1`);
   await waitForRows("Today", 4);
   for (let count = 8; count <= visibleCount; count += 4) {
     await showMore("Today").click();
@@ -956,7 +958,7 @@ test("a Site row keeps its conversations nested whichever session is selected", 
   for (const title of usageConversations) await railConversation(title).waitFor();
 }, 30_000);
 
-test("a Site a chat made sits in that chat's project, and opening a Site moves its row up", async () => {
+test("a Site a chat made sits in that chat's project, and opening a Site keeps its place", async () => {
   await page.goto(`${url}?scenario=sites&theme=light`);
   // "Pricing page copy" made it in Website redesign; nobody has asked it
   // anything, so the row has no count and nothing to disclose.
@@ -977,13 +979,31 @@ test("a Site a chat made sits in that chat's project, and opening a Site moves i
     (id) => window.sessionSidebarQa.siteOpens.includes(id),
     checklistSiteId,
   );
-  // Opening it is activity: it now leads Default.
-  await page.waitForFunction(() => {
-    const folder = document.querySelector('[role="group"][aria-label="Default"]');
-    const first = folder?.querySelector("a[data-session-row], [data-site-row] a");
-    return first?.textContent?.includes("Launch checklist") === true;
-  });
+  // Opening it is not activity, as opening a chat is not: it keeps its place
+  // once the sidebar has read the list again after the open.
+  const listsAtOpen = await page.evaluate(() => window.sessionSidebarQa.listCalls.length);
+  await page.evaluate(
+    ([workspace, site]) =>
+      window.dispatchEvent(
+        new CustomEvent("opengeni:site-opened", {
+          detail: { workspaceId: workspace, siteId: site },
+        }),
+      ),
+    [workspaceId, checklistSiteId] as const,
+  );
+  await page.waitForFunction(
+    (count) => window.sessionSidebarQa.listCalls.length > count,
+    listsAtOpen,
+  );
+  await page.waitForTimeout(300);
   expect(await siteRow("Launch checklist").getAttribute("aria-current")).toBe("page");
+  expect(
+    await page.evaluate(() => {
+      const folder = document.querySelector('[role="group"][aria-label="Default"]');
+      const first = folder?.querySelector("a[data-session-row], [data-site-row] a");
+      return first?.textContent?.includes("Launch checklist") === true;
+    }),
+  ).toBe(false);
   await capture("site-row-opened");
 }, 30_000);
 
@@ -1058,4 +1078,195 @@ test("a Site row opens the Site beside its conversations; a nested one opens sel
   await sitePanel().getByText("Ask about Opengeni usage").waitFor();
   await page.waitForURL(new RegExp(`/sites/${usageSiteId}$`, "u"));
   expect(await siteRow("Opengeni usage").getAttribute("aria-current")).toBe("page");
+}, 30_000);
+
+const parentId = conversationId(1);
+const childId = conversationId(11);
+const sessionRowBox = (id: string) =>
+  sidebar().locator(`a[data-session-row="${id}"]`).locator("..");
+const siteRowBox = (siteId: string) => sidebar().locator(`[data-site-row="${siteId}"]`);
+async function openRowActions() {
+  await page.goto(`${url}?scenario=row-actions&theme=light`);
+  await siteRow("Opengeni usage").waitFor();
+  await sessionRowBox(parentId).getByRole("button", { name: "Expand spawned sessions" }).click();
+  await railConversation("Check Slack bot scopes").waitFor();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+}
+
+test("every row shows Pin and Archive over its time on hover or focus, without moving", async () => {
+  await openRowActions();
+  const targets = [
+    {
+      box: sessionRowBox(parentId),
+      actions: sessionRowBox(parentId).locator("[data-session-quick-actions]"),
+      names: ["Pin session", "Archive session"],
+    },
+    {
+      box: sessionRowBox(childId),
+      actions: sessionRowBox(childId).locator("[data-session-quick-actions]"),
+      // Archive belongs to the workstream, so a spawned row names it.
+      names: ["Pin session", "Archive workstream"],
+    },
+    {
+      box: siteRowBox(usageSiteId),
+      actions: siteRowBox(usageSiteId).locator("[data-site-quick-actions]"),
+      names: ["Pin Site", "Archive Site"],
+    },
+  ];
+  for (const row of targets) {
+    await page.mouse.move(1100, 1000);
+    await page.waitForFunction(
+      (element) => element && getComputedStyle(element).opacity === "0",
+      await row.actions.elementHandle(),
+    );
+    const title = row.box.locator("a").first();
+    const before = { row: await row.box.boundingBox(), title: await title.boundingBox() };
+    await row.box.hover();
+    await page.waitForFunction(
+      (element) => element && getComputedStyle(element).opacity === "1",
+      await row.actions.elementHandle(),
+    );
+    for (const name of row.names)
+      await row.box.getByRole("button", { name, exact: true }).waitFor();
+    // The actions replace the time in place: the row and title keep their size.
+    expect(await row.box.boundingBox()).toEqual(before.row);
+    expect(await title.boundingBox()).toEqual(before.title);
+    const time = row.box.locator("[data-session-row-slot]").last();
+    expect(await time.evaluate((element) => getComputedStyle(element).visibility)).toBe("hidden");
+  }
+
+  // Tooltips name each action.
+  await siteRowBox(usageSiteId).getByRole("button", { name: "Pin Site", exact: true }).hover();
+  expect((await page.getByRole("tooltip").first().innerText()).trim()).toBe("Pin");
+  await capture("row-actions-site-hover");
+
+  // Keyboard: focus alone reveals them, and Tab reaches each one.
+  await page.mouse.move(1100, 1000);
+  await siteRow("Opengeni usage").focus();
+  const siteActions = siteRowBox(usageSiteId).locator("[data-site-quick-actions]");
+  await page.waitForFunction(
+    (element) => element && getComputedStyle(element).opacity === "1",
+    await siteActions.elementHandle(),
+  );
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
+    "Pin Site",
+  );
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
+    "Archive Site",
+  );
+}, 30_000);
+
+test("Pin moves a Site row and a spawned row into Pinned and back", async () => {
+  await openRowActions();
+  const pinned = () => group("Pinned");
+  await siteRowBox(usageSiteId).hover();
+  await siteRowBox(usageSiteId).getByRole("button", { name: "Pin Site", exact: true }).click();
+  await pinned()
+    .getByRole("link", { name: /^Open Opengeni usage\. Site\. Pinned/u })
+    .waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(1);
+  await page.waitForFunction(() =>
+    window.sessionSidebarQa.siteSidebarCalls.some((call) => call.pinned === true),
+  );
+  // The toggle names its next action instead of also announcing a state.
+  const unpin = pinned().getByRole("button", { name: "Unpin Site", exact: true });
+  expect(await unpin.getAttribute("aria-pressed")).toBeNull();
+
+  // A spawned chat is pinned as its own shortcut, by keyboard.
+  await sessionRowBox(childId).getByRole("button", { name: "Pin session", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await pinned().locator(`a[data-session-row="${childId}"]`).waitFor();
+  await capture("row-actions-pinned");
+
+  await siteRowBox(usageSiteId).hover();
+  await unpin.click();
+  await page.waitForFunction(() => {
+    const folder = document.querySelector('[role="group"][aria-label="Pinned"]');
+    return !folder?.querySelector("[data-site-row]");
+  });
+  await group("Default")
+    .getByRole("link", { name: /^Open Opengeni usage\. Site,/u })
+    .waitFor();
+}, 30_000);
+
+test("Archive hides a Site row for this person with Undo; a spawned row archives its workstream", async () => {
+  await openRowActions();
+  await siteRowBox(usageSiteId).hover();
+  await siteRowBox(usageSiteId).getByRole("button", { name: "Archive Site", exact: true }).click();
+  await page.getByText("Site archived", { exact: true }).waitFor();
+  await page.getByText("Hidden from your sidebar only.", { exact: true }).waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(0);
+  // Its conversations leave with it.
+  expect(await railConversation("Time filters across all graphs").count()).toBe(0);
+  await capture("row-actions-site-archived");
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await siteRow("Opengeni usage").waitFor();
+  expect(
+    await page.evaluate(() =>
+      window.sessionSidebarQa.siteSidebarCalls.map((call) => call.archived),
+    ),
+  ).toEqual([true, false]);
+
+  // Archiving from the right-click menu hands focus to the next row, not <body>.
+  await siteRowBox(usageSiteId).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
+  await page.getByText("Site archived", { exact: true }).waitFor();
+  await page.waitForFunction((siteId) => {
+    const active = document.activeElement;
+    return Boolean(
+      active?.closest("[data-session-row], [data-site-row]") &&
+      !active.closest(`[data-site-row="${siteId}"]`),
+    );
+  }, usageSiteId);
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await siteRow("Opengeni usage").waitFor();
+
+  // Archiving from the spawned row archives the whole workstream, with Undo.
+  await sessionRowBox(childId).hover();
+  await sessionRowBox(childId)
+    .getByRole("button", { name: "Archive workstream", exact: true })
+    .click();
+  await page.getByText("Chat archived", { exact: true }).waitFor();
+  await page.waitForFunction(
+    (id) => !document.querySelector(`a[data-session-row="${id}"]`),
+    parentId,
+  );
+  expect(
+    await page.evaluate(() =>
+      window.sessionSidebarQa.archiveCalls.map((call) => [call.sessionId, call.archived]),
+    ),
+  ).toEqual([[parentId, true]]);
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await sidebar().locator(`a[data-session-row="${parentId}"]`).waitFor();
+}, 30_000);
+
+test("right-click and the touch overflow menu offer Pin and Archive on every row", async () => {
+  await openRowActions();
+  for (const target of [
+    { row: siteRowBox(usageSiteId), archive: "Archive" },
+    { row: sessionRowBox(childId), archive: "Archive workstream" },
+  ]) {
+    await target.row.locator("a").first().click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).waitFor();
+    await page.getByRole("menuitem", { name: target.archive, exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+  }
+  const touch = await browser.newContext({
+    hasTouch: true,
+    viewport: { width: 1160, height: 1100 },
+  });
+  try {
+    const touchPage = await touch.newPage();
+    await touchPage.goto(`${url}?scenario=row-actions&theme=light`);
+    const row = touchPage.locator(`[data-site-row="${usageSiteId}"]`);
+    await row.waitFor();
+    expect(await row.locator("[data-site-quick-actions]").isVisible()).toBe(false);
+    await row.getByRole("button", { name: "Actions for Opengeni usage", exact: true }).click();
+    await touchPage.getByRole("menuitem", { name: "Pin", exact: true }).waitFor();
+    await touchPage.getByRole("menuitem", { name: "Archive", exact: true }).waitFor();
+  } finally {
+    await touch.close();
+  }
 }, 30_000);

@@ -22,6 +22,7 @@ import {
   revokeSessionAdminAccess,
   SessionAdminAccessNotAllowedError,
   SessionAdminAccessNotOwnSessionError,
+  SessionAdminAccessNotWorkspaceMemberError,
   setOrganizationAgentAdminAccess,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -37,13 +38,13 @@ import { requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 /* ----------------------------------------------------------------------------
-   Admin access for agent sessions.
+   Full access for agent sessions (named "admin access" in the API).
 
-   An organization allows it (off by default). An owner or admin then gives
-   one of their own sessions admin access for an hour by default, a number of
-   hours they choose, or with no time limit: the agent there gets the
-   organization's actions and runs them as that person, with what they can
-   manage right now. It ends by itself when the time is up. Turning the
+   An organization allows it (off by default). Any member then gives a
+   session they started themselves their access for an hour by default, a
+   number of hours they choose, or with no time limit: the agent there gets
+   the organization's actions and runs them as that person, with exactly what
+   they can do right now (an owner or admin can manage more than a member). It ends by itself when the time is up. Turning the
    organization setting off ends every session's admin access. An agent with
    the person's full access (such as one with admin access) can do all of
    this as them; an agent with less can read the state and end access, never
@@ -61,7 +62,7 @@ function parseOrganizationId(value: string | undefined): string {
 function administratorsOnly(error: unknown): never {
   if (nestedPostgresSqlState(error) === "42501") {
     throw new HTTPException(403, {
-      message: "Only organization owners and admins can manage admin access for sessions",
+      message: "Only organization owners and admins can change this setting",
     });
   }
   throw error;
@@ -176,8 +177,7 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
       grantedAt: state.active ? (state.grant?.grantedAt ?? null) : null,
       expiresAt: state.active ? (state.grant?.expiresAt ?? null) : null,
       allowed: state.allowed,
-      canGrant:
-        state.allowed && asThePerson && state.viewerIsAdministrator && state.viewerStartedSession,
+      canGrant: state.allowed && asThePerson && state.viewerStartedSession,
       canRevoke:
         state.grant !== null &&
         (state.grant.grantedBySubjectId === target.grant.subjectId || state.viewerIsAdministrator),
@@ -194,10 +194,15 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
     requireFullAccessIfAgent(c, "Giving a session admin access");
     requireSameOriginBrowserMutation(c, deps);
     const target = await authorizeSession(c, deps, "session.tool_policy.write");
-    const human = await requireOrganizationCodexHuman(c, deps, target.grant.accountId);
-    if (human.subjectId !== target.grant.subjectId) {
-      throw new HTTPException(403, { message: "Give admin access as yourself" });
+    // Only the person themselves (or an agent with their full access): never
+    // an API key or another principal acting on the workspace.
+    if (
+      target.grant.principalKind !== undefined &&
+      target.grant.principalKind !== "human_session"
+    ) {
+      throw new HTTPException(403, { message: "Give a session your access as yourself" });
     }
+    const human = { subjectId: target.grant.subjectId };
     // No body (older clients) means the default: one hour.
     const raw = (await c.req.text().catch(() => "")).trim();
     let input: unknown = null;
@@ -228,10 +233,13 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
       if (error instanceof SessionAdminAccessNotAllowedError) {
         throw new HTTPException(409, { message: error.message });
       }
-      if (error instanceof SessionAdminAccessNotOwnSessionError) {
+      if (
+        error instanceof SessionAdminAccessNotOwnSessionError ||
+        error instanceof SessionAdminAccessNotWorkspaceMemberError
+      ) {
         throw new HTTPException(403, { message: error.message });
       }
-      administratorsOnly(error);
+      throw error;
     }
     return c.json(await view(c, target));
   });
@@ -251,7 +259,7 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
       else await revoke();
     } else if (current.active) {
       throw new HTTPException(403, {
-        message: "Only the person who gave admin access, or an owner or admin, can end it",
+        message: "Only the person who gave this session access, or an owner or admin, can end it",
       });
     }
     return c.json(await view(c, target));

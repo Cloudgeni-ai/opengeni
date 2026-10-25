@@ -79,6 +79,7 @@ export {
   type ManagedAuthActorMutationLeaseStamp,
 } from "./managed-session";
 export * from "./transcription";
+export * from "./recording-transcription";
 export * from "./model-catalog";
 export * from "./model-provider-credentials";
 export * from "./goal-admission";
@@ -128,6 +129,7 @@ export * from "./domain/vaults";
 export * from "./rigs";
 export * from "./domain/automations";
 export * from "./domain/pr-review";
+export * from "./domain/event-triggers";
 
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/resources";

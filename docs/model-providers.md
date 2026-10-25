@@ -2215,10 +2215,21 @@ text is Anthropic's summary of the update, not the words the model wrote, and it
 can claim things the model never said. It therefore stays a reasoning item,
 streamed as reasoning and shown as a thought: it is never an assistant message,
 never `agent.message.completed` or `turn.completed.reply`, and never counts as
-visible text for `wait_for_input` or final-answer checks. When a person's turn
-has only such a summary before `wait_for_input`, the wait is refused so the
-model writes its reply as a `text` block; if it still writes none, nothing is
-recorded as the reply. A `text` block is always recorded verbatim. Replay sends
+visible text for `wait_for_input` or final-answer checks. The model writes a
+note longer than a sentence or two before a tool call this way, so an answer
+written just before `wait_for_input` would reach the person only as that
+summary. `wait_for_input` therefore takes a `reply` argument, shown verbatim as
+the agent's message (see [run lifecycle](./run-lifecycle.md)), and the prompt
+asks for it whenever the turn answers the person. When a person's turn asks to
+wait without a `reply` and the response holds a progress update, or the turn
+has no visible text, the wait is refused (at most twice per attempt) so the
+model passes its answer in `reply`; if it still passes none, nothing is
+recorded as the reply. A `text` block is always recorded verbatim. Progress
+updates are marked `providerData.anthropic.progressUpdate` on the reasoning
+item. `display: "updates"` stays on: under `"omitted"` the notes would be
+empty and under `"summarized"` they would be summaries mixed into reasoning,
+so no display mode returns them verbatim, and because a summary is only ever a
+thought it cannot replace a reply. Replay sends
 each signed block back unchanged in its original position, so history bytes
 match what Claude returned; history stored while updates were briefly recorded
 as assistant messages replays the same signed block. Other APIs see a newly

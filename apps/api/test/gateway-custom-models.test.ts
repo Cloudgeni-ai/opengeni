@@ -512,6 +512,21 @@ describe("workspace Gateway custom model API", () => {
         where account_id = ${grant.accountId}::uuid and provider = 'claude'`;
     }
   });
+  test("an access path naming no connection kind or id is a 404, never a 500", async () => {
+    if (!publicApp) throw new Error("Real database fixture required");
+    for (const route of [
+      "/model-connections/elevenlabs/current/access",
+      "/model-connections/not-a-kind/current/access",
+      "/model-connections/codex/current/access",
+      "/model-connections/openrouter/not-a-connection/access",
+    ]) {
+      const response = await request(route, {}, publicApp);
+      expect({ route, status: response.status }).toEqual({ route, status: 404 });
+      expect(await response.json()).toMatchObject({
+        error: { code: "not_found", details: { code: "invalid_path_identifier" } },
+      });
+    }
+  });
   test("disabled subscription routes fail closed while Anthropic remains accessible", async () => {
     if (!publicApp) throw new Error("Real database fixture required");
     for (const providerKind of ["anthropic", "claude_subscription"] as const) {

@@ -47,6 +47,7 @@ import {
   verifyLivePersonalGitHubRepositories,
 } from "../integrations/personal-github-repositories";
 import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { parsePathParam } from "../http/path-identifier";
 
 export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/github", async (c) => {
@@ -216,7 +217,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       );
       assertPersonalConnectionOwnerPrincipal(access, "My GitHub repositories");
       const query = ListGitHubRepositoryBranchesQuery.parse(c.req.query());
-      const repositoryId = PersonalGitHubRepositoryId.parse(c.req.param("repositoryId"));
+      const repositoryId = parsePathParam(c, "repositoryId", PersonalGitHubRepositoryId);
       try {
         return c.json(
           GitHubRepositoryBranchesResponse.parse(

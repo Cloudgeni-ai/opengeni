@@ -9,6 +9,7 @@ import {
   createDb,
   createSession,
   getRetainedScreenshotArtifact,
+  getSessionRetainedScreenshotArtifacts,
   getWorkspaceScreenshotQuota,
   initializeSessionStartAtomically,
   prepareRetainedScreenshotArtifact,
@@ -28,6 +29,7 @@ import {
   compactRetainedScreenshotHistory,
   inlineImagesFromToolResultItem,
   materializeRetainedScreenshotHistory,
+  RETAINED_SCREENSHOT_READ_CONCURRENCY,
   retainComputerScreenshot,
   retainSessionScreenshot,
   validateComputerScreenshot,
@@ -1321,4 +1323,202 @@ describe("retained screenshot lifecycle fences", () => {
       new Set([firstArtifact.artifactId, secondArtifact.artifactId]),
     );
   }, 180_000);
+
+  test("a history's images load with one row query and concurrent reads, each image once", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const receipts = await retainScreenshots(fixture, memory.storage, 4);
+    const history = [
+      ...receipts.map((receipt, index) => retainedOutputItem(`call-batch-${index}`, receipt)),
+      // The same image again later in the history is read once.
+      retainedOutputItem("call-batch-0-again", receipts[0]!),
+    ];
+
+    const reads: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const slowStorage: ObjectStorage = {
+      ...memory.storage,
+      async getObjectBytes(key) {
+        reads.push(key);
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // Hold each read briefly so overlapping reads are observable.
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        inFlight -= 1;
+        return await memory.storage.getObjectBytes(key);
+      },
+    };
+    const materialized = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: slowStorage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history,
+    });
+
+    const pixels = `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`;
+    expect(materialized.map((item) => item.output)).toEqual(history.map(() => pixels));
+    expect(materialized.map((item) => item.callId)).toEqual(history.map((item) => item.callId));
+    expect(reads).toHaveLength(4);
+    expect(new Set(reads).size).toBe(4);
+    expect(maxInFlight).toBe(Math.min(4, RETAINED_SCREENSHOT_READ_CONCURRENCY));
+  }, 180_000);
+
+  test("a storage error while loading history images still fails the turn so it retries", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const receipts = await retainScreenshots(fixture, memory.storage, 3);
+    let calls = 0;
+    const failingStorage: ObjectStorage = {
+      ...memory.storage,
+      async getObjectBytes(key) {
+        calls += 1;
+        if (calls === 2) throw new Error("storage temporarily unavailable");
+        return await memory.storage.getObjectBytes(key);
+      },
+    };
+    await expect(
+      materializeRetainedScreenshotHistory({
+        db,
+        objectStorage: failingStorage,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        history: receipts.map((receipt, index) =>
+          retainedOutputItem(`call-fail-${index}`, receipt),
+        ),
+      }),
+    ).rejects.toThrow("storage temporarily unavailable");
+  }, 180_000);
+
+  test("the batched row query returns only this session's own screenshots", async () => {
+    if (!available) return;
+    const first = await freshTurn();
+    const second = await freshTurn();
+    const memory = storageFixture();
+    const [own] = await retainScreenshots(first, memory.storage, 1);
+    const [other] = await retainScreenshots(second, memory.storage, 1);
+    const missing = crypto.randomUUID();
+
+    const rows = await getSessionRetainedScreenshotArtifacts(
+      db,
+      first.workspaceId,
+      first.sessionId,
+      [own!.artifactId, other!.artifactId, missing, own!.artifactId],
+    );
+    expect([...rows.keys()]).toEqual([own!.artifactId]);
+    expect(rows.get(own!.artifactId)).toEqual(
+      (await getRetainedScreenshotArtifact(
+        db,
+        first.workspaceId,
+        first.sessionId,
+        own!.artifactId,
+      ))!,
+    );
+    expect(
+      (
+        await getSessionRetainedScreenshotArtifacts(db, first.workspaceId, crypto.randomUUID(), [
+          own!.artifactId,
+        ])
+      ).size,
+    ).toBe(0);
+    expect(
+      (await getSessionRetainedScreenshotArtifacts(db, first.workspaceId, first.sessionId, []))
+        .size,
+    ).toBe(0);
+  }, 180_000);
+
+  test("a fork's inherited screenshot still loads through the per-image lineage proof", async () => {
+    if (!available) return;
+    const parent = await freshTurn();
+    const memory = storageFixture();
+    const [inherited] = await retainScreenshots(parent, memory.storage, 1);
+    const fork = await createSession(db, {
+      accountId: parent.accountId,
+      workspaceId: parent.workspaceId,
+      initialMessage: "forked",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const item = retainedOutputItem("call-inherited", inherited!);
+    // What a fork records: its ancestry and the copied receipt in its history.
+    // Ancestry is fixed at creation, so the fixture sets it past the fence;
+    // the lineage proof reads only the ancestry and the copied receipt.
+    await admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        update sessions
+        set forked_from_session_id = ${parent.sessionId},
+            forked_from_authority_epoch = 1,
+            forked_from_visibility = 'workspace_shared',
+            forked_at = now(),
+            forked_by_organization_membership_id = ${crypto.randomUUID()}
+        where id = ${fork.id}`;
+    });
+    await admin`insert into session_history_items (account_id, workspace_id, session_id, turn_id, position, item)
+      values (${parent.accountId}, ${parent.workspaceId}, ${fork.id}, null, 0, ${admin.json(item)})`;
+
+    expect(
+      (
+        await getSessionRetainedScreenshotArtifacts(db, parent.workspaceId, fork.id, [
+          inherited!.artifactId,
+        ])
+      ).size,
+    ).toBe(0);
+    const [materialized] = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: parent.workspaceId,
+      sessionId: fork.id,
+      history: [item],
+    });
+    expect(materialized!.output).toBe(
+      `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+    );
+  }, 180_000);
 });
+
+type AvailableReceipt = Extract<
+  Awaited<ReturnType<typeof retainComputerScreenshot>>,
+  { available: true }
+>;
+
+async function retainScreenshots(
+  fixture: TurnFixture,
+  storage: ObjectStorage,
+  count: number,
+): Promise<AvailableReceipt[]> {
+  const receipts: AvailableReceipt[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const receipt = await retainComputerScreenshot({
+      db,
+      objectStorage: storage,
+      ...fixture,
+      output: {
+        callId: `call-retain-${index}-${crypto.randomUUID()}`,
+        toolOutputId: `output-retain-${index}`,
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    });
+    if (!receipt.available) throw new Error("retain must succeed");
+    receipts.push(receipt);
+  }
+  return receipts;
+}
+
+function retainedOutputItem(callId: string, receipt: AvailableReceipt) {
+  return {
+    type: "function_call_output",
+    callId,
+    output: { type: "retained_artifact", artifact: receipt },
+  };
+}

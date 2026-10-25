@@ -119,6 +119,7 @@ import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN } from "./product-lifecycle-facts";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
+import { WorkspaceRecordingSettings } from "./recordings";
 import { MediaGenerationResult } from "./video-generation";
 import { KnowledgeProviderCitation } from "./knowledge";
 import { XaiProviderAccountAuthoritySnapshotV1 } from "./xai-provider-account-authority";
@@ -158,10 +159,19 @@ export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
 export * from "./desktop-app";
+export * from "./event-triggers";
+import {
+  ScheduledOccurrenceEvents,
+  ScheduledTaskEvents,
+  ScheduledTaskEventsInput,
+  ScheduledTaskRunEventOccurrence,
+  SessionAutomationWaitSummary,
+} from "./event-triggers";
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-resolution";
+export * from "./secret-use-approvals";
 export * from "./secret-generator";
 export * from "./secret-totp";
 
@@ -172,10 +182,13 @@ export {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   SiteOpenedResponse,
+  SiteSidebarStateResponse,
+  UpdateSiteSidebarStateRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactEvent,
   WorkspaceArtifactEventType,
@@ -992,6 +1005,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "knowledge_retain_file",
   "knowledge_retain_message",
   "knowledge_archive",
+  "meetings_search",
+  "meeting_read",
   "instruction_policy_save",
   "instruction_policy_get",
   "memory_search",
@@ -1362,7 +1377,7 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 
 /**
  * Tools a session has only while it has admin access: the organization's
- * actions, run as the owner or admin who gave it. Admin access, not the
+ * actions, run as the person who gave it, with exactly their access. Admin access, not the
  * session's tool selection, decides whether they are there.
  */
 export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
@@ -2575,6 +2590,7 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
 ] as const;
 
 export * from "./transcription-recordings";
+export * from "./recordings";
 
 /** Per-session / workspace Codex compaction strategy. */
 export const CodexCompactionMode = /* @__PURE__ */ defineSchema(() =>
@@ -2834,7 +2850,7 @@ export function workspaceModelCompactionThreshold(
 }
 
 /**
- * Whether owners and admins may give an agent session admin access. Off by
+ * Whether members may give a session they started their own access. Off by
  * default; turning it off ends every session's admin access.
  */
 export const OrganizationAgentAdminAccess = /* @__PURE__ */ defineSchema(() =>
@@ -2854,8 +2870,8 @@ export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
 
 /**
  * A session's admin access as the viewer sees it. While `active`, the agent
- * in this session can do what `grantedBy` can manage across the
- * organization, checked live on every action.
+ * in this session can do what `grantedBy` can do, checked live on every
+ * action.
  */
 export const SessionAdminAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -2868,7 +2884,7 @@ export const SessionAdminAccess = /* @__PURE__ */ defineSchema(() =>
     allowed: z.boolean(),
     /**
      * The viewer may turn it on, or choose a new time limit while it is on: an
-     * owner or admin, in person, on their own session.
+     * member, in person, on a session they started.
      */
     canGrant: z.boolean(),
     /** The viewer may turn it off. */
@@ -3196,6 +3212,8 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // The workspace's default realtime voice model; null or absent follows
       // the organization. Read leniently.
       realtimeDefaultModel: z.string().nullable().optional().catch(undefined),
+      // Meeting recording defaults. Read leniently.
+      recordings: WorkspaceRecordingSettings.optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3398,6 +3416,8 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
       // Default realtime voice model; null follows the organization again.
       realtimeDefaultModel: SessionRealtimeModel.nullable().optional(),
+      // Meeting recording defaults, replaced as a whole.
+      recordings: WorkspaceRecordingSettings.optional(),
     })
     .passthrough(),
 );
@@ -6244,6 +6264,18 @@ export type GitHubAppApiPort = {
     page: number;
     limit: number;
   }) => Promise<GitHubAppRepositoryBranchPage>;
+  /**
+   * Where the App sends its webhooks (null when it has no webhook URL) and the
+   * webhook events it is subscribed to. Read when a workspace adds a GitHub
+   * event source and when a trigger lists the event types it can use.
+   */
+  getWebhookSetup?: () => Promise<{ webhookUrl: string | null; events: string[] }>;
+  /**
+   * Point the App's webhook at Opengeni's GitHub receiver, signed with the
+   * webhook secret the deployment verifies (`OPENGENI_GITHUB_WEBHOOK_SECRET`).
+   * Only called when the App has no webhook URL yet.
+   */
+  setWebhookUrl?: (input: { url: string }) => Promise<void>;
 };
 
 export const PromotionalCreditScope = /* @__PURE__ */ defineSchema(() =>
@@ -10534,6 +10566,8 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
          * person pinned for them can no longer be used.
          */
         unavailableConnectors: z.array(z.string().min(1).max(256)).max(128).optional(),
+        /** Event runs only: the events that caused this run. */
+        events: ScheduledOccurrenceEvents.optional(),
       })
       .passthrough(),
     z
@@ -11680,7 +11714,7 @@ export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ /* @__PURE__ */ define
 export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
 
 export const ScheduledTaskTriggerType = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z.enum(["scheduled", "manual", "initial", "provider_event", "retry", "repair"]),
+  z.enum(["scheduled", "manual", "initial", "provider_event", "retry", "repair", "event"]),
 );
 export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
 
@@ -12462,6 +12496,11 @@ export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
      * active and until a run succeeds). Absent when nothing blocks it.
      */
     blocker: ScheduledTaskBlocker.optional(),
+    /**
+     * Read-only response projection: the automation's event triggers and
+     * event run policy. Absent when it has no event triggers.
+     */
+    events: ScheduledTaskEvents.optional(),
   }),
 );
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
@@ -12910,6 +12949,8 @@ export const ScheduledTaskRun = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() 
     degradedAccounts: ScheduledTaskDegradedAccounts.optional(),
     /** Why the scheduler refused this occurrence before running it (see the schema). */
     admissionRefusal: ScheduledTaskAdmissionRefusal.nullable().optional(),
+    /** Event runs only: the trigger and events that caused the run. */
+    eventOccurrence: ScheduledTaskRunEventOccurrence.nullable().optional(),
     /**
      * Read-time: this dispatched run's own turn is waiting on a person (a tool
      * approval or structured question) since `since`; `expiresAt` is when the
@@ -13065,6 +13106,8 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     // session's own environment for an existing-session task. null means none.
     rigId: z.string().uuid().nullable().optional(),
     metadata: ScheduledTaskMetadataInput.default({}),
+    /** Event triggers and the event run policy. Use schedule `{ type: "manual" }` for an event-only automation. */
+    events: ScheduledTaskEventsInput.optional(),
   },
   { rejectKeys: ["selectedHostMcpDelegations", "connectionAccounts"] },
 ).superRefine((value, context) => {
@@ -13154,6 +13197,8 @@ export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */
       overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
       status: ScheduledTaskStatus.default("active"),
       metadata: ScheduledTaskMetadataInput.default({}),
+      /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
+      events: ScheduledTaskEventsInput.optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -13258,6 +13303,8 @@ export const UpdateScheduledTaskRequest =
       // resolved per fire, so an update takes effect on the next dispatch.
       rigId: z.string().uuid().nullable().optional(),
       metadata: z.record(z.string(), z.unknown()).optional(),
+      /** Replace the event triggers and event run policy; `{ triggers: [] }` removes every trigger. */
+      events: ScheduledTaskEventsInput.optional(),
     },
     { rejectKeys: ["selectedHostMcpDelegations", "connectionAccounts"] },
   ).superRefine((value, context) => {
@@ -16043,6 +16090,19 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * paused, and not a one-time schedule whose time has passed.
      */
     hasUpcomingSchedules: z.boolean().optional(),
+    /**
+     * An active automation targeting this session will run when one of its
+     * events arrives: it has an active event trigger and, if it runs once,
+     * has not run yet.
+     */
+    waitingForEvents: z.boolean().optional(),
+    /**
+     * What the automations the reader can see are waiting for before they
+     * continue this session: the next scheduled run and the first event.
+     * Null when none of them can start a run; omitted by older servers and
+     * for readers without schedule access.
+     */
+    automationWait: SessionAutomationWaitSummary.nullable().optional(),
     initialMessage: z.string(),
     title: z.string().nullable(),
     titleSource: z.enum(["user", "agent"]).nullable(),
@@ -16317,7 +16377,7 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     title: z.string(),
     /** Root conversations in the group; 0 for a Site with none yet. */
     conversations: z.number().int().nonnegative(),
-    /** Latest activity: its conversations, its newest published version, or the viewer opening it. */
+    /** Latest activity: its conversations, its newest published version, or the chats that published it. Opening it is not activity. */
     updatedAt: z.string().datetime(),
     /** Creation time of the group's newest conversation, else of the Site. */
     createdAt: z.string().datetime(),
@@ -16331,6 +16391,9 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     waiting: z.number().int().nonnegative(),
     unread: z.number().int().nonnegative(),
     activeWork: z.number().int().nonnegative(),
+    /** This person pinned the Site in their sidebar. Absent when not pinned. */
+    pinned: z.literal(true).optional(),
+    pinnedAt: z.string().datetime().nullable().optional(),
   }),
 );
 export type SiteConversationGroup = z.infer<typeof SiteConversationGroup>;
@@ -16387,6 +16450,8 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     backgroundCommandActivity: true,
     hasSchedules: true,
     hasUpcomingSchedules: true,
+    waitingForEvents: true,
+    automationWait: true,
     title: true,
     titleSource: true,
     createdBy: true,
@@ -16495,6 +16560,10 @@ export const SessionLineageResponse = /* @__PURE__ */ defineSkillContractSchema(
     sessionHasSchedules: z.boolean().optional(),
     /** An active schedule targeting the requested session can still start a run. */
     sessionHasUpcomingSchedules: z.boolean().optional(),
+    /** An active automation targeting the requested session is waiting for an event. */
+    sessionWaitingForEvents: z.boolean().optional(),
+    /** What the automations continuing the requested session are waiting for. */
+    sessionAutomationWait: SessionAutomationWaitSummary.nullable().optional(),
     ancestors: z.array(Session),
     children: z.array(LineageNode),
     truncated: z.boolean().default(false),
@@ -22287,6 +22356,11 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
      * Omitted by older servers, which ignore `usageLimitMicros` on create.
      */
     sessionUsageLimits: z.object({ enabled: z.boolean() }).strict().optional(),
+    /**
+     * Whether automations can have event triggers on this server: event
+     * sources, the webhook intake and event runs. Omitted by older servers.
+     */
+    eventTriggers: z.object({ enabled: z.boolean() }).strict().optional(),
     // Whether this deployment offers the Jev-backed code_search agent tool and
     // whether workspaces without their own setting get it.
     codeSearch: z

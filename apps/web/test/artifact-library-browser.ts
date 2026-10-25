@@ -277,7 +277,51 @@ try {
     await page.goto(`${baseUrl}/test/artifact-library.html?session=1`, {
       waitUntil: "networkidle",
     });
+    // An image opens the large viewer, which steps through the panel's list.
     await page.getByRole("button", { name: "Project mark", exact: true }).click();
+    const viewer = page.getByRole("dialog", { name: "Project mark", exact: true });
+    await viewer.getByRole("img", { name: "Project mark", exact: true }).waitFor();
+    const viewerBox = await viewer.boundingBox();
+    assert.ok(viewerBox && viewerBox.width >= width - 1 && viewerBox.height >= height - 1);
+    const viewerPosition = viewer.locator("[data-artifact-viewer-position]");
+    const startPosition = (await viewerPosition.textContent()) ?? "";
+    assert.match(startPosition, /^\d+ of \d+$/);
+    await page.screenshot({ path: `${output}/viewer-${suffix}.png` });
+    // Ctrl + plus zooms the image itself, larger on screen, and Ctrl + 0 fits it again.
+    const viewerImage = viewer.locator("[data-zoom-pan-surface] img");
+    await viewerImage.and(page.locator("[data-zoom-scale]")).waitFor();
+    const fittedScale = Number(await viewerImage.getAttribute("data-zoom-scale"));
+    const fittedWidth = (await viewerImage.boundingBox())?.width ?? 0;
+    await page.keyboard.press("Control+Equal");
+    await page.waitForFunction(
+      (fitted) =>
+        Number(
+          document.querySelector("[data-zoom-pan-surface] img")?.getAttribute("data-zoom-scale"),
+        ) > fitted,
+      fittedScale,
+    );
+    assert.ok(((await viewerImage.boundingBox())?.width ?? 0) > fittedWidth);
+    await page.keyboard.press("Control+Digit0");
+    await page.waitForFunction(
+      (fitted) =>
+        Number(
+          document.querySelector("[data-zoom-pan-surface] img")?.getAttribute("data-zoom-scale"),
+        ) === fitted,
+      fittedScale,
+    );
+    await page.keyboard.press("ArrowRight");
+    await page.waitForFunction(
+      (previous) =>
+        document.querySelector("[data-artifact-viewer-position]")?.textContent !== previous,
+      startPosition,
+    );
+    await page.keyboard.press("ArrowLeft");
+    await page.getByRole("dialog", { name: "Project mark", exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    await page.locator("[data-artifact-viewer]").waitFor({ state: "detached" });
+    // Its menu's Open still shows it in the panel.
+    await page.getByRole("button", { name: "More actions for Project mark", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Open", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
     assert.equal(await page.getByRole("link", { name: "Artifacts", exact: true }).count(), 0);
     assert.equal(await page.getByRole("button", { name: "Back to session artifacts" }).count(), 1);

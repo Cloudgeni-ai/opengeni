@@ -66,6 +66,7 @@ import { LightboxProvider } from "../../timeline";
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
 import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
+import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
 import {
   SessionSecretsMenuBody,
@@ -177,6 +178,7 @@ import { useRail } from "../components/rail/rail-context";
 import { sessionComputeLabel } from "../../sandbox-label-model";
 import { useBackgroundAttentionTitle } from "../lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "../components/session/chat-viewport-file-drop-target";
+import { sessionInputWait } from "../lib/session-rail";
 import { SessionWorkspace } from "../components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "../components/session/artifact-link-boundary";
 import { Button } from "../../ui/button";
@@ -312,11 +314,6 @@ const SessionCapabilityCard = lazy(async () => ({
 const NativeConnectSetup = lazy(() =>
   import("../components/capabilities/native-connect-setup").then((module) => ({
     default: module.NativeConnectSetup,
-  })),
-);
-const LazySessionWaitStatus = lazy(() =>
-  import("../components/session/session-wait-status").then((module) => ({
-    default: module.SessionWaitStatus,
   })),
 );
 
@@ -2772,6 +2769,12 @@ function SessionChatPane(props: {
     props.connectionState,
     props.initialLoading,
   );
+  const queuedRecall = useQueuedPromptRecall({
+    queue: props.queue,
+    composer,
+    subjectId: context.accessContext.subjectId,
+    enabled: !terminal,
+  });
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
     if (attachments.hasUnresolved) {
       return {
@@ -3749,17 +3752,9 @@ function SessionChatPane(props: {
 
           {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
-          {props.session.inputWait &&
-          props.session.status === "idle" &&
-          admissionControl.state === "active" ? (
-            <Suspense fallback={null}>
-              <LazySessionWaitStatus session={props.session} />
-            </Suspense>
-          ) : null}
-
-          {/* Compact session chrome above the composer — incoming, queue, goal,
-          and agents as one dock. Hides entirely when there are no signals. */}
-          <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
+          {/* One slim status row above the composer: the agent's wait, queue,
+          goal and activity. Hides entirely when there are no signals. */}
+          <div className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6">
             <div className="mx-auto w-full max-w-3xl">
               <SessionAdmissionNotice
                 key={`${props.session.workspaceId}:${props.session.id}`}
@@ -3838,9 +3833,12 @@ function SessionChatPane(props: {
               ) : null}
               <SessionChrome
                 sessionStatus={props.session.status}
+                // Same rule as the header's Waiting badge, plus the merged admission control.
+                wait={admissionControl.state === "active" ? sessionInputWait(props.session) : null}
                 onOpenSession={props.onOpenSession}
                 queue={props.queue}
                 composer={terminal ? undefined : composer}
+                queuedRecall={queuedRecall}
                 goal={props.goal}
                 readOnly={terminal}
                 commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
@@ -3872,7 +3870,7 @@ function SessionChatPane(props: {
           <div
             ref={composerRegionRef}
             data-read-only-composer={readOnlyArchive ? "hidden" : undefined}
-            className={`shrink-0 px-4 pb-4 pt-1 sm:px-6${readOnlyArchive ? " hidden" : ""}`}
+            className={`shrink-0 px-4 pb-4 sm:px-6${readOnlyArchive ? " hidden" : ""}`}
           >
             <div className="mx-auto w-full max-w-3xl">
               <PersonalResourceAttachmentSurface
@@ -3887,6 +3885,7 @@ function SessionChatPane(props: {
                 attachments={attachments}
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
+                queuedRecall={queuedRecall}
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,

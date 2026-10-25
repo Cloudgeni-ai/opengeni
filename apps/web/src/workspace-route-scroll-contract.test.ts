@@ -32,6 +32,7 @@ const workspaceRouteContracts = {
   workspaceRigsRoute: { kind: "page", source: "routes/rigs.tsx" },
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
+  workspaceComputerUseRoute: { kind: "page", source: "routes/computer-use.tsx" },
   workspaceReadOnlyChatsRoute: { kind: "page", source: "routes/read-only-chats.tsx" },
   workspaceInboxRoute: { kind: "page", source: "routes/inbox.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
@@ -40,10 +41,20 @@ const workspaceRouteContracts = {
     source: "routes/capabilities.tsx",
   },
   workspaceLegacyCapabilitiesRoute: { kind: "redirect" },
-  workspaceSchedulesRoute: { kind: "page", source: "routes/schedules.tsx" },
-  workspaceScheduleNewRoute: { kind: "page", source: "routes/schedules.tsx" },
-  workspaceScheduleDetailRoute: { kind: "page", source: "routes/schedules.tsx" },
-  workspaceScheduleEditRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceAutomationsRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceAutomationNewRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceAutomationDetailRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceAutomationEditRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceEventSourcesRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceEventSourceNewRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceEventSourceDetailRoute: { kind: "page", source: "routes/automations.tsx" },
+  // The old Schedules URLs redirect to Automations.
+  workspaceLegacySchedulesRoute: { kind: "redirect" },
+  workspaceLegacyScheduleNewRoute: { kind: "redirect" },
+  workspaceLegacyScheduleDetailRoute: { kind: "redirect" },
+  workspaceLegacyScheduleEditRoute: { kind: "redirect" },
+  workspaceMeetingsRoute: { kind: "page", source: "routes/meetings.tsx" },
+  workspaceMeetingDetailRoute: { kind: "page", source: "routes/meetings.tsx" },
   workspaceDocumentsRoute: { kind: "redirect" },
   workspaceMemoryRoute: { kind: "redirect" },
   workspaceStateRoute: {
@@ -161,7 +172,7 @@ describe("workspace route scroll ownership", () => {
     const legacyWrapper =
       'className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8"';
     for (const path of [
-      "routes/schedules.tsx",
+      "routes/automations.tsx",
       "routes/rigs.tsx",
       "routes/rig-detail.tsx",
       "routes/machines.tsx",

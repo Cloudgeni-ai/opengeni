@@ -161,12 +161,16 @@ export function EmptyStateTemplates({
 /** One starter card. The whole card prefills the create form. */
 export function EmptyStateTemplate({
   icon,
+  tile,
   title,
   description,
   meta,
   onSelect,
 }: {
+  /** A 16px icon, shown in a brand tile. */
   icon?: ReactNode | undefined;
+  /** A finished 32px tile instead of the icon, for example an app's logo. */
+  tile?: ReactNode | undefined;
   title: ReactNode;
   description?: ReactNode | undefined;
   /** One quiet fact, for example the cadence: "Every weekday at 08:00". */
@@ -184,7 +188,7 @@ export function EmptyStateTemplate({
         aria-describedby={description ? descriptionId : undefined}
         className="group/template flex h-full w-full min-w-0 flex-col items-start gap-3 rounded-[14px] border border-border bg-surface p-4 text-left transition-colors duration-[120ms] hover:border-border-strong hover:bg-surface-2"
       >
-        {icon ? <LogoTile size="md" icon={icon} tone="brand" /> : null}
+        {tile ?? (icon ? <LogoTile size="md" icon={icon} tone="brand" /> : null)}
         <span className="flex min-w-0 flex-col gap-1">
           <span id={titleId} className="text-sm leading-5 font-medium text-fg">
             {title}

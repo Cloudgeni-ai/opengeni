@@ -2701,6 +2701,64 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  test("a failed relaunch closes the browser it started, so the next recovery relaunches", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let closes = 0,
+        detaches = 0,
+        starts = 0,
+        relaunchedRunning = false;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        // The recorded browser is gone, so recovery relaunches the profile.
+        inspectOwnedProcess: async () => "exited",
+        // The profile counts as in use while a relaunched browser runs.
+        assertProfileUnused: async () => {
+          if (relaunchedRunning) throw new Error("synthetic profile in use");
+        },
+        createDriver: async (context) => {
+          const driver = fakeDriver(context);
+          return {
+            ...driver,
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            async start(url?: string) {
+              relaunchedRunning = true;
+              starts++;
+              if (starts === 1) throw new Error("synthetic start failure after launch");
+              return await driver.start(url);
+            },
+            async close() {
+              closes++;
+              relaunchedRunning = false;
+              await driver.close();
+            },
+            async detach() {
+              detaches++;
+            },
+          };
+        },
+      });
+      try {
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow();
+        // The browser this recovery launched was stopped, not left running.
+        expect({ closes, detaches, relaunchedRunning }).toEqual({
+          closes: 1,
+          detaches: 0,
+          relaunchedRunning: false,
+        });
+        const result = await supervisor.createSession({
+          ...options,
+          recoverExistingWorkingDirectory: true,
+        });
+        expect(result.browserSessionId).toBe(options.browserSessionId);
+        expect(starts).toBe(2);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
   test("a failed reattach whose transport did not detach keeps the browser refused", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
       let drivers = 0;

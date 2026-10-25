@@ -82,6 +82,7 @@ describe("optional repository access lost after the session started", () => {
       authorityExpiresAt: new Date(checkedAt.getTime() + 600_000),
       authorityNonce: crypto.randomUUID(),
       repositoryIds,
+      eventRouteSecret: null,
     });
     if (!bound) throw new Error("allowlist binding was not recorded");
   }

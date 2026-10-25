@@ -12,6 +12,7 @@ import {
   Pressable,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
   type ViewStyle,
 } from "react-native";
@@ -198,11 +199,14 @@ export function SessionComposer(props: SessionComposerProps) {
   const c = theme.colors;
   const ios = Platform.OS === "ios";
   const pasteInputId = useComposerImagePaste(props.onPasteImages);
-  const [height, setHeight] = useState(22);
+  // One line of the field at the person's text size (the line height scales with it).
+  const { fontScale } = useWindowDimensions();
+  const line = Math.ceil(22 * fontScale);
+  const [height, setHeight] = useState(line);
   const empty = !props.value;
   useEffect(() => {
-    if (empty) setHeight(22);
-  }, [empty]);
+    if (empty) setHeight(line);
+  }, [empty, line]);
   // Track the keyboard directly: React Native's KeyboardAvoidingView mis-measures
   // inside modals and overlays; the animated keyboard height does not.
   const keyboard = useAnimatedKeyboard();
@@ -266,7 +270,7 @@ export function SessionComposer(props: SessionComposerProps) {
       autoFocus={props.autoFocus}
       selectionColor={c.accent}
       onContentSizeChange={(event) =>
-        setHeight(Math.min(150, Math.max(22, event.nativeEvent.contentSize.height)))
+        setHeight(Math.min(150, Math.max(line, event.nativeEvent.contentSize.height)))
       }
       style={{
         ...fontStyle(theme),
@@ -284,8 +288,8 @@ export function SessionComposer(props: SessionComposerProps) {
           ? inline
             ? props.value
               ? undefined
-              : 36
-            : (props.value ? height : 22) + 16
+              : Math.max(36, line + 14)
+            : (props.value ? height : line) + 16
           : undefined,
         maxHeight: 166,
         textAlignVertical: inline ? "center" : "top",
@@ -662,7 +666,8 @@ function AlternateSendAction(props: SessionComposerProps & { messages: ChatCompo
         onAlternateSend();
       }}
       style={({ pressed }) => ({
-        height: 34,
+        minHeight: 34,
+        paddingVertical: 6,
         paddingHorizontal: 14,
         borderRadius: 17,
         alignItems: "center",

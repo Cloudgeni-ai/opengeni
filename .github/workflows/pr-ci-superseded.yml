@@ -1,0 +1,26 @@
+name: Cancel superseded PR CI
+on:
+  pull_request_target:
+    branches: [main]
+    types: [synchronize]
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+jobs:
+  superseded:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Trusted base code only; never execute or check out the incoming PR here.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Cancel only superseded PR heads
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/github-pr-ci.ts superseded

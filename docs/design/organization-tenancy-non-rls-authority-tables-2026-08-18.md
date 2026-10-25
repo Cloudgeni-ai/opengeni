@@ -362,6 +362,39 @@ operational exemption is pinned in `NON_RLS_RUNTIME_TABLES` and
 `packages/db/test/non-rls-authority-tables.test.ts`, with shared atomic admission
 covered by `packages/db/test/slack-api-rate-limits.test.ts`.
 
+### 2026-10-24 addendum: event source ingress routes
+
+`event_ingress_routes` (migration `0929_event_triggers.sql`) generalizes the
+webhook routing exemption above to event sources. A delivery arrives with
+either a random route UUID (generic webhooks and MCP Events webhooks) or a
+GitHub App installation, and that key is what discovers the owning
+organization, workspace and FORCE-RLS `event_sources` row. Requiring an
+organization GUC first would be circular, as for
+`automation_webhook_endpoints`.
+
+Each row holds the route id, organization, workspace and source attribution,
+the source kind, an optional external key and its creation time. It stores no
+secret, credential, event payload, trigger configuration or provider identity;
+the FORCE-RLS source row and its encrypted secret still authenticate every
+delivery after the lookup.
+
+As first shipped, app routes keyed GitHub installations, Slack teams and Gmail
+mailboxes by their plain identity, so arbitrary runtime-role SQL could read
+mailbox addresses with their tenant attribution. Migration
+`0941_event_ingress_routes_without_identities.sql` removed those rows before
+runtime DML on this table was granted (migration `0937` withholds it):
+
+- A GitHub route's external key is an HMAC-SHA-256 of the installation under a
+  route secret derived from the deployment's encryption key, so equality
+  lookups still work and the table alone reveals no installation.
+- Slack and Gmail sources have no route. The Slack receiver's own installation
+  routing (`opengeni_private.resolve_slack_installation`) already names the
+  workspace, and Gmail is read rather than delivered. Their team id and
+  mailbox stay on the FORCE-RLS source row.
+
+The exemption is pinned in `NON_RLS_RUNTIME_TABLES` and
+`packages/db/test/non-rls-authority-tables.test.ts`.
+
 ## What would change the verdict
 
 The `workspaces` and `workspace_memberships` exemptions are consequences of one

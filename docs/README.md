@@ -97,3 +97,6 @@ This map defines who each doc tier serves and where volatile facts belong.
 1. Volatile facts such as paths, package names, commands, and env vars live in the canonical home; other docs link instead of restating.
 2. `docs/design/**` is a public record tier. Add the point-in-time banner and `<!-- docs-refs: record -->` marker; do not "freshen" those docs. Raw run logs, screenshots/video, reviewer transcripts, private issue links, production identifiers/metrics, personal paths, and credentials belong in private artifact storage, never this repository.
 3. Current-tier freshness is enforced in CI by `scripts/check-docs-refs.ts`.
+
+Microsoft Teams pilot setup, packaging, verification and Store submission:
+[release readiness](microsoft-teams-release-readiness.md).

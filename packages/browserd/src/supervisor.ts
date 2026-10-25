@@ -1745,18 +1745,67 @@ export class BrowserSupervisor {
     return this.requireRecording(reference, recordingId).summary();
   }
 
-  /** Uploads a stopped recording's bundle through a narrow object grant. */
+  /** Uploads a stopped recording's bundle through a narrow object grant and
+   * waits for it to land, however long that takes. */
   async exportRecording(
     reference: BrowserSessionReference,
     recordingId: string,
     upload: BrowserDownloadExportRequestValue["upload"],
   ): Promise<{ sizeBytes: number; sha256: string }> {
-    const bundle = this.requireRecording(reference, recordingId).exportable();
-    await this.uploadDownload(bundle.path, upload, {
+    const recording = this.requireRecording(reference, recordingId);
+    const bundle = recording.exportable();
+    await this.recordingTransfer(recording, upload).done;
+    return { sizeBytes: bundle.sizeBytes, sha256: bundle.sha256 };
+  }
+
+  /** Starts or joins the bundle upload and waits at most `waitMs` for it. A
+   * slow link keeps uploading after this returns `uploading`; asking again
+   * with a grant for the same object joins that upload. */
+  async uploadRecording(
+    reference: BrowserSessionReference,
+    recordingId: string,
+    upload: BrowserDownloadExportRequestValue["upload"],
+    waitMs: number,
+    replace = false,
+  ): Promise<{ state: "uploading" | "uploaded"; sizeBytes: number; sha256: string }> {
+    const recording = this.requireRecording(reference, recordingId);
+    const bundle = recording.exportable();
+    const transfer = this.recordingTransfer(recording, upload, replace);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const waited = new Promise<"waited">((settle) => {
+      timer = setTimeout(() => settle("waited"), waitMs);
+      timer.unref?.();
+    });
+    try {
+      await Promise.race([transfer.done, waited]);
+    } finally {
+      clearTimeout(timer);
+    }
+    return {
+      state: transfer.state === "uploaded" ? "uploaded" : "uploading",
       sizeBytes: bundle.sizeBytes,
       sha256: bundle.sha256,
-    });
-    return { sizeBytes: bundle.sizeBytes, sha256: bundle.sha256 };
+    };
+  }
+
+  private recordingTransfer(
+    recording: BrowserRecording,
+    upload: BrowserDownloadExportRequestValue["upload"],
+    replace = false,
+  ) {
+    const bundle = recording.exportable();
+    const target = new URL(upload.url);
+    target.search = "";
+    return recording.transferTo(
+      target.toString(),
+      async () => {
+        await this.uploadDownload(bundle.path, upload, {
+          sizeBytes: bundle.sizeBytes,
+          sha256: bundle.sha256,
+        });
+      },
+      replace,
+    );
   }
 
   private requireRecording(
@@ -2439,10 +2488,15 @@ export class BrowserSupervisor {
       let driverClosed = driver === null;
       let restoredProfileRemoved = false;
       // A launch from an adopted copy started a new process; it is closed,
-      // never detached, so the copy is provably unused again.
+      // never detached, so the copy is provably unused again. So is a
+      // recovery that relaunched the profile because its recorded browser had
+      // exited: detaching would leave that new browser running with nothing
+      // tracking it, and every later recovery refused because the profile
+      // could not be proven unused. Once it is closed, the next recovery
+      // reinstates the receipt it started from and relaunches the profile.
       const adoptedLaunch = recoveredReceipt?.intent === "adopt";
       try {
-        if (recoveredReceipt && !adoptedLaunch) await driver?.detach?.();
+        if (recoveredReceipt && !adoptedLaunch && !relaunchesProfile) await driver?.detach?.();
         else await driver?.close();
         driverClosed = true;
       } catch (cleanupError) {
@@ -2523,7 +2577,9 @@ export class BrowserSupervisor {
           failures.push(cleanupError);
         }
       }
-      if (recoveredReceipt && !adoptedLaunch && !driverClosed)
+      // A relaunch whose browser would not close is caught by the next
+      // recovery's own check that no process still uses the profile.
+      if (recoveredReceipt && !adoptedLaunch && !driverClosed && !relaunchesProfile)
         this.recoveryTransportsUncertain.add(options.browserSessionId);
       if (workingReceipt) {
         console.error("browser launch failed before its working-runtime receipt completed", {

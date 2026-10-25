@@ -134,6 +134,12 @@ jobs:
             echo "APPLE_API_ISSUER=$(printf '%s' "$APPLE_ASC_KEY" | jq -r .issuer_id)"
           } >> "$GITHUB_ENV"
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: System audio helper
+        working-directory: apps/desktop
+        run: bun scripts/build-audio-capture.ts
+
       - name: Build, sign and notarize
         working-directory: apps/desktop
         env:
@@ -147,6 +153,10 @@ jobs:
         run: |
           app="$(find . -maxdepth 2 -name 'Opengeni.app' -type d | head -1)"
           codesign --verify --deep --strict --verbose=2 "$app"
+          helper="$app/Contents/Resources/audio-capture/opengeni-audio-capture"
+          lipo -archs "$helper" | grep -q arm64
+          lipo -archs "$helper" | grep -q x86_64
+          codesign --verify --strict --verbose=2 "$helper"
           spctl --assess --type execute --verbose "$app"
           xcrun stapler validate "$app"
           ls -la
@@ -185,6 +195,16 @@ jobs:
           (cd packages/desktop && bun run typecheck)
           (cd apps/desktop && bun run typecheck)
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Built against glibc 2.28 with cargo-zigbuild, like the agent's Linux helpers.
+      - name: System audio helper
+        working-directory: apps/desktop
+        run: |
+          pip install ziglang
+          cargo install --locked cargo-zigbuild
+          bun scripts/build-audio-capture.ts
+
       - name: Build
         working-directory: apps/desktop
         env:
@@ -207,6 +227,7 @@ jobs:
             dpkg-deb --contents "$deb" > "$RUNNER_TEMP/deb-contents.txt"
             grep -q './usr/share/applications/opengeni.desktop' "$RUNNER_TEMP/deb-contents.txt"
             grep -q './opt/Opengeni/opengeni' "$RUNNER_TEMP/deb-contents.txt"
+            grep -q './opt/Opengeni/resources/audio-capture/opengeni-audio-capture' "$RUNNER_TEMP/deb-contents.txt"
             # Desktops look icons up in the standard hicolor sizes, which stop at 512.
             grep -q './usr/share/icons/hicolor/512x512/apps/opengeni.png' "$RUNNER_TEMP/deb-contents.txt"
             grep -q './usr/share/icons/hicolor/48x48/apps/opengeni.png' "$RUNNER_TEMP/deb-contents.txt"
@@ -269,6 +290,12 @@ jobs:
         run: |
           bun test ./packages/desktop/test
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: System audio helper
+        working-directory: apps/desktop
+        run: bun scripts/build-audio-capture.ts
+
       - name: Sign in to Azure for code signing
         if: env.SIGN == 'true'
         uses: azure/login@v3
@@ -320,6 +347,8 @@ jobs:
           grep -q "version: $VERSION" latest.yml
           test -f win-unpacked/Opengeni.exe
           test -f win-arm64-unpacked/Opengeni.exe
+          test -f win-unpacked/resources/audio-capture/opengeni-audio-capture.exe
+          test -f win-arm64-unpacked/resources/audio-capture/opengeni-audio-capture.exe
 
       - name: Verify signatures
         if: env.SIGN == 'true'

@@ -1236,7 +1236,7 @@ describe("createSessionProxyHandler", () => {
       modelContext: "Page: /reports · TZ: Europe/Oslo · 2026-09-29\n\nWorkspace plan",
     });
     expect(inputs).toEqual([
-      { sessionId: SESSION_ID, delivery: "send", user: "u_42" },
+      { sessionId: SESSION_ID, delivery: "send", browserContext: "Row 7", user: "u_42" },
       { sessionId: SESSION_ID, delivery: "steer", user: "u_42" },
       { sessionId: SESSION_ID, delivery: "submit", clientEventId: "c1", user: "u_42" },
       { delivery: "create", user: "u_42" },

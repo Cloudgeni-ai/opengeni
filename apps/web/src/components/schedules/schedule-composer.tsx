@@ -380,7 +380,7 @@ export function ComposerField({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-72">
-              <DropdownMenuLabel>Connected apps this schedule can use</DropdownMenuLabel>
+              <DropdownMenuLabel>Connected apps this automation can use</DropdownMenuLabel>
               {servers.length === 0 ? (
                 <p className="px-2 pb-2 text-xs leading-4.5 text-fg-muted">
                   No apps are connected to this workspace yet.

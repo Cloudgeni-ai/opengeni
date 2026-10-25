@@ -167,7 +167,9 @@ refused. Every action that starts model work passes through
 (`clientEventId`): messages (`create`, `send`, `steer`, `submit`), the
 person's `approval` and `answer`, `resume`, `retry`, `queue-steer` and
 `realtime` voice. It is where a product admits work (billing, rate limits)
-and adds per-message context; return a `Response` to refuse. Bodies are
+and adds per-message context. It also sees the context the browser attached
+(`browserContext`, an unverified claim; for voice, once per entry) and can
+keep, replace or drop it; return a `Response` to refuse. Bodies are
 bounded (`maxBodyBytes`, default 1 MiB) and `modelSelection: false` removes
 per-message and retry model choices. `afterForward(route, response, context)`
 sees Opengeni's answer to every forwarded request before the browser does,

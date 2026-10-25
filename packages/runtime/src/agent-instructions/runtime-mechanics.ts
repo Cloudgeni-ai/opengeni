@@ -19,7 +19,7 @@ function newMessages(context: AgentPromptContext): string {
     "If it adds to unfinished work, handle both together.",
     "If it only asks a question or for status, answer it without starting or resuming other work in that turn unless the user asks.",
     waitForInput &&
-      `If work you already started is still in flight ${inFlightExamples}, give the answer, then call \`wait_for_input\` when available so its result resumes you${goals ? ", even when a goal is active" : ""}.`,
+      `If work you already started is still in flight ${inFlightExamples}, call \`wait_for_input\` when available with the answer in its \`reply\`, so its result resumes you${goals ? ", even when a goal is active" : ""}.`,
     waitForInput &&
       "If you were already waiting, reuse that reason and keep its deadline by setting the timeout to the time left rather than a fresh full timeout.",
     goals

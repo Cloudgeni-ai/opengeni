@@ -58,6 +58,8 @@ export function scheduledTaskCreateToolInput() {
       })
       // Only a person pins connector accounts; agents never do.
       // Variable Sets were removed (RM-1); agents choose vaults via vaultPolicy.
+      // Event triggers are not part of this tool; how agents set them is
+      // designed with the agent tools and their guidance.
       .omit({
         agentLearning: true,
         connectionAuthorities: true,
@@ -65,6 +67,7 @@ export function scheduledTaskCreateToolInput() {
         pinnedAccountsRequired: true,
         variableSetId: true,
         environmentId: true,
+        events: true,
       })
       .strict()
   );

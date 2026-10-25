@@ -1108,6 +1108,31 @@ function signatureCompatible(previous: string, candidate: string): boolean {
       variants.some((variant) => same(variant, type)),
     );
   };
+  // A parameter's inline object type may gain optional members: every object
+  // a caller passed before still fits. Kept members must be unchanged.
+  type Literal = {
+    type?: string;
+    members?: Array<{ key?: { name?: string }; optional?: boolean }>;
+  };
+  const accepts = (widenedType: unknown, originalType: unknown): boolean => {
+    if (contains(widenedType, originalType)) return true;
+    const widened = widenedType as Literal | null;
+    const original = originalType as Literal | null;
+    if (widened?.type !== "TSTypeLiteral" || original?.type !== "TSTypeLiteral") return false;
+    const kept = original.members ?? [];
+    const extra = (widened.members ?? []).filter(
+      (member) => !kept.some((other) => same(other, member)),
+    );
+    return (
+      kept.every((member) => (widened.members ?? []).some((other) => same(other, member))) &&
+      extra.every(
+        (member) =>
+          member.optional === true &&
+          member.key?.name !== undefined &&
+          !kept.some((other) => other.key?.name === member.key?.name),
+      )
+    );
+  };
   if (
     before.kind !== after.kind ||
     before.static !== after.static ||
@@ -1124,7 +1149,7 @@ function signatureCompatible(previous: string, candidate: string): boolean {
       return (
         parameter.rest === next.rest &&
         (!parameter.optional || next.optional) &&
-        contains(next.type, parameter.type)
+        accepts(next.type, parameter.type)
       );
     }) &&
     after.parameters

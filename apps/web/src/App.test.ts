@@ -1120,7 +1120,7 @@ describe("api key permission options", () => {
       "Workspace",
       "Sessions",
       "Files & documents",
-      "Scheduled tasks",
+      "Automations",
       "Secrets",
       "Connections",
       "Machines",

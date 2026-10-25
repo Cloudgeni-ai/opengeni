@@ -69,6 +69,15 @@ product's own bookkeeping keyed the same way stays correct when the browser,
 or the relay, sends the action again. `modelContext` applies to the actions
 that carry a message; MCP credential rotations ride in the message body, or
 for actions without one are applied to the chat just before forwarding.
+
+The browser may attach its own `modelContext` to a message or a voice entry
+(the page, record or selection it was sent from). The hook receives it as
+`browserContext`, an unverified claim, and decides what the model gets: the
+claim as sent (by returning nothing for it), a replacement such as the
+validated form the product accepts, nothing (`null`), or a refusal of the
+action. Live voice calls the hook once for each finalized transcript or spoken
+request, keyed by the entry's `operationId`, because each entry becomes its
+own message and may come from a different page.
 Pausing, cancelling and other changes start no work and are not admitted
 here; `authorizeSession` and `refuse` cover them.
 

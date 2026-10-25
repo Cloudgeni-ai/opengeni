@@ -28,10 +28,12 @@ import {
   BrowserDownload,
   BrowserDownloadSaveRequest,
   BrowserDownloadSaveResponse,
+  BrowserRecordingSaveProgress,
   BrowserRecordingSaveRequest,
   BrowserRecordingSaveResponse,
   BrowserRecordingStartRequest,
   BrowserRecordingSummary,
+  type RecordingVisibility,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
   BrowserDomReadResponse,
@@ -129,6 +131,10 @@ import {
   getAuthRun,
   getExternalAuthPreparation,
   getSession,
+  getSessionAuthorityProjection,
+  browserRecordingBundleObjectKey,
+  findBrowserRecording,
+  getBrowserRecordingVideo,
   InteractionResourceConflictError,
   InteractionResourceNotFoundError,
   InteractionResourceStateError,
@@ -268,7 +274,12 @@ import {
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
-import { BrowserRecordingVideoError, encodeBrowserRecording } from "../browser-recording-video";
+import {
+  BROWSER_RECORDING_SAVE_RETRY_AFTER_MS,
+  browserRecordingFailureStatus,
+  browserRecordingOwner,
+  stageBrowserRecordingBundle,
+} from "../browser-recording-save";
 import {
   recordSourcePlacementMove,
   retireFormerPlacementControllers,
@@ -1269,8 +1280,12 @@ export function registerBrowserSessionRoutes(
 
   /** Stops a recording and saves it in the source session's workspace as an
    * MP4 plus its action log, then publishes the MP4 so it plays in the chat.
-   * The browser host only uploads its frame bundle; the video is encoded here,
-   * so no browser host needs a video encoder. */
+   * The browser host only uploads its frame bundle. That makes it a
+   * recording, and the worker encodes its video, so no browser host and no
+   * API request needs a video encoder. While the bundle is still uploading
+   * over a slow link, or its video is being made, this answers 202 with
+   * `retryAfterMs`; repeating the request with the same operationId joins
+   * that work instead of starting it again. */
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId/save",
     async (context) => {
@@ -1284,11 +1299,15 @@ export function registerBrowserSessionRoutes(
       if (!objectStorage) {
         throw new HTTPException(503, { message: "object storage is not configured" });
       }
-      const prefix = `workspaces/${workspaceId}/browser-recordings/${recordingId}/${request.operationId}`;
-      const bundleKey = `${prefix}/bundle`;
-      const temporaryKeys = [bundleKey];
+      const startVideo = deps.workflowClient.startBrowserRecordingVideo;
+      if (!startVideo) {
+        throw new HTTPException(503, { message: "browser recording videos are not available" });
+      }
+      // A bundle no save comes back for is deleted on a durable deadline;
+      // without that, the save waits for the whole upload instead.
+      const scheduleDeletion = deps.workflowClient.scheduleTransientObjectDeletion;
       try {
-        const { recording, sourceSessionId } = await withActiveBrowserController(
+        const staged = await withActiveBrowserController(
           context,
           grant,
           workspaceId,
@@ -1296,85 +1315,143 @@ export function registerBrowserSessionRoutes(
           "session.control",
           "browser.control",
           async ({ sessionClient, record }) => {
-            const stopped = await sessionClient.stopRecording(recordingId);
-            if (!stopped.bundle) {
-              throw new InteractionResourceStateError("The recording has nothing to save");
-            }
-            if (stopped.bundle.sizeBytes > objectStorage.maxSinglePutSizeBytes) {
-              throw new HTTPException(413, {
-                message: `browser recording exceeds single PUT limit of ${objectStorage.maxSinglePutSizeBytes} bytes`,
-              });
-            }
-            const put = await objectStorage.createPutUrl({
-              key: bundleKey,
-              contentType: "application/octet-stream",
-              sha256: stopped.bundle.sha256,
-              expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
-              audience: signedUrlAudienceForPlacement(record.session.placement),
+            const sourceSessionId = record.sourceSessionId;
+            const authorization = await authorizeSourceSession(
+              deps,
+              grant,
+              sourceSessionId,
+              "session.control",
+            );
+            const owner = browserRecordingOwner({
+              authorization,
+              grantSubjectId: grant.subjectId,
+              chat: await getSessionAuthorityProjection(deps.db, workspaceId, sourceSessionId),
             });
-            const receipt = await sessionClient.exportRecording({
+            const existing = await findBrowserRecording(deps.db, {
+              workspaceId,
+              subjectId: owner.subjectId,
               recordingId,
-              upload: {
-                url: put.url,
-                requiredHeaders: put.requiredHeaders,
-                expiresAt: put.expiresAt.toISOString(),
-              },
             });
-            if (
-              receipt.sizeBytes !== stopped.bundle.sizeBytes ||
-              receipt.sha256 !== stopped.bundle.sha256
-            ) {
-              throw new BrowserControlProtocolError(
-                "browser controller returned another recording export",
-              );
+            if (existing) {
+              return {
+                sourceSessionId,
+                owner,
+                existing,
+                recording: await sessionClient.stopRecording(recordingId),
+                bundle: null,
+              };
             }
-            return { recording: stopped, sourceSessionId: record.sourceSessionId };
+            return {
+              sourceSessionId,
+              owner,
+              existing: null,
+              ...(await stageBrowserRecordingBundle({
+                sessionClient,
+                objectStorage,
+                recordingId,
+                bundleKey: ({ sha256 }) =>
+                  browserRecordingBundleObjectKey({ workspaceId, recordingId, sha256 }),
+                audience: signedUrlAudienceForPlacement(record.session.placement),
+                uploadTtlSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+                scheduleDeletion:
+                  scheduleDeletion &&
+                  (async (objectKeys, deleteAfter) =>
+                    await scheduleDeletion({ workspaceId, objectKeys, deleteAfter })),
+              })),
+            };
           },
         );
+        const { recording, sourceSessionId, existing } = staged;
+        const progress = (state: "uploading" | "encoding") =>
+          context.json(
+            BrowserRecordingSaveProgress.parse({
+              state,
+              recording,
+              retryAfterMs: BROWSER_RECORDING_SAVE_RETRY_AFTER_MS,
+            }),
+            202,
+          );
+        const makeVideo = async (
+          ownerSubjectId: string,
+          visibility: RecordingVisibility,
+          bundle: { sizeBytes: number; sha256: string },
+        ) => {
+          // Starting it again while it runs, or after it finished, does nothing.
+          await startVideo({
+            accountId: grant.accountId,
+            workspaceId,
+            recordingId,
+            ownerSubjectId,
+            visibility,
+            startedAt: recording.startedAt,
+            durationMilliseconds: recording.durationMs,
+            bundle: { byteLength: bundle.sizeBytes, sha256: bundle.sha256 },
+          });
+        };
+        if (!existing) {
+          if (!staged.bundle) return progress("uploading");
+          await makeVideo(staged.owner.subjectId, staged.owner.visibility, staged.bundle);
+          return progress("encoding");
+        }
+        if (existing.recording.state === "processing") {
+          // Should its workflow have been lost, this starts it again.
+          if (recording.bundle) {
+            await makeVideo(
+              existing.recording.ownerSubjectId,
+              existing.recording.visibility,
+              recording.bundle,
+            );
+          }
+          return progress("encoding");
+        }
+        if (existing.recording.state === "failed") {
+          throw new HTTPException(browserRecordingFailureStatus(existing.recording.errorCode), {
+            message: existing.errorMessage ?? "the recording could not be encoded",
+          });
+        }
+        const actor = {
+          workspaceId,
+          subjectId: existing.recording.ownerSubjectId,
+          recordingId,
+        };
+        const video =
+          existing.recording.state === "ready"
+            ? await getBrowserRecordingVideo(deps.db, actor)
+            : null;
+        if (!video) return progress("encoding");
+        const actionLog = await objectStorage.getObjectBytes(video.actionLogObjectKey);
+        if (!actionLog) {
+          throw new HTTPException(503, {
+            message: "browser recording action log is not available",
+          });
+        }
         await authorizeSourceSession(deps, grant, sourceSessionId, "session.control");
         const sourceSession = await requireSourceSession(deps, workspaceId, sourceSessionId);
-        const bundle = await retryWhileMissing(
-          async () => await objectStorage.getObjectBytes(bundleKey),
-        );
-        if (!bundle) {
-          throw new HTTPException(503, { message: "browser recording bundle is not available" });
-        }
-        const encoded = await encodeBrowserRecording({
-          bundle: bundle.bytes,
-          ffmpegPath: deps.settings.voiceInputFfmpegPath,
-          signal: context.req.raw.signal,
-        });
         const videoPath =
           request.destinationPath ?? defaultBrowserRecordingPath(recording.startedAt);
         const actionLogPath = `${videoPath.replace(/\.[^./]*$/u, "")}.actions.json`;
         const outputs = [
-          { path: videoPath, bytes: encoded.video, contentType: "video/mp4", name: "video.mp4" },
           {
-            path: actionLogPath,
-            bytes: encoded.actionLog,
-            contentType: "application/json",
-            name: "actions.json",
+            name: "video.mp4",
+            path: videoPath,
+            key: video.objectKey,
+            sizeBytes: video.bytes,
+            sha256: video.sha256,
           },
-        ].map((output) => ({
-          ...output,
-          key: `${prefix}/${output.name}`,
-          sha256: createHash("sha256").update(output.bytes).digest("hex"),
-        }));
+          {
+            name: "actions.json",
+            path: actionLogPath,
+            key: video.actionLogObjectKey,
+            sizeBytes: actionLog.bytes.byteLength,
+            sha256: createHash("sha256").update(actionLog.bytes).digest("hex"),
+          },
+        ];
         await requireLimit(deps, {
           accountId: grant.accountId,
           workspaceId,
           action: "file:upload",
-          quantity: outputs.reduce((total, output) => total + output.bytes.byteLength, 0),
+          quantity: outputs.reduce((total, output) => total + output.sizeBytes, 0),
         });
-        for (const output of outputs) {
-          temporaryKeys.push(output.key);
-          await objectStorage.putObject({
-            key: output.key,
-            contentType: output.contentType,
-            body: output.bytes,
-            sha256: output.sha256,
-          });
-        }
         await withChannelA(
           channelServices,
           {
@@ -1401,7 +1478,7 @@ export function registerBrowserSessionRoutes(
                 overwrite: false,
                 mayReplaceExisting: false,
                 createParents: true,
-                sizeBytes: output.bytes.byteLength,
+                sizeBytes: output.sizeBytes,
                 sha256: output.sha256,
                 source: { url: get.url, expiresAt: get.expiresAt.toISOString() },
               });
@@ -1425,26 +1502,18 @@ export function registerBrowserSessionRoutes(
             video: {
               path: videoPath,
               artifactId: published.artifact.artifactId,
-              sizeBytes: encoded.video.byteLength,
-              durationMs: encoded.durationMs,
-              width: encoded.width,
-              height: encoded.height,
-              frameCount: encoded.frameCount,
+              sizeBytes: video.bytes,
+              durationMs: video.durationMilliseconds,
+              width: video.width,
+              height: video.height,
+              frameCount: video.frameCount,
             },
             actionLogPath,
           }),
           201,
         );
       } catch (error) {
-        if (error instanceof BrowserRecordingVideoError) {
-          throw new HTTPException(error.code === "encode_failed" ? 502 : 422, {
-            message: error.message,
-            cause: error,
-          });
-        }
         throw browserRouteError(error);
-      } finally {
-        await Promise.allSettled(temporaryKeys.map((key) => objectStorage.deleteObject(key)));
       }
     },
   );
@@ -1688,6 +1757,12 @@ export function registerBrowserSessionRoutes(
               surface: "browser",
               toolName: "browser_act",
               operationId: request.operationId,
+              // The page's host, shown to a person asked to approve the use.
+              lookupDestination: async () => {
+                const targets = await sessionClient.listTargets();
+                const url = targets.find((target) => target.id === request.targetId)?.url;
+                return url ? new URL(url).host || null : null;
+              },
             },
             beforeResolve: requirePlacementAcceptsSecretValues(
               deps.db,

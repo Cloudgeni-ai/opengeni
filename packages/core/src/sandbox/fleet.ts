@@ -1178,7 +1178,7 @@ export async function executeRunOnSelfhostedMachine(
     ...(machine.opStream !== undefined ? { opStream: machine.opStream } : {}),
   });
 
-  const secretUse = { surface: "run_on" as const, toolName: "run_on" };
+  const secretUse = { surface: "run_on" as const, toolName: "run_on", destination: target };
   try {
     if (op.kind === "exec") {
       const deadlineMs = session.effectiveExecDeadlineMs;

@@ -31,6 +31,20 @@ const roles: Record<string, string> = {
 };
 
 const MARKDOWN_ROW = /^(\s*)- (?:\[(\d+)\] )?(\S+)(.*)$/u;
+
+/** Checkbox and switch roles as observations show them on each platform. */
+export const TOGGLE_ROLES: ReadonlySet<string> = new Set([
+  "checkbox",
+  "check box",
+  "switch",
+  "toggle button",
+  "check menu item",
+]);
+
+/** The role an observation shows for an element CUA names by its own role. */
+export function observedRole(role: string): string {
+  return roles[role] ?? role;
+}
 const QUOTED = String.raw`"((?:[^"\\]|\\.)*)"`;
 const MARKDOWN_LABEL = new RegExp(`^ ${QUOTED}`, "u");
 const MARKDOWN_VALUE = new RegExp(`(?:^| )= (?:${QUOTED}|([^\\s\\[][^\\[]*?))(?: \\[|$)`, "u");
@@ -76,8 +90,32 @@ export function unindexedTextByElement(
   platform: Platform = "macos",
 ): Map<number, string[]> {
   const texts = new Map<number, string[]>();
-  if (!markdown || platform === "windows") return texts;
-  const ancestors: Array<{ indent: number; index: number | null; protected: boolean }> = [];
+  for (const row of unindexedRows(markdown, platform)) {
+    const list = texts.get(row.owner) ?? [];
+    if (list.length < MAX_ROW_TEXTS) list.push(row.text);
+    texts.set(row.owner, list);
+  }
+  return texts;
+}
+
+/** One unindexed row of CUA's Markdown tree that has text: the element_index
+ * of its nearest indexed ancestor, its own role, and whether it is, or sits
+ * inside, a menu. Protected rows are left out, as unindexedTextByElement
+ * describes. */
+export type UnindexedRow = { owner: number; role: string; text: string; inMenu: boolean };
+
+export function unindexedRows(
+  markdown: string | undefined,
+  platform: Platform = "macos",
+): UnindexedRow[] {
+  const rows: UnindexedRow[] = [];
+  if (!markdown || platform === "windows") return rows;
+  const ancestors: Array<{
+    indent: number;
+    index: number | null;
+    protected: boolean;
+    menu: boolean;
+  }> = [];
   for (const line of markdown.split("\n")) {
     const row = MARKDOWN_ROW.exec(line);
     if (!row) continue;
@@ -86,7 +124,8 @@ export function unindexedTextByElement(
     const index = row[2] === undefined ? null : Number(row[2]);
     const isProtected =
       protectionFor(row[3]!, platform) !== null || (ancestors.at(-1)?.protected ?? false);
-    ancestors.push({ indent, index, protected: isProtected });
+    const inMenu = /menu/iu.test(row[3]!) || (ancestors.at(-1)?.menu ?? false);
+    ancestors.push({ indent, index, protected: isProtected, menu: inMenu });
     if (index !== null || isProtected) continue;
     const rest = row[4] ?? "";
     const label = MARKDOWN_LABEL.exec(rest);
@@ -106,11 +145,9 @@ export function unindexedTextByElement(
       .reverse()
       .find((ancestor) => ancestor.index !== null);
     if (!owner) continue;
-    const list = texts.get(owner.index!) ?? [];
-    if (list.length < MAX_ROW_TEXTS) list.push(text);
-    texts.set(owner.index!, list);
+    rows.push({ owner: owner.index!, role: row[3]!, text, inMenu });
   }
-  return texts;
+  return rows;
 }
 
 type CuaElement = z.infer<typeof Element>;
@@ -123,6 +160,18 @@ type CuaElement = z.infer<typeof Element>;
  */
 export function opensOnInvoke(element: { readonly actions: readonly string[] }): boolean {
   return element.actions.includes("AXOpen") && !element.actions.includes("AXPress");
+}
+
+/**
+ * Whether a macOS element is a number field that takes a value: an
+ * AXIncrementor (Chrome's `<input type=number>`, a native stepper) that is
+ * not one part of a date or time field. A part takes neither the focus nor
+ * a value on its own (see dateFields).
+ */
+function isNumberField(element: CuaElement, byIndex: ReadonlyMap<number, CuaElement>): boolean {
+  if (element.role !== "AXIncrementor") return false;
+  const parent = element.parent_index === undefined ? undefined : byIndex.get(element.parent_index);
+  return parent?.role !== "AXDateField" && parent?.role !== "AXTimeField";
 }
 
 /**
@@ -181,6 +230,23 @@ function repeatsParentLabel(
  */
 function withoutLiveMemoryUsage(label: string): string {
   return label.replace(/ - (?:High )?[Mm]emory usage - [\d.,]+\s?[KMGT]?B(?= - |$)/u, "");
+}
+
+/**
+ * The title a reading's window element carries: its own label, not the page
+ * text an unlabeled element is named by, and clipped to a target title's
+ * bounds. Undefined when the reading has no labeled window element.
+ */
+export function readWindowTitle(
+  elements: readonly CuaElement[],
+  platform: Platform,
+): string | undefined {
+  const window = elements.find(
+    (element) => observedRole(element.role) === "window" && element.label?.trim(),
+  );
+  if (!window?.label) return undefined;
+  const title = platform === "macos" ? withoutLiveMemoryUsage(window.label) : window.label;
+  return title.trim() ? title.slice(0, 4_096) : undefined;
 }
 
 /** One part of a web page's date or time field, in the order the page shows
@@ -275,9 +341,9 @@ export function dateFieldFormat(segments: readonly DateSegment[]): string {
 /**
  * The ISO value a date or time field's parts read, in the parts' order, or
  * null when a part reads no number (an empty part reads its placeholder,
- * "dd" or "--") or the date reads zero. Chrome on macOS does not always
- * give the field itself a value: it may update only the parts (or only the
- * field) after typing.
+ * "dd" or "--") or the date reads zero. Chrome on macOS does not keep the
+ * field's own value current: after typing it still reads the value the page
+ * gave it first, or none, while its parts read what was typed.
  */
 export function dateFieldValueFromParts(
   segments: readonly DateSegment[],
@@ -370,6 +436,13 @@ export function parseDateValue(value: string): DateParts | null {
     const [low, high] = ranges[key];
     if (part < low || part > high) return null;
   }
+  // A real calendar date: the 31st of February is not one.
+  if (parts.day !== undefined && parts.month !== undefined) {
+    const year = parts.year;
+    const leap = year === undefined || (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0));
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][parts.month - 1]!;
+    if (parts.day > days) return null;
+  }
   return parts;
 }
 
@@ -427,6 +500,7 @@ export function projectElements(
   // returned node without inventing ancestry or dropping orphaned children.
   return elements.map((element) => {
     const protectedReason = protectionFor(element.role, platform);
+    const numberField = platform === "macos" && isNumberField(element, byIndex);
     const opaqueWindowsEdit = protectedReason === "policy";
     // The SDK uses value as its label fallback when the native name is absent.
     const valueLabel =
@@ -462,6 +536,7 @@ export function projectElements(
                   "AXSlider",
                   "AXPopUpButton",
                 ].includes(element.role)) ||
+              numberField ||
               typedFields.has(element.element_index)
       )
         actions.push("set_value");
@@ -480,22 +555,32 @@ export function projectElements(
       (text) => text !== label && text !== String(element.value ?? ""),
     );
     const containedText = contained.length > 0 ? contained.join(" | ").slice(0, 8_192) : undefined;
-    // A web date or time field Chrome left without a value reads what its
-    // parts read.
+    // A web date or time field reads what its parts read whenever they read
+    // a whole value: Chrome keeps the field's own value at the one the page
+    // gave it first (or none) while typing changes the parts.
     const typed = typedFields.get(element.element_index);
+    const role = (numberField ? "spinbutton" : (roles[element.role] ?? element.role)).slice(0, 256);
+    const fieldValue =
+      (typed &&
+        dateFieldValueFromParts(
+          typed.segments,
+          typed.parts.map((part) => byIndex.get(part)?.value),
+        )) ??
+      element.value;
+    // Linux and Windows report whether a checkbox or switch is on only as
+    // CUA's `selected`; it reads as its value, "1" or "0", as on macOS.
     const value =
-      typed && (element.value === undefined || String(element.value).trim() === "")
-        ? (dateFieldValueFromParts(
-            typed.segments,
-            typed.parts.map((part) => byIndex.get(part)?.value),
-          ) ?? element.value)
-        : element.value;
+      fieldValue === undefined && typeof element.selected === "boolean" && TOGGLE_ROLES.has(role)
+        ? element.selected
+          ? "1"
+          : "0"
+        : fieldValue;
     return {
       ref: element.element_token ?? `read-only:${element.element_index}`,
       // Desktop labels and values can be whole documents (an editor's text
       // area). Clip to the semantic-node contract so one element cannot make
       // the entire observation invalid.
-      role: (roles[element.role] ?? element.role).slice(0, 256),
+      role,
       ...(label
         ? { name: label.slice(0, 8_192) }
         : containedText && !protectedReason
@@ -526,13 +611,35 @@ export function projectElements(
   });
 }
 
+/** The elements of a reading with each listed once. macOS lists a table's
+ * cells again under each AXColumn, as new elements with the same role, label
+ * and bounds; the first of them stands for the element. */
+export function distinctElements<
+  Node extends Pick<InteractionSemanticNodeValue, "role" | "name" | "bounds">,
+>(nodes: readonly Node[]): Node[] {
+  const places = new Set<string>();
+  return nodes.filter((node) => {
+    if (!node.bounds || (node.bounds.width === 0 && node.bounds.height === 0)) return true;
+    const { x, y, width, height } = node.bounds;
+    const place = JSON.stringify([node.role, node.name ?? null, x, y, width, height]);
+    if (places.has(place)) return false;
+    places.add(place);
+    return true;
+  });
+}
+
 export function locate(
   nodes: InteractionSemanticNodeValue[],
   locator: ComputerLocator,
 ): InteractionSemanticNodeValue {
-  const matches = nodes.filter((node) => {
+  const found = nodes.filter((node) => {
+    // An exact name is the whole name, compared the way names are shown:
+    // trimmed, runs of whitespace as one space, and in any case.
+    const normalized = (value: string) => value.replace(/\s+/gu, " ").trim().toLowerCase();
     const match = (value: string | undefined, query: string, exact = false) =>
-      exact ? value === query : (value ?? "").toLowerCase().includes(query.toLowerCase());
+      exact
+        ? value !== undefined && normalized(value) === normalized(query)
+        : (value ?? "").toLowerCase().includes(query.toLowerCase());
     switch (locator.kind) {
       case "ref":
         return node.ref === locator.ref;
@@ -552,6 +659,7 @@ export function locate(
         return node.identifier === locator.value;
     }
   });
+  const matches = distinctElements(found);
   if (matches.length !== 1)
     throw new ComputerBackendError(
       matches.length ? "locator_ambiguous" : "locator_not_found",

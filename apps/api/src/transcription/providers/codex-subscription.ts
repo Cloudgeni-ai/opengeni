@@ -164,8 +164,7 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
       // attached; otherwise OpenAI/Azure remain eligible.
       if (!context?.workspaceId) return true;
       const accountId =
-        (context as { accountId?: string }).accountId ??
-        (await getWorkspace(input.db, context.workspaceId))?.accountId;
+        context.accountId ?? (await getWorkspace(input.db, context.workspaceId))?.accountId;
       // An unresolvable account fails closed rather than guessing a path.
       if (!accountId) return false;
       const disposition = await readCodexCutoverDisposition(

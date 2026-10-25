@@ -12,6 +12,7 @@ import {
   type Pull,
   type Run,
 } from "./model";
+import { failedBaseHold } from "./base-failure";
 
 export type Action =
   | { kind: "wait"; reason: string }
@@ -47,6 +48,9 @@ export function infrastructureRetryReason(candidate: Candidate, run: Run, config
   )
     return null;
   const reason = run.infrastructureRetryReason;
+  if (run.trusted && run.outcome === "code_failure") return "failed-batch";
+  if (reason === "failed-batch" && ["infrastructure", "cancelled"].includes(run.outcome))
+    return reason;
   if (reason === "verified-infrastructure" && run.trusted && run.outcome === "infrastructure")
     return reason;
   if (reason === "provider-cancelled" && run.outcome === "cancelled") return reason;
@@ -84,17 +88,9 @@ export function descendants(id: string, candidates: Candidate[]): string[] {
   return [...ids];
 }
 export function plan(o: Observation, c: Config): Action {
-  const action = planCandidate(o, c);
-  // Latency is admission backpressure, not evidence that an already tested
-  // candidate is unsafe. Drain only a landing selected by every normal guard;
-  // do not bypass provenance, readiness, base, latest-attempt or main priority.
-  if (o.telemetry?.status === "stop" && action.kind !== "land")
-    return {
-      kind: "wait",
-      reason:
-        "stop signal: recent 2h sampled capacity/OFF-adjusted p95 ready-to-CI exceeds 30 minutes",
-    };
-  return action;
+  // Latency is diagnostic, not permission to suppress recovery or admission.
+  // All evidence, provenance and single-slot guards remain in planCandidate.
+  return planCandidate(o, c);
 }
 function planCandidate(o: Observation, c: Config): Action {
   const ledger = structuredClone(o.ledger);
@@ -105,10 +101,19 @@ function planCandidate(o: Observation, c: Config): Action {
   };
   const fresh = new Map(o.ready.map((p) => [p.number, bindingKey(p)]));
   const matches = (p: Pull) => fresh.get(p.number) === bindingKey(p);
-  // Readiness churn and main advancement must not automatically retry code.
-  // A genuinely different head can re-enter; preserve the old base/run evidence.
+  // Main/label churn does not retry code. A changed head or an explicit native
+  // auto-merge re-enable after parking can re-enter; retain old failure evidence.
   const parked = (p: Pull) =>
-    ledger.parked?.some((item) => item.pull.number === p.number && item.pull.headSha === p.headSha);
+    ledger.parked?.some(
+      (item) =>
+        item.pull.number === p.number &&
+        item.pull.headSha === p.headSha &&
+        !(
+          p.binding.source === "auto-merge" &&
+          p.binding.eventId !== item.pull.binding.eventId &&
+          Date.parse(p.binding.at) > Date.parse(item.parkedAt)
+        ),
+    );
   for (const item of o.candidates) {
     const id = item.manifest.batchId;
     if (item.containedInBase && !ledger.landed.includes(id)) {
@@ -140,7 +145,7 @@ function planCandidate(o: Observation, c: Config): Action {
         reason:
           "missing-run infrastructure hold expired; candidate abandoned pending explicit recover-missing-run confirmation",
       };
-    if (item.manifest.pulls.some((p) => !matches(p)))
+    if ((item.headRefresh?.pulls ?? item.manifest.pulls).some((p) => !matches(p)))
       return invalid(
         item.manifest.batchId,
         "head or ready/evidence binding changed; descendants invalidated, running CI preserved",
@@ -176,6 +181,25 @@ function planCandidate(o: Observation, c: Config): Action {
               reason: "full-main CI has priority; tested candidate retained without cancellation",
             }
           : { kind: "land", candidate: root };
+      // A red exact base is not proof that members caused this failure. Hold
+      // before retry/splitting, retaining the failed candidate and all evidence.
+      // This does not claim identical fingerprints or authorize a green result.
+      if (run.trusted && run.outcome === "code_failure") {
+        const reason = failedBaseHold(run, root.manifest.baseSha, o.baseCI);
+        if (reason) return { kind: "wait", reason };
+      }
+      // A failed exact candidate gets one flake allowance before any split or
+      // singleton parking. The durable retry intent prevents duplicate requests.
+      if (run.attempt === 1 && infrastructureRetryReason(root, run, c)) {
+        if (ledger.retries[root.manifest.batchId])
+          return { kind: "wait", reason: "single batch retry already requested; no duplicate" };
+        if (!run.completedAt || inflight >= c.maxInflight || o.mainBusy)
+          return {
+            kind: "wait",
+            reason: "retry requires completion evidence and an available Batch slot",
+          };
+        return { kind: "retry", candidate: root, run };
+      }
       if (run.trusted && run.outcome === "code_failure") {
         const children = descendants(root.manifest.batchId, o.candidates).filter(
           (id) => id !== root.manifest.batchId && !ledger.invalidated.includes(id),
@@ -232,14 +256,11 @@ function planCandidate(o: Observation, c: Config): Action {
           reason:
             "not an eligible first-attempt infrastructure-only candidate; hold without PR blame",
         };
-      const backoff = 60;
-      if (
-        !run.completedAt ||
-        Date.parse(o.now) < Date.parse(run.completedAt) + backoff * 1000 ||
-        inflight >= c.maxInflight ||
-        o.mainBusy
-      )
-        return { kind: "wait", reason: "bounded retry backoff or CI capacity" };
+      if (!run.completedAt || inflight >= c.maxInflight || o.mainBusy)
+        return {
+          kind: "wait",
+          reason: "retry requires completion evidence and an available Batch slot",
+        };
       return { kind: "retry", candidate: root, run };
     }
     if (!run)

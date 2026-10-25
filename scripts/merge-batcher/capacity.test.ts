@@ -319,7 +319,7 @@ describe("batcher reader admission (stage.json headroom)", () => {
     return { github: new GitHubReader(cfg, new GitHubAuth({}), transport), urls, cfg };
   };
 
-  test("main fan-out arriving after admission holds the next candidate until runners start", async () => {
+  test("main fan-out and queued jobs are visible without withholding live submission", async () => {
     const main: Run = { id: 500, status: "queued", ...MAIN };
     const fanout = (queued: number, running: number) => ({
       500: [
@@ -330,11 +330,12 @@ describe("batcher reader admission (stage.json headroom)", () => {
     });
     // Batch 1 pattern: main CI fanned out while shards held runners; 13 jobs waited.
     const waiting = reader([main], fanout(13, 1));
-    expect(await waiting.github.mainBusy()).toBe(true);
+    expect(await waiting.github.mainBusy()).toBe(false);
     expect(waiting.github.lastHeadroom).toMatchObject({
-      allowed: false,
+      allowed: true,
+      capacityInformational: true,
       occupied: 14,
-      reason: "A full-main CI run has jobs waiting for hosted runners",
+      reason: expect.stringContaining("A full-main CI run has jobs waiting for hosted runners"),
       capacity: { hold: "main-queued", latestMain: { runId: 500, queuedJobs: 13 } },
     });
     expect(waiting.github.lastHeadroom?.capacity?.latestMain?.oldestQueuedSeconds).toBeGreaterThan(
@@ -349,12 +350,12 @@ describe("batcher reader admission (stage.json headroom)", () => {
       providerRequired: 60,
     });
     const large = reader([main], fanout(0, 15));
-    expect(await large.github.mainBusy()).toBe(true);
+    expect(await large.github.mainBusy()).toBe(false);
     expect(large.github.lastHeadroom?.capacity?.hold).toBe("provider-limit");
     // Main finished its fan-out tail: admitted again.
     const tail = reader([main], fanout(0, 3));
     expect(await tail.github.mainBusy()).toBe(false);
-    expect(tail.github.lastHeadroom?.reason).toContain("hosted job limit");
+    expect(tail.github.lastHeadroom?.reason).toContain("provider queue");
   });
 
   test("an approval-only newest main run is not runner demand and does not hold", async () => {
@@ -370,7 +371,7 @@ describe("batcher reader admission (stage.json headroom)", () => {
     // Approval granted: the admission job queues; the fan-out is not yet
     // instantiated, so the run is pre-fan-out and holds.
     const granted = reader([approval], { 600: [{ status: "queued", created_at: iso(2) }] });
-    expect(await granted.github.mainBusy()).toBe(true);
+    expect(await granted.github.mainBusy()).toBe(false);
     expect(granted.github.lastHeadroom?.capacity).toMatchObject({
       hold: "main-pre-fanout",
       preFanoutMainRuns: [600],
@@ -397,7 +398,7 @@ describe("batcher reader admission (stage.json headroom)", () => {
         BATCHER_OTHER_REPOSITORY_ALLOWANCE: "40",
       },
     );
-    expect(await strict.github.mainBusy()).toBe(true);
+    expect(await strict.github.mainBusy()).toBe(false);
     expect(strict.github.lastHeadroom?.capacity?.hold).toBe("provider-limit");
   });
 
@@ -486,7 +487,7 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
     [id]: many(MAIN_PRE_FANOUT_JOBS, "in_progress", { created_at: iso(10), started_at: iso(8) }),
   });
 
-  test("A1: newest main in its plan phase (3 jobs) holds in both readers", async () => {
+  test("A1: plan-phase main is informational live and holds traffic-shadow", async () => {
     const runs: Run[] = [{ id: 700, status: "in_progress", ...MAIN }];
     const d = await decide(runs, planPhase(700));
     // 7779ef9 admitted here: demand 3 fits, then the ~45 runner-holding fan-out
@@ -495,10 +496,11 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
     expect(45 + 17).toBeGreaterThan(DEFAULT_PROVIDER_JOB_LIMIT);
     expect(d.capacity).toMatchObject({ hold: "main-pre-fanout", preFanoutMainRuns: [700] });
     const r = await both(runs, planPhase(700));
-    expect(r.busy).toBe(true);
+    expect(r.busy).toBe(false);
     expect(r.batcher).toMatchObject({
-      allowed: false,
-      reason: "A full-main CI run has not instantiated its fan-out yet",
+      allowed: true,
+      capacityInformational: true,
+      reason: expect.stringContaining("A full-main CI run has not instantiated its fan-out yet"),
       capacity: { hold: "main-pre-fanout", preFanoutMainRuns: [700] },
     });
     expect(r.traffic).toMatchObject({
@@ -508,7 +510,7 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
     });
   });
 
-  test("A2: a just-pushed job-less main run holds in both readers", async () => {
+  test("A2: job-less main is informational live and holds traffic-shadow", async () => {
     const runs: Run[] = [{ id: 701, status: "queued", ...MAIN }];
     const d = await decide(runs, { 701: [] });
     expect(d.capacity).toMatchObject({
@@ -517,7 +519,7 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
       latestMain: { runId: 701, queuedJobs: 0 },
     });
     const r = await both(runs, { 701: [] });
-    expect(r.busy).toBe(true);
+    expect(r.busy).toBe(false);
     expect(r.batcher?.capacity?.hold).toBe("main-pre-fanout");
     expect(r.traffic).toMatchObject({ allowed: false, capacity: { hold: "main-pre-fanout" } });
   });
@@ -553,9 +555,11 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
       latestMain: { runId: 800, queuedJobs: 0 },
     });
     const r = await both(runs, fanned);
-    expect(r.busy).toBe(true);
+    expect(r.busy).toBe(false);
     expect(r.batcher).toMatchObject({
-      reason: "A full-main CI run has jobs waiting for hosted runners",
+      allowed: true,
+      capacityInformational: true,
+      reason: expect.stringContaining("A full-main CI run has jobs waiting for hosted runners"),
       capacity: { hold: "main-queued", mainQueuedJobs: 6 },
     });
     expect(r.traffic).toMatchObject({ allowed: false, capacity: { hold: "main-queued" } });
@@ -637,7 +641,7 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
     expect(hold({ preFanoutMainRuns: [1], providerJobLimit: Number.NaN })).toBe("invalid-capacity");
   });
 
-  test("reader re-reads on every call: fanned-out quiet main admits, then queued main holds", async () => {
+  test("reader re-reads on every call and reports newly queued main jobs", async () => {
     const cfg = config({
       BATCHER_MODE: "active",
       BATCHER_RUNNER_BUDGET: "52",
@@ -652,7 +656,7 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
     const r = new GitHubReader(cfg, new GitHubAuth({}), transport);
     expect(await r.mainBusy()).toBe(false);
     jobs = [...prePlan(), ...many(2, "queued", { created_at: iso(5) })];
-    expect(await r.mainBusy()).toBe(true);
+    expect(await r.mainBusy()).toBe(false);
     expect(r.lastHeadroom?.capacity?.hold).toBe("main-queued");
   });
 

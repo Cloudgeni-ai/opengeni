@@ -13,6 +13,7 @@
       "@opengeni/react-native/expo": ["../../packages/react-native/src/expo.ts"],
       "@opengeni/react-native/webrtc": ["../../packages/react-native/src/webrtc.ts"],
       "@opengeni/react-native/adapters": ["../../packages/react-native/src/adapters.ts"],
+      "@opengeni/react-native/recordings": ["../../packages/react-native/src/recordings/index.ts"],
       "zod": ["../../node_modules/zod"],
       "zod/*": ["../../node_modules/zod/*"],
       "*": ["./node_modules/@types/*", "./node_modules/*"],

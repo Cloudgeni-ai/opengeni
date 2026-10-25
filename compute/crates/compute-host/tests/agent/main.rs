@@ -42,6 +42,7 @@ mod requests;
 #[path = "../support/required.rs"]
 mod required;
 mod restart;
+mod roots;
 mod sleep;
 
 /// Bytes of fake guest memory that hold its value. A memory image is as long
@@ -895,20 +896,17 @@ struct Lab {
     handle: Handle,
 }
 
-static NEXT_LAB: AtomicUsize = AtomicUsize::new(0);
-
 impl Lab {
-    /// Unix socket paths are short, so labs live directly under /tmp.
+    /// Unix socket paths are short, so labs live directly under /tmp. The
+    /// root is removed when the test process exits.
     fn root() -> PathBuf {
         Self::root_in(std::path::Path::new("/tmp"))
     }
 
-    /// A lab directly under `dir`, which must be short.
+    /// A lab directly under `dir`, which must be short, removed when the
+    /// test process exits.
     fn root_in(dir: &std::path::Path) -> PathBuf {
-        let n = NEXT_LAB.fetch_add(1, Ordering::Relaxed);
-        let root = dir.join(format!("ch-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = roots::make(dir);
         std::fs::write(root.join("base.img"), "base").unwrap();
         std::fs::write(root.join("vmlinux"), "kernel").unwrap();
         root

@@ -4,9 +4,81 @@ import {
   dateFields,
   dateFieldValueFromParts,
   dateFieldTyping,
+  locate,
   projectElements,
   unindexedTextByElement,
 } from "../src/cua/projection";
+
+test("a table cell macOS repeats under its AXColumn is one element to a locator", () => {
+  const [row, column, elsewhere] = projectElements(
+    [
+      { x: 200, y: 459 },
+      { x: 200, y: 459 },
+      { x: 200, y: 900 },
+    ].map((frame, offset) => ({
+      element_index: offset + 1,
+      element_token: `snapshot:${offset + 1}`,
+      role: "AXLink",
+      label: "Juniper Dental",
+      actions: ["AXPress"],
+      frame: { ...frame, w: 106, h: 19 },
+    })),
+    "macos",
+  );
+  const locator = { kind: "role", role: "link", name: "Juniper Dental", exact: true } as const;
+  expect(locate([row!, column!], locator).ref).toBe(row!.ref);
+  expect(() => locate([row!, column!, elsewhere!], locator)).toThrow(
+    "CUA locator must resolve to exactly one observed element",
+  );
+});
+
+test("an exact name is the whole name in any case and spacing", () => {
+  const [save, saveAs] = projectElements(
+    ["  Save  changes ", "Save changes as"].map((label, offset) => ({
+      element_index: offset + 1,
+      element_token: `snapshot:${offset + 1}`,
+      role: "AXButton",
+      label,
+      actions: ["AXPress"],
+      frame: { x: 10, y: 10 + offset * 40, w: 80, h: 20 },
+    })),
+    "macos",
+  );
+  const exact = (name: string) => ({ kind: "role", role: "button", name, exact: true }) as const;
+  expect(locate([save!, saveAs!], exact("save changes")).ref).toBe(save!.ref);
+  expect(locate([save!, saveAs!], exact("Save Changes As")).ref).toBe(saveAs!.ref);
+  expect(() => locate([save!, saveAs!], exact("Save"))).toThrow(
+    "CUA locator must resolve to exactly one observed element",
+  );
+});
+
+test("a Linux or Windows checkbox or switch reads whether it is on as its value", () => {
+  const element = (role: string, selected: boolean, index: number) => ({
+    element_index: index,
+    element_token: `snapshot:${index}`,
+    role,
+    label: `Option ${index}`,
+    selected,
+    actions: ["click"],
+  });
+  const linux = projectElements(
+    [
+      element("check box", true, 1),
+      element("check box", false, 2),
+      element("switch", true, 3),
+      element("radio button", true, 4),
+    ],
+    "linux",
+  );
+  expect(linux.map((node) => node.value)).toEqual(["1", "0", "1", undefined]);
+  const [windows] = projectElements([element("CheckBox", false, 5)], "windows");
+  expect(windows).toMatchObject({ role: "checkbox", value: "0" });
+  const [mac] = projectElements(
+    [{ ...element("AXCheckBox", false, 6), value: "1", actions: ["AXPress"] }],
+    "macos",
+  );
+  expect(mac!.value).toBe("1");
+});
 
 test("desktop elements with document-sized labels and values still form valid nodes", () => {
   const [node] = projectElements(
@@ -346,6 +418,24 @@ test("a web date field Chrome left without a value reads what its parts read", (
   expect(read(["1", "11", "1996"])).toBe("1996-11-01");
   // A part still showing its placeholder: the field reads what Chrome says.
   expect(read(["1", "mm", "1996"])).toBe("");
+  // Chrome keeps the value the page gave the field first after typing
+  // changed its parts; the parts read what it holds.
+  const typedOver = (parts: string[]) =>
+    projectElements(
+      webDateField("AXDateField", "Start", ["Day", "Month", "Year"], "2026-01-02").map((element) =>
+        element.role === "AXIncrementor"
+          ? { ...element, value: parts[[3, 5, 7].indexOf(element.element_index)] }
+          : element,
+      ),
+      "macos",
+    ).find((node) => node.ref === "s1:2")!.value;
+  expect(typedOver(["7", "3", "2027"])).toBe("2027-03-07");
+  expect(typedOver(["dd", "mm", "yyyy"])).toBe("2026-01-02");
+  // Parts that are no calendar date do not stand for the field.
+  expect(typedOver(["31", "2", "2027"])).toBe("2026-01-02");
+  expect(typedOver(["29", "2", "2027"])).toBe("2026-01-02");
+  expect(typedOver(["29", "2", "2028"])).toBe("2028-02-29");
+  expect(typedOver(["31", "4", "2027"])).toBe("2026-01-02");
   expect(dateFieldValueFromParts(["hours", "minutes", "meridiem"], ["2", "05", "PM"])).toBe(
     "14:05",
   );

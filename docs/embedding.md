@@ -74,6 +74,35 @@ Stop, tool approvals, attachments, human-input forms, live voice, optimistic del
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
 
+**Automations in the host.** `AutomationsPanel` from
+`@opengeni/react/automations` lists, creates and edits automations inside the
+host's own dialog or page, so people can have the agent pick a chat up again
+on a schedule or when something happens without leaving the product. Scoped to
+a chat, new automations continue that chat with its settings; without a chat,
+each run starts a new chat with the workspace's defaults and the owner's
+access. Event triggers show when the deployment runs them.
+
+```tsx
+import { AutomationsPanel } from "@opengeni/react/automations";
+
+<AutomationsPanel
+  client={client}
+  workspaceId={workspaceId}
+  sessionId={chatId}
+  // The host's own MCP server, offered before the person has a source for it.
+  eventServers={[{ serverId: "acme-mcp", name: "Acme" }]}
+  // Subscription arguments new triggers start with, such as the open project.
+  argumentDefaults={{ projectId }}
+  onOpenSession={(id) => openChat(id)}
+/>;
+```
+
+Its words come from the `automations.*` keys of the message catalog, so
+`OpenGeniMessagesProvider` translates it. `AutomationForm`,
+`AutomationWhenField` and the pure helpers behind them (`automationCreateRequest`,
+`automationWhenSentence` and the rest) are exported for hosts that build their
+own layout.
+
 `NewConversation` exposes the same new-chat flow that `OpenGeniChat` uses.
 For a persistent shell, `useNewConversation`/`NewConversationView` and
 `useSessionConversation`/`SessionConversationView` separate ownership from
@@ -1515,6 +1544,12 @@ approvals. Hooks outside that baseline export exact structural refinements:
 `FileAttachmentClientLike`. A host proxy therefore implements only the methods
 used by the mounted hooks; it does not stub workspace administration, billing,
 sandbox environment, connected-machine, or unrelated workbench APIs.
+
+Meeting recording embeds the same way: `@opengeni/sdk/recordings` gives a
+headless, local-first recorder and uploader, and `@opengeni/react/recordings`
+gives capture, list, transcript and speaker hooks over an explicit
+`recordings` client when the host proxies the API. See
+[`recordings.md`](recordings.md#embedding).
 
 Generated-image timeline rows carry a compact permanent artifact receipt. A
 host using the styled `MessageTimeline` can pass `loadRetainedArtifact`; the

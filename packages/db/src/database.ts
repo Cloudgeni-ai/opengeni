@@ -19,6 +19,7 @@ import {
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 import * as schema from "./schema";
 import { startDatabaseTiming } from "./database-timing";
+import { traceQuery, traceTransaction } from "./database-spans";
 import {
   createSessionListChangeSource,
   type SessionListChangeSource,
@@ -600,14 +601,20 @@ function preparingUnsafe<T extends PostgresSql>(target: T, prepare = true, reser
         return (query: string, parameters?: unknown[], options?: postgres.UnsafeQueryOptions) => {
           const signal = reserved ? databaseQuerySignal.getStore() : undefined;
           signal?.throwIfAborted();
-          const pending = base.unsafe(query, parameters as never, { prepare, ...options });
+          const pending = traceQuery(
+            base.unsafe(query, parameters as never, { prepare, ...options }),
+            query,
+          );
           return signal ? abortableQuery(pending, signal) : pending;
         };
       }
       if (property === "begin" || property === "savepoint") {
         const method = Reflect.get(base, property) as unknown;
         if (typeof method !== "function") return method;
-        return (...args: unknown[]) => method.apply(base, wrapScoped(args));
+        return (...args: unknown[]) =>
+          traceTransaction(property === "begin" ? "transaction" : "savepoint", () =>
+            method.apply(base, wrapScoped(args)),
+          );
       }
       return Reflect.get(base, property);
     },

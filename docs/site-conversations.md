@@ -39,8 +39,11 @@
   ordinary lists ignore them. A Site row is stable: its conversations stay
   nested under it, collapsed by default, whichever session is open. A Site's
   title in its row refreshes with the next list read.
-- A Site row opens the console's Site view
-  (`/workspaces/:workspaceId/sites/:siteId`): the Site fills the page and a
+- Every way into a Site opens the console's Site view
+  (`/workspaces/:workspaceId/sites/:siteId`): its sidebar row, the Artifacts
+  list (and its Copy link), a duplicated Site, links and notifications naming
+  `/artifacts/:id` without a tab (replaced, so Back leaves the Site), and the
+  Site tab of its details. The Site fills the page and a
   chat panel sits beside it with one conversation open, the newest unless
   `?conversation=<id>` chooses one. The panel doesn't list conversations (the
   Site's sidebar row does); it shows the open one as a regular chat with the
@@ -64,8 +67,63 @@
   it). The panel follows `siteSessionIds` hints, so a conversation started in
   the Site beside it becomes the newest when the Site is next opened. The
   panel's menu opens the conversation as a full chat or the Site's details
-  (`/artifacts/:id`, with settings, sharing and its Conversations tab).
-  `/artifacts/:id` (with its tabs) and `/sessions/:id` keep working.
+  (`/artifacts/:id?tab=settings`; Versions for people who can't manage it).
+  The details page is reached by tab (`?tab=versions|conversations|data|settings`,
+  Versions by default) and `/sessions/:id` keeps working. **Edit with
+  Opengeni** on the details page opens the Site view with `?new=true`: a new
+  conversation in the panel (shown even if it was hidden), its composer
+  focused once the Site has loaded; the address then drops `?new`, so Back or
+  a reload doesn't repeat it.
+- The Site view edits the Site live, with today's permissions: anyone who can
+  see the Site and has `artifacts:publish` can change it; visitors can't, and
+  there are no drafts or approval step.
+  - The conversation knows its Site. When a conversation is created from the
+    panel (the request carries the Site headers without the frame marker, so
+    it isn't Site code, and its caller may publish), the API attaches
+    `siteConversationContext` (`@opengeni/contracts/site-session-http`) to
+    its first message as server-authored `modelContext`: the Site's id,
+    title and the version shown, and that a change is published as a new
+    version straight away. For someone who may publish, the panel attaches
+    the same context, with the version then live, to every later message
+    (`sendExtras`); others get none, as from the API. It is
+    ordinary model-visible context, never authority; a caller still can't
+    set its own context on a Site create (403), and a published host's
+    conversations get none.
+  - The preview follows the Site. `useSiteLiveVersion` checks the Site when
+    the open conversation's tool call returns or its turn ends
+    (`SessionConversation`'s `onEvent`, which fires only for events newer
+    than the history it opened with), every five seconds while the page is
+    visible (versions published from anywhere else), and on focus, coming
+    back online or into view; overlapping checks share one. A check reads
+    only the Site and its current version (`GET
+    /v1/workspaces/:workspaceId/published-artifacts/:artifactId/current`,
+    `getWorkspaceArtifactCurrent` in the SDK, `artifacts:read`, without
+    provenance, so it needs no session reads); the history is read again
+    only when that changed. Against a server without it (404 or 405) every
+    check reads the history. A Site that is gone (403 or 404) stops the timed
+    checks. `SiteView` gets the current `versionId` and reloads in place when
+    it changes, replacing the frame once, in the same render as its HTML,
+    and keeping the version on screen until the new one has loaded; a failed
+    update tries again, waiting longer each time (up to 30 seconds), and a
+    hidden tab waits until it is shown. The frame's label says what is true
+    (`ArtifactSandbox` `liveState`): **Live**, **Updating** while a new
+    version loads, or **Reconnecting** when a check or update failed (the
+    version shown stays); on a narrow screen only its dot shows, and it is
+    still announced. On a Site published to the web, the header's link to
+    the published Site stands in for **Live**, and **Updating** or
+    **Reconnecting** shows beside it.
+  - The version chip in the Site's header (`SiteVersionMenu`) shows the live
+    version and its recent history (eight, then **All versions** on the
+    details page). **Undo last change** restores the version that was live
+    before the change that made the current one live (a publish or a
+    restore, so a second Undo goes forward again and reads **Undo
+    restore**), else the revision before;
+    **Restore** on any listed version does the same. Both use the existing
+    rollback with `expectedCurrentVersionId`, so a version published
+    meanwhile wins and the chip says "The Site changed meanwhile". People
+    without publish permission, and archived Sites, get the history only.
+    In full screen its menu opens inside the full-screen frame. An archived
+    Site's view links to its details, where it can be restored.
 - A Site is a sidebar row even before anyone asks it anything. Placement has
   one rule: a Site is a top-level row in the project of the chat that created
   it (the session tree of its first version), and new Site conversations are
@@ -82,11 +140,14 @@
   console (`POST
   /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`,
   `recordSiteOpened` in the SDK, `artifacts:read`) records this person's
-  latest open. A row's activity is the latest of its conversations, its
-  newest published version (creation is the first) and that open, so Sites
-  in use rise and untouched ones sort down like old sessions, without being
-  hidden. Archiving, restoring, rolling back or any other write to the Site's
-  record is not activity. Opens are personal and never visible to anyone
+  latest open, which only lists the Site. A row's activity is the latest of
+  its conversations, its newest published version (creation is the first)
+  and the chats that published its versions (the one that created it and any
+  used to edit it), as far as the viewer can see them. So Sites in use rise
+  and untouched ones sort down like old sessions, without being hidden.
+  Opening a Site is not activity, just as opening a chat is not. Archiving,
+  restoring, rolling back or any other write to the Site's record is not
+  activity either. Opens are personal and never visible to anyone
   else; a Site page cannot record one. The console records one open per page
   (router history entry) that shows the Site view: not again when its client
   is replaced, only once a page that loaded hidden is shown, and not again
@@ -98,6 +159,19 @@
   conversations a row has no count and nothing to disclose; it opens the
   Site view. Conversations someone moved to another project nest under a row
   for the Site in that project, and the Site keeps its row in its own one.
+- Every sidebar row has Pin and Archive one click away (hover or keyboard
+  focus shows them over the row's time; right-click and the touch overflow
+  menu offer them too). For a Site row both are personal sidebar state
+  (`site_sidebar_states`, `PUT
+  /v1/workspaces/:workspaceId/published-artifacts/:artifactId/sidebar`,
+  `updateSiteSidebarState` in the SDK, `artifacts:read`, refused on a Site
+  origin) and never change the Site or anyone else's sidebar. Pin moves the
+  row, with its conversations, into Pinned, once across projects. Archive
+  hides the row and its conversations from this person's sidebar only; the
+  Site stays published and others still see it. Undo, or opening the Site
+  again, restores it; a pin is kept. Archived Sites are not listed under the
+  Archived filter. Archive on a spawned chat's row archives its workstream,
+  since archive belongs to the top-level chat.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.

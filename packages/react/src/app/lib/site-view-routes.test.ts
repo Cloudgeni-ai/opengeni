@@ -52,4 +52,8 @@ test("Site view links and search", () => {
     conversation: sessionId,
   });
   expect(siteViewSearch({ conversation: 42 })).toEqual({ conversation: undefined });
+  // Edit with Opengeni asks for a new conversation; anything else is no request.
+  for (const asked of [true, "true", 1]) expect(siteViewSearch({ new: asked }).new).toBe(true);
+  for (const other of [false, "false", 0, "yes", undefined])
+    expect(siteViewSearch({ new: other }).new).toBeUndefined();
 });

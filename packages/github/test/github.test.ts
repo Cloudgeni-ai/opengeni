@@ -37,7 +37,7 @@ describe("GitHub app manifest helpers", () => {
     expect(verifySignedState(state, "secret", 5000)).toBe(false);
   });
 
-  test("omits webhooks until a signed GitHub webhook receiver is shipped", () => {
+  test("subscribes public deployments to the GitHub events automations use", () => {
     const local = buildGitHubAppManifest({
       appName: "Local",
       baseUrl: "http://127.0.0.1:8000",
@@ -45,8 +45,9 @@ describe("GitHub app manifest helpers", () => {
       includeCiPermissions: true,
     });
     expect(local.hook_attributes).toBeUndefined();
+    expect(local.default_events).toBeUndefined();
     expect(local.request_oauth_on_install).toBe(true);
-    expect(local.default_permissions).toMatchObject({ members: "read" });
+    expect(local.default_permissions).toMatchObject({ members: "read", issues: "write" });
     expect(local.callback_urls).toEqual(["http://127.0.0.1:8000/v1/github/oauth/callback"]);
 
     const hosted = buildGitHubAppManifest({
@@ -55,8 +56,22 @@ describe("GitHub app manifest helpers", () => {
       public: false,
       includeCiPermissions: true,
     });
-    expect(hosted.hook_attributes).toBeUndefined();
-    expect(hosted.default_events).toBeUndefined();
+    expect(hosted.hook_attributes).toEqual({
+      url: "https://agents.example.com/v1/webhooks/github",
+      active: true,
+    });
+    expect(hosted.default_events).toEqual([
+      "issues",
+      "issue_comment",
+      "pull_request",
+      "pull_request_review",
+      "pull_request_review_comment",
+      "push",
+      "release",
+      "check_run",
+      "check_suite",
+      "workflow_run",
+    ]);
     expect(hosted.request_oauth_on_install).toBe(true);
     expect(hosted.callback_urls).toEqual(["https://agents.example.com/v1/github/oauth/callback"]);
 

@@ -10,8 +10,7 @@ import {
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateWorkspaceSettingsRequest,
   CreateScheduledTaskRequest,
-  CreateAutomationSourceRequest,
-  CreateAutomationTriggerRequest,
+  CreateEventSourceRequest,
   CreateWorkspaceWebhookRequest,
   PutWorkspaceCredentialProviderRequest,
 } from "@opengeni/contracts";
@@ -81,11 +80,16 @@ describe("developer setup skill", () => {
     });
     expectPreservedRequest(UpdateSessionMcpApprovalPolicyRequest, examples[8]);
     expectPreservedRequest(CreateScheduledTaskRequest, examples[9]);
-    expectPreservedRequest(CreateAutomationSourceRequest, {
-      ...examples[10],
-      webhookSecret: "fixture-secret-123",
+    expectPreservedRequest(CreateEventSourceRequest, examples[10]);
+    // An event-driven schedule is a scheduled task whose `events` name the source.
+    expectPreservedRequest(CreateScheduledTaskRequest, {
+      ...examples[11],
+      events: {
+        triggers: [
+          { ...examples[11].events.triggers[0], sourceId: "00000000-0000-4000-8000-000000000001" },
+        ],
+      },
     });
-    expectPreservedRequest(CreateAutomationTriggerRequest, examples[11]);
     expectPreservedRequest(CreateWorkspaceWebhookRequest, examples[12]);
     expectPreservedRequest(PutWorkspaceCredentialProviderRequest, examples[13]);
     expectPreservedRequest(SetWorkspaceAllowanceRequest, examples[14]);
@@ -100,7 +104,7 @@ describe("developer setup skill", () => {
     expect(markdown).toContain("(24-hour default expiry); it");
   });
 
-  test("cleanup distinguishes disabled automations from deleted resources", async () => {
+  test("cleanup deletes schedules before the event sources they listen to", async () => {
     const markdown = await readFile(referencePath, "utf8");
     const cleanup = (markdown.split("## Reruns, failures and cleanup")[1] ?? "").replace(
       /\s+/g,
@@ -108,13 +112,11 @@ describe("developer setup skill", () => {
     );
     expect(cleanup).toContain("Clean up **only disposable staging resources this run created**.");
     expect(cleanup).toContain("Never delete reused resources.");
-    expect(cleanup).toContain('status === "disabled"');
-    expect(cleanup).toContain("`GET .../automations/triggers` / `listTriggers`");
-    expect(cleanup).toContain("`GET .../automations/sources` / `listSources`");
-    expect(cleanup).toContain("Disabled records remain listed.");
-    expect(cleanup).toContain("For resources actually deleted, verify inventory absence");
+    expect(cleanup).toContain("Pause/remove schedules, then delete their event sources");
+    expect(cleanup).toContain("refuses deletion with 409 while a schedule still listens to it");
+    expect(cleanup).toContain("`DELETE .../event-sources/:sourceId` → `deleteEventSource`");
     expect(cleanup).toContain("where an exact GET is supported, 404.");
-    expect(cleanup).not.toContain("Verify inventory/GET absence after each removal.");
+    expect(cleanup).not.toContain("automations/triggers");
   });
 
   test("recipes use the canonical none agent without legacy branches or empty lists", async () => {
@@ -158,7 +160,7 @@ describe("developer setup skill", () => {
       sdkExamples.installProductApi,
       sdkExamples.setMcpApproval,
       sdkExamples.configureSchedule,
-      sdkExamples.configureEventSource,
+      sdkExamples.configureEventAutomation,
       sdkExamples.configureWebhook,
       sdkExamples.configureCredentialProvider,
       sdkExamples.configureBudget,

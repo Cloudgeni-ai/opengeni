@@ -982,6 +982,11 @@ input through its ref. Chrome calls it after a successful checkout and
 and pending/cancelled replacement do not request focus. The host retains
 ownership of the input and no DOM selector or global focus event is needed.
 
+Pass `wait={{ reason, deadlineAt }}` while an idle session waits for input
+(for example `session.inputWait`). Chrome shows it as the first chip of its
+row, with the reason and the next check time; tapping it opens the full reason.
+Leave it unset otherwise.
+
 When sharing `useSessionEvents().events` with `useGoal`, the hook still fetches
 the authoritative goal on mount and target changes, even when the supplied log
 already contains goal events. The shared log drives subsequent invalidations

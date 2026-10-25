@@ -919,6 +919,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "createEventSource",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/event-sources",
+    "request": [
+      "CreateEventSourceRequest"
+    ],
+    "response": [
+      "CreateEventSourceResponse"
+    ]
+  },
+  {
     "id": "createFeedback",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/feedback",
@@ -1362,6 +1373,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -1373,6 +1385,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
   },
   {
     "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
@@ -1405,6 +1433,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -1427,6 +1456,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -1486,6 +1516,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteDocument",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteEventSource",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId",
     "request": [],
     "response": []
   },
@@ -1629,6 +1666,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -1944,6 +1982,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2211,6 +2250,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2233,6 +2273,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2318,6 +2359,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/integrations/teams/bot",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/knowledge/entries",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries",
@@ -2360,6 +2408,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/link",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/link",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
@@ -2383,6 +2438,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2443,6 +2499,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2465,6 +2522,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2487,6 +2545,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2503,6 +2562,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
     "request": [],
     "response": []
   },
@@ -2530,6 +2596,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2559,6 +2626,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2821,6 +2889,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -2875,6 +2944,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/materializations/:jobId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "getEventSource",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId",
+    "request": [],
+    "response": [
+      "EventSource"
+    ]
   },
   {
     "id": "getFile",
@@ -3604,6 +3682,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary",
@@ -3644,6 +3723,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceArtifactContentResponse"
+    ]
+  },
+  {
+    "id": "getWorkspaceArtifactCurrent",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/current",
+    "request": [],
+    "response": [
+      "WorkspaceArtifactCurrentResponse"
     ]
   },
   {
@@ -3961,6 +4049,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -4365,11 +4454,38 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listEventDeliveries",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/deliveries",
+    "request": [],
+    "response": [
+      "ListEventDeliveriesResponse"
+    ]
+  },
+  {
     "id": "listEventPage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events",
     "request": [],
     "response": []
+  },
+  {
+    "id": "listEventSources",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/event-sources",
+    "request": [],
+    "response": [
+      "EventSource"
+    ]
+  },
+  {
+    "id": "listEventSourceTypes",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/event-types",
+    "request": [],
+    "response": [
+      "EventTypeDescriptor"
+    ]
   },
   {
     "id": "listFiles",
@@ -4438,6 +4554,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ExternalIdentityLinkPage"
     ],
     "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
+  },
+  {
+    "id": "listInboundEvents",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/events",
+    "request": [],
+    "response": [
+      "ListInboundEventsResponse"
+    ]
   },
   {
     "id": "listInbox",
@@ -5422,6 +5547,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5559,6 +5685,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5581,6 +5708,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5649,6 +5777,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links",
     "request": [],
     "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/integrations/teams/link",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/knowledge/search",
@@ -5853,6 +5989,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5875,6 +6012,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5897,6 +6035,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -5908,6 +6047,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items",
     "request": [],
     "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval/grants/:grantId/revoke",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval/grants/:grantId/revoke",
+    "request": [],
+    "response": [],
+    "browserOnly": "which secrets need the person's approval each time, and the approvals they gave, guard what agents may use, so only the person signed in to Opengeni themselves can change them, never an agent"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/restore",
@@ -5961,6 +6108,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -6183,10 +6331,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
@@ -6235,6 +6392,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -6266,10 +6424,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
+    "request": [],
+    "response": [],
+    "browserOnly": "which secrets need the person's approval each time, and the approvals they gave, guard what agents may use, so only the person signed in to Opengeni themselves can change them, never an agent"
   },
   {
     "id": "PUT /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
@@ -6288,6 +6455,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
@@ -6652,6 +6820,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "replayEventDelivery",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/deliveries/:deliveryId/replay",
+    "request": [],
+    "response": [
+      "EventDelivery"
+    ]
+  },
+  {
     "id": "reportBrowserAuthRun",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report",
@@ -6904,6 +7081,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "rotateEventSourceSecret",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/rotate-secret",
+    "request": [],
+    "response": [
+      "RotateEventSourceSecretResponse"
+    ]
+  },
+  {
     "id": "rotateOrganizationCredentialProviderSecret",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/credential-provider/rotate-secret",
@@ -7009,6 +7195,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "BrowserRecordingSaveRequest"
     ],
     "response": [
+      "BrowserRecordingSaveProgress",
       "BrowserRecordingSaveResponse"
     ]
   },
@@ -7099,6 +7286,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionEvent"
+    ]
+  },
+  {
+    "id": "sendTestEvent",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId/test",
+    "request": [
+      "SendTestEventRequest"
+    ],
+    "response": [
+      "SendTestEventResponse"
     ]
   },
   {
@@ -7792,6 +7990,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "updateEventSource",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId",
+    "request": [
+      "UpdateEventSourceRequest"
+    ],
+    "response": [
+      "EventSource"
+    ]
+  },
+  {
     "id": "updateExternalIdentityMembership",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/external-members/:membershipId",
@@ -8288,6 +8497,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateSiteSidebarState",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sidebar",
+    "request": [
+      "UpdateSiteSidebarStateRequest"
+    ],
+    "response": [
+      "SiteSidebarStateResponse"
+    ]
+  },
+  {
     "id": "updateSiteSqlSettings",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/settings",
@@ -8348,6 +8568,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SessionSecretsView",
       "VaultFieldVersionMeta",
       "VaultItem",
+      "VaultItemApproval",
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary",

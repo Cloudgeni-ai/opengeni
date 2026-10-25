@@ -8,6 +8,7 @@ import {
   AgentUpdateStage,
   ControlRequest,
   ControlResponse,
+  ErrorCode,
   GoingOfflineReason,
   Hello,
 } from "@opengeni/agent-proto";
@@ -102,6 +103,8 @@ function busWithAgent(opts: {
   agentId: string;
   online: boolean;
   onRequest?: (request: ControlRequest) => void;
+  /** Refuse update requests the way the agent does, instead of accepting. */
+  updateRefusal?: { failureCode: string; retryable: boolean };
 }): MemoryEventBus {
   const bus = new MemoryEventBus();
   if (!opts.online) {
@@ -113,8 +116,20 @@ function busWithAgent(opts: {
       const req = ControlRequest.decode(payload);
       opts.onRequest?.(req);
       const op = req.op;
-      const res: ControlResponse =
-        op?.$case === "ping"
+      const refusal = op?.$case === "agentUpdateApply" ? opts.updateRefusal : undefined;
+      const res: ControlResponse = refusal
+        ? {
+            requestId: req.requestId,
+            error: {
+              code: refusal.retryable
+                ? ErrorCode.ERROR_CODE_DRAINING
+                : ErrorCode.ERROR_CODE_PROTOCOL,
+              message: `self-update request rejected: ${refusal.failureCode}`,
+              retryable: refusal.retryable,
+              detail: { failure_code: refusal.failureCode },
+            },
+          }
+        : op?.$case === "ping"
           ? {
               requestId: req.requestId,
               result: {
@@ -1850,6 +1865,89 @@ describe("Connected Machine signed self-update orchestration", () => {
     await heartbeat();
     await Bun.sleep(50);
     expect(updateRequests()).toHaveLength(2);
+  }, 90_000);
+
+  test("a machine whose agent is already installing another update is postponed, not failed", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment } = await seed();
+    const subject = `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}`;
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `${subject}.hello`,
+    );
+    // The same process already accepted an update requested through another
+    // enrollment, so its process-global updater refuses this one.
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+      updateRefusal: { failureCode: "update_already_in_progress", retryable: true },
+    });
+    let now = Date.now();
+    const updates = createAutomaticAgentUpdater({
+      db,
+      bus,
+      settings: {
+        ...settings,
+        agentAutoUpdate: true,
+        agentStableVersion: "0.1.16",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+      now: () => now,
+    })!;
+    const heartbeat = () =>
+      handleAgentEventPayload(
+        db,
+        undefined,
+        AgentEvent.encode(
+          AgentEvent.fromPartial({
+            agentId: enrollment.id,
+            event: { $case: "heartbeat", heartbeat: {} },
+          }),
+        ).finish(),
+        `${subject}.events`,
+        bus,
+        updates,
+      );
+    const updateRequests = () =>
+      requests.filter((request) => request.op?.$case === "agentUpdateApply");
+    const status = async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate;
+
+    await heartbeat();
+    const postponed = await waitForValue(
+      status,
+      (update) => update?.status === "failed",
+      "the refused automatic update",
+    );
+    expect(postponed).toMatchObject({
+      errorCode: "update_busy_updating",
+      retryable: true,
+      targetVersion: "0.1.16",
+    });
+    expect(agentVersionState("0.1.15", "0.1.16", postponed!)).toBe("outdated");
+    // It is asked again after the short busy backoff, not the failure backoff.
+    await heartbeat();
+    await Bun.sleep(50);
+    expect(updateRequests()).toHaveLength(1);
+    now += 11 * 60_000;
+    await heartbeat();
+    await waitForValue(
+      async () => updateRequests().length,
+      (count) => count === 2,
+      "the retried automatic update",
+    );
   }, 90_000);
 
   test("an older agent with open managed browsers is not updated automatically until they close", async () => {

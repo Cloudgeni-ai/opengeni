@@ -93,6 +93,10 @@ export function createSecretArgumentResolver(input: {
       toolName: entry.modelName,
       operationId: call.operationId,
       ...(context.sourceCallId === undefined ? {} : { sourceCallId: context.sourceCallId }),
+      // The connector the value goes to, for a person approving the use.
+      ...(entry.codemodePath.length > 1
+        ? { destination: entry.codemodePath.slice(0, -1).join(".") }
+        : {}),
     });
     const values = new Map<string, string>();
     const binary: string[] = [];

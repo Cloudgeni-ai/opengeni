@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
 import {
   dbSearchPath,
@@ -20,15 +21,19 @@ import {
   createDb,
   databasePoolOptions,
   defaultDatabasePreparedStatements,
+  eventOccurrenceProducerKey,
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
   type Database,
+  type EventOccurrenceToStart,
 } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import {
   createObservability,
   installCpuSamplingSignal,
   logStartupDependencyRetry,
+  traceClientCalls,
+  traceFetch,
   type Observability,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
@@ -53,6 +58,7 @@ import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
+import { startTeamsBotPump } from "./integrations/teams-bot";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
@@ -61,6 +67,11 @@ import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
+import {
+  startEventIntakePrunePump,
+  startEventTriggerDispatchPump,
+  startEventSubscriptionPump,
+} from "./event-trigger-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -117,6 +128,7 @@ export async function createTemporalWorkflowClient(
 ): Promise<{
   client: SessionWorkflowClient;
   documentIndexer: DocumentIndexClient;
+  startScheduledTaskEventRun: (occurrence: EventOccurrenceToStart) => Promise<void>;
   close: () => Promise<void>;
 }> {
   const connection = await Connection.connect(temporalConnectionOptions(settings));
@@ -312,6 +324,66 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
+    startRecordingWorkflow: async (work) => {
+      const transcript = work.kind === "transcript" && work.versionId !== null;
+      try {
+        await temporal.workflow.start(
+          transcript ? "recordingTranscriptWorkflow" : "recordingDeletionWorkflow",
+          {
+            taskQueue: settings.temporalTaskQueue,
+            workflowId: transcript
+              ? `recording-transcript:${work.versionId}`
+              : `recording-deletion:${work.recordingId}`,
+            workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+            args: [
+              {
+                accountId: work.accountId,
+                workspaceId: work.workspaceId,
+                recordingId: work.recordingId,
+                ownerSubjectId: work.ownerSubjectId,
+                ...(transcript ? { versionId: work.versionId } : {}),
+              },
+            ],
+          },
+        );
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    startBrowserRecordingVideo: async (input) => {
+      try {
+        await temporal.workflow.start("browserRecordingVideoWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `recording-browser-video:${input.recordingId}`,
+          // A rerun after a finished one finds the recording made and stops,
+          // and one after its deletion makes it again from the bundle.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    scheduleTransientObjectDeletion: async ({ workspaceId, objectKeys, deleteAfter }) => {
+      const keys = [...new Set(objectKeys)].sort();
+      if (keys.length === 0) return;
+      const digest = createHash("sha256").update(JSON.stringify(keys)).digest("hex");
+      try {
+        await temporal.workflow.start("transientObjectDeletionWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // Keys already waiting keep their first deadline; once that run has
+          // finished, the same keys can be scheduled again.
+          workflowId: `transient-object-deletion-${workspaceId}-${digest}`,
+          startDelay: Math.max(0, deleteAfter.getTime() - Date.now()),
+          args: [{ workspaceId, objectKeys: keys }],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
     },
@@ -330,6 +402,27 @@ export async function createTemporalWorkflowClient(
   return {
     client,
     documentIndexer,
+    // An event occurrence's run. The workflow id is the occurrence's producer
+    // key, so a retried start collides instead of starting a second run.
+    startScheduledTaskEventRun: async (occurrence: EventOccurrenceToStart) => {
+      try {
+        await temporal.workflow.start("scheduledTaskFireWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: eventOccurrenceProducerKey(occurrence.id),
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [
+            {
+              accountId: occurrence.accountId,
+              workspaceId: occurrence.workspaceId,
+              taskId: occurrence.taskId,
+              triggerType: "event",
+            },
+          ],
+        });
+      } catch (error) {
+        if (!isWorkflowAlreadyStarted(error)) throw error;
+      }
+    },
     close: async () => {
       await connection.close();
     },
@@ -436,7 +529,11 @@ export async function startApi(
   }
   // Compute sandboxes reach their agent over this process's bus and database.
   installComputeAgentPlane({ db: dbClient.db, bus, settings });
-  const objectStorage = createObjectStorage(settings);
+  // Calls made while serving a request become child spans of its request span.
+  const createdObjectStorage = createObjectStorage(settings);
+  const objectStorage = createdObjectStorage
+    ? traceClientCalls(createdObjectStorage, "object_storage")
+    : null;
   let editableArtifactComposition: StandaloneEditableArtifactApplication | undefined;
   if (objectStorage && isArtifactRuntimeConfigured()) {
     try {
@@ -454,8 +551,8 @@ export async function startApi(
     settings,
     db: dbClient.db,
     bus,
-    workflowClient: workflowClient.client,
-    documentIndexer: workflowClient.documentIndexer,
+    workflowClient: traceClientCalls(workflowClient.client, "temporal"),
+    documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
     objectStorage,
     ...(editableArtifactComposition
       ? {
@@ -548,6 +645,7 @@ export async function startApi(
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
+  const stopTeamsBotPump = startTeamsBotPump(routeDeps);
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopWorkspaceWebhookDispatchPump = startWorkspaceWebhookDispatchPump({
     db: dbClient.db,
@@ -571,6 +669,20 @@ export async function startApi(
   const stopScheduledTaskLifecyclePump = startScheduledTaskLifecyclePump({
     db: dbClient.db,
     sync: (task) => workflowClient.client.syncScheduledTask({ task }),
+    bus,
+    observability,
+  });
+  const stopEventTriggerDispatchPump = startEventTriggerDispatchPump({
+    db: dbClient.db,
+    settings,
+    bus,
+    startRun: (occurrence) => workflowClient.startScheduledTaskEventRun(occurrence),
+    observability,
+  });
+  const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
+  const stopEventSubscriptionPump = startEventSubscriptionPump({
+    db: dbClient.db,
+    settings,
     bus,
     observability,
   });
@@ -647,11 +759,15 @@ export async function startApi(
       const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
       metricsServer?.stop(true);
       stopSlackInteractionPump?.();
+      stopTeamsBotPump();
       await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
       await stopScheduledTaskLifecyclePump();
+      await stopEventTriggerDispatchPump();
+      await stopEventIntakePrunePump();
+      await stopEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();
       // Write queued presence before the database pool closes.
@@ -672,6 +788,9 @@ export async function startApi(
 if (import.meta.main) {
   const fatalBoundary = installApiFatalProcessBoundary();
   try {
+    // Standalone process only: an embedding host owns its own global fetch.
+    // Outbound HTTP made while serving a request becomes a child span of it.
+    globalThis.fetch = traceFetch(globalThis.fetch);
     const settings = getSettings();
     const observability = createObservability(settings, { component: "api" });
     fatalBoundary.attachObservability(observability);

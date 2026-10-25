@@ -14,7 +14,7 @@ import {
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { findPickerRow, type PickerModelRow } from "./model-policy";
 import { sessionDisplayStatus, type SessionDisplayStatus } from "./session-status-model";
-import { type OpenGeniText } from "./messages/runtime";
+import { createOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
 // Title ranking shared with the web command menu, so chat search on every
 // surface orders matches the same way.
@@ -115,6 +115,33 @@ export function sessionHasUpcomingSchedule(
 ): boolean {
   return session.hasUpcomingSchedules ?? session.hasSchedules === true;
 }
+
+/**
+ * What an automation posting into this chat is waiting for: an event that can
+ * still arrive, or the schedule's next run. An event wins when both apply,
+ * because it can start a run at any moment; null when nothing will.
+ */
+export type SessionAutomationWait = "event" | "schedule";
+
+export function sessionAutomationWait(
+  session: Pick<SessionListRow, "hasSchedules" | "hasUpcomingSchedules" | "waitingForEvents">,
+): SessionAutomationWait | null {
+  if (session.waitingForEvents === true) return "event";
+  return sessionHasUpcomingSchedule(session) ? "schedule" : null;
+}
+
+/** How a chat's automation wait reads in a tooltip, hover card or announcement. */
+export function sessionAutomationWaitLabel(t: OpenGeniText, wait: SessionAutomationWait): string {
+  return wait === "event" ? t("automations.wait.event") : t("automations.wait.schedule");
+}
+
+const english = createOpenGeniText();
+
+/** @deprecated English only. Use `sessionAutomationWaitLabel(t, wait)`, which follows the host's text. */
+export const SESSION_AUTOMATION_WAIT_LABEL: Record<SessionAutomationWait, string> = {
+  event: sessionAutomationWaitLabel(english, "event"),
+  schedule: sessionAutomationWaitLabel(english, "schedule"),
+};
 
 export function hasActiveEffectiveControl(session: SessionListRow): boolean {
   return (session.effectiveControl?.state ?? "active") === "active";

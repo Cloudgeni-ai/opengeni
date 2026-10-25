@@ -22,13 +22,15 @@
     "./settings": "./src/settings.ts",
     "./fakes": "./src/fakes.ts",
     "./mcp": "./src/mcp.ts",
-    "./screenshot": "./src/screenshot.ts"
+    "./screenshot": "./src/screenshot.ts",
+    "./mcp-events-server": "./src/mcp-events-server.ts"
   },
   "scripts": {
     "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/server": "2.3.1",
     "@openai/agents": "0.14.3",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",

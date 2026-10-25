@@ -24,6 +24,7 @@ import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
 import {
   answersFromDrafts,
+  choiceOffersOther,
   defaultHumanInputFormMessages,
   emptyDraft,
   initialDrafts,
@@ -1084,7 +1085,7 @@ function QuestionControls({
               </label>
             );
           })}
-          {!question.skillReview ? (
+          {choiceOffersOther(question) ? (
             <div
               className={cn(
                 "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",

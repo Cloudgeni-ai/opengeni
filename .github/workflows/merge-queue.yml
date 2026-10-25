@@ -14,7 +14,7 @@ permissions:
 # Never share a group with full main CI or another speculative queue head.
 concurrency:
   group: queue-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 env:
   OPENGENI_TEST_MAX_CONCURRENCY: "4"
@@ -29,15 +29,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Explain queue entry and auditable local verification
+      - name: Explain queue entry
         run: |
-          echo 'PR entry only: before enqueueing, an agent must post exact-head full VM test evidence and independent review as required by AGENTS.md.' >> "$GITHUB_STEP_SUMMARY"
-          echo 'This entry check is not test or review evidence. The combined merge_group runs all selected source/unit checks before landing; full post-merge CI remains independent.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Add queue-ready to request landing. The batcher requires exact-head PR CI and existing branch protection checks; no prose attestation is admission evidence.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'This entry check is not test evidence. PR CI and combined candidate CI remain separate; full post-merge main CI is independent.' >> "$GITHUB_STEP_SUMMARY"
 
   plan:
     name: Queue impact
-    # Ordinary PRs use the required VM/review evidence process, not a duplicate
-    # hosted suite. queue-shadow is an explicit pre-rollout measurement lane.
+    # Ordinary PRs use pr-ci.yml. queue-shadow is an explicit measurement lane;
+    # it is not runtime admission evidence or a substitute for PR CI.
     if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'queue-shadow') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

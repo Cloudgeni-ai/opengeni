@@ -5,6 +5,7 @@ export interface VerifiedResult {
   retryable: boolean;
   reason: string;
   infrastructureOnly?: true;
+  failedClasses?: ("source" | "units")[];
 }
 interface Task {
   schemaVersion: 1;
@@ -122,6 +123,21 @@ export function verifyResult(
     outcome,
     retryable,
     reason: data.reason.slice(0, 2000),
+    ...(outcome === "code_failure" &&
+    !incomplete &&
+    verified
+      .filter((t) => t.outcome === "code_failure")
+      .every((t) => t.job === "source" || /^unit-\d+$/.test(t.job))
+      ? {
+          failedClasses: [
+            ...new Set(
+              verified
+                .filter((t) => t.outcome === "code_failure")
+                .map((t): "source" | "units" => (t.job === "source" ? "source" : "units")),
+            ),
+          ],
+        }
+      : {}),
     ...(outcome === "infrastructure" &&
     !incomplete &&
     verified.some((t) => t.outcome === "infrastructure") &&

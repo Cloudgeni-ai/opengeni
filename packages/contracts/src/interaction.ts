@@ -1871,6 +1871,41 @@ export const BrowserRecordingExportReceipt = /* @__PURE__ */ defineSchema(() =>
 );
 export type BrowserRecordingExportReceipt = z.infer<typeof BrowserRecordingExportReceipt>;
 
+/** Starts uploading a stopped recording's bundle, or joins the upload already
+ * going to the same object, and waits at most `waitMs` for it to land. A slow
+ * link keeps uploading in the background; the caller asks again. `replace`
+ * uploads again even if an earlier upload to the same object finished, for a
+ * caller that found that object gone. */
+export const BrowserRecordingUploadRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      recordingId: z.string().uuid(),
+      upload: z
+        .object({
+          url: boundedHttpUrl,
+          requiredHeaders: z.record(z.string().min(1).max(256), z.string().max(8_192)),
+          expiresAt: z.string().datetime({ offset: true }),
+        })
+        .strict(),
+      waitMs: z.number().int().min(0).max(60_000),
+      replace: z.boolean().optional(),
+    })
+    .strict(),
+);
+export type BrowserRecordingUploadRequest = z.infer<typeof BrowserRecordingUploadRequest>;
+
+export const BrowserRecordingUploadStatus = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      recordingId: z.string().uuid(),
+      state: z.enum(["uploading", "uploaded"]),
+      sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      sha256: sha256Hex,
+    })
+    .strict(),
+);
+export type BrowserRecordingUploadStatus = z.infer<typeof BrowserRecordingUploadStatus>;
+
 /** Stops a recording and saves it as an MP4 (plus its action log) in the
  * browser's source session workspace, published as a retained artifact. */
 export const BrowserRecordingSaveRequest = /* @__PURE__ */ defineSchema(() =>
@@ -1904,6 +1939,20 @@ export const BrowserRecordingSaveResponse = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type BrowserRecordingSaveResponse = z.infer<typeof BrowserRecordingSaveResponse>;
+
+/** A save still in progress (HTTP 202): `uploading` while the recording
+ * moves off its browser host, `encoding` while the worker makes its video.
+ * Repeat the same request, with the same operationId, after `retryAfterMs`. */
+export const BrowserRecordingSaveProgress = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      state: z.enum(["uploading", "encoding"]),
+      recording: BrowserRecordingSummary,
+      retryAfterMs: z.number().int().positive().max(60_000),
+    })
+    .strict(),
+);
+export type BrowserRecordingSaveProgress = z.infer<typeof BrowserRecordingSaveProgress>;
 
 export const InteractionRect = /* @__PURE__ */ defineSchema(() =>
   z
@@ -3446,6 +3495,9 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
        * minimized window or a hidden app's window is not marked: reading it
        * brings it back on screen behind the person's front window. */
       offScreen: z.literal(true).optional(),
+      /** Present on the target this computer was last observed or acted on
+       * in, which a call that omits targetId works in. */
+      current: z.literal(true).optional(),
     })
     .strict(),
 );
@@ -3695,6 +3747,33 @@ export const ComputerActionCommand = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerActionCommand = z.infer<typeof ComputerActionCommand>;
 
+/** An action whose locator named a pressable control by role and name, when
+ * nothing of that role had the name and the one control of a role pressed
+ * alike (a button for a link, or a link for a button) with that exact name
+ * was used instead. */
+export const ComputerActionRoleStandIn = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      actionIndex: z
+        .number()
+        .int()
+        .min(0)
+        .max(INTERACTION_MAX_ACTIONS_PER_BATCH - 1),
+      /** The role the locator named. */
+      requestedRole: resolvedTargetRole,
+      /** The role of the element used. */
+      role: resolvedTargetRole,
+      name: resolvedTargetText,
+    })
+    .strict(),
+);
+export type ComputerActionRoleStandIn = z.infer<typeof ComputerActionRoleStandIn>;
+
+/** Query parameter by which a caller asks a computer controller to include
+ * `roleStandIns` in an action receipt. Controllers that predate the field
+ * ignore it, and callers that do not send it receive receipts without it. */
+export const COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER = "receiptRoleStandIns";
+
 export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3708,6 +3787,14 @@ export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
       settledAt: z.string().datetime({ offset: true }).nullable(),
       observation: ComputerObservation.nullable(),
       error: InteractionError.nullable(),
+      /** Actions that acted on an element of another role than the one named,
+       * in dispatch order. Present only when the controller supports it and the
+       * caller asked for it; never persisted in the controller's operation
+       * journal, so an idempotent replay omits it. */
+      roleStandIns: z
+        .array(ComputerActionRoleStandIn)
+        .max(INTERACTION_MAX_ACTIONS_PER_BATCH)
+        .optional(),
     })
     .strict()
     .superRefine((receipt, context) => {

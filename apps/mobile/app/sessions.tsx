@@ -23,6 +23,7 @@ import { appSessionPath } from "@/app-links";
 import { rankChatSearch, workspacesToSearch } from "@/chat-search";
 import { useServerChatSearch } from "@/use-server-chat-search";
 import { cachedLists, rememberLists } from "@/session-list-cache";
+import { isCapturing, useMeetingRecorder } from "@/meetings";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
 import { AppThemeProvider } from "@/theme";
 import { WorkspaceSwitcherBlock } from "@/workspace-switcher";
@@ -46,7 +47,8 @@ function Sessions() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { client, models, workspaceId, workspaces, organizations, setWorkspaceId } = useAccount();
+  const { client, models, workspaceId, workspaces, organizations, setWorkspaceId, reload } =
+    useAccount();
   // Home's search button opens this screen ready to type.
   const { search } = useLocalSearchParams<{ search?: string }>();
   // The last list paints at once; refreshes run quietly behind it.
@@ -170,7 +172,8 @@ function Sessions() {
             refreshing={pulling}
             onRefresh={() => {
               setPulling(true);
-              void load().finally(() => setPulling(false));
+              // Pull to refresh covers the workspace switcher above the list too.
+              void Promise.all([load(), reload()]).finally(() => setPulling(false));
             }}
           />
         }
@@ -184,7 +187,8 @@ function Sessions() {
             flexDirection: "row",
             alignItems: "center",
             gap: 8,
-            height: 40,
+            minHeight: 40,
+            paddingVertical: 6,
             paddingHorizontal: 12,
             marginTop: 8,
             marginBottom: 12,
@@ -214,6 +218,7 @@ function Sessions() {
             style={{ ...fontStyle(theme), flex: 1, fontSize: 14, color: c.fg }}
           />
         </View>
+        {searching ? null : <MeetingsRow />}
         {searching ? (
           <>
             {results.workspaces.length > 0 ? (
@@ -357,6 +362,42 @@ function WorkspaceResultRow(props: {
         ) : null}
       </View>
       <Text style={{ ...fontStyle(theme), fontSize: 11, color: c["fg-subtle"] }}>Switch</Text>
+    </Pressable>
+  );
+}
+
+/* The rail's Meetings entry, saying so while a recording is running. */
+function MeetingsRow() {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const recorder = useMeetingRecorder();
+  const live = isCapturing(recorder);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={live ? "Meetings, recording now" : "Meetings"}
+      onPress={() => router.push("/meetings")}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 10,
+        minHeight: 40,
+        paddingVertical: 8,
+        paddingHorizontal: 8,
+        marginBottom: 4,
+        borderRadius: theme.radius.md,
+        backgroundColor: pressed ? c.hover : "transparent",
+      })}
+    >
+      <Icon name="audio-lines" size={16} color={c["fg-muted"]} />
+      <Text style={{ ...fontStyle(theme, 500), flex: 1, fontSize: 15, color: c.fg }}>Meetings</Text>
+      {live ? (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c.danger }} />
+          <Text style={{ ...fontStyle(theme, 500), fontSize: 12, color: c.danger }}>Recording</Text>
+        </View>
+      ) : null}
+      <Icon name="chevron-right" size={14} color={c["fg-subtle"]} />
     </Pressable>
   );
 }

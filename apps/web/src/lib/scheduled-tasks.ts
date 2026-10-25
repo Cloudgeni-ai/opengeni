@@ -845,6 +845,7 @@ const RUN_TRIGGER_LABEL: Record<ScheduledTaskRun["triggerType"], string> = {
   manual: "Run now",
   initial: "First run",
   provider_event: "Provider event",
+  event: "Event",
   retry: "Retry",
   repair: "Repair",
 };
@@ -969,8 +970,8 @@ const ACCESS_FAILURE_REASON: Record<ScheduledTaskRunAccessFailure["reason"], str
   expired: "its connection expired",
   insufficient_scope: "its connection is missing a permission it needs",
   refresh_failed: "its connection could not be renewed",
-  personal_authority_unavailable: "your personal account is not available to this schedule",
-  unsupported_auth: "its sign-in is not supported for scheduled runs",
+  personal_authority_unavailable: "your personal account is not available to this automation",
+  unsupported_auth: "its sign-in is not supported for automation runs",
   resource_scope_unavailable: "the resources it was allowed to use are no longer available",
   designated_credential_unavailable: "the account chosen for it is no longer available",
 };
@@ -1049,7 +1050,7 @@ export function scheduledTaskPolicyDriftLines(
   if (unavailableAccounts) lines.push(unavailableAccounts);
   if (drift.missingConnectors.length > 0) {
     lines.push(
-      `New schedules in this workspace also get ${names(drift.missingConnectors)}; this one does not.`,
+      `New automations in this workspace also get ${names(drift.missingConnectors)}; this one does not.`,
     );
   }
   if (drift.missingOpenGeniTools.length > 0) {

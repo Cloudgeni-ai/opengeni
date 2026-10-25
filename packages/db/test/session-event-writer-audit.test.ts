@@ -505,6 +505,8 @@ const DEV_SEED_CONVERSATION_WRITER = `${DEV_SEED_PATH}#seedConversations`;
 const DEV_SEED_SCHEDULE_RUN_WRITER = `${DEV_SEED_PATH}#seedScheduleRuns`;
 // A benchmark that seeds a disposable local fixture database, never a deployment.
 const DISPOSABLE_BENCH_SESSION_WRITER = "scripts/bench-insights-hourly.ts";
+// A benchmark that seeds raw tool-call events into a shared-harness test database.
+const DISPOSABLE_BENCH_EVENT_WRITER = "scripts/operator/bench-tool-name-pages.ts";
 const ARCHIVED_IMPORT_PATH = "packages/db/src/archived-session-imports.ts";
 const ARCHIVED_IMPORT_WRITER = `${ARCHIVED_IMPORT_PATH}#appendTimeline`;
 
@@ -589,6 +591,18 @@ function expectDisposableBenchGuards(source: string): void {
     'throw new Error("This benchmark only accepts a local disposable test cluster");',
   );
   expect(source).not.toContain("OPENGENI_DATABASE_URL");
+}
+
+/** The event benchmark only seeds the shared-harness database it acquires itself. */
+function expectDisposableBenchEventGuards(source: string): void {
+  expect(source).toContain(
+    'import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";',
+  );
+  expect(source).toContain('await acquireSharedTestDatabase("tool-name-pages-benchmark")');
+  expect(source).toContain('throw Error("Real PostgreSQL required");');
+  expect(source).toContain("const client = createDb(shared.appUrl, { max: 1 });");
+  expect(source).not.toContain("OPENGENI_DATABASE_URL");
+  expect(source).not.toContain("process.env");
 }
 
 function productionTypeScriptFiles(): string[] {
@@ -1722,12 +1736,17 @@ describe("session_events writer inventory", () => {
         }
         if (isTaggedTemplateExpression(node)) {
           const sqlText = sourceFile.source.slice(nodeStart(node.quasi), node.quasi.end);
-          if (
-            /\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText) &&
-            // The DEV-only seed's pinned exception; see DEV_SEED_CONVERSATION_WRITER.
-            `${file}#${namedEnclosingFunction(node, true)?.name}` !== DEV_SEED_CONVERSATION_WRITER
-          ) {
-            rawSqlWriters.push(`${file}:${lineNumber(sourceFile.source, node)}`);
+          if (/\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText)) {
+            const outer = namedEnclosingFunction(node, true);
+            if (`${file}#${outer?.name}` === DEV_SEED_CONVERSATION_WRITER) {
+              // The DEV-only seed's pinned exception; see DEV_SEED_CONVERSATION_WRITER.
+            } else if (file === DISPOSABLE_BENCH_EVENT_WRITER && !outer) {
+              // Top-level fixture seeding in the benchmark's own shared-harness
+              // database; pin its guards and do not exempt any other writer.
+              expectDisposableBenchEventGuards(sourceFile.source);
+            } else {
+              rawSqlWriters.push(`${file}:${lineNumber(sourceFile.source, node)}`);
+            }
           }
         }
         forEachChild(node, visit);

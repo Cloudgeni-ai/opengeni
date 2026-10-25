@@ -963,6 +963,67 @@ test("managers publish workspace Sites under globally unique, held hostnames", a
   expect(code(unknown)).toBe("site_not_found");
 }, 60_000);
 
+test("anyone who can open a Site reads where it is published; its settings stay with managers", async () => {
+  const f = await fixture();
+  const site = await f.publish("Newsletter");
+  const viewer = await f.person(["workspace:read", "artifacts:read"]);
+  const link = (who: Who, siteId = site.id) =>
+    f.publication(who, siteId, "GET", undefined, "/link");
+
+  // Not published yet: no address, for anyone.
+  const before = await link(viewer);
+  expect(before.status).toBe(404);
+  expect(code(before)).toBe("site_not_published");
+
+  const created = await f.publication(f.owner, site.id, "PUT", { access: "invited" });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  // A viewer without artifacts:publish gets the primary address and status only.
+  const published = await link(viewer);
+  expect(published.status, JSON.stringify(published.json)).toBe(200);
+  expect(published.json).toEqual({
+    siteId: site.id,
+    hostname: created.json.hostname,
+    url: created.json.url,
+    status: "active",
+  });
+  // The publication's settings (access, invitations, moderation) stay with managers.
+  const settings = await f.publication(viewer, site.id, "GET");
+  expect(settings.status).toBe(403);
+  expect(code(settings)).toBe("site_manager_required");
+  expect((await link(f.owner)).json).toEqual(published.json);
+
+  // Without artifacts:read there is no Site to open, and an Only me Site stays hidden.
+  const outsider = await f.person(["workspace:read"]);
+  expect((await link(outsider)).status).toBe(403);
+  // Another person's Only me Site answers as if it didn't exist (site_not_found, not
+  // site_not_published), while its owner learns it isn't published.
+  const mine = await f.publish("Mine only", "private");
+  const unseen = await link(viewer, mine.id);
+  expect(unseen.status).toBe(404);
+  expect(code(unseen)).toBe("site_not_found");
+  expect(code(await link(f.owner, mine.id))).toBe("site_not_published");
+  // A Site in another workspace is not reachable through this one.
+  const elsewhere = await fixture();
+  const theirs = await elsewhere.live("Theirs");
+  const foreign = await link(viewer, theirs.id);
+  expect(foreign.status).toBe(404);
+  expect(code(foreign)).toBe("site_not_found");
+
+  // Taken-down and unpublished Sites say so, without the moderation details.
+  const takedown = await f.publication(
+    f.owner,
+    site.id,
+    "POST",
+    { reason: "Testing" },
+    "/takedown",
+  );
+  expect(takedown.status, JSON.stringify(takedown.json)).toBe(200);
+  expect((await link(viewer)).json).toEqual({ ...published.json, status: "suspended" });
+  expect((await f.publication(f.owner, site.id, "POST", {}, "/restore")).status).toBe(200);
+  await f.publication(f.owner, site.id, "DELETE");
+  expect((await link(viewer)).json).toEqual({ ...published.json, status: "unpublished" });
+});
+
 test("site-runtime checks the gateway signature before anything else", async () => {
   const f = await fixture();
   const site = await f.live("Signed", { access: "public" });

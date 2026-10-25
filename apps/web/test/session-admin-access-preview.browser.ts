@@ -25,7 +25,7 @@ try {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(base);
-    const toggle = page.getByRole("switch", { name: "Admin access for agent sessions" });
+    const toggle = page.getByRole("switch", { name: "Full access for agent sessions" });
     await toggle.waitFor();
     assert.equal(await toggle.getAttribute("aria-checked"), "true");
     await noHorizontalOverflow(page);
@@ -42,25 +42,25 @@ try {
     await shield.click();
     await page.getByText("acts as them", { exact: false }).waitFor();
     await page.screenshot({ path: `${output}/${name}-shield-menu.png` });
-    await page.getByRole("menuitem", { name: "Turn off admin access" }).click();
+    await page.getByRole("menuitem", { name: "Turn off full access" }).click();
     await shield.waitFor({ state: "detached" });
 
     // Giving access goes through a confirmation that defaults focus to Cancel.
     const off = page.getByTestId("header-off");
     await off.getByRole("button", { name: "More session actions" }).click();
-    await page.getByRole("menuitem", { name: "Give admin access…" }).click();
-    const dialog = page.getByRole("dialog", { name: "Give this session admin access?" });
+    await page.getByRole("menuitem", { name: "Give full access…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Give this session your full access?" });
     await dialog.waitFor();
     assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), "Cancel");
     await noHorizontalOverflow(page);
     await page.screenshot({ path: `${output}/${name}-grant-dialog.png` });
-    await dialog.getByRole("button", { name: "Give admin access" }).click();
+    await dialog.getByRole("button", { name: "Give full access" }).click();
     await dialog.waitFor({ state: "detached" });
     await off.locator("[data-session-admin-access]").waitFor();
 
     // Turning the organization setting off asks first.
     await toggle.click();
-    const confirm = page.getByRole("dialog", { name: "Turn off admin access for agents?" });
+    const confirm = page.getByRole("dialog", { name: "Turn off full access for agents?" });
     await confirm.waitFor();
     await page.screenshot({ path: `${output}/${name}-org-off-confirm.png` });
     await confirm.getByRole("button", { name: "Turn off" }).click();
@@ -68,14 +68,14 @@ try {
     await page.waitForFunction(
       () =>
         document
-          .querySelector('[role="switch"][aria-label="Admin access for agent sessions"]')
+          .querySelector('[role="switch"][aria-label="Full access for agent sessions"]')
           ?.getAttribute("aria-checked") === "false",
     );
     await toggle.click();
     await page.waitForFunction(
       () =>
         document
-          .querySelector('[role="switch"][aria-label="Admin access for agent sessions"]')
+          .querySelector('[role="switch"][aria-label="Full access for agent sessions"]')
           ?.getAttribute("aria-checked") === "true",
     );
     assert.deepEqual(errors, []);

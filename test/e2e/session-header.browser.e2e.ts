@@ -246,9 +246,15 @@ describe("responsive production session header", () => {
       const page = await context.newPage();
       await page.goto(`${webBaseUrl}/workspaces/${fixture.workspaceId}/sessions/${session.id}`);
       const header = page.locator("header");
-      const waitStatus = page.locator("[data-session-wait-status]");
+      // The wait is the first chip of the status row above the composer.
+      const waitStatus = page.getByTestId("session-chrome-wait");
       await waitStatus.getByText("Waiting for CI to finish", { exact: true }).waitFor();
-      expect(await waitStatus.innerText()).toContain("Checks again at");
+      expect(await waitStatus.getAttribute("aria-label")).toMatch(
+        /^Waiting for CI to finish\. Checks again at /,
+      );
+      await waitStatus.click();
+      const waitPanel = page.locator('[data-og-session-chrome-panel="wait"]');
+      expect(await waitPanel.innerText()).toContain("resumes sooner if an update arrives");
       expect(await header.locator("[data-session-wait-badge]").innerText()).toBe("Waiting");
       const waitLabel = page
         .locator(`a[href="/workspaces/${fixture.workspaceId}/sessions/${session.id}"]`)

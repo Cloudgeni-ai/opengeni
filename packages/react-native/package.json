@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react-native",
-  "version": "5.1.2",
+  "version": "5.2.1",
   "description": "React Native and Expo kit for Opengeni agents: the native session timeline, composer adapters, voice dictation, and realtime voice calls (CallKit) on the same SDK controllers as the web.",
   "license": "Apache-2.0",
   "repository": {
@@ -35,6 +35,10 @@
     "./expo": {
       "types": "./src/expo.ts",
       "default": "./src/expo.ts"
+    },
+    "./recordings": {
+      "types": "./src/recordings/index.ts",
+      "default": "./src/recordings/index.ts"
     },
     "./ui": {
       "types": "./src/ui/index.ts",

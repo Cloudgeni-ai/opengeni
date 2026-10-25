@@ -313,7 +313,7 @@ describe("provider-neutral operational instructions", () => {
     // active goal it instead starts a continuation that rediscovers the same
     // wait. The re-wait rule must not be conditional on having no goal.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "If work you already started is still in flight (a child, a command, or a timed recheck), give the answer, then call `wait_for_input` when available so its result resumes you, even when a goal is active.",
+      "If work you already started is still in flight (a child, a command, or a timed recheck), call `wait_for_input` when available with the answer in its `reply`, so its result resumes you, even when a goal is active.",
     );
     // Each turn's wait sets a fresh absolute deadline from its timeout, so a
     // re-wait with the full timeout would push a timed recheck back on every
@@ -325,9 +325,13 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
       "Otherwise the answer is your final response: an active goal continues on its own",
     );
+    // Text written just before the call can reach the person only as a
+    // summary (Claude's progress updates), so an answer goes in `reply`, which
+    // is shown verbatim (session df030716, 13:13 UTC on 2026-10-23).
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "do not post a status right before `wait_for_input` unless it answers the user",
+      "do not post a status right before `wait_for_input`: its reason is the status. When the turn answers the user, put the whole answer in its `reply` argument, which they see exactly as written, instead of writing it before the call.",
     );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("unless it answers the user");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "For ordinary background commands, register that session-level wait before ending your turn.",
     );
@@ -349,7 +353,7 @@ describe("provider-neutral operational instructions", () => {
     // Any turn may end with a wait instead of a final response, so a turn that
     // starts long work and waits still has a compliant ending.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "a turn that ends with `wait_for_input` has none, and its reason is the user-visible status.",
+      "a turn that ends with `wait_for_input` has none: its `reply` carries any answer, and its reason is the user-visible status.",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
       "unchanged-wait `wait_for_input` continuation",
