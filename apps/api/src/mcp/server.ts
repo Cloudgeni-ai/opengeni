@@ -187,6 +187,7 @@ import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools
 import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
+  scheduledTaskScheduleToolInput,
   scheduledTaskCreateToolValidation,
   scheduledTaskEventsToolInput,
 } from "./scheduled-task-input";
@@ -393,6 +394,7 @@ import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
+import { scheduleTimeZoneFacts, withAgentScheduleTimeZone } from "../scheduled-task-time-zone";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
@@ -668,6 +670,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
       .object({
         ...UpdateScheduledTaskRequest.out.shape,
         id: z4.string().uuid(),
+        schedule: scheduledTaskScheduleToolInput().optional(),
         action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
         agentConfig: z4
           .object(ScheduledTaskAgentConfigInput.shape)
@@ -1972,7 +1975,12 @@ export function buildOpenGeniMcpServer(
           scheduledTaskCreateToolValidation(sessionId),
         ),
       },
-      async (args) => {
+      async (rawArgs) => {
+        const { input: args, timeZoneDefault } = await withAgentScheduleTimeZone(
+          deps.db,
+          grant,
+          rawArgs,
+        );
         const payload = resolveScheduledTaskCreateInput(args, sessionId);
         await requireLimit(deps, {
           accountId: grant.accountId,
@@ -2006,10 +2014,15 @@ export function buildOpenGeniMcpServer(
               warnings: [
                 "The task database record committed, but Temporal schedule synchronization failed.",
               ],
+              ...scheduleTimeZoneReceiptFacts(timeZoneDefault),
             }),
           );
         }
-        return json(scheduledTaskReceipt("scheduled_tasks_create", task, "created", true));
+        return json(
+          scheduledTaskReceipt("scheduled_tasks_create", task, "created", true, {
+            ...scheduleTimeZoneReceiptFacts(timeZoneDefault),
+          }),
+        );
       },
     );
 
@@ -2023,9 +2036,15 @@ export function buildOpenGeniMcpServer(
             : ""),
         inputSchema: scheduledTaskUpdateToolInput(eventTriggers),
       },
-      async ({ id, ...raw }) => {
+      async ({ id, ...requested }) => {
         const existing = await requireVisibleTask(id);
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
+        const { input: raw, timeZoneDefault } = await withAgentScheduleTimeZone(
+          deps.db,
+          grant,
+          requested,
+          existing.schedule,
+        );
         const payload = UpdateScheduledTaskRequest.parse(raw);
         const patchWarnings = (task: ScheduledTask) =>
           (payload.agentConfigPatch?.model !== undefined ||
@@ -2081,6 +2100,7 @@ export function buildOpenGeniMcpServer(
         return json(
           scheduledTaskReceipt("scheduled_tasks_update", task, "updated", true, {
             warnings: patchWarnings(task),
+            ...scheduleTimeZoneReceiptFacts(timeZoneDefault),
           }),
         );
       },
@@ -4221,6 +4241,14 @@ function registerPreferenceRegistryTools(
     async ({ retrievalHandle }) =>
       json(await getPreferenceRegistryFullContent(deps.db, attemptClaims(), retrievalHandle)),
   );
+}
+
+/** Report the zone a schedule uses when the agent's call left it out. */
+function scheduleTimeZoneReceiptFacts(
+  timeZoneDefault: Parameters<typeof scheduleTimeZoneFacts>[0],
+): { facts?: Record<string, string> } {
+  const facts = scheduleTimeZoneFacts(timeZoneDefault);
+  return facts ? { facts } : {};
 }
 
 function scheduledTaskReceipt(

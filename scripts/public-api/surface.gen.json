@@ -15510,6 +15510,7 @@
         "$.skills[]": "ref(SessionSkill)",
         "$.startMode": "enum?=[\"\\\"realtime\\\"\",\"\\\"standard\\\"\"]",
         "$.targetSandboxId": "string?",
+        "$.timeZone": "string?",
         "$.tools": "array?",
         "$.tools[]": "ref(ToolRef)",
         "$.usageLimitMicros": "integer? null",
@@ -28109,7 +28110,8 @@
         "$.reasoningEffort": "ref(ReasoningEffort)!",
         "$.resources": "array!",
         "$.resources[]": "ref(ResourceRef)",
-        "$.text": "string!"
+        "$.text": "string!",
+        "$.timeZone": "string?"
       }
     },
     "SubmitComposerDraftResponse": {

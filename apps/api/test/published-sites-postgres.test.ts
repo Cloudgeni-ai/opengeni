@@ -338,6 +338,45 @@ test("guest agents are confined by native authority without a Site-agent write a
   }
 }, 30_000);
 
+test("a Site viewer's time zone reaches each message they send", async () => {
+  const f = await fixture();
+  const site = await f.live("Zones", { access: "members", agent: { enabled: true } });
+  const session = await f.signIn(await f.person(memberPermissions), site.host);
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    session,
+    body: { initialMessage: "Remind me tomorrow at 9", timeZone: "Europe/Oslo" },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(202);
+  const sessionId = String(created.json.id);
+  const zones = async () =>
+    (
+      await shared.admin<{ metadata: Record<string, unknown> }[]>`
+        select metadata from session_turns where session_id = ${sessionId} order by created_at`
+    ).map((turn) => turn.metadata.messageTimeZone ?? null);
+  expect(await zones()).toEqual(["Europe/Oslo"]);
+
+  await finishConversation(sessionId);
+  const sent = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+    session,
+    body: { type: "user.message", payload: { text: "And Friday?", timeZone: "Asia/Tokyo" } },
+  });
+  expect(sent.status, JSON.stringify(sent.json)).toBe(202);
+  await finishConversation(sessionId);
+  const steered = await f.gateway(site.host, "POST", `/sessions/${sessionId}/steer`, {
+    session,
+    body: { text: "Make it 10", clientEventId: crypto.randomUUID(), timeZone: "America/Denver" },
+  });
+  expect(steered.status, JSON.stringify(steered.json)).toBeLessThan(300);
+  expect(await zones()).toEqual(["Europe/Oslo", "Asia/Tokyo", "America/Denver"]);
+
+  const malformed = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+    session,
+    body: { type: "user.message", payload: { text: "Hi", timeZone: "../etc/passwd" } },
+  });
+  expect(malformed.status).toBeGreaterThanOrEqual(400);
+  expect(malformed.status).toBeLessThan(500);
+});
+
 test("Site execution respects member control permission and explicitly refuses disabled private conversations", async () => {
   const f = await fixture();
   const site = await f.live("Policy", { access: "public", agent: { enabled: true } });

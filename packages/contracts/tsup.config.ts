@@ -50,6 +50,7 @@ export default defineConfig({
     "src/insights-usage.ts",
     "src/session-final-reply.ts",
     "src/session-history.ts",
+    "src/message-time-zone.ts",
     "src/site-session-http.ts",
     "src/slack-bot-scopes.ts",
     "src/slack-rest-mcp.ts",
