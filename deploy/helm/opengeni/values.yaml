@@ -1161,6 +1161,12 @@ ingress:
   enabled: false
   className: ""
   annotations: {}
+  # The largest request body the primary Ingress passes on, as
+  # nginx.ingress.kubernetes.io/proxy-body-size (unless annotations set one).
+  # The API refuses bodies over 32 MiB itself (API_MAX_REQUEST_BODY_BYTES);
+  # ingress-nginx's own default of 1m would refuse sandbox file writes, voice
+  # uploads and imports the API accepts. "" leaves the controller's default.
+  maxRequestBody: 32m
   hosts:
     - host: opengeni.local
       paths:
