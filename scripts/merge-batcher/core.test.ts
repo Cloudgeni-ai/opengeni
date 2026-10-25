@@ -746,7 +746,6 @@ describe("controller isolation and fencing", () => {
     expect(state.epoch).toBe(1);
     const stale: Transaction = {
       expectedState: refs.get(cfg.stateRef)!,
-      nextState: SHA,
       expectedLedger: { ...state, expiresAt: "2099-01-01T00:00:00Z" },
       nextLedger: { ...state, owner: "intruder", epoch: 2 },
       now: NOW,

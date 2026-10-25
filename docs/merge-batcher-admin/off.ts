@@ -1,6 +1,6 @@
 /** Operator-only STOP + exact reverse stages. Importing this file does nothing. */
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rmdir, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rmdir, writeFile, rm, rename } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { validatePlan, verify, type Phase, type Plan, type RuleSet, type Snapshot } from "./bundle";
 
@@ -345,6 +345,7 @@ export async function off(
   optIn: string,
   expectedContractSha256?: string,
   expectedPlanSha256?: string,
+  resumeOnly = false,
 ): Promise<void> {
   if (optIn !== "--apply-after-go")
     throw new Error("OFF requires separate operator go and --apply-after-go");
@@ -383,16 +384,63 @@ export async function off(
     const attempt = await mkdtemp(join(admin, "off."));
     // STOP precedes GitHub reads and plan validation: a GitHub outage must not
     // prevent the already-bound runtime's durable stop operation.
-    const result = JSON.parse(
-      await command(
-        [process.execPath, join(contract.directory, "control.ts"), "stop"],
-        attempt,
-        "stop",
-      ),
-    ) as Stop;
+    const pointer = join(planDir, "off-stop-attempt.json");
+    let result: Stop;
+    let receipt = await json<Deployment>(join(receiptDirectory, "deployment-receipt.json"));
+    if (resumeOnly) {
+      const retained = await json<{ name: string }>(pointer);
+      if (!/^off\.[A-Za-z0-9]+$/.test(retained.name)) throw Error("Invalid retained STOP path");
+      const original = await json<Stop>(join(admin, retained.name, "stop.stdout"));
+      const cloud = await import(join(contract.directory, "cloud-auth.ts"));
+      const config = await import(join(contract.directory, "service-config.ts"));
+      const { reconcileRetainedStop } = await import("./resume-stop");
+      let reads = 0;
+      const supplemental = await reconcileRetainedStop(
+        original,
+        receipt,
+        contract.deployment,
+        config.serviceId,
+        config.controlSecret,
+        cloud.api,
+        async (path) =>
+          JSON.parse(
+            await command(
+              ["bash", join(code, "stage.sh"), admin, "read-json", path],
+              attempt,
+              `reconciliation-${++reads}`,
+            ),
+          ),
+        { project: cloud.project, region: cloud.region },
+      );
+      await writeFile(join(attempt, "stop-supplement.json"), JSON.stringify(supplemental), {
+        flag: "wx",
+        mode: 0o600,
+      });
+      result = supplemental.result;
+      receipt = supplemental.receipt;
+    } else {
+      // The lock serializes writers. Point to this attempt atomically BEFORE
+      // STOP, so later activations never reconcile an older drain. Every old
+      // attempt directory and its original outcome remain unchanged.
+      const nextPointer = join(attempt, "stop-attempt-pointer.json");
+      await writeFile(nextPointer, JSON.stringify({ name: attempt.slice(admin.length + 1) }), {
+        flag: "wx",
+        mode: 0o600,
+      });
+      await rename(nextPointer, pointer);
+      result = JSON.parse(
+        await command(
+          [process.execPath, join(contract.directory, "control.ts"), "stop"],
+          attempt,
+          "stop",
+        ),
+      ) as Stop;
+    }
     verifyStop(
       result,
-      await json<Deployment>(join(receiptDirectory, "deployment-receipt.json")),
+      resumeOnly
+        ? receipt
+        : await json<Deployment>(join(receiptDirectory, "deployment-receipt.json")),
       contract.deployment,
     );
     const planBytes = await readFile(join(planDir, "plan.json"));
@@ -517,6 +565,8 @@ export async function off(
     await rmdir(lock);
   }
 }
+export const resumeOff = (admin: string, optIn: string, contract?: string, plan?: string) =>
+  off(admin, optIn, contract, plan, true);
 if (import.meta.main) {
   const [action, admin, argument] = process.argv.slice(2);
   if (action === "bind-stop" && admin && argument) await bindStop(admin, argument);

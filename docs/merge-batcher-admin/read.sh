@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Sourceable definitions only: no API call or shell-option change on source.
 # Every remote operation here is GET or a read-only GraphQL query.
+batcher_read_json() (
+  set +x
+  set -euo pipefail
+  unset GH_DEBUG
+  gh api --method GET "/repos/Cloudgeni-ai/opengeni/${1:?Read path required}"
+)
+
 batcher_snapshot() (
   set -euo pipefail
   umask 077

@@ -2,7 +2,6 @@
 "@opengeni/config": patch
 "@opengeni/network": patch
 "@opengeni/runtime": patch
-"@opengeni/testing": patch
 ---
 
 Support keyless built-in Azure OpenAI authentication with workload or managed
