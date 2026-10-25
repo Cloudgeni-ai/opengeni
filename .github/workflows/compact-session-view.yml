@@ -1,0 +1,41 @@
+name: Compact session view
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/compact-session-view.yml"
+      - "test/e2e/compact-session-view.browser.e2e.ts"
+      - "test/e2e/fixtures/session-list-read-probe.ts"
+      - "packages/react/src/app/components/rail/session-list.tsx"
+      - "packages/react/src/app/lib/session-list-invalidation.tsx"
+      - "packages/react/src/hooks/internal.ts"
+      - "packages/react/src/hooks/use-workspace-sessions.ts"
+      - "packages/react/test/polled-value-invalidation.test.tsx"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compact-session-view-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    name: Compact session view browser regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/playwright-browsers
+        with:
+          browsers: chromium
+      - name: Run the complete compact session view regression
+        run: bun scripts/run-browser-e2e.ts ./test/e2e/compact-session-view.browser.e2e.ts
