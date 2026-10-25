@@ -67,6 +67,8 @@ beforeAll(async () => {
     await owner`alter table session_events add column usage_source_key text, add column tool_name text, add column tool_call_id text`;
     // ...and the claim adapter reads 0917's nullable continue-waiting-work columns.
     await owner`alter table session_system_updates add column continued_by_subject_id text, add column continued_at timestamptz`;
+    // Turn settlement reads 0961's human-input request origin.
+    await owner`alter table session_human_input_requests add column origin text not null default 'tool_call'`;
     await provisionRoles(shared.adminUrl, { appPassword: shared.appPassword });
   } finally {
     await owner.end();
