@@ -455,6 +455,29 @@ describe("organization MCP server", () => {
     });
   });
 
+  test("compact session-page guidance uses ordinary query dispatch without changing defaults", async () => {
+    const { call, seen } = await connect(person(readOnly));
+    const compact = await call("opengeni_action_call", {
+      id: "listSessionPage",
+      pathParameters: { workspaceId },
+      query: { view: "page", projection: "summary", limit: 50, cursor: "next-page" },
+    });
+    expect(compact.isError).toBe(false);
+    expect(Object.fromEntries(new URL(seen[0]!.url).searchParams)).toEqual({
+      view: "page",
+      projection: "summary",
+      limit: "50",
+      cursor: "next-page",
+    });
+    const fullPage = await call("opengeni_action_call", {
+      id: "listSessionPage",
+      pathParameters: { workspaceId },
+      query: { view: "page", limit: 50 },
+    });
+    expect(fullPage.isError).toBe(false);
+    expect(new URL(seen[1]!.url).searchParams.has("projection")).toBe(false);
+  });
+
   test("read only refuses changes before anything runs; reads still work", async () => {
     const { call, seen } = await connect(person(readOnly));
     const refused = await call("opengeni_action_call", {
