@@ -30,6 +30,30 @@ a timeout. Reusing a key with different content returns 409. A new key creates a
 new immutable submission, preserving earlier ratings instead of overwriting them.
 Analytics must distinguish submissions from the newest rating per author/target.
 
+### Context and screenshots
+
+A report can say where it came from and show what the person saw. `context`
+carries app and device facts: `source` (`web`, `desktop` or `mobile`) is
+required; `trigger` (`menu` or `shake`), `platform`, `appVersion`,
+`buildNumber`, `osVersion`, `deviceModel`, `screen` (the app path in view),
+`locale`, `timeZone`, `online` and up to ten `recentErrors` (`at`, `message`,
+optional `title`, `code`, `status`, `screen`) are optional. `screenshots` holds up
+to three JPEG or PNG images as `{ contentType, base64 }`, each at most 3 MiB once
+decoded; the server checks each image's signature against its declared type.
+
+Screenshot bytes go to the deployment's object storage under create-only,
+content-addressed keys before the row is written, so a retry stores nothing new.
+The stored feedback lists `screenshots` as `{ index, contentType, sizeBytes,
+sha256 }`; a retry with different images under the same key returns 409.
+Submitting screenshots requires object storage (503 without it). The author reads
+an image with `GET /v1/workspaces/:workspaceId/feedback/:feedbackId/screenshots/:index`.
+
+The phone app sends this from **Shake to send feedback**: shaking opens a sheet
+with a screenshot of the screen in view (removable), a comment and a summary of
+the context it attaches. Reports are written to the device first and retried on
+launch, on return to the app and every minute until the server accepts them, so a
+report is not lost without a connection. Settings has a toggle to turn shaking off.
+
 `GET /v1/workspaces/:workspaceId/feedback` returns `{ feedback: [...] }` containing
 only the authenticated principal's general feedback, newest first. Pass
 `?sessionId=<uuid>` to read that principal's feedback for an authorized session.

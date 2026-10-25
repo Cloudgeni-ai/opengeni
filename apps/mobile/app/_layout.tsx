@@ -10,6 +10,7 @@ import { restoreAppearance } from "@/appearance";
 import { CallProvider } from "@/call";
 import { restoreOutsideCallTarget } from "@/call-preferences";
 import { AppLinkRouting } from "@/app-link-routing";
+import { FeedbackHost } from "@/feedback/host";
 import { MeetingRecorderProvider } from "@/meetings";
 import { NotificationRouting } from "@/notifications";
 
@@ -51,6 +52,7 @@ export default function RootLayout() {
                 <StatusBar style="auto" />
                 <NotificationRouting />
                 <AppLinkRouting />
+                <FeedbackHost />
                 <Stack screenOptions={{ headerShown: true }}>
                   <Stack.Screen name="index" options={{ title: "Opengeni" }} />
                   {/* The sessions list is the menu behind Home's top-left button, so it
@@ -85,6 +87,10 @@ export default function RootLayout() {
                     options={{ headerShown: false, presentation: "modal" }}
                   />
                   <Stack.Screen name="call" options={{ headerShown: false }} />
+                  <Stack.Screen
+                    name="feedback"
+                    options={{ headerShown: false, presentation: "modal" }}
+                  />
                   <Stack.Screen
                     name="open"
                     options={{

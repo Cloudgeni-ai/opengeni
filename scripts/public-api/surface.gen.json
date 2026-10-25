@@ -15096,7 +15096,10 @@
       "shape": {
         "$": "object",
         "$.comment": "string?",
+        "$.context": "ref(FeedbackContext)?",
         "$.idempotencyKey": "string!",
+        "$.screenshots": "array?",
+        "$.screenshots[]": "ref(FeedbackScreenshotUpload)",
         "$.sentiment": "ref(FeedbackSentiment)?",
         "$.sessionId": "string?",
         "$.turnId": "string?"
@@ -16793,14 +16796,84 @@
       "shape": {
         "$": "object",
         "$.comment": "string! null",
+        "$.context": "ref(FeedbackContext)! null",
         "$.createdAt": "string!",
         "$.id": "string!",
         "$.principalKind": "string! null",
+        "$.screenshots": "array!",
+        "$.screenshots[]": "ref(FeedbackScreenshot)",
         "$.sentiment": "ref(FeedbackSentiment)! null",
         "$.sessionId": "string! null",
         "$.subjectId": "string!",
         "$.turnId": "string! null",
         "$.workspaceId": "string!"
+      }
+    },
+    "FeedbackContext": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.appVersion": "string?",
+        "$.buildNumber": "string?",
+        "$.deviceModel": "string?",
+        "$.locale": "string?",
+        "$.online": "boolean?",
+        "$.osVersion": "string?",
+        "$.platform": "string?",
+        "$.recentErrors": "array?",
+        "$.recentErrors[]": "ref(FeedbackRecentError)",
+        "$.screen": "string?",
+        "$.source": "enum!=[\"\\\"desktop\\\"\",\"\\\"mobile\\\"\",\"\\\"web\\\"\"]",
+        "$.timeZone": "string?",
+        "$.trigger": "enum?=[\"\\\"menu\\\"\",\"\\\"shake\\\"\"]"
+      }
+    },
+    "FeedbackRecentError": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.at": "string!",
+        "$.code": "string?",
+        "$.message": "string!",
+        "$.screen": "string?",
+        "$.status": "integer?",
+        "$.title": "string?"
+      }
+    },
+    "FeedbackScreenshot": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.contentType": "ref(FeedbackScreenshotContentType)!",
+        "$.index": "integer!",
+        "$.sha256": "string!",
+        "$.sizeBytes": "integer!"
+      }
+    },
+    "FeedbackScreenshotContentType": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"image/jpeg\\\"\",\"\\\"image/png\\\"\"]"
+      }
+    },
+    "FeedbackScreenshotUpload": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.base64": "string!",
+        "$.contentType": "ref(FeedbackScreenshotContentType)!"
       }
     },
     "FeedbackSentiment": {
@@ -33285,6 +33358,10 @@
       "ExternalIdentityLinkPreview": "type",
       "ExternalVaultProviderKind": "type",
       "Feedback": "type",
+      "FeedbackContext": "type",
+      "FeedbackRecentError": "type",
+      "FeedbackScreenshot": "type",
+      "FeedbackScreenshotUpload": "type",
       "FeedbackSentiment": "type",
       "FeedbackSubmissionResponse": "type",
       "FetchLike": "type",
