@@ -12185,6 +12185,7 @@
         "$|kind=element.kind": "const!=[\"\\\"element\\\"\"]",
         "$|kind=element.locator": "ref(BrowserDomReadLocator)!",
         "$|kind=element.maxChars": "integer?",
+        "$|kind=element.offset": "integer?",
         "$|kind=count": "object",
         "$|kind=count.expectedDocumentGeneration": "string!",
         "$|kind=count.expectedFrameId": "string!",

@@ -182,6 +182,11 @@ export type CodemodeBrowserAgentNode = Readonly<{
   name?: string;
   description?: string;
   value?: string | { redacted: true; reason: string };
+  /** Full length of a name, description or value the outline clipped; read
+   * the rest with a dom read of this ref. Absent when nothing was clipped. */
+  nameChars?: number;
+  descriptionChars?: number;
+  valueChars?: number;
   /** Omitted when empty. */
   states?: readonly string[];
   /** Omitted when empty. */
@@ -270,6 +275,7 @@ export type CodemodeBrowserDomReadOptions = BrowserActionFences &
           locator: BrowserDomReadLocator;
           attributes?: readonly BrowserDomSafeAttribute[];
           maxChars?: number;
+          offset?: number;
         }
       | { kind: "count"; selector: string };
   }>;
@@ -297,7 +303,11 @@ export type CodemodeBrowserAxReadResult = Readonly<{
 
 export type CodemodeBrowserReadResult =
   | CodemodeBrowserAxReadResult
-  | (BrowserDomReadResponse & { source: "dom" });
+  | (BrowserDomReadResponse & {
+      source: "dom";
+      /** Offset of the next page when the text or value was cut. */
+      nextOffset?: number;
+    });
 
 export type ComputerActionFences = {
   expectedTargetGeneration?: string | undefined;

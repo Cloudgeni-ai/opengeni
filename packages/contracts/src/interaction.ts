@@ -2257,6 +2257,9 @@ export const BrowserDomReadRequest = /* @__PURE__ */ defineSchema(() =>
       locator: BrowserDomReadLocator,
       attributes: z.array(BrowserDomSafeAttribute).max(13).optional(),
       maxChars: z.number().int().min(1).max(32_768).optional(),
+      /** Characters of the element's text and value to skip, to read on
+       * past a truncated read. */
+      offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
     }).strict(),
     BrowserDomReadFence.extend({
       kind: z.literal("count"),
