@@ -133,6 +133,41 @@ describe("browser model text", () => {
     );
   });
 
+  test("a clipped name, value or text keeps its ref, its full length and the way to read it", () => {
+    const text = browserObservationText({
+      target,
+      agentView: {
+        sourceKind: "snapshot",
+        nodes: [
+          {
+            ref: "e0000000c",
+            role: "textbox",
+            depth: 0,
+            name: "Policy",
+            value: `${"a".repeat(179)}…`,
+            valueChars: 3_299,
+            states: ["readonly"],
+          },
+          {
+            ref: "e0000000d",
+            role: "text",
+            depth: 0,
+            name: `${"b".repeat(179)}…`,
+            nameChars: 1_240,
+          },
+          { ref: "e0000000e", role: "text", depth: 0, name: "Short" },
+        ],
+        clippedFieldCount: 2,
+      },
+    });
+    expect(text.split("\n").slice(1)).toEqual([
+      `- textbox "Policy" [e0000000c] value=${JSON.stringify(`${"a".repeat(179)}…`)} valueChars=3299 readonly`,
+      `- text ${JSON.stringify(`${"b".repeat(179)}…`)} nameChars=1240 [e0000000d]`,
+      '- text "Short"',
+      "(2 long fields clipped; browser_read mode=dom with an element's ref reads it in full)",
+    ]);
+  });
+
   test("says when no accessibility view is available", () => {
     expect(
       browserObservationText({ target, agentView: { sourceKind: "none", nodes: [] } }),

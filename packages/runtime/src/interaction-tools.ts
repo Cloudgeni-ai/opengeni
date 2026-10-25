@@ -184,6 +184,11 @@ const BrowserAgentNode = z
     // empty arrays on every node only costs the model tokens.
     states: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).min(1).max(6).optional(),
     actions: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).min(1).max(6).optional(),
+    // The full length of a name, description or value clipped above, so the
+    // model knows how much it is not seeing.
+    nameChars: z.number().int().positive().optional(),
+    descriptionChars: z.number().int().positive().optional(),
+    valueChars: z.number().int().positive().optional(),
   })
   .strict();
 /** The model-facing view keeps only what a next call can use: what is on the
@@ -310,7 +315,8 @@ const BrowserReadInput = z
             kind: z.literal("element"),
             locator: BrowserDomReadLocator,
             attributes: z.array(BrowserDomSafeAttribute).max(6).optional(),
-            maxChars: z.number().int().min(1).max(4_096).optional(),
+            maxChars: z.number().int().min(1).max(32_768).optional(),
+            offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
           })
           .strict(),
         z
@@ -399,6 +405,9 @@ const BrowserReadOutput = z
   .strict();
 const BrowserDomAgentReadOutput = BrowserDomReadResponse.safeExtend({
   source: z.literal("dom"),
+  /** On a truncated element read, the offset that reads on from where this
+   * read stopped. */
+  nextOffset: z.number().int().positive().optional(),
 });
 const BrowserReadToolOutput = z.discriminatedUnion("source", [
   BrowserReadOutput,
@@ -2058,16 +2067,25 @@ export function createInteractionAttemptToolDefinitions(
                   locator: dom.locator,
                   ...(dom.attributes ? { attributes: dom.attributes } : {}),
                   maxChars: dom.maxChars ?? 4_096,
+                  ...(dom.offset ? { offset: dom.offset } : {}),
                 }
               : { ...inspectedFences, kind: "count" as const, selector: dom.selector };
+          const read = await input.transport.readBrowserDom(
+            input.workspaceId,
+            browserSessionId,
+            targetId,
+            request,
+          );
           return {
-            ...(await input.transport.readBrowserDom(
-              input.workspaceId,
-              browserSessionId,
-              targetId,
-              request,
-            )),
+            ...read,
             source: "dom" as const,
+            ...(dom.kind === "element" && read.truncated
+              ? {
+                  nextOffset:
+                    (dom.offset ?? 0) +
+                    Math.max(read.text?.length ?? 0, read.value?.length ?? 0, 1),
+                }
+              : {}),
           };
         }
         return readBrowserObservation(
@@ -4702,6 +4720,15 @@ function boundedAgentField(value: string, onClip: () => void): string {
   return `${value.slice(0, BROWSER_AGENT_MAX_FIELD_LENGTH - 1)}…`;
 }
 
+function clippedLength<K extends "nameChars" | "descriptionChars" | "valueChars">(
+  key: K,
+  value: string | undefined,
+): Partial<Record<K, number>> {
+  return value !== undefined && value.length > BROWSER_AGENT_MAX_FIELD_LENGTH
+    ? ({ [key]: value.length } as Partial<Record<K, number>>)
+    : {};
+}
+
 function projectAgentNode(flat: FlatBrowserNode): {
   node: z.infer<typeof BrowserAgentNode>;
   clippedFieldCount: number;
@@ -4731,6 +4758,9 @@ function projectAgentNode(flat: FlatBrowserNode): {
     ...(source.actions.length > 0
       ? { actions: source.actions.slice(0, 6).map((action) => boundedAgentField(action, clip)) }
       : {}),
+    ...clippedLength("nameChars", source.name),
+    ...clippedLength("descriptionChars", source.description),
+    ...clippedLength("valueChars", typeof source.value === "string" ? source.value : undefined),
   };
   if (source.states.length > 6) clippedFieldCount += source.states.length - 6;
   if (source.actions.length > 6) clippedFieldCount += source.actions.length - 6;

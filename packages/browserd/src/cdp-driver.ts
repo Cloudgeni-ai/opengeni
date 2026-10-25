@@ -1607,7 +1607,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state,
         entry.backendDOMNodeId,
         DOM_READ_FUNCTION,
-        [{ value: request.maxChars ?? 4_096 }, { value: request.attributes ?? [] }],
+        [
+          { value: request.maxChars ?? 4_096 },
+          { value: request.attributes ?? [] },
+          { value: false },
+          { value: request.offset ?? 0 },
+        ],
         { isolatedFrameId: entry.frameId ?? state.frame.id },
       );
       if (!isRecord(value) || value.ok !== true) {
@@ -5176,7 +5181,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return;
     }
     if (action.operation === "copy") {
-      const text = await this.copyBrowserText(state, action.locator, action.content ?? "selection");
+      // Copying an element without saying what copies what it shows, or its
+      // selected part; without an element, the page's selection.
+      const text = await this.copyBrowserText(
+        state,
+        action.locator,
+        action.content ?? (action.locator ? "whole" : "selection"),
+      );
       this.setClipboard(text, "copy", state.targetId);
       return;
     }
@@ -5227,7 +5238,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async copyBrowserText(
     state: TargetState,
     locator: BrowserLocator | undefined,
-    content: "selection" | "value" | "text",
+    content: "selection" | "value" | "text" | "whole",
   ): Promise<string> {
     let value: unknown;
     if (locator) {
@@ -5261,9 +5272,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         isRecord(value) && typeof value.error === "string" ? value.error : "unavailable";
       throw new InteractionDefiniteDriverError(
         reason === "protected" ? "permission_denied" : "invalid_action",
-        reason === "protected"
-          ? "browser clipboard cannot copy a protected field"
-          : "browser clipboard source is unavailable",
+        clipboardCopyFailure(reason, locator !== undefined),
       );
     }
     this.assertClipboardText(value.text);
@@ -7987,6 +7996,24 @@ function closedTargetListFailure(error: unknown): unknown {
   );
 }
 
+/** Why a clipboard copy found nothing to copy, and what copies instead. */
+export function clipboardCopyFailure(reason: string, fromElement: boolean): string {
+  switch (reason) {
+    case "protected":
+      return "browser clipboard cannot copy a protected field";
+    case "no_value":
+      return 'browser clipboard copy found no value on this element; copy its text with content "text", or read it with browser_read mode=dom';
+    case "no_selection":
+      return fromElement
+        ? "browser clipboard copy found nothing selected in this element; omit content to copy all of its text or value"
+        : "browser clipboard copy found nothing selected on the page; select text first, or pass a locator to copy an element's text or value";
+    case "detached":
+      return "browser clipboard copy lost its element, which is no longer on the page; observe the page and copy again";
+    default:
+      return "browser clipboard copy found no focused element to copy from; pass a locator to copy an element's text or value";
+  }
+}
+
 function absoluteTargetUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0 || value.length > 16_384) return null;
   try {
@@ -8843,7 +8870,7 @@ const PAGE_SCROLL_FUNCTION = `function(deltaX, deltaY) {
 
 /** Fixed browser-side projection. Every field shares one character budget, so
  * a huge page cannot turn a focused query into an unbounded CDP payload. */
-const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect) {
+const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect, offset) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
   if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
   const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
@@ -8873,17 +8900,18 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect
     "aria-checked", "aria-selected", "placeholder", "type", "name", "data-testid"]);
   let remaining = maxChars;
   let truncated = false;
-  const bounded = (raw) => {
+  const bounded = (raw, skip = 0) => {
     if (raw === null || raw === undefined) return null;
-    const value = String(raw);
+    const value = String(raw).slice(skip);
     const kept = value.slice(0, remaining);
     remaining -= kept.length;
     if (kept.length < value.length) truncated = true;
     return kept;
   };
-  const text = bounded(element.innerText ?? element.textContent ?? "");
+  const skip = Number(offset) || 0;
+  const text = bounded(element.innerText ?? element.textContent ?? "", skip);
   const value = tag === "input" || tag === "textarea" || tag === "select"
-    ? bounded(element.value ?? "") : null;
+    ? bounded(element.value ?? "", skip) : null;
   const attributes = {};
   for (const attribute of requestedAttributes) {
     if (allowed.has(attribute)) attributes[attribute] = bounded(element.getAttribute(attribute));
@@ -8909,35 +8937,49 @@ function assertSafeDomReadSelector(selector: string): void {
   }
 }
 
+// What a clipboard copy takes from an element. "value" is a form field's
+// value, or the text of an element whose accessible value is its text
+// (editable content, custom text boxes, combo boxes and spin buttons);
+// "text" is what the element shows, which for a text field is its value;
+// "selection" is the selected text inside it; "whole" (content omitted) is
+// the selection when there is one, otherwise all of what it shows.
 const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
-  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false, error: "unavailable" };
+  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false, error: "detached" };
   const tag = String(element.tagName || "").toLowerCase();
   if (tag === "input" && String(element.type).toLowerCase() === "password") {
     return { ok: false, error: "protected" };
   }
+  const textField = tag === "input" || tag === "textarea";
+  const shown = () => textField
+    ? String(element.value ?? "")
+    : String(element.innerText ?? element.textContent ?? "");
   if (content === "value") {
-    if (tag === "input" || tag === "textarea" || tag === "select") {
-      return { ok: true, text: String(element.value ?? "") };
+    if (textField || tag === "select") return { ok: true, text: String(element.value ?? "") };
+    const role = String(element.getAttribute("role") || "").toLowerCase();
+    if (element.isContentEditable === true || ["textbox", "searchbox", "combobox", "spinbutton"].includes(role)) {
+      return { ok: true, text: shown() };
     }
-    return { ok: false, error: "unavailable" };
+    return { ok: false, error: "no_value" };
   }
-  if (content === "text") {
-    return { ok: true, text: String(element.innerText ?? element.textContent ?? "") };
-  }
-  if (tag === "input" || tag === "textarea") {
+  if (content === "text") return { ok: true, text: shown() };
+  let selected = "";
+  if (textField) {
     const start = element.selectionStart;
     const end = element.selectionEnd;
-    if (typeof start !== "number" || typeof end !== "number") return { ok: false, error: "unavailable" };
-    return { ok: true, text: String(element.value).slice(start, end) };
+    if (typeof start === "number" && typeof end === "number") selected = String(element.value).slice(start, end);
+  } else {
+    const selection = element.ownerDocument.defaultView?.getSelection();
+    if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
+      const range = selection.getRangeAt(0);
+      if (element === range.commonAncestorContainer || element.contains(range.commonAncestorContainer)) {
+        selected = selection.toString();
+      }
+    }
   }
-  const selection = element.ownerDocument.defaultView?.getSelection();
-  if (!selection || selection.rangeCount === 0) return { ok: true, text: "" };
-  const range = selection.getRangeAt(0);
-  if (!element.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== element) {
-    return { ok: false, error: "unavailable" };
-  }
-  return { ok: true, text: selection.toString() };
+  if (selected !== "") return { ok: true, text: selected };
+  if (content === "whole") return { ok: true, text: shown() };
+  return { ok: false, error: "no_selection" };
 }`;
 
 const COPY_ACTIVE_BROWSER_TEXT_FUNCTION = `function(content) {

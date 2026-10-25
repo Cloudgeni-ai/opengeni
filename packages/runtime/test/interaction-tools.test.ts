@@ -6266,6 +6266,12 @@ describe("interaction attempt tools", () => {
     expect(agentView.nodes.length).toBeLessThanOrEqual(60);
     expect(agentView.omittedNodeCount).toBe(150 - agentView.nodes.length);
     expect(agentView.clippedFieldCount).toBeGreaterThan(0);
+    // A clipped name carries its full length.
+    expect(
+      (agentView.nodes as Array<{ ref: string; nameChars?: number }>).find(
+        (node) => node.ref !== "element-149",
+      )?.nameChars,
+    ).toBe(8_000);
     expect(Buffer.byteLength(JSON.stringify(compact.structuredContent))).toBeLessThan(17_000);
     const again = await definitions[0]!.execute({ browserSessionId, targetId: target.id }, context);
     expect(again.structuredContent).toEqual(compact.structuredContent);
@@ -6599,6 +6605,76 @@ describe("interaction attempt tools", () => {
       value: "user@example.test",
       attributes: { placeholder: "Enter email" },
     });
+  });
+
+  test("reads a long element value in pages: a truncated read says where to read on", async () => {
+    const target = browserTarget();
+    const full = "x".repeat(40_000);
+    const requests: Array<{ maxChars?: number; offset?: number }> = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getBrowserTargetState: async () => ({
+          browserSessionId,
+          controllerGeneration: target.controllerGeneration,
+          targetId: target.id,
+          targetGeneration: target.targetGeneration,
+          documentGeneration: target.documentGeneration,
+          frameId: "frame-2",
+        }),
+        readBrowserDom: async (_workspaceId, _browserSessionId, _targetId, request) => {
+          const element = request as { maxChars?: number; offset?: number };
+          requests.push({ maxChars: element.maxChars, offset: element.offset });
+          const rest = full.slice(element.offset ?? 0);
+          const value = rest.slice(0, element.maxChars ?? 4_096);
+          return {
+            browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            documentGeneration: target.documentGeneration,
+            frameId: "frame-2",
+            kind: "element",
+            count: 1,
+            text: "",
+            value,
+            attributes: {},
+            redacted: null,
+            truncated: value.length < rest.length,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_read"],
+      permissions: ["sessions:read"],
+    });
+    const read = async (offset?: number) =>
+      (
+        await definitions[0]!.execute(
+          {
+            browserSessionId,
+            targetId: target.id,
+            mode: "dom",
+            dom: {
+              kind: "element",
+              locator: { kind: "ref", ref: "e0000000c" },
+              maxChars: 32_768,
+              ...(offset !== undefined ? { offset } : {}),
+            },
+          },
+          { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+        )
+      ).structuredContent as { value: string; truncated: boolean; nextOffset?: number };
+    const first = await read();
+    expect(first).toMatchObject({ truncated: true, nextOffset: 32_768 });
+    const second = await read(first.nextOffset);
+    expect(second.truncated).toBe(false);
+    expect(second.nextOffset).toBeUndefined();
+    expect(first.value + second.value).toBe(full);
+    expect(requests).toEqual([
+      { maxChars: 32_768, offset: undefined },
+      { maxChars: 32_768, offset: 32_768 },
+    ]);
   });
 
   test("captures screenshots without accessibility scans and returns image content", async () => {

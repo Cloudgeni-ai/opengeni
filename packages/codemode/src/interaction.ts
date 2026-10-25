@@ -270,6 +270,7 @@ export type CodemodeBrowserDomReadOptions = BrowserActionFences &
           locator: BrowserDomReadLocator;
           attributes?: readonly BrowserDomSafeAttribute[];
           maxChars?: number;
+          offset?: number;
         }
       | { kind: "count"; selector: string };
   }>;
