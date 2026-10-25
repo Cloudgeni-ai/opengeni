@@ -273,6 +273,8 @@ export function computerNodeLines(
   const listedAt = new Set<string>();
   let omitted = 0;
   let focusedListed = false;
+  // The line of the menu bar items listed last, while the run continues.
+  let menuBarLine: number | null = null;
   const visit = (
     nodes: readonly ComputerTextNode[],
     depth: number,
@@ -330,12 +332,47 @@ export function computerNodeLines(
       }
       if (place !== null) listedAt.add(place);
       if (node.ref === options.focusedRef) focusedListed = true;
+      // A macOS menu bar lists a dozen plain items; one line holds them all.
+      const disabled = tree.reportsEnabled && !node.states.includes("enabled");
+      if (plainMenuBarItem(node, name, value, focused || disabled || offscreen)) {
+        const item = `${quoted(clipped(name ?? "", MAX_NAME_CHARS, clip))} [${node.ref}]`;
+        if (menuBarLine !== null && menuBarLine === lines.length - 1) {
+          lines[menuBarLine] += `, ${item}`;
+        } else {
+          lines.push(`${"  ".repeat(depth)}- ${node.role} ${item}`);
+          menuBarLine = lines.length - 1;
+        }
+        continue;
+      }
       lines.push(computerNodeLine(node, depth, tree, offscreen, focused, clip));
       if (node.children) visit(node.children, depth + 1, name);
     }
   };
   visit(roots, 0, undefined);
   return { lines, listed: lines.length, omitted, clipped: clip.clipped, focusedListed };
+}
+
+/** A named menu bar item with nothing else to say: no value, state, own
+ * action or children. */
+function plainMenuBarItem(
+  node: ComputerTextNode,
+  name: string | undefined,
+  value: ComputerTextNode["value"],
+  marked: boolean,
+): boolean {
+  return (
+    node.role === "AXMenuBarItem" &&
+    name !== undefined &&
+    value === undefined &&
+    !marked &&
+    !node.description &&
+    !node.identifier &&
+    actionableRef(node.ref) &&
+    !node.children?.length &&
+    listedActions(node).length === 0 &&
+    !node.states.includes("expandable") &&
+    !node.states.some((state) => SHOWN_STATES.has(state))
+  );
 }
 
 function boundsText(bounds: ComputerTextTarget["bounds"]): string | null {

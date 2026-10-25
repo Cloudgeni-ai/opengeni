@@ -148,6 +148,39 @@ describe("computerObservationText", () => {
     ]);
   });
 
+  test("lists a macOS menu bar's plain items on one line", () => {
+    const item = (ref: string, name: string, extra: Partial<ComputerTextNode> = {}) =>
+      ({
+        ref,
+        role: "AXMenuBarItem",
+        name,
+        states: [],
+        actions: ["invoke", "focus"],
+        ...extra,
+      }) satisfies ComputerTextNode;
+    const roots: ComputerTextNode[] = [
+      { ref: "e1", role: "button", name: "New Tab", states: [], actions: ["invoke"] },
+      { ref: "e2", role: "AXMenuBar", states: [], actions: [] },
+      item("e3", "Apple"),
+      item("e4", "Chrome"),
+      item("e5", "File"),
+      // Open: it has something of its own to say, so it keeps its line.
+      item("e6", "Edit", { states: ["selected"] }),
+      item("e7", "View"),
+      item("e8", "Help"),
+    ];
+    const text = computerObservationText(
+      observation({ kind: "snapshot", roots, nodeCount: roots.length }),
+    );
+    expect(text.split("\n").slice(3)).toEqual([
+      '- button "New Tab" [e1]',
+      '- AXMenuBarItem "Apple" [e3], "Chrome" [e4], "File" [e5]',
+      '- AXMenuBarItem "Edit" [e6] selected',
+      '- AXMenuBarItem "View" [e7], "Help" [e8]',
+      "(1 hidden, unlabeled or repeated element not shown)",
+    ]);
+  });
+
   test("lists a macOS table cell once though AXColumn repeats it", () => {
     const at = (x: number, y: number) => ({ x, y, width: 106, height: 19 });
     const cell = (ref: string, role: string, name: string, x: number, y: number) =>
