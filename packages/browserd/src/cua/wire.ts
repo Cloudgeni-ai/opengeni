@@ -332,6 +332,28 @@ export async function callDesktop(
       throw new Error("invalid envelope");
     data = z.record(z.string(), z.unknown()).parse(JSON.parse(result.structuredJson));
   } catch {
+    // Windows CUA reports a window that was not in front only as text, both
+    // when it refused before sending anything (its text then says no input
+    // was sent, or could be sent) and after a click it already sent.
+    if (mutation && result?.isError && result.text.startsWith("foreground_unavailable:")) {
+      if (
+        /\bno (?:mouse |keyboard )?input was sent\b|\bbefore mouse input could be sent\b/u.test(
+          result.text,
+        )
+      )
+        throw new ComputerBackendError(
+          "unavailable",
+          "Windows did not keep this window in front for the input, so none of it was sent; try again",
+          true,
+          false,
+        );
+      throw new ComputerBackendError(
+        "outcome_unknown",
+        "The input was sent, but Windows did not keep this window in front afterwards, so its effect is unknown; observe the window before acting again",
+        false,
+        true,
+      );
+    }
     // A failure CUA reports only as text (Windows launch_app does) still says
     // why; keep it, as written, like any other CUA reason.
     const reason = result?.isError && result.text.trim() ? `: ${result.text}` : "";
