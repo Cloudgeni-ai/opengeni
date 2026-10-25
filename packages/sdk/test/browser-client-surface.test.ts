@@ -180,6 +180,17 @@ const retiredGoogleDriveNativeMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
+// Dictation is recorded as a recording since #6022; the resumable transcription
+// recording methods are deprecated and stay only for existing SDK callers.
+const deprecatedTranscriptionRecordingMethods = [
+  "createTranscriptionRecording",
+  "discardTranscriptionRecording",
+  "finalizeTranscriptionRecording",
+  "getTranscriptionRecording",
+  "processNextTranscriptionRecordingSegment",
+  "uploadTranscriptionRecordingChunk",
+];
+
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return source.match(new RegExp(`\\b${escaped}\\b`, "g"))?.length ?? 0;
@@ -247,6 +258,7 @@ describe("browser client runtime surface", () => {
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
+        ...deprecatedTranscriptionRecordingMethods,
       ].sort(),
     );
   });
