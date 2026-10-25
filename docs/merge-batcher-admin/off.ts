@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rmdir, writeFile, rm } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { validatePlan, verify, type Phase, type Plan, type RuleSet, type Snapshot } from "./bundle";
+import { reconcileRetainedStop } from "./resume-stop";
 
 const controlFiles = [
   "control.ts",
@@ -345,6 +346,7 @@ export async function off(
   optIn: string,
   expectedContractSha256?: string,
   expectedPlanSha256?: string,
+  resumeOnly = false,
 ): Promise<void> {
   if (optIn !== "--apply-after-go")
     throw new Error("OFF requires separate operator go and --apply-after-go");
@@ -383,16 +385,68 @@ export async function off(
     const attempt = await mkdtemp(join(admin, "off."));
     // STOP precedes GitHub reads and plan validation: a GitHub outage must not
     // prevent the already-bound runtime's durable stop operation.
-    const result = JSON.parse(
-      await command(
-        [process.execPath, join(contract.directory, "control.ts"), "stop"],
-        attempt,
-        "stop",
-      ),
-    ) as Stop;
+    const pointer = join(planDir, "off-stop-attempt.json");
+    let result: Stop;
+    let receipt = await json<Deployment>(join(receiptDirectory, "deployment-receipt.json"));
+    if (resumeOnly) {
+      const retained = await json<{ name: string }>(pointer);
+      if (!/^off\.[A-Za-z0-9]+$/.test(retained.name)) throw Error("Invalid retained STOP path");
+      const original = await json<Stop>(join(admin, retained.name, "stop.stdout"));
+      const cloud = await import(join(contract.directory, "cloud-auth.ts"));
+      const config = await import(join(contract.directory, "service-config.ts"));
+      const supplemental = await reconcileRetainedStop(
+        original,
+        receipt,
+        contract.deployment,
+        config.serviceId,
+        config.controlSecret,
+        cloud.api,
+        async (path) => {
+          const response = await fetch(
+            `https://api.github.com/repos/Cloudgeni-ai/opengeni/${path}`,
+            {
+              signal: AbortSignal.timeout(15000),
+              headers: { Accept: "application/vnd.github+json" },
+            },
+          );
+          if (!response.ok) throw Error("Read-only STOP reconciliation unavailable");
+          const text = await response.text();
+          if (text.length > 22000000) throw Error("Reconciliation response exceeds bound");
+          return JSON.parse(text);
+        },
+      );
+      await writeFile(join(attempt, "stop-supplement.json"), JSON.stringify(supplemental), {
+        flag: "wx",
+        mode: 0o600,
+      });
+      result = supplemental.result;
+      receipt = supplemental.receipt;
+    } else {
+      // Retain one STOP identity for proof-only continuation. Never replace it.
+      try {
+        await writeFile(pointer, JSON.stringify({ name: attempt.slice(admin.length + 1) }), {
+          flag: "wx",
+          mode: 0o600,
+        });
+      } catch (error) {
+        // Explicit operator OFF retains its established reentrant semantics.
+        // Watchdog repeats never enter this branch: they use resumeOnly, and
+        // the first original STOP pointer remains immutable.
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      result = JSON.parse(
+        await command(
+          [process.execPath, join(contract.directory, "control.ts"), "stop"],
+          attempt,
+          "stop",
+        ),
+      ) as Stop;
+    }
     verifyStop(
       result,
-      await json<Deployment>(join(receiptDirectory, "deployment-receipt.json")),
+      resumeOnly
+        ? receipt
+        : await json<Deployment>(join(receiptDirectory, "deployment-receipt.json")),
       contract.deployment,
     );
     const planBytes = await readFile(join(planDir, "plan.json"));
@@ -517,6 +571,8 @@ export async function off(
     await rmdir(lock);
   }
 }
+export const resumeOff = (admin: string, optIn: string, contract?: string, plan?: string) =>
+  off(admin, optIn, contract, plan, true);
 if (import.meta.main) {
   const [action, admin, argument] = process.argv.slice(2);
   if (action === "bind-stop" && admin && argument) await bindStop(admin, argument);

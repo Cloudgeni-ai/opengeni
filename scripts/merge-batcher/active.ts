@@ -23,7 +23,7 @@ import {
   type FollowupPull,
 } from "./model";
 import { latestRun, infrastructureRetryReason } from "./planner";
-import { observeDurableUncertainty, writeResolved } from "./cycle-outcome";
+import { LeasePreparationExpired, observeDurableUncertainty, writeResolved } from "./cycle-outcome";
 import { proveHeadRefresh } from "./head-refresh";
 
 export interface ActiveReads {
@@ -340,7 +340,8 @@ export class GitHubActiveExecutor implements Executor {
     if (
       t.nextLedger.owner !== this.owner ||
       t.nextLedger.epoch !== t.expectedLedger.epoch + 1 ||
-      Date.parse(t.nextLedger.expiresAt) <= Date.parse(this.now())
+      !Number.isFinite(Date.parse(t.nextLedger.expiresAt)) ||
+      Date.parse(t.nextLedger.expiresAt) <= Date.parse(t.now)
     )
       throw new Error("Expired or invalid prepared lease");
     await this.options.refreshAuth?.();
@@ -399,8 +400,18 @@ export class GitHubActiveExecutor implements Executor {
           throw new Error("Latest exact workflow attempt is not verified green");
       }
     }
+    // Observation and final provider validation do not hold a remote lease.
+    // Stamp the lease only after those reads, then atomically acquire it with
+    // the original expected-state CAS. A competing owner/state change still
+    // rejects the entire transaction, including main/candidate updates.
+    const preparedAt = this.now();
+    const nextLedger = structuredClone(t.nextLedger);
+    nextLedger.expiresAt = new Date(
+      Date.parse(preparedAt) + this.config.leaseSeconds * 1000,
+    ).toISOString();
+    const nextState = await this.git.stateCommit(nextLedger, t.expectedState, preparedAt);
     const updates: RefUpdate[] = [
-      { ref: this.writer.stateRef, expected: t.expectedState, next: t.nextState },
+      { ref: this.writer.stateRef, expected: t.expectedState, next: nextState },
     ];
     if (effect.kind === "publish") {
       if (effect.branch !== `${this.config.branchPrefix}${effect.manifest.batchId}`)
@@ -420,6 +431,8 @@ export class GitHubActiveExecutor implements Executor {
     // AtomicGitWriter never grants force authority to main. PR metadata may
     // change after the final read: destination is testedTip or a recomputed
     // ancestry-only descendant with the identical tested tree.
+    if (Date.parse(nextLedger.expiresAt) <= Date.parse(this.now()))
+      throw new LeasePreparationExpired("Local lease preparation elapsed before submission");
     await this.push(updates);
     if (effect.kind === "land") await this.maintain();
   }

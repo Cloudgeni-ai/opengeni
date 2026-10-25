@@ -80,6 +80,33 @@ test("unknown write/drain failure remains held across a later invocation", async
   expect(calls.filter((x) => x === "off")).toHaveLength(1);
   expect(calls).not.toContain("manual");
 });
+test("consumed claim may finish proven reverse stages without another OFF", async () => {
+  const { ports, calls } = fixture();
+  ports.off = async () => {
+    calls.push("off");
+    throw Error("stopped; provider read failed");
+  };
+  ports.resumeOff = async () => {
+    calls.push("resume-proof-only");
+  };
+  expect(await tick(ports)).toBe("held");
+  expect(await tick(ports)).toBe("manual");
+  expect(calls.filter((x) => x === "off")).toHaveLength(1);
+  expect(calls.filter((x) => x === "resume-proof-only")).toHaveLength(1);
+});
+test("unproven resumed drain remains held without replay", async () => {
+  const { ports, calls } = fixture();
+  ports.off = async () => {
+    calls.push("off");
+    throw Error("unknown");
+  };
+  ports.resumeOff = async () => {
+    throw Error("no current matching drain");
+  };
+  expect(await tick(ports)).toBe("held");
+  expect(await tick(ports)).toBe("held");
+  expect(calls.filter((x) => x === "off")).toHaveLength(1);
+});
 test("binding or indeterminate claim failure never reaches OFF", async () => {
   for (const target of ["verifyBinding", "claim"] as const) {
     const { ports, calls } = fixture();

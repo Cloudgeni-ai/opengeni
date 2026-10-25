@@ -41,10 +41,10 @@ deadline. Do not widen watchdog grace to mask incompatible runtime scheduling.
 Deploy the paired supervisor before this watchdog, and roll back the watchdog
 before rolling back to a supervisor without these fields.
 
-The trigger cannot declare safety from status flags. Only unchanged OFF may
+The trigger cannot declare safety from status flags. Only reviewed OFF may
 declare Manual after its verified STOP/drain/reconciliation and exact saved-policy
 restoration. Unknown effects, failed drain, rules drift or unavailable proof keep
-protections and report held. No automatic ON, retry of an uncertain OFF, candidate
+protections and report held. No automatic ON, replay of a STOP, candidate
 deletion, CI cancellation or readiness edits.
 
 Explicit STOP/crash detection is next five-minute tick plus scheduler/dispatch
@@ -64,8 +64,20 @@ directory across executions. Before provider implementation/deployment, pin the
 portable copy of the existing OFF bundle and its receipt retention. The wrapper
 uses one Cloud Storage `ifGenerationMatch=0` claim object per explicitly assigned
 activation ID and exact plan digest. Only a definitive 412 is treated as another
-owner; timeout/other errors hold without OFF. One winner may invoke OFF; an unfinished claim must hold across restart,
-not expire and replay an unknown write. Preserve the originals and all resulting
+owner; timeout/other errors hold without OFF. One winner may invoke STOP. OFF first
+retains its attempt path with exclusive creation. A subsequent tick may only
+continue that attempt: read its original exited-writer witness, verify the same
+stopped service generation/image/control twice around read-only durable-state
+reconciliation, then use the existing exact reverse stages. It never expires,
+deletes or replaces the claim, calls STOP again, or rewrites the original outcome.
+The existing plan lock excludes concurrent reverse invocations. A missing STOP
+receipt, live writer, changed generation/control, unresolved effect or abandoned
+lock remains held; elapsed time alone is not proof. Thus a transient reconciliation
+read failure can recover on the next five-minute tick without replaying controls.
+The tracked settlement reader accepts completed current-schema effects and only
+the exact obsolete rerun branch with zero attempts and its explicit pre-submit
+reason. Other blocked effects, including attempted reruns, remain unresolved.
+Preserve the originals and all resulting
 receipts. This must be a small provider wrapper, not the deferred generic journal
 or hydration implementation. No provider claim is qualified by the in-memory test.
 
@@ -90,7 +102,7 @@ an independent VM operator. Before manual OFF, pause the Scheduler and reconcile
 all running Job executions, or acquire the same create-only activation claim as
 the watchdog. An existing/uncertain claim is not permission to steal ownership.
 Do not race two OFF operators or remove a claim after a timeout. After successful
-OFF, pause the schedule: later ticks otherwise report held on the retained claim.
+OFF, pause the schedule: later ticks otherwise reverify the retained stopped proof.
 Held outcomes need the rollout's alert destination and operator response; a stopped
 watchdog cannot announce its own absence. A missed-run sweep remains out of scope.
 

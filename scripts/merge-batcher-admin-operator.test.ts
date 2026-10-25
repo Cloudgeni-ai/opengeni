@@ -973,6 +973,106 @@ test("one-command OFF stops first, reconciles ambiguous admit, restores exact or
   }
 });
 
+test("watchdog continuation restores exact Manual after a held STOP without replaying STOP", async () => {
+  const h = await harness(true);
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h);
+    const witness = {
+      uid: deployment.uid,
+      generation: "66",
+      mode: "active",
+      instance: "exited",
+      controlGeneration: "stop-bf7e90b5-b757-4e79-a264-3bdf58336178",
+    };
+    const receipt = { ...deployment, drainWitness: witness };
+    const live = {
+      ...deployment,
+      generation: "66",
+      observedGeneration: "66",
+      etag: "same",
+      template: { containers: [{ image: deployment.image }] },
+      scaling: { scalingMode: "MANUAL", manualInstanceCount: 0 },
+      traffic: [{ type: "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST", percent: 100 }],
+    };
+    const secret = {
+      name: "version55",
+      payload: {
+        data: Buffer.from(
+          JSON.stringify({ state: "stopped", generation: witness.controlGeneration }),
+        ).toString("base64"),
+      },
+    };
+    await writeFile(join(operator.runtime, "deployment-receipt.json"), JSON.stringify(receipt));
+    await writeFile(
+      join(operator.runtime, "cloud-auth.ts"),
+      `export async function api(url){return url.includes('secretmanager')?${JSON.stringify(secret)}:${JSON.stringify(live)}}`,
+    );
+    await writeFile(
+      join(operator.runtime, "service-config.ts"),
+      `export const serviceId='batcher',controlSecret='control';`,
+    );
+    await rm(join(h.root, "stop-contract.json"));
+    await bindStop(h.root, operator.runtime);
+    const held = {
+      ...stopped,
+      outcome: "unknown",
+      drainWitness: witness,
+      writer: {
+        ...stopped.writer,
+        instance: witness.instance,
+        control: { generation: witness.controlGeneration },
+        uncertainOutcome: true,
+        reconciliationRequired: true,
+      },
+    };
+    expect(
+      (await operator.run({ STOP_FAILURE: "1", STOP_OVERRIDE: JSON.stringify(held) })).code,
+    ).not.toBe(0);
+    const ledger = {
+      schemaVersion: 1,
+      epoch: 1,
+      landed: [],
+      invalidated: [],
+      effects: {
+        old: {
+          kind: "rerun",
+          status: "blocked",
+          attempts: 0,
+          lastError: "Candidate readiness changed before retry; obsolete intent not submitted",
+        },
+      },
+    };
+    const content = {
+      encoding: "base64",
+      content: Buffer.from(JSON.stringify(ledger)).toString("base64"),
+    };
+    const script = `import {resumeOff} from ${JSON.stringify(join(directory, "off.ts"))}; globalThis.fetch=async(url)=>Response.json(String(url).includes('contents/')?${JSON.stringify(content)}:String(url).includes('matching-refs')?[]:{object:{sha:'${"a".repeat(40)}'}}); await resumeOff(process.argv[1],'--apply-after-go');`;
+    const child = Bun.spawn(["bun", "-e", script, h.root], {
+      env: h.fixtureEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exit, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stderr).text(),
+      new Response(child.stdout).text(),
+    ]);
+    expect(stderr).toBe("");
+    expect(exit).toBe(0);
+    expect((await h.events()).filter((e) => e.method === "STOP")).toHaveLength(1);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+    const pointer = JSON.parse(await readFile(join(h.root, "plan/off-stop-attempt.json"), "utf8"));
+    expect(
+      JSON.parse(await readFile(join(h.root, pointer.name, "stop.stdout"), "utf8")).outcome,
+    ).toBe("unknown");
+  } finally {
+    await h.close();
+  }
+});
+
 test("OFF restoration consumes frozen plan and payload despite mount replacement during readback and PUT", async () => {
   const h = await harness();
   try {

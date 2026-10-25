@@ -86,6 +86,8 @@ export type Ports = {
   // a lost process/result must not cause automatic repeat of an unknown OFF.
   claim(): Promise<boolean>;
   off(): Promise<void>;
+  // Existing claim may continue proof/reverse stages only, never another STOP.
+  resumeOff?(): Promise<void>;
   record(event: { outcome: "healthy" | "held" | "manual"; reason?: Reason }): Promise<void>;
 };
 export async function tick(ports: Ports): Promise<"healthy" | "held" | "manual"> {
@@ -102,6 +104,15 @@ export async function tick(ports: Ports): Promise<"healthy" | "held" | "manual">
     return "healthy";
   }
   if (!(await ports.claim())) {
+    if (ports.resumeOff) {
+      try {
+        await ports.resumeOff();
+        await ports.record({ outcome: "manual", reason: cause });
+        return "manual";
+      } catch {
+        /* Unknown/missing drain stays held; no automatic control replay. */
+      }
+    }
     await ports.record({ outcome: "held", reason: cause });
     return "held";
   }
