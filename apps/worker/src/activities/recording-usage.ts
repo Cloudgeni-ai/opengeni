@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { readFileSync } from "node:fs";
 import type { Attributes, Observability } from "@opengeni/observability";
 
 /**
@@ -38,13 +39,16 @@ export type RecordingStageUsage = {
 /** A finished child process's own accounting, as Bun reports it. */
 export type ProcessResourceUsage = {
   cpuTime: { total: bigint | number };
-  maxRSS: number;
 };
 
 export type MeasuredProcess = {
+  pid: number;
   exited: Promise<number>;
   resourceUsage(): ProcessResourceUsage | undefined;
 };
+
+/** How often a running program's memory high-water mark is read. */
+const MEMORY_SAMPLE_MILLISECONDS = 100;
 
 export class RecordingUsage {
   readonly #stages = new Map<RecordingUsageStage, RecordingStageUsage>();
@@ -130,15 +134,13 @@ export function trackRecordingProcesses(processes: readonly MeasuredProcess[]): 
   const started = performance.now();
   void Promise.all(
     processes.map(async (process) => {
+      const peak = sampleMemoryHighWater(process.pid);
       await process.exited;
       const wallSeconds = (performance.now() - started) / 1_000;
+      const maxRssBytes = peak.stop();
       const resources = process.resourceUsage();
       return resources
-        ? {
-            cpuSeconds: Number(resources.cpuTime.total) / 1_000_000,
-            maxRssBytes: resources.maxRSS,
-            wallSeconds,
-          }
+        ? { cpuSeconds: Number(resources.cpuTime.total) / 1_000_000, maxRssBytes, wallSeconds }
         : null;
     }),
   ).then(
@@ -149,6 +151,50 @@ export function trackRecordingProcesses(processes: readonly MeasuredProcess[]): 
       ),
     () => undefined,
   );
+}
+
+/**
+ * A running program's peak memory, from Linux's VmHWM. The rusage maximum
+ * can't be used: on exec Linux keeps the high-water mark of the memory the
+ * child was spawned with, which is the whole worker's. Samples taken before
+ * the program replaced the worker's image are skipped for the same reason.
+ * Other systems report 0.
+ */
+function sampleMemoryHighWater(pid: number): { stop(): number } {
+  if (process.platform !== "linux") return { stop: () => 0 };
+  let peak = 0;
+  let reading = false;
+  const sample = () => {
+    if (reading) return;
+    reading = true;
+    try {
+      const status = readFileSync(`/proc/${pid}/status`, "utf8");
+      const name = /^Name:\s+(.*)$/mu.exec(status)?.[1];
+      const highWater = /^VmHWM:\s+(\d+) kB$/mu.exec(status)?.[1];
+      if (name && name !== workerName() && highWater) {
+        peak = Math.max(peak, Number(highWater) * 1024);
+      }
+    } catch {
+      // Exited between samples.
+    } finally {
+      reading = false;
+    }
+  };
+  const timer = setInterval(sample, MEMORY_SAMPLE_MILLISECONDS);
+  timer.unref?.();
+  setTimeout(sample, 10).unref?.();
+  return {
+    stop() {
+      clearInterval(timer);
+      return peak;
+    },
+  };
+}
+
+let ownName: string | null = null;
+function workerName(): string {
+  ownName ??= readFileSync("/proc/self/status", "utf8").match(/^Name:\s+(.*)$/mu)?.[1] ?? "";
+  return ownName;
 }
 
 /** Read a child's output stream, keeping only its last `limit` characters. */

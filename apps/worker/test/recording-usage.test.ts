@@ -44,16 +44,35 @@ describe("recording usage", () => {
         }),
       ),
     );
-    await withRecordingUsage(usage, () =>
-      measureRecordingStage("segment", () => runMeasuredCommand(ffmpegPath, ["-version"])),
+    // Long enough for its memory to be read while it runs.
+    const generated = await withRecordingUsage(usage, () =>
+      measureRecordingStage("segment", () =>
+        runMeasuredCommand(ffmpegPath, [
+          "-nostdin",
+          "-re",
+          "-f",
+          "lavfi",
+          "-i",
+          "sine=d=0.4",
+          "-f",
+          "null",
+          "-",
+        ]),
+      ),
     );
+    expect(generated.exitCode).toBe(0);
     const prepare = usage.stages().get("prepare")!;
     expect(prepare.processes).toBe(1);
     expect(prepare.cpuSeconds).toBeGreaterThan(0);
-    expect(prepare.peakMemoryBytes).toBeGreaterThan(1024 * 1024);
-    expect(prepare.memoryByteSeconds).toBeGreaterThan(0);
     expect(prepare.wallSeconds).toBeGreaterThan(0);
-    expect(usage.stages().get("segment")?.processes).toBe(1);
+    const segment = usage.stages().get("segment")!;
+    expect(segment.processes).toBe(1);
+    if (process.platform === "linux") {
+      // The program's own memory, not the worker's it was spawned from.
+      expect(segment.peakMemoryBytes).toBeGreaterThan(1024 * 1024);
+      expect(segment.peakMemoryBytes).toBeLessThan(process.memoryUsage().rss);
+      expect(segment.memoryByteSeconds).toBeGreaterThan(0);
+    }
   });
 
   test("work outside a recording, or outside a stage, is not counted", async () => {
