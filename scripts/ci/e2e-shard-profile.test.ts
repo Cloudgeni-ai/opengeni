@@ -83,6 +83,11 @@ describe("content-fenced E2E planning", () => {
       );
       expect(integrationShardWeights(f.root, profilePath).weights?.get(path)).toBe(25);
       f.write("service-images", "changed");
+      const drifted = integrationShardWeights(f.root, profilePath);
+      expect(drifted.mode).toBe("profile");
+      expect(drifted.weights?.get(path)).toBe(25);
+      expect(drifted.reason).toContain("measured before a service images change");
+      rmSync(join(f.root, "service-images"));
       expect(integrationShardWeights(f.root, profilePath).mode).toBe("source-bytes");
       expect(e2eShardWeights(f.root).mode).toBe("profile");
     } finally {
@@ -179,28 +184,10 @@ describe("content-fenced E2E planning", () => {
       },
     ],
     [
-      "Bun runtime",
+      "missing dependency fence",
       (f) => {
-        f.profile.environment.bunVersion = "other";
+        delete (f.profile.environment as { dependencyLockSha256?: string }).dependencyLockSha256;
         f.save();
-      },
-    ],
-    [
-      "Bun pin",
-      (f) => {
-        f.write(".bun-version", "other");
-      },
-    ],
-    [
-      "dependency lock",
-      (f) => {
-        f.write("bun.lock", "other");
-      },
-    ],
-    [
-      "browser runner",
-      (f) => {
-        f.write("scripts/run-browser-e2e.ts", "other");
       },
     ],
     [
@@ -290,4 +277,29 @@ describe("content-fenced E2E planning", () => {
       }
     });
   }
+
+  test("toolchain, dependency and runner drift keeps the measured timings", () => {
+    const f = fixture();
+    try {
+      f.profile.environment.bunVersion = "other";
+      f.save();
+      f.write(".bun-version", "other");
+      f.write("bun.lock", "other");
+      f.write("scripts/run-browser-e2e.ts", "other");
+      const result = e2eShardWeights(f.root);
+      expect(result.mode).toBe("profile");
+      expect(f.files.map((path) => result.weights?.get(path))).toEqual([400, 100, 100]);
+      expect(result.reason).toContain(
+        "measured before a Bun runtime, Bun pin, dependency lock, browser runner change",
+      );
+      // The slow file still gets a shard of its own instead of sharing one
+      // with whichever file is largest on disk.
+      expect(deterministicShards(f.root, f.files, 2, result.weights ?? undefined)).toEqual([
+        [f.files[0]!],
+        [f.files[1]!, f.files[2]!],
+      ]);
+    } finally {
+      f.close();
+    }
+  });
 });

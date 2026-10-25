@@ -335,31 +335,44 @@ function testShardWeights(
       !environment ||
       environment.platform !== process.platform ||
       environment.architecture !== process.arch ||
-      environment.bunVersion !== Bun.version ||
+      typeof environment.bunVersion !== "string" ||
       typeof environment.bunVersionFileSha256 !== "string"
     ) {
-      throw new Error("profile environment or toolchain does not match this runner");
+      throw new Error("profile environment does not match this runner's platform");
     }
     const hashFile = (path: string): string =>
       createHash("sha256")
         .update(readFileSync(join(root, path)))
         .digest("hex");
-    if (hashFile(".bun-version") !== environment.bunVersionFileSha256) {
-      throw new Error("profile Bun version file fence is stale");
-    }
+    // A toolchain, dependency or runner change shifts file times a little. It
+    // never makes them worse estimates than source size, and falling back to
+    // source size puts the slowest suites together and overruns the shard
+    // deadline. Plan with the measured times and report what drifted; a
+    // refreshed profile restores exact evidence.
+    const drift: string[] = [];
+    if (environment.bunVersion !== Bun.version) drift.push("Bun runtime");
+    if (hashFile(".bun-version") !== environment.bunVersionFileSha256) drift.push("Bun pin");
     if (tier === "integration") {
       if (
         typeof environment.serviceImagesPath !== "string" ||
-        typeof environment.serviceImagesSha256 !== "string" ||
-        hashFile(environment.serviceImagesPath) !== environment.serviceImagesSha256
+        typeof environment.serviceImagesSha256 !== "string"
       ) {
-        throw new Error("profile service-image fence is stale");
+        throw new Error("profile service-image fence is missing");
       }
-    } else if (
-      hashFile("bun.lock") !== environment.dependencyLockSha256 ||
-      hashFile("scripts/run-browser-e2e.ts") !== environment.browserRunnerSha256
-    ) {
-      throw new Error("profile browser runner or dependency fence is stale");
+      if (hashFile(environment.serviceImagesPath) !== environment.serviceImagesSha256) {
+        drift.push("service images");
+      }
+    } else {
+      if (
+        typeof environment.dependencyLockSha256 !== "string" ||
+        typeof environment.browserRunnerSha256 !== "string"
+      ) {
+        throw new Error("profile dependency or browser runner fence is missing");
+      }
+      if (hashFile("bun.lock") !== environment.dependencyLockSha256) drift.push("dependency lock");
+      if (hashFile("scripts/run-browser-e2e.ts") !== environment.browserRunnerSha256) {
+        drift.push("browser runner");
+      }
     }
     if (!parsed.entries || Array.isArray(parsed.entries))
       throw new Error("entries must be an object");
@@ -371,12 +384,10 @@ function testShardWeights(
         throw new Error(`invalid planning weight for ${path}`);
       }
     }
-    // Ordinary test edits must not discard every other file's timing: a single
-    // global fallback to source bytes puts the slowest suites together and
-    // overruns the shard deadline. A changed file keeps its last measured
-    // time (its closest estimate); a new file is estimated from its size at
-    // the profile's median milliseconds per byte. The environment fences above
-    // still invalidate the whole profile.
+    // Ordinary test edits must not discard every other file's timing either. A
+    // changed file keeps its last measured time (its closest estimate); a new
+    // file is estimated from its size at the profile's median milliseconds per
+    // byte.
     const discovered = discoverTestFiles(root)[tier];
     const sizeOf = (path: string) => Math.max(1, statSync(join(root, path)).size);
     const weights = new Map<string, number>();
@@ -412,10 +423,11 @@ function testShardWeights(
       changed.length + added.length > 0
         ? `; estimated ${changed.length} changed file(s) from their last timing and ${added.length} new file(s) from size`
         : "";
+    const drifted = drift.length > 0 ? `; measured before a ${drift.join(", ")} change` : "";
     return {
       mode: "profile",
       weights,
-      reason: `content-fenced ${tier} planning profile${estimated}`,
+      reason: `content-fenced ${tier} planning profile${estimated}${drifted}`,
       profileSha256: createHash("sha256").update(bytes).digest("hex"),
     };
   } catch (error) {
