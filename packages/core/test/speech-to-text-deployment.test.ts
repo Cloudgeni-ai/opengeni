@@ -85,29 +85,33 @@ describe("speech-to-text deployment", () => {
       azureClientId: "client",
     };
     const tokens: string[] = [];
-    const signedIn = createSpeechToTextDeployment({
-      settings: testSettings({ ...identity, azureFederatedTokenFile: "/var/token" }),
-      readTokenFile: async () => "assertion",
-      fetch: (async (url: string, init?: RequestInit) => {
-        if (String(url).includes("/oauth2/")) {
-          tokens.push(new URLSearchParams(String(init?.body)).get("client_assertion") ?? "");
-          return Response.json({ access_token: "entra", expires_in: 3_600 });
-        }
-        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer entra");
-        return Response.json({ durationMilliseconds: 0, phrases: [] });
-      }) as unknown as typeof fetch,
-    });
+    const signedIn = createSpeechToTextDeployment(
+      { settings: testSettings({ ...identity, azureFederatedTokenFile: "/var/token" }) },
+      {
+        readTokenFile: async () => "assertion",
+        fetch: (async (url: string, init?: RequestInit) => {
+          if (String(url).includes("/oauth2/")) {
+            tokens.push(new URLSearchParams(String(init?.body)).get("client_assertion") ?? "");
+            return Response.json({ access_token: "entra", expires_in: 3_600 });
+          }
+          expect(new Headers(init?.headers).get("authorization")).toBe("Bearer entra");
+          return Response.json({ durationMilliseconds: 0, phrases: [] });
+        }) as unknown as typeof fetch,
+      },
+    );
     const audio = { bytes: new Uint8Array([1]), mimeType: "audio/wav", fileName: "a.wav" };
     await signedIn.registry
       .get("azure-speech")!
       .transcribe({ audio, model: "MAI-Transcribe-2", diarize: false }, null as never);
     expect(tokens).toEqual(["assertion"]);
 
-    const refused = createSpeechToTextDeployment({
-      settings: testSettings({ ...identity, azureClientSecret: "secret" }),
-      fetch: (async () =>
-        Response.json({ error: "invalid_client" }, { status: 401 })) as unknown as typeof fetch,
-    });
+    const refused = createSpeechToTextDeployment(
+      { settings: testSettings({ ...identity, azureClientSecret: "secret" }) },
+      {
+        fetch: (async () =>
+          Response.json({ error: "invalid_client" }, { status: 401 })) as unknown as typeof fetch,
+      },
+    );
     const error = (await refused.registry
       .get("azure-speech")!
       .transcribe({ audio, model: "MAI-Transcribe-2", diarize: false }, null as never)
