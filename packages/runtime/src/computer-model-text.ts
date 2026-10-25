@@ -3,8 +3,9 @@
  *
  * A computer tool result keeps its complete typed value in
  * `structuredContent` for Code Mode, the API and the UI. What the model reads
- * is this text: one line per useful accessibility element, in the role/name
- * vocabulary that computer_act locators use. Desktop accessibility trees are
+ * is this text: one line per useful accessibility element (a run of plain
+ * menu bar items shares one), in the role/name vocabulary that computer_act
+ * locators use. Desktop accessibility trees are
  * far noisier than web pages: a Linux AT-SPI window repeats platform metadata
  * on every node, names unlabeled containers after their role, and keeps
  * hundreds of hidden elements. As JSON one browser window costs over 20k
@@ -273,8 +274,9 @@ export function computerNodeLines(
   const listedAt = new Set<string>();
   let omitted = 0;
   let focusedListed = false;
-  // The line of the menu bar items listed last, while the run continues.
-  let menuBarLine: number | null = null;
+  // The line of the menu bar items listed last and its depth, while the run
+  // continues.
+  let menuBar: { line: number; depth: number } | null = null;
   const visit = (
     nodes: readonly ComputerTextNode[],
     depth: number,
@@ -336,11 +338,11 @@ export function computerNodeLines(
       const disabled = tree.reportsEnabled && !node.states.includes("enabled");
       if (plainMenuBarItem(node, name, value, focused || disabled || offscreen)) {
         const item = `${quoted(clipped(name ?? "", MAX_NAME_CHARS, clip))} [${node.ref}]`;
-        if (menuBarLine !== null && menuBarLine === lines.length - 1) {
-          lines[menuBarLine] += `, ${item}`;
+        if (menuBar !== null && menuBar.line === lines.length - 1 && menuBar.depth === depth) {
+          lines[menuBar.line] += `, ${item}`;
         } else {
           lines.push(`${"  ".repeat(depth)}- ${node.role} ${item}`);
-          menuBarLine = lines.length - 1;
+          menuBar = { line: lines.length - 1, depth };
         }
         continue;
       }

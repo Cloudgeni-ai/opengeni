@@ -179,6 +179,27 @@ describe("computerObservationText", () => {
       '- AXMenuBarItem "View" [e7], "Help" [e8]',
       "(1 hidden, unlabeled or repeated element not shown)",
     ]);
+
+    // A run ends where the nesting changes.
+    const nested: ComputerTextNode[] = [
+      {
+        ref: "m1",
+        role: "AXMenuBar",
+        name: "Main",
+        states: [],
+        actions: [],
+        children: [item("m2", "Apple"), item("m3", "File")],
+      },
+      item("m4", "Wi-Fi"),
+    ];
+    const nestedText = computerObservationText(
+      observation({ kind: "snapshot", roots: nested, nodeCount: 4 }),
+    );
+    expect(nestedText.split("\n").slice(3)).toEqual([
+      '- AXMenuBar "Main" [m1]',
+      '  - AXMenuBarItem "Apple" [m2], "File" [m3]',
+      '- AXMenuBarItem "Wi-Fi" [m4]',
+    ]);
   });
 
   test("lists a macOS table cell once though AXColumn repeats it", () => {
