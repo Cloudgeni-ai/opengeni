@@ -161,9 +161,11 @@ unsupported-routing error.
 
 For `run_on`, resolution is scoped to exec `op.cmd` and write `op.content`;
 `target`, `op.path` and `op.workdir` are literal routing/path inputs. Secret
-failures dispatch no command or file write and retain the canonical structured
-failure, including a missing-secret `askCard` or per-use `approvalCard`, rather
-than only an error message.
+failures dispatch no command or file write and return the gateway's canonical
+`isError` tool result containing only the serialized secret failure, including
+a missing-secret `askCard` or per-use `approvalCard`. No ordinary `run_on`
+result fields are added to that failure. Approval cards describe the actual
+target command or file write rather than a generic connector call.
 
 Variable Sets used to inject every value into every sandbox as environment
 variables. That is gone: nothing is injected, and a value exists in a process

@@ -302,7 +302,7 @@ describe("run_on secret delivery (DL-9)", () => {
           },
         };
         const content = `{{secretfile:Canary}} ${reference}`;
-        const result = await runOn(
+        const error = await runOn(
           machine,
           kind === "exec"
             ? { kind, cmd: `cat ${content}` }
@@ -310,12 +310,11 @@ describe("run_on secret delivery (DL-9)", () => {
           true,
           "model",
           resolver,
-        );
-        expect(result.ok).toBe(false);
-        // exec_command renders this same canonical failure, including the
-        // complete host-owned card and instruction for retry after approval.
-        expect(result).toMatchObject(JSON.parse(failure.toModelOutput()));
-        expect(result.approvalCard).toEqual(card);
+        ).catch((caught) => caught);
+        // The API boundary, rather than a fleet result envelope, must render
+        // this same error with its complete host-owned approval card intact.
+        expect(error).toBe(failure);
+        expect(error.approvalCard).toEqual(card);
         expect(machine.execs).toHaveLength(0);
         expect(machine.writes).toHaveLength(0);
       });
@@ -501,9 +500,11 @@ describe("run_on secret delivery (DL-9)", () => {
 
   test("an unknown reference fails before dispatch; capability off passes text literally", async () => {
     const machine = new CapturingMachine("/home/user/project");
-    const failed = await runOn(machine, { kind: "exec", cmd: "echo {{secret:Missing}}" });
-    expect(failed.ok).toBe(false);
-    expect(failed.error).toBe("secret_reference_error");
+    const failed = await runOn(machine, { kind: "exec", cmd: "echo {{secret:Missing}}" }).catch(
+      (caught) => caught,
+    );
+    expect(failed).toBeInstanceOf(SecretReferenceError);
+    expect(failed.code).toBe("secret_reference_error");
     expect(failed.askCard).not.toBeNull();
     expect(failed.failures?.[0]?.code).toBe("not_found");
     expect(machine.execs).toHaveLength(0);
