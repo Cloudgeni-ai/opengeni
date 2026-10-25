@@ -11992,7 +11992,7 @@
       "shape": {
         "$": "object",
         "$.actionIndex": "integer!",
-        "$.kind": "enum!=[\"\\\"network_busy\\\"\"]",
+        "$.kind": "enum!=[\"\\\"network_busy\\\"\",\"\\\"observation_unavailable\\\"\"]",
         "$.message": "string!"
       }
     },

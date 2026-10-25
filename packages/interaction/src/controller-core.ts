@@ -111,6 +111,9 @@ type InteractionDriver<
   validate?(command: TCommand, target: TTarget): Promise<void> | void;
   validateSession?(command: TCommand): Promise<void> | void;
   dispatch(command: TCommand, trace?: InteractionDispatchTrace): Promise<TObservation | null>;
+  /** Bounded liveness probe: false only when the browser or computer, or the
+   * driver's connection to it, is gone. */
+  isAvailable?(): Promise<boolean>;
 };
 
 type InteractionCoreAdapter<
@@ -496,13 +499,47 @@ export class InteractionControllerCore<
       }
       return await this.settle(
         entry,
-        this.makeReceipt(command, "outcome_unknown", dispatchedAt, this.timestamp(), null, {
-          code: "controller_lost",
-          message: `${this.adapter.resourceLabel} command outcome is unknown after dispatch`,
-          retryable: false,
-        }),
+        this.makeReceipt(
+          command,
+          "outcome_unknown",
+          dispatchedAt,
+          this.timestamp(),
+          null,
+          await this.unexpectedDispatchError(error),
+        ),
       );
     }
+  }
+
+  /**
+   * The error for a dispatched command that failed in a way its driver did
+   * not classify. Its outcome is unknown either way. A typed controller error
+   * keeps its own code; anything else is controller_lost only when the driver
+   * cannot show that it is still connected, because a page or command error
+   * on a live connection is not a lost controller.
+   */
+  private async unexpectedDispatchError(error: unknown): Promise<InteractionError> {
+    const label = this.adapter.resourceLabel;
+    if (error instanceof InteractionControllerError && error.code !== "journal_full")
+      return { code: error.code, message: error.message, retryable: false };
+    let available = false;
+    try {
+      available = (await this.driver.isAvailable?.()) === true;
+    } catch {
+      // A probe that fails cannot show the connection is still there.
+    }
+    if (available) {
+      return {
+        code: "driver_failed",
+        message: `${label} command failed unexpectedly after dispatch and its outcome is unknown; the ${label} is still connected, so check its current state before repeating the command`,
+        retryable: false,
+      };
+    }
+    return {
+      code: "controller_lost",
+      message: `${label} command outcome is unknown after dispatch`,
+      retryable: false,
+    };
   }
 
   private assertActionObservation(observation: TObservation, command: TCommand): void {

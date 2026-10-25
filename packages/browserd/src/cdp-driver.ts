@@ -47,6 +47,7 @@ import {
   type BrowserActionResolvedTarget as BrowserActionResolvedTargetValue,
   type InteractionSemanticNodeValue,
   INTERACTION_MAX_RESOLVED_TARGET_TEXT,
+  redactInteractionDriverMessage,
 } from "@opengeni/contracts";
 import {
   InteractionControllerError,
@@ -92,6 +93,7 @@ import type {
 import type { AgentBrowserJsonCommand, OwnedManagedBrowserProcess } from "./runner";
 import type { BrowserPasskeyManager } from "./passkeys";
 import { TypedSecretMemory } from "./typed-secrets";
+import { reportUnexpectedDispatchError } from "./controller-diagnostics";
 import {
   completeClientHints,
   hasEmptiedHighEntropyHints,
@@ -290,6 +292,38 @@ const USER_AGENT_METADATA_EXPRESSION = `(async () => {
 })()`;
 
 class DialogOpenedSignal extends Error {}
+
+/** Whether an error is about the browser's transport rather than the page:
+ * the browser or the connection to it or to the tab is gone, or a command
+ * deadline passed (which the unresponsive-tab path reports). */
+function browserTransportFailure(error: unknown): boolean {
+  return error instanceof CdpTransportError || error instanceof CdpSessionDetachedError;
+}
+
+/**
+ * The failure of one action of a dispatch. An error no step classified (a
+ * protocol error the page caused, say) on a live browser becomes a definite
+ * driver_failed, which the batch then reports as failed or, once input was
+ * sent, as an unknown outcome. Typed errors, dialogs and transport failures
+ * pass through unchanged.
+ */
+function classifyActionFailure(error: unknown, command: BrowserActionCommandValue): unknown {
+  if (
+    error instanceof InteractionControllerError ||
+    error instanceof InteractionDefiniteDriverError ||
+    error instanceof InteractionOutcomeUnknownDriverError ||
+    error instanceof DialogOpenedSignal ||
+    browserTransportFailure(error)
+  )
+    return error;
+  reportUnexpectedDispatchError("browser", error, command);
+  return new InteractionDefiniteDriverError(
+    "driver_failed",
+    `the browser could not perform this action (${
+      error instanceof Error ? redactInteractionDriverMessage(error.message) : "unknown error"
+    })`,
+  );
+}
 
 /** Page reads cannot complete while a JavaScript dialog is open: the page's
  * renderer is blocked until the dialog is answered. */
@@ -2133,11 +2167,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               );
             break;
           }
-        } catch (error) {
+        } catch (thrown) {
           state.nodeRoute = null;
           state.inputFence = null;
           state.actionTrace = undefined;
           state.locatorFollowsNavigation = false;
+          const error = classifyActionFailure(thrown, command);
           if (error instanceof DialogBlockedError || error instanceof DialogOpenedSignal) {
             // This action counts as run once it sent input: that input is
             // what opened the dialog, or it may have had effects before it.
@@ -2288,7 +2323,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             error.cause instanceof CdpSessionDetachedError);
         // A native invalid-session reply after this exact attachment retired
         // is target loss, not loss of the browser transport or healthy peers.
-        if (!(error instanceof InteractionDefiniteDriverError) && !retiredSession) throw error;
+        if (!(error instanceof InteractionDefiniteDriverError) && !retiredSession) {
+          if (error instanceof InteractionControllerError || browserTransportFailure(error))
+            throw error;
+          // Every action ran. Only reading the page after them failed (a page
+          // whose frames keep changing, say), and the browser is still there:
+          // the actions completed, and the receipt says why it has no outline.
+          reportUnexpectedDispatchError("browser", error, command);
+          trace?.record({
+            actionIndex: actions.length - 1,
+            kind: "observation_unavailable",
+            message:
+              actions.length > 1
+                ? `all ${actions.length} actions completed, but the page could not be read after them, so this receipt has no outline; observe the tab to see the page now`
+                : "the action completed, but the page could not be read after it, so this receipt has no outline; observe the tab to see the page now",
+          } satisfies BrowserActionNoteValue);
+          return null;
+        }
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
           "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
@@ -4539,6 +4590,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       case "click": {
         const node = await this.resolveActionLocator(state, action.locator);
+        if ((action.button ?? "left") === "left" && (await this.chooseDropdownOption(state, node)))
+          return;
         await this.clickNode(
           state,
           node.backendDOMNodeId,
@@ -5683,6 +5736,44 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return [...byBackend.values()].slice(0, WAIT_LOCATOR_CANDIDATE_LIMIT);
   }
 
+  /**
+   * The options of a native dropdown (a single-choice select shown as a
+   * button) have no box on the page: the browser draws its list itself, so a
+   * pointer cannot reach them. A person who clicks one chooses it, so choose
+   * it the same way the select action does. Returns false for any other
+   * element, which is clicked as usual.
+   */
+  private async chooseDropdownOption(
+    state: TargetState,
+    node: CdpAccessibilityEntry,
+  ): Promise<boolean> {
+    // Only an option, or an element a DOM locator found (its role is not
+    // known), costs the extra read; every other click goes straight on.
+    const synthetic = node.nodeId === "";
+    if (
+      node.backendDOMNodeId === null ||
+      this.engine === "lightpanda" ||
+      (!synthetic && !/option/iu.test(node.role))
+    )
+      return false;
+    const chosen = await this.callOnNode(
+      state,
+      node.backendDOMNodeId,
+      CHOOSE_DROPDOWN_OPTION_FUNCTION,
+      [],
+    );
+    if (chosen === "disabled") {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "this option of a native dropdown is disabled and cannot be chosen",
+      );
+    }
+    // Choosing the option that is already selected changes nothing, as for a
+    // person, beyond closing an open list.
+    if (chosen === "changed" || chosen === "closed") state.actionEffectCount += 1;
+    return chosen === "changed" || chosen === "closed" || chosen === "unchanged";
+  }
+
   private async clickNode(
     state: TargetState,
     backendDOMNodeId: number | null,
@@ -5986,9 +6077,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
     const effectsBeforeScroll = state.actionEffectCount;
     if (state.nodeRoute) await this.scrollFrameOwnersIntoView(state, state.nodeRoute);
-    await this.sendActionTarget(state, "DOM.scrollIntoViewIfNeeded", {
-      backendNodeId: backendDOMNodeId,
-    });
+    const effectsBeforeElementScroll = state.actionEffectCount;
+    try {
+      await this.sendActionTarget(state, "DOM.scrollIntoViewIfNeeded", {
+        backendNodeId: backendDOMNodeId,
+      });
+    } catch (error) {
+      // -32001: the tab's session is gone, which is not about this element.
+      if (!(error instanceof CdpProtocolError) || error.code === -32_001) throw error;
+      // The browser refused the scroll itself, so nothing moved: an element
+      // that is not rendered (hidden, or drawn by the browser rather than
+      // the page) has no box to scroll to or point at.
+      state.actionEffectCount = effectsBeforeElementScroll;
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `browser element has no box on the page to act on (${redactInteractionDriverMessage(error.message)}); it is hidden or not rendered`,
+      );
+    }
     if (
       scrollBefore !== null &&
       (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
@@ -8738,6 +8843,26 @@ const SELECT_OPTIONS_FUNCTION = `function(values) {
   this.dispatchEvent(new Event("input", { bubbles: true }));
   this.dispatchEvent(new Event("change", { bubbles: true }));
   return true;
+}`;
+
+// Chooses an option of a native dropdown, whose options are never laid out on
+// the page: "changed"; when it was already chosen, "closed" if that closed the
+// open list, else "unchanged"; "disabled"; or "other" for anything else
+// (including an option a pointer can reach).
+const CHOOSE_DROPDOWN_OPTION_FUNCTION = `function() {
+  if (!(this instanceof HTMLOptionElement) || this.getClientRects().length > 0) return "other";
+  const select = this.closest("select");
+  if (!(select instanceof HTMLSelectElement) || select.multiple || select.getClientRects().length === 0) return "other";
+  if (select.matches(":disabled") || this.matches(":disabled")) return "disabled";
+  // Choosing closes the dropdown's list, if it is open, and leaves focus on it.
+  let open = false;
+  try { open = select.matches(":open"); } catch {}
+  if (open) { select.blur(); select.focus({ preventScroll: true }); }
+  if (this.selected) return open ? "closed" : "unchanged";
+  this.selected = true;
+  select.dispatchEvent(new Event("input", { bubbles: true }));
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  return "changed";
 }`;
 
 /** How long select waits for a custom popup's option to show after opening it. */

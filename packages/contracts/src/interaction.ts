@@ -3344,8 +3344,10 @@ export const BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER = "receiptTargets";
 /** Something an action did that its completed state alone does not say. A
  * `network_busy` note is a network_idle wait on a page that loaded but whose
  * network never went quiet (it keeps polling or holds requests open): the wait
- * ended at its timeout and the action still completed. `message` says so in
- * plain words. */
+ * ended at its timeout and the action still completed. An
+ * `observation_unavailable` note is on a completed action after which the
+ * page could not be read, so its receipt carries no observation although one
+ * was asked for. `message` says so in plain words. */
 export const BrowserActionNote = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3354,7 +3356,7 @@ export const BrowserActionNote = /* @__PURE__ */ defineSchema(() =>
         .int()
         .min(0)
         .max(INTERACTION_MAX_ACTIONS_PER_BATCH - 1),
-      kind: z.enum(["network_busy"]),
+      kind: z.enum(["network_busy", "observation_unavailable"]),
       message: primitives.nonEmptyString.max(1_024),
     })
     .strict(),
@@ -3363,8 +3365,23 @@ export type BrowserActionNote = z.infer<typeof BrowserActionNote>;
 
 /** Query parameter by which a caller asks a browser controller to include
  * `notes` in an action receipt. Controllers that predate the field ignore it,
- * and callers that do not send it receive receipts without the field. */
+ * and callers that do not send it receive receipts without the field. Its
+ * value is the newest note version the caller parses (see
+ * BROWSER_ACTION_NOTE_KIND_VERSIONS). */
 export const BROWSER_ACTION_RECEIPT_NOTES_PARAMETER = "receiptNotes";
+
+/** The receipt-notes version that introduced each note kind. A controller
+ * returns a note only to a caller that asked with at least that version,
+ * because receipts are parsed strictly and an older caller would reject a
+ * kind it does not know. */
+export const BROWSER_ACTION_NOTE_KIND_VERSIONS = {
+  network_busy: 1,
+  observation_unavailable: 2,
+} as const satisfies Record<BrowserActionNote["kind"], number>;
+
+/** The newest receipt-notes version; callers send it as the value of
+ * BROWSER_ACTION_RECEIPT_NOTES_PARAMETER. */
+export const BROWSER_ACTION_RECEIPT_NOTES_VERSION = 2;
 
 export const BrowserActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z

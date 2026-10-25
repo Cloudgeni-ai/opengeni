@@ -253,6 +253,47 @@ describe("interaction attempt tools", () => {
     expect((result.content[0] as { text: string }).text).toContain(`\nNote: ${note.message}.\n`);
   });
 
+  test("browser_act says when the actions completed but the page after them was not read", async () => {
+    const target = browserTarget();
+    const note = {
+      actionIndex: 1,
+      kind: "observation_unavailable" as const,
+      message:
+        "all 2 actions completed, but the page could not be read after them, so this receipt has no outline; observe the tab to see the page now",
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, request) => ({
+          ...browserReceipt(request.operationId, browserObservation(target)),
+          observation: null,
+          notes: [note],
+        }),
+      }),
+    });
+    const result = await definitions[0]!.execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: {
+          type: "batch",
+          actions: [
+            { type: "fill", locator: { kind: "label", text: "Search" }, value: "report" },
+            { type: "press", key: "Enter" },
+          ],
+        },
+      },
+      { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+    );
+    expect(result.isError).toBeFalsy();
+    expect((result.content[0] as { text: string }).text).toBe(
+      `Action completed on tab ${target.id}.\nNote: ${note.message}.`,
+    );
+  });
+
   test("browser_act tells the model where upload workspace File IDs come from", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,

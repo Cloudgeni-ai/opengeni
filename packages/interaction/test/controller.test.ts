@@ -498,6 +498,73 @@ describe("BrowserInteractionController", () => {
     expect(reported).toEqual([{ error: failure, operationId: operationId(1) }]);
   });
 
+  test("an unclassified dispatch error is a lost controller only when the driver is gone", async () => {
+    const run = async (
+      thrown: unknown,
+      isAvailable: (() => Promise<boolean>) | undefined,
+    ): Promise<{ state: string; error: unknown; probes: number }> => {
+      let probes = 0;
+      const base = driver(new Map([["target-1", target()]]), async () => {
+        throw thrown;
+      });
+      const controller = new BrowserInteractionController({
+        browserSessionId,
+        controllerGeneration,
+        driver: isAvailable
+          ? {
+              ...base,
+              isAvailable: async () => {
+                probes += 1;
+                return await isAvailable();
+              },
+            }
+          : base,
+      });
+      const receipt = await controller.run(command(1));
+      return { state: receipt.state, error: receipt.error, probes };
+    };
+    const pageError = new Error("Node does not have a layout object");
+
+    // The browser still answers: the command failed, its effect is unknown.
+    expect(await run(pageError, async () => true)).toEqual({
+      state: "outcome_unknown",
+      error: {
+        code: "driver_failed",
+        message:
+          "browser command failed unexpectedly after dispatch and its outcome is unknown; the browser is still connected, so check its current state before repeating the command",
+        retryable: false,
+      },
+      probes: 1,
+    });
+    // Gone, a probe that fails, or a driver without a probe: lost, as before.
+    const lost = {
+      state: "outcome_unknown",
+      error: {
+        code: "controller_lost",
+        message: "browser command outcome is unknown after dispatch",
+        retryable: false,
+      },
+    };
+    expect(await run(pageError, async () => false)).toEqual({ ...lost, probes: 1 });
+    expect(
+      await run(pageError, async () => {
+        throw new Error("probe failed");
+      }),
+    ).toEqual({ ...lost, probes: 1 });
+    expect(await run(pageError, undefined)).toEqual({ ...lost, probes: 0 });
+    // A typed controller error keeps its own code, without a probe.
+    expect(
+      await run(
+        new InteractionControllerError("tab_crashed", "browser tab crashed", true),
+        async () => true,
+      ),
+    ).toEqual({
+      state: "outcome_unknown",
+      error: { code: "tab_crashed", message: "browser tab crashed", retryable: false },
+      probes: 0,
+    });
+  });
+
   test("durably journals preparation and dispatch before invoking the driver", async () => {
     const targets = new Map([["target-1", target()]]);
     const preparedRelease = deferred();

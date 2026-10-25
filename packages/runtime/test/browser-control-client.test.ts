@@ -568,7 +568,7 @@ describe("BrowserControlClient", () => {
       expect(await browser.action(command())).not.toHaveProperty("targets");
       expect(requests).toEqual(
         Array(2).fill(
-          `POST /v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=1`,
+          `POST /v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=2`,
         ),
       );
     } finally {

@@ -1194,13 +1194,14 @@ export type BrowserActionReceipt = {
   /** Elements the action's locators resolved to, in dispatch order. */
   targets?: BrowserActionResolvedTarget[] | undefined;
   /** Per-action notes, such as a network_idle wait that ended on a page whose
-   * network kept busy; `message` says what happened in plain words. */
+   * network kept busy, or a completed action after which the page could not
+   * be read; `message` says what happened in plain words. */
   notes?: BrowserActionNote[] | undefined;
 };
 
 export type BrowserActionNote = {
   actionIndex: number;
-  kind: "network_busy";
+  kind: "network_busy" | "observation_unavailable";
   message: string;
 };
 

@@ -8,6 +8,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import { summarizeUpdateBlockers, type UpdateBlocker } from "./update-admission";
 import {
+  BROWSER_ACTION_NOTE_KIND_VERSIONS,
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_PORT,
@@ -663,18 +664,20 @@ export class BrowserControlServer {
         async () => await this.supervisor.action(command),
       );
       // Older clients parse receipts strictly. Return resolved targets and
-      // per-action notes only to a caller that asked for them.
+      // per-action notes only to a caller that asked for them, and only the
+      // note kinds its version of the receipt knows.
       const { targets, notes, ...base } = receipt;
+      const notesVersion = Number(url.searchParams.get(BROWSER_ACTION_RECEIPT_NOTES_PARAMETER));
+      const knownNotes = notes?.filter(
+        (note) => BROWSER_ACTION_NOTE_KIND_VERSIONS[note.kind] <= notesVersion,
+      );
       return success({
         ...base,
         ...(targets !== undefined &&
         url.searchParams.get(BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER) === "1"
           ? { targets }
           : {}),
-        ...(notes !== undefined &&
-        url.searchParams.get(BROWSER_ACTION_RECEIPT_NOTES_PARAMETER) === "1"
-          ? { notes }
-          : {}),
+        ...(knownNotes !== undefined && knownNotes.length > 0 ? { notes: knownNotes } : {}),
       });
     }
     if (
