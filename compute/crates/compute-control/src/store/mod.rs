@@ -308,7 +308,9 @@ pub trait Store: Send + Sync + 'static {
     /// Moves a host from `from` to `to` (live and draining), if it is in
     /// `from`. A drained host stays drained until moved back to live: given
     /// up on, it registers again draining, so a drain an operator asked for
-    /// outlasts the host's going away and coming back.
+    /// outlasts the host's going away and coming back. Moved from draining
+    /// to live while given up on, it stays given up on and registers again
+    /// live.
     fn set_state(
         &self,
         host: HostId,

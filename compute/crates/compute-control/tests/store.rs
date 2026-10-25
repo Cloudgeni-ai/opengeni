@@ -450,6 +450,42 @@ async fn drained<S: Store>(store: S) {
         HostState::Live,
         "an undrained host comes back live"
     );
+
+    // Undrained while given up on, it stays given up on, then comes back
+    // live; a host given up on cannot be drained.
+    assert!(
+        store
+            .set_state(host, HostState::Live, HostState::Draining)
+            .await
+            .unwrap()
+    );
+    let count = renewals(&store, host).await.unwrap();
+    assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(0));
+    assert!(
+        store
+            .set_state(host, HostState::Draining, HostState::Live)
+            .await
+            .unwrap(),
+        "undrained while given up on"
+    );
+    assert_eq!(state(&store, host).await, HostState::Lost);
+    assert!(
+        !store
+            .set_state(host, HostState::Draining, HostState::Live)
+            .await
+            .unwrap(),
+        "undrained once"
+    );
+    assert!(
+        !store
+            .set_state(host, HostState::Live, HostState::Draining)
+            .await
+            .unwrap(),
+        "not drained while given up on"
+    );
+    let (again, _) = registered(&store, &register(&name, random(), Vec::new())).await;
+    assert_eq!(again, host);
+    assert_eq!(state(&store, host).await, HostState::Live);
 }
 
 #[tokio::test]

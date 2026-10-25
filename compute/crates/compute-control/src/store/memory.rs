@@ -281,10 +281,16 @@ impl MemoryStore {
         let Some(entry) = inner.hosts.get_mut(&host) else {
             return false;
         };
-        if entry.row.state != from {
+        let undrained_while_lost = entry.row.state == HostState::Lost
+            && entry.drained
+            && from == HostState::Draining
+            && to == HostState::Live;
+        if entry.row.state != from && !undrained_while_lost {
             return false;
         }
-        entry.row.state = to;
+        if !undrained_while_lost {
+            entry.row.state = to;
+        }
         entry.drained = to == HostState::Draining;
         entry.row.changed = changed;
         inner.changes = changed;

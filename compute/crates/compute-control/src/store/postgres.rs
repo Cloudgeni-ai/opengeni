@@ -653,8 +653,11 @@ impl Store for PostgresStore {
             .client()
             .await?
             .execute(
-                "update compute_hosts set state = $3, drained = $3 = 'draining', \
-                 changed = nextval('compute_changes') where id = $1 and state = $2",
+                "update compute_hosts \
+                 set state = case when state = 'lost' then state else $3 end, \
+                 drained = $3 = 'draining', changed = nextval('compute_changes') \
+                 where id = $1 and (state = $2 or (state = 'lost' and drained \
+                 and $2 = 'draining' and $3 = 'live'))",
                 &[&big(host.0)?, &state_name(from), &state_name(to)],
             )
             .await
