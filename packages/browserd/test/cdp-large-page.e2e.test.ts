@@ -8,7 +8,7 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { INTERACTION_MAX_SEMANTIC_NODES } from "@opengeni/contracts";
-import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
+import { AgentBrowserDriver, CdpResponseRefusedError, ManagedBrowserRunner } from "../src";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
@@ -88,6 +88,32 @@ e2e(
           );
           return html(`<title>Names</title><h1>Long names</h1>${buttons.join("")}`);
         }
+        if (url.pathname === "/sprite") {
+          // Many elements, few of them in the accessibility tree: 2,000
+          // buttons beside a hidden sprite sheet of 26,000 elements.
+          const buttons = Array.from(
+            { length: 2_000 },
+            (_, index) => `<button>Button ${index}</button>`,
+          );
+          const symbols = Array.from({ length: 13_000 }, () => "<symbol><path/></symbol>");
+          return html(
+            `<title>Sprite</title><svg style="display:none">${symbols.join("")}</svg>${buttons.join("")}`,
+          );
+        }
+        if (url.pathname === "/noise") {
+          // A tall page of noise: its full-page PNG is larger than any image
+          // the controller may carry.
+          return html(
+            `<title>Noise</title><style>body{margin:0}</style><button>Noisy</button><canvas id="c" width="1280" height="8000"></canvas><script>
+              const context = c.getContext("2d");
+              const image = context.createImageData(1280, 8000);
+              for (let at = 0; at < image.data.length; at += 65536)
+                crypto.getRandomValues(image.data.subarray(at, at + 65536));
+              for (let at = 3; at < image.data.length; at += 4) image.data[at] = 255;
+              context.putImageData(image, 0, 0);
+            </script>`,
+          );
+        }
         if (url.pathname === "/log") {
           // One console message of 40 MB: an event over the message bound.
           return html(
@@ -165,6 +191,26 @@ e2e(
       const longNames = await driver.openTarget(`${base}/names`);
       expect(snapshot(longNames).incomplete).toMatchObject({ reason: "node_budget" });
       expect(names(snapshot(longNames).roots)).toContain("Long names");
+      await otherTab();
+
+      // Hidden elements do not make a page partial: one whose tree fits is
+      // read whole, every button included.
+      const sprite = snapshot(await driver.openTarget(`${base}/sprite`));
+      expect(sprite.incomplete).toBeUndefined();
+      const spriteNames = names(sprite.roots);
+      expect(new Set(spriteNames.filter((name) => /^Button \d+$/u.test(name))).size).toBe(2_000);
+      expect(spriteNames).toContain("Button 1999");
+      await otherTab();
+
+      // A full-page screenshot larger than the controller carries fails alone,
+      // with a refusal naming the method; the tab and the others carry on.
+      const noise = await driver.openTarget(`${base}/noise`);
+      const refused = await driver
+        .captureScreenshot(noise.target.id, { fullPage: true, format: "png" })
+        .catch((error: unknown) => error);
+      expect(refused).toBeInstanceOf(CdpResponseRefusedError);
+      expect(refused).toMatchObject({ method: "Page.captureScreenshot", reason: "too_large" });
+      expect(names(snapshot(await driver.observe(noise.target.id)).roots)).toContain("Noisy");
       await otherTab();
 
       // A 40 MB console message is dropped; diagnostics and every tab carry on.

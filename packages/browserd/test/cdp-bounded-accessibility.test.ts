@@ -35,6 +35,10 @@ describe("bounded accessibility reads", () => {
     expect(ids(boundedChildWindow(list, new Set(["995"]))).at(-1)).toBe(999);
     // Without anything on screen, the list starts at its beginning.
     expect(ids(boundedChildWindow(list, new Set()))[0]).toBe(0);
+    // A widened window (budget left over) keeps more, still around the anchor.
+    const wide = ids(boundedChildWindow(list, new Set(["500"]), 400));
+    expect(wide).toHaveLength(400);
+    expect(wide[0]).toBe(400);
   });
 
   test("an outline read within a budget says how much it left unread", () => {

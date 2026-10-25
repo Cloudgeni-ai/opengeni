@@ -4,6 +4,7 @@ import {
   CdpConnection,
   CdpProtocolError,
   CdpResponseRefusedError,
+  refusedMessageFields,
   type CdpDroppedMessage,
 } from "../src";
 
@@ -74,7 +75,12 @@ describe("CdpConnection", () => {
       expect(await connection.send("Page.enable")).toEqual({ method: "Page.enable" });
       expect(events).toEqual([{ timestamp: 1 }]);
       expect(dropped).toEqual([
-        { method: "Runtime.consoleAPICalled", reason: "too_large", bytes: expect.any(Number) },
+        {
+          method: "Runtime.consoleAPICalled",
+          reason: "too_large",
+          bytes: expect.any(Number),
+          sessionId: "tab",
+        },
         { method: null, reason: "invalid", bytes: 8 },
       ]);
       expect(connection.droppedMessageCount).toBe(2);
@@ -82,6 +88,67 @@ describe("CdpConnection", () => {
       connection.close();
     }
   }, 60_000);
+
+  test("a reply above the WebSocket client's 128 MiB frame limit fails only its own command", async () => {
+    // Bun's global WebSocket errors the whole socket on such a frame before
+    // any handler runs; the connection's own client takes it and refuses it.
+    const huge = "y".repeat(129 * 1024 * 1024);
+    const server = Bun.serve({
+      port: 0,
+      fetch(request, instance) {
+        if (instance.upgrade(request)) return;
+        return new Response(null, { status: 426 });
+      },
+      websocket: {
+        backpressureLimit: 512 * 1024 * 1024,
+        message(socket, raw) {
+          const { id, method } = JSON.parse(String(raw)) as { id: number; method: string };
+          if (method === "Page.captureScreenshot")
+            socket.send(`{"id":${id},"result":{"data":"${huge}"}}`);
+          else socket.send(JSON.stringify({ id, result: { method } }));
+        },
+      },
+    });
+    servers.push(server);
+    const connection = await CdpConnection.connect(`ws://127.0.0.1:${server.port}/devtools`);
+    try {
+      const refused = await connection.send("Page.captureScreenshot").catch((error) => error);
+      expect(refused).toBeInstanceOf(CdpResponseRefusedError);
+      expect(refused).toMatchObject({ method: "Page.captureScreenshot", reason: "too_large" });
+      expect(await connection.send("Page.enable")).toEqual({ method: "Page.enable" });
+    } finally {
+      connection.close();
+    }
+  }, 60_000);
+
+  test("a refused message is matched by its top-level fields in any key order", () => {
+    const nested = `{"nodes":[{"id":99,"method":"inner","sessionId":"inner"}],"text":"a\\"}b,"}`;
+    // Chromium's order: read from the ends at once.
+    expect(refusedMessageFields(`{"id":12,"result":${nested},"sessionId":"tab"}`)).toEqual({
+      id: 12,
+      method: null,
+      sessionId: "tab",
+    });
+    expect(
+      refusedMessageFields(`{"method":"Page.screencastFrame","params":${nested},"sessionId":"t2"}`),
+    ).toEqual({ id: null, method: "Page.screencastFrame", sessionId: "t2" });
+    // Any other order is scanned key by key, skipping nested values.
+    expect(refusedMessageFields(`{"result":${nested},"sessionId":"tab","id":7}`)).toEqual({
+      id: 7,
+      method: null,
+      sessionId: "tab",
+    });
+    expect(refusedMessageFields(` { "params" : ${nested} , "method" : "Log.entryAdded" }`)).toEqual(
+      { id: null, method: "Log.entryAdded", sessionId: null },
+    );
+    // A message cut short keeps the fields read before the cut.
+    expect(refusedMessageFields(`{"sessionId":"tab","id":3,"result":{"data":"abc`)).toEqual({
+      id: 3,
+      method: null,
+      sessionId: "tab",
+    });
+    expect(refusedMessageFields("not json")).toEqual({ id: null, method: null, sessionId: null });
+  });
 
   test("detaching a target settles its event waits without cancelling sibling or browser events", async () => {
     let emit: (message: unknown) => void = () => {
