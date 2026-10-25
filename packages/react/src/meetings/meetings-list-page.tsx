@@ -71,6 +71,7 @@ export function MeetingsListPage({
   externalRef = null,
   notice = null,
   header = true,
+  recordingOff = null,
 }: {
   workspaceId: string;
   /** Whether the workspace shows a live transcript while recording by default. */
@@ -92,6 +93,12 @@ export function MeetingsListPage({
   notice?: ReactNode;
   /** Show the page title; false when the list sits inside a page of the host's. */
   header?: boolean;
+  /**
+   * Shown instead of the recorder when the host doesn't let this person record
+   * here, such as a setting an administrator has to turn on first. Meetings
+   * already recorded stay listed, and a recording already underway keeps its controls.
+   */
+  recordingOff?: ReactNode;
 }) {
   const msg = useOpenGeniText();
   const columns: RowListColumn[] = [
@@ -138,6 +145,7 @@ export function MeetingsListPage({
 
   const loading = list.loading && list.recordings.length === 0;
   const empty = !list.loading && !list.error && list.recordings.length === 0;
+  const showRecorder = recordingOff === null || (recorder !== null && recorder.state !== "idle");
 
   return (
     <>
@@ -149,19 +157,23 @@ export function MeetingsListPage({
         />
       ) : null}
       <div className={header ? "mt-2 grid gap-8" : "grid gap-8"}>
-        <RecorderPanel
-          recorder={recorder}
-          onStopped={onOpen}
-          defaultLanguage={defaultLanguage}
-          autoStart={autoStart}
-          externalRef={externalRef}
-          notice={notice}
-          liveTranscript={
-            liveTranscript && liveModel
-              ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }
-              : null
-          }
-        />
+        {showRecorder ? (
+          <RecorderPanel
+            recorder={recorder}
+            onStopped={onOpen}
+            defaultLanguage={defaultLanguage}
+            autoStart={autoStart}
+            externalRef={externalRef}
+            notice={notice}
+            liveTranscript={
+              liveTranscript && liveModel
+                ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }
+                : null
+            }
+          />
+        ) : (
+          <Notice tone="info">{recordingOff}</Notice>
+        )}
         {recorder && recorder.recovered.length > 0 ? (
           <Notice tone="info">
             {msg("meetings.listPage.earlierRecordingsWereStillSaved", {
@@ -226,7 +238,9 @@ export function MeetingsListPage({
                 variant="page"
                 icon={<AudioLinesIcon />}
                 title={msg("meetings.listPage.noMeetingsYet")}
-                description={msg("meetings.listPage.startARecordingAboveWhen")}
+                description={
+                  showRecorder ? msg("meetings.listPage.startARecordingAboveWhen") : undefined
+                }
                 className="pt-8"
               />
             )

@@ -190,6 +190,30 @@ describe("Meetings list", () => {
       await view.unmount();
     }
   });
+
+  test("a host that doesn't let this person record says why, and still lists the meetings", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+        recordingOff="An administrator has to turn on meeting recording."
+      />,
+    );
+    try {
+      await waitForText(view.container, "Weekly product sync");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("An administrator has to turn on meeting recording.");
+      const start = [...view.container.querySelectorAll("button")].find((button) =>
+        /start recording/i.test(button.textContent ?? ""),
+      );
+      expect(start).toBeUndefined();
+    } finally {
+      await view.unmount();
+    }
+  });
 });
 
 describe("Meeting page", () => {

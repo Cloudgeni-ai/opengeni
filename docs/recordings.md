@@ -89,8 +89,10 @@ the console uses:
   such as a project, and to give new recordings started there the same id;
   `notice` for a line shown before every start, such as a reminder to tell
   the people present; `liveTranscript={false}` to not offer the live preview
-  even when a live model is connected; and `header={false}` when the list sits
-  inside a page of your own.
+  even when a live model is connected; `recordingOff` to show why this person
+  can't record here instead of the recorder, such as a setting an
+  administrator has to turn on, while the meetings stay listed; and
+  `header={false}` when the list sits inside a page of your own.
 - `MeetingDetailPage`: one meeting, with its player, transcript, speaker
   naming, versions and sharing. `details` adds your own lines beside the
   transcript, such as the project it belongs to.
