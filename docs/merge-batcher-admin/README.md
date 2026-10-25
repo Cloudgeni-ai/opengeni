@@ -1,3 +1,8 @@
+# App-only namespace guidance compatibility
+
+New `prepare-app-only` plans name the namespace `Merges go through the batcher: use gh pr merge --auto or add the queue-ready label`.
+Retained v3 and older v4 plans keep their exact original name and restore payload; verification accepts only their matching full inventory and creation receipts. This does not authorize renaming an active ruleset without rebinding its plan. Use the coordinated Manual/fresh-activation procedure, preserving old claims and journals. Capture `allow_auto_merge=true` in the new saved Manual snapshot when native auto-merge is enabled, so later OFF keeps that repository setting.
+
 # Prepared administration bundle — inactive
 
 This bundle is **inactive by default**. `bundle.ts` is offline: it reads saved
