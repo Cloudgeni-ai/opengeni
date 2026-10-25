@@ -2,8 +2,10 @@
  * "Ask me each time" for vault items and fields (docs/secrets.md, "Approval
  * for each use"): reading and changing an item's rules, and the grants in
  * force for it. Reach comes from the vault routines: a person sees and marks
- * only items they can open. Changing rules and revoking grants is for people
- * (not API keys or agents), so an agent can never lift its own approval.
+ * only items they can open. Anyone who may write the item can add marks and
+ * revoke grants, because both only make use stricter. Removing a mark is for
+ * the person signed in themselves (not API keys or agents), so an agent can
+ * never lift its own approval.
  */
 import {
   secretNameKey,
@@ -47,7 +49,7 @@ function requirePerson(actor: VaultRequestActor): void {
   if (!isPerson(actor)) {
     throw new VaultError(
       "human_auth_required",
-      "only a person signed in can change which secrets need approval",
+      "only a person signed in can remove an approval requirement; agents and API keys can only add them",
     );
   }
 }
@@ -114,7 +116,6 @@ export async function setVaultItemApproval(
   itemId: string,
   request: SetVaultItemApprovalRequest,
 ): Promise<VaultItemApproval> {
-  requirePerson(actor);
   const item = await getVaultItem(deps.db, contextFor(actor, workspaceId), { itemId });
   const known = new Set(item.fields.map((field) => secretNameKey(field.name)));
   const fieldKeys = [...new Set(request.fields.map(secretNameKey))];
@@ -123,6 +124,16 @@ export async function setVaultItemApproval(
     throw new VaultError("vault_field_not_found", "the item has no field with that name", {
       fields: unknown,
     });
+  }
+  if (!isPerson(actor)) {
+    // Adding marks only makes use stricter; lifting one needs the person.
+    const scope = { accountId: actor.grant.accountId, workspaceId };
+    const current = await listSecretApprovalRules(deps.db, scope, [item.id]);
+    const requested = new Set(fieldKeys);
+    const lifts = current.some((rule) =>
+      rule.fieldKey === "" ? !request.item : !requested.has(rule.fieldKey),
+    );
+    if (lifts) requirePerson(actor);
   }
   await setSecretApprovalRules(
     deps.db,
@@ -145,7 +156,6 @@ export async function revokeVaultItemGrant(
   itemId: string,
   grantId: string,
 ): Promise<VaultItemApproval> {
-  requirePerson(actor);
   const item = await getVaultItem(deps.db, contextFor(actor, workspaceId), { itemId });
   const revoked =
     UUID.test(grantId) &&

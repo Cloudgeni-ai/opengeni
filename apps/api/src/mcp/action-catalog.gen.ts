@@ -6053,8 +6053,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval/grants/:grantId/revoke",
     "request": [],
-    "response": [],
-    "browserOnly": "which secrets need the person's approval each time, and the approvals they gave, guard what agents may use, so only the person signed in to Opengeni themselves can change them, never an agent"
+    "response": []
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/restore",
@@ -6434,9 +6433,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PUT /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
-    "request": [],
-    "response": [],
-    "browserOnly": "which secrets need the person's approval each time, and the approvals they gave, guard what agents may use, so only the person signed in to Opengeni themselves can change them, never an agent"
+    "request": [
+      "SetVaultItemApprovalRequest"
+    ],
+    "response": []
   },
   {
     "id": "PUT /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
