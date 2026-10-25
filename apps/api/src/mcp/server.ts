@@ -5150,6 +5150,19 @@ function registerWorkspaceOrchestrationTools(
   json: JsonResult,
   sessionAdminReach: SessionAdminReach | null = null,
 ): void {
+  // A chat's canonical link, from the deployment's web base URL and this
+  // workspace, so agents never build one themselves; null when none is set.
+  // A chat in another workspace gets its link there, where the tool runs.
+  const chatUrlFor = (sessionId: string): string | null =>
+    sessionChatUrl(
+      deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl,
+      grant.workspaceId,
+      sessionId,
+    );
+  const withChatUrl = <T extends object>(value: T, sessionId: string): T => {
+    const chatUrl = chatUrlFor(sessionId);
+    return chatUrl ? { ...value, chatUrl } : value;
+  };
   // A not-found-or-denied answer tells an agent how a chat in another
   // workspace is reached, never whether this one exists anywhere else.
   const denialHint =
@@ -5565,10 +5578,11 @@ function registerWorkspaceOrchestrationTools(
           });
           const result =
             detail === "full"
-              ? capSessionDiscoveryPage(page, includeLastMessage === true)
+              ? capSessionDiscoveryPage(page, includeLastMessage === true, { chatUrl: chatUrlFor })
               : capSessionDiscoveryCompactPage(page, {
                   includeLastMessage: includeLastMessage === true,
                   includeRelatedWork: relatedWorkRequested,
+                  chatUrl: chatUrlFor,
                 });
           observeWorkDiscovery(deps.observability, {
             surface: "first_party_mcp",
@@ -5643,24 +5657,30 @@ function registerWorkspaceOrchestrationTools(
         );
         if (detail !== "full") {
           return json(
-            boundSessionCompactDetailMcp(
-              projected,
-              await getSessionMcpMonitoringSummary(deps.db, grant.workspaceId, sessionId),
-              queue,
+            withChatUrl(
+              boundSessionCompactDetailMcp(
+                projected,
+                await getSessionMcpMonitoringSummary(deps.db, grant.workspaceId, sessionId),
+                queue,
+              ),
+              sessionId,
             ),
           );
         }
         return json(
-          boundSessionDetailMcp(
-            await withMcpEffectivePolicy(
-              deps,
-              grant.workspaceId,
-              grant.subjectId,
-              // The Codex pointers by cutover disposition, as REST shows them.
-              (await loadCodexSessionPointerProjection(deps.db, grant.workspaceId, [projected]))(
-                projected,
+          withChatUrl(
+            boundSessionDetailMcp(
+              await withMcpEffectivePolicy(
+                deps,
+                grant.workspaceId,
+                grant.subjectId,
+                // The Codex pointers by cutover disposition, as REST shows them.
+                (await loadCodexSessionPointerProjection(deps.db, grant.workspaceId, [projected]))(
+                  projected,
+                ),
               ),
             ),
+            sessionId,
           ),
         );
       }),
@@ -6192,7 +6212,13 @@ function registerWorkspaceOrchestrationTools(
             undefined,
             title === undefined ? {} : { automaticTitleCandidate: title },
           );
-          return json(sessionCreateMutationReceipt(result, Boolean(request.idempotencyKey)));
+          return json(
+            sessionCreateMutationReceipt(
+              result,
+              Boolean(request.idempotencyKey),
+              chatUrlFor(result.session.id),
+            ),
+          );
         } catch (error) {
           return orchestrationFailureResult("session_create", error, deps, grant);
         }
@@ -7914,13 +7940,19 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
 
 export function capSessionDiscoveryCompactPage(
   page: Awaited<ReturnType<typeof listSessionDiscoverySummaries>>,
-  options: { includeLastMessage?: boolean; includeRelatedWork?: boolean } = {},
+  options: {
+    includeLastMessage?: boolean;
+    includeRelatedWork?: boolean;
+    chatUrl?: (sessionId: string) => string | null;
+  } = {},
   maxBytes = SESSION_DISCOVERY_PAGE_MAX_BYTES,
 ) {
   let previewBytes = 0;
   const projected = page.sessions.map((session) => {
+    const chatUrl = options.chatUrl?.(session.id) ?? null;
     const row = {
       ...compactSessionMcpListRow(session, options.includeRelatedWork),
+      ...(chatUrl ? { chatUrl } : {}),
       ...(options.includeLastMessage && session.queuedPromptCount > 0
         ? { queuedPromptCount: session.queuedPromptCount }
         : {}),
@@ -8002,8 +8034,10 @@ export function capSessionDiscoveryCompactPage(
 export function capSessionDiscoveryPage(
   page: Awaited<ReturnType<typeof listSessionDiscoverySummaries>>,
   includeLastMessage: boolean,
+  options: { chatUrl?: (sessionId: string) => string | null } = {},
 ) {
   const projected = page.sessions.map((session) => {
+    const chatUrl = options.chatUrl?.(session.id) ?? null;
     const title = capSessionDiscoveryText(session.title, 200, session.titleOriginalChars);
     const goal = session.goal
       ? capSessionDiscoveryText(
@@ -8025,6 +8059,7 @@ export function capSessionDiscoveryPage(
       : null;
     return {
       id: session.id,
+      ...(chatUrl ? { chatUrl } : {}),
       ...(session.channelId ? { projectId: session.channelId } : {}),
       title: title.text,
       titleTruncated: title.truncated,

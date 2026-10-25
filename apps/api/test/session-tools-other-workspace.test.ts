@@ -23,6 +23,8 @@ import { buildOpenGeniMcpServer } from "../src/mcp/server";
    whether the chat exists. */
 
 const origin = "http://opengeni.test";
+const link = (workspaceId: string, sessionId: string) =>
+  `${origin}/workspaces/${workspaceId}/sessions/${sessionId}`;
 const AGENT_PERMISSIONS: Permission[] = [
   "workspace:read",
   "sessions:create",
@@ -30,6 +32,7 @@ const AGENT_PERMISSIONS: Permission[] = [
   "sessions:control",
 ];
 const SESSION_TOOLS = [
+  "sessions_list",
   "session_get",
   "session_events",
   "session_wait",
@@ -240,7 +243,7 @@ describe("session tools on a chat in another workspace", () => {
       buildOpenGeniMcpServer(deps, agent, { sessionAdminAccess: null });
 
     // Every session tool offers workspaceId, with or without full access.
-    for (const name of SESSION_TOOLS) {
+    for (const name of SESSION_TOOLS.filter((tool) => tool !== "sessions_list")) {
       const tools = (
         withoutFullAccess() as unknown as {
           _registeredTools: Record<string, { inputSchema?: unknown }>;
@@ -280,6 +283,20 @@ describe("session tools on a chat in another workspace", () => {
       false,
     );
 
+    // Each chat comes with its canonical link: its own (a self read), and
+    // every listed row.
+    const self = await call(withoutFullAccess(), "session_get", {});
+    expect(self.isError, self.text).toBe(false);
+    expect(JSON.parse(self.text)).toMatchObject({ id: own, chatUrl: link(home, own) });
+    for (const detail of ["compact", "full"] as const) {
+      const listed = await call(withoutFullAccess(), "sessions_list", { limit: 50, detail });
+      expect(listed.isError, listed.text).toBe(false);
+      const rows = (
+        JSON.parse(listed.text) as { sessions: Array<{ id: string; chatUrl?: string }> }
+      ).sessions;
+      expect(rows.find((row) => row.id === local)?.chatUrl, detail).toBe(link(home, local));
+    }
+
     // The person allows full access and gives it to this session.
     expect(
       (
@@ -304,6 +321,8 @@ describe("session tools on a chat in another workspace", () => {
     });
     expect(read.isError, read.text).toBe(false);
     expect(read.text).toContain(target);
+    // Its link is in its own workspace.
+    expect(JSON.parse(read.text)).toMatchObject({ id: target, chatUrl: link(other, target) });
 
     // Message it: the person's prompt, sent by this session for them.
     const idempotencyKey = crypto.randomUUID();
