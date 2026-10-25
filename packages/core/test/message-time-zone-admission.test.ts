@@ -41,15 +41,19 @@ test("a sent message freezes its normalized time zone on the accepted turn", asy
       workflowClient: { wakeSessionWorkflow: async () => {} },
       objectStorage: null,
     };
-    const send = (timeZone: string | undefined, delivery: "send" | "steer" = "send") =>
+    const send = (
+      timeZone: string | undefined,
+      delivery: "send" | "steer" = "send",
+      clientEventId: string = crypto.randomUUID(),
+    ) =>
       acceptSessionUserMessageWithOutcome(
         deps,
         { ...scope, subjectId, permissions: ["admin"], principalKind: "human_session" },
         scope.workspaceId,
         session.id,
         {
-          text: `message in ${timeZone ?? "no zone"}`,
-          clientEventId: crypto.randomUUID(),
+          text: `message ${clientEventId}`,
+          clientEventId,
           delivery,
           ...(timeZone ? { timeZone } : {}),
         },
@@ -65,6 +69,18 @@ test("a sent message freezes its normalized time zone on the accepted turn", asy
     expect(await frozenZone((await send("america/new_york")).turn.id)).toBe("America/New_York");
     expect(await frozenZone((await send("Mars/Olympus_Mons")).turn.id)).toBeUndefined();
     expect(await frozenZone((await send(undefined)).turn.id)).toBeUndefined();
+
+    // The zone is not part of a message's identity: a retry that names another
+    // zone, or none, replays the original turn and keeps its frozen zone.
+    for (const delivery of ["send", "steer"] as const) {
+      const clientEventId = crypto.randomUUID();
+      const original = await send(undefined, delivery, clientEventId);
+      const zonedRetry = await send("Europe/Oslo", delivery, clientEventId);
+      const otherRetry = await send("Asia/Tokyo", delivery, clientEventId);
+      expect(zonedRetry.turn.id).toBe(original.turn.id);
+      expect(otherRetry.turn.id).toBe(original.turn.id);
+      expect(await frozenZone(original.turn.id)).toBeUndefined();
+    }
   } finally {
     await client.close();
     await shared.release();

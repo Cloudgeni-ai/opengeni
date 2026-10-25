@@ -92,8 +92,12 @@ async function sendPrompt(
   grant: Awaited<ReturnType<typeof fixture>>,
   sessionId: string,
   turnMetadata?: Record<string, unknown>,
+  identity: { sender: string; operationKey: string } = {
+    sender: `user:sender-${crypto.randomUUID()}`,
+    operationKey: crypto.randomUUID(),
+  },
 ) {
-  const sender = `user:sender-${crypto.randomUUID()}`;
+  const { sender, operationKey } = identity;
   return await withWorkspaceSubjectRls(client.db, grant.workspaceId!, sender, (db) =>
     db.transaction((tx) =>
       submitHumanPromptInTransaction(tx as unknown as typeof db, {
@@ -103,7 +107,7 @@ async function sendPrompt(
         subjectId: sender,
         subjectLabel: "Ada",
         actor: { type: "human", subjectId: sender },
-        operationKey: crypto.randomUUID(),
+        operationKey,
         delivery: "send",
         text: "Remind me tomorrow at 9.",
         resources: [],
@@ -190,5 +194,24 @@ describe("message time zone persistence", () => {
     });
     if (!started.turn) throw new Error("initial turn was not created");
     expect(started.turn.metadata[MESSAGE_TIME_ZONE_METADATA_KEY]).toBeUndefined();
+  }, 60_000);
+
+  test("a retry naming another zone replays the original prompt", async () => {
+    const grant = await fixture();
+    const session = await createSession(client.db, sessionInput(grant));
+    const identity = {
+      sender: `user:sender-${crypto.randomUUID()}`,
+      operationKey: crypto.randomUUID(),
+    };
+    const original = await sendPrompt(grant, session.id, undefined, identity);
+    const retried = await sendPrompt(
+      grant,
+      session.id,
+      { [MESSAGE_TIME_ZONE_METADATA_KEY]: "Europe/Oslo" },
+      identity,
+    );
+    expect(retried.turnId).toBe(original.turnId);
+    const turn = await getSessionTurn(client.db, grant.workspaceId!, original.turnId);
+    expect(turn?.metadata[MESSAGE_TIME_ZONE_METADATA_KEY]).toBeUndefined();
   }, 60_000);
 });

@@ -1054,8 +1054,15 @@ function withMessageTimeZone<T extends { timeZone?: string | undefined }>(
   mode: OpenGeniClientOptions["messageTimeZone"],
 ): { body: T; automatic: boolean } {
   const { timeZone: requested, ...rest } = body;
-  const explicit = normalizeMessageTimeZone(requested);
-  if (explicit) return { body: { ...rest, timeZone: explicit } as T, automatic: false };
+  // A zone the caller chose is used as is, or dropped when it is unusable;
+  // it is never swapped for the device's zone.
+  if (requested !== undefined && requested !== null) {
+    const explicit = normalizeMessageTimeZone(requested);
+    return {
+      body: (explicit ? { ...rest, timeZone: explicit } : rest) as T,
+      automatic: false,
+    };
+  }
   const device = mode !== false && runsOnPersonsDevice() ? currentMessageTimeZone() : undefined;
   return device
     ? { body: { ...rest, timeZone: device } as T, automatic: true }
@@ -1069,14 +1076,23 @@ function withoutMessageTimeZone<T extends { timeZone?: string | undefined }>(bod
 
 /**
  * Whether a request was refused only because the server (or an embedding
- * host's session relay) predates message time zones: older servers reject
- * unknown fields on the strict message and steer bodies with these messages,
- * and older relays refuse unknown create fields by name.
+ * host's session relay or Site frame guard) predates message time zones:
+ * older servers reject unknown fields on the strict message and steer bodies
+ * with these messages, older relays refuse unknown create fields by name, and
+ * older Site hosts refuse a frame field they do not list.
  */
 function rejectsMessageTimeZoneField(error: unknown): boolean {
   if (!(error instanceof OpenGeniApiError)) return false;
   const text = `${error.message}\n${error.body}`;
   if (error.status === 422) return /invalid (session event|steer request)/.test(text);
+  if (error.status === 403) {
+    const field = error.details?.field;
+    return (
+      error.details?.code === "site_frame_field_forbidden" &&
+      typeof field === "string" &&
+      /(^|\.)timeZone$/.test(field)
+    );
+  }
   return error.status === 400 && /timeZone\W+cannot be set/.test(text);
 }
 

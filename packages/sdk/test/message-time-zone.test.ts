@@ -151,6 +151,19 @@ describe("messages carry the person's time zone", () => {
     });
   });
 
+  test("an unusable explicit zone is dropped, not replaced by the device zone", async () => {
+    pretendToBe("browser");
+    const { client, sent } = clientWith();
+    await client.sendMessage(WORKSPACE_ID, SESSION_ID, { text: "hi", timeZone: "+09:00" });
+    await client.steerMessage(WORKSPACE_ID, SESSION_ID, { text: "now", timeZone: "Mars/Base" });
+    await client.createSession(WORKSPACE_ID, { initialMessage: "hello", timeZone: "" });
+    expect(sent.map((request) => request.body)).toEqual([
+      { type: "user.message", payload: { text: "hi" } },
+      { text: "now" },
+      { initialMessage: "hello" },
+    ]);
+  });
+
   test("a React Native app fills in the device zone", async () => {
     pretendToBe("react-native");
     const { client, sent } = clientWith();
@@ -194,6 +207,38 @@ describe("messages carry the person's time zone", () => {
       { text: "now" },
       { initialMessage: "hello", timeZone: "Europe/Oslo" },
       { initialMessage: "hello" },
+    ]);
+  });
+
+  test("an older Site host that refuses the frame field gets the message again without it", async () => {
+    pretendToBe("browser");
+    const refusedField = (field: string) => () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            status: 403,
+            code: "forbidden",
+            message: "A Site page can send message text only.",
+            retryable: false,
+            details: { code: "site_frame_field_forbidden", field },
+          },
+        }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      );
+    const { client, sent } = clientWith([
+      refusedField("payload.timeZone"),
+      null,
+      refusedField("resources"),
+    ]);
+    await client.sendMessage(WORKSPACE_ID, SESSION_ID, "hi");
+    await expect(client.steerMessage(WORKSPACE_ID, SESSION_ID, "now")).rejects.toHaveProperty(
+      "status",
+      403,
+    );
+    expect(sent.map((request) => request.body)).toEqual([
+      { type: "user.message", payload: { text: "hi", timeZone: "Europe/Oslo" } },
+      { type: "user.message", payload: { text: "hi" } },
+      { text: "now", timeZone: "Europe/Oslo" },
     ]);
   });
 

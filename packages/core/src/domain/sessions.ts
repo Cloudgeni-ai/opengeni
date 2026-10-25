@@ -4307,8 +4307,6 @@ function sessionPromptBoundaryRequestHash(input: {
   connectionAccounts?: McpConnectionAccountSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
   commandActor: SessionCommandActor;
-  /** Normalized sender zone; omitted when absent so unzoned hashes are unchanged. */
-  timeZone?: string;
 }): string {
   return `prompt-boundary-v1:${canonicalSessionCommandHash({
     delivery: input.delivery,
@@ -4327,7 +4325,6 @@ function sessionPromptBoundaryRequestHash(input: {
     mcpCredentialUpdates: input.mcpCredentialUpdates,
     connectionAccounts: input.connectionAccounts ?? [],
     personalResourceAttachment: input.personalResourceAttachment ?? null,
-    ...(input.timeZone ? { timeZone: input.timeZone } : {}),
     ...(input.commandActor.type === "service"
       ? {
           serviceInitiator: {
@@ -4446,8 +4443,9 @@ async function acceptSessionUserMessageInFileScope(
         ...(input.personalResourceAttachment
           ? { personalResourceAttachment: input.personalResourceAttachment }
           : {}),
+        // The sender's zone is deliberately not part of the request identity:
+        // a retry that names another zone (or none) replays the original turn.
         commandActor,
-        ...(timeZone ? { timeZone } : {}),
       })
     : null;
   if (input.clientEventId && boundaryRequestHash) {
