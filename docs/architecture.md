@@ -3114,7 +3114,12 @@ native PR merge identity, retaining immutable tested-tip/run evidence and explic
 old/new-head linkage. `scripts/merge-batcher/head-refresh.ts` proves clean main-only
 merge ancestry and whole-batch tree identity; the final executor recomputes it
 before CAS. Late PR-head races require post-land reconciliation,
-never a claim that the newer head was tested. Post-merge full CI remains independent.
+never a claim that the newer head was tested. Post-merge CI retains its full test
+inventory and independent service/e2e/image gates. Main pushes can reuse complete
+unit coverage from a successful Batch attempt only with identical-tree, canonical
+manifest, exact attempt and archive-digest proof (`scripts/ci/reuse-batch-units.ts`).
+Impact-selected subsets or missing/unknown evidence run the ordinary main units;
+the full-green release receipt contract is unchanged.
 Candidate plan/source/selected-unit/ready success may land on red or unknown
 full-main CI. A two-hour latency breaker retains raw measurements and deducts only
 bounded recorded main-capacity holds. Latency-stop backpressure holds new work, not an otherwise eligible

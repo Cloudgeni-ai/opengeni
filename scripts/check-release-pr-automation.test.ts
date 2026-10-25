@@ -5283,7 +5283,10 @@ describe("workflow contracts", () => {
     expect(shards.if).toContain("needs.plan.outputs.unit_count != '0'");
     expect(shards.strategy).toEqual({
       "fail-fast": false,
-      matrix: { include: "${{ fromJSON(needs.plan.outputs.unit_matrix) }}" },
+      matrix: {
+        include:
+          '${{ fromJSON(needs.plan.outputs.unit_reuse == \'true\' && \'[{"index":0,"number":1,"total":1}]\' || needs.plan.outputs.unit_matrix) }}',
+      },
     });
     const shardStep = shards.steps.find((step: any) => step.name === "Unit test shard");
     expect(shardStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
