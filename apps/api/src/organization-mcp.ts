@@ -337,9 +337,22 @@ export async function callOrganizationAction(
   context: OrganizationActionContext,
   input: z.infer<typeof OrganizationActionCallInput>,
 ): Promise<CallToolResult> {
+  const outcome = await runOrganizationAction(context, input);
+  return "refused" in outcome ? outcome.refused : await toolResult(outcome.response);
+}
+
+/**
+ * Run one action as the caller and return the route's raw response, or the
+ * refusal shown to the agent when the call can't be made at all. The same
+ * request, proof and route checks as {@link callOrganizationAction}.
+ */
+export async function runOrganizationAction(
+  context: OrganizationActionContext,
+  input: z.infer<typeof OrganizationActionCallInput>,
+): Promise<{ response: Response } | { refused: CallToolResult }> {
   const entry = findAction(input.id);
-  if (!entry) return failure(`No action "${input.id}". Search for it first.`);
-  if (entry.browserOnly) return browserOnly(entry);
+  if (!entry) return { refused: failure(`No action "${input.id}". Search for it first.`) };
+  if (entry.browserOnly) return { refused: browserOnly(entry) };
   const reads = entry.method === "GET" || entry.method === "HEAD";
   if (
     context.caller.kind === "person" &&
@@ -347,18 +360,19 @@ export async function callOrganizationAction(
     !READ_ONLY_POST_ACTIONS.has(entry.path) &&
     isReadOnlyPermissionSet(context.caller.access.permissions)
   ) {
-    return failure("This connection is read only, so it can't change anything.");
+    return { refused: failure("This connection is read only, so it can't change anything.") };
   }
   let path = entry.path;
   for (const name of pathParameters(entry.path)) {
     const value = input.pathParameters[name];
-    if (!value) return failure(`Missing path parameter ${name}.`);
+    if (!value) return { refused: failure(`Missing path parameter ${name}.`) };
     // Encoding leaves "." alone, so a dot segment would reach another route.
-    if (value === "." || value === "..") return failure(`Invalid path parameter ${name}.`);
+    if (value === "." || value === "..")
+      return { refused: failure(`Invalid path parameter ${name}.`) };
     path = path.replace(`:${name}`, encodeURIComponent(value));
   }
   const url = new URL(path, context.origin);
-  if (url.pathname !== path) return failure("Invalid path parameters.");
+  if (url.pathname !== path) return { refused: failure("Invalid path parameters.") };
   for (const [key, value] of Object.entries(input.query)) {
     for (const each of Array.isArray(value) ? value : [value])
       url.searchParams.append(key, String(each));
@@ -393,8 +407,7 @@ export async function callOrganizationAction(
       workspaceScope: context.caller.access.workspaceScope,
     });
   }
-  const response = await context.dispatch(request);
-  return await toolResult(response);
+  return { response: await context.dispatch(request) };
 }
 
 async function toolResult(response: Response): Promise<CallToolResult> {

@@ -5,7 +5,12 @@ import { organizationAccessPresetPermissions, type AccessGrant } from "@opengeni
 import { resolveSessionAdminAuthority, type Database } from "@opengeni/db";
 import * as z4 from "zod/v4";
 
-import { callOrganizationAction, describeActionResult, searchActions } from "../organization-mcp";
+import {
+  callOrganizationAction,
+  describeActionResult,
+  searchActions,
+  type OrganizationActionContext,
+} from "../organization-mcp";
 
 /**
  * How a session with admin access reaches the organization's actions: the
@@ -33,6 +38,59 @@ function failure(message: string): CallToolResult {
 }
 
 /**
+ * The one authority path of a session with full access. Both the admin
+ * action tools and the ordinary session tools, when they reach a chat in
+ * another workspace, act through it.
+ */
+export type SessionAdminReach = {
+  /**
+   * How to run an organization action as the person who gave this session
+   * full access, checked live: null once the session no longer has it (the
+   * person or organization turned it off, it expired, or the person lost
+   * access to the workspace). Call it again for every action.
+   */
+  actingPerson(): Promise<OrganizationActionContext | null>;
+};
+
+export function createSessionAdminReach(input: {
+  db: Database;
+  grant: AccessGrant;
+  sessionId: string;
+  access: SessionAdminAccessDispatch;
+  authorize: () => Promise<void>;
+}): SessionAdminReach {
+  const { db, grant, sessionId, access, authorize } = input;
+  return {
+    async actingPerson() {
+      await authorize();
+      const authority = await resolveSessionAdminAuthority(db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId,
+      });
+      if (!authority) return null;
+      return {
+        caller: {
+          kind: "person",
+          accountId: grant.accountId,
+          subjectId: authority.subjectId,
+          // The cap is everything: each route still resolves this person's
+          // live role and workspace access, exactly as in their browser.
+          access: {
+            preset: "full",
+            permissions: organizationAccessPresetPermissions("full"),
+            workspaceScope: { kind: "all" },
+          },
+        },
+        origin: access.origin,
+        dispatch: access.dispatch,
+        ...(access.signal ? { signal: access.signal } : {}),
+      };
+    },
+  };
+}
+
+/**
  * Register the admin tools. The server admits them only while the session
  * has admin access; every call checks it again, live, so turning it off,
  * the organization stopping it, or the person losing their role takes effect
@@ -40,21 +98,9 @@ function failure(message: string): CallToolResult {
  */
 export function registerSessionAdminAccessTools(input: {
   server: McpServer;
-  db: Database;
-  grant: AccessGrant;
-  sessionId: string;
-  access: SessionAdminAccessDispatch;
-  authorize: () => Promise<void>;
+  reach: SessionAdminReach;
 }): void {
-  const { server, db, grant, sessionId, access, authorize } = input;
-  const currentAuthority = async () => {
-    await authorize();
-    return await resolveSessionAdminAuthority(db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId,
-    });
-  };
+  const { server, reach } = input;
   const ended = () =>
     failure(
       "This session no longer has full access. The person who started it can give it again from the session's menu in the app.",
@@ -65,7 +111,7 @@ export function registerSessionAdminAccessTools(input: {
     {
       title: "Find organization actions",
       description:
-        "This session has full access: it can do what the person who gave it can do in the app, and nothing more. Search every action (sessions and chats, workspaces and their settings, people, connections and capabilities, knowledge, files, schedules, models, keys, billing and organization settings); actions beyond that person's own access are refused when called. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
+        "Read, message or manage chats and sessions in another workspace as the person who gave this session full access. Also every other action they can take, in every workspace they can use: workspaces and their settings, people, connections and capabilities, knowledge, files, schedules, models, keys, billing and organization settings. It can do what that person can do in the app, and nothing more; actions beyond their own access are refused when called. The ordinary session tools also reach a chat in another workspace when given its workspaceId. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
       inputSchema: {
         query: z4
           .string()
@@ -78,7 +124,7 @@ export function registerSessionAdminAccessTools(input: {
       annotations: { readOnlyHint: true },
     },
     async ({ query, limit, offset }) => {
-      if (!(await currentAuthority())) return ended();
+      if (!(await reach.actingPerson())) return ended();
       return text(searchActions({ query, limit, offset }));
     },
   );
@@ -95,7 +141,7 @@ export function registerSessionAdminAccessTools(input: {
       annotations: { readOnlyHint: true },
     },
     async ({ id }) => {
-      if (!(await currentAuthority())) return ended();
+      if (!(await reach.actingPerson())) return ended();
       return describeActionResult(id);
     },
   );
@@ -132,29 +178,14 @@ export function registerSessionAdminAccessTools(input: {
       annotations: { readOnlyHint: false, openWorldHint: false },
     },
     async ({ id, pathParameters, query, body }) => {
-      const authority = await currentAuthority();
-      if (!authority) return ended();
-
-      return await callOrganizationAction(
-        {
-          caller: {
-            kind: "person",
-            accountId: grant.accountId,
-            subjectId: authority.subjectId,
-            // The cap is everything: each route still resolves this person's
-            // live role and workspace access, exactly as in their browser.
-            access: {
-              preset: "full",
-              permissions: organizationAccessPresetPermissions("full"),
-              workspaceScope: { kind: "all" },
-            },
-          },
-          origin: access.origin,
-          dispatch: access.dispatch,
-          ...(access.signal ? { signal: access.signal } : {}),
-        },
-        { id, pathParameters, query, ...(body !== undefined ? { body } : {}) },
-      );
+      const actingPerson = await reach.actingPerson();
+      if (!actingPerson) return ended();
+      return await callOrganizationAction(actingPerson, {
+        id,
+        pathParameters,
+        query,
+        ...(body !== undefined ? { body } : {}),
+      });
     },
   );
 }
