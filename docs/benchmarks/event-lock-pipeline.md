@@ -40,3 +40,11 @@ The helper still requires a transaction-pinned handle; supported drivers must
 serialize submitted statements on that transaction's connection. A queued read
 may already be in flight when application-side result decoding fails, so rollback
 must wait for that read rather than assuming it was never submitted.
+
+Restricted-role probes cover the default prepared postgres-js driver, an injected
+unprepared postgres-js handle, and an injected node-postgres handle. They verify
+canonical locking, reads after blocked predecessors, and SQL-error/savepoint
+restoration. The latency numbers above apply only to postgres-js: a driver that
+serializes requests locally may preserve correctness without overlapping wire
+waits. An injected result-decoder exception also reproduces the documented
+rollback-delay boundary; it is not a claim of identical failure timing.
