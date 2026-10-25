@@ -1085,6 +1085,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         },
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({ operationId, result }),
+        modelToolOutputTruncationTokens: () =>
+          eventing.modelRunSettings.modelToolOutputTruncationTokens,
         localMcpServers,
         ...(deferNonEagerToolPreparation
           ? {

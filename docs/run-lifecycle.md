@@ -4641,7 +4641,13 @@ recovery replays the stored bytes. The instructions never contain a clock.
    durable rematerialization path remains the virtual
    `/workspace/tool-results/<operationId>.json`), and history/events keep the
    compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt whose
-   `sandboxPath` is that cwd-relative shell path. Later turns do not
+   `sandboxPath` is that cwd-relative shell path. The path is given only once
+   the copy is in the sandbox: a spill that finds the turn's lazy sandbox not
+   started yet joins it (as a shell command would; the start copies the
+   attempt's spilled files before releasing its first operation, and the spill
+   retries a failed copy once), so the receipt never promises a later copy. It
+   is `null` without a sandbox route, when the sandbox cannot start or the copy
+   fails, and on the SDK-owned path before its session exists. Later turns do not
    rematerialize; retrieve old bytes through Files MCP plus shell. Spill write
    failure is a bounded `result_too_large` error and never puts the huge payload
    in history.
@@ -4659,6 +4665,11 @@ recovery replays the stored bytes. The instructions never contain a clock.
    item and event record that copy, while Codemode receives the exact executor
    result. See
    [model-visible discovery results](knowledge.md#model-visible-discovery-results).
+   A local MCP bridge may also supply its own model-visible copy through
+   `LocalMcpBridgeServer.projectModelToolResult` (the Gmail bridge's compact
+   mail cards, see [Gmail](gmail.md#model-visible-results)); it runs before
+   the 1 MiB check, Codemode and the spill file keep the exact result, and a
+   projection that throws leaves the exact result in place.
    User attachment rows store stable file references, not inline bytes. Active
    messages reconstruct the same authorized receipt and supported image content
    across turns and before compaction. File metadata is batch-authorized once
