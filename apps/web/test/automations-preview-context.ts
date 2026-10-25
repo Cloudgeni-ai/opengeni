@@ -47,6 +47,8 @@ function source(index: number, fields: Partial<EventSource>): EventSource {
     visibility: "workspace",
     status: "active",
     statusReason: null,
+    statusReasonCode: null,
+    statusReasonDetail: null,
     webhookUrl: null,
     awaitingSigningSecret: false,
     mcp: null,
@@ -66,6 +68,7 @@ const linear = source(3, {
   name: "Linear",
   status: "blocked",
   statusReason: "Paste the signing secret Linear shows for this webhook.",
+  statusReasonCode: "awaiting_secret",
   awaitingSigningSecret: true,
   webhookUrl: "https://app.opengeni.ai/v1/webhooks/events/5ce00000-0000-4000-8000-000000000003",
   lastDeliveryAt: null,
@@ -102,6 +105,8 @@ function descriptor(type: string, description: string, fields: string[] = []): E
     argumentsSchema: null,
     available: true,
     unavailableReason: null,
+    unavailableReasonCode: null,
+    unavailableReasonDetail: null,
   };
 }
 const eventTypes: Record<string, EventTypeDescriptor[]> = {
@@ -252,6 +257,8 @@ function trigger(index: number, fields: Partial<EventTrigger>): EventTrigger {
     arguments: null,
     status: "active",
     statusReason: null,
+    statusReasonCode: null,
+    statusReasonDetail: null,
     createdAt: at(24 * 5),
     updatedAt: at(24 * 5),
     ...fields,

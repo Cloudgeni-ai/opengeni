@@ -8,11 +8,13 @@ import {
   type Database,
   type EventSourceFeedRecord,
   type EventSourceRecord,
+  type EventStatusReason,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { gmailFeed } from "./gmail-source";
-import { McpEventSourceUnavailableError, type McpEventsFetch } from "./mcp-event-source-client";
+import type { McpEventsFetch } from "./mcp-event-source-client";
+import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
 import { postTriggerNotices } from "./trigger-notices";
 import { workspaceFeed } from "./workspace-source";
 
@@ -59,18 +61,10 @@ export type EventSourceFeedAdapter = {
   /** Read what changed since the feed's cursor, record it, and say where to continue. */
   read(context: EventSourceFeedReadContext): Promise<EventSourceFeedReadOutcome>;
   /** A failure a person has to fix, in plain language; null when retrying may help. */
-  blockedReason(error: unknown, source: EventSourceRecord): string | null;
+  blockedReason(error: unknown, source: EventSourceRecord): EventStatusReason | null;
   /** The app's name in messages, such as Gmail. */
   appName: string;
 };
-
-/** A refusal a person has to fix: the source's triggers are blocked with this message. */
-export class EventSourceFeedBlocked extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "EventSourceFeedBlocked";
-  }
-}
 
 const FEED_ADAPTERS: Partial<Record<EventSourceRecord["kind"], EventSourceFeedAdapter>> = {
   gmail: gmailFeed,
@@ -87,7 +81,7 @@ const BLOCK_AFTER_FAILING_MS = 60 * 60_000;
 async function setTriggers(
   deps: EventSourceFeedPumpDeps,
   source: EventSourceRecord,
-  change: { blocked: true; reason: string } | { blocked: false },
+  change: { blocked: true; reason: EventStatusReason } | { blocked: false },
 ): Promise<void> {
   const notices = await setEventStreamTriggerStatus(
     deps.db,
@@ -96,7 +90,12 @@ async function setTriggers(
     change.blocked ? "blocked" : "active",
     change.blocked ? change.reason : null,
   );
-  await postTriggerNotices(deps, source.workspaceId, notices, change);
+  await postTriggerNotices(
+    deps,
+    source.workspaceId,
+    notices,
+    change.blocked ? { blocked: true, reason: change.reason.text } : change,
+  );
 }
 
 /** Read one source's feed, if it is due and no other pump holds it. */
@@ -147,9 +146,7 @@ async function handleReadFailure(
       outcome: { kind: "failure", error: message },
     });
   let reason =
-    error instanceof EventSourceFeedBlocked || error instanceof McpEventSourceUnavailableError
-      ? error.message
-      : adapter.blockedReason(error, source);
+    error instanceof EventSourceBlockedError ? error.reason : adapter.blockedReason(error, source);
   if (reason === null) {
     const failingFor = feed.failingSince ? now.getTime() - feed.failingSince.getTime() : 0;
     if (failingFor < BLOCK_AFTER_FAILING_MS) {
@@ -165,7 +162,10 @@ async function handleReadFailure(
       await finish(new Date(now.getTime() + backoff));
       return;
     }
-    reason = `${adapter.appName} hasn't answered for over an hour`;
+    reason = eventStatusReason(
+      "not_answering",
+      `${adapter.appName} hasn't answered for over an hour`,
+    );
   }
   await finish(new Date(now.getTime() + BLOCKED_RETRY_MS));
   await setTriggers(deps, source, { blocked: true, reason });

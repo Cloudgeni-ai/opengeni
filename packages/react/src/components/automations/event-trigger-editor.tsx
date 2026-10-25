@@ -20,6 +20,7 @@ import {
   eventSourceAddLabel,
   eventSourceChoiceName,
   eventSourceKindLabel,
+  eventStatusReasonText,
   type EventSourceChoice,
 } from "./event-source-model";
 import { EventSourceTile, type EventSourceLogoResolver } from "./event-source-tile";
@@ -276,7 +277,16 @@ export function EventTriggerEditor({
     ...(candidate.status === "active"
       ? {}
       : {
-          description: candidate.statusReason ?? t("automations.editor.sourceOff"),
+          description:
+            eventStatusReasonText(
+              t,
+              {
+                text: candidate.statusReason,
+                code: candidate.statusReasonCode,
+                detail: candidate.statusReasonDetail,
+              },
+              candidate.name,
+            ) ?? t("automations.editor.sourceOff"),
         }),
   }));
   const label = t("automations.editor.eventN", { index: index + 1 });
@@ -406,6 +416,7 @@ export function EventTriggerEditor({
                 })
               }
               state={eventTypes}
+              sourceName={source?.name}
               single={source?.kind === "mcp"}
               invalid={Boolean(issues?.eventTypes)}
               disabled={disabled}
@@ -454,6 +465,7 @@ export function EventTypePicker({
   value,
   onChange,
   state,
+  sourceName,
   single = false,
   invalid = false,
   disabled = false,
@@ -461,6 +473,8 @@ export function EventTypePicker({
   value: string[];
   onChange: (eventTypes: string[]) => void;
   state: EventTypesState | undefined;
+  /** The source's name, which the reasons a type can't be picked mention. */
+  sourceName?: string | undefined;
   /** Only one type (MCP triggers); picking replaces it. */
   single?: boolean | undefined;
   invalid?: boolean | undefined;
@@ -473,20 +487,29 @@ export function EventTypePicker({
     const picked = new Set(value);
     const known: SelectOption[] = descriptors
       .filter((descriptor) => !picked.has(descriptor.type))
-      .map((descriptor) => ({
-        value: descriptor.type,
-        label: descriptor.type,
-        description: descriptor.available
-          ? descriptor.description
-          : (descriptor.unavailableReason ?? descriptor.description),
-        disabled: !descriptor.available,
-        ...(descriptor.available
-          ? {}
-          : {
-              disabledReason: descriptor.unavailableReason ?? t("automations.picker.cantReceive"),
-            }),
-        keywords: [descriptor.description],
-      }));
+      .map((descriptor) => {
+        const unavailable = descriptor.available
+          ? null
+          : eventStatusReasonText(
+              t,
+              {
+                text: descriptor.unavailableReason,
+                code: descriptor.unavailableReasonCode,
+                detail: descriptor.unavailableReasonDetail,
+              },
+              sourceName,
+            );
+        return {
+          value: descriptor.type,
+          label: descriptor.type,
+          description: unavailable ?? descriptor.description,
+          disabled: !descriptor.available,
+          ...(descriptor.available
+            ? {}
+            : { disabledReason: unavailable ?? t("automations.picker.cantReceive") }),
+          keywords: [descriptor.description],
+        };
+      });
     const all: SelectOption[] =
       single || picked.has("*")
         ? []
@@ -524,7 +547,7 @@ export function EventTypePicker({
           ]
         : [];
     return [...matches, ...custom];
-  }, [descriptors, query, single, t, value]);
+  }, [descriptors, query, single, sourceName, t, value]);
 
   const add = (picked: string) => {
     const type = picked.startsWith(CUSTOM_PREFIX) ? picked.slice(CUSTOM_PREFIX.length) : picked;

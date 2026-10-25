@@ -559,6 +559,37 @@ export const englishMessages = {
   "automations.source.workspace.description":
     "Meetings recorded in {product}: when one ends and when its transcript is ready. You only see meetings you may open.",
   "automations.source.workspace.name": "This workspace",
+  "automations.statusReason.accountChanged":
+    "The connection for {source} now signs in as {account}. Reconnect the original account.",
+  "automations.statusReason.appNotEnabled": "{source} isn't turned on for the connected account.",
+  "automations.statusReason.awaitingSecret":
+    "Paste the signing secret the sending app shows for this webhook. Until then its deliveries are refused.",
+  "automations.statusReason.callbackUnreachable":
+    "{source} can't reach {product}'s webhook address.",
+  "automations.statusReason.connectorRemoved":
+    "Its app is no longer added to this workspace. Add it again and connect your account.",
+  "automations.statusReason.deliveryModeUnsupported":
+    "{source} won't deliver these events in a way {product} can receive.",
+  "automations.statusReason.eventsUnsupported": "{source} doesn't offer events.",
+  "automations.statusReason.eventTypeGone": "{source} no longer offers these events.",
+  "automations.statusReason.forbidden":
+    "{source} doesn't let your account receive these events with these settings.",
+  "automations.statusReason.githubEventNotSubscribed":
+    "The GitHub App isn't subscribed to \"{event}\" events. Turn them on in the App's Permissions & events settings.",
+  "automations.statusReason.hostSignIn":
+    "{source} signs in through the app {product} runs in, which automations can't use for events.",
+  "automations.statusReason.invalidArguments": "{source} rejected this trigger's settings.",
+  "automations.statusReason.missingPermission":
+    "{source} no longer allows reading what these events need. Reconnect it and allow access.",
+  "automations.statusReason.needsPublicAddress":
+    "{source} sends these events only to a public https address, which {product} doesn't have here.",
+  "automations.statusReason.notAnswering": "{source} hasn't answered for over an hour.",
+  "automations.statusReason.pushOnly":
+    "{source} sends these events only over a held-open connection, which {product} doesn't support yet.",
+  "automations.statusReason.reconnect": "Reconnect {source} to keep its events coming.",
+  "automations.statusReason.turnedOff": "Turned off.",
+  "automations.statusReason.unavailable": "{source} can't receive events right now.",
+  "automations.statusReason.withDetail": "{reason} It said: {detail}",
   "automations.summary.from": "From",
   "automations.template.costCheck.description": "Flag unusual cloud spend from the last day.",
   "automations.template.costCheck.instructions":

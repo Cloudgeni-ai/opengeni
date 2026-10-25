@@ -93,7 +93,7 @@ async function readWorkspaceFeed(
 ): Promise<EventSourceFeedReadOutcome> {
   const { deps, source, feed, now } = context;
   const owner = source.ownerSubjectId;
-  if (!owner) throw new McpEventSourceUnavailableError("This source has no owner");
+  if (!owner) throw new McpEventSourceUnavailableError("unavailable", "This source has no owner");
   const later = new Date(now.getTime() + POLL_MS);
   const position = parseCursor(feed.cursor);
   const read = await listWorkspaceRecordingEventsForSource(deps.db, {

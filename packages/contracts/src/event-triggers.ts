@@ -41,6 +41,64 @@ export const EventSourceStatus = /* @__PURE__ */ defineSchema(() =>
 );
 export type EventSourceStatus = z.infer<typeof EventSourceStatus>;
 
+/**
+ * Why an event source or trigger is not active, or why a source can't send
+ * an event type, as a code clients word in their own language. Each comes
+ * with the same reason as an English sentence (`statusReason`,
+ * `unavailableReason`) and, for some, what the app or server said
+ * (`…Detail`). The wire carries a plain string: a client reads a code it
+ * doesn't know, or none, as "show the sentence".
+ *
+ * - `turned_off`: someone turned it off.
+ * - `awaiting_secret`: a pasted Linear or Sentry webhook waits for its signing secret.
+ * - `reconnect`: the owner's connection to the app has to be signed in again.
+ * - `missing_permission`: the connection no longer allows reading what the events need.
+ * - `app_not_enabled`: the app isn't turned on for the connected account.
+ * - `account_changed`: the connection now signs in as another account (the detail names it).
+ * - `connector_removed`: the app or connector is no longer added to the workspace.
+ * - `host_sign_in`: the server signs in through the app that embeds Opengeni, which automations can't use.
+ * - `events_unsupported`: the server doesn't offer events.
+ * - `event_type_gone`: the server no longer offers this event type.
+ * - `forbidden`: the server won't let the owner's account receive these events with these settings.
+ * - `invalid_arguments`: the server rejected the trigger's subscription arguments.
+ * - `needs_public_address`: the server sends this type only to a public https address, which the deployment lacks.
+ * - `push_only`: the server sends this type only over a held-open connection, which isn't supported yet.
+ * - `delivery_mode_unsupported`: the server won't send this type in a way the deployment can receive.
+ * - `callback_unreachable`: the server can't reach the deployment's webhook address.
+ * - `not_answering`: the app or server hasn't answered for over an hour.
+ * - `github_event_not_subscribed`: the GitHub App isn't subscribed to the event (the detail names it).
+ * - `unavailable`: the source can't receive events for another reason.
+ */
+export const EVENT_STATUS_REASON_CODES = [
+  "turned_off",
+  "awaiting_secret",
+  "reconnect",
+  "missing_permission",
+  "app_not_enabled",
+  "account_changed",
+  "connector_removed",
+  "host_sign_in",
+  "events_unsupported",
+  "event_type_gone",
+  "forbidden",
+  "invalid_arguments",
+  "needs_public_address",
+  "push_only",
+  "delivery_mode_unsupported",
+  "callback_unreachable",
+  "not_answering",
+  "github_event_not_subscribed",
+  "unavailable",
+] as const;
+export type EventStatusReasonCode = (typeof EVENT_STATUS_REASON_CODES)[number];
+
+/** Whether `code` is one this version of the contract knows. */
+export function isEventStatusReasonCode(code: unknown): code is EventStatusReasonCode {
+  return (
+    typeof code === "string" && (EVENT_STATUS_REASON_CODES as readonly string[]).includes(code)
+  );
+}
+
 /** Who can use a source and see its events: only its owner, or the workspace. */
 export const EventSourceVisibility = /* @__PURE__ */ defineSchema(() =>
   z.enum(["private", "workspace"]),
@@ -106,6 +164,13 @@ export const EventSource = /* @__PURE__ */ defineSchema(() =>
     status: EventSourceStatus,
     /** Why the source is blocked or disabled, in plain language. */
     statusReason: z.string().nullable(),
+    /**
+     * The same reason as a code (`EVENT_STATUS_REASON_CODES`) a client words
+     * in its own language; null when active or from an older server.
+     */
+    statusReasonCode: z.string().nullable().default(null),
+    /** What the app or server said about it, verbatim, when it said something. */
+    statusReasonDetail: z.string().nullable().default(null),
     /** The URL to paste into the sending app. Webhook sources only. */
     webhookUrl: z.string().nullable(),
     /**
@@ -451,6 +516,10 @@ export const EventTrigger = /* @__PURE__ */ defineSchema(() =>
     arguments: z.record(z.string(), z.unknown()).nullable(),
     status: EventTriggerStatus,
     statusReason: z.string().nullable(),
+    /** The reason as a code a client words itself; see `EVENT_STATUS_REASON_CODES`. */
+    statusReasonCode: z.string().nullable().default(null),
+    /** What the source's server said about it, verbatim, when it said something. */
+    statusReasonDetail: z.string().nullable().default(null),
     createdAt: Timestamp,
     updatedAt: Timestamp,
   }),
@@ -574,6 +643,10 @@ export const EventTypeDescriptor = /* @__PURE__ */ defineSchema(() =>
     /** False when Opengeni cannot receive this type from this source. */
     available: z.boolean(),
     unavailableReason: z.string().nullable(),
+    /** The reason as a code a client words itself; see `EVENT_STATUS_REASON_CODES`. */
+    unavailableReasonCode: z.string().nullable().default(null),
+    /** What the reason names, such as the GitHub App event to subscribe to. */
+    unavailableReasonDetail: z.string().nullable().default(null),
   }),
 );
 export type EventTypeDescriptor = z.infer<typeof EventTypeDescriptor>;

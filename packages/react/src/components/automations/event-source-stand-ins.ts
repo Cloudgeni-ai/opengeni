@@ -61,6 +61,8 @@ function standIn(
     visibility: "private",
     status: "active",
     statusReason: null,
+    statusReasonCode: null,
+    statusReasonDetail: null,
     webhookUrl: null,
     awaitingSigningSecret: false,
     lastDeliveryAt: null,

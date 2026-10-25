@@ -37,6 +37,9 @@ export const eventSources = pgTable(
     visibility: text("visibility").notNull().default("private"),
     status: text("status").notNull().default("active"),
     statusReason: text("status_reason"),
+    // Migration 0960: the reason as a code clients word, and what the app said.
+    statusReasonCode: text("status_reason_code"),
+    statusReasonDetail: text("status_reason_detail"),
     secretEncrypted: text("secret_encrypted"),
     externalKey: text("external_key"),
     mcpServerId: text("mcp_server_id"),
@@ -173,6 +176,9 @@ export const eventTriggers = pgTable(
     streamKey: text("stream_key").notNull().default(""),
     status: text("status").notNull().default("active"),
     statusReason: text("status_reason"),
+    // Migration 0960: the reason as a code clients word, and what the app said.
+    statusReasonCode: text("status_reason_code"),
+    statusReasonDetail: text("status_reason_detail"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

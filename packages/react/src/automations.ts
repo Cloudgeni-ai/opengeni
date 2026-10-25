@@ -168,12 +168,14 @@ export {
   eventSourceProviderDomain,
   eventSourceStatusBadge,
   eventSourceSubjectOfChoice,
+  eventStatusReasonText,
   isEventSourceChoice,
   pastedWebhookSetup,
 } from "./components/automations/event-source-model";
 export type {
   EventSourceChoice,
   EventSourceChoiceMeta,
+  EventStatusReasonParts,
   PastedWebhookSetup,
 } from "./components/automations/event-source-model";
 export {

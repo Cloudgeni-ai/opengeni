@@ -10,6 +10,10 @@ import type {
   EventSource,
   WebhookEventAdapter,
 } from "@opengeni/sdk";
+import {
+  isEventStatusReasonCode,
+  type EventStatusReasonCode,
+} from "@opengeni/contracts/event-triggers";
 
 import type { OpenGeniText } from "../../messages/runtime";
 import type { ProductStatus } from "../../ui/status-badge";
@@ -194,23 +198,121 @@ export function eventSourceProviderDomain(
   return choiceFacts(eventSourceChoiceOf(source)).providerDomain;
 }
 
-/** The badge a source's row shows; a healthy source shows none. */
+/**
+ * Why a source or trigger is held back, or why a source can't send an event
+ * type, as the server reported it: a code, the same reason as an English
+ * sentence, and what the app or server said, when it said something.
+ */
+export interface EventStatusReasonParts {
+  /** The server's sentence, shown when the code is missing or unknown here. */
+  text: string | null;
+  code?: string | null | undefined;
+  detail?: string | null | undefined;
+}
+
+type SourceNamedReason = Exclude<
+  EventStatusReasonCode,
+  | "turned_off"
+  | "awaiting_secret"
+  | "connector_removed"
+  | "account_changed"
+  | "github_event_not_subscribed"
+>;
+
+const SOURCE_NAMED_REASONS: Record<SourceNamedReason, (t: OpenGeniText, source: string) => string> =
+  {
+    reconnect: (t, source) => t("automations.statusReason.reconnect", { source }),
+    missing_permission: (t, source) => t("automations.statusReason.missingPermission", { source }),
+    app_not_enabled: (t, source) => t("automations.statusReason.appNotEnabled", { source }),
+    host_sign_in: (t, source) => t("automations.statusReason.hostSignIn", { source }),
+    events_unsupported: (t, source) => t("automations.statusReason.eventsUnsupported", { source }),
+    event_type_gone: (t, source) => t("automations.statusReason.eventTypeGone", { source }),
+    forbidden: (t, source) => t("automations.statusReason.forbidden", { source }),
+    invalid_arguments: (t, source) => t("automations.statusReason.invalidArguments", { source }),
+    needs_public_address: (t, source) =>
+      t("automations.statusReason.needsPublicAddress", { source }),
+    push_only: (t, source) => t("automations.statusReason.pushOnly", { source }),
+    delivery_mode_unsupported: (t, source) =>
+      t("automations.statusReason.deliveryModeUnsupported", { source }),
+    callback_unreachable: (t, source) =>
+      t("automations.statusReason.callbackUnreachable", { source }),
+    not_answering: (t, source) => t("automations.statusReason.notAnswering", { source }),
+    unavailable: (t, source) => t("automations.statusReason.unavailable", { source }),
+  };
+
+/** Codes whose detail is what the app or server said, quoted after the reason. */
+const QUOTES_DETAIL: ReadonlySet<EventStatusReasonCode> = new Set([
+  "forbidden",
+  "invalid_arguments",
+  "callback_unreachable",
+]);
+
+/**
+ * A held-back reason in the viewer's language. Known codes are worded from
+ * the catalog, naming the source when `sourceName` is given; anything else,
+ * such as a code from a newer server, shows the server's sentence.
+ */
+export function eventStatusReasonText(
+  t: OpenGeniText,
+  reason: EventStatusReasonParts,
+  sourceName?: string | null,
+): string | null {
+  const code = reason.code;
+  if (!isEventStatusReasonCode(code)) return reason.text;
+  const detail = reason.detail?.trim() || null;
+  const source = sourceName?.trim() || null;
+  switch (code) {
+    case "turned_off":
+      return t("automations.statusReason.turnedOff");
+    case "awaiting_secret":
+      return t("automations.statusReason.awaitingSecret");
+    case "connector_removed":
+      return t("automations.statusReason.connectorRemoved");
+    case "github_event_not_subscribed":
+      return detail
+        ? t("automations.statusReason.githubEventNotSubscribed", { event: detail })
+        : reason.text;
+    case "account_changed":
+      return detail && source
+        ? t("automations.statusReason.accountChanged", { source, account: detail })
+        : reason.text;
+  }
+  if (!source) return reason.text;
+  const sentence = SOURCE_NAMED_REASONS[code](t, source);
+  return detail && QUOTES_DETAIL.has(code)
+    ? t("automations.statusReason.withDetail", { reason: sentence, detail })
+    : sentence;
+}
+
+/**
+ * The badge a source's or trigger's row shows; a healthy one shows none.
+ * `sourceName` names the source in the reason; a source's own name is used
+ * when the item is a source.
+ */
 export function eventSourceStatusBadge(
   t: OpenGeniText,
-  source: Pick<EventSource, "status" | "statusReason">,
+  item: Pick<EventSource, "status" | "statusReason"> &
+    Partial<Pick<EventSource, "statusReasonCode" | "statusReasonDetail" | "name">>,
+  sourceName?: string | null,
 ): { status: ProductStatus; label: string; reason: string | null } | null {
-  if (source.status === "blocked") {
+  const reason = () =>
+    eventStatusReasonText(
+      t,
+      { text: item.statusReason, code: item.statusReasonCode, detail: item.statusReasonDetail },
+      sourceName ?? item.name,
+    );
+  if (item.status === "blocked") {
     return {
       status: "needs_you",
       label: t("automations.source.status.blocked"),
-      reason: source.statusReason,
+      reason: reason(),
     };
   }
-  if (source.status === "disabled") {
+  if (item.status === "disabled") {
     return {
       status: "off",
       label: t("automations.source.status.off"),
-      reason: source.statusReason,
+      reason: reason(),
     };
   }
   return null;

@@ -88,6 +88,8 @@ const mcpSource: EventSource = {
   visibility: "private",
   status: "active",
   statusReason: null,
+  statusReasonCode: null,
+  statusReasonDetail: null,
   webhookUrl: null,
   awaitingSigningSecret: false,
   mcp: { serverId: "orders-mcp", connectionId: null },
@@ -107,6 +109,8 @@ const orderCreated: EventTypeDescriptor = {
   },
   available: true,
   unavailableReason: null,
+  unavailableReasonCode: null,
+  unavailableReasonDetail: null,
 };
 
 const workspaceSource: EventSource = {
@@ -124,6 +128,8 @@ const transcriptReady: EventTypeDescriptor = {
   argumentsSchema: null,
   available: true,
   unavailableReason: null,
+  unavailableReasonCode: null,
+  unavailableReasonDetail: null,
 };
 
 const builtin = builtinAutomationTemplates(createOpenGeniText());
