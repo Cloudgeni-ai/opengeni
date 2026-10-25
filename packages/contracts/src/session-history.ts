@@ -105,3 +105,45 @@ export function isPresentedSessionToolName(name: unknown): boolean {
     (leaf) => name === leaf || name.endsWith(`__${leaf}`),
   );
 }
+
+/** The tool leaf a session runs the app's own actions through. */
+export const SESSION_EVENT_APP_ACTION_CALL_LEAF = "admin_action_call";
+
+/**
+ * App actions whose call is primary output too: each opens a payment page,
+ * and the chat shows it as a button that later confirms the payment, which a
+ * person returning to the chat (often in a reloaded tab) needs to see.
+ */
+export const SESSION_EVENT_PRESENTED_APP_ACTIONS = [
+  "createBillingCheckout",
+  "createSubscriptionCheckout",
+  "createBillingPortalSession",
+  "createSubscriptionPortalSession",
+] as const;
+
+/**
+ * Whether a tool call's result is primary output: a presented tool
+ * ({@link isPresentedSessionToolName}), or an app action call that runs one of
+ * {@link SESSION_EVENT_PRESENTED_APP_ACTIONS}. Takes the `agent.toolCall.created`
+ * payload (its `name` and `arguments`, an object or JSON text).
+ */
+export function isPresentedSessionToolCall(call: unknown): boolean {
+  if (!call || typeof call !== "object") return false;
+  const { name, arguments: args } = call as { name?: unknown; arguments?: unknown };
+  if (isPresentedSessionToolName(name)) return true;
+  const leaf = SESSION_EVENT_APP_ACTION_CALL_LEAF;
+  if (typeof name !== "string" || (name !== leaf && !name.endsWith(`__${leaf}`))) return false;
+  let parsed: unknown = args;
+  if (typeof args === "string") {
+    try {
+      parsed = JSON.parse(args);
+    } catch {
+      return false;
+    }
+  }
+  const id = parsed && typeof parsed === "object" ? (parsed as { id?: unknown }).id : undefined;
+  return (
+    typeof id === "string" &&
+    (SESSION_EVENT_PRESENTED_APP_ACTIONS as readonly string[]).includes(id)
+  );
+}

@@ -1,5 +1,6 @@
 import { ACTION_CATALOG } from "./app-action-catalog.gen";
 import type { ActionCatalogEntry } from "./app-action-catalog-types";
+import { SESSION_EVENT_PRESENTED_APP_ACTIONS } from "./session-history";
 
 /* ----------------------------------------------------------------------------
    App actions: every public API action, the same ones the organization MCP
@@ -68,12 +69,9 @@ export function appActionCallChangesState(args: unknown): boolean {
  * portal) and charge nothing themselves: the person pays, or doesn't, on that
  * page, which is its own confirmation. The chat shows the page as a button.
  */
-export const PAYMENT_PAGE_ACTIONS: ReadonlySet<string> = new Set([
-  "createBillingCheckout",
-  "createSubscriptionCheckout",
-  "createBillingPortalSession",
-  "createSubscriptionPortalSession",
-]);
+export const PAYMENT_PAGE_ACTIONS: ReadonlySet<string> = new Set(
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
+);
 
 /** Whether the action only opens a payment page (see {@link PAYMENT_PAGE_ACTIONS}). */
 export function appActionOpensPaymentPage(entry: ActionCatalogEntry): boolean {

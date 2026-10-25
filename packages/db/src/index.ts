@@ -937,6 +937,8 @@ import {
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
+  SESSION_EVENT_APP_ACTION_CALL_LEAF,
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
   SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
   SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
@@ -37872,10 +37874,10 @@ export type ListSessionEventsOptions = {
   excludeStreamedAssistantMessages?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
-   * Keep `agent.toolCall.created` rows of presented tools (see
-   * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
-   * conversation-first reader still sees images, published files and Skill
-   * changes without loading every step. Excluded rows without a turn (PTY and
+   * Keep `agent.toolCall.created` rows of presented calls (see
+   * isPresentedSessionToolCall) even when that type is excluded, so a
+   * conversation-first reader still sees images, published files, Skill
+   * changes and payment pages without loading every step. Excluded rows without a turn (PTY and
    * background command output) stay excluded: the sandbox dock reads them
    * itself. No effect unless `agent.toolCall.created` is excluded.
    */
@@ -37909,6 +37911,18 @@ const PRESENTED_TOOL_NAME_PATTERNS = SESSION_EVENT_PRESENTED_TOOL_LEAVES.flatMap
   return [literal, `%\\_\\_${literal}`];
 });
 
+/** The same LIKE patterns for the app action call tool. */
+const APP_ACTION_CALL_NAME_PATTERNS = [SESSION_EVENT_APP_ACTION_CALL_LEAF].flatMap((leaf) => {
+  const literal = leaf.replace(/[\\%_]/g, "\\$&");
+  return [literal, `%\\_\\_${literal}`];
+});
+
+/**
+ * Matches an app action call's arguments (JSON text) naming one of
+ * SESSION_EVENT_PRESENTED_APP_ACTIONS; the ids are plain identifiers.
+ */
+const PRESENTED_APP_ACTION_ARGUMENTS = `"id"[[:space:]]*:[[:space:]]*"(${SESSION_EVENT_PRESENTED_APP_ACTIONS.join("|")})"`;
+
 function sessionEventExcludeTypesFilter(
   excludeTypes: readonly SessionEventType[],
   options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
@@ -37925,11 +37939,24 @@ function sessionEventExcludeTypesFilter(
     PRESENTED_TOOL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
     sql`, `,
   );
+  const appActionPatterns = sql.join(
+    APP_ACTION_CALL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
+    sql`, `,
+  );
+  const toolName = sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name')`;
   return or(
     excluded,
     and(
       eq(schema.sessionEvents.type, "agent.toolCall.created"),
-      sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name') like any (array[${patterns}])`,
+      or(
+        sql`${toolName} like any (array[${patterns}])`,
+        // Payment pages: only app action calls (whose payload is their short
+        // arguments) are read past the name, for the action id.
+        and(
+          sql`${toolName} like any (array[${appActionPatterns}])`,
+          sql`${schema.sessionEvents.payload} ->> 'arguments' ~ ${PRESENTED_APP_ACTION_ARGUMENTS}`,
+        ),
+      ),
     ),
   )!;
 }

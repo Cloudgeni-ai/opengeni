@@ -1486,6 +1486,16 @@ describe("conversation-first session history", () => {
     expect(isConversationHistoryEvent(created("opengeni__sandbox_file_publish"), presented)).toBe(
       true,
     );
+    // An app action call is presented only when it opens a payment page.
+    const appAction = (id: string) =>
+      at(
+        5,
+        "agent.toolCall.created",
+        { id: "x", name: "opengeni__admin_action_call", arguments: JSON.stringify({ id }) },
+        "T",
+      );
+    expect(isConversationHistoryEvent(appAction("createBillingCheckout"), presented)).toBe(true);
+    expect(isConversationHistoryEvent(appAction("getBilling"), presented)).toBe(false);
     expect(
       isConversationHistoryEvent(at(6, "agent.toolCall.output", { id: "pub" }, "T"), presented),
     ).toBe(true);
