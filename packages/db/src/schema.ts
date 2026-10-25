@@ -10010,7 +10010,7 @@ export const sessionHumanInputRequests = pgTable(
     toolCallId: text("tool_call_id").notNull(),
     /**
      * `tool_call`: asked by the agent's `request_human_input`; its turn waits
-     * and ends with it. `secret_use_approval` (0957): Opengeni's own card for
+     * and ends with it. `secret_use_approval` (0961): Opengeni's own card for
      * a blocked secret use (`tool_call_id` is `secret-approval:<approval>`);
      * the turn does not wait, and the card outlives the turn until answered.
      */

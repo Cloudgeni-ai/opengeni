@@ -2340,7 +2340,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0957_secret_use_approval_host_cards.sql",
+      "0961_secret_use_approval_host_cards.sql",
       "0960_event_status_reason_codes.sql",
       "0959_automation_templates.sql",
       "0958_workspace_event_source.sql",
