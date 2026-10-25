@@ -15,9 +15,13 @@ import { DeferredChatMedia } from "./deferred-chat-media";
 import { inlineHtmlDocument } from "./inline-html-document";
 import type { PublishedHtmlArtifactToolBridge } from "./published-html-artifact-frame";
 
-// Fixed chat viewports keep async Site loads and fragment resize messages from
-// moving the conversation. Full-screen remains available for larger content.
+// Saved Sites load asynchronously into a fixed chat viewport so they never move
+// the conversation. Inline visuals render synchronously from the message and
+// size to their content, up to a bound that keeps one visual from taking over
+// the conversation; taller content scrolls inside it. Full screen remains
+// available for larger content.
 const INLINE_PREVIEW_HEIGHT = 360;
+const INLINE_PREVIEW_MAX_HEIGHT = 640;
 const SITE_PREVIEW_HEIGHT = 400;
 const PREVIEW_CHROME_HEIGHT = 50;
 
@@ -74,16 +78,19 @@ function InteractiveBlock(props: ChatInteractiveBlockProps) {
       height={height}
       actionLabel={props.kind === "html" ? labels.loadPreview : labels.loadSitePreview}
     >
-      <div style={{ height }}>
-        <LoadedChatInteractiveBlock {...props} />
-      </div>
+      {props.kind === "html" ? (
+        <InlineHtml {...props} />
+      ) : (
+        <div style={{ height }}>
+          <LoadedChatInteractiveBlock {...props} />
+        </div>
+      )}
     </DeferredChatMedia>
   );
 }
 
 function LoadedChatInteractiveBlock(props: ChatInteractiveBlockProps) {
   const labels = useArtifactLabels();
-  if (props.kind === "html") return <InlineHtml {...props} />;
   try {
     const value = JSON.parse(props.content);
     if (
@@ -119,8 +126,8 @@ function InlineHtml({ content, toolBridge, theme }: ChatInteractiveBlockProps) {
       html={html}
       toolBridge={bridge}
       height={INLINE_PREVIEW_HEIGHT}
-      className="h-full"
-      fill
+      autoHeight
+      maxAutoHeight={INLINE_PREVIEW_MAX_HEIGHT}
       theme={theme}
     />
   );
