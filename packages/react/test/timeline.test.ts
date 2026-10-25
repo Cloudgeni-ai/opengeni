@@ -3005,6 +3005,39 @@ describe("buildTimeline", () => {
     expect(phases.find((phase) => phase.phase === "provider_first_byte")?.durationMs).toBe(1_250);
   });
 
+  test("post-provision completion-only intervals preserve overlap and failure after replay", () => {
+    reset();
+    const names: StartupPhaseItem["phase"][] = [
+      "credential_resolution",
+      "credential_mint",
+      "credential_materialization",
+      "client_publication",
+      "client_readiness",
+      "credential_seed",
+      "credential_hooks",
+      "artifact_runtime",
+    ];
+    const completedAt = "2026-01-01T00:00:05.000Z";
+    const events = names.map((phase, index) => ({
+      ...event(
+        index === 4 ? "turn.startup.phase.failed" : "turn.startup.phase.completed",
+        { phase, durationMs: 2000 },
+        { turnId: "startup" },
+      ),
+      occurredAt: completedAt,
+    }));
+    const phases = buildTimeline(englishText, JSON.parse(JSON.stringify(events))).filter(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
+    expect(phases.map((phase) => phase.phase)).toEqual(names);
+    expect(
+      phases.every(
+        (phase) => phase.startedAt === "2026-01-01T00:00:03.000Z" && phase.durationMs === 2000,
+      ),
+    ).toBe(true);
+    expect(phases[4]!.status).toBe("failed");
+  });
+
   test("recovery replaces an abandoned startup attempt without leaving a stale duplicate", () => {
     reset();
     const turnId = "turn-recovered-tools";

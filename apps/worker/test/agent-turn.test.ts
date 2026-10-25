@@ -3509,7 +3509,7 @@ describe("lazy sandbox provisioner single-flight", () => {
       "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
     );
     const lazyCredentialAttachAt = establishSource.indexOf(
-      "await attachRunCredentialRenewal(",
+      "attachRunCredentialRenewal(",
       provisionerAt,
     );
     const lazyProvisionerPrefix = establishSource.slice(

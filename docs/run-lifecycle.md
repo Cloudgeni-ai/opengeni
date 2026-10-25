@@ -4986,8 +4986,8 @@ The user-visible startup critical path is also durable and phase-specific. The
 existing `turn.queued`/`turn.started`, `sandbox.operation.*`, `rig.setup.*`, and
 `agent.model.request` events reconstruct queueing, box establishment, sandbox environment,
 repository/file work, and provider first byte. Compact
-`turn.startup.phase.started|completed|failed` checkpoints fill the two gaps for
-tool connection and model-request preparation; terminal payloads contain only a
+`turn.startup.phase.started|completed|failed` checkpoints cover
+tool connection, model-request preparation, and post-provision preparation; terminal payloads contain only a
 closed phase name and non-negative `durationMs`. In particular, lazy
 `sandbox.provision` completes as soon as the box is established, before owned
 sandbox environment/repository/file setup, so “Starting sandbox” never absorbs unrelated work.
@@ -4996,6 +4996,44 @@ the runtime and ends at the provider transport boundary, so it may include the
 sandbox, sandbox environment, repository, and other setup rows whose starts appear below it.
 The timeline labels that overlap explicitly instead of presenting the parent as
 an additional sequential wait.
+
+Managed eager and lazy setup also records completion-only startup receipts and
+the existing startup histogram/spans for `credential_resolution` (host material),
+`credential_mint` (Git/Codemode credentials, including a prefetched mint's remaining
+wait), `credential_materialization` (renewal handoff and the fenced initial write
+or clear), `client_publication` (release asset load, storage publication and fresh
+download URL), and `client_readiness` (in-box verification/install, including the
+editor fallback). `credential_seed`, `credential_hooks`, and `artifact_runtime`
+cover the other turn-private hooks. Resolver binding has its own
+`run_credential_binding` metric/span. Inapplicable hooks emit nothing; no-op
+prerequisite branches can record near-zero time. Publication can complete without
+a URL when storage is unavailable: readiness then includes staging the same
+release bytes through the provider editor. No credential, URL, hook output, or
+error text enters these receipts. Completion timestamps are captured before
+event delivery. Receipts are batched once per preparation boundary rather than
+adding a database round trip per hook; observation failures preserve the
+operation's result. `startup_phase_delivery` measures that batch delivery, and
+`sandbox_provision_receipt` measures the existing provisioning-completion write.
+`run_git_credential_mint` measures the full prefetched mint, distinct from the
+remaining wait in the visible `credential_mint` row. Shared rig claim/join time
+remains covered by the existing shared-preparation metric.
+
+After lazy box establishment, credential mint/join, client publication, and run
+credential materialization overlap. They share no inputs that require serial
+execution. All started operations settle before any error is propagated or setup
+ownership is released, with the previous serial error precedence. Rig and
+repository setup still wait for credentials; existing hook dependencies and
+renewal registration order stay intact. A fresh download URL is signed at use,
+not reused from a potentially old agent-build URL. The recorded intervals overlap
+one another as well as model preparation. These are diagnostic events only:
+model input, tool schemas, credential scope and selected release bytes do not change.
+
+`bun scripts/bench-post-provision-startup.ts [source-ref]` executes the production
+lazy prerequisite block (optionally read from a Git revision) with real local
+credential writes, token signing, and client installation. It reports local and
+controlled 100 ms transport-delay cases, with cold and warm publication caches.
+It never calls a model or cloud provider; injected Git/storage/command latency
+is not a measurement of a particular provider.
 
 Eager owned-box platform setup (rig setup, credential hooks and repository
 clones) needs nothing from file delivery or the model input, so the worker

@@ -55,6 +55,7 @@ import {
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
+import { withSandboxStartupPhases } from "./sandbox-startup-phase";
 import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@opengeni/contracts";
 
 import {
@@ -658,11 +659,22 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   // Managed boxes fetch the release's Codemode client in one setup command.
   const codemodeClientDownload =
     activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
-      ? await managedCodemodeClientDownload({
-          settings: eventing.modelRunSettings,
-          objectStorage,
-          activeSandboxBackend: activeSandboxBackend ?? groupBoxBackend,
-        })
+      ? await withSandboxStartupPhases(
+          {
+            observability,
+            provider: turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+            publish: eventing.publish,
+          },
+          (measure) =>
+            measure("client_publication", () =>
+              managedCodemodeClientDownload({
+                settings: eventing.modelRunSettings,
+                objectStorage,
+                activeSandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+              }),
+            ),
+        )
       : undefined;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();

@@ -12,6 +12,7 @@ import {
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 import type { TurnStreamAttemptDeps } from "./stream-attempt";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
+import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
 
 export type EagerOwnedSandboxSetupDeps = Pick<
   TurnStreamAttemptDeps,
@@ -71,6 +72,12 @@ export async function runEagerOwnedSandboxSetup(
   const eagerResolvedSandbox = sandboxState.resolvedSandbox;
   const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
   if (!eagerResolvedSandbox || sandboxState.lazyOwnedSandbox || !ownedEstablished) return;
+  const measure = sandboxStartupPhaseObserver({
+    observability,
+    provider: deps.turnExecutionPolicy.providerId,
+    backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
+    publish: eventing.publish,
+  });
   const ownedSandboxSetupStartedAt = performance.now();
   let ownedSandboxSetupOutcome: "completed" | "failed" = "completed";
   try {
@@ -79,10 +86,12 @@ export async function runEagerOwnedSandboxSetup(
     // credential session callback. Materialize host-managed run credentials
     // before any setup command (including provider login hooks), then decorate
     // setup commands so they source the active generation.
-    await deps.attachRunCredentialRenewal(
-      eagerSetupSession as RunCredentialCommandSession,
-      deps.initialRunCredentialMaterial,
-      eagerResolvedSandbox,
+    await measure("credential_materialization", () =>
+      deps.attachRunCredentialRenewal(
+        eagerSetupSession as RunCredentialCommandSession,
+        deps.initialRunCredentialMaterial,
+        eagerResolvedSandbox,
+      ),
     );
     const eagerCredentialSetupSession = deps.initialRunCredentialMaterial
       ? withRunCredentialsSession(eagerSetupSession as object, input.sessionId)
@@ -98,6 +107,7 @@ export async function runEagerOwnedSandboxSetup(
           {
             settings: deps.runSettings,
             environment: deps.sandboxEnvironment,
+            measureSetup: measure,
             ...(options.preparedInput ? { preparedInput: options.preparedInput } : {}),
             ...(options.fileDownloadsMaterialized ? { fileDownloadsMaterialized: true } : {}),
             onRuntimeEvent: async (event) => {
@@ -143,6 +153,7 @@ export async function runEagerOwnedSandboxSetup(
     ownedSandboxSetupOutcome = "failed";
     throw error;
   } finally {
+    await measure.flush();
     recordTurnStartupPhase(observability, {
       phase: "owned_sandbox_setup",
       provider: deps.turnExecutionPolicy.providerId,

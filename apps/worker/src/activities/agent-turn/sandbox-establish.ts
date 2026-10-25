@@ -58,6 +58,7 @@ import {
   recordSandboxProvisionAttempt,
   recordSandboxSharedPreparation,
   recordTurnStartupPhase,
+  measureTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
@@ -85,6 +86,7 @@ import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
+import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
 
 export type SandboxRouteDeps = {
   input: RunAgentTurnInput;
@@ -850,19 +852,27 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         // attributable from the DB alone — worker logs rotate within hours, which
         // left both 2026-07-06 incidents without a durable trace. Best-effort.
         await publishSandboxLifecycleEvents(sandboxState.resolvedSandbox);
-        await eventing.publish!(
-          [
-            {
-              type: "sandbox.operation.completed",
-              payload: {
-                name: "sandbox.provision",
-                ...(sandboxState.resolvedSandbox.established.origin
-                  ? { origin: sandboxState.resolvedSandbox.established.origin }
-                  : {}),
-              },
-            },
-          ],
-          true,
+        const establishedOrigin = sandboxState.resolvedSandbox.established.origin;
+        await measureTurnStartupPhase(
+          observability,
+          {
+            phase: "sandbox_provision_receipt",
+            provider: turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+          },
+          () =>
+            eventing.publish!(
+              [
+                {
+                  type: "sandbox.operation.completed",
+                  payload: {
+                    name: "sandbox.provision",
+                    ...(establishedOrigin ? { origin: establishedOrigin } : {}),
+                  },
+                },
+              ],
+              true,
+            ),
         );
         // M7 hot-swap: when the selfhosted feature is on, wrap the established
         // group box in the STABLE routing proxy before it is injected NON-OWNED
@@ -1069,21 +1079,30 @@ export async function bindLazySandboxProvisioner(
           // This durable completion and its logical metric close at actual box
           // establishment. Credential, rig, repository, and file preparation below
           // must never be attributed to "Starting sandbox" or provision latency.
-          await eventing.publish?.(
-            [
-              {
-                type: "sandbox.operation.completed",
-                payload: {
-                  name: "sandbox.provision",
-                  ...(provisioned.established.origin
-                    ? { origin: provisioned.established.origin }
-                    : {}),
-                  provisionId: settlement.provisionId,
-                  internalAttempts: settlement.internalAttempts,
-                },
-              },
-            ],
-            true,
+          await measureTurnStartupPhase(
+            observability,
+            {
+              phase: "sandbox_provision_receipt",
+              provider: deps.turnExecutionPolicy.providerId,
+              backend: activeSandboxBackend ?? groupBoxBackend,
+            },
+            async () =>
+              eventing.publish?.(
+                [
+                  {
+                    type: "sandbox.operation.completed",
+                    payload: {
+                      name: "sandbox.provision",
+                      ...(provisioned.established.origin
+                        ? { origin: provisioned.established.origin }
+                        : {}),
+                      provisionId: settlement.provisionId,
+                      internalAttempts: settlement.internalAttempts,
+                    },
+                  },
+                ],
+                true,
+              ),
           );
           const successStage =
             provisioned.established.origin === "created"
@@ -1104,115 +1123,153 @@ export async function bindLazySandboxProvisioner(
           });
           lazySandboxEstablishmentSettled = true;
 
-          const lazyGitCredentials =
-            activeSandboxBackend === "selfhosted" ? undefined : await startRunGitCredentialsMint();
-          const lazyGitTokens = lazyGitCredentials?.gitTokens;
-          const lazyCodemodeToken = sandboxCodemodeToken
-            ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
-            : undefined;
-          // A fresh URL: a lazy box can be provisioned long after agent build.
-          const lazyCodemodeClientDownload = lazyCodemodeToken
-            ? await managedCodemodeClientDownload({
-                settings: runSettings,
-                objectStorage,
-                activeSandboxBackend: activeSandboxBackend ?? groupBoxBackend,
-              })
-            : undefined;
-          await attachRunCredentialRenewal(
-            provisioned.established.session as RunCredentialCommandSession,
-            initialRunCredentialMaterial,
-            provisioned,
-          );
-          const provisionedSetupSession = initialRunCredentialMaterial
-            ? withRunCredentialsSession(provisioned.established.session as object, input.sessionId)
-            : provisioned.established.session;
-          await runWorkspaceMutationForSandbox(
-            provisioned,
-            "lazyOwnedSandboxSetup",
-            async () =>
-              await runOwnedSandboxSetup(
-                agent,
-                provisioned.established.session as never,
-                provisionedSetupSession as never,
-                {
-                  settings: runSettings,
-                  environment: sandboxEnvironment,
-                  recordLazyManifest: true,
-                  onRuntimeEvent: async (event) => {
-                    await eventing.publish?.([{ type: event.type, payload: event.payload }], true);
-                  },
-                  ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
-                  ...(lazyGitCredentials?.bindings
-                    ? {
-                        gitCredentialBindingsOverride: lazyGitCredentials.bindings,
-                      }
-                    : {}),
-                  ...(lazyCodemodeToken
-                    ? {
-                        codemodeTokenSeedOverride: lazyCodemodeToken.token,
-                        ...(lazyCodemodeClientDownload
-                          ? { codemodeClientDownloadOverride: lazyCodemodeClientDownload }
-                          : {}),
-                      }
-                    : {}),
-                  ...(eventing.toolCancellationFenceRef.current
-                    ? {
-                        commandRunner:
-                          eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                            eventing.toolCancellationFenceRef.current,
-                          ),
-                      }
-                    : {}),
-                  ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
-                    ? {
-                        coordinateSharedRigSetup: createSharedRigSetupCoordinator({
-                          db,
-                          accountId: input.accountId,
-                          workspaceId: input.workspaceId,
-                          sandboxGroupId: sandboxState.sandboxGroupId,
-                          attemptId: input.attemptId,
-                          holderId: sandboxState.sandboxHolderId,
-                          sandbox: provisioned,
-                          ...(runtimeCancellationSignal
-                            ? { signal: runtimeCancellationSignal }
-                            : {}),
-                          observe: (measurement) =>
-                            recordSandboxSharedPreparation(observability, measurement),
-                        }),
-                      }
-                    : {}),
-                },
+          const measure = sandboxStartupPhaseObserver({
+            observability,
+            provider: deps.turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+            publish: eventing.publish,
+          });
+          try {
+            // Post-provision prerequisites: independent authorities and storage.
+            // Join every started operation before failure/disposal; in particular
+            // never let credential writes outlive the setup's workspace owner.
+            const [credentials, clientDownload, materialization] = await Promise.allSettled([
+              measure("credential_mint", async () => {
+                const lazyGitCredentials =
+                  activeSandboxBackend === "selfhosted"
+                    ? undefined
+                    : await startRunGitCredentialsMint();
+                const lazyCodemodeToken = sandboxCodemodeToken
+                  ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
+                  : undefined;
+                return { lazyGitCredentials, lazyCodemodeToken };
+              }),
+              // Sign at actual use, never reuse an agent-build URL after a long
+              // lazy wait. Publication needs no minted bearer or sandbox writes.
+              measure("client_publication", async () =>
+                sandboxCodemodeToken
+                  ? await managedCodemodeClientDownload({
+                      settings: runSettings,
+                      objectStorage,
+                      activeSandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+                    })
+                  : undefined,
               ),
-            (measurement) => {
-              if (eventing.firstModelRequestPreparationRecorded) return;
-              sandboxState.firstModelPreparationNestedSandboxMs +=
-                measurement.durationSeconds * 1_000;
-              sandboxState.firstModelPreparationNestedSandboxPhases.push(measurement);
-            },
-          );
-          await attachCodemodeTokenRenewal(
-            provisioned.established.session as CodemodeTokenWriterSession,
-            lazyCodemodeToken?.expiresAt,
-            provisioned,
-          );
-          await attachGitCredentialRenewal(
-            provisioned.established.session as GitCredentialTokenWriterSession,
-            lazyGitCredentials,
-            provisioned,
-          );
-          // `get()` does not release the first routed sandbox operation
-          // until this hook returns. Only images created during this exact
-          // turn can require deferred delivery here; historical images stay
-          // as durable receipts and are restored explicitly when requested.
-          for (const receipt of media.generatedImageReceiptsCreatedThisTurn.values()) {
-            await media.materializeGeneratedImageInSandbox(
-              receipt,
+              measure("credential_materialization", () =>
+                attachRunCredentialRenewal(
+                  provisioned.established.session as RunCredentialCommandSession,
+                  initialRunCredentialMaterial,
+                  provisioned,
+                ),
+              ),
+            ]);
+            // Preserve the original serial failure precedence, not completion order.
+            if (credentials.status === "rejected") throw credentials.reason;
+            if (clientDownload.status === "rejected") throw clientDownload.reason;
+            if (materialization.status === "rejected") throw materialization.reason;
+            const { lazyGitCredentials, lazyCodemodeToken } = credentials.value;
+            const lazyGitTokens = lazyGitCredentials?.gitTokens;
+            const lazyCodemodeClientDownload = clientDownload.value;
+            const provisionedSetupSession = initialRunCredentialMaterial
+              ? withRunCredentialsSession(
+                  provisioned.established.session as object,
+                  input.sessionId,
+                )
+              : provisioned.established.session;
+            await runWorkspaceMutationForSandbox(
               provisioned,
-              provisioned.established.session,
+              "lazyOwnedSandboxSetup",
+              async () =>
+                await runOwnedSandboxSetup(
+                  agent,
+                  provisioned.established.session as never,
+                  provisionedSetupSession as never,
+                  {
+                    settings: runSettings,
+                    environment: sandboxEnvironment,
+                    recordLazyManifest: true,
+                    measureSetup: measure,
+                    onRuntimeEvent: async (event) => {
+                      await eventing.publish?.(
+                        [{ type: event.type, payload: event.payload }],
+                        true,
+                      );
+                    },
+                    ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                    ...(lazyGitCredentials?.bindings
+                      ? {
+                          gitCredentialBindingsOverride: lazyGitCredentials.bindings,
+                        }
+                      : {}),
+                    ...(lazyCodemodeToken
+                      ? {
+                          codemodeTokenSeedOverride: lazyCodemodeToken.token,
+                          ...(lazyCodemodeClientDownload
+                            ? { codemodeClientDownloadOverride: lazyCodemodeClientDownload }
+                            : {}),
+                        }
+                      : {}),
+                    ...(eventing.toolCancellationFenceRef.current
+                      ? {
+                          commandRunner:
+                            eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
+                              eventing.toolCancellationFenceRef.current,
+                            ),
+                        }
+                      : {}),
+                    ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
+                      ? {
+                          coordinateSharedRigSetup: createSharedRigSetupCoordinator({
+                            db,
+                            accountId: input.accountId,
+                            workspaceId: input.workspaceId,
+                            sandboxGroupId: sandboxState.sandboxGroupId,
+                            attemptId: input.attemptId,
+                            holderId: sandboxState.sandboxHolderId,
+                            sandbox: provisioned,
+                            ...(runtimeCancellationSignal
+                              ? { signal: runtimeCancellationSignal }
+                              : {}),
+                            observe: (measurement) =>
+                              recordSandboxSharedPreparation(observability, measurement),
+                          }),
+                        }
+                      : {}),
+                  },
+                ),
+              (measurement) => {
+                if (eventing.firstModelRequestPreparationRecorded) return;
+                sandboxState.firstModelPreparationNestedSandboxMs +=
+                  measurement.durationSeconds * 1_000;
+                sandboxState.firstModelPreparationNestedSandboxPhases.push(measurement);
+              },
             );
+            await attachCodemodeTokenRenewal(
+              provisioned.established.session as CodemodeTokenWriterSession,
+              lazyCodemodeToken?.expiresAt,
+              provisioned,
+            );
+            await attachGitCredentialRenewal(
+              provisioned.established.session as GitCredentialTokenWriterSession,
+              lazyGitCredentials,
+              provisioned,
+            );
+            // `get()` does not release the first routed sandbox operation
+            // until this hook returns. Only images created during this exact
+            // turn can require deferred delivery here; historical images stay
+            // as durable receipts and are restored explicitly when requested.
+            for (const receipt of media.generatedImageReceiptsCreatedThisTurn.values()) {
+              await media.materializeGeneratedImageInSandbox(
+                receipt,
+                provisioned,
+                provisioned.established.session,
+              );
+            }
+            await toolResultSpill.materializeDeferred();
+            throwIfTurnOperationCancelled(sandboxResumeSignal);
+          } finally {
+            await measure.flush();
           }
-          await toolResultSpill.materializeDeferred();
-          throwIfTurnOperationCancelled(sandboxResumeSignal);
         },
         onFailed: async (error, settlement) => {
           if (lazySandboxEstablishmentSettled) return;
