@@ -15,11 +15,11 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { desktopCapability } from "@opengeni/react/app/lib/desktop";
 import type { UseRecorderResult } from "@opengeni/react/recordings";
 
@@ -108,9 +108,15 @@ async function hasLocalRecordings(): Promise<boolean> {
 
 export function MeetingRecorderProvider({
   workspaceId,
+  onOpenMeetings,
+  onOpenMeeting,
   children,
 }: {
   workspaceId: string;
+  /** Shows the Meetings page, where the recorder panel takes a requested start. */
+  onOpenMeetings: () => void;
+  /** Shows one meeting, such as the one a call notification just stopped. */
+  onOpenMeeting: (recordingId: string) => void;
   children: ReactNode;
 }) {
   const [active, setActive] = useState(false);
@@ -124,7 +130,7 @@ export function MeetingRecorderProvider({
       cancelled = true;
     };
   }, []);
-  useDesktopMeetingRequests(workspaceId, store);
+  useDesktopMeetingRequests(store, onOpenMeetings, onOpenMeeting);
   return (
     <MeetingRecorderContext.Provider value={store}>
       {children}
@@ -143,8 +149,14 @@ const NO_FINISHED: readonly string[] = [];
  * The desktop app's call notifications: "Record" opens Meetings and starts
  * recording the call; "Stop" (the call ended) stops and opens the meeting.
  */
-function useDesktopMeetingRequests(workspaceId: string, store: MeetingRecorderStore): void {
-  const navigate = useNavigate();
+function useDesktopMeetingRequests(
+  store: MeetingRecorderStore,
+  onOpenMeetings: () => void,
+  onOpenMeeting: (recordingId: string) => void,
+): void {
+  // The latest callbacks, without re-subscribing to the desktop app on each render.
+  const open = useRef({ onOpenMeetings, onOpenMeeting });
+  open.current = { onOpenMeetings, onOpenMeeting };
   useEffect(() => {
     const detection = desktopCapability("meetingDetection")?.meetingDetection;
     if (!detection) return;
@@ -153,20 +165,16 @@ function useDesktopMeetingRequests(workspaceId: string, store: MeetingRecorderSt
       if (request.kind === "record") {
         // Already recording shows that recording rather than start a second one.
         if (!recorder || recorder.state === "idle") store.requestStart({ title: request.title });
-        void navigate({ to: "/workspaces/$workspaceId/meetings", params: { workspaceId } });
+        open.current.onOpenMeetings();
         return;
       }
       const recordingId = recorder?.recordingId ?? null;
       if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
       void recorder.stop().then(() => {
-        if (!recordingId) return;
-        void navigate({
-          to: "/workspaces/$workspaceId/meetings/$recordingId",
-          params: { workspaceId, recordingId },
-        });
+        if (recordingId) open.current.onOpenMeeting(recordingId);
       });
     });
-  }, [navigate, store, workspaceId]);
+  }, [store]);
 }
 
 /** The start a desktop notification asked for, until the recorder panel takes it. */

@@ -493,6 +493,7 @@ function AuthorizedWorkspaceShell({
   onMount?: () => void;
 }) {
   const location = useRouterState({ select: (state) => state.location });
+  const navigate = useNavigate();
   const managementLocation = workspaceManagementLocation(
     location.pathname,
     workspaceId,
@@ -530,7 +531,18 @@ function AuthorizedWorkspaceShell({
           menu bar) span both shells, so keys work in settings too. */}
           {/* A meeting being recorded keeps going while the person moves
           between pages, so the recorder lives above both shells. */}
-          <MeetingRecorderProvider workspaceId={workspaceId}>
+          <MeetingRecorderProvider
+            workspaceId={workspaceId}
+            onOpenMeetings={() =>
+              void navigate({ to: "/workspaces/$workspaceId/meetings", params: { workspaceId } })
+            }
+            onOpenMeeting={(recordingId) =>
+              void navigate({
+                to: "/workspaces/$workspaceId/meetings/$recordingId",
+                params: { workspaceId, recordingId },
+              })
+            }
+          >
             <RailProvider workspaceId={workspaceId}>
               <ActionsProvider>
                 {managementLocation ? (
