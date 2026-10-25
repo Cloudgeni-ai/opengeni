@@ -1,4 +1,5 @@
 import type { Effect, Executor, Transaction } from "./controller";
+import { ReplanRequired } from "./controller";
 import { AtomicGitWriter, GitFailure, GitStore, type RefUpdate } from "./git";
 import {
   githubCapabilities,
@@ -21,6 +22,7 @@ import {
   type Run,
   type FollowupRequest,
   type FollowupPull,
+  type BatchReservation,
 } from "./model";
 import { latestRun, infrastructureRetryReason } from "./planner";
 import { observeDurableUncertainty, writeResolved } from "./cycle-outcome";
@@ -32,10 +34,19 @@ export interface ActiveReads {
   baseCI(sha: string): Promise<import("./model").BaseCiEvidence>;
   ready(): Promise<{ ready: Pull[]; excluded: { number: number; reason: string }[] }>;
   runs(manifest: Manifest, branch: string): Promise<Run[]>;
+  observedRuns?(
+    manifest: Manifest,
+    branch: string,
+    archived: boolean,
+    allowRefresh?: boolean,
+  ): Promise<Run[]>;
   pullSnapshot(number: number): Promise<PullSnapshot>;
   hasComment(number: number, marker: string): Promise<boolean>;
   currentAttempt(run: Run): Promise<{ attempt: number; status: string }>;
-  mainBusy(): Promise<boolean>;
+  mainBusy(
+    purpose?: "publish" | "land" | "observe",
+    reservations?: BatchReservation[],
+  ): Promise<boolean>;
   findFollowup(request: FollowupRequest): Promise<FollowupPull | null>;
 }
 export interface ActiveWrites {
@@ -327,6 +338,48 @@ export class GitHubActiveExecutor implements Executor {
       }
     return ledger;
   }
+  private async slotReservations(ledger: Ledger): Promise<BatchReservation[]> {
+    const refs = await this.git.remoteRefs(this.writer.remote);
+    const prefix = `refs/heads/${this.config.branchPrefix}`;
+    const queue = [...refs].filter(
+      ([ref]) => ref.startsWith(prefix) && /^[a-f0-9]{64}$/.test(ref.slice(prefix.length)),
+    );
+    await this.git.fetch(
+      this.writer.remote,
+      queue.map(([, sha]) => sha),
+      "state",
+    );
+    const reservations: BatchReservation[] = [];
+    for (const [ref, sha] of queue) {
+      let manifest: Manifest;
+      try {
+        manifest = await this.git.inspect(sha);
+      } catch {
+        // Match candidate discovery: unrelated malformed refs are not trusted
+        // reservations. Any actual provider run still occupies a provider slot.
+        continue;
+      }
+      const branch = ref.slice("refs/heads/".length);
+      if (branch !== `${this.config.branchPrefix}${manifest.batchId}` || manifest.tipSha !== sha)
+        continue;
+      const archived =
+        ledger.landed.includes(manifest.batchId) || ledger.invalidated.includes(manifest.batchId);
+      const runs = this.reads.observedRuns
+        ? await this.reads.observedRuns(manifest, branch, archived, !archived)
+        : await this.reads.runs(manifest, branch);
+      const candidate = { manifest, branch, runs, containedInBase: false };
+      for (const run of runs.filter(
+        (item) => item.workflow === this.config.workflow && item.status !== "completed",
+      ))
+        reservations.push({ branch, headSha: sha, runId: run.id });
+      if (
+        !latestRun(candidate, this.config) &&
+        ledger.missingRuns[manifest.batchId]?.status !== "released"
+      )
+        reservations.push({ branch, headSha: sha });
+    }
+    return reservations;
+  }
   async transact(t: Transaction): Promise<void> {
     requireInitializedState(t.expectedState, t.expectedLedger);
     requireInitializedState(t.expectedState, t.nextLedger);
@@ -342,8 +395,15 @@ export class GitHubActiveExecutor implements Executor {
     await this.options.refreshAuth?.();
     const effect = t.effect;
     if (effect.kind === "publish" || effect.kind === "land") {
-      if (await this.reads.mainBusy())
-        throw new Error("Full-main CI reserves headroom; replan without writes");
+      if (
+        await this.reads.mainBusy(
+          effect.kind,
+          effect.kind === "publish" ? await this.slotReservations(t.expectedLedger) : [],
+        )
+      )
+        throw new ReplanRequired(
+          "Batch slot or complete inventory unavailable; replan without writes",
+        );
       const ready = await this.reads.ready();
       if (
         t.bindings.some(
@@ -550,7 +610,7 @@ export class GitHubActiveExecutor implements Executor {
         if (
           current.attempt !== effect.run.attempt ||
           current.status !== "completed" ||
-          (await this.reads.mainBusy())
+          (await this.reads.mainBusy("publish", await this.slotReservations(state.ledger)))
         ) {
           await this.patchEffect(effect.id, {
             nextAt: new Date(Date.parse(now) + 60_000).toISOString(),

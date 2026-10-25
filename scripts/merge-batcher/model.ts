@@ -239,8 +239,12 @@ export interface Headroom {
   cachedApprovalOnlyRuns?: number;
   /** Provider capacity fields; see `capacityDecision`. */
   capacity?: CapacityObservation;
-  /** Live admission uses provider queueing; valid capacity holds are telemetry only. */
+  /** Slot one uses provider queueing; extra slots require clear capacity. */
   capacityInformational?: boolean;
+  /** Complete union of provider Batch runs and unseen durable reservations. */
+  occupiedBatchSlots?: number;
+  /** Publication/retry only; never a veto on landing or recovery bookkeeping. */
+  publicationBlocked?: boolean;
 }
 // GitHub job statuses. Only jobs that hold or are about to request a hosted
 // runner are demand: queued and in_progress jobs, plus requested jobs (created
@@ -327,6 +331,12 @@ function publicReleaseApprovalJobs(run: unknown, jobs: unknown): jobs is unknown
   return waiting === 1;
 }
 
+export interface BatchReservation {
+  branch: string;
+  headSha: string;
+  runId?: number;
+}
+
 export type RunnerScanHold =
   | "incomplete-runs"
   | "invalid-run"
@@ -343,6 +353,10 @@ export type RunnerScan =
       approvalOnlyRuns: number;
       cachedApprovalOnlyRuns: number;
       runnerRelevantRuns: number;
+      activeBatchRuns: number;
+      occupiedBatchSlots: number;
+      observedBatchDemand: number;
+      reservedBatchDemand: number;
       /** Newest active full-main push CI run (highest run ID), or null when none is active. */
       latestMain: LatestMainObservation | null;
       /** Jobs `queued` or `requested` for a runner across every active full-main run. */
@@ -397,6 +411,11 @@ export async function scanRunnerDemand(input: {
   baseBranch: string;
   /** PR fast checks use the provider queue, not Batch submission backpressure. */
   excludePrCiDemand?: boolean;
+  /** Complete provider inventory counts every active Batch, including foreign or obsolete runs. */
+  maxInflight?: number;
+  /** Landing/observation does not consume a new hosted slot. Unknown evidence still holds. */
+  requireFreeBatchSlot?: boolean;
+  reservations?: BatchReservation[];
   /** Run ID validator; return null to hold, or throw. Defaults to positive safe integers. */
   runId?: (value: unknown) => number | null;
   now?: () => number;
@@ -423,6 +442,9 @@ export async function scanRunnerDemand(input: {
     approvalOnlyRuns,
   });
   const runs = new Map<number, Record<string, unknown>>();
+  const maxInflight = input.maxInflight ?? 1;
+  if (!Number.isSafeInteger(maxInflight) || maxInflight < 1 || maxInflight > 16)
+    return hold("invalid-run");
   // IDs are mandatory across paginated responses so overlap cannot hide a gap.
   // Single-page job fixtures may omit IDs; run identities are always validated below.
   async function list(path: string, key: "workflow_runs" | "jobs") {
@@ -500,7 +522,29 @@ export async function scanRunnerDemand(input: {
       runs.set(id, record);
     }
   }
-  if ([...runs.values()].some((run) => run.path === input.batchWorkflow)) return hold("batch-slot");
+  const batchRuns = [...runs.values()].filter((run) => run.path === input.batchWorkflow);
+  const activeBatchRuns = batchRuns.length;
+  const unseen = new Set<string>();
+  for (const reservation of input.reservations ?? []) {
+    if (
+      !reservation.branch ||
+      !/^[a-f0-9]{40}$/.test(reservation.headSha) ||
+      (reservation.runId !== undefined && runId(reservation.runId) === null)
+    )
+      return hold("invalid-run");
+    if (
+      !batchRuns.some(
+        (run) =>
+          run.event === "push" &&
+          run.head_branch === reservation.branch &&
+          run.head_sha === reservation.headSha &&
+          (reservation.runId === undefined || run.id === reservation.runId),
+      )
+    )
+      unseen.add(`${reservation.branch}:${reservation.headSha}:${reservation.runId ?? "missing"}`);
+  }
+  if (input.requireFreeBatchSlot !== false && activeBatchRuns + unseen.size >= maxInflight)
+    return hold("batch-slot");
   if (input.excludePrCiDemand) {
     for (const [id, run] of runs) {
       if (
@@ -593,6 +637,8 @@ export async function scanRunnerDemand(input: {
     }),
   );
   if (failed) throw failure;
+  let observedBatchDemand = 0;
+  let reservedBatchDemand = unseen.size * CANDIDATE_SLOTS;
   for (const [index, [id, run]] of entries.entries()) {
     if (now() - started > deadline) return hold("deadline");
     const page = pages[index]!;
@@ -602,6 +648,10 @@ export async function scanRunnerDemand(input: {
     const jobs = page.items;
     const demand = runnerJobDemand(jobs);
     if (demand === null) return hold("unknown-job-status");
+    if (run.path === input.batchWorkflow) {
+      observedBatchDemand += demand;
+      reservedBatchDemand += Math.max(demand, CANDIDATE_SLOTS);
+    }
     const approvalOnly = !listedNotWaiting.has(id) && approvalOnlyRun(run, jobs);
     if (approvalOnly) approvalOnlyRuns++;
     else runnerRelevantRuns++;
@@ -634,6 +684,10 @@ export async function scanRunnerDemand(input: {
     approvalOnlyRuns,
     cachedApprovalOnlyRuns,
     runnerRelevantRuns,
+    activeBatchRuns,
+    occupiedBatchSlots: activeBatchRuns + unseen.size,
+    observedBatchDemand,
+    reservedBatchDemand,
     latestMain: latestMain ? observeMainQueue(latestMain.id, latestMain.jobs, finished) : null,
     mainQueuedJobs,
     preFanoutMainRuns: preFanoutMainRuns.sort((a, b) => a - b),
@@ -732,8 +786,23 @@ export function capacityDecision(input: {
   mainReserve: number;
   providerJobLimit: number;
   otherRepositoryAllowance: number;
+  occupiedBatchSlots?: number;
+  observedBatchDemand?: number;
+  reservedBatchDemand?: number;
 }): { allowed: boolean; reservedMain: number; capacity: CapacityObservation } {
   const reservedMain = Math.max(input.mainReserve, input.mainDemand);
+  const occupied = input.occupiedBatchSlots ?? 0;
+  const observedBatch = input.observedBatchDemand ?? 0;
+  const reservedBatch = Math.max(
+    input.reservedBatchDemand ?? 0,
+    observedBatch,
+    occupied * CANDIDATE_SLOTS,
+  );
+  const validBatch =
+    [occupied, observedBatch, reservedBatch].every(
+      (value) => Number.isSafeInteger(value) && value >= 0,
+    ) && observedBatch <= input.otherDemand;
+  const effectiveOther = input.otherDemand - observedBatch + reservedBatch;
   const validLimit = Number.isSafeInteger(input.providerJobLimit) && input.providerJobLimit >= 1;
   const validAllowance =
     Number.isSafeInteger(input.otherRepositoryAllowance) &&
@@ -741,8 +810,8 @@ export function capacityDecision(input: {
     validLimit &&
     input.otherRepositoryAllowance <= input.providerJobLimit;
   const providerRequired =
-    validLimit && validAllowance
-      ? input.mainDemand + input.otherDemand + input.otherRepositoryAllowance + CANDIDATE_SLOTS
+    validLimit && validAllowance && validBatch
+      ? input.mainDemand + effectiveOther + input.otherRepositoryAllowance + CANDIDATE_SLOTS
       : null;
   const hold: CapacityHold | null =
     providerRequired === null
@@ -753,7 +822,7 @@ export function capacityDecision(input: {
             input.mainQueuedJobs !== 0 ||
             (input.latestMain?.queuedJobs ?? 0) > 0
           ? "main-queued"
-          : input.otherDemand + reservedMain + CANDIDATE_SLOTS > input.runnerBudget
+          : effectiveOther + reservedMain + CANDIDATE_SLOTS > input.runnerBudget
             ? "repository-budget"
             : providerRequired > input.providerJobLimit
               ? "provider-limit"

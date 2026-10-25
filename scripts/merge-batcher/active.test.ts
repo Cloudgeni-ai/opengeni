@@ -29,6 +29,7 @@ import {
   type Run,
   type FollowupRequest,
   type FollowupPull,
+  type BatchReservation,
 } from "./model";
 
 const NOW = "2026-10-21T12:00:00.000Z";
@@ -371,7 +372,10 @@ async function fixture() {
       if (!latest) throw new Error("missing mock run");
       return { attempt: latest.attempt, status: latest.status };
     }
-    override async mainBusy() {
+    override async mainBusy(
+      _purpose?: "publish" | "land" | "observe",
+      _reservations?: BatchReservation[],
+    ) {
       return this.busy;
     }
   }
@@ -552,6 +556,90 @@ async function mergedOriginalWithDelta() {
 }
 
 describe("actual active executor with local bare Git and mocked GitHub", () => {
+  test("observation binds unseen candidate reservations and foreign slots before planning", async () => {
+    const f = await fixture();
+    f.cfg.maxInflight = 2;
+    const root = await f.publish();
+    let checked = false;
+    f.api.mainBusy = async (purpose, reservations) => {
+      expect(purpose).toBe("observe");
+      expect(reservations).toEqual([
+        { branch: `${f.cfg.branchPrefix}${root.batchId}`, headSha: root.tipSha },
+      ]);
+      checked = true;
+      f.api.lastHeadroom = {
+        allowed: true,
+        reason: "foreign run plus invisible reservation",
+        budget: 52,
+        occupied: 1,
+        reservedMain: 0,
+        candidateSlots: 18,
+        occupiedBatchSlots: 2,
+        publicationBlocked: true,
+      };
+      return false;
+    };
+    f.api.pulls.push({ ...f.makePull(f.newer), number: 2 });
+    const observation = await f.controller().reader.observe();
+    expect(checked).toBe(true);
+    expect(observation.headroom?.occupiedBatchSlots).toBe(2);
+  });
+  test("malformed owned-looking queue refs do not block unrelated publication", async () => {
+    const f = await fixture();
+    const foreign = `refs/heads/${f.cfg.branchPrefix}${"f".repeat(64)}`;
+    await f.git.exec(["push", f.origin.dir, `${f.base}:${foreign}`]);
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("build");
+    expect(result.manifest).not.toBeNull();
+    expect((await f.git.remoteRefs(f.origin.dir)).get(foreign)).toBe(f.base);
+  });
+  test("publication passes invisible predecessor reservation to the final provider slot check", async () => {
+    const f = await fixture();
+    f.cfg.maxInflight = 2;
+    const root = await f.publish();
+    const running = f.verdict(root);
+    running.status = "in_progress";
+    running.completedAt = null;
+    let observations = 0;
+    f.api.observedRuns = async (manifest, branch) => {
+      // The planner saw a running predecessor; the final provider lookup loses
+      // visibility. Its published ref still reserves capacity, not permission.
+      if (manifest.batchId === root.batchId && observations++ > 0) return [];
+      return f.api.runs(manifest, branch);
+    };
+    f.api.pulls.push({ ...f.makePull(f.newer), number: 2 });
+    f.api.snapshot.headSha = f.newer;
+    f.api.snapshot.branchHeadSha = f.newer;
+    let checked = false;
+    f.api.mainBusy = async (purpose, reservations) => {
+      if (purpose !== "publish") return false;
+      checked = true;
+      expect(reservations).toEqual([
+        { branch: `${f.cfg.branchPrefix}${root.batchId}`, headSha: root.tipSha },
+      ]);
+      // One foreign provider run plus this invisible reservation fills two slots.
+      return true;
+    };
+    const before = await f.git.remoteRefs(f.origin.dir);
+    expect((await f.controller().step()).reason).toContain("replan without writes");
+    expect(checked).toBe(true);
+    expect(await f.git.remoteRefs(f.origin.dir)).toEqual(before);
+  });
+  test("landing checks evidence without reserving another hosted slot", async () => {
+    const f = await fixture();
+    const purposes: Array<string | undefined> = [];
+    // Seed the already-published candidate before simulating occupied slots.
+    const manifest = await f.publish();
+    f.verdict(manifest);
+    f.api.mainBusy = async (purpose) => {
+      purposes.push(purpose);
+      return purpose === "publish";
+    };
+    expect((await f.controller().step()).action.kind).toBe("land");
+    expect(purposes).toContain("observe");
+    expect(purposes).toContain("land");
+    expect(purposes).not.toContain("publish");
+  });
   async function refreshedFixture() {
     const f = await fixture();
     const advancedMain = await f.commit({ base: "base", main: "advance" }, [f.base]);
@@ -1681,7 +1769,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         workflow_runs: [{ id: 2, path: settings.workflow, status: "queued" }],
       })) as unknown as typeof fetch);
     expect(await batch.mainBusy()).toBe(true);
-    expect(batch.lastHeadroom?.reason).toContain("single candidate");
+    expect(batch.lastHeadroom?.reason).toContain("candidate slots");
   });
   describe("runner headroom counts runner-holding jobs, not run placeholders", () => {
     type JobPage = Record<string, unknown> | unknown[];
@@ -1838,7 +1926,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         "1000",
       );
       expect(await batch.mainBusy()).toBe(true);
-      expect(batch.lastHeadroom?.reason).toContain("single candidate");
+      expect(batch.lastHeadroom?.reason).toContain("candidate slots");
     });
   });
   describe("proven approval-only runs are excluded from the 32-run runner cap", () => {
@@ -2298,6 +2386,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       const ok = listed({ waiting });
       expect(await scan(ok.get)).toEqual({
         ok: true,
+        activeBatchRuns: 0,
+        occupiedBatchSlots: 0,
+        observedBatchDemand: 0,
+        reservedBatchDemand: 0,
         mainDemand: 0,
         otherDemand: 0,
         scannedRuns: 10,
@@ -2349,6 +2441,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(order).toEqual([...statuses, ...statuses]);
       expect(raced).toEqual({
         ok: true,
+        activeBatchRuns: 0,
+        occupiedBatchSlots: 0,
+        observedBatchDemand: 0,
+        reservedBatchDemand: 0,
         mainDemand: 1,
         otherDemand: 0,
         scannedRuns: 1,

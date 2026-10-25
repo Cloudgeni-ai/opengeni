@@ -13,6 +13,7 @@ import {
   type FollowupRequest,
   type FollowupPull,
   type BaseCiEvidence,
+  type BatchReservation,
 } from "./model";
 import { verifyResult, type VerifiedResult } from "./result";
 import { baseJobClasses } from "./base-failure";
@@ -33,7 +34,7 @@ type Json = Record<string, any>; // Wire JSON is checked at the adapter boundary
 const HEADROOM_HOLD_REASONS: Record<RunnerScanHold, string> = {
   "incomplete-runs": "Incomplete or inconsistent active workflow observation",
   "invalid-run": "Invalid active run identity",
-  "batch-slot": "Another Batch CI run occupies the single candidate slot",
+  "batch-slot": "Active Batch CI runs occupy the configured candidate slots",
   "incomplete-jobs": "Incomplete or inconsistent current job observation",
   "unknown-job-status": "Unrecognized job status in current job observation",
   deadline: "Active workflow observation exceeded its scan deadline",
@@ -335,11 +336,17 @@ export class GitHubReader {
       throw new Error("Retry run identity changed");
     return { attempt: data.run_attempt, status: data.status };
   }
-  async mainBusy(): Promise<boolean> {
-    this.lastHeadroom = await this.headroom();
+  async mainBusy(
+    purpose: "publish" | "land" | "observe" = "publish",
+    reservations: BatchReservation[] = [],
+  ): Promise<boolean> {
+    this.lastHeadroom = await this.headroom(purpose, reservations);
     return !this.lastHeadroom.allowed;
   }
-  async headroom(): Promise<Headroom> {
+  async headroom(
+    purpose: "publish" | "land" | "observe" = "publish",
+    reservations: BatchReservation[] = [],
+  ): Promise<Headroom> {
     const result: Headroom = {
       allowed: false,
       reason: "Configure allocated repository runner budget and full-main reserve",
@@ -355,6 +362,9 @@ export class GitHubReader {
       baseBranch: this.config.baseBranch,
       excludePrCiDemand: true,
       approvalCache: this.cache,
+      maxInflight: this.config.maxInflight,
+      requireFreeBatchSlot: purpose === "publish",
+      reservations,
     });
     result.scannedRuns = scan.scannedRuns;
     result.approvalOnlyRuns = scan.approvalOnlyRuns;
@@ -373,17 +383,26 @@ export class GitHubReader {
       mainReserve: this.config.mainReserve,
       providerJobLimit: this.config.providerJobLimit,
       otherRepositoryAllowance: this.config.otherRepositoryAllowance,
+      occupiedBatchSlots: scan.occupiedBatchSlots,
+      observedBatchDemand: scan.observedBatchDemand,
+      reservedBatchDemand: scan.reservedBatchDemand,
     });
     result.reservedMain = decision.reservedMain;
     result.capacity = decision.capacity;
-    // A complete observation and the single Batch slot are still mandatory.
-    // Valid runner-demand estimates do not withhold submission: GitHub queues
-    // the one candidate. This does not promise capacity or scheduling fairness.
-    result.capacityInformational = decision.capacity.hold !== "invalid-capacity";
-    result.allowed = result.capacityInformational;
+    // Slot one remains advisory for liveness. Speculative slots must fit the
+    // observed capacity budget; landing/observation never consume another slot.
+    result.occupiedBatchSlots = scan.occupiedBatchSlots;
+    result.capacityInformational =
+      decision.capacity.hold !== "invalid-capacity" && scan.occupiedBatchSlots === 0;
+    result.publicationBlocked =
+      scan.occupiedBatchSlots >= this.config.maxInflight ||
+      (scan.occupiedBatchSlots > 0 && decision.capacity.hold !== null);
+    result.allowed =
+      decision.capacity.hold !== "invalid-capacity" &&
+      (purpose !== "publish" || !result.publicationBlocked);
     result.reason = result.allowed
-      ? `Single Batch may enter the provider queue; capacity observation: ${decision.capacity.hold ? CAPACITY_HOLD_REASONS[decision.capacity.hold] : "observed demand fits configured estimates"}`
-      : CAPACITY_HOLD_REASONS["invalid-capacity"];
+      ? `Batch ${purpose}; ${scan.activeBatchRuns}/${this.config.maxInflight} active provider slots; capacity observation: ${decision.capacity.hold ? CAPACITY_HOLD_REASONS[decision.capacity.hold] : "observed demand fits configured estimates"}`
+      : CAPACITY_HOLD_REASONS[decision.capacity.hold ?? "invalid-capacity"];
     return result;
   }
   async findFollowup(request: FollowupRequest): Promise<FollowupPull | null> {

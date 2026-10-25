@@ -46,6 +46,30 @@ const NOW = "2026-10-21T11:00:00.000Z";
 const SHA = "a".repeat(40);
 const cfg = config({});
 const roots: string[] = [];
+test("foreign provider slots allow local builds but prevent publication, never a tested root landing", () => {
+  const settings = { ...cfg, maxInflight: 2 };
+  const o = observation([pull(1)], []);
+  o.headroom = {
+    allowed: true,
+    reason: "complete inventory",
+    budget: 52,
+    occupied: 2,
+    reservedMain: 0,
+    candidateSlots: 18,
+    occupiedBatchSlots: 2,
+    publicationBlocked: true,
+  };
+  expect(plan(o, settings)).toMatchObject({ kind: "build", publish: false });
+  const green = candidate();
+  green.runs = [run(green, "success")];
+  o.candidates = [green];
+  expect(plan(o, settings).kind).toBe("land");
+  green.runs = [run(green, "code_failure")];
+  expect(plan(o, settings).kind).toBe("wait");
+  o.headroom.occupiedBatchSlots = 0;
+  o.headroom.publicationBlocked = false;
+  expect(plan(o, settings).kind).toBe("retry");
+});
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -291,6 +315,28 @@ describe("readiness and deterministic planning", () => {
     expect(action.kind).toBe("record");
     if (action.kind === "record")
       expect(action.ledger.invalidated).toEqual([a.manifest.batchId, b.manifest.batchId]);
+    expect(b.runs[0]!.status).toBe("in_progress");
+  });
+  test("two hosted slots publish an exact predecessor successor and land only the tested root", () => {
+    const a = candidate();
+    a.runs = [{ ...run(a, "unknown"), status: "in_progress" }];
+    const settings = { ...cfg, maxInflight: 2, speculationDepth: 3 };
+    const building = plan(observation([pull(1), pull(2)], [a]), settings);
+    expect(building.kind).toBe("build");
+    if (building.kind !== "build") throw Error("expected build");
+    expect(building.publish).toBe(true);
+    expect(building.spec.baseSha).toBe(a.manifest.tipSha);
+    expect(building.spec.predecessor).toBe(a.manifest.batchId);
+    const b = candidate([pull(2)], a.manifest.tipSha, a.manifest.batchId);
+    b.runs = [{ ...run(b, "unknown"), status: "in_progress" }];
+    const full = plan(observation([pull(1), pull(2), pull(3)], [a, b]), settings);
+    expect(full.kind).toBe("build");
+    if (full.kind === "build") expect(full.publish).toBe(false);
+    a.runs = [run(a, "success")];
+    const landing = plan(observation([pull(1), pull(2)], [a, b]), settings);
+    expect(landing.kind).toBe("land");
+    if (landing.kind === "land")
+      expect(landing.candidate.manifest.batchId).toBe(a.manifest.batchId);
     expect(b.runs[0]!.status).toBe("in_progress");
   });
   test("edited evidence and removed ready signal invalidate a candidate", () => {

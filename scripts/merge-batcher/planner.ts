@@ -160,13 +160,15 @@ function planCandidate(o: Observation, c: Config): Action {
   // Publication reserves capacity before the provider exposes its run, even
   // after composition invalidation. Only terminal evidence or explicit
   // infrastructure release frees that reservation; abandonment alone does not.
-  const inflight = o.candidates.reduce((n, x) => {
+  const localInflight = o.candidates.reduce((n, x) => {
     const running = x.runs.filter(
       (r) => r.workflow === c.workflow && r.status !== "completed",
     ).length;
     const missing = o.missingRuns?.[x.manifest.batchId] ?? ledger.missingRuns[x.manifest.batchId];
     return n + running + (!latestRun(x, c) && missing?.status !== "released" ? 1 : 0);
   }, 0);
+  const inflight = Math.max(localInflight, o.headroom?.occupiedBatchSlots ?? 0);
+  const publicationBlocked = o.mainBusy || o.headroom?.publicationBlocked === true;
   // Full main CI is an independent backstop, not candidate admission evidence.
   // Retain any legacy baseHold for audit; it neither blocks a tested green tip
   // nor authorizes attribution of a failed subset to one of its members.
@@ -193,7 +195,7 @@ function planCandidate(o: Observation, c: Config): Action {
       if (run.attempt === 1 && infrastructureRetryReason(root, run, c)) {
         if (ledger.retries[root.manifest.batchId])
           return { kind: "wait", reason: "single batch retry already requested; no duplicate" };
-        if (!run.completedAt || inflight >= c.maxInflight || o.mainBusy)
+        if (!run.completedAt || inflight >= c.maxInflight || publicationBlocked)
           return {
             kind: "wait",
             reason: "retry requires completion evidence and an available Batch slot",
@@ -256,7 +258,7 @@ function planCandidate(o: Observation, c: Config): Action {
           reason:
             "not an eligible first-attempt infrastructure-only candidate; hold without PR blame",
         };
-      if (!run.completedAt || inflight >= c.maxInflight || o.mainBusy)
+      if (!run.completedAt || inflight >= c.maxInflight || publicationBlocked)
         return {
           kind: "wait",
           reason: "retry requires completion evidence and an available Batch slot",
@@ -299,7 +301,7 @@ function planCandidate(o: Observation, c: Config): Action {
       null,
       pulls,
       group.batchId,
-      inflight < c.maxInflight && !o.mainBusy,
+      inflight < c.maxInflight && !publicationBlocked,
       0,
     );
   }
@@ -344,7 +346,7 @@ function planCandidate(o: Observation, c: Config): Action {
     tail?.manifest.batchId ?? null,
     pulls,
     null,
-    inflight < c.maxInflight && !o.mainBusy,
+    inflight < c.maxInflight && !publicationBlocked,
     null,
   );
 }
