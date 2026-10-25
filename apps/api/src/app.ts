@@ -206,6 +206,7 @@ import { createManagedAuthNewSignupsGate } from "./auth/new-signups-gate";
 import {
   createManagedAuth,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthRequiresEmailVerification,
   managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
@@ -2615,7 +2616,7 @@ function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabl
     return {
       mode: "managedSession" as const,
       session: "cookie" as const,
-      emailVerificationRequired: settings.environment !== "local",
+      emailVerificationRequired: managedAuthRequiresEmailVerification(settings),
       newSignupsEnabled,
       socialProviders: [
         ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
