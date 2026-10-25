@@ -20,7 +20,7 @@ import {
 } from "../src";
 
 const migrationUrl = new URL(
-  "../drizzle/0957_organization_azure_openai_entra_auth.sql",
+  "../drizzle/0965_organization_azure_openai_entra_auth.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -41,7 +41,7 @@ let client: DbClient | null = null;
 beforeAll(async () => {
   if (!requireRealDatabase) return;
   shared = await acquireSharedTestDatabase("migration-0957-organization-azure-openai-entra");
-  if (!shared) throw new Error("migration 0957 requires real PostgreSQL");
+  if (!shared) throw new Error("migration 0965 requires real PostgreSQL");
   client = createDb(shared.appUrl, { max: 4 });
 }, 180_000);
 
@@ -50,7 +50,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0957 organization Azure OpenAI Microsoft Entra ID sign-in", () => {
+describe("migration 0965 organization Azure OpenAI Microsoft Entra ID sign-in", () => {
   test("is a rolling, metadata-only column add with Azure-only Entra methods", async () => {
     const migration = await readFile(migrationUrl, "utf8");
     expect(migration.startsWith("-- deployment-mode: rolling\n")).toBe(true);
