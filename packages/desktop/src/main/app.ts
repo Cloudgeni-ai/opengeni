@@ -444,8 +444,14 @@ export class DesktopShell {
     // which macOS would ask the person about (the app ships no Bluetooth
     // usage description; see web-permissions.ts).
     app.commandLine.appendSwitch("disable-blink-features", "WebBluetooth");
-    // Without it Windows shows no notifications for the installed app.
-    if (process.platform === "win32") app.setAppUserModelId(config.appId);
+    // Without it Windows shows no notifications for the installed app. A run
+    // from source gets its own ID: Electron then adds a Start-menu shortcut
+    // for its own binary, and two shortcuts with one ID make Windows show the
+    // installed app's notifications as "Electron" and open the development
+    // build when they are clicked.
+    if (process.platform === "win32") {
+      app.setAppUserModelId(app.isPackaged ? config.appId : `${config.appId}.dev`);
+    }
     if (process.defaultApp && process.argv[1]) {
       app.setAsDefaultProtocolClient(config.scheme, process.execPath, [process.argv[1]]);
     } else if (!appImagePath()) {
