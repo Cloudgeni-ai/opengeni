@@ -413,13 +413,14 @@ async fn a_disk_fetched_over_its_base_downloads_only_what_differs() {
 
 /// A host fetches disks over several images: each keeps its hashes, taken
 /// once per version of its file however fetches over them interleave, and
-/// an image that is gone keeps nothing.
+/// an image that is gone keeps nothing, whether or not a fetch asks for it
+/// again.
 #[tokio::test(flavor = "multi_thread")]
 async fn seeds_are_kept_per_file_and_taken_once_per_version() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let dir = tempfile::tempdir().unwrap();
-    let [one, other] = ["one", "other"].map(|name| dir.path().join(name));
-    for path in [&one, &other] {
+    let [one, other, retired] = ["one", "other", "retired"].map(|name| dir.path().join(name));
+    for path in [&one, &other, &retired] {
         sparse(
             path,
             3 * CHUNK_BYTES,
@@ -459,8 +460,20 @@ async fn seeds_are_kept_per_file_and_taken_once_per_version() {
     fs::remove_file(&other).unwrap();
     assert!(get(other.clone()).await.is_none());
     assert_eq!(hashed.load(Ordering::SeqCst), 3);
-    let held: Vec<PathBuf> = seeds.by_path.lock().unwrap().keys().cloned().collect();
-    assert_eq!(held, [one]);
+    let held = || {
+        let mut held: Vec<PathBuf> = seeds.by_path.lock().unwrap().keys().cloned().collect();
+        held.sort();
+        held
+    };
+    assert_eq!(held(), std::slice::from_ref(&one));
+
+    // An image retired after its seed was taken, never asked for again.
+    assert!(get(retired.clone()).await.is_some());
+    assert_eq!(held(), [one.clone(), retired.clone()]);
+    fs::remove_file(&retired).unwrap();
+    assert!(get(one.clone()).await.is_some());
+    assert_eq!(held(), [one]);
+    assert_eq!(hashed.load(Ordering::SeqCst), 4);
 }
 
 /// Rebuilds a memory file from a remote image's manifest, as lazy wake

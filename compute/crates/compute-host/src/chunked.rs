@@ -200,7 +200,8 @@ impl Seed {
 /// The chunk hashes of each local file disks are fetched over (the host's
 /// base image and each sandbox image it keeps), computed at most once per
 /// version of the file however many fetches ask at once. One file's
-/// hashing never holds up fetches over another.
+/// hashing never holds up fetches over another, and the hashes of a file
+/// that is gone (an image retired) are dropped by the next fetch.
 #[derive(Debug, Default)]
 struct Seeds {
     by_path: std::sync::Mutex<HashMap<PathBuf, SeedSlot>>,
@@ -219,6 +220,11 @@ impl Seeds {
     ) -> Option<Arc<Seed>> {
         let slot = {
             let mut by_path = self.by_path.lock().unwrap_or_else(PoisonError::into_inner);
+            // A slot no fetch holds, for a file that is gone, keeps nothing
+            // anyone can use again. There are only as many as the host has
+            // had images since the last fetch.
+            by_path
+                .retain(|held, slot| held == path || Arc::strong_count(slot) > 1 || held.exists());
             Arc::clone(by_path.entry(path.to_owned()).or_default())
         };
         let mut cached = slot.lock().await;
