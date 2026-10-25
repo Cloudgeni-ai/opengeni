@@ -2244,9 +2244,10 @@ export class CuaComputerBackend implements ComputerBackend {
   /** Windows sends foreground input to whichever window is in front, so the
    * window is brought there first, past a Start menu or Search left open,
    * and the input is refused, with none of it sent, while Windows keeps
-   * another window in front. Afterwards the foreground goes back to the
-   * window that had it, as CUA does for keyboard input it fronts a window for;
-   * a window that was clicked stays in front, as after CUA's own clicks. */
+   * another window in front. After keyboard input the foreground goes back to
+   * the window that had it, as CUA does for input it fronts a window for.
+   * After a click it deliberately stays with the clicked window, unlike CUA:
+   * taking it away would close a menu or popup the click opened. */
   private async front(
     windowId: number,
     steps: readonly { name: string; args: Record<string, unknown> }[],
@@ -2267,8 +2268,8 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 }
 
-/** The CUA tools that click with the pointer; CUA leaves a window it clicked
- * in the foreground. */
+/** The CUA tools that click with the pointer. A window they clicked keeps the
+ * foreground (see front). */
 const CLICK_TOOLS = new Set(["click", "double_click", "right_click", "drag"]);
 
 function clicks(step: { name: string; args: Record<string, unknown> }): boolean {

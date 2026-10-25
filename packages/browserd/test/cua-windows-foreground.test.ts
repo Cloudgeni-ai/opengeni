@@ -118,7 +118,7 @@ describe("bringing a Windows window to the front", () => {
   test("a minimized window is restored before it is activated", async () => {
     const win = desktop(1);
     win.windows.get(10)!.minimized = true;
-    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true, previous: 1 });
+    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true, previous: 0 });
     expect(win.log).toEqual(["restore 10", "activate 10"]);
   });
 
@@ -168,6 +168,18 @@ describe("bringing a Windows window to the front", () => {
 });
 
 describe("giving the foreground back", () => {
+  test("the desktop and the taskbar are not given the foreground back", async () => {
+    // Program Manager (1), the taskbar (40) and the desktop's WorkerW (50).
+    for (const foreground of [1, 40, 50]) {
+      const win = desktop(foreground);
+      win.windows.set(50, { className: "WorkerW", title: "", process: "explorer.exe" });
+      expect(await bringToFront(win, 10, sleep)).toEqual({ front: true, previous: 0 });
+      expect(win.current).toBe(10);
+    }
+    // An app window that was in front is given it back.
+    expect(await bringToFront(desktop(30), 10, sleep)).toEqual({ front: true, previous: 30 });
+  });
+
   test("the window that was in front gets it back while the target is still in front", async () => {
     for (const foreground of [10, 11]) {
       const win = desktop(foreground);

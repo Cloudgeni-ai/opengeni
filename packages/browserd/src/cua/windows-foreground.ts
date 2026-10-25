@@ -16,11 +16,14 @@
  * is clicked. Only then is the input refused, and the refusal names the
  * window Windows kept in front.
  *
- * CUA gives the foreground back after keyboard input it fronted a window for,
- * and leaves a window it clicked in front, as a person's click would. Fronting
+ * CUA gives the foreground back after input it fronted a window for. Fronting
  * here first means CUA finds the window already in front, so the caller gives
- * the foreground back the same way (see giveBack). A Start or Search surface
- * that was dismissed is not given back.
+ * the foreground back after keyboard input itself (see giveBack). After a
+ * click it deliberately does not, although CUA would: the clicked window stays
+ * in front as after a person's click, so a menu or popup the click opened is
+ * not closed by taking the foreground away. Nothing is given back to a Start
+ * or Search surface that was dismissed, nor to the desktop or the taskbar,
+ * which only held the foreground because no app window did.
  */
 
 /** What fronting needs from Windows. Window handles are plain numbers. */
@@ -95,6 +98,11 @@ const SHELL_SURFACE_CLASS = "Windows.UI.Core.CoreWindow";
 /** The taskbar has no title; a person calls it the taskbar. */
 const TASKBAR_CLASSES = new Set(["Shell_TrayWnd", "Shell_SecondaryTrayWnd"]);
 
+/** The desktop and the taskbar: the shell's own windows, which hold the
+ * foreground only when no app window does, and which the foreground is not
+ * given back to (the desktop window is Progman, or WorkerW behind it). */
+const SHELL_WINDOW_CLASSES = new Set(["Progman", "WorkerW", ...TASKBAR_CLASSES]);
+
 /** How long each step waits for Windows to show its result. */
 const DISMISS_WAIT_MS = 500;
 const ACTIVATE_WAIT_MS = 250;
@@ -166,7 +174,13 @@ export async function bringToFront(
   }
   const fronted = (): ForegroundResult => ({
     front: true,
-    previous: previous && previous !== window && win.isWindow(previous) ? previous : 0,
+    previous:
+      previous &&
+      previous !== window &&
+      win.isWindow(previous) &&
+      !SHELL_WINDOW_CLASSES.has(win.className(previous))
+        ? previous
+        : 0,
   });
   if (front()) return fronted();
   if (win.isMinimized(window)) win.restore(window);
