@@ -73,7 +73,8 @@ use files::{
 pub(crate) use files::{
     clear_checkpoint, clear_local, images_of, mark_archived, paged, recover_images, take_written,
 };
-pub(crate) use live::{Base, DiskWatch, LiveMemory, Reconnected};
+pub(crate) use live::{Base, DiskWatch, LiveMemory, Reconnected, recorded_base};
+use live::{record_base, withdraw_base};
 
 /// A VM process the host owns.
 #[derive(Debug)]
@@ -269,6 +270,21 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
     tokio::task::spawn_blocking(work)
         .await
         .map_err(io::Error::other)
+}
+
+/// Forgets what a live VM's memory is based on, so its next save holds
+/// every page, and withdraws the record of it, so an agent that restarts
+/// does not go by it either.
+async fn lose_base(paths: &Paths, base: &mut Base) {
+    *base = Base::Unknown;
+    let paths = paths.clone();
+    let dir = paths.dir.clone();
+    if let Err(error) = blocking(move || withdraw_base(&paths))
+        .await
+        .and_then(|withdrawn| withdrawn)
+    {
+        tracing::warn!(dir = %dir.display(), %error, "memory base record not withdrawn");
+    }
 }
 
 impl<E: Engine, S: Store> Job<E, S> {
@@ -564,7 +580,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         match self.settled(&live, "save").await {
             None => return (Outcome::Cancelled, After::Kept(live)),
             Some(Err(error)) => {
-                live.memory.base = Base::Unknown;
+                lose_base(&self.paths, &mut live.memory.base).await;
                 return (failure(&error), After::Kept(live));
             }
             Some(Ok(())) => {}
@@ -597,7 +613,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 }
             }
             Err(error) => {
-                live.memory.base = Base::Unknown;
+                lose_base(&self.paths, &mut live.memory.base).await;
                 if live.memory.disk.failed() {
                     // No snapshot of this VM can be trusted again. It keeps
                     // running, pausing and waking from memory until a new
@@ -692,11 +708,21 @@ impl<E: Engine, S: Store> Job<E, S> {
             },
         );
         let files = diff_files(&self.paths);
+        let process = self
+            .engine
+            .process_identity(&live.vm)
+            .inspect_err(
+                |error| tracing::debug!(id = %self.id, %error, "the VM's process is not named"),
+            )
+            .ok();
         // The VMM syncs the disk while it takes the snapshot, so the check
-        // that vouches for the disk starts first.
-        let starting = Arc::clone(&live.memory.disk);
+        // that vouches for the disk starts first. The snapshot resets the
+        // VMM's record of which pages changed, so the record of the base
+        // they changed from is withdrawn before it, whatever becomes of
+        // the snapshot.
+        let (starting, paths) = (Arc::clone(&live.memory.disk), self.paths.clone());
         // A failed watch is final, which the caller finds on it.
-        blocking(move || starting.begin())
+        blocking(move || starting.begin().and_then(|()| withdraw_base(&paths)))
             .await
             .and_then(|begun| begun)
             .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?;
@@ -731,21 +757,26 @@ impl<E: Engine, S: Store> Job<E, S> {
                 _ => None,
             },
             runtime: self.engine.vm_runtime(&live.vm).to_owned(),
+            process,
         })
     }
 
     /// Publishes what [`Self::take_snapshot`] took as a new image
     /// generation, merging a diff over the image it was taken against, and
-    /// makes it the VM's `base`. The VM may run meanwhile.
+    /// makes it the VM's `base`, and the base its record names (see
+    /// [`record_base`]). The VM may run meanwhile.
     async fn make_image(&self, base: &mut Base, taken: Taken) -> Result<Verified, EngineError> {
         const OP: &str = "save";
         let images = images_of(&self.paths);
         let memory_len = self.spec.memory_bytes();
+        let paths = self.paths.clone();
+        let id = self.id;
         let published = blocking(move || {
             let Taken {
                 files,
                 over,
                 runtime,
+                process,
             } = taken;
             let parts = match over {
                 Some(generation) => Parts::Diff {
@@ -761,9 +792,19 @@ impl<E: Engine, S: Store> Job<E, S> {
             };
             let made_by = (!runtime.is_empty()).then_some(runtime.as_str());
             let published = images.publish_made_by(parts, made_by);
-            if published.is_err() {
-                let _ = remove_if_present(&files.state);
-                let _ = remove_if_present(&files.memory);
+            match (&published, process) {
+                (Err(_), _) => {
+                    let _ = remove_if_present(&files.state);
+                    let _ = remove_if_present(&files.memory);
+                }
+                (Ok(image), Some(process)) => {
+                    // Without it, an agent that restarts beside the VM
+                    // saves every page next time.
+                    if let Err(error) = record_base(&paths, &process, Some(image.meta())) {
+                        tracing::warn!(%id, %error, "memory base not recorded");
+                    }
+                }
+                (Ok(_), None) => {}
             }
             published
         })
@@ -846,6 +887,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             Ok(vm) => {
                 self.launches += 1;
                 self.hold_watch(&vm, &live_memory.disk).await;
+                self.record_started(&vm, Some(&image)).await;
                 vm
             }
             Err(error) => {
@@ -1211,6 +1253,27 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
+    /// Records what the memory of `vm`, just started from `image` or booted
+    /// fresh if `None`, is based on, for an agent that restarts while it
+    /// runs (see [`record_base`]). Without it, that agent's first save of
+    /// the VM holds every page.
+    async fn record_started(&self, vm: &E::Vm, image: Option<&Verified>) {
+        let process = match self.engine.process_identity(vm) {
+            Ok(process) => process,
+            Err(error) => {
+                tracing::debug!(id = %self.id, %error, "the VM's process is not named");
+                return;
+            }
+        };
+        let (paths, meta) = (self.paths.clone(), image.map(|image| image.meta().clone()));
+        if let Err(error) = blocking(move || record_base(&paths, &process, meta.as_ref()))
+            .await
+            .and_then(|recorded| recorded)
+        {
+            tracing::warn!(id = %self.id, %error, "memory base not recorded");
+        }
+    }
+
     /// Boot fresh from the disk; any old memory image is meaningless now.
     ///
     /// The guest finds its id on the kernel command line. A clone that never
@@ -1252,6 +1315,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 self.launches += 1;
                 notes::phase("launch");
                 self.hold_watch(&vm, &watch).await;
+                self.record_started(&vm, None).await;
                 let memory = LiveMemory::booted(watch);
                 if pending && self.tell_guest_restored().await.is_err() {
                     let outcome = self

@@ -41,5 +41,18 @@ restore depend on every earlier link.
   touching the newer.
 - A crash while running loses running programs; data already written to the
   guest's disk is kept.
+- A save writes only the pages that changed since the VM's base, the image
+  it was restored from or the zeros it booted with, because the VMM tracks
+  them from that moment. An agent restarted beside a running VM learns
+  that base from `memory-base.json` in the sandbox's directory, which
+  names the VM process it holds for (boot id, pid and start time) and the
+  image by generation and hashes; it is written after each start, restore
+  and published image. A snapshot resets the VMM's record of changed
+  pages, so the file is withdrawn before every snapshot and written again
+  only once the image is published. A record that is missing, names
+  another process, or names an image no longer at hand, local and intact,
+  means the base is unknown, and the next save writes every page. The
+  file is never synced: it means anything only beside the live process it
+  names, which a power loss ends.
 - Reflinks make the copy nearly free on file systems that support them (XFS,
   Btrfs); elsewhere the copy costs real disk writes.

@@ -370,7 +370,10 @@ can be built and tested.
     whether or not this upload succeeded; a failed upload is retried
     after the usual backoff from a fresh bundle, never from the old one.
     From the snapshot until the image is made the VM's base is unknown,
-    so a merge that fails makes its next save a full one.
+    so a merge that fails makes its next save a full one, and so does
+    an agent restart meanwhile: the record of the base an agent
+    restarted beside the VM goes by is withdrawn before the snapshot
+    ([ADR 6](0006-memory-images-and-disks.md)).
   - *Ordered by the step.* The step runs in the sandbox's single step
     slot and reserves its save number there, so no later save,
     retirement or forgetting can touch the bundle while it uploads, and a
