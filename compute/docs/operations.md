@@ -409,7 +409,13 @@ authority alone for agent links.
   archive, which loses their programs and what they wrote since; drain
   with `{"awake": true}` first.
 - **A lost host.** A host whose lease renewals stop is given up on after
-  its term and margin: the service fences it first (on GCP it resets the
+  its term and margin if it holds no sandboxes, or its instance is found
+  stopped or gone. One that holds sandboxes is waited for first, up to
+  `--give-up-after-s` (120 by default) from its last renewal, because a
+  host cut off only by the network keeps its VMs frozen and runs them on
+  once it renews again; giving up on it would end every program they
+  run. Meanwhile their wakes retry and new sandboxes go elsewhere. Then
+  the service fences it (on GCP it resets the
   instance, or finds it stopped or gone), then clears its sandboxes'
   owner with a raised epoch, and each wakes on another host from its
   latest archived copy on its next request. It boots from that copy's

@@ -56,6 +56,25 @@ can be built and tested.
   clocks are compared;
   each needs only to run at a rate within a stated bound of true time
   (below).
+- **Lapsed is when giving up is safe, not when it is worth it.** A host
+  whose renewals stopped has frozen its VMs (below), but one cut off only
+  by the network, as when the link between two clouds drops for half a
+  minute, still holds them, and thaws them once it renews again. Giving
+  up on it costs every sandbox it holds its running programs and what it
+  wrote since its last archive, and resets the whole machine. So while a
+  lapsed host holds sandboxes (by its last report) the leader waits for
+  it, up to `give_up_after` (two minutes by default) from its last
+  renewal, before it fences it and gives up. A host of a cloud group
+  whose instance the cloud reports stopped or gone holds nothing to wait
+  for and goes at once, and so does a host that holds no sandbox. The
+  leader asks the cloud about a waited-for instance at most every five
+  seconds, apart from its own rounds so a slow answer holds up no other
+  host, and a failed read counts as still running. Meanwhile the host's
+  sandboxes stay its own: a wake retries until its own deadline. New
+  sandboxes go to other hosts, since every replica's placement passes
+  over a host it has read no renewal from for T. The wait trades a truly hung
+  host's recovery time (up to two minutes, not T plus margin) for keeping
+  every program on a host that was only out of reach.
 - **A cut-off host stops its VMs, with or without its agent.** The host's
   deadline is the boot-clock time it sent its last accepted renewal, plus
   T; a failed or unanswered renewal never extends it. A guard process, one
@@ -454,9 +473,13 @@ can be built and tested.
 ## Consequences
 
 - A service and a database to run. A host without them works as before.
-- A host cut off for longer than T has its VMs frozen; their programs are
-  lost once their sandboxes are handed elsewhere. One whose guard cannot
+- A host cut off for longer than T has its VMs frozen until it renews
+  again. Their programs are lost only if their sandboxes are handed
+  elsewhere, which waits up to `give_up_after` while the host holds
+  sandboxes and its instance may still run them. One whose guard cannot
   stop them reboots.
+- A host that truly hangs while it holds sandboxes is recovered after
+  `give_up_after`, not after T plus margin.
 - Every host needs the `softdog` module (or a hardware watchdog) and
   cgroup v2 with `cgroup.kill` (Linux 5.14 or later).
 - Losing a host costs what changed since each sandbox's last archive.

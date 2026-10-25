@@ -168,6 +168,12 @@ struct Serve {
     /// Seconds a wake or connect may take in all.
     #[arg(long, default_value_t = 60)]
     wake_within_s: u64,
+    /// Seconds the leader waits for a host that stopped renewing while it
+    /// holds sandboxes before giving up on it, which costs them their
+    /// running programs; one that holds none, or whose instance is found
+    /// stopped or gone, goes as soon as its lease allows.
+    #[arg(long, default_value_t = 120)]
+    give_up_after_s: u64,
     /// Seconds a sandbox whose create names no sleep config runs between
     /// checkpoints, the fleet's target for how much work losing a host
     /// costs; 0 takes none.
@@ -499,6 +505,7 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
         settings: Settings {
             disk_mib: args.disk_mib,
             wake_within: Duration::from_secs(args.wake_within_s),
+            give_up_after: Duration::from_secs(args.give_up_after_s),
             sleep: SleepConfig {
                 checkpoint_every_ms: (args.checkpoint_every_s > 0)
                     .then(|| args.checkpoint_every_s.saturating_mul(1000)),

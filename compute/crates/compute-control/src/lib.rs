@@ -137,7 +137,8 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
     terms
         .validate()
         .map_err(|error| anyhow::anyhow!("lease terms: {error}"))?;
-    let view = Arc::new(View::new(config.seed));
+    let give_up_after = config.settings.give_up_after;
+    let view = Arc::new(View::new(config.seed, terms.term));
     let service = Arc::new(Service::new(
         Arc::clone(&store),
         Arc::clone(&view),
@@ -179,6 +180,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             Arc::clone(&store),
             Arc::clone(&view),
             terms,
+            give_up_after,
             config.scaling,
             Arc::clone(&metrics),
         )),
@@ -193,18 +195,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         tokio::spawn(prune(Arc::clone(&service))),
         tokio::spawn(images::follow(Arc::clone(&service), config.image_sources)),
     ];
-    let metrics = match config.metrics {
-        Some(address) => {
-            let listener = TcpListener::bind(address)
-                .await
-                .with_context(|| format!("listening for Prometheus on {address}"))?;
-            let bound = listener.local_addr()?;
-            let router = metrics::router(metrics, Arc::clone(&view));
-            tasks.push(tokio::spawn(metrics::serve(listener, router)));
-            Some(bound)
-        }
-        None => None,
-    };
+    let metrics = serve_metrics(config.metrics, metrics, &view, &mut tasks).await?;
     let e2b = match config.e2b {
         Some(e2b::listen::Listen {
             address,
@@ -231,6 +222,26 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         service,
         tasks,
     })
+}
+
+/// Serves Prometheus metrics on `address`, if one is set, among `tasks`;
+/// returns the address bound.
+async fn serve_metrics(
+    address: Option<SocketAddr>,
+    metrics: Arc<Metrics>,
+    view: &Arc<View>,
+    tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> anyhow::Result<Option<SocketAddr>> {
+    let Some(address) = address else {
+        return Ok(None);
+    };
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("listening for Prometheus on {address}"))?;
+    let bound = listener.local_addr()?;
+    let router = metrics::router(metrics, Arc::clone(view));
+    tasks.push(tokio::spawn(metrics::serve(listener, router)));
+    Ok(Some(bound))
 }
 
 /// Forgets, once an hour, the requests whose sandboxes were deleted more

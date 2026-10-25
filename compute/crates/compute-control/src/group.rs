@@ -373,6 +373,16 @@ impl GcpGroup {
         Ok(Some(instance.status))
     }
 
+    /// Whether instance `name` may still hold its memory: it runs, or may
+    /// (starting, as one resuming from a suspend does, suspended, or being
+    /// repaired). One gone, stopped or stopping holds nothing.
+    pub async fn may_hold_memory(&self, name: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .status(name)
+            .await?
+            .is_some_and(|status| !matches!(status.as_str(), "TERMINATED" | "STOPPING")))
+    }
+
     /// Asks for `action` (`reset`, `stop` or `start`) on instance `name`.
     async fn act(&self, name: &str, action: &str) -> anyhow::Result<Operation> {
         let token = self.token().await?;
