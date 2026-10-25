@@ -25,6 +25,7 @@ import {
   isAgentWorkHumanInput,
   isPreparingWork,
   noticeDisplayText,
+  noticeIsResolvedApproval,
   noticeTone,
   QUESTION_NAV_MARGIN_PX,
   recordedWaitSummaryText,
@@ -58,6 +59,7 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   type StyleProp,
+  type TextStyle,
   type ViewStyle,
 } from "react-native";
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
@@ -101,7 +103,12 @@ import { measureQuoteAnchors, useNativeTextAnnotation } from "./text-selection";
 
 export type NativeMarkdownRenderer = (
   text: string,
-  options: { tone: "body" | "muted"; streaming?: boolean | undefined },
+  options: {
+    tone: "body" | "muted";
+    streaming?: boolean | undefined;
+    /** Overrides the body text style, for Markdown inside compact card chrome. */
+    textStyle?: TextStyle | undefined;
+  },
 ) => ReactNode;
 
 /** Start fetching older history this far before the reader reaches the top. */
@@ -932,7 +939,11 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
       return isAgentWorkHumanInput(item) ? (
         <AgentWorkHumanInputRow item={item} />
       ) : (
-        <HumanInputRow item={item} onCopy={context.onCopy} />
+        <HumanInputRow
+          item={item}
+          onCopy={context.onCopy}
+          renderMarkdown={context.renderMarkdown}
+        />
       );
     case "session-status": {
       const meta = SESSION_STATUS_PRESENTATION(t)[item.blocked ? "blocked" : item.status];
@@ -1061,7 +1072,11 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
       }}
     >
       <View style={{ marginTop: 2, opacity: item.tone === "cancelled" ? 0.6 : 1 }}>
-        <Icon name="triangle-alert" size={16} color={accent} />
+        {noticeIsResolvedApproval(item) ? (
+          <Icon name="check" size={16} color={accent} />
+        ) : (
+          <Icon name="triangle-alert" size={16} color={accent} />
+        )}
       </View>
       <Text style={{ ...fontStyle(theme), flex: 1, fontSize: 14, lineHeight: 20, color: accent }}>
         {noticeDisplayText(t, item)}
@@ -1454,9 +1469,11 @@ function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
 function HumanInputRow({
   item,
   onCopy,
+  renderMarkdown,
 }: {
   item: HumanInputItem;
   onCopy?: ((text: string) => void) | undefined;
+  renderMarkdown?: NativeMarkdownRenderer | undefined;
 }) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
@@ -1482,6 +1499,13 @@ function HumanInputRow({
     .join("\n");
   const savedLines = lines.filter((line) => line.secret);
   const copyText = lines.map((line) => line.text).join("\n");
+  // The prompt reads as the web row does: inline Markdown in the card's type style.
+  const promptStyle = (labelled: boolean): TextStyle => ({
+    ...fontStyle(theme),
+    fontSize: labelled ? theme.size.sm : theme.size.md,
+    lineHeight: labelled ? 18 : 24,
+    color: labelled ? theme.colors["fg-muted"] : theme.colors.fg,
+  });
   return (
     <View style={{ gap: 10 }}>
       <View
@@ -1539,17 +1563,29 @@ function HumanInputRow({
                     {question.label}
                   </Text>
                 ) : null}
-                <Text
+                <View
                   style={{
-                    ...fontStyle(theme),
-                    fontSize: question.label ? theme.size.sm : theme.size.md,
-                    lineHeight: question.label ? 18 : 24,
+                    flexDirection: "row",
+                    alignItems: "flex-start",
                     marginTop: question.label ? 2 : 0,
-                    color: question.label ? theme.colors["fg-muted"] : theme.colors.fg,
                   }}
                 >
-                  {question.prompt}
-                </Text>
+                  {!question.label && multiple ? (
+                    <Text style={{ ...promptStyle(false), color: theme.colors["fg-muted"] }}>
+                      {`${index + 1}. `}
+                    </Text>
+                  ) : null}
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    {renderMarkdown ? (
+                      renderMarkdown(question.prompt, {
+                        tone: question.label ? "muted" : "body",
+                        textStyle: promptStyle(Boolean(question.label)),
+                      })
+                    ) : (
+                      <Text style={promptStyle(Boolean(question.label))}>{question.prompt}</Text>
+                    )}
+                  </View>
+                </View>
               </View>
             ))}
           </View>

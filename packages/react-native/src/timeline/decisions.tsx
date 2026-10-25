@@ -7,6 +7,7 @@ import type {
 import type { PendingApproval } from "@opengeni/react/session";
 import {
   approvalAnswerLabels,
+  approvalArgumentsText,
   approvalToolName,
   formatApprovalToolName,
   pendingApprovalReview,
@@ -33,9 +34,10 @@ import {
   type ReactNode,
 } from "react";
 import { createOpenGeniText, useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, Text, TextInput, View, type TextStyle } from "react-native";
 import { Button } from "./controls";
 import { Icon } from "./icon";
+import type { NativeMarkdownRenderer } from "./message-timeline";
 import { blendOver, withAlpha } from "./primitives";
 import { SecretQuestionField } from "./secret-field";
 import {
@@ -78,6 +80,8 @@ export interface HumanInputCardProps {
   messages?: Partial<HumanInputFormMessages> | undefined;
   /** Copy for secret questions (Save to, Generate, show / hide). */
   secretMessages?: Partial<SecretFieldMessages> | undefined;
+  /** The conversation's Markdown renderer, so questions read as the web form does. */
+  renderMarkdown?: NativeMarkdownRenderer | undefined;
 }
 
 const HumanInputMessagesContext = createContext<HumanInputFormMessages>(
@@ -86,6 +90,47 @@ const HumanInputMessagesContext = createContext<HumanInputFormMessages>(
 const SecretFieldMessagesContext = createContext<SecretFieldMessages>(
   defaultSecretFieldMessages(createOpenGeniText()),
 );
+const QuestionMarkdownContext = createContext<NativeMarkdownRenderer | undefined>(undefined);
+
+/** Emphasis, code, links, lists or line breaks: text a plain label would show raw. */
+const MARKDOWN_SYNTAX = /[*_`#[\]]|https?:\/\/|\n/;
+
+/**
+ * Question copy as the web form shows it (inline Markdown, so links and
+ * emphasis work). Plain text keeps the card's own type style; only copy that
+ * actually carries Markdown goes through the conversation's renderer.
+ */
+function QuestionText({
+  text,
+  style,
+  tone,
+  prefix,
+  suffix,
+}: {
+  text: string;
+  style: TextStyle;
+  tone: "body" | "muted";
+  /** Plain lead-in kept outside the Markdown, such as a "2. " step number. */
+  prefix?: string;
+  suffix?: ReactNode;
+}) {
+  const render = useContext(QuestionMarkdownContext);
+  if (!render || !MARKDOWN_SYNTAX.test(text))
+    return (
+      <Text style={style}>
+        {prefix}
+        {text}
+        {suffix}
+      </Text>
+    );
+  return (
+    <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
+      {prefix ? <Text style={style}>{prefix}</Text> : null}
+      <View style={{ flexShrink: 1, minWidth: 0 }}>{render(text, { tone, textStyle: style })}</View>
+      {suffix ? <Text style={style}>{suffix}</Text> : null}
+    </View>
+  );
+}
 
 /** One decision shell for pending requests, oldest first, "N of M" when stepping. */
 export function HumanInputCard({
@@ -95,6 +140,7 @@ export function HumanInputCard({
   error,
   messages,
   secretMessages,
+  renderMarkdown,
 }: HumanInputCardProps) {
   const t = useOpenGeniText();
   const merged = useMemo(
@@ -126,21 +172,23 @@ export function HumanInputCard({
   return (
     <HumanInputMessagesContext.Provider value={merged}>
       <SecretFieldMessagesContext.Provider value={mergedSecret}>
-        <HumanInputForm
-          key={active.id}
-          request={active}
-          progressLabel={
-            batchTotal.current > 1
-              ? t("native.timeline.decisions.positionOfCurrent", {
-                  position,
-                  current: batchTotal.current,
-                })
-              : null
-          }
-          submitting={respondingRequestId !== null}
-          error={error ?? null}
-          onSubmit={(response) => onSubmit(active.id, response)}
-        />
+        <QuestionMarkdownContext.Provider value={renderMarkdown}>
+          <HumanInputForm
+            key={active.id}
+            request={active}
+            progressLabel={
+              batchTotal.current > 1
+                ? t("native.timeline.decisions.positionOfCurrent", {
+                    position,
+                    current: batchTotal.current,
+                  })
+                : null
+            }
+            submitting={respondingRequestId !== null}
+            error={error ?? null}
+            onSubmit={(response) => onSubmit(active.id, response)}
+          />
+        </QuestionMarkdownContext.Provider>
       </SecretFieldMessagesContext.Provider>
     </HumanInputMessagesContext.Provider>
   );
@@ -306,28 +354,28 @@ function HumanInputForm({
           <Icon name="message-circle-question" size={16} color={tone.waiting} />
         </View>
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Text
+          <QuestionText
+            text={heading.title}
+            tone="body"
             style={{
               ...fontStyle(theme, 600),
               fontSize: theme.size.md,
               lineHeight: 24,
               color: c.fg,
             }}
-          >
-            {heading.title}
-            {required ? <Text style={{ color: c["status-failed"] }}> *</Text> : null}
-          </Text>
+            suffix={required ? <Text style={{ color: c["status-failed"] }}> *</Text> : null}
+          />
           {heading.description ? (
-            <Text
+            <QuestionText
+              text={heading.description}
+              tone="muted"
               style={{
                 ...fontStyle(theme),
                 fontSize: theme.size.sm,
                 lineHeight: 18,
                 color: c["fg-muted"],
               }}
-            >
-              {heading.description}
-            </Text>
+            />
           ) : null}
           {progressLabel ? (
             <Text
@@ -491,35 +539,38 @@ function QuestionControls({
   const hint = multi
     ? messages.selectionHint(question.validation?.minSelections, question.validation?.maxSelections)
     : null;
+  const secondary: TextStyle = {
+    ...fontStyle(theme),
+    fontSize: theme.size.sm,
+    lineHeight: 18,
+    color: c["fg-muted"],
+  };
+  // A lone question's heading already shows its help unless a label took the title.
+  const help = question.helpText && (index !== null || question.label) ? question.helpText : null;
   return (
     <View style={{ gap: 10 }}>
       {index !== null ? (
         <View>
-          <Text
+          <QuestionText
+            prefix={`${index}. `}
+            text={question.label ?? question.prompt}
+            tone="body"
             style={{
               ...fontStyle(theme, 600),
               fontSize: theme.size.sm,
               lineHeight: 18,
               color: c.fg,
             }}
-          >
-            {`${index}. ${question.label ?? question.prompt}`}
-            {question.required ? <Text style={{ color: c["status-failed"] }}> *</Text> : null}
-          </Text>
+            suffix={
+              question.required ? <Text style={{ color: c["status-failed"] }}> *</Text> : null
+            }
+          />
           {question.label ? (
-            <Text
-              style={{
-                ...fontStyle(theme),
-                fontSize: theme.size.sm,
-                lineHeight: 18,
-                color: c["fg-muted"],
-              }}
-            >
-              {question.prompt}
-            </Text>
+            <QuestionText text={question.prompt} tone="muted" style={secondary} />
           ) : null}
         </View>
       ) : null}
+      {help ? <QuestionText text={help} tone="muted" style={secondary} /> : null}
       {hint ? (
         <Text style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["fg-subtle"] }}>
           {hint}
@@ -561,16 +612,16 @@ function QuestionControls({
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={label}>{option.label}</Text>
                   {option.description ? (
-                    <Text
+                    <QuestionText
+                      text={option.description}
+                      tone="muted"
                       style={{
                         ...fontStyle(theme),
                         fontSize: theme.size.xs,
                         lineHeight: 16,
                         color: c["fg-muted"],
                       }}
-                    >
-                      {option.description}
-                    </Text>
+                    />
                   ) : null}
                 </View>
               </Pressable>
@@ -706,9 +757,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
         const note = review.consequence;
         const canApprove = review.availableActions.includes("approve");
         const showDetails = details[approval.id] === true;
-        const payload = showDetails
-          ? JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2)
-          : "";
+        const payload = showDetails ? approvalArgumentsText(approval) : "";
         const approveLabel = answer?.approve ?? messages.approve;
         const rejectLabel = answer?.reject ?? messages.reject;
         return (

@@ -3,6 +3,7 @@
 // fields, with the answer buttons in their words. Renderer-neutral, so the
 // web approval card and the React Native one read the same; no DOM here.
 import { toolReviewAction, toolReviewFields, type ToolActionReview } from "@opengeni/sdk";
+import { decodeReviewArguments } from "@opengeni/contracts/tool-review-presentation";
 import type { PendingApproval } from "./approvals";
 import type { OpenGeniText } from "./messages/runtime";
 import { toolDisplayName } from "./timeline/tool-display-name";
@@ -22,6 +23,18 @@ const SELECTION_PATHS = new Set([
 ]);
 /** Long argument lists stay readable; the full set is one tap away in details. */
 export const VISIBLE_REVIEW_FIELDS = 6;
+
+/**
+ * The full arguments behind a card's details, indented for reading. Arguments
+ * that arrive JSON-encoded are decoded once, so details never show an escaped
+ * string; anything else is shown as it came.
+ */
+export function approvalArgumentsText(approval: PendingApproval): string {
+  const value = approval.arguments ?? approval.raw ?? {};
+  const decoded = decodeReviewArguments(value);
+  if (decoded) return JSON.stringify(decoded, null, 2);
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
 
 /**
  * The facts a review card lists: its selection field (when it acts on a

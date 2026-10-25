@@ -36904,6 +36904,16 @@
     "@opengeni/react/app.css": {
       "default": "value"
     },
+    "@opengeni/react/approval-review-model": {
+      "APP_ACTION_TOOL_NAME": "value",
+      "approvalAnswerLabels": "value",
+      "approvalArgumentsText": "value",
+      "approvalToolName": "value",
+      "formatApprovalToolName": "value",
+      "pendingApprovalReview": "value",
+      "reviewFacts": "value",
+      "VISIBLE_REVIEW_FIELDS": "value"
+    },
     "@opengeni/react/artifacts": {
       "ArtifactBadge": "value",
       "ArtifactButton": "value",
@@ -37465,6 +37475,40 @@
       "enableCodeEditor": "value",
       "languageForPath": "value",
       "registerCodeEditor": "value"
+    },
+    "@opengeni/react/in-chat-connect-model": {
+      "attemptHint": "value",
+      "authNeededPresentation": "value",
+      "AuthNeededPresentation": "type",
+      "canFinishPreparedMcpSetup": "value",
+      "ConnectAttempt": "type",
+      "ConnectController": "type",
+      "ConnectNavigation": "type",
+      "ConnectSetupFlow": "type",
+      "ConnectSetupFlowOptions": "type",
+      "connectSetupStatus": "value",
+      "ConnectWindowHost": "type",
+      "inChatConnectDecision": "value",
+      "InChatConnectDecision": "type",
+      "InChatConnectSource": "type",
+      "InChatConnectSupport": "type",
+      "IntegrationCapabilityAvailability": "type",
+      "IntegrationCapabilityConnect": "type",
+      "IntegrationCapabilityConnectInput": "type",
+      "isAgentCapabilityRequest": "value",
+      "isInChatConnectRequest": "value",
+      "isPreparedMcpSetup": "value",
+      "McpCapabilityConnect": "type",
+      "McpCapabilityConnectInput": "type",
+      "providerLabel": "value",
+      "reconnectCandidate": "value",
+      "useConnect": "value",
+      "useConnectSetupFlow": "value",
+      "useInChatConnectSupport": "value",
+      "useIntegrationCapabilityConnect": "value",
+      "useMcpCapabilityConnect": "value",
+      "usePreparedMcpSetupAccess": "value",
+      "usePreparedMcpSetupAttempt": "value"
     },
     "@opengeni/react/interaction": {
       "AttachedBrowsersClient": "type",

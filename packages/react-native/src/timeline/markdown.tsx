@@ -736,6 +736,7 @@ function MarkdownImage({ src, alt }: { src: string; alt: string }) {
 function TrimmedMarkdown({
   text,
   tone,
+  textStyle,
   streaming,
   onLinkPress,
   onCopy,
@@ -743,13 +744,17 @@ function TrimmedMarkdown({
 }: {
   text: string;
   tone: "body" | "muted";
+  textStyle?: TextStyle | undefined;
   streaming: boolean;
   onLinkPress?: ((url: string) => boolean) | undefined;
   onCopy?: ((text: string) => void) | undefined;
   media: MarkdownMediaOptions & MarkdownLinkOptions;
 }) {
   const theme = useNativeTimelineTheme();
-  const styles = useMemo(() => webMarkdownStyles(theme, tone), [theme, tone]);
+  const styles = useMemo(() => {
+    const base = webMarkdownStyles(theme, tone);
+    return textStyle ? { ...base, body: { ...base.body, ...textStyle } } : base;
+  }, [theme, tone, textStyle]);
   const rules = useMemo(() => webRules(theme, tone, onCopy, media), [theme, tone, onCopy, media]);
   const openTail = useMemo(
     () => (media.renderInteractiveBlock ? trailingOpenFence(text) : null),
@@ -795,11 +800,12 @@ export function createWebMarkdownRenderer(
     renderInteractiveBlock: options.renderInteractiveBlock,
     renderLink: options.renderLink,
   };
-  return (text, { tone, streaming }): ReactNode =>
+  return (text, { tone, streaming, textStyle }): ReactNode =>
     text.trim() ? (
       <TrimmedMarkdown
         text={text}
         tone={tone}
+        textStyle={textStyle}
         streaming={streaming === true}
         onLinkPress={onLinkPress}
         onCopy={options.onCopy}

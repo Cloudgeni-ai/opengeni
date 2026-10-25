@@ -323,6 +323,7 @@ function SessionScreenBody({
                 respondingRequestId={humanInput.respondingRequestId}
                 error={humanInput.mutationError?.message}
                 messages={humanInputMessages}
+                renderMarkdown={timelineProps.renderMarkdown}
                 onSubmit={(requestId, response) =>
                   humanInput.respond(requestId, response).then(() => undefined)
                 }
