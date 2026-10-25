@@ -50,8 +50,8 @@ import { getWorkspace, type CreditDebitAttribution } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
-import { wavDurationSeconds } from "../transcription/wav-duration";
-import { TranscriptionSegmenterError } from "../transcription/segmenter";
+import { wavDurationSeconds } from "@opengeni/core/transcription-service";
+import { TranscriptionSegmenterError } from "@opengeni/core/transcription-service";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
 
 const CHUNK_SHA256_HEADER = "x-opengeni-chunk-sha256";

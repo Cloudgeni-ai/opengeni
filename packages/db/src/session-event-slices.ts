@@ -126,11 +126,25 @@ async function listSessionEventSlicesInternal(
   // ordinary JSON text predicate cannot match those stored representations.
   const indexedToolName =
     options.toolName !== undefined && toPostgresLosslessJson(options.toolName) === options.toolName;
-  if (options.callId !== undefined && toPostgresLosslessJson(options.callId) === options.callId)
+  const exactCallId =
+    options.callId !== undefined && toPostgresLosslessJson(options.callId) === options.callId;
+  // Only optimize the existing explicit tool-event selection. Call IDs on other
+  // event kinds retain their original payload fallback and type semantics.
+  const indexedCallId =
+    exactCallId &&
+    !indexedToolName &&
+    filters.includeTypes.length > 0 &&
+    filters.includeTypes.every(
+      (type) => type === "agent.toolCall.created" || type === "agent.toolCall.output",
+    );
+  const callIdPredicate = exactCallId
+    ? sql`coalesce(${schema.sessionEvents.toolCallId}, ${schema.sessionEvents.payload}->>'callId', ${schema.sessionEvents.payload}->>'call_id', ${schema.sessionEvents.payload}->>'id') = ${options.callId}`
+    : undefined;
+  if (callIdPredicate && !indexedCallId)
     predicates.push(
       // As for tool names, the projection is only a payload-read optimization.
       // Legacy rows and other event kinds retain the original identity expression.
-      sql`coalesce(${schema.sessionEvents.toolCallId}, ${schema.sessionEvents.payload}->>'callId', ${schema.sessionEvents.payload}->>'call_id', ${schema.sessionEvents.payload}->>'id') = ${options.callId}`,
+      callIdPredicate,
     );
   // Unlike audit `none` mode, this identity query does not compute a payload
   // projection merely to report its size. Only the selected scalar is extracted.
@@ -161,7 +175,29 @@ async function listSessionEventSlicesInternal(
                 : asc(schema.sessionEvents.sequence),
             )
             .limit(limit + 1);
-        if (!indexedToolName) return query();
+        if (!indexedToolName && !indexedCallId) return query();
+        if (indexedCallId) {
+          // Literal type and byte predicates permit both partial indexes in
+          // generic plans. Every branch retains scope, RLS and keyset filters.
+          const toolEvents = sql`${schema.sessionEvents.type} in ('agent.toolCall.created', 'agent.toolCall.output')`;
+          const calls = unionAll(
+            query([
+              toolEvents,
+              sql`${schema.sessionEvents.toolCallId} is not null and octet_length(${schema.sessionEvents.toolCallId}) <= 2048`,
+              eq(schema.sessionEvents.toolCallId, options.callId!),
+            ]),
+            query([
+              toolEvents,
+              sql`(${schema.sessionEvents.toolCallId} is null or octet_length(${schema.sessionEvents.toolCallId}) > 2048)`,
+              callIdPredicate!,
+            ]),
+          ).as("tool_call_pages");
+          return tx
+            .select()
+            .from(calls)
+            .orderBy(direction === "before" ? desc(calls.sequence) : asc(calls.sequence))
+            .limit(limit + 1);
+        }
         // Literal partial-index predicates also work with generic prepared plans.
         // These branches are disjoint and together cover every created call.
         // Limit each ordered branch before merging: no global top N needs more

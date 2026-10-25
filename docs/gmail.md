@@ -41,6 +41,44 @@ dedicated operations or `addLabelIds: ["TRASH"]`; batch changes use the latter. 
 permanently removes that unsent draft; permanent deletion of messages/threads is
 not exposed because it requires the broader full-mail scope.
 
+## Model-visible results
+
+Codemode, the spill file and every programmatic caller receive the exact
+results described on this page. A model call receives a compact copy from the
+bridge's `projectModelToolResult` hook
+(`packages/runtime/src/gmail-model-projection.ts`), applied at the per-caller
+seam before the 1 MiB model limit:
+
+- `search_messages`, `search_threads`, `get_thread` and `list_drafts` return
+  one card per message: `id`, `threadId` (and `draftId`/`messageId` for
+  drafts), `sender`, `replyTo` when the root Reply-To header names an address
+  the sender does not, non-empty `toRecipients`/`ccRecipients`/`bccRecipients`,
+  `dateTime` (or the raw `date` when unparseable), `subject`, `labelIds` and
+  attachment file names. Full-content views add `plaintextBody`: the plain-text
+  part, or text extracted from the HTML part when there is none
+  (`bodyFromHtml: true`), with whitespace and invisible preheader padding
+  collapsed. Bodies are cut so the whole result fits the current model's
+  tool-output budget (`modelToolOutputTruncationTokens`, 10,000 tokens or
+  about 47 KB of text by default), so the generic middle truncation never
+  drops whole messages: bodies share what the other fields leave, short bodies
+  give their unused share to long ones, and each body keeps between 200 and
+  4,000 characters. `contentTruncated` is true when this cut or the bridge's
+  256 Ki cap shortened it.
+  Gmail's `snippet` is kept only without a plain-text body. The raw root
+  header array, MIME parts, HTML body, attachment tokens, size and history
+  fields are dropped, and `readWith: "get_message"` names the complete read.
+  A realistic 50-message `FULL_CONTENT` page measures about 3.5 MB exact and
+  about 47 KB of model-visible text (about 580 body characters per message);
+  a 6-message thread keeps up to 4,000 per message.
+- `get_message` keeps everything (root headers, MIME parts, the full bounded
+  plain-text body) except the HTML body when a plain-text body exists
+  (`htmlBodyOmitted: true`). A message with only HTML keeps its markup while
+  the result fits the budget; a larger one carries the HTML's readable text
+  instead (`bodyFromHtml: true`, `htmlBodyOmitted: true`). A body still longer
+  than the budget is middle-truncated by the generic tool-output policy.
+
+Errors and unrecognized result shapes are returned unchanged.
+
 ## Files and composing
 
 `get_message` preserves all root headers and MIME part metadata, including

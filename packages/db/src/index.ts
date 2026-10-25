@@ -48,6 +48,7 @@ import {
   decideSecretUseApprovalTx,
   secretUseApprovalsForSessionTx,
   secretUseApprovalView,
+  type SecretUseApprovalRow,
 } from "./secret-use-approvals";
 import type { VaultDbContext } from "./vaults";
 import { browserDeadlineCheckpoint } from "./browser-deadline-checkpoints";
@@ -897,6 +898,9 @@ import {
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   TimelineAnnotations,
   renderUserMessageContentForModel,
+  MESSAGE_TIME_ZONE_METADATA_KEY,
+  messageTimeZoneFromTurnMetadata,
+  normalizeMessageTimeZone,
   SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -946,8 +950,10 @@ import {
   OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
   HumanInputQuestion as HumanInputQuestionContract,
   canonicalSkillReviewQuestion,
+  secretUseApprovalDecisionSummary,
   secretUseApprovalHumanInput,
   secretUseApprovalIdFromQuestionId,
+  secretUseApprovalQuestionId,
   SECRET_USE_APPROVAL_DECISIONS,
   type SecretUseApprovalDecision,
   SubmitHumanInputResponseRequest,
@@ -8281,6 +8287,7 @@ export function durableUserHistoryItem(
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | null,
   sender?: string | null,
+  timeZone?: string | null,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -8295,6 +8302,7 @@ export function durableUserHistoryItem(
       goalSnapshot,
       sentAt,
       sender,
+      timeZone,
     ),
     ...(attachmentRefs.length > 0
       ? {
@@ -9363,6 +9371,13 @@ export async function completeFileUpload(
   db: Database,
   workspaceId: string,
   uploadId: string,
+  options: {
+    /**
+     * Digest the server computed from the stored bytes. Recorded only when the
+     * file has none: a client digest is never replaced.
+     */
+    computedSha256?: string | undefined;
+  } = {},
 ): Promise<FileAsset> {
   return await withWorkspaceRls(
     db,
@@ -9410,6 +9425,9 @@ export async function completeFileUpload(
           .update(schema.files)
           .set({
             status: "ready",
+            ...(options.computedSha256 && !fileRow.sha256
+              ? { sha256: options.computedSha256 }
+              : {}),
             updatedAt: now,
           })
           .where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileRow.id)))
@@ -19443,6 +19461,7 @@ type AutomationWaitRow = {
   triggerStatus: string | null;
   triggerPosition: number | null;
   eventTypes: string[] | null;
+  sourceId: string | null;
   sourceKind: string | null;
   sourceName: string | null;
   sourceVisibility: string | null;
@@ -19451,6 +19470,14 @@ type AutomationWaitRow = {
   eventsCompletedAt: Date | null;
   hasEventSettings: string | null;
 };
+
+type AutomationWaitEvent = NonNullable<SessionAutomationWaitSummary["event"]>;
+
+/** Both lists of event types as one, in order; every event covers the rest. */
+function mergedWaitEventTypes(left: readonly string[], right: readonly string[]): string[] {
+  if (left.includes("*") || right.includes("*")) return ["*"];
+  return [...new Set([...left, ...right])];
+}
 
 /**
  * What the automations the reader can see are waiting for, per session. A
@@ -19480,37 +19507,52 @@ function automationWaitSummaries(
       left.rows[0]!.taskId.localeCompare(right.rows[0]!.taskId),
   );
   const waits = new Map<string, SessionAutomationWaitSummary>();
+  // Each chat's events by source id ("" for the ones the reader can't see).
+  const sourceEvents = new Map<string, Map<string, AutomationWaitEvent>>();
   for (const { sessionId, rows: taskRows } of ordered) {
     const task = taskRows[0]!;
     if (task.status !== "active" || (task.eventsOnce && task.eventsCompletedAt)) continue;
     const nextRun = scheduledTaskHasUpcomingRun(task, now)
       ? scheduledTaskNextRunAt(task.schedule, now)
       : null;
-    const trigger = task.hasEventSettings
+    const triggers = task.hasEventSettings
       ? taskRows
           .filter((row) => row.triggerStatus === "active")
-          .sort((left, right) => left.triggerPosition! - right.triggerPosition!)[0]
-      : undefined;
-    if (!nextRun && !trigger) continue;
-    const wait = waits.get(sessionId) ?? { nextRunAt: null, event: null, automations: 0 };
+          .sort((left, right) => left.triggerPosition! - right.triggerPosition!)
+      : [];
+    if (!nextRun && triggers.length === 0) continue;
+    const wait = waits.get(sessionId) ?? {
+      nextRunAt: null,
+      event: null,
+      events: [],
+      automations: 0,
+    };
     wait.automations += 1;
     if (nextRun && (!wait.nextRunAt || nextRun.getTime() < Date.parse(wait.nextRunAt))) {
       wait.nextRunAt = nextRun.toISOString();
     }
-    if (trigger && !wait.event) {
-      wait.event = {
-        source:
-          trigger.sourceKind &&
-          trigger.sourceName !== null &&
-          visible(trigger.sourceVisibility, trigger.sourceOwnerSubjectId, "workspace")
-            ? {
-                kind: trigger.sourceKind as EventSourceKind,
-                name: trigger.sourceName,
-              }
-            : null,
-        eventTypes: trigger.eventTypes ?? [],
-      };
+    const bySource = sourceEvents.get(sessionId) ?? new Map<string, AutomationWaitEvent>();
+    for (const trigger of triggers) {
+      const source =
+        trigger.sourceId &&
+        trigger.sourceKind &&
+        trigger.sourceName !== null &&
+        visible(trigger.sourceVisibility, trigger.sourceOwnerSubjectId, "workspace")
+          ? { kind: trigger.sourceKind as EventSourceKind, name: trigger.sourceName }
+          : null;
+      const eventTypes = trigger.eventTypes ?? [];
+      wait.event ??= { source, eventTypes: [...eventTypes] };
+      const key = source ? trigger.sourceId! : "";
+      const entry = bySource.get(key);
+      if (entry) {
+        entry.eventTypes = mergedWaitEventTypes(entry.eventTypes, eventTypes);
+      } else {
+        const added = { source, eventTypes: mergedWaitEventTypes([], eventTypes) };
+        bySource.set(key, added);
+        wait.events!.push(added);
+      }
     }
+    sourceEvents.set(sessionId, bySource);
     waits.set(sessionId, wait);
   }
   return waits;
@@ -19552,6 +19594,7 @@ export async function sessionScheduleTargets(
         triggerStatus: schema.eventTriggers.status,
         triggerPosition: schema.eventTriggers.position,
         eventTypes: schema.eventTriggers.eventTypes,
+        sourceId: schema.eventSources.id,
         sourceKind: schema.eventSources.kind,
         sourceName: schema.eventSources.name,
         sourceVisibility: schema.eventSources.visibility,
@@ -39419,6 +39462,7 @@ function mapSessionHumanInputRequest(
     turnGeneration: row.turnGeneration,
     creationAttemptId: row.creationAttemptId,
     toolCallId: row.toolCallId,
+    origin: row.origin === "secret_use_approval" ? "secret_use_approval" : "tool_call",
     status: row.status as SessionHumanInputRequest["status"],
     questions: row.questions,
     allowSkip: row.allowSkip,
@@ -39464,7 +39508,8 @@ export async function listSessionHumanInputRequests(
     const actionablePendingIds =
       options.status === "pending"
         ? await scopedDb.execute<{ id: string }>(sql`
-            select request_row.id
+            select actionable.id from (
+            select request_row.id, request_row.created_at
             from session_human_input_requests request_row
             join sessions session_row
               on session_row.workspace_id = request_row.workspace_id
@@ -39480,6 +39525,7 @@ export async function listSessionHumanInputRequests(
             where request_row.workspace_id = ${workspaceId}
               and request_row.session_id = ${sessionId}
               and request_row.status = 'pending'
+              and request_row.origin = 'tool_call'
               and (request_row.expires_at is null or request_row.expires_at > now())
               and session_row.status = 'requires_action'
               and session_row.active_turn_id = request_row.turn_id
@@ -39495,7 +39541,16 @@ export async function listSessionHumanInputRequests(
                   and accepted_row.type in ('user.approvalDecision', 'user.humanInputResponse')
                   and accepted_row.sequence > trigger_row.sequence
               )
-            order by request_row.created_at desc, request_row.id desc
+            union all
+            -- Opengeni's own approval cards wait on no turn: pending is actionable.
+            select request_row.id, request_row.created_at
+            from session_human_input_requests request_row
+            where request_row.workspace_id = ${workspaceId}
+              and request_row.session_id = ${sessionId}
+              and request_row.status = 'pending'
+              and request_row.origin = 'secret_use_approval'
+            ) actionable
+            order by actionable.created_at desc, actionable.id desc
             limit ${limit}
           `)
         : null;
@@ -39715,7 +39770,8 @@ export type AcceptSessionHumanInputResponseResult =
       request: SessionHumanInputRequest;
       event: SessionEvent;
       events: SessionEvent[];
-      workflowWakeRevision: number;
+      /** Null when no wake was needed (an approval card answered while its chat is busy). */
+      workflowWakeRevision: number | null;
     }
   | {
       action: "completed";
@@ -39808,6 +39864,328 @@ async function humanInputResponseEventForRequest(
   return event ? mapEvent(event) : null;
 }
 
+type AcceptSessionHumanInputResponseInput = Parameters<typeof acceptSessionHumanInputResponse>[1];
+
+async function humanInputRequestIsSecretUseApprovalCard(
+  db: Database,
+  input: Pick<AcceptSessionHumanInputResponseInput, "workspaceId" | "sessionId" | "requestId">,
+): Promise<boolean> {
+  if (!UUID_PATTERN.test(input.requestId)) return false;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ origin: schema.sessionHumanInputRequests.origin })
+      .from(schema.sessionHumanInputRequests)
+      .where(
+        and(
+          eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+          eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+          eq(schema.sessionHumanInputRequests.id, input.requestId),
+        ),
+      )
+      .limit(1);
+    return row?.origin === "secret_use_approval";
+  });
+}
+
+/** Unwinds the answer transaction when another answer settled the card first. */
+class SecretUseApprovalCardSettledError extends Error {
+  constructor() {
+    super("The approval card was already answered");
+  }
+}
+
+/**
+ * Answer one of Opengeni's own secret approval cards. Only the person the
+ * blocked run acted for, signed in to Opengeni themselves, may answer, with
+ * one of the card's choices. In one transaction the card is answered, the
+ * request becomes a grant (or a denial), and the agent gets a
+ * `secret_use_approval_decided` input that wakes an idle chat. The turn that
+ * was blocked is never resumed: nothing ran, so the agent retries the call.
+ */
+async function acceptSecretUseApprovalCardResponse(
+  db: Database,
+  input: AcceptSessionHumanInputResponseInput,
+): Promise<AcceptSessionHumanInputResponseResult> {
+  const loaded = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [request] = await scopedDb
+      .select()
+      .from(schema.sessionHumanInputRequests)
+      .where(
+        and(
+          eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+          eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+          eq(schema.sessionHumanInputRequests.id, input.requestId),
+        ),
+      )
+      .limit(1);
+    if (!request) return null;
+    const approvalId = secretUseApprovalIdFromQuestionId(request.toolCallId);
+    const approvals = approvalId
+      ? await secretUseApprovalsForSessionTx(scopedDb, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          ids: [approvalId],
+        })
+      : new Map<string, SecretUseApprovalRow>();
+    const sameSubmission = input.clientEventId
+      ? (
+          await scopedDb
+            .select()
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, input.sessionId),
+                eq(schema.sessionEvents.clientEventId, input.clientEventId),
+              ),
+            )
+            .limit(1)
+        )[0]
+      : undefined;
+    const answer =
+      request.status === "pending"
+        ? null
+        : await humanInputResponseEventForRequest(scopedDb, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            requestId: request.id,
+          });
+    return {
+      request,
+      approval: approvalId ? (approvals.get(approvalId) ?? null) : null,
+      sameSubmission,
+      answer,
+    };
+  });
+  if (!loaded) return { action: "not_found" };
+  const { request, approval } = loaded;
+  const settled = async (): Promise<AcceptSessionHumanInputResponseResult> => {
+    const current = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+      const [row] = await scopedDb
+        .select()
+        .from(schema.sessionHumanInputRequests)
+        .where(
+          and(
+            eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+            eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+            eq(schema.sessionHumanInputRequests.id, input.requestId),
+          ),
+        )
+        .limit(1);
+      const event = row
+        ? await humanInputResponseEventForRequest(scopedDb, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            requestId: row.id,
+          })
+        : null;
+      return row ? { row, event } : null;
+    });
+    if (!current) return { action: "not_found" };
+    const mapped = mapSessionHumanInputRequest(current.row);
+    if (!current.event) {
+      return { action: "conflict", request: mapped, events: [], workflowWakeRevision: null };
+    }
+    return {
+      action: "completed",
+      request: mapped,
+      event: current.event,
+      events: [],
+      workflowWakeRevision: null,
+      settledBy:
+        input.clientEventId && current.event.clientEventId === input.clientEventId
+          ? "same_submission"
+          : "earlier_response",
+    };
+  };
+  if (loaded.sameSubmission) {
+    if (
+      loaded.sameSubmission.type !== "user.humanInputResponse" ||
+      (loaded.sameSubmission.payload as { requestId?: unknown }).requestId !== request.id
+    ) {
+      throw new Error("clientEventId belongs to a different session operation");
+    }
+    return await settled();
+  }
+  if (request.status !== "pending") return await settled();
+  const mappedRequest = mapSessionHumanInputRequest(request);
+  // The card has no deadline, so there is nothing to expire.
+  if (input.expireOnly) {
+    return { action: "conflict", request: mappedRequest, events: [], workflowWakeRevision: null };
+  }
+  if ((input.secretAnswers?.length ?? 0) > 0) {
+    throw new HumanInputResponseValidationError(
+      "INVALID_RESPONSE",
+      "An approval card takes no secret answers.",
+    );
+  }
+  const response = validateHumanInputResponse(mappedRequest, input.response);
+  const question = request.questions[0];
+  const answer =
+    response.outcome === "answered" && question
+      ? response.answers.find((candidate) => candidate.questionId === question.id)
+      : undefined;
+  const decision = answer?.values[0];
+  if (
+    !answer ||
+    answer.values.length !== 1 ||
+    Boolean(answer.other?.trim()) ||
+    !(SECRET_USE_APPROVAL_DECISIONS as readonly string[]).includes(decision ?? "")
+  ) {
+    throw new HumanInputResponseValidationError(
+      "INVALID_RESPONSE",
+      "Choose one of the card's options to allow or deny this secret.",
+    );
+  }
+  const responderKind = childRequiresActionRespondedByKindFor(
+    input.respondedBy,
+    input.respondedByKind,
+  );
+  if (
+    responderKind !== "human" ||
+    input.personSignedIn !== true ||
+    !approval ||
+    input.respondedBy !== approval.approverSubjectId
+  ) {
+    throw new HumanInputResponseValidationError(
+      "HUMAN_AUTH_REQUIRED",
+      "Only the person this agent works for can allow it to use this secret, signed in to Opengeni themselves.",
+    );
+  }
+  const chosen = decision as SecretUseApprovalDecision;
+  const view = secretUseApprovalView(approval);
+  const answered: { event?: SessionEvent; request?: SessionHumanInputRequest } = {};
+  try {
+    const result = await withWorkspaceSessionActivityRls(db, input.workspaceId, (scopedDb) =>
+      addSessionSystemUpdateWithSourceMutation(
+        scopedDb,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          kind: "secret_use_approval_decided",
+          classification: chosen === "deny" ? "info" : "action_required",
+          sourceId: approval.id,
+          dedupeKey: `secret-use-approval-decided:${approval.id}`,
+          summary: secretUseApprovalDecisionSummary(view, chosen),
+          payload: {
+            type: "secret_use_approval_decided",
+            approvalId: approval.id,
+            requestId: request.id,
+            decision: chosen,
+            secrets: view.targets
+              .slice(0, 20)
+              .map((target) =>
+                (target.fieldName
+                  ? `${target.itemName} › ${target.fieldName}`
+                  : target.itemName
+                ).slice(0, 512),
+              ),
+            surface: view.surface.slice(0, 64),
+            toolName: view.toolName.slice(0, 200),
+            destination: view.destination?.slice(0, 500) ?? null,
+          },
+        },
+        async () => undefined,
+        {
+          prepareSource: async (tx, sessionId) => {
+            const locks = await lockSessionEventWriteRows(tx, {
+              workspaceId: input.workspaceId,
+              controlLock: "share",
+              sessionIds: [sessionId],
+            });
+            const session = locks.sessions[0];
+            if (!session) throw new Error("Failed to answer the approval card");
+            const [locked] = await tx
+              .select()
+              .from(schema.sessionHumanInputRequests)
+              .where(
+                and(
+                  eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+                  eq(schema.sessionHumanInputRequests.sessionId, sessionId),
+                  eq(schema.sessionHumanInputRequests.id, request.id),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            if (locked?.status !== "pending") throw new SecretUseApprovalCardSettledError();
+            const now = new Date();
+            const decided = await decideSecretUseApprovalTx(tx, {
+              workspaceId: input.workspaceId,
+              sessionId,
+              approvalId: approval.id,
+              decision: chosen,
+              subjectId: input.respondedBy,
+              now,
+            });
+            if (!decided) throw new SecretUseApprovalCardSettledError();
+            const [updated] = await tx
+              .update(schema.sessionHumanInputRequests)
+              .set({
+                status: "answered",
+                response,
+                respondedBy: input.respondedBy,
+                respondedAt: now,
+                updatedAt: now,
+              })
+              .where(eq(schema.sessionHumanInputRequests.id, request.id))
+              .returning();
+            if (!updated) throw new Error("Failed to answer the approval card");
+            // Turnless: the card belongs to no waiting turn, and the answer
+            // must not read as a resume of the turn that was blocked.
+            const [event] = await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId,
+                    sequence: session.lastSequence + 1,
+                    type: "user.humanInputResponse",
+                    payload: { requestId: request.id, response, respondedByKind: responderKind },
+                    clientEventId: input.clientEventId ?? null,
+                    occurredAt: now,
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning();
+            if (!event) throw new Error("Failed to append the approval card's answer");
+            await tx
+              .update(schema.sessions)
+              .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+              .where(eq(schema.sessions.id, sessionId));
+            answered.event = mapEvent(event);
+            answered.request = mapSessionHumanInputRequest(updated);
+            return { events: [answered.event] };
+          },
+        },
+      ),
+    );
+    if (!("update" in result) || !answered.event || !answered.request) {
+      // An archived or cancelled chat takes no more work.
+      return {
+        action: "conflict",
+        request: mappedRequest,
+        events: [],
+        workflowWakeRevision: null,
+      };
+    }
+    return {
+      action: "accepted",
+      request: answered.request,
+      event: answered.event,
+      events: result.events,
+      workflowWakeRevision: result.workflowWakeRevision,
+    };
+  } catch (error) {
+    if (error instanceof SecretUseApprovalCardSettledError) return await settled();
+    throw error;
+  }
+}
+
 /**
  * First-writer-wins settlement for one structured input boundary. Session +
  * logical turn + current freeze generation are locked with the row; the
@@ -39849,6 +40227,11 @@ export async function acceptSessionHumanInputResponse(
     secretWriteContext?: VaultDbContext;
   },
 ): Promise<AcceptSessionHumanInputResponseResult> {
+  // Opengeni's own secret approval cards wait on no turn; their answer is a
+  // grant plus a machine input for the agent. `origin` never changes.
+  if (await humanInputRequestIsSecretUseApprovalCard(db, input)) {
+    return await acceptSecretUseApprovalCardResponse(db, input);
+  }
   const secretAnswers = input.expireOnly ? [] : (input.secretAnswers ?? []);
   const secretAnswerQuestionIds = new Set(secretAnswers.map((answer) => answer.questionId));
   if (secretAnswerQuestionIds.size !== secretAnswers.length) {
@@ -40159,75 +40542,6 @@ export async function acceptSessionHumanInputResponse(
             "Choose Save or Don't save for this Skill review.",
           );
         }
-        // Secret approval cards: only the person the run acts for decides,
-        // signed in themselves, with one of the card's own choices. The only
-        // other answer is the system denying on a scheduled run's timeout.
-        const secretApprovalAnswers: Array<{
-          approvalId: string;
-          decision: SecretUseApprovalDecision;
-        }> = [];
-        const boundApprovals = expired
-          ? new Map()
-          : await secretUseApprovalsForSessionTx(tx as unknown as Database, {
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              ids: request.questions.flatMap((question) => {
-                const id = secretUseApprovalIdFromQuestionId(question.id);
-                return id === null ? [] : [id];
-              }),
-            });
-        if (boundApprovals.size > 0) {
-          const responderKind = childRequiresActionRespondedByKindFor(
-            input.respondedBy,
-            input.respondedByKind,
-          );
-          const answered = response.outcome === "answered" ? response.answers : null;
-          const systemDenial =
-            responderKind === "system" &&
-            answered !== null &&
-            [...boundApprovals.keys()].every((approvalId) =>
-              answered.some(
-                (answer) =>
-                  secretUseApprovalIdFromQuestionId(answer.questionId) === approvalId &&
-                  answer.values.length === 1 &&
-                  answer.values[0] === "deny",
-              ),
-            );
-          for (const approval of boundApprovals.values()) {
-            if (
-              !systemDenial &&
-              (responderKind !== "human" ||
-                input.personSignedIn !== true ||
-                input.respondedBy !== approval.approverSubjectId)
-            ) {
-              throw new HumanInputResponseValidationError(
-                "HUMAN_AUTH_REQUIRED",
-                "Only the person this agent works for can allow it to use this secret, signed in to Opengeni themselves.",
-              );
-            }
-          }
-          if (response.outcome === "answered") {
-            for (const answer of response.answers) {
-              const approvalId = secretUseApprovalIdFromQuestionId(answer.questionId);
-              if (approvalId === null || !boundApprovals.has(approvalId)) continue;
-              const decision = answer.values[0];
-              if (
-                answer.values.length !== 1 ||
-                Boolean(answer.other?.trim()) ||
-                !(SECRET_USE_APPROVAL_DECISIONS as readonly string[]).includes(decision ?? "")
-              ) {
-                throw new HumanInputResponseValidationError(
-                  "INVALID_RESPONSE",
-                  "Choose one of the card's options to allow or deny this secret.",
-                );
-              }
-              secretApprovalAnswers.push({
-                approvalId,
-                decision: decision as SecretUseApprovalDecision,
-              });
-            }
-          }
-        }
         if (response.outcome === "answered" && secretAnswers.length > 0) {
           if (
             secretAnswers.some((answer) => answer.saveTo === "user") &&
@@ -40300,16 +40614,6 @@ export async function acceptSessionHumanInputResponse(
             workspaceId: input.workspaceId,
             subjectId: input.respondedBy,
             requestId: request.id,
-          });
-        }
-        for (const answer of secretApprovalAnswers) {
-          await decideSecretUseApprovalTx(tx as unknown as Database, {
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            approvalId: answer.approvalId,
-            decision: answer.decision,
-            subjectId: input.respondedBy,
-            now,
           });
         }
         await applySessionResponseMcpCredentialUpdatesInTransaction(
@@ -71241,6 +71545,11 @@ export type InitializeSessionStartInput = {
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
   /**
+   * Normalized IANA zone of the person sending the initial message, frozen in
+   * the initial turn's metadata.
+   */
+  initialTimeZone?: string;
+  /**
    * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
    * scheduled firing passes its task's value, which is copied, never
    * recomputed. Omitted by every other caller (the acceptance rule applies).
@@ -71296,6 +71605,14 @@ export type InitializeSessionStartResult = {
   /** True when this call installed/repaired start state or committed a new wake revision. */
   changed: boolean;
 };
+
+/** Trusted per-message facts the create request froze for the initial turn. */
+function initialTurnMetadata(
+  input: Pick<InitializeSessionStartInput, "initialTimeZone">,
+): Record<string, unknown> {
+  const timeZone = normalizeMessageTimeZone(input.initialTimeZone);
+  return timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {};
+}
 
 /**
  * Install a newly created session's complete first runnable unit atomically.
@@ -71854,8 +72171,11 @@ export async function initializeSessionStartAtomically(
                   sandboxBackend: session.sandboxBackend,
                   sandboxOs: session.sandboxOs,
                   metadata: input.turnExecutionPolicy
-                    ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
-                    : {},
+                    ? metadataWithTurnExecutionPolicyV1(
+                        initialTurnMetadata(input),
+                        input.turnExecutionPolicy,
+                      )
+                    : initialTurnMetadata(input),
                   lineage: {},
                   ...initiatorColumns(creator),
                   initiatingHumanSubjectId: initialTurnInitiatingHumanSubjectId,
@@ -76572,6 +76892,8 @@ export async function claimSessionWorkForAttempt(
                     // moment the user sent it.
                     historyTurn.createdAt,
                     humanTurnSenderLabel(historyTurn),
+                    // The sender's zone frozen in the turn at acceptance.
+                    messageTimeZoneFromTurnMetadata(historyTurn.metadata),
                   ),
                 ),
               },
@@ -78495,6 +78817,7 @@ export async function peekSessionWork(
               eq(schema.sessionHumanInputRequests.turnId, turn.id),
               eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
               eq(schema.sessionHumanInputRequests.status, "pending"),
+              eq(schema.sessionHumanInputRequests.origin, "tool_call"),
               isNotNull(schema.sessionHumanInputRequests.expiresAt),
             ),
           )
@@ -79619,6 +79942,7 @@ async function settleSessionWorkBeforeAttemptClaim(
                 eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
                 eq(schema.sessionHumanInputRequests.turnId, turn.id),
                 eq(schema.sessionHumanInputRequests.status, "pending"),
+                eq(schema.sessionHumanInputRequests.origin, "tool_call"),
               ),
             )
             .returning({
@@ -81964,6 +82288,7 @@ export async function applySessionTurnSettlement(
               eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
               eq(schema.sessionHumanInputRequests.turnId, input.turnId),
               eq(schema.sessionHumanInputRequests.status, "pending"),
+              eq(schema.sessionHumanInputRequests.origin, "tool_call"),
             ),
           )
           .limit(1)
@@ -82051,23 +82376,11 @@ export async function applySessionTurnSettlement(
         return { action: "pending_steer_withdrawn" as const, events: [] as [] };
       }
 
-      // A secret approval card is bound to its stored request by question id;
-      // the host's own text replaces whatever the agent sent, so the person
-      // always sees what is really being approved.
-      const secretApprovals = await secretUseApprovalsForSessionTx(tx as unknown as Database, {
-        workspaceId,
-        sessionId: input.sessionId,
-        ids: (input.runState?.humanInputRequests ?? []).flatMap((request) =>
-          request.questions.flatMap((question) => {
-            const id = secretUseApprovalIdFromQuestionId(question.id);
-            return id === null ? [] : [id];
-          }),
-        ),
-      });
-      const approvalCardRequestIds = new Set<string>();
-      const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => {
-        let approvalCard = false;
-        const questions = request.questions.map((question) => {
+      // Secret approval cards are Opengeni's own (origin secret_use_approval),
+      // never an agent's request: the runtime refuses to ask with one.
+      const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => ({
+        ...request,
+        questions: request.questions.map((question) => {
           const parsed = HumanInputQuestionContract.parse(question);
           if (parsed.skillReview) {
             const canonical = canonicalSkillReviewQuestion(question);
@@ -82076,19 +82389,11 @@ export async function applySessionTurnSettlement(
             }
             return canonical;
           }
-          const approvalId = secretUseApprovalIdFromQuestionId(parsed.id);
-          const approval = approvalId === null ? undefined : secretApprovals.get(approvalId);
-          if (approval) {
-            approvalCard = true;
-            return secretUseApprovalHumanInput(secretUseApprovalView(approval)).questions[0]!;
-          }
           return parsed.kind === "text" || parsed.allowOther
             ? parsed
             : { ...parsed, allowOther: true };
-        });
-        if (approvalCard) approvalCardRequestIds.add(request.id);
-        return { ...request, questions, ...(approvalCard ? { allowSkip: false } : {}) };
-      });
+        }),
+      }));
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
@@ -82467,6 +82772,7 @@ export async function applySessionTurnSettlement(
                 eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
                 eq(schema.sessionHumanInputRequests.turnId, input.turnId),
                 eq(schema.sessionHumanInputRequests.status, "pending"),
+                eq(schema.sessionHumanInputRequests.origin, "tool_call"),
               ),
             )
             .returning({
@@ -82598,50 +82904,13 @@ export async function applySessionTurnSettlement(
           };
         }
       }
-      // The requested event feeds push, chat integrations and timelines, so
-      // an approval card's event carries the same host text as its row.
-      const canonicalApprovalRequests = new Map(
-        humanInputRequests
-          .filter((request) => approvalCardRequestIds.has(request.id))
-          .map((request) => [request.id, request]),
-      );
-      const turnEvents =
-        canonicalApprovalRequests.size === 0
-          ? input.events
-          : input.events.map((event) => {
-              if (event.type !== "session.humanInput.requested") return event;
-              const payload =
-                event.payload && typeof event.payload === "object"
-                  ? (event.payload as Record<string, unknown>)
-                  : null;
-              const request =
-                payload?.request && typeof payload.request === "object"
-                  ? (payload.request as Record<string, unknown>)
-                  : null;
-              const canonical =
-                typeof request?.id === "string"
-                  ? canonicalApprovalRequests.get(request.id)
-                  : undefined;
-              if (!payload || !request || !canonical) return event;
-              return {
-                ...event,
-                payload: {
-                  ...payload,
-                  request: {
-                    ...request,
-                    questions: canonical.questions,
-                    allowSkip: canonical.allowSkip,
-                  },
-                },
-              };
-            });
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
         ...terminalHumanInputEvents,
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
-        ...turnEvents,
+        ...input.events,
         ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
       ];
       const values = settlementEvents.map((event) => {
@@ -84122,6 +84391,53 @@ export async function getSessionTurn(
       )
       .limit(1);
     return row ? mapSessionTurn(row) : null;
+  });
+}
+
+/** How many of a session's newest finished turns the message-zone lookup reads. */
+const LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW = 64;
+
+/**
+ * The time zone of the newest finished turn in a session whose message
+ * carried one, among its latest {@link LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW}
+ * finished turns. Walks the newest-finished-first index and stops there, so a
+ * long session costs one bounded index range.
+ */
+export async function getLatestSessionMessageTimeZone(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | undefined> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const recent = scopedDb
+      .select({
+        metadata: schema.sessionTurns.metadata,
+        finishedAt: schema.sessionTurns.finishedAt,
+        position: schema.sessionTurns.position,
+        createdAt: schema.sessionTurns.createdAt,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          isNotNull(schema.sessionTurns.finishedAt),
+        ),
+      )
+      .orderBy(
+        desc(schema.sessionTurns.finishedAt),
+        desc(schema.sessionTurns.position),
+        desc(schema.sessionTurns.createdAt),
+      )
+      .limit(LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW)
+      .as("recent");
+    const rows = await scopedDb
+      .select({ metadata: recent.metadata })
+      .from(recent)
+      .where(sql`${recent.metadata} ? ${MESSAGE_TIME_ZONE_METADATA_KEY}`)
+      .orderBy(desc(recent.finishedAt), desc(recent.position), desc(recent.createdAt))
+      .limit(1);
+    return messageTimeZoneFromTurnMetadata(rows[0]?.metadata);
   });
 }
 
@@ -88064,6 +88380,7 @@ async function scheduledHumanWaitTargetInRlsContext(
         eq(schema.sessionHumanInputRequests.turnId, turn.id),
         eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
         eq(schema.sessionHumanInputRequests.status, "pending"),
+        eq(schema.sessionHumanInputRequests.origin, "tool_call"),
       ),
     )
     .orderBy(
@@ -88412,6 +88729,113 @@ export async function appendTurnCapabilityCardOnce(
 }
 
 export type SessionEventAppendClass = "raw" | "semantic" | "mixed";
+
+/**
+ * Post Opengeni's own approval card for a blocked secret use, in the chat of
+ * the exact attempt that was blocked. The card is a `secret_use_approval`
+ * human-input request: its `session.humanInput.requested` event shows it in
+ * the chat and Slack thread and opens the person's inbox item and phone
+ * notification, and it stays answerable after the turn. A request that
+ * already has a pending card is not posted again, so an identical blocked
+ * use never notifies twice. Returns whether the person has been asked; false
+ * only when this attempt no longer owns the chat or the request was decided.
+ */
+export async function postSecretUseApprovalCard(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    approval: SecretUseApprovalRow;
+  },
+): Promise<{ asked: boolean; requestId: string | null; events: SessionEvent[] }> {
+  const card = secretUseApprovalHumanInput(secretUseApprovalView(input.approval));
+  const toolCallId = secretUseApprovalQuestionId(input.approval.id);
+  const requestId = crypto.randomUUID();
+  let existingId: string | null = null;
+  const result = await mutateAndAppendSessionEventsForTurnAttempt(
+    db,
+    input.workspaceId,
+    input.sessionId,
+    input.turnId,
+    input.executionGeneration,
+    input.attemptId,
+    [
+      {
+        type: "session.humanInput.requested",
+        payload: {
+          request: {
+            id: requestId,
+            questions: card.questions,
+            allowSkip: false,
+            expiresAt: null,
+            origin: "secret_use_approval",
+          },
+        },
+      },
+    ],
+    {
+      rowProjection: "event",
+      // The attempt fence holds the session row, which also serializes the
+      // answer path: the request's state read here is current.
+      mutate: async (tx, fence) => {
+        existingId = null;
+        const [existing] = await tx
+          .select({ id: schema.sessionHumanInputRequests.id })
+          .from(schema.sessionHumanInputRequests)
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+              eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+              eq(schema.sessionHumanInputRequests.toolCallId, toolCallId),
+              eq(schema.sessionHumanInputRequests.origin, "secret_use_approval"),
+              eq(schema.sessionHumanInputRequests.status, "pending"),
+            ),
+          )
+          .limit(1);
+        if (existing) {
+          existingId = existing.id;
+          return false;
+        }
+        if (!fence.allowed || !fence.session) return false;
+        const [approval] = await tx
+          .select({ status: schema.secretUseApprovals.status })
+          .from(schema.secretUseApprovals)
+          .where(
+            and(
+              eq(schema.secretUseApprovals.workspaceId, input.workspaceId),
+              eq(schema.secretUseApprovals.id, input.approval.id),
+            ),
+          )
+          .limit(1);
+        if (approval?.status !== "pending") return false;
+        const inserted = await tx
+          .insert(schema.sessionHumanInputRequests)
+          .values({
+            id: requestId,
+            accountId: fence.session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            turnGeneration: input.executionGeneration,
+            creationAttemptId: input.attemptId,
+            toolCallId,
+            origin: "secret_use_approval",
+            questions: card.questions,
+            allowSkip: false,
+            expiresAt: null,
+          })
+          .onConflictDoNothing()
+          .returning({ id: schema.sessionHumanInputRequests.id });
+        return inserted.length > 0;
+      },
+    },
+  );
+  if (result.mutationApplied) return { asked: true, requestId, events: result.events };
+  return { asked: existingId !== null, requestId: existingId, events: [] };
+}
 export type SessionEventAppendPhase =
   | "transaction"
   | "mutation"
@@ -90806,6 +91230,7 @@ export * from "./automations";
 export * from "./event-triggers";
 export * from "./mcp-event-subscriptions";
 export * from "./event-source-feeds";
+export * from "./automation-templates";
 export * from "./organization-model-providers";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";

@@ -2,14 +2,15 @@
 // approvals, goals paused on them) and what agents chose to tell them. It is a
 // to-do surface, not an archive: an item leaves once it is answered, resolved,
 // withdrawn or dismissed, and it always stays in its session's timeline.
-import type {
-  InboxItem,
-  InboxSettings,
-  InboxTidyPolicy,
-  SessionHumanInputRequest,
-  SubmitHumanInputResponseRequest,
+import {
+  openGeniConsolePath,
+  type InboxItem,
+  type InboxSettings,
+  type InboxTidyPolicy,
+  type SessionHumanInputRequest,
+  type SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { HumanInputForm, SecretRefText } from "@opengeni/react/session-ui";
+import { HumanInputForm, OpenGeniLinkProvider, SecretRefText } from "@opengeni/react/session-ui";
 import {
   notificationPlainText,
   parseNotificationText,
@@ -1027,14 +1028,22 @@ function AnswerDialog({
         {loadError ? (
           <Notice tone="failed">{loadError}</Notice>
         ) : request ? (
-          <HumanInputForm
-            request={request}
-            onSubmit={submit}
-            submitting={submitting}
-            error={submitError}
-            allowedSaveTo={secretSaveTargets(context.accessContext, request.workspaceId)}
-            decisionButtons
-          />
+          // Artifact links in the question open the workspace's pages, as in the session.
+          <OpenGeniLinkProvider
+            resolveLink={(target) => {
+              const href = openGeniConsolePath(target, request.workspaceId);
+              return href ? { href } : null;
+            }}
+          >
+            <HumanInputForm
+              request={request}
+              onSubmit={submit}
+              submitting={submitting}
+              error={submitError}
+              allowedSaveTo={secretSaveTargets(context.accessContext, request.workspaceId)}
+              decisionButtons
+            />
+          </OpenGeniLinkProvider>
         ) : (
           <div className="grid gap-3 py-2" aria-busy="true">
             <Skeleton className="h-5 w-3/4" />

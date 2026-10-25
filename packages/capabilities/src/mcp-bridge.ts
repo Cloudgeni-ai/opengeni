@@ -36,6 +36,22 @@ export interface LocalMcpBridgeServer extends MCPServer {
     toolName: string,
     args: Record<string, unknown>,
   ) => Promise<Partial<import("@opengeni/contracts").ToolReviewContext>>;
+  /**
+   * Optional model-visible copy of one exact result of a freshly executed call.
+   * Only the model caller receives the returned value; Codemode and the spill
+   * file keep the exact result. It must be pure and deterministic, return the
+   * input unchanged for any result shape it does not recognize, and never add
+   * facts that the exact result lacks.
+   *
+   * `budget.maxTextBytes` is the model's textual tool-output budget (UTF-8
+   * bytes) after which the generic model-output truncation would cut the
+   * middle of the result; a projection should aim to fit inside it.
+   */
+  projectModelToolResult?: (
+    toolName: string,
+    result: import("@opengeni/contracts").AttemptToolResult,
+    budget: { readonly maxTextBytes: number },
+  ) => import("@opengeni/contracts").AttemptToolResult;
 }
 
 export interface LocalMcpBridgeAdapter<TConfig, TContext> {

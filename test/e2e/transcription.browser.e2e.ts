@@ -147,9 +147,15 @@ describe("native composer voice-input browser acceptance", () => {
     await page.getByRole("button", { name: "Start voice input" }).click();
     await page.getByRole("button", { name: "Stop and transcribe" }).click();
     await page.waitForFunction(
-      () => document.documentElement.dataset.transcriptionUpload === "completed",
+      () =>
+        document.querySelector<HTMLTextAreaElement>("textarea")?.value ===
+        "Existing editable draft fixture transcript",
     );
     expect(await textarea.inputValue()).toBe("Existing editable draft fixture transcript");
+    // Taking the text deletes the dictation from the server.
+    expect(
+      await page.evaluate(() => localStorage.getItem("opengeni.transcription-fixture.server")),
+    ).toBe("{}");
     await textarea.fill("Edited final transcript");
     await page.getByRole("button", { name: "Send message" }).click();
     await page.getByText("Sent: Edited final transcript", { exact: true }).waitFor();
@@ -251,7 +257,7 @@ describe("native composer voice-input browser acceptance", () => {
     await context.close();
   });
 
-  test("embedded container composer keeps a saved recording readable at phone width", async () => {
+  test("embedded container composer keeps a saved transcript readable at phone width", async () => {
     const context = await browser.newContext({
       viewport: { width: 360, height: 800 },
       hasTouch: true,
@@ -262,10 +268,11 @@ describe("native composer voice-input browser acceptance", () => {
     });
     await page.getByRole("button", { name: "Start voice input" }).click();
     await page.getByRole("button", { name: "Stop and transcribe" }).waitFor();
-    // Longer than an accidental start: Escape keeps the dictation.
+    // Longer than an accidental start: Escape keeps the dictation, which is
+    // heard and held for an explicit insert.
     await page.waitForTimeout(3_500);
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Transcribe saved recording" }).waitFor();
+    await page.getByRole("button", { name: "Insert saved transcript" }).waitFor();
     const audit = await page.locator(".og-composer-footer").evaluate((footer) => {
       const label = footer.querySelector<HTMLElement>(".og-transcription-recovered-label");
       const send = footer.querySelector<HTMLElement>('button[aria-label="Send message"]');
@@ -287,7 +294,7 @@ describe("native composer voice-input browser acceptance", () => {
         overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       };
     });
-    expect(audit.text).toBe("Recording saved on this device.");
+    expect(audit.text).toBe("Transcript saved. Insert it into your draft?");
     expect(audit.truncated).toBe(false);
     expect(audit.labelInside).toBe(true);
     expect(audit.sendInside).toBe(true);
@@ -295,24 +302,22 @@ describe("native composer voice-input browser acceptance", () => {
     await context.close();
   });
 
-  test("reload recovers a timesliced recording without reopening the microphone", async () => {
+  test("reload recovers an interrupted dictation without reopening the microphone", async () => {
     const context = await browser.newContext({ viewport: { width: 768, height: 960 } });
     const page = await context.newPage();
     await page.goto(`${baseUrl}/transcription.html?theme=dark`, { waitUntil: "networkidle" });
     await page.getByRole("button", { name: "Start voice input" }).click();
+    // A chunk reached the server while still speaking.
     await page.waitForFunction(
       () => document.documentElement.dataset.transcriptionChunkEmitted === "true",
-    );
-    expect(await page.evaluate(() => document.documentElement.dataset.transcriptionTimeslice)).toBe(
-      "5000",
     );
     expect(
       await page.evaluate(() => document.documentElement.dataset.transcriptionMicRequests),
     ).toBe("1");
 
     await page.reload({ waitUntil: "networkidle" });
-    // The interrupted capture transcribes automatically but is never appended
-    // behind the user's back: it waits for an explicit insert.
+    // The interrupted dictation finishes uploading and is heard, but is never
+    // appended behind the user's back: it waits for an explicit insert.
     const insert = page.getByRole("button", { name: "Insert saved transcript" });
     await insert.waitFor();
     expect(

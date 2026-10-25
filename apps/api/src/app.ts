@@ -345,6 +345,7 @@ import { registerChannelRoutes } from "./routes/channels";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerEventSourceRoutes } from "./routes/event-sources";
+import { registerAutomationTemplateRoutes } from "./routes/automation-templates";
 import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
 import {
@@ -396,8 +397,8 @@ import {
 } from "./routes/managed-auth-session-sets";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
 import { projectClientModel } from "./model-catalog";
-import { createTranscriptionService } from "./transcription/service";
-import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
+import { createTranscriptionService } from "@opengeni/core/transcription-service";
+import { createFfmpegTranscriptionSegmenter } from "@opengeni/core/transcription-service";
 import { registerTeamsBotRoutes } from "./integrations/teams-bot";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
 import { resolveSignedStateSecret } from "./signed-state-secret";
@@ -2333,6 +2334,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerOrganizationIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerEventSourceRoutes(app, routeDeps);
+  registerAutomationTemplateRoutes(app, routeDeps);
   registerRecordingRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);

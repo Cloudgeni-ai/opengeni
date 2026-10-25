@@ -601,6 +601,8 @@ const SettingsSchema = z.object({
   // Operator gate for unverified Gmail/Drive OAuth acquisition; sign-in and refresh are independent.
   googleConnectorSetupEnabled: EnvBoolean.default(true),
   googleDriveMcpEnabled: EnvBoolean.default(false),
+  // Google Calendar shares the Gmail OAuth client; enable once its consent screen lists the Calendar scopes.
+  googleCalendarEnabled: EnvBoolean.default(false),
   microsoftTeamsToolsEnabled: EnvBoolean.default(false),
   microsoftTeamsAllowedWorkspaceIds: z.preprocess(
     (value) =>
@@ -5262,6 +5264,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     googleConnectorSetupEnabled: optional("OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED"),
     googleDriveMcpEnabled: optional("OPENGENI_GOOGLE_DRIVE_MCP_ENABLED"),
+    googleCalendarEnabled: optional("OPENGENI_GOOGLE_CALENDAR_ENABLED"),
     microsoftTeamsToolsEnabled: optional("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED"),
     microsoftTeamsAllowedWorkspaceIds: optional("OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS"),
     teamsBotEnabled: optional("OPENGENI_TEAMS_BOT_ENABLED"),

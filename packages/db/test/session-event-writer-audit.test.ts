@@ -285,6 +285,12 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 2,
     contract: "canonical",
   },
+  // Opengeni's own secret approval card: the answer event, appended in the
+  // decision update's source mutation.
+  "packages/db/src/index.ts#acceptSecretUseApprovalCardResponse": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#persist": {
     inserts: 1,
     contract: "turn_attempt_fence",

@@ -997,6 +997,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         subjectId: "worker:first-party-mcp",
         secretResolver: attemptSecretResolver({
           db,
+          bus,
           settings: githubRestMcp.settings,
           agentConfig: session.agent,
           vaultAccess: deps.vaultAccess,
@@ -1085,6 +1086,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         },
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({ operationId, result }),
+        modelToolOutputTruncationTokens: () =>
+          eventing.modelRunSettings.modelToolOutputTruncationTokens,
         localMcpServers,
         ...(deferNonEagerToolPreparation
           ? {

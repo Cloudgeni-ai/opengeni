@@ -47,6 +47,7 @@ import { ProviderRecoveryNotice } from "./provider-recovery-notice";
 import { currentProviderRecovery } from "../lib/provider-recovery";
 import {
   chainLinkResolvers,
+  OpenGeniLinkProvider,
   sessionLinkResolver,
   useOpenGeniLinkResolver,
   viewerLinkResolver,
@@ -710,23 +711,26 @@ function ConversationView({
                 className="mx-auto max-w-3xl px-1"
                 recovery={providerRecovery}
               />
-              <HumanInputSurface
-                className="mx-auto max-w-3xl"
-                autoFocus={false}
-                decisionButtons
-                {...humanInputProps}
-                loadSkillReview={loadSkillReview}
-                requests={human.requests}
-                onSubmit={async (id, response) => {
-                  // `respond` reports a failed send as null. Reject so the card
-                  // keeps what was typed (including a secret) for a retry.
-                  if (!(await human.respond(id, response))) {
-                    throw new Error(t("sessionConversation.yourAnswerWasnTSent"));
-                  }
-                }}
-                respondingRequestId={human.respondingRequestId}
-                error={human.mutationError ? formatError(human.mutationError) : null}
-              />
+              {/* Links in agent questions resolve like links in its replies. */}
+              <OpenGeniLinkProvider resolveLink={links}>
+                <HumanInputSurface
+                  className="mx-auto max-w-3xl"
+                  autoFocus={false}
+                  decisionButtons
+                  {...humanInputProps}
+                  loadSkillReview={loadSkillReview}
+                  requests={human.requests}
+                  onSubmit={async (id, response) => {
+                    // `respond` reports a failed send as null. Reject so the card
+                    // keeps what was typed (including a secret) for a retry.
+                    if (!(await human.respond(id, response))) {
+                      throw new Error(t("sessionConversation.yourAnswerWasnTSent"));
+                    }
+                  }}
+                  respondingRequestId={human.respondingRequestId}
+                  error={human.mutationError ? formatError(human.mutationError) : null}
+                />
+              </OpenGeniLinkProvider>
               <ConversationChrome
                 sessionId={sessionId}
                 client={context.client}
@@ -1044,7 +1048,8 @@ export function useComposerTranscription(
     () =>
       supported
         ? {
-            client: reader as Pick<OpenGeniClient, "transcribeAudio">,
+            client: reader as Pick<OpenGeniClient, "transcribeAudio"> &
+              Partial<Pick<OpenGeniClient, "requestJson">>,
             workspaceId,
             capability,
             workspaceEnabled:

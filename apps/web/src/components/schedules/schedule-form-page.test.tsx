@@ -130,6 +130,8 @@ mock.module("./schedule-composer", () => ({
   ),
 }));
 mock.module("@opengeni/react/ui/form-dialog", () => ({
+  // The template dialog is never open on this page.
+  FormDialog: () => null,
   FormPage: ({
     children,
     onSubmit,

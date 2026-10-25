@@ -22,6 +22,10 @@
       "types": "./src/event-triggers.ts",
       "default": "./src/event-triggers.ts"
     },
+    "./automation-templates": {
+      "types": "./src/automation-templates.ts",
+      "default": "./src/automation-templates.ts"
+    },
     "./prepared-mcp-setup": {
       "types": "./src/prepared-mcp-setup.ts",
       "default": "./src/prepared-mcp-setup.ts"
@@ -173,6 +177,10 @@
     "./session-history": {
       "types": "./src/session-history.ts",
       "default": "./src/session-history.ts"
+    },
+    "./message-time-zone": {
+      "types": "./src/message-time-zone.ts",
+      "default": "./src/message-time-zone.ts"
     },
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",

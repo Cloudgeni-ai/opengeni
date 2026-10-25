@@ -16,6 +16,7 @@ import type {
   InboundEvent,
   ScheduledTask,
   ScheduledTaskRun,
+  WorkspaceAutomationTemplate,
 } from "@opengeni/sdk";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -46,6 +47,8 @@ function source(index: number, fields: Partial<EventSource>): EventSource {
     visibility: "workspace",
     status: "active",
     statusReason: null,
+    statusReasonCode: null,
+    statusReasonDetail: null,
     webhookUrl: null,
     awaitingSigningSecret: false,
     mcp: null,
@@ -65,6 +68,7 @@ const linear = source(3, {
   name: "Linear",
   status: "blocked",
   statusReason: "Paste the signing secret Linear shows for this webhook.",
+  statusReasonCode: "awaiting_secret",
   awaitingSigningSecret: true,
   webhookUrl: "https://app.opengeni.ai/v1/webhooks/events/5ce00000-0000-4000-8000-000000000003",
   lastDeliveryAt: null,
@@ -101,6 +105,8 @@ function descriptor(type: string, description: string, fields: string[] = []): E
     argumentsSchema: null,
     available: true,
     unavailableReason: null,
+    unavailableReasonCode: null,
+    unavailableReasonDetail: null,
   };
 }
 const eventTypes: Record<string, EventTypeDescriptor[]> = {
@@ -164,6 +170,80 @@ const projectEventTypes: EventTypeDescriptor[] = [
   descriptor("project.commented", "Someone commented on a project", ["data.author"]),
 ];
 
+/** What a "This workspace" source offers: its meetings and other recordings. */
+const recordingFields = [
+  "data.title",
+  "data.purpose",
+  "data.recordingId",
+  "data.visibility",
+  "data.recordedByYou",
+];
+const workspaceEventTypes: EventTypeDescriptor[] = [
+  descriptor("recording.started", "A recording started", recordingFields),
+  descriptor("recording.finished", "A recording finished", recordingFields),
+  descriptor(
+    "recording.transcript.ready",
+    "A recording's transcript is ready to read",
+    recordingFields,
+  ),
+  descriptor("recording.deleted", "A recording was deleted", recordingFields),
+];
+
+/* Templates saved in the workspace. */
+
+function savedTemplate(
+  index: number,
+  fields: Partial<WorkspaceAutomationTemplate>,
+): WorkspaceAutomationTemplate {
+  return {
+    id: uuid("7e3a0000", index),
+    workspaceId,
+    name: "Template",
+    description: "",
+    instructions: "Do the thing.",
+    schedule: null,
+    triggers: [],
+    maxRunsPerHour: null,
+    createdBySubjectId: viewer,
+    viewerAccess: "manage",
+    createdAt: at(24 * 3),
+    updatedAt: at(24 * 3),
+    ...fields,
+  };
+}
+
+/** One template the viewer saved, one a teammate did; `?templates=0` has none. */
+export const releaseNotesTemplateId = uuid("7e3a0000", 1);
+const templates: WorkspaceAutomationTemplate[] =
+  params.get("templates") === "0"
+    ? []
+    : [
+        savedTemplate(1, {
+          name: "Release notes",
+          description: "Drafts the notes for each release from the merged pull requests.",
+          instructions:
+            "Draft release notes from the pull requests merged since the last release. Group them by feature, fix and internal change, and link each one.",
+          triggers: eventsEnabled
+            ? [
+                {
+                  source: { kind: "github", sourceId: github.id },
+                  eventTypes: ["push"],
+                  conditions: [{ field: "data.ref", op: "equals", value: "refs/heads/main" }],
+                  includeOwnEvents: false,
+                },
+              ]
+            : [],
+        }),
+        savedTemplate(2, {
+          name: "Friday wrap-up",
+          description: "What shipped this week, for the team channel.",
+          instructions: "Summarize what the team shipped this week and what is still open.",
+          schedule: { type: "calendar", hour: 15, minute: 0, daysOfWeek: ["FRIDAY"] },
+          createdBySubjectId: "teammate-subject",
+          viewerAccess: "use",
+        }),
+      ];
+
 /* Automations. */
 
 function trigger(index: number, fields: Partial<EventTrigger>): EventTrigger {
@@ -177,6 +257,8 @@ function trigger(index: number, fields: Partial<EventTrigger>): EventTrigger {
     arguments: null,
     status: "active",
     statusReason: null,
+    statusReasonCode: null,
+    statusReasonDetail: null,
     createdAt: at(24 * 5),
     updatedAt: at(24 * 5),
     ...fields,
@@ -560,11 +642,54 @@ const modeled: Record<string, (...args: never[]) => unknown> = {
     return { delivery: delivery(10, { replayOfDeliveryId: id }) };
   },
   rotateEventSourceSecret: async () => ({ signingSecret: "whsec_previewSecretValue0123456789" }),
+  listAutomationTemplates: async () => templates.map((item) => ({ ...item })),
+  createAutomationTemplate: async (
+    _workspace: string,
+    request: Omit<WorkspaceAutomationTemplate, "id" | "workspaceId">,
+  ) => {
+    await wait();
+    const created = savedTemplate(10 + templates.length, {
+      ...request,
+      maxRunsPerHour: request.maxRunsPerHour ?? null,
+    });
+    templates.push(created);
+    return { ...created };
+  },
+  updateAutomationTemplate: async (
+    _workspace: string,
+    id: string,
+    request: Partial<WorkspaceAutomationTemplate>,
+  ) => {
+    await wait();
+    const found = templates.find((candidate) => candidate.id === id);
+    if (!found) throw new Error("This template is gone.");
+    Object.assign(found, request);
+    return { ...found };
+  },
+  deleteAutomationTemplate: async (_workspace: string, id: string) => {
+    await wait();
+    const index = templates.findIndex((candidate) => candidate.id === id);
+    if (index >= 0) templates.splice(index, 1);
+  },
   createEventSource: async (
     _workspace: string,
     request: { kind: string; serverId?: string; name?: string },
   ) => {
     await wait();
+    if (request.kind === "workspace") {
+      const existing = sources.find((candidate) => candidate.kind === "workspace");
+      if (existing) return { source: { ...existing } };
+      const created = source(10 + sources.length, {
+        kind: "workspace",
+        name: request.name ?? "This workspace",
+        ownerSubjectId: viewer,
+        visibility: "private",
+        lastDeliveryAt: null,
+      });
+      sources.push(created);
+      eventTypes[created.id] = workspaceEventTypes;
+      return { source: created };
+    }
     if (request.kind === "mcp") {
       const created = source(10 + sources.length, {
         kind: "mcp",

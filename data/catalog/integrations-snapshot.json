@@ -14619,6 +14619,51 @@
         "reason": "mcp_json_rpc",
         "httpStatus": 200
       }
+    },
+    {
+      "domain": "calendarmcp.googleapis.com",
+      "name": "Google Calendar",
+      "description": "See events, check free and busy times, and add, move or delete events in Google Calendar.",
+      "category": "productivity",
+      "featured": true,
+      "official": true,
+      "mcpUrl": "https://calendarmcp.googleapis.com/mcp/v1",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.freebusy"
+      ],
+      "allowedTools": [
+        "list_calendars",
+        "list_events",
+        "get_event",
+        "create_event",
+        "update_event",
+        "delete_event"
+      ],
+      "requireApproval": ["create_event", "update_event", "delete_event"],
+      "connectionOwnership": "personal_only",
+      "credentialFacts": [
+        {
+          "id": "google_oauth_client",
+          "type": "oauth2",
+          "generateUrl": "https://console.cloud.google.com/auth/clients",
+          "setup": "Use the Google OAuth web client for Opengeni's integration callback, enable the Google Calendar API, and approve the calendar.calendarlist.readonly, calendar.events and calendar.freebusy scopes."
+        }
+      ],
+      "tier": "verified",
+      "provenance": "official:developers.google.com/workspace/calendar/api/guides/configure-mcp-server",
+      "logoSourceUrl": null,
+      "homepageUrl": "https://developers.google.com/workspace/calendar/api/v3/reference",
+      "installUrl": "https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server",
+      "documentationUrl": "https://developers.google.com/workspace/calendar/api/v3/reference",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
+      }
     }
   ],
   "skipped": [

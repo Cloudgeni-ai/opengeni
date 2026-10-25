@@ -448,6 +448,8 @@ function Overview({
   const manage = source.viewerAccess === "manage";
   const setup = pastedWebhookSetup(t, source);
   const waiting = source.awaitingSigningSecret && setup;
+  const blockedReason =
+    source.status === "blocked" ? (eventSourceStatusBadge(t, source)?.reason ?? null) : null;
   return (
     <>
       <DetailSection className="pt-6">
@@ -473,9 +475,9 @@ function Overview({
               ? `Paste its URL into ${setup.app}, then paste the ${setup.secretName} ${setup.app} shows here. Until then its deliveries are refused.`
               : `Its owner still needs to paste the ${setup.secretName} from ${setup.app}.`}
           </Notice>
-        ) : source.status === "blocked" && source.statusReason ? (
+        ) : blockedReason ? (
           <Notice tone="failed" title="It can't receive events" className="mb-4">
-            {source.statusReason}
+            {blockedReason}
           </Notice>
         ) : null}
         <SettingRow

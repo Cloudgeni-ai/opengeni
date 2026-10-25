@@ -21,6 +21,7 @@ import {
 import { cn } from "../../lib/cn";
 import { defaultAutomationCadence, viewerTimeZone as localTimeZone } from "./automation-model";
 import { EventTriggersField } from "./event-trigger-editor";
+import type { EventSourceChoice } from "./event-source-model";
 import type { EventSourceLogoResolver } from "./event-source-tile";
 import type { EventTriggersDraft, EventTriggersIssues } from "./event-trigger-model";
 
@@ -53,8 +54,11 @@ export interface AutomationWhenFieldProps {
   /** Why the schedule and the events don't fit together. */
   error?: string | undefined;
   sourceLogo?: EventSourceLogoResolver | undefined;
-  /** Opens the host's "Add a source" page; offered when no source fits. */
-  onAddSource?: (() => void) | undefined;
+  /**
+   * Opens the host's "Add a source" page; offered when no source fits. Gets
+   * the kind a template's trigger asks for, when it asks for one.
+   */
+  onAddSource?: ((choice?: EventSourceChoice) => void) | undefined;
   /** Arguments a new MCP subscription starts with; see `EventTriggersField`. */
   argumentDefaults?: Readonly<Record<string, unknown>> | undefined;
   /** Default `AUTOMATION_FREQUENCIES`. */

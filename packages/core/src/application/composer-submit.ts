@@ -42,6 +42,7 @@ export async function submitComposerDraftForRequest(
     text: input.text,
     annotations: input.annotations,
     modelContext: input.modelContext ?? null,
+    timeZone: input.timeZone ?? null,
     resources: [...input.resources, ...additionalResources],
     ...(additionalResources.length > 0 ? { composerDraftResources: input.resources } : {}),
     model: input.model,

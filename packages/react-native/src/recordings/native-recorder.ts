@@ -198,6 +198,7 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
         recordingId,
         create: {
           recordingId,
+          ...(options.purpose ? { purpose: options.purpose } : {}),
           ...(options.title ? { title: options.title } : {}),
           ...(options.visibility ? { visibility: options.visibility } : {}),
           startedAt: new Date().toISOString(),

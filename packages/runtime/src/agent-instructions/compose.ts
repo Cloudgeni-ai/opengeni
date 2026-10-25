@@ -8,7 +8,6 @@ import { renderBaseBehavior } from "./base-behavior";
 import { renderRuntimeMechanics } from "./runtime-mechanics";
 import { adminModule } from "./modules/admin";
 import { artifactsModule } from "./modules/artifacts";
-import { attachmentsModule } from "./modules/attachments";
 import { goalsModule } from "./modules/goals";
 import { knowledgeModule } from "./modules/knowledge";
 import { connectedMachineModule } from "./modules/machines";
@@ -29,9 +28,10 @@ import type {
 } from "./types";
 
 /**
- * Conditional modules in composition order. Session-stable modules first;
- * `attachments` (per turn) last so a file attachment changes as little of the
- * cached prefix as possible.
+ * Conditional modules in composition order. Every module depends only on
+ * session-level facts: per-turn attachments never change the instructions, so
+ * a turn with a file shares the cached prefix of a turn without one. Their
+ * guidance travels with the turn's attachment notice instead.
  */
 export const AGENT_PROMPT_MODULES: readonly AgentPromptModule[] = [
   rendererMarkdownModule,
@@ -47,7 +47,6 @@ export const AGENT_PROMPT_MODULES: readonly AgentPromptModule[] = [
   skillsModule,
   secretsModule,
   adminModule,
-  attachmentsModule,
 ];
 
 export type ModularInstructionLayer = {
@@ -91,14 +90,10 @@ export type ComposeModularAgentInstructionsInput = {
 export const MODULAR_LAYER_SEPARATOR = "\n\n";
 
 /**
- * Contract modules whose text depends on the workspace (sandbox environment)
- * or the turn (attachments). Under the stable-prefix experiment they follow
- * every other module.
+ * Contract modules whose text depends on the workspace (sandbox environment).
+ * Under the stable-prefix experiment they follow every other module.
  */
-const VOLATILE_CONTRACT_MODULE_IDS: ReadonlySet<AgentPromptModule["id"]> = new Set([
-  "rig",
-  "attachments",
-]);
+const VOLATILE_CONTRACT_MODULE_IDS: ReadonlySet<AgentPromptModule["id"]> = new Set(["rig"]);
 
 /**
  * Heads the session instructions so the precedence rule has a concrete target

@@ -7,6 +7,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, resolve as resolvePath } from "node:path";
 import {
+  BROWSER_ACTION_NAVIGATION_SETTLE_MS,
+  BROWSER_ACTION_REQUEST_SETTLE_MS,
+  BROWSER_ANIMATION_SETTLE_MS,
+  BROWSER_DEFAULT_WAIT_MS,
+  BROWSER_LOCATOR_WAIT_MS,
+  BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS,
   BrowserActionCommand,
   BrowserClipboard,
   BrowserDiagnosticBatch,
@@ -100,7 +106,9 @@ import {
 import { BrowserWindowParking } from "./window-parking";
 import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
 
-const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+/** The request deadline that carries an action is derived from this bound and
+ * the other declared waits (see browserActionDeadlineMs). */
+const DEFAULT_ACTION_TIMEOUT_MS = BROWSER_DEFAULT_WAIT_MS;
 // Attached Chrome without file access receives upload bytes over its
 // one-megabyte command channel: 384 KiB per chunk is 512 KiB of base64.
 const ATTACHED_TRANSFER_CHUNK_BYTES = 384 * 1024;
@@ -188,13 +196,13 @@ const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 const BROWSER_CLOSE_REQUEST_TIMEOUT_MS = 5_000;
 const NETWORK_IDLE_MS = 500;
 /** How long an action's locator waits for its element to appear or enable. */
-const LOCATOR_WAIT_MS = 10_000;
+const LOCATOR_WAIT_MS = BROWSER_LOCATOR_WAIT_MS;
 /** Response types that stay open for the life of the page by design. */
 const STREAMING_MIME_TYPES = new Set(["text/event-stream", "multipart/x-mixed-replace"]);
 /** How long a navigation may wait for its server to answer before the tab
  * stops loading. Chromium itself waits for the operating system's connect
  * timeout, which outlives every caller's deadline. */
-const NAVIGATION_COMMIT_TIMEOUT_MS = 20_000;
+const NAVIGATION_COMMIT_TIMEOUT_MS = BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS;
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
@@ -7696,14 +7704,15 @@ const KEY_DEFINITIONS: Record<string, KeyDefinition> = {
 
 // Typical exit animations take 100-300 ms. Longer finite animations are
 // waited for only this long, so a slow transition cannot stall every action.
-const ANIMATION_SETTLE_LIMIT_MS = 750;
+// Action request deadlines count these settle limits (BROWSER_ACTION_SETTLE_MAX_MS).
+const ANIMATION_SETTLE_LIMIT_MS = BROWSER_ANIMATION_SETTLE_MS;
 // Requests an action starts usually answer in well under a second; a request
 // that stays open (a stream, a stalled server) must not hold the result back.
-const ACTION_REQUEST_SETTLE_LIMIT_MS = 1_500;
+const ACTION_REQUEST_SETTLE_LIMIT_MS = BROWSER_ACTION_REQUEST_SETTLE_MS;
 // A navigation an action starts (a form post, a followed link) is waited for
 // this long to show its new document; a server slower than this leaves the
 // result on the page as it is, still loading.
-const ACTION_NAVIGATION_SETTLE_LIMIT_MS = 10_000;
+const ACTION_NAVIGATION_SETTLE_LIMIT_MS = BROWSER_ACTION_NAVIGATION_SETTLE_MS;
 const ACTION_REQUEST_POLL_MS = 20;
 // Input after which a page handler commonly starts a request: a click or
 // key that submits, a choice, a chosen file, a click at a point, typed keys

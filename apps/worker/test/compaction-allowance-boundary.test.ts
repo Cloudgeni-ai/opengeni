@@ -74,6 +74,7 @@ test("stream component retains the completed compaction checkpoint before refusi
           executionGeneration: 1,
           model: "scripted-model",
           initiatingHumanSubjectId: "user:frozen-initiator",
+          resources: [],
         },
         turnExecutionPolicy: { providerId: "openai" },
         providerTurn: {},

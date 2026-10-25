@@ -274,6 +274,44 @@ own `externalRef`), never a title, audio, transcript or note text:
 
 Read the recording through the API for its details.
 
+## Dictation
+
+Composer dictation (the microphone button in a message box) is a recording
+too, with `purpose: "dictation"`. It uses the same local-first capture and
+upload as a meeting, so a closed tab, a killed phone app, a dropped
+connection or a failed transcription never loses what was said.
+
+A dictation differs from a meeting in a few ways:
+
+- It has exactly one `microphone` track and is always private. Sharing it
+  answers 409 `dictation_private`.
+- It is transcribed with the workspace's voice input (its provider choice and
+  the voice input setting), not `settings.recordings.transcription`. Creating
+  one answers 403 with `details.code: "policy_blocked"` when voice input is
+  off, and 503 when no voice input provider is available.
+- It is billed like voice input: each piece is charged against the
+  dictating person's usage, and a refused charge fails the transcript with
+  that code (for example `insufficient_credits`).
+- It sends no webhook events, never appears in Meetings or in
+  `meetings_search`, and gets no live preview (409 `not_a_meeting`).
+- The worker deletes it a day after it is heard. Clients normally delete it
+  sooner, as soon as its text is in the draft.
+
+`GET …/recordings?purpose=dictation` lists the caller's own dictations that
+are still kept, newest first. A client that opens a composer uses it to
+offer the text of a dictation an earlier page, tab or device left behind.
+
+`useVoiceInput` (in `@opengeni/react/recordings`, used by the web composer)
+and `useNativeDictation` (in `@opengeni/react-native/recordings`) do all of
+this. Taking the text deletes the dictation first and inserts the text only
+if that delete succeeded or couldn't reach the server, so two tabs never
+insert the same speech twice. Cancel or Escape keeps anything longer than
+three seconds to insert later. A client without the recordings API (only
+`transcribeAudio`) records in memory and sends one request, as before.
+
+Dictation recordings replace the older `transcription-recordings` routes,
+which are deprecated and kept for older clients until their sunset.
+
 ## Deletion
 
 `DELETE …/recordings/:recordingId` hides the recording at once; the worker

@@ -95,6 +95,7 @@ export type BuildTurnAgentDeps = {
   mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
+  bus: ActivityServices["bus"];
   runtime: ActivityServices["runtime"];
   objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
@@ -164,6 +165,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     mcpServers,
     input,
     db,
+    bus,
     runtime,
     objectStorage,
     observability,
@@ -741,6 +743,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // W1: `{{secret:…}}` references resolve at the exec boundary.
         secretResolver: createAttemptSecretResolver({
           db,
+          bus,
           settings: eventing.modelRunSettings,
           accountId: input.accountId,
           workspaceId: input.workspaceId,

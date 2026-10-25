@@ -75,6 +75,7 @@ import {
   losslessText,
 } from "./lossless-columns";
 
+export * from "./automation-templates-schema";
 export * from "./editable-artifacts-schema";
 export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";
@@ -9205,7 +9206,7 @@ export const sessionSystemUpdates = pgTable(
   (table) => ({
     kindValid: check(
       "system_updates_kind_check",
-      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress')`,
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress', 'secret_use_approval_decided')`,
     ),
     payloadKindValid: check(
       "system_updates_payload_kind_check",
@@ -9810,6 +9811,16 @@ export const sessionEvents = pgTable(
       .where(
         sql`${table.type} = 'agent.toolCall.created' and (${table.toolName} is null or octet_length(${table.toolName}) > 2048)`,
       ),
+    toolCallPage: index("session_events_tool_call_page_idx")
+      .on(table.workspaceId, table.sessionId, table.toolCallId, table.sequence)
+      .where(
+        sql`${table.type} in ('agent.toolCall.created', 'agent.toolCall.output') and ${table.toolCallId} is not null and octet_length(${table.toolCallId}) <= 2048`,
+      ),
+    toolCallFallbackPage: index("session_events_tool_call_fallback_page_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(
+        sql`${table.type} in ('agent.toolCall.created', 'agent.toolCall.output') and (${table.toolCallId} is null or octet_length(${table.toolCallId}) > 2048)`,
+      ),
     // Pre-0527 attention probes (which still counted commentary) during a rolling
     // deploy. Drop it in a later rolling migration once no pre-0527 API can run.
     meaningfulAttention: index("session_events_meaningful_attention_idx")
@@ -10007,6 +10018,13 @@ export const sessionHumanInputRequests = pgTable(
     turnGeneration: integer("turn_generation").notNull(),
     creationAttemptId: uuid("creation_attempt_id").notNull(),
     toolCallId: text("tool_call_id").notNull(),
+    /**
+     * `tool_call`: asked by the agent's `request_human_input`; its turn waits
+     * and ends with it. `secret_use_approval` (0961): Opengeni's own card for
+     * a blocked secret use (`tool_call_id` is `secret-approval:<approval>`);
+     * the turn does not wait, and the card outlives the turn until answered.
+     */
+    origin: text("origin").notNull().default("tool_call"),
     status: text("status").notNull().default("pending"),
     questions: jsonb("questions").$type<HumanInputQuestion[]>().notNull(),
     allowSkip: boolean("allow_skip").notNull().default(false),
@@ -10051,6 +10069,10 @@ export const sessionHumanInputRequests = pgTable(
     status: check(
       "session_human_input_requests_status_check",
       sql`${table.status} in ('pending','answered','skipped','expired','cancelled')`,
+    ),
+    origin: check(
+      "session_human_input_requests_origin_check",
+      sql`${table.origin} in ('tool_call','secret_use_approval')`,
     ),
     generation: check(
       "session_human_input_requests_generation_check",

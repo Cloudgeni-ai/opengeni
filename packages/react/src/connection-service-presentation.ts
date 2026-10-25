@@ -11,6 +11,11 @@ const services: Record<string, { name: string; logo: string | null; mcpUrl?: str
     mcpUrl: "https://drivemcp.googleapis.com/mcp/v1",
   },
   gmail: { name: "Gmail", logo: gmailLogo, mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
+  "google-calendar": {
+    name: "Google Calendar",
+    logo: null,
+    mcpUrl: "https://calendarmcp.googleapis.com/mcp/v1",
+  },
   "microsoft-outlook-mail": { name: "Outlook Mail", logo: outlookLogo },
   "microsoft-outlook-calendar": { name: "Outlook Calendar", logo: outlookLogo },
   "microsoft-outlook-contacts": { name: "Outlook Contacts", logo: outlookLogo },

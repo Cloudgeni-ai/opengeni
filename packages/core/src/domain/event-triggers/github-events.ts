@@ -689,6 +689,8 @@ export function githubEventTypeCatalog(
       unavailableReason: available
         ? null
         : `The GitHub App isn't subscribed to "${appEvent}" events. Turn them on in the App's Permissions & events settings.`,
+      unavailableReasonCode: available ? null : "github_event_not_subscribed",
+      unavailableReasonDetail: available ? null : appEvent,
     };
   };
   const known = GITHUB_TYPES.map(descriptor);
