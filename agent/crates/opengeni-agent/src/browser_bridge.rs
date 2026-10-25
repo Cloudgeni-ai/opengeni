@@ -1484,22 +1484,27 @@ impl BrowserBridgeInventory {
     }
 }
 
+/// Fail and forget every command sent on a native port that has ended or been
+/// replaced. Its result can only come back on that port, so nothing can settle
+/// it any more; keeping it would hold its work reservation, and with it every
+/// self-update, for as long as the agent runs.
 fn notify_pending_for_profile(
     state: &mut InventoryState,
     device_id: &str,
     connection_generation: Option<&str>,
     reason: BrowserBridgeRequestFailure,
 ) {
-    for command in state.pending.values_mut() {
-        if command.device_id == device_id
+    state.pending.retain(|_, command| {
+        let ended = command.device_id == device_id
             && connection_generation
-                .is_none_or(|generation| command.connection_generation == generation)
-        {
+                .is_none_or(|generation| command.connection_generation == generation);
+        if ended {
             if let Some(settle) = command.settle.take() {
                 let _ = settle.send(Err(reason));
             }
         }
-    }
+        !ended
+    });
 }
 
 /// Long-running loopback server owned by the main agent process.
@@ -3248,6 +3253,72 @@ mod tests {
             serde_json::from_slice(&hello(device_id, generation, 1)).expect("hello");
         edit(&mut value);
         serde_json::to_vec(&value).expect("hello")
+    }
+
+    async fn wait_until_no_routed_work(drain: &crate::uploads::update_drain::UpdateDrain) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drain.snapshot().unwrap().routed != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the ended port's command no longer holds work");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_command_on_an_ended_port_does_not_hold_self_updates() {
+        use super::test_support::connect_extension;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let server = BrowserBridgeServer::start(directory.path())
+            .await
+            .expect("start");
+        let device_id = "11111111-1111-4111-8111-111111111111";
+        let inventory = server.inventory();
+        let drain = inventory.update_drain.clone();
+
+        // A command whose caller stopped waiting (a timeout) is still owned by
+        // the extension while its port lives.
+        let mut first = connect_extension(directory.path(), device_id, "connection-1", None).await;
+        let sent = |request_id: &'static str, generation: &'static str| {
+            let inventory = inventory.clone();
+            let reservation = drain.reserve_work(None).unwrap();
+            tokio::spawn(opengeni_agent_platform::with_work_reservation(
+                Some(reservation),
+                async move {
+                    inventory
+                        .request(request_id, device_id, generation, json!({"type":"ping"}))
+                        .await
+                },
+            ))
+        };
+        let waiter = sent("22222222-2222-4222-8222-222222222222", "connection-1");
+        assert_eq!(read_json(&mut first).await["type"], "command");
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+
+        // The profile reconnects on a new port: the old port's result can
+        // never arrive, so its command must stop holding updates.
+        let mut second = connect_extension(directory.path(), device_id, "connection-2", None).await;
+        wait_until_no_routed_work(&drain).await;
+
+        // The same when the live port closes with a command outstanding.
+        let waiter = sent("33333333-3333-4333-8333-333333333333", "connection-2");
+        assert_eq!(read_json(&mut second).await["type"], "command");
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        drop(second);
+        wait_until_no_routed_work(&drain).await;
+        assert_eq!(
+            drain.reserve_update("update"),
+            crate::uploads::update_drain::UpdateReservation::Started
+        );
+        assert!(drain.seal_update("update"));
+        drain.release_update("update");
+
+        drop(first);
+        server.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
