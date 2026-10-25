@@ -8,6 +8,7 @@ import {
   createWorkspace,
   encryptEnvironmentValue,
   ensureExternalIdentity,
+  setWorkspaceAllowance,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -47,7 +48,7 @@ async function fixture(
   const accountId = String(account!.id);
   const workspace = await createWorkspace(db.db, { accountId, name: "Team workspace" });
   const token = crypto.randomUUID();
-  await createOrganizationApiKey(db.db, {
+  const serviceKey = await createOrganizationApiKey(db.db, {
     accountId,
     name: "Service fixture",
     prefix: "test",
@@ -59,6 +60,7 @@ async function fixture(
       "sessions:read",
       "sessions:create",
       "account:admin",
+      "api_keys:manage",
     ],
   });
   const objects = new Map<string, Uint8Array>();
@@ -156,6 +158,7 @@ async function fixture(
   return {
     accountId,
     workspaceId: workspace.id,
+    serviceSubjectId: `api_key:${serviceKey.id}`,
     objects,
     started,
     admin,
@@ -167,6 +170,42 @@ async function fixture(
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 describe("recording routes", () => {
+  test("a used-up usage allowance refuses new recordings and re-runs", async () => {
+    const scope = await fixture();
+    const recordingId = crypto.randomUUID();
+    const tracks = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }];
+    expect((await scope.owner.call("POST", "/recordings", { recordingId, tracks })).status).toBe(
+      201,
+    );
+    await setWorkspaceAllowance(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      actorSubjectId: scope.serviceSubjectId,
+      includedCredits: 0,
+      period: "monthly",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    const refused = await scope.owner.call("POST", "/recordings", {
+      recordingId: crypto.randomUUID(),
+      tracks,
+    });
+    expect(refused).toMatchObject({
+      status: 402,
+      body: { error: { code: "allowance_exhausted", details: { scope: "workspace" } } },
+    });
+    expect(
+      (await scope.owner.call("POST", `/recordings/${recordingId}/transcripts`, {})).status,
+    ).toBe(402);
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+          trackNumber: 0,
+        })
+      ).status,
+    ).toBe(402);
+  });
+
   test("capture, upload, finalize and re-run start the worker; private stays Only me", async () => {
     const scope = await fixture();
     const recordingId = crypto.randomUUID();
