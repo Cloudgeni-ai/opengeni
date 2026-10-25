@@ -34,14 +34,17 @@ export type UserSetupCardInput = {
 export function userSetupCardPoster(input: UserSetupCardInput): UserSetupCardPoster {
   const append = input.append ?? appendTurnCapabilityCardOnce;
   const publish = input.publish ?? publishDurableSessionEvents;
-  return async (blocker, toolName) => {
+  return async (blocker, toolName, options) => {
     if (
       blocker.capabilityId === CONNECTED_MACHINE_CAPABILITY_ID &&
       !input.connectedMachinesEnabled
     ) {
       return "unavailable";
     }
-    const payload = userSetupCardPayload(blocker, { toolName });
+    // A machine card names the machine the agent asked for, so it leads with
+    // allowing that machine, and a refusal for another machine gets its own.
+    const requestedSandboxId = options?.requestedSandboxId?.toLowerCase() ?? null;
+    const payload = userSetupCardPayload(blocker, { toolName, requestedSandboxId });
     if (!payload) return null;
     const appended = await append(
       input.db,
@@ -52,6 +55,7 @@ export function userSetupCardPoster(input: UserSetupCardInput): UserSetupCardPos
       input.attemptId,
       blocker.capabilityId,
       { type: "tool.auth_needed", payload },
+      requestedSandboxId,
     );
     await publish(input.bus, input.workspaceId, input.sessionId, appended.events);
     if (!appended.accepted) return null;

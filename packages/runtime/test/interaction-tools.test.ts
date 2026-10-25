@@ -590,6 +590,116 @@ describe("interaction attempt tools", () => {
     ]);
   });
 
+  test("discovery lists the person's computers and leaves out sessions on offline ones", async () => {
+    const windowsPc = randomUUID();
+    const linuxDesktop = randomUUID();
+    const machineView = (
+      sandboxId: string,
+      name: string,
+      os: string,
+      state: "online" | "offline",
+      active: boolean,
+    ) => ({
+      sandboxId,
+      enrollmentId: randomUUID(),
+      name,
+      kind: "selfhosted" as const,
+      state,
+      active,
+      isSessionGroup: false,
+      os,
+      arch: "x86_64",
+      hasDisplay: state === "online",
+    });
+    const stale = discoveredComputerSession(randomUUID(), sessionId);
+    stale.placement = { kind: "connected_machine", sandboxId: windowsPc };
+    const home = discoveredComputerSession(randomUUID(), sessionId);
+    const machineRequests: unknown[] = [];
+    let machinesFail = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+          listComputerSessions: async () => ({ revision: 1, sessions: [stale, home] }),
+          listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+          listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices: [] }),
+        }),
+        listMachines: async (workspace, options) => {
+          machineRequests.push({ workspace, ...options });
+          if (machinesFail) throw new OpenGeniApiError(404, "not found");
+          return {
+            activeSandboxId: windowsPc,
+            activeEpoch: 3,
+            machines: [
+              {
+                ...machineView(randomUUID(), "Session sandbox", "linux", "online", false),
+                kind: "modal",
+                isSessionGroup: true,
+              },
+              machineView(linuxDesktop, "Linux desktop", "linux", "online", false),
+              machineView(windowsPc, "Windows PC", "win32", "offline", true),
+            ],
+          } as never;
+        },
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const discover = async (caller: "model" | "codemode") =>
+      await definitions[0]!.execute(
+        {},
+        { operationId: randomUUID(), caller: { kind: caller, subjectId: `${caller}:test` } },
+      );
+
+    const model = await discover("model");
+    expect(model.isError).not.toBe(true);
+    expect(machineRequests).toEqual([{ workspace: workspaceId, sessionId }]);
+    const machines = [
+      {
+        name: "Windows PC",
+        os: "win32",
+        state: "offline",
+        hasDisplay: false,
+        placement: { kind: "connected_machine", sandboxId: windowsPc },
+        onThisMachine: true,
+      },
+      {
+        name: "Linux desktop",
+        os: "linux",
+        state: "online",
+        hasDisplay: true,
+        placement: { kind: "connected_machine", sandboxId: linuxDesktop },
+      },
+    ];
+    const compact = JSON.parse((model.content[0] as { text: string }).text) as {
+      machines: unknown[];
+      computers: Array<{ id: string }>;
+    };
+    expect(compact.machines).toEqual(machines);
+    expect(compact.computers.map((computer) => computer.id)).toEqual([home.id]);
+    expect((model.structuredContent as { machines: unknown[] }).machines).toEqual(machines);
+    expect((model.content[1] as { text: string }).text).toBe(
+      "Left out 1 browser and computer sessions on machines that are offline or no longer available. machines lists the person's computers this chat can use; open one with computer_open or browser_open and its placement.",
+    );
+
+    // Code Mode keeps every record, with the machines.
+    const codemode = await discover("codemode");
+    const full = codemode.structuredContent as { machines: unknown[]; computers: unknown[] };
+    expect(full.machines).toEqual(machines);
+    expect(full.computers).toHaveLength(2);
+
+    // Without a machine list nothing is known to be offline, and the rest of
+    // the discovery still answers.
+    machinesFail = true;
+    const unlisted = await discover("model");
+    expect(unlisted.isError).not.toBe(true);
+    expect(unlisted.structuredContent).not.toHaveProperty("machines");
+    expect((unlisted.structuredContent as { computers: unknown[] }).computers).toHaveLength(2);
+    expect(unlisted.content).toHaveLength(1);
+  });
+
   test("attached Chrome discovery lists lean profiles and hides bridges once one is connected", async () => {
     const device = {
       id: randomUUID(),
@@ -7664,6 +7774,164 @@ describe("open reuses only a session on the chat's current machine", () => {
       }
     });
   }
+
+  // Naming another of the person's machines moves the chat there in the same
+  // call, as sandbox_swap and then the open would, instead of failing with a
+  // request to swap first.
+  test("computer_open naming another machine moves the chat there and opens it", async () => {
+    const old = discoveredComputerSession(randomUUID(), sessionId);
+    old.placement = { kind: "connected_machine", sandboxId: oldMachine };
+    const swaps: string[] = [];
+    let activeSandboxId: string = swappedMachine;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => ({ revision: 0, sessions: [old] }),
+          createComputerSession: async () => {
+            throw new Error("the session on that machine is reused");
+          },
+        }),
+        getSession: async () =>
+          ({ id: sessionId, sandboxGroupId: groupId, activeSandboxId }) as never,
+        swapActiveSandbox: async (_workspaceId, _sessionId, request) => {
+          swaps.push(request.target);
+          activeSandboxId = request.target;
+          return { swapped: true, activeSandboxId: request.target, activeEpoch: 2 };
+        },
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const placement = { kind: "connected_machine", sandboxId: oldMachine } as const;
+    const result = await definitions[0]!.execute({ placement }, context());
+    expect(result.isError).not.toBe(true);
+    expect(swaps).toEqual([oldMachine]);
+    expect((result.structuredContent as { session: ComputerSession }).session.id).toBe(old.id);
+
+    // Already there: no second move.
+    await definitions[0]!.execute({ placement }, context());
+    expect(swaps).toEqual([oldMachine]);
+  });
+
+  test("browser_open naming another machine moves the chat there before creating", async () => {
+    const swaps: string[] = [];
+    const createRequests: unknown[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+          createBrowserSession: async (_workspaceId, request) => {
+            // The chat is on the machine before the session is created there.
+            expect(swaps).toEqual([oldMachine]);
+            createRequests.push(request);
+            return { session: { lifecycle: "starting" } } as never;
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+        swapActiveSandbox: async (_workspaceId, _sessionId, request) => {
+          swaps.push(request.target);
+          return { swapped: true, activeSandboxId: request.target, activeEpoch: 2 };
+        },
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const placement = { kind: "connected_machine", sandboxId: oldMachine } as const;
+    await definitions[0]!.execute({ placement }, context());
+    expect(swaps).toEqual([oldMachine]);
+    expect(createRequests).toEqual([expect.objectContaining({ placement })]);
+  });
+
+  test("a personal machine not yet allowed shows its card from computer_open in one call", async () => {
+    const posted: unknown[] = [];
+    let created = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+          createComputerSession: async () => {
+            created += 1;
+            return { session: discoveredComputerSession(randomUUID(), sessionId) } as never;
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+        swapActiveSandbox: async () => ({
+          swapped: false,
+          activeSandboxId: swappedMachine,
+          activeEpoch: 1,
+          code: "personal_machine_permission_required",
+          reason: "Its owner has not allowed this chat to use it yet.",
+        }),
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+      postSetupCard: async (blocker, toolName, options) => {
+        posted.push({ code: blocker.code, toolName, ...options });
+        return { chatUrl: null };
+      },
+    });
+    const result = await definitions[0]!.execute(
+      { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+      context(),
+    );
+    expect(result.isError).toBe(true);
+    expect(created).toBe(0);
+    expect(posted).toEqual([
+      {
+        code: "personal_machine_permission_required",
+        toolName: "computer_open",
+        requestedSandboxId: oldMachine,
+      },
+    ]);
+    expect(JSON.stringify(result.structuredContent)).toContain(
+      "A card that fixes this is now posted in this chat",
+    );
+  });
+
+  test("any other refused move says why and opens nothing", async () => {
+    let created = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+          createComputerSession: async () => {
+            created += 1;
+            return { session: discoveredComputerSession(randomUUID(), sessionId) } as never;
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+        swapActiveSandbox: async () => ({
+          swapped: false,
+          activeSandboxId: swappedMachine,
+          activeEpoch: 1,
+          code: "offline_enrollment",
+          reason: "sandbox is offline; cannot attach to a non-online machine",
+        }),
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+      postSetupCard: async () => {
+        throw new Error("no card for an offline machine");
+      },
+    });
+    const result = await definitions[0]!.execute(
+      { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+      context(),
+    );
+    expect(result.isError).toBe(true);
+    expect(created).toBe(0);
+    expect(JSON.stringify(result.structuredContent)).toContain(
+      "This chat could not move to that machine: sandbox is offline",
+    );
+  });
 
   // The chat's own sandbox group is usable from any route, so a session there
   // is reused while the chat works on a Connected Machine.

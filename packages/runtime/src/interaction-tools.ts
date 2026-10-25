@@ -475,12 +475,35 @@ const AgentAttachedBrowserBridge = z
     connectedProfileCount: z.number().int().nonnegative(),
   })
   .strict();
+/**
+ * One of the person's Connected Machines this chat can use, with whether it is
+ * online and has a screen, and the placement computer_open and browser_open
+ * take to use it. onThisMachine marks the one this chat runs on now.
+ */
+const AgentMachine = z
+  .object({
+    name: z.string(),
+    os: z.string(),
+    state: z.enum([
+      "online",
+      "reconnecting",
+      "offline",
+      "consent_required",
+      "display_unavailable",
+      "enrolling",
+    ]),
+    hasDisplay: z.boolean(),
+    placement: z.object({ kind: z.literal("connected_machine"), sandboxId: z.string() }).strict(),
+    onThisMachine: z.literal(true).optional(),
+  })
+  .strict();
 const DiscoveryOutput = z
   .object({
     browserRevision: z.number().int().nonnegative(),
     computerRevision: z.number().int().nonnegative(),
     identityRevision: z.number().int().nonnegative(),
     attachedBrowserRevision: z.number().int().nonnegative(),
+    machines: z.array(AgentMachine).optional(),
     browsers: z.array(BrowserSession),
     computers: z.array(ComputerSession),
     identities: z.array(BrowserIdentity),
@@ -1768,7 +1791,7 @@ export function createInteractionAttemptToolDefinitions(
         ...(scope === "current_session" ? { associatedSessionId: input.sessionId } : {}),
         ...((value.includeTerminal ?? false) ? {} : { includeTerminal: false }),
       };
-      const [browsers, computers, identities, attached, thisMachine] = await Promise.all([
+      const [browsers, computers, identities, attached, thisMachine, machines] = await Promise.all([
         input.transport.listBrowserSessions(input.workspaceId, listFilter),
         input.transport.listComputerSessions(input.workspaceId, listFilter),
         input.transport.listBrowserIdentities(input.workspaceId, {
@@ -1780,12 +1803,14 @@ export function createInteractionAttemptToolDefinitions(
         scope === "workspace"
           ? readCurrentMachineSandboxId(input.transport, input.workspaceId, input.sessionId)
           : null,
+        discoverMachines(input.transport, input.workspaceId, input.sessionId),
       ]);
       const discovered = {
         browserRevision: browsers.revision,
         computerRevision: computers.revision,
         identityRevision: identities.revision,
         attachedBrowserRevision: attached.revision,
+        ...(machines ? { machines } : {}),
         browsers: filterDiscoveredSessions(
           browsers.sessions,
           input.sessionId,
@@ -3285,6 +3310,58 @@ function filterDiscoveredSessions<
   );
 }
 
+/**
+ * The person's Connected Machines this chat can use, as the person who started
+ * the turn sees them: the one this chat runs on first, then online ones, then
+ * by name. Undefined when they cannot be listed (no Connected Machines on this
+ * deployment, or a failed read): a failed read must not fail the rest of the
+ * discovery.
+ */
+async function discoverMachines(
+  transport: InteractionPlacementTransport,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Array<z.infer<typeof AgentMachine>> | undefined> {
+  if (!transport.listMachines) return undefined;
+  let listed: Awaited<ReturnType<NonNullable<InteractionPlacementTransport["listMachines"]>>>;
+  try {
+    listed = await transport.listMachines(workspaceId, { sessionId });
+  } catch {
+    return undefined;
+  }
+  return listed.machines
+    .filter((machine) => machine.kind === "selfhosted" && !machine.isSessionGroup)
+    .sort(
+      (left, right) =>
+        Number(right.active) - Number(left.active) ||
+        Number(right.state === "online") - Number(left.state === "online") ||
+        left.name.localeCompare(right.name),
+    )
+    .map((machine) => ({
+      name: machine.name,
+      os: machine.os,
+      state: machine.state,
+      hasDisplay: machine.hasDisplay,
+      placement: { kind: "connected_machine" as const, sandboxId: machine.sandboxId },
+      ...(machine.active ? { onThisMachine: true as const } : {}),
+    }));
+}
+
+/**
+ * Whether a session runs on a Connected Machine discovery found unusable:
+ * offline, or not among the machines this chat can use. Such a session is not
+ * one of the person's computers to offer; it only becomes usable again when
+ * its machine is back. Without a machine list, nothing is known to be gone.
+ */
+function onUnavailableMachine(
+  placement: z.infer<typeof InteractionPlacement>,
+  machines: ReadonlyArray<z.infer<typeof AgentMachine>> | undefined,
+): boolean {
+  if (!machines || placement.kind !== "connected_machine") return false;
+  const machine = machines.find((entry) => entry.placement.sandboxId === placement.sandboxId);
+  return !machine || machine.state === "offline";
+}
+
 /** The most records of each kind the model sees from one discovery. */
 const DISCOVERY_MODEL_LIST_LIMIT = 50;
 /** The most bytes a model caller's discovery result serializes to: its
@@ -3358,11 +3435,22 @@ function modelDiscoverySelection(
       .filter((association) => (association as { sessionId?: unknown }).sessionId === sessionId)
       .slice(0, 1),
   });
+  // Sessions on a machine that is offline or no longer usable are not the
+  // person's computers to offer; the machines list shows what is.
+  const usable = <T extends { placement: z.infer<typeof InteractionPlacement> }>(
+    sessions: readonly T[],
+  ) => sessions.filter((session) => !onUnavailableMachine(session.placement, output.machines));
+  const usableBrowsers = usable(output.browsers);
+  const usableComputers = usable(output.computers);
+  const leftOnOfflineMachines =
+    output.browsers.length -
+    usableBrowsers.length +
+    (output.computers.length - usableComputers.length);
   const ranked: Record<DiscoveryListKind, unknown[]> = {
-    browsers: discoveryRank(output.browsers as DiscoveredSession[], sessionId).map(
+    browsers: discoveryRank(usableBrowsers as DiscoveredSession[], sessionId).map(
       ownAssociationOnly,
     ),
-    computers: discoveryRank(output.computers as DiscoveredSession[], sessionId).map(
+    computers: discoveryRank(usableComputers as DiscoveredSession[], sessionId).map(
       ownAssociationOnly,
     ),
     identities: [...output.identities].sort((left, right) =>
@@ -3373,6 +3461,8 @@ function modelDiscoverySelection(
   };
   const empty = {
     ...output,
+    // The person's machines are few; they always come first and whole.
+    ...(output.machines ? { machines: output.machines.slice(0, DISCOVERY_MODEL_LIST_LIMIT) } : {}),
     browsers: [],
     computers: [],
     identities: [],
@@ -3421,6 +3511,7 @@ function modelDiscoverySelection(
   }
   const selection = {
     ...output,
+    ...(empty.machines ? { machines: empty.machines } : {}),
     browsers: selected.browsers as DiscoveryOutputValue["browsers"],
     computers: selected.computers as DiscoveryOutputValue["computers"],
     identities: selected.identities as DiscoveryOutputValue["identities"],
@@ -3431,18 +3522,25 @@ function modelDiscoverySelection(
   const omitted = DISCOVERY_LIST_KINDS.filter(
     (kind) => selected[kind].length < ranked[kind].length,
   );
-  if (omitted.length === 0) return selection;
-  const shown = omitted
-    .map(
-      (kind) => `${selected[kind].length} of ${ranked[kind].length} ${DISCOVERY_LIST_NAMES[kind]}`,
-    )
-    .join(", ");
-  return new InteractionExecutionResult(selection, [
-    {
+  const notes: Array<{ type: "text"; text: string }> = [];
+  if (omitted.length > 0) {
+    const shown = omitted
+      .map(
+        (kind) =>
+          `${selected[kind].length} of ${ranked[kind].length} ${DISCOVERY_LIST_NAMES[kind]}`,
+      )
+      .join(", ");
+    notes.push({
       type: "text",
       text: `Listed ${shown}: this session's own first, then usable ones, most recently used first. Reuse one by its id. A Code Mode program calling interaction.discover receives every record.`,
-    },
-  ]);
+    });
+  }
+  if (leftOnOfflineMachines > 0)
+    notes.push({
+      type: "text",
+      text: `Left out ${leftOnOfflineMachines} browser and computer sessions on machines that are offline or no longer available. machines lists the person's computers this chat can use; open one with computer_open or browser_open and its placement.`,
+    });
+  return notes.length > 0 ? new InteractionExecutionResult(selection, notes) : selection;
 }
 
 /** The model's view of a discovery: what it needs to pick a session or
@@ -3471,6 +3569,7 @@ function compactDiscoveryForModel(
     computerRevision: output.computerRevision,
     identityRevision: output.identityRevision,
     attachedBrowserRevision: output.attachedBrowserRevision,
+    ...(output.machines ? { machines: output.machines } : {}),
     browsers: output.browsers.map((browser) => ({
       id: browser.id,
       name: browser.name,
@@ -3946,6 +4045,10 @@ async function openBrowser(
     // read too: a profile on the computer this session runs on comes first.
     const resolveProfile =
       value.placement?.kind === "attached_device" && !("deviceId" in value.placement);
+    const moved =
+      value.placement?.kind === "connected_machine"
+        ? await moveChatToRequestedMachine(transport, workspaceId, sourceSessionId, value.placement)
+        : null;
     const [listed, attachedInventory, currentPlacement] = await Promise.all([
       value.mode === "new"
         ? { sessions: [] }
@@ -3956,12 +4059,16 @@ async function openBrowser(
       resolveProfile
         ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
         : null,
-      resolveProfile || (value.mode !== "new" && value.placement?.kind === "connected_machine")
-        ? // Only a preference here: a failed read must not fail the open.
-          readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(() => null)
-        : value.mode === "new" || value.placement
-          ? null
-          : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
+      moved
+        ? moved
+        : resolveProfile || (value.mode !== "new" && value.placement?.kind === "connected_machine")
+          ? // Only a preference here: a failed read must not fail the open.
+            readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
+              () => null,
+            )
+          : value.mode === "new" || value.placement
+            ? null
+            : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
     ]);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
@@ -4192,6 +4299,8 @@ function chooseAttachedProfile(
 export type UserSetupCardPoster = (
   blocker: UserSetupBlocker,
   toolName: string,
+  /** The machine the refused call asked for, so its card can lead with it. */
+  options?: { requestedSandboxId?: string },
 ) => Promise<{ chatUrl: string | null } | "unavailable" | null>;
 
 /**
@@ -4215,7 +4324,13 @@ async function withUserSetupCard(
   let posted: Awaited<ReturnType<UserSetupCardPoster>> = null;
   if (post) {
     try {
-      posted = await post(blocker, toolName);
+      posted = await post(
+        blocker,
+        toolName,
+        error instanceof MachineMoveRefusedError
+          ? { requestedSandboxId: error.requestedSandboxId }
+          : undefined,
+      );
     } catch {
       posted = null;
     }
@@ -4316,6 +4431,12 @@ async function openComputer(
   if (value.computerSessionId) {
     session = await transport.getComputerSession(workspaceId, value.computerSessionId);
   } else {
+    const moved = await moveChatToRequestedMachine(
+      transport,
+      workspaceId,
+      sourceSessionId,
+      value.placement,
+    );
     const [listed, currentPlacement] = await Promise.all([
       value.mode === "new"
         ? { sessions: [] }
@@ -4323,8 +4444,8 @@ async function openComputer(
             associatedSessionId: sourceSessionId,
             includeTerminal: false,
           }),
-      value.mode === "new"
-        ? null
+      value.mode === "new" || moved
+        ? moved
         : value.placement?.kind === "connected_machine"
           ? // Only a preference here: a failed read must not fail the open.
             readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
@@ -4541,7 +4662,7 @@ export function openComputerAppWindow(
 }
 
 type InteractionPlacementTransport = InteractionTransport &
-  Partial<Pick<OpenGeniClient, "getSession">>;
+  Partial<Pick<OpenGeniClient, "getSession" | "listMachines" | "swapActiveSandbox">>;
 
 /** Where a placement-less open creates its session: the machine the chat is
  * routed to now. No active sandbox means the session's own group sandbox; a
@@ -4558,6 +4679,56 @@ async function readCurrentInteractionPlacement(
   return session.activeSandboxId === null
     ? { kind: "sandbox_group", sandboxGroupId: session.sandboxGroupId }
     : { kind: "connected_machine", sandboxId: session.activeSandboxId };
+}
+
+/**
+ * A refused move of this chat to the machine an open asked for. It names that
+ * machine, so a setup card for it (a personal machine whose owner has not
+ * allowed this chat yet) leads with allowing exactly that machine.
+ */
+class MachineMoveRefusedError extends OpenGeniApiError {
+  readonly requestedSandboxId: string;
+  constructor(requestedSandboxId: string, code: string | undefined, reason: string | undefined) {
+    super(code && userSetupBlocker(code) ? 403 : 409, "", {
+      code,
+      retryable: false,
+      displayMessage: `This chat could not move to that machine: ${reason ?? "the move was refused"}`,
+    });
+    this.name = "MachineMoveRefusedError";
+    this.requestedSandboxId = requestedSandboxId;
+  }
+}
+
+/**
+ * Move this chat to the Connected Machine an open names when it runs on
+ * another one, so computer_open and browser_open reach any of the person's
+ * machines in one call, exactly as sandbox_swap followed by the open would.
+ * The move is the chat's, not only this session's: later commands and files
+ * run there too, as after sandbox_swap. A personal machine whose owner has not
+ * allowed this chat yet refuses with the blocker that shows them the card to
+ * allow it. Returns the chat's placement after the move, or null when there
+ * was nothing to move (another placement, a transport that cannot read or
+ * move the chat, or a failed read, which leaves the server to say where the
+ * chat is).
+ */
+async function moveChatToRequestedMachine(
+  transport: InteractionPlacementTransport,
+  workspaceId: string,
+  sessionId: string,
+  placement: z.infer<typeof BrowserOpenPlacement> | undefined,
+): Promise<z.infer<typeof InteractionPlacement> | null> {
+  if (placement?.kind !== "connected_machine" || !transport.swapActiveSandbox) return null;
+  const current = await readCurrentInteractionPlacement(transport, workspaceId, sessionId).catch(
+    () => null,
+  );
+  if (!current) return null;
+  if (placementFieldsMatch(current, placement)) return current;
+  const moved = await transport.swapActiveSandbox(workspaceId, sessionId, {
+    target: placement.sandboxId,
+  });
+  if (!moved.swapped)
+    throw new MachineMoveRefusedError(placement.sandboxId, moved.code, moved.reason);
+  return { kind: "connected_machine", sandboxId: moved.activeSandboxId ?? placement.sandboxId };
 }
 
 function compatibleInteractionPlacement(

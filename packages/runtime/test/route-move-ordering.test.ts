@@ -52,7 +52,14 @@ function firstPartyServer(log: string[]): PrefixedMcpServer {
     connect: async () => {},
     close: async () => {},
     listTools: async () =>
-      ["sandbox_swap", "sandbox_attach", "sandboxes_list"].map((name) => ({
+      [
+        "sandbox_swap",
+        "sandbox_attach",
+        "sandboxes_list",
+        "computer_open",
+        "browser_open",
+        "computer_observe",
+      ].map((name) => ({
         name,
         inputSchema: { type: "object", properties: {} },
       })),
@@ -94,6 +101,10 @@ describe("route-moving tools", () => {
       opengeni__sandbox_swap: true,
       opengeni__sandbox_attach: true,
       opengeni__sandboxes_list: undefined,
+      // The opens move the chat when they name a machine it is not on.
+      opengeni__computer_open: true,
+      opengeni__browser_open: true,
+      opengeni__computer_observe: undefined,
       linear__sandbox_swap: undefined,
     });
     // Clones (the sandbox runtime resolves tools on one) keep the ordering.

@@ -51,7 +51,12 @@ import {
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
+import { swapActiveSandbox } from "@opengeni/core";
+import {
+  isAgentAttemptOnOwnSession,
+  machineSubjectForCaller,
+  sessionFleetContextForCaller,
+} from "../sandbox/agent-fleet-context";
 import {
   enableMachineScreenControl,
   enrollmentAccess,
@@ -110,16 +115,24 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── GET /workspaces/:ws/machines (the dashboard list) ───────────────────────
   app.get("/v1/workspaces/:workspaceId/machines", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
-    assertSelfhostedEnabled();
     // sessionId is OPTIONAL: present → an in-session view (synthetic group box +
     // active pointer); absent → the pure workspace dashboard.
     const sessionId = c.req.query("sessionId") ?? null;
+    // An agent attempt lists the machines of its own chat with the session
+    // read permission its sandboxes_list tool needs; everyone else needs
+    // enrollments:read.
+    const sessionGrant = sessionId
+      ? await requireAccessGrant(c, deps, workspaceId, "sessions:read")
+      : null;
+    const grant =
+      sessionGrant && sessionId && isAgentAttemptOnOwnSession(sessionGrant, sessionId)
+        ? sessionGrant
+        : await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
+    assertSelfhostedEnabled();
     if (sessionId !== null && !z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(400, { message: "sessionId must be a UUID" });
     }
     if (sessionId) {
-      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
       try {
         await requireSessionAuthorization(deps, grant, {
           sessionId,
@@ -144,7 +157,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       {
         accountId: grant.accountId,
         workspaceId,
-        subjectId: grant.subjectId,
+        // An agent sees the machines of the person who started its turn, as
+        // its sandboxes_list tool does.
+        subjectId: sessionId
+          ? await machineSubjectForCaller(deps, grant, sessionId, grant.subjectId)
+          : grant.subjectId,
         sessionId,
       },
     );
@@ -467,12 +484,9 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
     }
     const body = await parseRequestJson(c, SwapActiveSandboxRequest);
-    const ctx = await buildFleetContextForSession(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      sessionId,
-      subjectId: grant.subjectId,
-    });
+    // An agent moves its chat for the person who started its turn, exactly as
+    // its sandbox_swap tool does; a person moves it for themselves.
+    const ctx = await sessionFleetContextForCaller(deps, grant, sessionId, grant.subjectId);
     ctx.consentToCurrentTurn = !grantHasAgentAttemptAuthority(grant);
     const result = await swapActiveSandbox(
       {

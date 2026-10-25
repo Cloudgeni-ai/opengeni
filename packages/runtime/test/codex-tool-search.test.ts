@@ -10,7 +10,13 @@ import {
   type Tool,
 } from "@openai/agents";
 import { testSettings } from "@opengeni/testing/settings";
-import { bm25RankTools, searchToolPool, toolsNamedInQuery } from "../src/codex-tool-search";
+import {
+  bm25RankTools,
+  rankToolPool,
+  searchToolPool,
+  toolsNamedInQuery,
+  unresolvedToolNames,
+} from "../src/codex-tool-search";
 import { MCP_MAX_TOOL_DEFINITION_BYTES } from "../src/mcp-network";
 import {
   buildOpenGeniAgent,
@@ -239,6 +245,17 @@ describe("searchToolPool disclosure bounds", () => {
       }),
     ).toEqual([wanted]);
     expect(searchToolPool([unrelated], { query: "legal", names: ["not_authorized"] })).toEqual([]);
+  });
+
+  test("an exact name without its server prefix loads the tool, and a full name stays exact", () => {
+    const wanted = connectorTool("sandboxes_list", "List the person's computers");
+    const other = connectorTool("sandbox_swap", "Move this chat to a computer");
+    const pool = [other, wanted];
+    expect(searchToolPool(pool, { query: "", names: ["sandboxes_list"] })).toEqual([wanted]);
+    expect(rankToolPool(pool, { query: "", names: ["sandboxes_list"] })).toEqual([wanted]);
+    // A prefixed name never falls back to another server's tool of that name.
+    expect(searchToolPool(pool, { query: "", names: ["other__sandboxes_list"] })).toEqual([]);
+    expect(unresolvedToolNames(pool, ["sandboxes_list", "missing_tool"])).toEqual(["missing_tool"]);
   });
 
   test("backfills rank-limited results after rejecting an oversized definition", () => {

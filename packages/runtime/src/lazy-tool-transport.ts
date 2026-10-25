@@ -20,6 +20,7 @@ import {
   rankToolPool,
   parseSearchArgs,
   toolsNamedInQuery,
+  unresolvedToolNames,
 } from "./codex-tool-search";
 import { ToolSearchIndex } from "./tool-discovery-ranking";
 import { decisionCandidate, type ToolSelector } from "./tool-discovery-decision";
@@ -553,7 +554,7 @@ export class LazyToolRuntime {
     const tools = (
       names === undefined ? this.matches(rawArguments) : this.search(rawArguments)
     ).filter(isFunctionTool);
-    const unavailable = names?.filter((name) => !tools.some((tool) => tool.name === name)) ?? [];
+    const unavailable = names ? unresolvedToolNames(tools, names) : [];
     return JSON.stringify({
       tools: tools.map(toolDescriptor),
       schemasLoaded: names !== undefined && tools.length > 0,

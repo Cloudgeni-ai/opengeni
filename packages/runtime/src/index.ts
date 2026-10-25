@@ -3727,8 +3727,15 @@ function modelMcpSourceCallId(modelName: string): string | undefined {
   return identity?.modelName === modelName ? identity.callId : undefined;
 }
 
-/** First-party tools that move this chat to another machine. */
-const ROUTE_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set(["sandbox_swap", "sandbox_attach"]);
+/** First-party tools that move this chat to another machine. computer_open
+ * and browser_open move it when they name a Connected Machine the chat is not
+ * on. */
+const ROUTE_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set([
+  "sandbox_swap",
+  "sandbox_attach",
+  "computer_open",
+  "browser_open",
+]);
 
 /**
  * Run the tools that move this chat to another machine in model order. A
