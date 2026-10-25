@@ -2,6 +2,7 @@ import type { McpServerConfig } from "@opengeni/config";
 import {
   readyEventSourceKey,
   readyEventSourceRequest,
+  type McpConnectionAccountBinding,
   type ReadyEventSource,
   type ReadyEventSourceRequest,
 } from "@opengeni/contracts";
@@ -9,7 +10,11 @@ import { listEventSources, type EventSourceRecord } from "@opengeni/db";
 import { isOfficialGmailMcpConfig } from "@opengeni/runtime/gmail-rest-mcp";
 import { HTTPException } from "hono/http-exception";
 import { accountIdentity } from "../mcp-account-routes";
-import { createGmailEventSource } from "./gmail-source";
+import {
+  createGmailEventSource,
+  gmailAccountBindings,
+  gmailMailboxSourceKey,
+} from "./gmail-source";
 import {
   mcpServerDisplayName,
   ownerConnectionBindings,
@@ -148,21 +153,25 @@ export async function listReadyEventSources(
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
   const gmailIds = new Set(gmailServers.map((server) => server.id));
-  const gmail = new Map<string, ReadyEventSource>();
-  for (const binding of bindings) {
-    if (!gmailIds.has(binding.canonicalServerId) && !gmailIds.has(binding.serverId)) continue;
-    if (gmail.has(binding.connectionId)) continue;
-    if (
-      own.some((source) => source.kind === "gmail" && source.connectionId === binding.connectionId)
-    )
-      continue;
-    gmail.set(binding.connectionId, {
+  const gmailBindings = bindings.filter(
+    (binding) => gmailIds.has(binding.canonicalServerId) || gmailIds.has(binding.serverId),
+  );
+  // A mailbox the person already receives, through any of its connections.
+  const received = (binding: McpConnectionAccountBinding) =>
+    own.some(
+      (source) =>
+        source.kind === "gmail" &&
+        (source.connectionId === binding.connectionId ||
+          source.externalKey === gmailMailboxSourceKey(accountIdentity(binding))),
+    );
+  const gmail: ReadyEventSource[] = gmailAccountBindings(gmailBindings, input.workspaceId)
+    .filter((binding) => !received(binding))
+    .map((binding) => ({
       key: readyEventSourceKey({ kind: "gmail", connectionId: binding.connectionId }),
-      kind: "gmail",
+      kind: "gmail" as const,
       // Named as its source will be once added.
       name: `Gmail (${accountIdentity(binding)})`,
-    });
-  }
+    }));
   const workspace: ReadyEventSource[] = own.some((source) => source.kind === "workspace")
     ? []
     : [
@@ -172,7 +181,7 @@ export async function listReadyEventSources(
           name: WORKSPACE_EVENT_SOURCE_NAME,
         },
       ];
-  return [...mcp, ...gmail.values(), ...workspace];
+  return [...mcp, ...gmail, ...workspace];
 }
 
 /**

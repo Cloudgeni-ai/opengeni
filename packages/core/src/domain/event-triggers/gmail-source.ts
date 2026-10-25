@@ -1,5 +1,6 @@
 import { createPinnedIntegrationTransport } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
+import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 import {
   createEventSource,
   recordEventSourceFeedDelivery,
@@ -10,6 +11,7 @@ import {
 import { readResponseJsonBounded } from "@opengeni/network";
 import { GMAIL_REST_API_BASE, isOfficialGmailMcpConfig } from "@opengeni/runtime/gmail-rest-mcp";
 import { HTTPException } from "hono/http-exception";
+import { accountIdentity } from "../mcp-account-routes";
 import { sha256Hex } from "./delivery-intake";
 import type {
   EventSourceFeedAdapter,
@@ -83,6 +85,30 @@ function sourceMailbox(source: EventSourceRecord): string {
   return source.externalKey?.replace(/^email:/u, "") ?? "";
 }
 
+/**
+ * One connection per Gmail mailbox. A person can connect the same mailbox
+ * more than once, for example from two workspaces; it is still one account,
+ * read with this workspace's connection when there is one.
+ */
+export function gmailAccountBindings(
+  bindings: readonly McpConnectionAccountBinding[],
+  workspaceId: string,
+): McpConnectionAccountBinding[] {
+  const accounts = new Map<string, McpConnectionAccountBinding>();
+  for (const binding of bindings) {
+    const identity = accountIdentity(binding);
+    const mailbox = identity.includes("@") ? identity.toLowerCase() : binding.connectionId;
+    const kept = accounts.get(mailbox);
+    if (
+      !kept ||
+      (kept.originWorkspaceId !== workspaceId && binding.originWorkspaceId === workspaceId)
+    ) {
+      accounts.set(mailbox, binding);
+    }
+  }
+  return [...accounts.values()];
+}
+
 type GmailApi = {
   connectionId: string;
   get(path: string, query?: Record<string, string | readonly string[]>): Promise<unknown>;
@@ -109,13 +135,13 @@ async function gmailApi(
   const bindings = await ownerConnectionBindings(deps, owner, servers);
   let binding = bindings.find((candidate) => candidate.connectionId === connectionId);
   if (!connectionId) {
-    const accounts = new Set(bindings.map((candidate) => candidate.connectionId));
-    if (accounts.size > 1) {
+    const accounts = gmailAccountBindings(bindings, owner.workspaceId);
+    if (accounts.length > 1) {
       throw new HTTPException(422, {
         message: "You have more than one Gmail account connected. Choose which one to use.",
       });
     }
-    binding = bindings[0];
+    binding = accounts[0];
   }
   const server = servers.find((candidate) => candidate.id === binding?.canonicalServerId);
   if (!binding || !server) throw new McpEventSourceUnavailableError("reconnect", RECONNECT);
