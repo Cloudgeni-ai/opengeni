@@ -36,6 +36,9 @@ const SiteIdInput = z4.string().uuid().describe("The Site (published artifact) i
 export const SITE_AUDIENCE_RULES =
   "Workspace members may use everything the Site declares, within what they may do in the workspace, and are never limited by Site limits. People outside the workspace (invited people and public visitors) get only the Site's own data: Site Data (by each collection's access mode, and its guest access for anonymous visitors), Site SQL named queries their audience allows, and the page. They never get workspace tools or subscription-billed models, and their assistant use counts toward the Site limit.";
 
+const SIGN_IN_EXPECTED =
+  "Visitors sign in to Opengeni before the Site opens: that sign-in page is expected on this deployment, not a broken link, so tell the person when you share the link.";
+
 /** A publication as the agent tools answer it: the audience rules and what to fix next. */
 export function publicationAnswer(publication: SitePublication) {
   const fixable = publication.warnings.some(
@@ -44,20 +47,20 @@ export function publicationAnswer(publication: SitePublication) {
   const signInRequired = publication.warnings.some(
     (warning) => warning.code === "public_sign_in_required",
   );
+  const steps = [
+    ...(fixable
+      ? [
+          "Fix these readiness warnings before sharing the Site: apply a warning's fix with site_publication_apply_fix, or change the page, collection or query yourself, then read the publication again.",
+        ]
+      : signInRequired
+        ? ["Nothing to fix."]
+        : []),
+    ...(signInRequired ? [SIGN_IN_EXPECTED] : []),
+  ];
   return {
     ...publication,
     audienceRules: SITE_AUDIENCE_RULES,
-    ...(fixable
-      ? {
-          nextStep:
-            "Fix these readiness warnings before sharing the Site: apply a warning's fix with site_publication_apply_fix, or change the page, collection or query yourself, then read the publication again.",
-        }
-      : signInRequired
-        ? {
-            nextStep:
-              "Nothing to fix. When you share the link, tell the person that visitors sign in to Opengeni before the Site opens; that sign-in page is expected on this deployment, not a broken link.",
-          }
-        : {}),
+    ...(steps.length > 0 ? { nextStep: steps.join("\n") } : {}),
   };
 }
 

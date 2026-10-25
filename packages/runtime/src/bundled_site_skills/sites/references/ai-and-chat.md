@@ -117,7 +117,9 @@ Use the narrow `@opengeni/react/session-ui` entry for chat, not the broad root
 entry that pulls unrelated editor/terminal peers. Import compiled CSS once.
 Session creation, history, live events,
 composer drafts, Send/Steer and queue/control use this client. The same local
-Bun handler above forwards them using the agent's current Codemode token;
+Bun preview handler (`createCodemodeSiteRequestHandler()`, see "Use normal
+Bun + React" in `references/build-and-preview.md`) forwards them using the
+agent's current Codemode token;
 published Sites use the viewing user's host auth. Agent authority remains
 agent authority: testing cannot approve on a human's behalf. Where preview access
 permits, test a real Send

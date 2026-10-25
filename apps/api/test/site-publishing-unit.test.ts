@@ -470,6 +470,15 @@ describe("readiness", () => {
     expect(publicationAnswer(both as unknown as SitePublication).nextStep).toStartWith(
       "Fix these readiness warnings",
     );
+    // The sign-in line stays when there is also something to fix.
+    expect(publicationAnswer(both as unknown as SitePublication).nextStep).toContain(
+      "\nVisitors sign in to Opengeni before the Site opens",
+    );
+    expect(
+      publicationAnswer({
+        warnings: siteReadinessWarnings(base),
+      } as unknown as SitePublication).nextStep,
+    ).not.toContain("not a broken link");
     expect(
       publicationAnswer({ warnings: [] } as unknown as SitePublication).nextStep,
     ).toBeUndefined();

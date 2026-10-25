@@ -240,6 +240,14 @@ To embed a published Site, use a fenced `opengeni-site` block containing JSON:
 
 Use the actual returned ids. `versionId` is optional; omitting it loads the
 current version when the embed opens. Including it preserves the intended
-version. The embed uses the same Site renderer, tool declarations and viewer
-permissions as the Site page, and resolves in the chat's workspace. Keep a
-normal Site link when it helps the user reopen or share it.
+version. The viewer can choose another version within the embed without
+publishing or rolling back the Site. The embed uses the same Site renderer,
+reload/full-screen controls, tool declarations and viewer permissions as the
+Site page. Embeds resolve in the chat's workspace. Keep a normal Site link when
+it helps the user reopen or share it. Archived or inaccessible Sites display
+an unavailable state.
+
+Use inline HTML for a visualization that belongs in this response. Use a Site
+for a reusable app or durable page, and embed it when useful. Both can be small;
+neither requires a dashboard or full-page layout. React Sites still use the
+normal build and publish workflow.
