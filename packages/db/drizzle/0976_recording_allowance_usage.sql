@@ -7,8 +7,9 @@
 -- counted once against the workspace and the person it was for.
 --
 -- count_unbilled_allowance_usage() is the one place that adds unbilled usage
--- to the allowance counters. The model-call trigger now uses it too, with the
--- same behaviour as before. Dictations are excluded: they are paid for with
+-- to the allowance counters. The existing model-call trigger function now
+-- uses it, with the same behaviour as before, and also serves the two
+-- recording triggers. Dictations are excluded: they are paid for with
 -- credits, so their ledger debit already counts.
 
 CREATE FUNCTION count_unbilled_allowance_usage(
@@ -75,12 +76,36 @@ BEGIN
   END IF;
 END $$;
 
--- Same behaviour as 0638: the turn's frozen attribution receipt names the
--- causal human, exactly like a credit debit for the same turn.
+-- The one trigger function for unbilled usage, so rolling readiness keeps its
+-- existing named contract: a new SECURITY DEFINER trigger would need a prior
+-- binary release. It dispatches on the table that fired it.
+--
+-- model_call_facts, as in 0638: the turn's frozen attribution receipt names
+-- the causal human, exactly like a credit debit for the same turn.
+-- recording_transcript_versions: a version counts once, when it completes,
+-- for whoever asked for it.
+-- recording_tracks: a live track's cost grows while it streams; each increase
+-- counts, for the person recording.
 CREATE OR REPLACE FUNCTION count_unbilled_model_allowance_debit()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE human text;
 BEGIN
+  IF TG_TABLE_NAME='recording_transcript_versions' THEN
+    PERFORM 1 FROM recordings r WHERE r.id=NEW.recording_id AND r.workspace_id=NEW.workspace_id
+      AND r.purpose<>'dictation';
+    IF NOT FOUND THEN RETURN NULL; END IF;
+    PERFORM count_unbilled_allowance_usage(NEW.account_id,NEW.workspace_id,
+      NEW.requested_by_subject_id,NEW.cost_usd_micros,TG_TABLE_SCHEMA);
+    RETURN NULL;
+  END IF;
+  IF TG_TABLE_NAME='recording_tracks' THEN
+    SELECT r.owner_subject_id INTO human FROM recordings r
+      WHERE r.id=NEW.recording_id AND r.workspace_id=NEW.workspace_id AND r.purpose<>'dictation';
+    IF NOT FOUND THEN RETURN NULL; END IF;
+    PERFORM count_unbilled_allowance_usage(NEW.account_id,NEW.workspace_id,human,
+      NEW.live_cost_usd_micros-coalesce(OLD.live_cost_usd_micros,0),TG_TABLE_SCHEMA);
+    RETURN NULL;
+  END IF;
   IF NEW.workspace_id IS NULL OR NEW.priced_cost_micros <> 0
     OR coalesce(NEW.estimated_provider_cost_micros,0) <= 0 THEN RETURN NULL; END IF;
   -- A late cost fill-in counts once; an unchanged or already-priced row never recounts.
@@ -94,39 +119,13 @@ BEGIN
   RETURN NULL;
 END $$;
 
--- A transcript version counts once, when it completes, for whoever asked for it.
-CREATE FUNCTION count_recording_transcript_allowance_usage()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
-BEGIN
-  PERFORM 1 FROM recordings r WHERE r.id=NEW.recording_id AND r.workspace_id=NEW.workspace_id
-    AND r.purpose<>'dictation';
-  IF NOT FOUND THEN RETURN NULL; END IF;
-  PERFORM count_unbilled_allowance_usage(NEW.account_id,NEW.workspace_id,
-    NEW.requested_by_subject_id,NEW.cost_usd_micros,TG_TABLE_SCHEMA);
-  RETURN NULL;
-END $$;
-
--- A live track's cost grows while it streams; each increase counts, for the
--- person recording.
-CREATE FUNCTION count_recording_live_allowance_usage()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
-DECLARE owner text;
-BEGIN
-  SELECT r.owner_subject_id INTO owner FROM recordings r
-    WHERE r.id=NEW.recording_id AND r.workspace_id=NEW.workspace_id AND r.purpose<>'dictation';
-  IF NOT FOUND THEN RETURN NULL; END IF;
-  PERFORM count_unbilled_allowance_usage(NEW.account_id,NEW.workspace_id,owner,
-    NEW.live_cost_usd_micros-coalesce(OLD.live_cost_usd_micros,0),TG_TABLE_SCHEMA);
-  RETURN NULL;
-END $$;
-
 CREATE TRIGGER recording_transcript_allowance_usage AFTER UPDATE OF state ON recording_transcript_versions
 FOR EACH ROW WHEN (OLD.state IS DISTINCT FROM 'complete' AND NEW.state = 'complete'
   AND NEW.cost_usd_micros > 0)
-EXECUTE FUNCTION count_recording_transcript_allowance_usage();
+EXECUTE FUNCTION count_unbilled_model_allowance_debit();
 CREATE TRIGGER recording_live_allowance_usage AFTER UPDATE OF live_cost_usd_micros ON recording_tracks
 FOR EACH ROW WHEN (coalesce(NEW.live_cost_usd_micros,0) > coalesce(OLD.live_cost_usd_micros,0))
-EXECUTE FUNCTION count_recording_live_allowance_usage();
+EXECUTE FUNCTION count_unbilled_model_allowance_debit();
 
 -- CREATE OR REPLACE resets SET clauses: pin the search path and strip any
 -- inherited grants from every owner-internal routine here.
@@ -135,9 +134,7 @@ DECLARE role_name text; function_name text; target_schema text := current_schema
 BEGIN
   FOREACH function_name IN ARRAY ARRAY[
     'count_unbilled_allowance_usage(uuid,uuid,text,bigint,text)',
-    'count_unbilled_model_allowance_debit()',
-    'count_recording_transcript_allowance_usage()',
-    'count_recording_live_allowance_usage()']
+    'count_unbilled_model_allowance_debit()']
   LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',target_schema,function_name);
     EXECUTE format('ALTER FUNCTION %I.%s SET search_path=pg_catalog,%I,pg_temp',target_schema,function_name,target_schema);

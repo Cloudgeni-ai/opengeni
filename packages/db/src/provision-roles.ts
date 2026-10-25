@@ -801,7 +801,7 @@ BEGIN
         EXECUTE format('REVOKE ALL ON FUNCTION %I.count_unbilled_model_allowance_debit() FROM %I', ${literal(schema)}, ${literal(role)});
       END IF;
       IF to_regprocedure(format('%I.count_unbilled_allowance_usage(uuid,uuid,text,bigint,text)', ${literal(schema)})) IS NOT NULL THEN
-        EXECUTE format('REVOKE ALL ON FUNCTION %I.count_unbilled_allowance_usage(uuid,uuid,text,bigint,text), %I.count_recording_transcript_allowance_usage(), %I.count_recording_live_allowance_usage() FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.count_unbilled_allowance_usage(uuid,uuid,text,bigint,text) FROM %I', ${literal(schema)}, ${literal(role)});
       END IF;
       FOREACH runtime_table IN ARRAY ARRAY['workspace_usage_allowances','workspace_member_allowances',
         'workspace_allowance_grants','workspace_allowance_counters','workspace_allowance_notifications','workspace_allowance_periods',

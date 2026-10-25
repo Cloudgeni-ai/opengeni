@@ -1631,8 +1631,6 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "count_workspace_allowance_debit()",
   "count_unbilled_model_allowance_debit()",
   "count_unbilled_allowance_usage(uuid, uuid, text, bigint, text)",
-  "count_recording_transcript_allowance_usage()",
-  "count_recording_live_allowance_usage()",
   "capture_usage_allowance_attribution()",
   "reverse_video_allowance_refund()",
   "capture_usage_allowance_period(uuid, uuid, jsonb, timestamp with time zone)",
