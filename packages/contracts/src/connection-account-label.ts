@@ -18,6 +18,7 @@ export function connectionAccountIdentityLabel(
       metadata.providerEmail,
       metadata.googleEmail,
       metadata.gmailEmail,
+      metadata.googleCalendarEmail,
       metadata.accountLabel,
       metadata.displayName,
       metadata.providerDisplayName,

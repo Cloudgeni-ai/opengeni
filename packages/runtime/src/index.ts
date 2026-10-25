@@ -83,6 +83,7 @@ export {
 import {
   createLocalMcpBridgeFromAdapters,
   IntegrationInvocationError,
+  isLocalMcpBridgeServer,
   type LocalMcpBridgeAdapter,
 } from "@opengeni/capabilities";
 import {
@@ -123,6 +124,7 @@ import {
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   RequestHumanInteractionToolInput,
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
@@ -226,6 +228,12 @@ import {
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
 import {
+  GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
+  googleCalendarRestResultOutcome,
+  isOfficialGoogleCalendarMcpConfig,
+  type GoogleCalendarRestMcpBridgeContext,
+} from "./google-calendar-rest-mcp";
+import {
   SLACK_REST_MCP_BRIDGE_ADAPTER,
   type SlackApiRateLimiter,
   type SlackRestMcpBridgeContext,
@@ -239,6 +247,7 @@ import {
   type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 import {
+  modelToolTextBudgetBytes,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
   type SpillOversizedModelToolResult,
@@ -246,10 +255,12 @@ import {
 export {
   modelToolResultFits,
   modelToolResultOverflowError,
+  modelToolTextBudgetBytes,
   projectAttemptToolResultForCaller,
   spilledModelToolResult,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
+  type ProjectModelToolResult,
   type SpillOversizedModelToolResult,
 } from "./tool-result-spill";
 export {
@@ -274,6 +285,16 @@ export {
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "./gmail-rest-mcp";
+export {
+  GOOGLE_CALENDAR_REST_API_BASE,
+  GOOGLE_CALENDAR_REST_MCP_TOOLS,
+  GoogleCalendarRestMcpServer,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+  googleCalendarRestToolIsMutation,
+  googleCalendarToolSupportsScopes,
+  isOfficialGoogleCalendarMcpConfig,
+  type GoogleCalendarRestMcpServerOptions,
+} from "./google-calendar-rest-mcp";
 export {
   SLACK_REST_API_BASE,
   SLACK_REST_MCP_TOOLS,
@@ -910,6 +931,7 @@ export type {
 ensureReadableStreamFrom();
 
 type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
+  GoogleCalendarRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
   DriveMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
@@ -917,6 +939,7 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   BuiltInMcpBridgeContext
 >[] = Object.freeze([
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
   SLACK_REST_MCP_BRIDGE_ADAPTER,
   DRIVE_MCP_BRIDGE_ADAPTER,
 ]);
@@ -2586,8 +2609,10 @@ function gitBindingDiscoveryApplies(
 }
 
 /**
- * Resource facts for modular module selection. Every input is a session- or
- * turn-level fact, so the composed prefix changes only when they change.
+ * Resource facts for modular module selection. Every output is a session-level
+ * fact, so the composed prefix changes only when they change. Per-turn file
+ * attachments deliberately select nothing here: a turn with a file must share
+ * the cached instructions of a turn without one.
  */
 export function agentPromptResourcesFor(
   settings: Settings,
@@ -2595,7 +2620,6 @@ export function agentPromptResourcesFor(
   options: Pick<
     BuildAgentOptions,
     | "activeSandboxBackend"
-    | "fileResourceDownloads"
     | "gitCredentialBindings"
     | "gitTokenSeed"
     | "gitTokenSeeds"
@@ -2618,10 +2642,6 @@ export function agentPromptResourcesFor(
       (Boolean(options.gitTokenSeed) ||
         gitTokenSeeds.length > 0 ||
         (options.gitCredentialBindings?.length ?? 0) > 0),
-    attachments:
-      (managedSandbox || connectedMachine) &&
-      (resources.some((resource) => resource.kind === "file") ||
-        (options.fileResourceDownloads?.length ?? 0) > 0),
     ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
     ...(options.rig ? { rig: options.rig } : {}),
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
@@ -3402,6 +3422,8 @@ export function buildOpenGeniAgent(
           }
         : undefined,
     ),
+    instructionManifest: (manifest: Manifest) =>
+      manifestWithoutFileResourceEntries(manifest, resources),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(options.authorizeAttemptExecution
@@ -4933,6 +4955,12 @@ export type PrepareToolsOptions = {
    */
   spillOversizedModelToolResult?: SpillOversizedModelToolResult;
   /**
+   * The current model's tool-output truncation policy in tokens, read for each
+   * call so a mid-attempt model change is honoured. Local bridge projections
+   * size their model-visible copy to it. Defaults to the settings value.
+   */
+  modelToolOutputTruncationTokens?: () => number;
+  /**
    * Private exact-byte connector attachment bridge. Source URLs are passed only
    * through this host callback and never included in the returned MCP result.
    */
@@ -5786,6 +5814,7 @@ export async function prepareAgentTools(
             registry,
             resolvedMcpConnectionIds,
             options,
+            settings.modelToolOutputTruncationTokens,
           ),
         execution,
       );
@@ -6082,6 +6111,7 @@ async function prepareAttemptToolEnvironment(
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   options: PrepareToolsOptions,
+  defaultModelToolOutputTruncationTokens: number,
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
@@ -6099,16 +6129,31 @@ async function prepareAttemptToolEnvironment(
     options.sessionAttachedRemoteMcpTargets,
     options.runMcpCredentials,
   );
+  const serversByRegistryId = new Map(
+    prepared.servers.map(({ server }) => [server.registryId, server]),
+  );
+  const modelToolOutputBudget = () => ({
+    maxTextBytes: modelToolTextBudgetBytes(
+      options.modelToolOutputTruncationTokens?.() ?? defaultModelToolOutputTruncationTokens,
+    ),
+  });
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
-      ...prepared.definitions.map((definition) => ({
-        ...definition,
-        execute: wrapAttemptToolExecute(
-          async (argumentsValue, context) => await definition.execute(argumentsValue, context),
-          options.spillOversizedModelToolResult,
-          definition.identity,
-        ),
-      })),
+      ...prepared.definitions.map((definition) => {
+        const server = serversByRegistryId.get(definition.identity.serverId);
+        const toolName = definition.identity.toolName;
+        return {
+          ...definition,
+          execute: wrapAttemptToolExecute(
+            async (argumentsValue, context) => await definition.execute(argumentsValue, context),
+            options.spillOversizedModelToolResult,
+            definition.identity,
+            server?.hasModelToolResultProjection()
+              ? (result) => server.projectModelToolResult(toolName, result, modelToolOutputBudget())
+              : undefined,
+          ),
+        };
+      }),
       ...wrapAttemptToolDefinitions(
         options.attemptToolDefinitions ?? [],
         options.spillOversizedModelToolResult,
@@ -6267,7 +6312,9 @@ function installAttemptConnectorActionGatewayLifecycle(
           ? { resultOutcome: binding.resultOutcome }
           : config && isOfficialGmailMcpConfig(config.url ?? "", config.connectionRef)
             ? { resultOutcome: gmailRestResultOutcome }
-            : {}),
+            : config && isOfficialGoogleCalendarMcpConfig(config.url ?? "", config.connectionRef)
+              ? { resultOutcome: googleCalendarRestResultOutcome }
+              : {}),
         ...(connectorActionPolicy ? { connectorActionPolicy } : {}),
       }),
     };
@@ -8910,6 +8957,29 @@ export class PrefixedMcpServer implements MCPServer {
       : {};
   }
 
+  /** True when the wrapped local bridge supplies its own model-visible result copy. */
+  hasModelToolResultProjection(): boolean {
+    if (this.inner instanceof PrefixedMcpServer) return this.inner.hasModelToolResultProjection();
+    return (
+      isLocalMcpBridgeServer(this.inner) && typeof this.inner.projectModelToolResult === "function"
+    );
+  }
+
+  /** The wrapped local bridge's model-visible copy of one exact result (unprefixed tool name). */
+  projectModelToolResult(
+    toolName: string,
+    result: AttemptToolResultValue,
+    budget: { readonly maxTextBytes: number },
+  ): AttemptToolResultValue {
+    if (this.inner instanceof PrefixedMcpServer) {
+      return this.inner.projectModelToolResult(toolName, result, budget);
+    }
+    if (isLocalMcpBridgeServer(this.inner) && this.inner.projectModelToolResult) {
+      return this.inner.projectModelToolResult(toolName, result, budget);
+    }
+    return result;
+  }
+
   catalogEffectAuthority(toolName: string): unknown {
     return this.effectAuthority ? this.effectAuthority(toolName) : this.approvalAuthority;
   }
@@ -11255,6 +11325,33 @@ export function buildManifest(
       Object.entries(environment).filter(([name]) => keepEnvironmentName(name)),
     ),
   });
+}
+
+/**
+ * The manifest the SDK renders into the system instructions (remote mount
+ * policy and filesystem layout): the runtime manifest without file resource
+ * entries. Files are attached per turn, so listing them there would change the
+ * cached instruction prefix on every turn with a file. The session still
+ * materializes the full manifest, and the turn's attachment notice at the end
+ * of the input tells the model where each file is and how to treat it. Entries
+ * under the default file root are dropped too, because a resumed sandbox's
+ * manifest state can still hold files attached on earlier turns.
+ */
+export function manifestWithoutFileResourceEntries(
+  manifest: Manifest,
+  resources: readonly ResourceRef[],
+): Manifest {
+  const filePaths = new Set(
+    resources.flatMap((resource) =>
+      resource.kind === "file" ? [resourceMountPath(resource)] : [],
+    ),
+  );
+  const fileRoot = `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/`;
+  const entries = Object.entries(manifest.entries).filter(
+    ([path]) => !filePaths.has(path) && !path.startsWith(fileRoot),
+  );
+  if (entries.length === Object.keys(manifest.entries).length) return manifest;
+  return new Manifest({ ...manifest, entries: Object.fromEntries(entries) });
 }
 
 export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {

@@ -28,6 +28,7 @@ import {
   updateEventSource,
   type Database,
   type EventSourceRecord,
+  type EventStatusReason,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { scheduledTaskAccess, type ScheduledTaskViewer } from "../scheduled-task-audience";
@@ -38,6 +39,7 @@ import {
   type DeliveryOutcome,
 } from "./delivery-intake";
 import { webhookEventTypeCatalog } from "./event-type-catalog";
+import { eventStatusReason } from "./status-reason";
 import {
   createGitHubEventSource,
   githubSourceEventTypes,
@@ -50,6 +52,8 @@ import { boundEvent, type NormalizedEventInput } from "./normalize";
 import { slackEventTypeCatalog } from "./slack-events";
 import { createSlackEventSource } from "./slack-source";
 import { webhookAdapter } from "./webhook-adapters";
+import { workspaceDeliveryEvents, workspaceEventTypeCatalog } from "./workspace-events";
+import { createWorkspaceEventSource } from "./workspace-source";
 import {
   withMcpEventSourceClient,
   McpEventSourceUnavailableError,
@@ -139,6 +143,8 @@ export function eventSourceForClient(source: EventSourceRecord, baseUrl: string)
     visibility: source.visibility,
     status: source.status,
     statusReason: source.statusReason,
+    statusReasonCode: source.statusReasonCode,
+    statusReasonDetail: source.statusReasonDetail,
     webhookUrl:
       source.kind === "webhook" && source.routeId
         ? eventSourceWebhookUrl(baseUrl, source.routeId)
@@ -197,6 +203,14 @@ export async function createEventSourceForViewer(
     });
     return { source: eventSourceForClient(source, input.baseUrl) };
   }
+  if (request.kind === "workspace") {
+    const source = await createWorkspaceEventSource({
+      ...input,
+      ownerSubjectId: input.viewer.subjectId,
+      name: request.name,
+    });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
   if (request.kind !== "webhook") {
     throw new HTTPException(422, {
       message: `${request.kind} event sources are not available on this deployment yet`,
@@ -229,9 +243,12 @@ export async function createEventSourceForViewer(
 }
 
 /** Why a pasted webhook waits: the sending app's secret is not pasted yet. */
-function awaitingSecretReason(adapter: WebhookEventAdapter): string {
+function awaitingSecretReason(adapter: WebhookEventAdapter): EventStatusReason {
   const app = adapter === "linear" ? "Linear" : adapter === "sentry" ? "Sentry" : "the sending app";
-  return `Paste the signing secret ${app} shows for this webhook. Until then its deliveries are refused.`;
+  return eventStatusReason(
+    "awaiting_secret",
+    `Paste the signing secret ${app} shows for this webhook. Until then its deliveries are refused.`,
+  );
 }
 
 /** Network access for MCP sources; tests replace the transport. */
@@ -327,12 +344,17 @@ export async function updateEventSourceForViewer(input: {
       message: "This source belongs to the workspace, so everyone in it can already use it",
     });
   }
-  if (request.visibility === "workspace" && (source.kind === "mcp" || source.kind === "gmail")) {
+  if (
+    request.visibility === "workspace" &&
+    (source.kind === "mcp" || source.kind === "gmail" || source.kind === "workspace")
+  ) {
     throw new HTTPException(422, {
       message:
         source.kind === "gmail"
           ? "A Gmail source reads your own mailbox, so it stays private to you"
-          : "An MCP source listens with your own sign-in, so it stays private to you",
+          : source.kind === "workspace"
+            ? "This source shows what you may see in the workspace, so it stays private to you"
+            : "An MCP source listens with your own sign-in, so it stays private to you",
     });
   }
   if (
@@ -368,7 +390,8 @@ export async function updateEventSourceForViewer(input: {
     ...(status !== undefined
       ? {
           status,
-          statusReason: status === "disabled" ? "Turned off" : null,
+          statusReason:
+            status === "disabled" ? eventStatusReason("turned_off", "Turned off") : null,
         }
       : {}),
     ...(request.signingSecret !== undefined
@@ -522,6 +545,7 @@ const REPLAYABLE_SOURCE_KINDS: ReadonlySet<EventSourceRecord["kind"]> = new Set(
   "github",
   "slack",
   "gmail",
+  "workspace",
 ]);
 
 /** Run a stored delivery through intake again; its events fire again even if seen before. */
@@ -554,11 +578,14 @@ export async function replayEventDelivery(input: {
   }
   const receivedAt = new Date();
   let outcome: DeliveryOutcome;
-  if (source.kind === "mcp" || source.kind === "gmail") {
+  if (source.kind === "mcp" || source.kind === "gmail" || source.kind === "workspace") {
     const events =
       source.kind === "mcp"
         ? mcpDeliveryEvents(stored.body, stored.streamKey, receivedAt)
-        : gmailDeliveryEvents(stored.body, receivedAt).map((event) => ({
+        : (source.kind === "gmail"
+            ? gmailDeliveryEvents(stored.body, receivedAt)
+            : workspaceDeliveryEvents(stored.body, source.ownerSubjectId)
+          ).map((event) => ({
             ...boundEvent(event, receivedAt),
             externalId: null,
           }));
@@ -692,6 +719,7 @@ export async function listEventSourceTypes(
   }
   if (input.source.kind === "slack") return slackEventTypeCatalog();
   if (input.source.kind === "gmail") return gmailEventTypeCatalog();
+  if (input.source.kind === "workspace") return workspaceEventTypeCatalog();
   if (input.source.kind === "webhook") {
     return webhookEventTypeCatalog(input.source.adapter ?? "standard", recent);
   }
@@ -702,5 +730,7 @@ export async function listEventSourceTypes(
     argumentsSchema: null,
     available: true,
     unavailableReason: null,
+    unavailableReasonCode: null,
+    unavailableReasonDetail: null,
   }));
 }

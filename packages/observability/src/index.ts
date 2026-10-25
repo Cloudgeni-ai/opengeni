@@ -619,6 +619,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
 ]);
 
 const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
+  "action_timeout",
   "agent_command_wake_failed",
   "api_startup_failed",
   "api_uncaught_exception",

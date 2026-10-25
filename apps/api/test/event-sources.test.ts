@@ -12,8 +12,15 @@ import {
 } from "@opengeni/core";
 import {
   bindAuthorizedGitHubInstallationRepositories,
+  claimRecordingTranscriptVersion,
+  completeRecordingTranscriptVersion,
   createConnection,
   createDb,
+  createRecording,
+  finalizeRecording,
+  saveRecordingNote,
+  markRecordingChunksUploaded,
+  reserveRecordingChunks,
   createOrganizationApiKey,
   createWorkspace,
   deleteGitHubInstallationBinding,
@@ -509,7 +516,12 @@ describe("event sources", () => {
       headers: f.owner.headers,
       body: JSON.stringify({ status: "disabled" }),
     });
-    expect(await f.json(off)).toMatchObject({ status: "disabled", statusReason: "Turned off" });
+    expect(await f.json(off)).toMatchObject({
+      status: "disabled",
+      statusReason: "Turned off",
+      statusReasonCode: "turned_off",
+      statusReasonDetail: null,
+    });
     const body = JSON.stringify({ type: "order.created", data: { id: "ord_9" } });
     const ignored = await f.deliver(source.webhookUrl, signingSecret, body);
     expect(await f.json(ignored)).toMatchObject({ status: "ignored" });
@@ -559,6 +571,10 @@ describe("event sources", () => {
       awaitingSigningSecret: true,
     });
     expect(pending.statusReason).toContain("Paste the signing secret Linear shows");
+    expect(pending).toMatchObject({
+      statusReasonCode: "awaiting_secret",
+      statusReasonDetail: null,
+    });
     const early = await f.app.request(new URL(pending.webhookUrl).pathname, {
       method: "POST",
       headers: { "content-type": "application/json", "linear-event": "Issue" },
@@ -586,6 +602,7 @@ describe("event sources", () => {
     expect(await f.json(pasted)).toMatchObject({
       status: "active",
       statusReason: null,
+      statusReasonCode: null,
       awaitingSigningSecret: false,
     });
 
@@ -1123,11 +1140,17 @@ describe("MCP event sources", () => {
     const blocked = await f.task(automation.id);
     expect(blocked.events.triggers[0]).toMatchObject({ status: "blocked" });
     expect(blocked.events.triggers[0].statusReason).toContain("Queue is private");
+    expect(blocked.events.triggers[0]).toMatchObject({
+      statusReasonCode: "forbidden",
+      statusReasonDetail: "Queue is private",
+    });
 
     await f.pump();
     expect((await f.task(automation.id)).events.triggers[0]).toMatchObject({
       status: "active",
       statusReason: null,
+      statusReasonCode: null,
+      statusReasonDetail: null,
     });
 
     const paused = await f.app.request(`${f.tasks}/${automation.id}`, {
@@ -1975,6 +1998,7 @@ describe("Gmail event sources", () => {
     expect(blocked.events.triggers[0]).toMatchObject({
       status: "blocked",
       statusReason: "Reconnect Gmail to keep its mail coming",
+      statusReasonCode: "reconnect",
     });
 
     f.gmail.revoke(false);
@@ -1982,6 +2006,7 @@ describe("Gmail event sources", () => {
     expect((await f.task(automation.id)).events.triggers[0]).toMatchObject({
       status: "active",
       statusReason: null,
+      statusReasonCode: null,
     });
 
     const paused = await f.app.request(`${f.tasks}/${automation.id}`, {
@@ -1995,5 +2020,450 @@ describe("Gmail event sources", () => {
     const reads = f.gmail.requests.length;
     await f.pump();
     expect(f.gmail.requests.length).toBe(reads);
+  });
+});
+
+describe("This workspace event sources", () => {
+  const transcription = { providerId: "elevenlabs", model: "scribe_v2", options: {} };
+
+  async function workspaceFixture() {
+    const f = await fixture({ enabled: true });
+    const started: EventOccurrenceToStart[] = [];
+    const createSource = async (headers: Record<string, string>) =>
+      await f.app.request(f.sources, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ kind: "workspace" }),
+      });
+    const pump = async () => {
+      await shared.admin`update event_source_feeds
+        set next_action_at = now() - interval '1 second', lease_until = null
+        where workspace_id = ${f.workspace.id}`;
+      await pumpDueEventSourceFeeds({ db: db.db, settings: f.settings, bus: f.bus });
+    };
+    const dispatch = async () => {
+      await makeDue(f.workspace.id);
+      await dispatchDueEventTriggers({
+        db: db.db,
+        settings: f.settings,
+        bus: f.bus,
+        startRun: async (occurrence) => {
+          if (occurrence.workspaceId === f.workspace.id) started.push(occurrence);
+        },
+      });
+    };
+    const queued = async (taskId: string) =>
+      Number(
+        (
+          await shared.admin`select count(*)::int as count from scheduled_task_event_inbox
+            where task_id = ${taskId}`
+        )[0]!.count,
+      );
+    const events = async (sourceId: string, headers: Record<string, string>) =>
+      (await f.json(await f.app.request(`${f.sources}/${sourceId}/events`, { headers })))
+        .events as Array<Record<string, any>>;
+    /** A meeting by `subjectId` whose first transcript is now ready. */
+    const meeting = async (
+      subjectId: string,
+      title: string,
+      visibility: "private" | "workspace",
+    ): Promise<string> => {
+      const actor = { workspaceId: f.workspace.id, subjectId };
+      const recordingId = crypto.randomUUID();
+      await createRecording(db.db, {
+        ...actor,
+        accountId: f.workspace.accountId,
+        recordingId,
+        title,
+        visibility,
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+      });
+      await reserveRecordingChunks(db.db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: 100,
+            sha256: createHash("sha256").update(recordingId).digest("hex"),
+            startMilliseconds: 0,
+            durationMilliseconds: 5_000,
+          },
+        ],
+      });
+      await markRecordingChunksUploaded(db.db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        chunkNumbers: [0],
+      });
+      const versionId = crypto.randomUUID();
+      await finalizeRecording(db.db, {
+        ...actor,
+        recordingId,
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+        transcription,
+        versionId,
+      });
+      const processingOwner = crypto.randomUUID();
+      await claimRecordingTranscriptVersion(db.db, {
+        ...actor,
+        versionId,
+        processingOwner,
+        leaseSeconds: 600,
+      });
+      await completeRecordingTranscriptVersion(db.db, {
+        ...actor,
+        versionId,
+        processingOwner,
+        languages: ["en"],
+        diarized: false,
+        diarization: "none",
+        audioMilliseconds: 5_000,
+        segments: [
+          {
+            startMilliseconds: 0,
+            endMilliseconds: 4_000,
+            trackNumber: 0,
+            speakerLabel: "speaker_0",
+            text: "We agreed to ship on Friday.",
+          },
+        ],
+      });
+      return recordingId;
+    };
+    return { ...f, started, createSource, pump, dispatch, queued, events, meeting };
+  }
+
+  test("it is each person's own, and a workspace key can't make one", async () => {
+    const f = await workspaceFixture();
+    const first = await f.createSource(f.owner.headers);
+    expect(first.status).toBe(201);
+    const { source } = await f.json(first);
+    expect(source).toMatchObject({
+      kind: "workspace",
+      name: "This workspace",
+      ownerSubjectId: f.owner.subjectId,
+      visibility: "private",
+      webhookUrl: null,
+    });
+    // Asking again returns the same source, so clients add it on first use.
+    expect((await f.json(await f.createSource(f.owner.headers))).source.id).toBe(source.id);
+    // Everyone else gets their own, and can't see this one.
+    const theirs = (await f.json(await f.createSource(f.other.headers))).source;
+    expect(theirs.id).not.toBe(source.id);
+    expect(
+      (await f.app.request(`${f.sources}/${source.id}`, { headers: f.other.headers })).status,
+    ).toBe(404);
+    expect((await f.createSource(f.service)).status).toBe(422);
+    const widened = await f.app.request(`${f.sources}/${source.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ visibility: "workspace" }),
+    });
+    expect(widened.status).toBe(422);
+    const types = await f.json(
+      await f.app.request(`${f.sources}/${source.id}/event-types`, { headers: f.owner.headers }),
+    );
+    expect(types.eventTypes.map((entry: { type: string }) => entry.type)).toContain(
+      "recording.transcript.ready",
+    );
+  });
+
+  test("a meeting's transcript becoming ready wakes its owner's automation, never someone else's", async () => {
+    const f = await workspaceFixture();
+    const { source } = await f.json(await f.createSource(f.owner.headers));
+    const created = await f.createAutomation(f.owner.headers, {
+      triggers: [
+        {
+          sourceId: source.id,
+          eventTypes: ["recording.transcript.ready"],
+          conditions: [{ field: "data.purpose", op: "equals", value: "meeting" }],
+        },
+      ],
+    });
+    expect(created.status).toBe(201);
+    const automation = await f.json(created);
+    // What the Meeting notes template listens for: only meetings its owner recorded.
+    const ownMeetings = await f.json(
+      await f.createAutomation(f.owner.headers, {
+        triggers: [
+          {
+            sourceId: source.id,
+            eventTypes: ["recording.transcript.ready"],
+            conditions: [
+              { field: "data.purpose", op: "equals", value: "meeting" },
+              { field: "data.recordedByYou", op: "equals", value: true },
+            ],
+          },
+        ],
+      }),
+    );
+    const earlier = await f.meeting(f.owner.subjectId, "Before anyone listened", "private");
+
+    // The first read only learns where "now" is.
+    await f.pump();
+    expect(await f.events(source.id, f.owner.headers)).toHaveLength(0);
+
+    const mine = await f.meeting(f.owner.subjectId, "Weekly sync", "private");
+    await f.meeting(f.other.subjectId, "Their private 1:1", "private");
+    const sharedMeeting = await f.meeting(f.other.subjectId, "All hands", "workspace");
+    await f.pump();
+
+    const stored = await f.events(source.id, f.owner.headers);
+    const ready = stored.filter((event) => event.type === "recording.transcript.ready");
+    expect(ready.map((event) => event.subject).sort()).toEqual(["All hands", "Weekly sync"]);
+    expect(stored.some((event) => event.subject === "Their private 1:1")).toBe(false);
+    expect(stored.some((event) => event.data.recordingId === earlier)).toBe(false);
+    expect(ready.find((event) => event.data.recordingId === mine)).toMatchObject({
+      summary: "Transcript ready: Weekly sync",
+      actor: { kind: "unknown" },
+      data: {
+        recordingId: mine,
+        title: "Weekly sync",
+        purpose: "meeting",
+        visibility: "private",
+        recordedByYou: true,
+      },
+    });
+    expect(ready.find((event) => event.data.recordingId === sharedMeeting)?.data).toMatchObject({
+      ownerSubjectId: f.other.subjectId,
+      recordedByYou: false,
+    });
+    expect(await f.queued(automation.id)).toBe(2);
+    expect(await f.queued(ownMeetings.id)).toBe(1);
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId).sort()).toEqual(
+      [automation.id, ownMeetings.id].sort(),
+    );
+
+    // Reading again finds nothing new, even though it looks back.
+    await f.pump();
+    expect(await f.events(source.id, f.owner.headers)).toHaveLength(stored.length);
+
+    // The other person's source sees their own private meeting once they listen.
+    const theirs = (await f.json(await f.createSource(f.other.headers))).source;
+    expect(
+      (
+        await f.createAutomation(f.other.headers, {
+          triggers: [{ sourceId: theirs.id, eventTypes: ["recording.transcript.ready"] }],
+        })
+      ).status,
+    ).toBe(201);
+    await f.pump();
+    await f.meeting(f.other.subjectId, "Another 1:1", "private");
+    await f.pump();
+    expect((await f.events(theirs.id, f.other.headers)).map((event) => event.subject)).toContain(
+      "Another 1:1",
+    );
+    expect(
+      (await f.events(source.id, f.owner.headers)).some((event) => event.subject === "Another 1:1"),
+    ).toBe(false);
+
+    // A replayed read fires its events again.
+    const [read] = (
+      await f.json(
+        await f.app.request(`${f.sources}/${source.id}/deliveries`, { headers: f.owner.headers }),
+      )
+    ).deliveries as Array<Record<string, any>>;
+    const replay = await f.app.request(`${f.sources}/${source.id}/deliveries/${read!.id}/replay`, {
+      method: "POST",
+      headers: f.owner.headers,
+    });
+    expect(replay.status).toBe(201);
+    expect((await f.json(replay)).delivery.eventIds.length).toBeGreaterThan(0);
+  });
+
+  test("notes an agent saves are Opengeni's own, so they don't wake an automation by default", async () => {
+    const f = await workspaceFixture();
+    const { source } = await f.json(await f.createSource(f.owner.headers));
+    const created = await f.createAutomation(f.owner.headers, {
+      triggers: [{ sourceId: source.id, eventTypes: ["recording.notes.updated"] }],
+    });
+    expect(created.status).toBe(201);
+    const automation = await f.json(created);
+    const recordingId = await f.meeting(f.owner.subjectId, "Planning", "private");
+    await f.pump();
+
+    const actor = { workspaceId: f.workspace.id, subjectId: f.owner.subjectId };
+    const agentChat = crypto.randomUUID();
+    await saveRecordingNote(db.db, {
+      ...actor,
+      recordingId,
+      kind: "notes",
+      body: "## Summary\nShip on Friday.",
+      sessionId: agentChat,
+    });
+    await saveRecordingNote(db.db, {
+      ...actor,
+      recordingId,
+      kind: "notes",
+      body: "## Summary\nShip on Friday, after the review.",
+    });
+    await f.pump();
+
+    const saved = (await f.events(source.id, f.owner.headers)).filter(
+      (event) => event.type === "recording.notes.updated",
+    );
+    expect(saved).toHaveLength(2);
+    expect(saved.find((event) => event.data.sessionId === agentChat)).toMatchObject({
+      summary: "Notes saved: Planning",
+      actor: { kind: "opengeni" },
+      data: { recordingId, noteRevision: 1 },
+    });
+    expect(saved.find((event) => event.data.noteRevision === 2)).toMatchObject({
+      actor: { kind: "unknown" },
+      data: { sessionId: null },
+    });
+    // Only the person's save wakes it; the agent's needs "Also run for what Opengeni does".
+    expect(await f.queued(automation.id)).toBe(1);
+    const types = await f.json(
+      await f.app.request(`${f.sources}/${source.id}/event-types`, { headers: f.owner.headers }),
+    );
+    expect(
+      types.eventTypes.find((entry: { type: string }) => entry.type === "recording.notes.updated")
+        ?.fields,
+    ).toContainEqual({
+      field: "data.sessionId",
+      description: "The chat whose agent saved them; null when a person did",
+    });
+  });
+});
+
+describe("automation templates", () => {
+  const sendJson = (headers: Record<string, string>, method: string, body?: unknown) => ({
+    method,
+    headers,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+
+  test("a saved template is the workspace's to use, and its saver's or an admin's to change", async () => {
+    const f = await fixture({ enabled: true });
+    const templates = `/v1/workspaces/${f.workspace.id}/automation-templates`;
+    const teamSource = (
+      await f.json(
+        await f.app.request(
+          f.sources,
+          sendJson(f.owner.headers, "POST", {
+            kind: "webhook",
+            adapter: "standard",
+            name: "Orders",
+            visibility: "workspace",
+          }),
+        ),
+      )
+    ).source;
+    const created = await f.app.request(
+      templates,
+      sendJson(f.owner.headers, "POST", {
+        name: "Flag unusual orders",
+        description: "Looks at each new order.",
+        instructions: "Look at the new order and flag anything unusual.",
+        schedule: { type: "calendar", hour: 8, minute: 0, daysOfWeek: ["MONDAY"] },
+        triggers: [
+          {
+            source: { kind: "webhook", adapter: "standard", sourceId: teamSource.id },
+            eventTypes: ["order.created"],
+            conditions: [{ field: "data.total", op: "exists" }],
+          },
+          { source: { kind: "workspace" }, eventTypes: ["recording.transcript.ready"] },
+        ],
+      }),
+    );
+    expect(created.status).toBe(201);
+    const { template } = await f.json(created);
+    expect(template).toMatchObject({
+      name: "Flag unusual orders",
+      description: "Looks at each new order.",
+      schedule: { type: "calendar", hour: 8, minute: 0, daysOfWeek: ["MONDAY"] },
+      maxRunsPerHour: null,
+      createdBySubjectId: f.owner.subjectId,
+      viewerAccess: "manage",
+    });
+    expect(template.triggers[0]).toEqual({
+      source: { kind: "webhook", adapter: "standard", sourceId: teamSource.id },
+      eventTypes: ["order.created"],
+      conditions: [{ field: "data.total", op: "exists" }],
+      includeOwnEvents: false,
+    });
+
+    // Everyone in the workspace finds it; only its saver and admins change it.
+    const theirs = (await f.json(await f.app.request(templates, { headers: f.other.headers })))
+      .templates as Array<Record<string, unknown>>;
+    expect(theirs.map((entry) => [entry.id, entry.viewerAccess])).toEqual([[template.id, "use"]]);
+    const one = `${templates}/${template.id}`;
+    expect(
+      (await f.app.request(one, sendJson(f.other.headers, "PATCH", { name: "Mine now" }))).status,
+    ).toBe(403);
+    expect((await f.app.request(one, sendJson(f.other.headers, "DELETE"))).status).toBe(403);
+    const renamed = await f.app.request(
+      one,
+      sendJson(f.owner.headers, "PATCH", { name: "Unusual orders", schedule: null }),
+    );
+    expect(renamed.status).toBe(200);
+    expect((await f.json(renamed)).template).toMatchObject({
+      name: "Unusual orders",
+      description: "Looks at each new order.",
+      instructions: "Look at the new order and flag anything unusual.",
+      schedule: null,
+    });
+    expect((await f.app.request(one, sendJson(f.service, "DELETE"))).status).toBe(200);
+    expect((await f.app.request(one, sendJson(f.owner.headers, "DELETE"))).status).toBe(404);
+    expect(
+      (await f.json(await f.app.request(templates, { headers: f.owner.headers }))).templates,
+    ).toEqual([]);
+  });
+
+  test("a template names only a source shared with the workspace, of its trigger's kind", async () => {
+    const f = await fixture({ enabled: true });
+    const templates = `/v1/workspaces/${f.workspace.id}/automation-templates`;
+    const source = async (visibility: "private" | "workspace") =>
+      (
+        await f.json(
+          await f.app.request(
+            f.sources,
+            sendJson(f.owner.headers, "POST", {
+              kind: "webhook",
+              adapter: "standard",
+              name: "Orders",
+              visibility,
+            }),
+          ),
+        )
+      ).source as { id: string };
+    const save = async (trigger: Record<string, unknown>) =>
+      await f.app.request(
+        templates,
+        sendJson(f.owner.headers, "POST", {
+          name: "Orders",
+          instructions: "Look at the order.",
+          triggers: [{ eventTypes: ["order.created"], ...trigger }],
+        }),
+      );
+    const mine = await source("private");
+    const team = await source("workspace");
+    expect(
+      (await save({ source: { kind: "webhook", adapter: "standard", sourceId: mine.id } })).status,
+    ).toBe(422);
+    expect(
+      (await save({ source: { kind: "webhook", adapter: "linear", sourceId: team.id } })).status,
+    ).toBe(422);
+    expect((await save({ source: { kind: "webhook" } })).status).toBe(400);
+    expect((await save({ source: { kind: "mcp" } })).status).toBe(400);
+    expect((await save({ source: { kind: "github", adapter: "standard" } })).status).toBe(400);
+    expect(
+      (await save({ source: { kind: "webhook", adapter: "standard", sourceId: team.id } })).status,
+    ).toBe(201);
+    // A template has no time zone: the person using it brings theirs.
+    const zoned = await f.app.request(
+      templates,
+      sendJson(f.owner.headers, "POST", {
+        name: "Brief",
+        instructions: "Summarize yesterday.",
+        schedule: { type: "calendar", hour: 8, minute: 0, timeZone: "Europe/Oslo" },
+      }),
+    );
+    expect(zoned.status).toBe(400);
   });
 });

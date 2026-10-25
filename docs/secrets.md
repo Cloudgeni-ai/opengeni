@@ -144,10 +144,10 @@ implementation: `packages/contracts/src/secret-references.ts`,
 |---|---|
 | `exec_command` (every sandbox backend) | The command is spliced so each reference becomes a shell variable `OPENGENI_SECRET_n`, quoted correctly for its context. Values reach the process through native env where Opengeni owns the exec, or a 0600 env file that is sourced and deleted in the same command. Commands without references are untouched. |
 | Connected machines | POSIX hosts use `/bin/sh`, Windows uses PowerShell; values travel in `ExecRequest.env`. `cmd.exe`, fish and unknown shells return `unsupported_shell`. No run credentials or tokens are copied onto machines. |
-| `run_on` | Exec splices for the target's shell; file writes resolve content; reads resolve nothing. |
+| `run_on` | The gateway preserves references and escapes for the target delivery boundary. Exec uses the same shell splicing and per-command env/file delivery as `exec_command`, including `secretfile`; file writes resolve content once; reads resolve nothing. |
 | `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
 | `{{secretfile:…}}` | Written to a 0600 file under `/tmp/opengeni-private/secrets/` and replaced by its path; removed at attempt end. Use it for binary values and anything over 100 KiB. |
-| MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed here. |
+| MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed in ordinary tool arguments; Opengeni's `run_on` retains its exec delivery boundary through these callers. |
 | Opengeni's own tools (messages, sessions, schedules, goals, Knowledge, artifacts, admin actions) | Resolved like connectors: the executing call receives values, while the journal keeps the reference. To store or hand on a reference for later work, escape it (`\{{secret:Item}}`); the tool receives `{{secret:Item}}`. The `secret_*` tools take references as names and never resolve them. |
 | Sites | Tool calls from a Site resolve with the viewer's authority (no task vault) and audit the Site. |
 | Browser and desktop | `fill`, `type`, clipboard writes and key presses resolve for agent callers. Receipts keep the reference. `type` with `mode: "keys"` handles split one-time-code boxes. Resolved values are never pasted on the desktop. |
@@ -157,6 +157,14 @@ Exec caps: 256 KiB of env per command and 100 KiB per value. Larger or binary
 values return `too_large` or `binary_value` with a `secretfile` hint.
 OpenSandbox has no file writer, so commands with references fail there with an
 unsupported-routing error.
+
+For `run_on`, resolution is scoped to exec `op.cmd` and write `op.content`;
+`target`, `op.path` and `op.workdir` are literal routing/path inputs. Secret
+failures dispatch no command or file write and return the gateway's canonical
+`isError` tool result containing only the serialized secret failure, including
+a missing-secret `askCard` or per-use `approvalCard`. No ordinary `run_on`
+result fields are added to that failure. Approval cards describe the actual
+target command or file write rather than a generic connector call.
 
 Variable Sets used to inject every value into every sandbox as environment
 variables. That is gone: nothing is injected, and a value exists in a process

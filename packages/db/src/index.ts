@@ -898,6 +898,9 @@ import {
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   TimelineAnnotations,
   renderUserMessageContentForModel,
+  MESSAGE_TIME_ZONE_METADATA_KEY,
+  messageTimeZoneFromTurnMetadata,
+  normalizeMessageTimeZone,
   SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -8284,6 +8287,7 @@ export function durableUserHistoryItem(
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | null,
   sender?: string | null,
+  timeZone?: string | null,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -8298,6 +8302,7 @@ export function durableUserHistoryItem(
       goalSnapshot,
       sentAt,
       sender,
+      timeZone,
     ),
     ...(attachmentRefs.length > 0
       ? {
@@ -9366,6 +9371,13 @@ export async function completeFileUpload(
   db: Database,
   workspaceId: string,
   uploadId: string,
+  options: {
+    /**
+     * Digest the server computed from the stored bytes. Recorded only when the
+     * file has none: a client digest is never replaced.
+     */
+    computedSha256?: string | undefined;
+  } = {},
 ): Promise<FileAsset> {
   return await withWorkspaceRls(
     db,
@@ -9413,6 +9425,9 @@ export async function completeFileUpload(
           .update(schema.files)
           .set({
             status: "ready",
+            ...(options.computedSha256 && !fileRow.sha256
+              ? { sha256: options.computedSha256 }
+              : {}),
             updatedAt: now,
           })
           .where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileRow.id)))
@@ -19446,6 +19461,7 @@ type AutomationWaitRow = {
   triggerStatus: string | null;
   triggerPosition: number | null;
   eventTypes: string[] | null;
+  sourceId: string | null;
   sourceKind: string | null;
   sourceName: string | null;
   sourceVisibility: string | null;
@@ -19454,6 +19470,14 @@ type AutomationWaitRow = {
   eventsCompletedAt: Date | null;
   hasEventSettings: string | null;
 };
+
+type AutomationWaitEvent = NonNullable<SessionAutomationWaitSummary["event"]>;
+
+/** Both lists of event types as one, in order; every event covers the rest. */
+function mergedWaitEventTypes(left: readonly string[], right: readonly string[]): string[] {
+  if (left.includes("*") || right.includes("*")) return ["*"];
+  return [...new Set([...left, ...right])];
+}
 
 /**
  * What the automations the reader can see are waiting for, per session. A
@@ -19483,37 +19507,52 @@ function automationWaitSummaries(
       left.rows[0]!.taskId.localeCompare(right.rows[0]!.taskId),
   );
   const waits = new Map<string, SessionAutomationWaitSummary>();
+  // Each chat's events by source id ("" for the ones the reader can't see).
+  const sourceEvents = new Map<string, Map<string, AutomationWaitEvent>>();
   for (const { sessionId, rows: taskRows } of ordered) {
     const task = taskRows[0]!;
     if (task.status !== "active" || (task.eventsOnce && task.eventsCompletedAt)) continue;
     const nextRun = scheduledTaskHasUpcomingRun(task, now)
       ? scheduledTaskNextRunAt(task.schedule, now)
       : null;
-    const trigger = task.hasEventSettings
+    const triggers = task.hasEventSettings
       ? taskRows
           .filter((row) => row.triggerStatus === "active")
-          .sort((left, right) => left.triggerPosition! - right.triggerPosition!)[0]
-      : undefined;
-    if (!nextRun && !trigger) continue;
-    const wait = waits.get(sessionId) ?? { nextRunAt: null, event: null, automations: 0 };
+          .sort((left, right) => left.triggerPosition! - right.triggerPosition!)
+      : [];
+    if (!nextRun && triggers.length === 0) continue;
+    const wait = waits.get(sessionId) ?? {
+      nextRunAt: null,
+      event: null,
+      events: [],
+      automations: 0,
+    };
     wait.automations += 1;
     if (nextRun && (!wait.nextRunAt || nextRun.getTime() < Date.parse(wait.nextRunAt))) {
       wait.nextRunAt = nextRun.toISOString();
     }
-    if (trigger && !wait.event) {
-      wait.event = {
-        source:
-          trigger.sourceKind &&
-          trigger.sourceName !== null &&
-          visible(trigger.sourceVisibility, trigger.sourceOwnerSubjectId, "workspace")
-            ? {
-                kind: trigger.sourceKind as EventSourceKind,
-                name: trigger.sourceName,
-              }
-            : null,
-        eventTypes: trigger.eventTypes ?? [],
-      };
+    const bySource = sourceEvents.get(sessionId) ?? new Map<string, AutomationWaitEvent>();
+    for (const trigger of triggers) {
+      const source =
+        trigger.sourceId &&
+        trigger.sourceKind &&
+        trigger.sourceName !== null &&
+        visible(trigger.sourceVisibility, trigger.sourceOwnerSubjectId, "workspace")
+          ? { kind: trigger.sourceKind as EventSourceKind, name: trigger.sourceName }
+          : null;
+      const eventTypes = trigger.eventTypes ?? [];
+      wait.event ??= { source, eventTypes: [...eventTypes] };
+      const key = source ? trigger.sourceId! : "";
+      const entry = bySource.get(key);
+      if (entry) {
+        entry.eventTypes = mergedWaitEventTypes(entry.eventTypes, eventTypes);
+      } else {
+        const added = { source, eventTypes: mergedWaitEventTypes([], eventTypes) };
+        bySource.set(key, added);
+        wait.events!.push(added);
+      }
     }
+    sourceEvents.set(sessionId, bySource);
     waits.set(sessionId, wait);
   }
   return waits;
@@ -19555,6 +19594,7 @@ export async function sessionScheduleTargets(
         triggerStatus: schema.eventTriggers.status,
         triggerPosition: schema.eventTriggers.position,
         eventTypes: schema.eventTriggers.eventTypes,
+        sourceId: schema.eventSources.id,
         sourceKind: schema.eventSources.kind,
         sourceName: schema.eventSources.name,
         sourceVisibility: schema.eventSources.visibility,
@@ -71505,6 +71545,11 @@ export type InitializeSessionStartInput = {
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
   /**
+   * Normalized IANA zone of the person sending the initial message, frozen in
+   * the initial turn's metadata.
+   */
+  initialTimeZone?: string;
+  /**
    * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
    * scheduled firing passes its task's value, which is copied, never
    * recomputed. Omitted by every other caller (the acceptance rule applies).
@@ -71560,6 +71605,14 @@ export type InitializeSessionStartResult = {
   /** True when this call installed/repaired start state or committed a new wake revision. */
   changed: boolean;
 };
+
+/** Trusted per-message facts the create request froze for the initial turn. */
+function initialTurnMetadata(
+  input: Pick<InitializeSessionStartInput, "initialTimeZone">,
+): Record<string, unknown> {
+  const timeZone = normalizeMessageTimeZone(input.initialTimeZone);
+  return timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {};
+}
 
 /**
  * Install a newly created session's complete first runnable unit atomically.
@@ -72118,8 +72171,11 @@ export async function initializeSessionStartAtomically(
                   sandboxBackend: session.sandboxBackend,
                   sandboxOs: session.sandboxOs,
                   metadata: input.turnExecutionPolicy
-                    ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
-                    : {},
+                    ? metadataWithTurnExecutionPolicyV1(
+                        initialTurnMetadata(input),
+                        input.turnExecutionPolicy,
+                      )
+                    : initialTurnMetadata(input),
                   lineage: {},
                   ...initiatorColumns(creator),
                   initiatingHumanSubjectId: initialTurnInitiatingHumanSubjectId,
@@ -76836,6 +76892,8 @@ export async function claimSessionWorkForAttempt(
                     // moment the user sent it.
                     historyTurn.createdAt,
                     humanTurnSenderLabel(historyTurn),
+                    // The sender's zone frozen in the turn at acceptance.
+                    messageTimeZoneFromTurnMetadata(historyTurn.metadata),
                   ),
                 ),
               },
@@ -84336,6 +84394,53 @@ export async function getSessionTurn(
   });
 }
 
+/** How many of a session's newest finished turns the message-zone lookup reads. */
+const LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW = 64;
+
+/**
+ * The time zone of the newest finished turn in a session whose message
+ * carried one, among its latest {@link LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW}
+ * finished turns. Walks the newest-finished-first index and stops there, so a
+ * long session costs one bounded index range.
+ */
+export async function getLatestSessionMessageTimeZone(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | undefined> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const recent = scopedDb
+      .select({
+        metadata: schema.sessionTurns.metadata,
+        finishedAt: schema.sessionTurns.finishedAt,
+        position: schema.sessionTurns.position,
+        createdAt: schema.sessionTurns.createdAt,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          isNotNull(schema.sessionTurns.finishedAt),
+        ),
+      )
+      .orderBy(
+        desc(schema.sessionTurns.finishedAt),
+        desc(schema.sessionTurns.position),
+        desc(schema.sessionTurns.createdAt),
+      )
+      .limit(LATEST_MESSAGE_TIME_ZONE_TURN_WINDOW)
+      .as("recent");
+    const rows = await scopedDb
+      .select({ metadata: recent.metadata })
+      .from(recent)
+      .where(sql`${recent.metadata} ? ${MESSAGE_TIME_ZONE_METADATA_KEY}`)
+      .orderBy(desc(recent.finishedAt), desc(recent.position), desc(recent.createdAt))
+      .limit(1);
+    return messageTimeZoneFromTurnMetadata(rows[0]?.metadata);
+  });
+}
+
 /**
  * Read only the immutable causal human for one exact accepted turn. Public
  * SessionTurn projections intentionally omit this execution-authority field.
@@ -91125,6 +91230,7 @@ export * from "./automations";
 export * from "./event-triggers";
 export * from "./mcp-event-subscriptions";
 export * from "./event-source-feeds";
+export * from "./automation-templates";
 export * from "./organization-model-providers";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";

@@ -5,6 +5,7 @@ import {
   recordEventSourceFeedDelivery,
   type Database,
   type EventSourceRecord,
+  type EventStatusReason,
 } from "@opengeni/db";
 import { readResponseJsonBounded } from "@opengeni/network";
 import { GMAIL_REST_API_BASE, isOfficialGmailMcpConfig } from "@opengeni/runtime/gmail-rest-mcp";
@@ -32,6 +33,7 @@ import {
   type McpEventsFetch,
 } from "./mcp-event-source-client";
 import { boundEvent } from "./normalize";
+import { eventStatusReason } from "./status-reason";
 
 /**
  * The Gmail source: one person's mailbox, read with the Gmail connection
@@ -99,7 +101,10 @@ async function gmailApi(
     isOfficialGmailMcpConfig(server.url, server.connectionRef),
   );
   if (servers.length === 0) {
-    throw new McpEventSourceUnavailableError("Gmail is no longer added to this workspace");
+    throw new McpEventSourceUnavailableError(
+      "connector_removed",
+      "Gmail is no longer added to this workspace",
+    );
   }
   const bindings = await ownerConnectionBindings(deps, owner, servers);
   let binding = bindings.find((candidate) => candidate.connectionId === connectionId);
@@ -113,7 +118,7 @@ async function gmailApi(
     binding = bindings[0];
   }
   const server = servers.find((candidate) => candidate.id === binding?.canonicalServerId);
-  if (!binding || !server) throw new McpEventSourceUnavailableError(RECONNECT);
+  if (!binding || !server) throw new McpEventSourceUnavailableError("reconnect", RECONNECT);
   const headers = ownerConnectionHeaders(deps, owner, server, binding, {
     toolName: "events",
     destinationUrl: GMAIL_REST_API_BASE,
@@ -208,13 +213,13 @@ export async function createGmailEventSource(input: {
     if (error instanceof McpEventSourceUnavailableError) {
       throw new HTTPException(422, {
         message:
-          error.message === RECONNECT
+          error.reason.code === "reconnect"
             ? "Connect your Gmail account first, then add it as a source"
             : `${error.message}. Add it, connect your account, then try again.`,
       });
     }
     const blocked = gmailBlockedReason(error);
-    if (blocked) throw new HTTPException(422, { message: blocked });
+    if (blocked) throw new HTTPException(422, { message: blocked.text });
     throw new HTTPException(503, {
       message: `Couldn't reach Gmail (${(error instanceof Error ? error.message : String(error)).slice(0, 200)}). Try again shortly.`,
     });
@@ -239,17 +244,20 @@ export async function createGmailEventSource(input: {
 }
 
 /** What a person has to fix when Gmail refuses, in plain language; null when retrying may help. */
-export function gmailBlockedReason(error: unknown): string | null {
+export function gmailBlockedReason(error: unknown): EventStatusReason | null {
   if (!(error instanceof GmailApiError)) return null;
-  if (error.status === 401) return RECONNECT;
+  if (error.status === 401) return eventStatusReason("reconnect", RECONNECT);
   if (
     error.status === 403 &&
     !["rateLimitExceeded", "userRateLimitExceeded", "backendError"].includes(error.reason ?? "")
   ) {
-    return "Gmail doesn't let Opengeni read this mailbox any more. Reconnect Gmail and allow reading mail.";
+    return eventStatusReason(
+      "missing_permission",
+      "Gmail doesn't let Opengeni read this mailbox any more. Reconnect Gmail and allow reading mail.",
+    );
   }
   if (error.status === 400 && error.reason === "failedPrecondition") {
-    return "Gmail isn't turned on for this account";
+    return eventStatusReason("app_not_enabled", "Gmail isn't turned on for this account");
   }
   return null;
 }
@@ -336,7 +344,9 @@ async function readGmailFeed(
   const { deps, source, feed, now } = context;
   const mailbox = sourceMailbox(source);
   const owner = source.ownerSubjectId;
-  if (!owner || !mailbox) throw new McpEventSourceUnavailableError("This source has no mailbox");
+  if (!owner || !mailbox) {
+    throw new McpEventSourceUnavailableError("unavailable", "This source has no mailbox");
+  }
   const api = await gmailApi(
     deps,
     { accountId: source.accountId, workspaceId: source.workspaceId, ownerSubjectId: owner },
@@ -348,7 +358,9 @@ async function readGmailFeed(
     const profile = await readProfile(api);
     if (profile.mailbox !== mailbox) {
       throw new McpEventSourceUnavailableError(
+        "account_changed",
         `This Gmail connection now signs in as ${profile.mailbox}, not ${mailbox}. Reconnect ${mailbox}.`,
+        profile.mailbox,
       );
     }
     return { cursor: profile.historyId, nextActionAt: later };

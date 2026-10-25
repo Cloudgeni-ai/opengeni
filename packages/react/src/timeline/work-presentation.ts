@@ -113,8 +113,9 @@ export function readableWorkHasDetails(
 
 /**
  * Status of a readable turn's work row, minus the host-rendered live preview.
- * Time spent waiting for model capacity is not work: the worked duration and
- * the live working clock exclude it, and the wait itself shows no clock. A
+ * Time spent waiting for model capacity, or between a failed attempt and its
+ * Retry, is not work: the worked duration and the live working clock exclude
+ * it, and a capacity wait itself shows no clock. A
  * wait's `detail` is its one quiet secondary line.
  */
 export function readableWorkStatus(

@@ -493,6 +493,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "secret_use_approvals",
       // 0954 meeting notes are also withheld.
       "recording_notes",
+      // 0959 automation templates are also withheld.
+      "automation_templates",
     ].sort();
     // 0823 (personal machine consent) adds protected tables the runtime role
     // never reads directly; insert them in the sorted protected list.

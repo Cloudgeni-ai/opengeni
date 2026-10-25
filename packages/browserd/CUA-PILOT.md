@@ -194,7 +194,10 @@ workflow tools; lifecycle, escalation, configuration, updates and browser tools
 stay outside this interface. macOS, Linux and Windows each have a generated
 catalog, produced by running the script on that platform after every CUA pin
 change; macOS defines the admitted set, and a platform whose driver lacks a tool
-omits it. Agent schemas preserve the union of the native
+omits it. Each catalog records the CUA version it was generated from, and a
+browserd test fails unless every catalog names the `@trycua/cua-driver` version
+browserd pins, so a catalog left on an older CUA release shows up before its
+runtime refuses calls. Agent schemas preserve the union of the native
 variants, and the selected runtime checks its exact platform schema.
 Each admitted tool's input/output schemas are checked against the running worker.
 

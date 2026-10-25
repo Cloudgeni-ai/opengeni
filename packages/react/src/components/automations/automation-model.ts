@@ -12,6 +12,7 @@ import type {
   ScheduledTask,
   ScheduledTaskRun,
   ScheduledTaskScheduleSpec,
+  SessionAutomationWaitSummary,
   UpdateScheduledTaskRequest,
 } from "@opengeni/sdk";
 
@@ -564,12 +565,55 @@ export interface SessionAutomationWaitWords {
   kind: SessionAutomationWait;
   /**
    * A sentence for a tooltip or hover card: "Waiting for deploy.finished from
-   * Deploys", "Next run: Tomorrow, 09:00", both, and how many more automations
-   * wait. Servers without the details get the plain "Waiting for an event".
+   * Deploys or message.received from Gmail", "Next run: Tomorrow, 09:00" or
+   * both. Servers without the details get the plain "Waiting for an event".
    */
   label: string;
-  /** A few words for a chip: "Waiting on Deploys", "Next: Tomorrow, 09:00". */
+  /** A few words for a chip: "Waiting on Deploys and Gmail", "Next: Tomorrow, 09:00". */
   short: string;
+}
+
+type SessionAutomationWaitEvent = NonNullable<SessionAutomationWaitSummary["event"]>;
+
+/** How many sources a chip names before it counts the rest. */
+const WAIT_CHIP_SOURCES = 2;
+
+/** "A and B", or "A or B", in the host's language. */
+function listWords(
+  t: OpenGeniText,
+  items: readonly string[],
+  type: "conjunction" | "disjunction",
+): string {
+  try {
+    return new Intl.ListFormat(t.locale, { type }).format(items);
+  } catch {
+    return items.join(", ");
+  }
+}
+
+/** "deploy.finished or deploy.failed from Deploys", "every event from a source you can't see". */
+function waitEventWords(t: OpenGeniText, event: SessionAutomationWaitEvent): string {
+  const types = eventTypesLabel(t, event.eventTypes);
+  return t("automations.trigger.short", {
+    // "Every event" reads "every event" mid-sentence; event names keep their case.
+    events: event.eventTypes[0]?.endsWith("*") ? inSentence(types, t) : types,
+    source: event.source?.name ?? t("automations.trigger.hiddenSourceInline"),
+  });
+}
+
+/** "Waiting on Deploys and Gmail", "Waiting on Deploys, Gmail and 2 more". */
+function waitSourcesShort(t: OpenGeniText, events: readonly SessionAutomationWaitEvent[]): string {
+  const names = events.flatMap((event) => (event.source ? [event.source.name] : []));
+  if (names.length === 0) return t("automations.wait.chip.anyEvent");
+  const shown = names.slice(0, WAIT_CHIP_SOURCES);
+  const rest = events.length - shown.length;
+  return t("automations.wait.chip.event", {
+    source: listWords(
+      t,
+      rest > 0 ? [...shown, t("automations.wait.chip.more", { count: rest })] : shown,
+      "conjunction",
+    ),
+  });
 }
 
 /**
@@ -585,10 +629,12 @@ export function sessionAutomationWaitWords(
   { now, timeZone = viewerTimeZone() }: { now: Date; timeZone?: string },
 ): SessionAutomationWaitWords | null {
   const summary = session.automationWait;
+  // Servers that send only the first event still name that one.
+  const events = summary ? (summary.events ?? (summary.event ? [summary.event] : [])) : [];
   // The details cover only automations this person can see; without them the
   // plain facts still say a chat waits on someone else's Only me automation.
   const kind: SessionAutomationWait | null = summary
-    ? summary.event
+    ? events.length > 0
       ? "event"
       : "schedule"
     : sessionAutomationWait(session);
@@ -601,15 +647,13 @@ export function sessionAutomationWaitWords(
       short: kind === "event" ? t("automations.wait.chip.anyEvent") : label,
     };
   }
-  const source = summary.event?.source?.name ?? null;
-  const types = summary.event ? eventTypesLabel(t, summary.event.eventTypes) : null;
   const event =
-    summary.event && types
-      ? t("automations.trigger.short", {
-          // "Every event" reads "every event" mid-sentence; event names keep their case.
-          events: summary.event.eventTypes[0]?.endsWith("*") ? inSentence(types, t) : types,
-          source: source ?? t("automations.trigger.hiddenSourceInline"),
-        })
+    events.length > 0
+      ? listWords(
+          t,
+          events.map((entry) => waitEventWords(t, entry)),
+          "disjunction",
+        )
       : null;
   const time = summary.nextRunAt
     ? formatRunTime(new Date(summary.nextRunAt), { timeZone, now, text: t })
@@ -622,15 +666,15 @@ export function sessionAutomationWaitWords(
         : time
           ? t("automations.wait.nextRun", { time })
           : sessionAutomationWaitLabel(t, kind);
-  const more = summary.automations - 1;
+  // Every event is named, and only the soonest run matters; a server that
+  // names only the first event leaves the rest to a count.
+  const more = summary.events ? 0 : summary.automations - 1;
   return {
     kind,
     label: more > 0 ? t("automations.wait.more", { wait, count: more }) : wait,
     short:
       kind === "event"
-        ? source
-          ? t("automations.wait.chip.event", { source })
-          : t("automations.wait.chip.anyEvent")
+        ? waitSourcesShort(t, events)
         : time
           ? t("automations.wait.chip.nextRun", { time })
           : sessionAutomationWaitLabel(t, kind),

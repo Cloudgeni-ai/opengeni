@@ -4555,6 +4555,156 @@ describe("interaction attempt tools", () => {
     ]);
   });
 
+  test("computer_open returns the screen's screenshot in the same call when includeScreenshot is set", async () => {
+    const session: ComputerSession = {
+      ...discoveredComputerSession(computerSessionId, sessionId),
+      lifecycle: "active",
+      controller: {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      },
+      platform: "windows",
+      adapter: "opengeni.windows.test.v1",
+      seatId: "seat-1",
+      displayId: "display-1",
+      capabilities: {
+        semanticObservation: true,
+        appDiscovery: true,
+        appLaunch: true,
+        windowCapture: true,
+        screenCapture: true,
+        semanticActions: true,
+        pointerInput: true,
+        keyboardInput: true,
+        clipboard: true,
+        backgroundActions: true,
+        parallelApps: true,
+      },
+    };
+    const window = computerTarget();
+    const screen: ComputerTarget = { ...computerTarget(), id: "screen-1", kind: "screen" };
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const captures: string[] = [];
+    let captureFails = false;
+    let targets: ComputerTarget[] = [window, screen];
+    let frameGeneration: string | null = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets,
+        }),
+        captureComputerTarget: async (_workspaceId, capturedSessionId, targetId) => {
+          captures.push(`${capturedSessionId}:${targetId}`);
+          if (captureFails) throw new Error("synthetic capture failure");
+          return {
+            frameId: "open-frame",
+            computerSessionId,
+            controllerGeneration: "controller-1",
+            targetId,
+            targetGeneration:
+              frameGeneration ?? targets.find((target) => target.id === targetId)!.targetGeneration,
+            sequence: 0,
+            mediaType: "image/jpeg",
+            width: 1024,
+            height: 640,
+            capturedAt: now,
+            sha256: "0".repeat(64),
+            data: image,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:control"],
+    });
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+
+    const plain = await definitions[0]!.execute({ computerSessionId }, context());
+    expect(plain.content).toHaveLength(1);
+    expect(captures).toEqual([]);
+
+    const visual = await definitions[0]!.execute(
+      { computerSessionId, includeScreenshot: true },
+      context(),
+    );
+    // The screen is captured, not the first-listed window.
+    expect(captures).toEqual([`${computerSessionId}:screen-1`]);
+    expect(visual.isError).toBeFalsy();
+    expect(visual.structuredContent).toMatchObject({ session: { id: computerSessionId } });
+    expect(visual.content).toEqual([
+      plain.content[0],
+      {
+        type: "text",
+        text: "Screenshot of screen-1: frameId open-frame, 1024x640 pixels; use these pixels for pointer coordinates.",
+      },
+      { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
+    ]);
+
+    // A failed capture keeps the opened computer's result and says why.
+    captureFails = true;
+    const failed = await definitions[0]!.execute(
+      { computerSessionId, includeScreenshot: true },
+      context(),
+    );
+    expect(failed.isError).toBeFalsy();
+    expect(failed.content).toEqual([
+      plain.content[0],
+      {
+        type: "text",
+        text: "The computer opened, but its screenshot could not be captured: synthetic capture failure",
+      },
+    ]);
+    captureFails = false;
+
+    // Pixels of a screen that changed since it was listed are not returned.
+    frameGeneration = "target-3";
+    const changed = await definitions[0]!.execute(
+      { computerSessionId, includeScreenshot: true },
+      context(),
+    );
+    expect(changed.isError).toBeFalsy();
+    expect(changed.content).toEqual([
+      plain.content[0],
+      {
+        type: "text",
+        text: "The computer opened, but its screen changed while it was captured; observe it for a current screenshot.",
+      },
+    ]);
+    frameGeneration = null;
+
+    // With several screens, the one showing the focused window is captured,
+    // and the screen the computer works in comes before it.
+    const left: ComputerTarget = {
+      ...screen,
+      id: "screen-left",
+      focused: false,
+      bounds: { x: 0, y: 0, width: 1024, height: 640 },
+    };
+    const right: ComputerTarget = {
+      ...left,
+      id: "screen-right",
+      bounds: { x: 1024, y: 0, width: 1024, height: 640 },
+    };
+    const shown = { ...window, bounds: { x: 1200, y: 100, width: 400, height: 300 } };
+    for (const [listed, expected] of [
+      [[shown, left, right], "screen-right"],
+      [[shown, { ...left, current: true as const }, right], "screen-left"],
+    ] as const) {
+      targets = [...listed];
+      captures.length = 0;
+      await definitions[0]!.execute({ computerSessionId, includeScreenshot: true }, context());
+      expect(captures).toEqual([`${computerSessionId}:${expected}`]);
+    }
+  });
+
   test("observes an app target from its tree when it has no screenshot", async () => {
     const target: ComputerTarget = { ...computerTarget(), id: "app-1", kind: "app" };
     const observation = { ...computerObservation(target), frameId: null };

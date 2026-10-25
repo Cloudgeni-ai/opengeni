@@ -3845,6 +3845,13 @@ export type CreateSessionRequest = {
   startMode?: "realtime" | "standard" | undefined;
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
+  /**
+   * IANA time zone of the person sending `initialMessage` (for example
+   * `Europe/Oslo`), so the model sees the message's local time. In a browser
+   * or app the client fills in the device's zone when this is omitted;
+   * invalid names are dropped.
+   */
+  timeZone?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —
   // how a host supplies per-agent-type prompts without leaking them into the
@@ -7481,6 +7488,8 @@ export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expecte
   delivery: "send" | "steer";
   controlEtag?: string;
   modelContext?: string;
+  /** IANA time zone of the sender; see `UserMessageEventInput`. */
+  timeZone?: string;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
   connectionAccounts?: McpConnectionAccountSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -10178,6 +10187,13 @@ export type UserMessageEventInput = {
     text: string;
     annotations?: SubmittedTimelineAnnotation[] | undefined;
     modelContext?: string | undefined;
+    /**
+     * IANA time zone of the person sending the message (for example
+     * `Europe/Oslo`), so the model sees the message's local time. In a
+     * browser or app the client fills in the device's zone when this is
+     * omitted; invalid names are dropped.
+     */
+    timeZone?: string | undefined;
     resources?: ResourceRef[] | undefined;
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;

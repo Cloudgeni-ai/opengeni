@@ -1,5 +1,6 @@
 import {
   ClaudeProviderAccountAuthoritySnapshotV1,
+  MESSAGE_TIME_ZONE_METADATA_KEY,
   WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
 } from "@opengeni/contracts";
 import {
@@ -2073,6 +2074,19 @@ export async function steerQueuedTurnInTransaction(
   };
 }
 
+/**
+ * The sender's time zone is presentation context, not part of a prompt's
+ * request identity: a retry that names another zone (or none) replays the
+ * original turn instead of conflicting with it.
+ */
+function turnMetadataRequestIdentity(
+  turnMetadata: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!turnMetadata || !(MESSAGE_TIME_ZONE_METADATA_KEY in turnMetadata)) return turnMetadata ?? {};
+  const { [MESSAGE_TIME_ZONE_METADATA_KEY]: _timeZone, ...identity } = turnMetadata;
+  return identity;
+}
+
 export async function submitHumanPromptInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -2198,7 +2212,7 @@ export async function submitHumanPromptInTransaction(
     reasoningEffort: input.reasoningEffort ?? null,
     latencyMode: input.latencyMode ?? null,
     source: input.source,
-    turnMetadata: input.turnMetadata ?? {},
+    turnMetadata: turnMetadataRequestIdentity(input.turnMetadata),
     messagePresentation: input.messagePresentation ?? null,
     mirrorToRealtime: input.mirrorToRealtime ?? true,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],

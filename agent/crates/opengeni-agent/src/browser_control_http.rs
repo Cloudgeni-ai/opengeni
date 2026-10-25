@@ -24,7 +24,9 @@ const MAX_PATH_BYTES: usize = 8 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 48 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// The longest controller request the control plane sends: an action batch's
+/// deadline is derived from its declared waits and capped here.
+const MAX_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const MAX_RESPONSE_HEADERS: usize = 128;
 const SPOOL_TTL: Duration = Duration::from_secs(120);
 const SPOOL_MAX_BYTES: usize = 256 * 1024 * 1024;

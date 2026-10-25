@@ -2,7 +2,8 @@
 // test/automations-preview.html?path=/workspaces/<id>/automations (any of the
 // pages' own paths) and `&theme=dark` for the dark theme. The embeddable
 // Automations panel is at /workspaces/<id>/panel, in a dialog-sized frame;
-// `?chat=1` scopes it to a chat.
+// `?chat=1` scopes it to a chat and `?builtin=1` offers the built-in
+// templates and this workspace's events.
 import { createRoot } from "react-dom/client";
 import {
   createMemoryHistory,
@@ -12,13 +13,14 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { OpenGeniProvider } from "@opengeni/react";
-import { AutomationsPanel } from "@opengeni/react/automations";
+import { OpenGeniProvider, useOpenGeniText } from "@opengeni/react";
+import { AutomationsPanel, builtinAutomationTemplates } from "@opengeni/react/automations";
 import { Toaster } from "@opengeni/react/app/components/toaster";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   AutomationDetailRoute,
   AutomationFormRoute,
+  AutomationTemplatesRoute,
   AutomationsRoute,
   EventSourceDetailRoute,
   EventSourceNewRoute,
@@ -44,7 +46,7 @@ const root = createRootRoute({
     <OpenGeniProvider client={previewClient as never} workspaceId={previewWorkspaceId}>
       <TooltipProvider>
         <main className="min-h-dvh min-w-0 bg-bg text-fg">
-          <Toaster />
+          <Toaster theme={theme} />
           <Outlet />
         </main>
       </TooltipProvider>
@@ -78,6 +80,13 @@ const create = createRoute({
         mode={{ kind: "create", template, from, eventSourceId: source }}
       />
     );
+  },
+});
+const templatesList = createRoute({
+  getParentRoute: () => root,
+  path: "/workspaces/$workspaceId/automations/templates",
+  component: function Templates() {
+    return <AutomationTemplatesRoute workspaceId={templatesList.useParams().workspaceId} />;
   },
 });
 const sourcesList = createRoute({
@@ -132,10 +141,14 @@ const edit = createRoute({
 const panel = createRoute({
   getParentRoute: () => root,
   path: "/workspaces/$workspaceId/panel",
-  validateSearch: (search: Record<string, unknown>) => ({ chat: Boolean(search.chat) }),
+  validateSearch: (search: Record<string, unknown>) => ({
+    chat: Boolean(search.chat),
+    builtin: Boolean(search.builtin),
+  }),
   component: function Panel() {
+    const t = useOpenGeniText();
     const { workspaceId } = panel.useParams();
-    const inChat = panel.useSearch().chat;
+    const { chat: inChat, builtin } = panel.useSearch();
     return (
       <div className="flex min-h-dvh justify-center p-4 sm:p-10">
         <div
@@ -149,6 +162,8 @@ const panel = createRoute({
             sessionId={inChat ? chatSessionId : undefined}
             eventServers={[projectsServer]}
             argumentDefaults={{ projectId }}
+            templates={builtin ? builtinAutomationTemplates(t) : undefined}
+            workspaceEvents={builtin}
             onOpenSession={() => undefined}
           />
         </div>
@@ -161,6 +176,7 @@ const router = createRouter({
   routeTree: root.addChildren([
     list,
     create,
+    templatesList,
     sourcesList,
     sourceNew,
     sourceDetail,

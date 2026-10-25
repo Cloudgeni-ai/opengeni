@@ -1,5 +1,9 @@
 import type { AttemptToolDefinition, AttemptToolExecutionContext } from "@opengeni/codemode";
 import {
+  DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+  modelToolOutputSerializationBudgetTokens,
+} from "@opengeni/codex";
+import {
   ToolResultSpilledReceipt,
   sandboxShellPath,
   type AttemptToolIdentity,
@@ -14,6 +18,24 @@ export type SpillOversizedModelToolResult = (input: {
   result: AttemptToolResultValue;
   serializedBytes: number;
 }) => Promise<AttemptToolResultValue>;
+
+/**
+ * A tool's own model-visible copy of one exact result (for example a local MCP
+ * bridge's compact mail cards). Only the model caller receives it.
+ */
+export type ProjectModelToolResult = (result: AttemptToolResultValue) => AttemptToolResultValue;
+
+/**
+ * UTF-8 text bytes one model-visible tool result may use before the generic
+ * model-output truncation cuts its middle (four bytes per approximate token),
+ * less a small allowance for the `Structured result: ` framing of the model
+ * view.
+ */
+export function modelToolTextBudgetBytes(
+  policyTokens: number = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+): number {
+  return Math.max(4_096, modelToolOutputSerializationBudgetTokens(policyTokens) * 4 - 512);
+}
 
 const OVERFLOW_ERROR = {
   code: "result_too_large",
@@ -53,9 +75,11 @@ export function modelToolResultFits(result: AttemptToolResultValue): boolean {
 
 /**
  * The single per-caller seam over one executor result. Codemode receives the
- * exact result. The model receives its model-visible projection (compact
- * Knowledge discovery output for the exact tool identity) when that fits in
- * 1 MiB; otherwise the exact result is spilled to a file, as for any tool.
+ * exact result. The model receives its model-visible projection (the tool's
+ * own `projectForModel`, such as compact Gmail cards, or compact Knowledge
+ * discovery output for the exact tool identity) when that fits in 1 MiB;
+ * otherwise the exact result is spilled to a file, as for any tool. A
+ * projection that throws leaves the exact result in place.
  * MCP-backed exact results are bounded only by the 8 MiB MCP transport cap
  * before this seam runs, so a large MCP read spills here like any other tool
  * instead of failing after the provider already returned it.
@@ -65,12 +89,14 @@ export async function projectAttemptToolResultForCaller(
   context: AttemptToolExecutionContext,
   spill?: SpillOversizedModelToolResult,
   identity?: AttemptToolIdentity,
+  projectForModel?: ProjectModelToolResult,
 ): Promise<AttemptToolResultValue> {
   switch (context.caller.kind) {
     case "codemode":
       return result;
     case "model": {
-      const visible = identity ? projectKnowledgeToolResultForModel(identity, result) : result;
+      const own = projectForModel ? toolOwnModelProjection(projectForModel, result) : result;
+      const visible = identity ? projectKnowledgeToolResultForModel(identity, own) : own;
       if (modelToolResultFits(visible)) return visible;
       if (!spill) return modelToolResultOverflowError();
       try {
@@ -90,13 +116,31 @@ export async function projectAttemptToolResultForCaller(
   }
 }
 
+function toolOwnModelProjection(
+  projectForModel: ProjectModelToolResult,
+  result: AttemptToolResultValue,
+): AttemptToolResultValue {
+  try {
+    return projectForModel(result);
+  } catch {
+    return result;
+  }
+}
+
 export function wrapAttemptToolExecute(
   execute: AttemptToolDefinition["execute"],
   spill?: SpillOversizedModelToolResult,
   identity?: AttemptToolIdentity,
+  projectForModel?: ProjectModelToolResult,
 ): AttemptToolDefinition["execute"] {
   return async (args, context) =>
-    await projectAttemptToolResultForCaller(await execute(args, context), context, spill, identity);
+    await projectAttemptToolResultForCaller(
+      await execute(args, context),
+      context,
+      spill,
+      identity,
+      projectForModel,
+    );
 }
 
 export function wrapAttemptToolDefinitions(

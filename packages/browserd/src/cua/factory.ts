@@ -5,6 +5,7 @@ import { CuaComputerBackend } from "./backend";
 import { computerNativeMacWindows } from "./macos-windows";
 import { createCuaRuntime, missingLinuxLibraryError } from "./sdk";
 import type { CuaDesktopRuntime } from "./wire";
+import { windowsFronting } from "./windows-foreground";
 
 /** The part of the CUA SDK a desktop runtime uses. */
 type CuaSdk = {
@@ -189,7 +190,9 @@ export async function createCuaComputerDriver(
     process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : "macos",
     process.platform === "darwin" && nativeBinary
       ? { macWindows: computerNativeMacWindows(resolve(nativeBinary)) }
-      : {},
+      : process.platform === "win32"
+        ? { frontWindow: windowsFronting() }
+        : {},
   );
   return new ComputerDriver({
     computerSessionId: context.computerSessionId,
