@@ -196,13 +196,10 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "operation policy body must be valid JSON",
       });
     }
-    const parsed = UpdateMachineOperationPolicyRequest.safeParse(json);
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid machine operation policy",
-      });
-    }
-    const body = parsed.data;
+    const body = parseRequestBody(UpdateMachineOperationPolicyRequest, json, {
+      status: 400,
+      message: "invalid machine operation policy",
+    });
     const current = await requireScopedEnrollment(grant, enrollmentId);
     if (
       current.scope === "organization" &&

@@ -238,13 +238,10 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const legacy = rejectLegacyVariableSetFields(c, await readRequestJson(c));
     if ("response" in legacy) return legacy.response;
     const rawPayload = legacy.payload;
-    const parsedPayload = CreateScheduledTaskRequest.safeParse(rawPayload);
-    if (!parsedPayload.success) {
-      throw new HTTPException(400, {
-        message: "invalid scheduled task create request",
-      });
-    }
-    const payload = parsedPayload.data;
+    const payload = parseRequestBody(CreateScheduledTaskRequest, rawPayload, {
+      status: 400,
+      message: "invalid scheduled task create request",
+    });
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -417,17 +414,15 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const legacy = rejectLegacyVariableSetFields(c, body);
     if ("response" in legacy) return legacy.response;
     const rawPayload = legacy.payload;
-    const parsedPayload = UpdateScheduledTaskRequest.safeParse(rawPayload);
-    if (!parsedPayload.success) {
-      throw new HTTPException(400, {
-        message: "invalid scheduled task update request",
-      });
-    }
+    const parsedPayload = parseRequestBody(UpdateScheduledTaskRequest, rawPayload, {
+      status: 400,
+      message: "invalid scheduled task update request",
+    });
     // `variableSetId: null` / `variableSetIds: []` still clear an old link, so a
     // task tied to a set that is gone can be fixed without recreating it.
     const payload = clearsLegacyVariableSet(body)
-      ? { ...parsedPayload.data, variableSetId: null }
-      : parsedPayload.data;
+      ? { ...parsedPayload, variableSetId: null }
+      : parsedPayload;
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,

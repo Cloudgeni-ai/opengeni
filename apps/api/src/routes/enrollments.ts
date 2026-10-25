@@ -344,13 +344,10 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     requirePermission(grant, "enrollments:manage");
     assertSelfhostedEnabled();
     const rawBody = await c.req.json().catch(() => null);
-    const parsed = DeviceEnrollmentApproveRequest.safeParse(rawBody);
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid device-approve request",
-      });
-    }
-    const body = parsed.data;
+    const body = parseRequestBody(DeviceEnrollmentApproveRequest, rawBody, {
+      status: 400,
+      message: "invalid device-approve request",
+    });
     const scopeWasExplicit =
       typeof rawBody === "object" &&
       rawBody !== null &&

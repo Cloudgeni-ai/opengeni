@@ -186,7 +186,7 @@ import {
 } from "@opengeni/contracts";
 import { readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
-import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 import { parsePathParam } from "../http/path-identifier";
 
 type OpenGeniSlackInstallState = {
@@ -1427,29 +1427,27 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ? GoogleDriveDisconnectRequest.safeParse(disconnectPayload)
       : null;
     if (googleDriveDisconnect && !googleDriveDisconnect.success) {
-      throw new HTTPException(400, {
-        message:
-          googleDriveDisconnect.error.issues[0]?.message ??
-          "invalid Google Drive disconnect request",
+      throw requestValidationError(googleDriveDisconnect.error, "body", {
+        status: 400,
+        message: "invalid Google Drive disconnect request",
       });
     }
     const atlassianDisconnect = isAtlassian
       ? AtlassianDisconnectRequest.safeParse(disconnectPayload)
       : null;
     if (atlassianDisconnect && !atlassianDisconnect.success) {
-      throw new HTTPException(400, {
-        message:
-          atlassianDisconnect.error.issues[0]?.message ?? "invalid Atlassian disconnect request",
+      throw requestValidationError(atlassianDisconnect.error, "body", {
+        status: 400,
+        message: "invalid Atlassian disconnect request",
       });
     }
     const personalGitHubDisconnect = isPersonalGitHub
       ? PersonalGitHubDisconnectRequest.safeParse(disconnectPayload)
       : null;
     if (personalGitHubDisconnect && !personalGitHubDisconnect.success) {
-      throw new HTTPException(400, {
-        message:
-          personalGitHubDisconnect.error.issues[0]?.message ??
-          "invalid personal GitHub disconnect request",
+      throw requestValidationError(personalGitHubDisconnect.error, "body", {
+        status: 400,
+        message: "invalid personal GitHub disconnect request",
       });
     }
     if (

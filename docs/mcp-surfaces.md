@@ -99,6 +99,25 @@ workspace, or selected ones). The connection then acts as that person:
   A personal API key (`ogp_…`) calls the same server as its owner, exactly
   like a connected agent with the key's access setting. Organization API keys
   may call it too and act as the organization.
+- Describe shows each action's input: `requestSchema` is the contract the
+  route validates its body with, and `queryParameters` lists the query
+  parameters it reads. Both are read from the route handlers when the catalog
+  is generated: a body or query parsed with `parseRequestBody`,
+  `parseRequestJson` or `parseRequestQuery` (`apps/api/src/http/request-body.ts`)
+  is found automatically, and the few handlers that delegate parsing to a
+  helper are listed in `ACTION_REQUEST_SCHEMAS`. Those helpers are also the
+  one way a route validates input, so an invalid request answers 400 or 422
+  with `validation_failed`, a message naming each bad field
+  (`Invalid Skill request: stableKey: …; scope: …`) and `details.issues`.
+- A route retired in favour of another answers 410 with code `gone` and
+  `details.replacement` (`routeRetired` in `apps/api/src/http/deprecation.ts`).
+  Its action is marked `retired`: search never returns it, and describe or
+  call names the replacement action without running anything.
+- A call result holds at most 256 KiB. A JSON list larger than that keeps as
+  many whole items as fit (a top-level array, or the largest array in the
+  top-level object) with `truncated` counts and a hint naming the `offset`,
+  `limit` or `cursor` query parameters to call again with. Other bodies are
+  cut at the byte limit.
 - `initialize` advertises `serverInfo` title `Opengeni` and the brand mark as
   MCP `icons` (light and dark SVG data URIs, plus `/icon-512.png` on the public
   origin when `OPENGENI_PUBLIC_BASE_URL` is set) for clients that render them.

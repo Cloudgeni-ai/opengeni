@@ -112,6 +112,7 @@ import { googleDriveKnowledgeSourceIdentity } from "@opengeni/documents/google-d
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
+import { requestValidationError } from "../http/request-body";
 import {
   personalOnlyConnectionPrincipalMessage,
   personalOwnerStateAccepted,
@@ -1080,7 +1081,10 @@ export async function saveGoogleDriveFacetSource(
   assertNativeGoogleDriveAvailable();
   const parsedPayload = SaveGoogleDriveIntegrationSourceRequest.safeParse(input.payload);
   if (!parsedPayload.success) {
-    throw new HTTPException(400, { message: "invalid Google Drive source selection" });
+    throw requestValidationError(parsedPayload.error, "body", {
+      status: 400,
+      message: "invalid Google Drive source selection",
+    });
   }
   const payload = parsedPayload.data;
   const requestedSources = payload.sources.map((source) => ({
@@ -1254,7 +1258,10 @@ export async function saveGoogleDriveSource(
   assertNativeGoogleDriveAvailable();
   const parsedPayload = SaveGoogleDriveSourceRequest.safeParse(input.payload);
   if (!parsedPayload.success) {
-    throw new HTTPException(400, { message: "invalid Google Drive source selection" });
+    throw requestValidationError(parsedPayload.error, "body", {
+      status: 400,
+      message: "invalid Google Drive source selection",
+    });
   }
   const payload = parsedPayload.data;
   const existing = await getConnectionMetadata(

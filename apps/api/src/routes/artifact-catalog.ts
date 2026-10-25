@@ -52,7 +52,7 @@ import {
   type EditableArtifactRouteDependencies,
 } from "./editable-artifacts";
 import { fileAuthoritySubjectIdForGrant } from "./files";
-import { parseRequestQuery } from "../http/request-body";
+import { parseRequestQuery, requestValidationError } from "../http/request-body";
 
 type Dependencies = ApiRouteDeps & EditableArtifactRouteDependencies;
 const editableKinds = new Set(["document", "spreadsheet", "presentation"]);
@@ -85,12 +85,16 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
     const requestedId = context.req.param("artifactId");
     if (
       !kind.success ||
-      !body.success ||
       !(editableKinds.has(kind.data)
         ? /^[0-9a-f]{32}$/.test(requestedId)
         : z.string().uuid().safeParse(requestedId).success)
     )
       throw new HTTPException(422, { message: "Invalid artifact pin request" });
+    if (!body.success)
+      throw requestValidationError(body.error, "body", {
+        status: 422,
+        message: "Invalid artifact pin request",
+      });
     const artifactId = editableKinds.has(kind.data) ? requestedId : requestedId.toLowerCase();
     const fileKind = kind.data === "file" || kind.data === "image";
     if (!hasPermission(grant.permissions, fileKind ? "files:read" : "artifacts:read"))

@@ -1991,8 +1991,7 @@ export function createAppComposition(deps: AppDependencies): {
             : operation === "manifest"
               ? ToolGatewayManifestRequest
               : ToolGatewayTargetApprovalRequest;
-      if (!schema.safeParse(body).success)
-        throw new HTTPException(400, { message: "Invalid targeted tool request" });
+      parseRequestBody(schema, body, { status: 400, message: "Invalid targeted tool request" });
       c.header("cache-control", "no-store");
       const started = performance.now();
       let outcome: "ok" | "failed" = "failed";

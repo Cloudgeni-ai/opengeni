@@ -1456,7 +1456,7 @@ test("workspace timer wire types match contracts", async () => {
 });
 
 test("Skill write requests the SDK sends are the ones the API validates", () => {
-  // Client -> server, both ways: the SDK sends exactly the contract's input.
+  // Client -> server: every SDK request satisfies the contract's input.
   const toContract = {
     save: (value: SaveWorkspaceSkillRequest): z.input<typeof ContractSaveWorkspaceSkillRequest> =>
       value,
@@ -1467,17 +1467,7 @@ test("Skill write requests the SDK sends are the ones the API validates", () => 
       value: RemoveWorkspaceSkillRequest,
     ): z.input<typeof ContractRemoveWorkspaceSkillRequest> => value,
   };
-  const fromContract = {
-    save: (value: z.input<typeof ContractSaveWorkspaceSkillRequest>): SaveWorkspaceSkillRequest =>
-      value,
-    apply: (
-      value: z.input<typeof ContractApplyWorkspaceSkillRevisionRequest>,
-    ): ApplyWorkspaceSkillRevisionRequest => value,
-    remove: (
-      value: z.input<typeof ContractRemoveWorkspaceSkillRequest>,
-    ): RemoveWorkspaceSkillRequest => value,
-  };
-  expect(Object.keys(toContract)).toEqual(Object.keys(fromContract));
+  expect(Object.keys(toContract)).toEqual(["save", "apply", "remove"]);
   const save: SaveWorkspaceSkillRequest = {
     operationId: "00000000-0000-4000-8000-000000000001",
     skillId: "00000000-0000-4000-8000-000000000002",

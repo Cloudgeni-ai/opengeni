@@ -2842,14 +2842,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
       const sessionId = c.req.param("sessionId");
       const parsedServerId = SessionMcpServerId.safeParse(c.req.param("serverId"));
-      const payload = UpdateSessionMcpApprovalPolicyRequest.safeParse(
-        await c.req.json().catch(() => null),
-      );
-      if (!parsedServerId.success || !payload.success) {
+      const rawPayload = await c.req.json().catch(() => null);
+      if (!parsedServerId.success) {
         throw new HTTPException(400, {
           message: "invalid MCP approval-policy request",
         });
       }
+      const payload = parseRequestBody(UpdateSessionMcpApprovalPolicyRequest, rawPayload, {
+        status: 400,
+        message: "invalid MCP approval-policy request",
+      });
       await assertSessionExists(db, workspaceId, sessionId);
       return c.json(
         await updateSessionMcpApprovalPolicy(
@@ -2857,7 +2859,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           grant,
           sessionId,
           parsedServerId.data,
-          payload.data.requireApproval,
+          payload.requireApproval,
         ),
       );
     },
@@ -5004,18 +5006,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     };
   }
 
-  async function parseChannelABody<T>(
+  async function parseChannelABody<Schema extends z.ZodType>(
     c: Context,
-    schema: {
-      safeParse: (v: unknown) => { success: true; data: T } | { success: false };
-    },
-  ): Promise<T> {
+    schema: Schema,
+  ): Promise<z.output<Schema>> {
     const raw = await c.req.json().catch(() => undefined);
-    const result = schema.safeParse(raw ?? {});
-    if (!result.success) {
-      throw new HTTPException(400, { message: "invalid request body" });
-    }
-    return result.data;
+    return parseRequestBody(schema, raw ?? {}, { status: 400, message: "invalid request body" });
   }
 
   // ── FileSystem ──────────────────────────────────────────────────────────

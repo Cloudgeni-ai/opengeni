@@ -31,7 +31,7 @@ import { createHash } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import { requireSelectedAccount, withBillingUsageActor } from "./billing";
 import { createInFlightCoalescer } from "./insights";
-import { parseRequestQuery } from "../http/request-body";
+import { parseRequestQuery, requestValidationError } from "../http/request-body";
 import {
   createInsightsCredentialPartition,
   createInsightsResponseCache,
@@ -257,7 +257,11 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     if (!insightsRawQuerySupported(query, false, false))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });
     const parsed = WorkspaceInsightsUsageQuery.safeParse(query);
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights usage query" });
+    if (!parsed.success)
+      throw requestValidationError(parsed.error, "query", {
+        status: 400,
+        message: "invalid Insights usage query",
+      });
     const scope = {
       accountId: grant.accountId,
       workspaceId,
@@ -288,7 +292,11 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     if (!insightsRawQuerySupported(query, false, true))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });
     const parsed = WorkspaceInsightsCallsQuery.safeParse(query);
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights calls query" });
+    if (!parsed.success)
+      throw requestValidationError(parsed.error, "query", {
+        status: 400,
+        message: "invalid Insights calls query",
+      });
     const scope = {
       accountId: grant.accountId,
       workspaceId,
@@ -322,7 +330,11 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     if (!insightsRawQuerySupported(query, true, false))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });
     const parsed = OrganizationInsightsUsageQuery.safeParse(query);
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights usage query" });
+    if (!parsed.success)
+      throw requestValidationError(parsed.error, "query", {
+        status: 400,
+        message: "invalid Insights usage query",
+      });
     const scope = organizationInsightsScope(context, accountId);
     const response = await withBillingUsageActor(deps, context, accountId, () =>
       cached(
@@ -348,7 +360,11 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     if (!insightsRawQuerySupported(query, true, true))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });
     const parsed = OrganizationInsightsCallsQuery.safeParse(query);
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights calls query" });
+    if (!parsed.success)
+      throw requestValidationError(parsed.error, "query", {
+        status: 400,
+        message: "invalid Insights calls query",
+      });
     const scope = organizationInsightsScope(context, accountId);
     // Call readers intersect these canonical grants with current actor visibility.
     const response = await withBillingUsageActor(deps, context, accountId, () =>

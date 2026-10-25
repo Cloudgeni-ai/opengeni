@@ -29,7 +29,7 @@ import {
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
-import { parseRequestBody } from "../http/request-body";
+import { parseRequestBody, requestValidationError } from "../http/request-body";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
@@ -65,7 +65,8 @@ export function registerManagedOnboardingRoutes(
     );
     if (!parsed.success) {
       recordOrganizationSetupOutcome(deps.observability, "failed");
-      throw new HTTPException(422, {
+      throw requestValidationError(parsed.error, "body", {
+        status: 422,
         message: "invalid organization setup request",
       });
     }
