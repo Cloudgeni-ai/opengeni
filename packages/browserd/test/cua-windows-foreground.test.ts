@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bringToFront, type Win32Foreground } from "../src/cua/windows-foreground";
+import { bringToFront, giveBack, type Win32Foreground } from "../src/cua/windows-foreground";
 
 type Window = {
   className: string;
@@ -57,7 +57,14 @@ class Desktop implements Win32Foreground {
   captionPoint = () => this.caption;
   click = (point: { x: number; y: number }) => {
     this.log.push(`click ${point.x},${point.y}`);
+    this.pointer = point;
     if (this.onlyClick) this.current = 10;
+  };
+  pointer = { x: 640, y: 400 };
+  cursor = () => this.pointer;
+  moveCursor = (point: { x: number; y: number }) => {
+    this.log.push(`cursor ${point.x},${point.y}`);
+    this.pointer = point;
   };
 }
 
@@ -88,7 +95,7 @@ describe("bringing a Windows window to the front", () => {
   test("a window already in front, or its own dialog in front, is left as it is", async () => {
     for (const foreground of [10, 11]) {
       const win = desktop(foreground);
-      expect(await bringToFront(win, 10, sleep)).toEqual({ front: true });
+      expect(await bringToFront(win, 10, sleep)).toEqual({ front: true, previous: 0 });
       expect(win.log).toEqual([]);
       expect(win.current).toBe(foreground);
     }
@@ -96,36 +103,43 @@ describe("bringing a Windows window to the front", () => {
 
   test("Start or Search left open is dismissed with Escape, then the window is activated", async () => {
     const win = desktop(20);
-    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true });
+    // A dismissed Search is not given the foreground back.
+    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true, previous: 0 });
     expect(win.log).toEqual(["escape", "activate 10"]);
     expect(win.current).toBe(10);
   });
 
   test("Escape is never sent to an ordinary app in front", async () => {
     const win = desktop(30);
-    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true });
+    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true, previous: 30 });
     expect(win.log).toEqual(["activate 10"]);
   });
 
   test("a minimized window is restored before it is activated", async () => {
     const win = desktop(1);
     win.windows.get(10)!.minimized = true;
-    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true });
+    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true, previous: 1 });
     expect(win.log).toEqual(["restore 10", "activate 10"]);
   });
 
   test("activation is retried after this process claims the last input", async () => {
     const win = desktop(30);
     win.needsInputClaim = true;
-    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true });
+    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true, previous: 30 });
     expect(win.log).toEqual(["activate 10", "claim", "activate 10"]);
   });
 
-  test("the window's own title bar is clicked as the last resort", async () => {
+  test("the window's own title bar is clicked as the last resort, and the cursor put back", async () => {
     const win = desktop(30);
     win.onlyClick = true;
-    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true });
-    expect(win.log).toEqual(["activate 10", "claim", "activate 10", "click 300,8"]);
+    expect(await bringToFront(win, 10, sleep)).toEqual({ front: true, previous: 30 });
+    expect(win.log).toEqual([
+      "activate 10",
+      "claim",
+      "activate 10",
+      "click 300,8",
+      "cursor 640,400",
+    ]);
   });
 
   test("when nothing works, it names the window Windows kept in front", async () => {
@@ -148,7 +162,29 @@ describe("bringing a Windows window to the front", () => {
 
   test("a window that is gone is left for CUA to report", async () => {
     const win = desktop(30);
-    expect(await bringToFront(win, 99, sleep)).toEqual({ front: true });
+    expect(await bringToFront(win, 99, sleep)).toEqual({ front: true, previous: 0 });
     expect(win.log).toEqual([]);
+  });
+});
+
+describe("giving the foreground back", () => {
+  test("the window that was in front gets it back while the target is still in front", async () => {
+    for (const foreground of [10, 11]) {
+      const win = desktop(foreground);
+      giveBack(win, 10, 30);
+      expect(win.log).toEqual(["activate 30"]);
+      expect(win.current).toBe(30);
+    }
+  });
+
+  test("nothing is given back when there is nothing to give back or the input moved the foreground", () => {
+    const none = desktop(10);
+    giveBack(none, 10, 0);
+    const gone = desktop(10);
+    giveBack(gone, 10, 99);
+    const moved = desktop(1);
+    giveBack(moved, 10, 30);
+    for (const win of [none, gone, moved]) expect(win.log).toEqual([]);
+    expect(moved.current).toBe(1);
   });
 });

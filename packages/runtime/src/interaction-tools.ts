@@ -2487,9 +2487,7 @@ export function createInteractionAttemptToolDefinitions(
       if (!includeScreenshot) return opened;
       // The computer is already open. A failed capture must not turn its result
       // into an error the model could answer by opening another computer.
-      const target =
-        opened.targets.find((candidate) => candidate.kind === "screen") ??
-        opened.targets.find((candidate) => candidate.kind === "window");
+      const target = openedScreenshotTarget(opened.targets);
       if (!target)
         return new InteractionExecutionResult(opened, [
           {
@@ -2503,6 +2501,15 @@ export function createInteractionAttemptToolDefinitions(
           opened.session.id,
           target.id,
         );
+        // As in computer_observe: pixels of a target that changed since the
+        // computer listed it would not match the targets the result names.
+        if (frame.targetGeneration !== target.targetGeneration)
+          return new InteractionExecutionResult(opened, [
+            {
+              type: "text" as const,
+              text: "The computer opened, but its screen changed while it was captured; observe it for a current screenshot.",
+            },
+          ]);
         const image = await compactComputerImage(frame.data, frame.mediaType);
         return new InteractionExecutionResult(opened, [
           {
@@ -4715,6 +4722,36 @@ export function interactionToolErrorOutput(error: unknown): InteractionToolError
   } catch {
     return null;
   }
+}
+
+/** The screen computer_open includes a screenshot of: the one this computer
+ * works in, else the focused one, else the one showing the focused window;
+ * with no screen, the window it works in, else the focused one. */
+function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTarget | undefined {
+  const screens = targets.filter((target) => target.kind === "screen");
+  const windows = targets.filter((target) => target.kind === "window");
+  const focusedWindow = windows.find((target) => target.focused)?.bounds;
+  const centre = focusedWindow && {
+    x: focusedWindow.x + focusedWindow.width / 2,
+    y: focusedWindow.y + focusedWindow.height / 2,
+  };
+  return (
+    screens.find((screen) => screen.current) ??
+    screens.find((screen) => screen.focused) ??
+    (centre &&
+      screens.find(
+        ({ bounds }) =>
+          bounds !== null &&
+          centre.x >= bounds.x &&
+          centre.x < bounds.x + bounds.width &&
+          centre.y >= bounds.y &&
+          centre.y < bounds.y + bounds.height,
+      )) ??
+    screens[0] ??
+    windows.find((window) => window.current) ??
+    windows.find((window) => window.focused) ??
+    windows[0]
+  );
 }
 
 function screenshotFailureReason(error: unknown): string {

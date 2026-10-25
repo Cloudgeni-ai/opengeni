@@ -48,7 +48,7 @@ import {
   type UnindexedRow,
 } from "./projection";
 import type { MacWindowPresence, MacWindows } from "./macos-windows";
-import type { ForegroundResult } from "./windows-foreground";
+import type { WindowFronting } from "./windows-foreground";
 
 type Target = {
   native: ComputerBackendTarget;
@@ -190,7 +190,7 @@ export class CuaComputerBackend implements ComputerBackend {
     actionBatches: boolean,
     private readonly launchWindowWaitMs: number,
     private readonly macWindows: MacWindows | null,
-    private readonly frontWindow: ((windowId: number) => Promise<ForegroundResult>) | null,
+    private readonly frontWindow: WindowFronting | null,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -227,7 +227,7 @@ export class CuaComputerBackend implements ComputerBackend {
       macWindows?: MacWindows | null;
       /** Windows: bring a window to the foreground before CUA sends it
        * pointer or keyboard input (see windows-foreground.ts). */
-      frontWindow?: ((windowId: number) => Promise<ForegroundResult>) | null;
+      frontWindow?: WindowFronting | null;
     } = {},
   ): Promise<CuaComputerBackend> {
     try {
@@ -277,9 +277,15 @@ export class CuaComputerBackend implements ComputerBackend {
       this.nativeObservations = true;
       this.observations.clear();
       const { delivery_mode, window_id } = request.arguments as Record<string, unknown>;
-      if (delivery_mode === "foreground" && typeof window_id === "number")
-        await this.front(window_id);
-      return await this.nativeTools.call(request);
+      const fronted =
+        typeof window_id === "number"
+          ? await this.front(window_id, [{ name: request.tool, args: { delivery_mode } }])
+          : null;
+      try {
+        return await this.nativeTools.call(request);
+      } finally {
+        await fronted?.giveBack();
+      }
     });
   }
 
@@ -389,58 +395,67 @@ export class CuaComputerBackend implements ComputerBackend {
       this.observations.delete(command.targetId);
       const acted = await this.target(command.targetId);
       const known = new Set(this.targetsById.keys());
-      if (operations.some(inForeground)) await this.front(acted.windowId);
+      const fronted = await this.front(acted.windowId, operations);
       let report = "";
-      for (let index = 0; index < operations.length; index++) {
-        const operation = operations[index]!;
-        try {
-          const { result } = await callDesktop(this.runtime, operation.name, operation.args, true);
-          report += openedWindowsReport(result.text);
-        } catch (error) {
-          if (index > 0)
-            throw new ComputerBackendError(
-              "outcome_unknown",
-              "CUA delivered only part of the input",
-              false,
+      try {
+        for (let index = 0; index < operations.length; index++) {
+          const operation = operations[index]!;
+          try {
+            const { result } = await callDesktop(
+              this.runtime,
+              operation.name,
+              operation.args,
               true,
             );
-          // CUA's own wording names its raw tools; say what the caller does.
-          if (
-            error instanceof ComputerBackendError &&
-            error.code === "observation_stale" &&
-            !error.dispatched
-          )
-            throw new ComputerBackendError(
-              "observation_stale",
-              "CUA refused the element reference because the window was read again since; observe it again and act on a ref from that observation",
-              false,
-              false,
-            );
-          if (error instanceof CuaFailure && !error.dispatched)
-            throw (
-              (command.action.type === "keyboard"
-                ? this.keyboardRefusal(command.targetId, error.cuaCode, error.code, observed)
-                : null) ??
-              (await this.elementWindowRefusal(
-                command.targetId,
-                error.cuaCode,
-                error.code,
-                error.message,
-              )) ??
-              error
-            );
-          // macOS answers an accessibility action with "cannot complete"
-          // (-25205) even when it pressed the button or opened the item, often
-          // because the window changed or closed meanwhile. The windows read
-          // afterwards say whether it did.
-          if (
-            operation.name === "click" &&
-            operation.args.element_token !== undefined &&
-            cannotComplete(error)
-          )
-            return await this.afterUnconfirmed(command.targetId, acted, known, observed);
-          throw error;
+            report += openedWindowsReport(result.text);
+          } catch (error) {
+            if (index > 0)
+              throw new ComputerBackendError(
+                "outcome_unknown",
+                "CUA delivered only part of the input",
+                false,
+                true,
+              );
+            // CUA's own wording names its raw tools; say what the caller does.
+            if (
+              error instanceof ComputerBackendError &&
+              error.code === "observation_stale" &&
+              !error.dispatched
+            )
+              throw new ComputerBackendError(
+                "observation_stale",
+                "CUA refused the element reference because the window was read again since; observe it again and act on a ref from that observation",
+                false,
+                false,
+              );
+            if (error instanceof CuaFailure && !error.dispatched)
+              throw (
+                (command.action.type === "keyboard"
+                  ? this.keyboardRefusal(command.targetId, error.cuaCode, error.code, observed)
+                  : null) ??
+                (await this.elementWindowRefusal(
+                  command.targetId,
+                  error.cuaCode,
+                  error.code,
+                  error.message,
+                )) ??
+                error
+              );
+            // macOS answers an accessibility action with "cannot complete"
+            // (-25205) even when it pressed the button or opened the item, often
+            // because the window changed or closed meanwhile. The windows read
+            // afterwards say whether it did.
+            if (
+              operation.name === "click" &&
+              operation.args.element_token !== undefined &&
+              cannotComplete(error)
+            )
+              return await this.afterUnconfirmed(command.targetId, acted, known, observed);
+            throw error;
+          }
         }
+      } finally {
+        await fronted.giveBack();
       }
       const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
@@ -641,51 +656,55 @@ export class CuaComputerBackend implements ComputerBackend {
     this.observations.delete(command.targetId);
     const acted = await this.target(command.targetId);
     const known = new Set(this.targetsById.keys());
-    if (steps.some(inForeground)) await this.front(acted.windowId);
+    const fronted = await this.front(acted.windowId, steps);
     let report = "";
     let stopped: { step: number; outcome: Extract<RunStepsOutcome, { kind: "stopped" }> } | null =
       null;
-    for (let start = 0; start < steps.length && !stopped; start += MAX_RUN_STEPS) {
-      const chunk = steps.slice(start, start + MAX_RUN_STEPS);
-      let outcome: RunStepsOutcome;
-      try {
-        outcome = await runSteps(this.runtime, {
-          ...this.args(acted),
-          // Each step was checked against the batch's observation. A token CUA
-          // finds stale names an element of a window that changed since: the
-          // batch stops there instead of acting on a lookalike CUA finds again.
-          refind_stale: false,
-          steps: chunk.map((step) => ({ tool: step.name, args: step.args, ...step.stepOptions })),
-        });
-      } catch (error) {
-        // A later call refused before it ran: the earlier calls still did.
-        if (start === 0 || !(error instanceof ComputerBackendError) || error.dispatched)
-          throw error;
-        outcome = {
-          kind: "stopped",
-          completed: 0,
-          definite: false,
-          code: null,
-          cuaCode: null,
-          message: error.message,
-          standIns: [],
-        };
+    try {
+      for (let start = 0; start < steps.length && !stopped; start += MAX_RUN_STEPS) {
+        const chunk = steps.slice(start, start + MAX_RUN_STEPS);
+        let outcome: RunStepsOutcome;
+        try {
+          outcome = await runSteps(this.runtime, {
+            ...this.args(acted),
+            // Each step was checked against the batch's observation. A token CUA
+            // finds stale names an element of a window that changed since: the
+            // batch stops there instead of acting on a lookalike CUA finds again.
+            refind_stale: false,
+            steps: chunk.map((step) => ({ tool: step.name, args: step.args, ...step.stepOptions })),
+          });
+        } catch (error) {
+          // A later call refused before it ran: the earlier calls still did.
+          if (start === 0 || !(error instanceof ComputerBackendError) || error.dispatched)
+            throw error;
+          outcome = {
+            kind: "stopped",
+            completed: 0,
+            definite: false,
+            code: null,
+            cuaCode: null,
+            message: error.message,
+            standIns: [],
+          };
+        }
+        // CUA used the one element of a role pressed alike for a step that
+        // named its element by role and name (see namedOperation).
+        for (const used of outcome.standIns) {
+          const actionIndex = actionOf[start + used.step]!;
+          const action = actions[actionIndex];
+          if (action?.type !== "semantic" || action.locator.kind !== "role") continue;
+          standIns.push({
+            actionIndex,
+            requestedRole: action.locator.role,
+            role: observedRole(used.role),
+            name: used.name,
+          });
+        }
+        if (outcome.kind === "completed") report += openedWindowsReport(outcome.windowChanges);
+        else stopped = { step: start + outcome.completed, outcome };
       }
-      // CUA used the one element of a role pressed alike for a step that
-      // named its element by role and name (see namedOperation).
-      for (const used of outcome.standIns) {
-        const actionIndex = actionOf[start + used.step]!;
-        const action = actions[actionIndex];
-        if (action?.type !== "semantic" || action.locator.kind !== "role") continue;
-        standIns.push({
-          actionIndex,
-          requestedRole: action.locator.role,
-          role: observedRole(used.role),
-          name: used.name,
-        });
-      }
-      if (outcome.kind === "completed") report += openedWindowsReport(outcome.windowChanges);
-      else stopped = { step: start + outcome.completed, outcome };
+    } finally {
+      await fronted.giveBack();
     }
     // The actions that ran in full acted on their stand-ins.
     const ran = stopped ? actionOf[stopped.step]! : actions.length;
@@ -2224,22 +2243,39 @@ export class CuaComputerBackend implements ComputerBackend {
 
   /** Windows sends foreground input to whichever window is in front, so the
    * window is brought there first, past a Start menu or Search left open,
-   * and the input is refused, with nothing sent, while Windows keeps another
-   * window in front. */
-  private async front(windowId: number): Promise<void> {
-    if (!this.frontWindow) return;
-    const fronted = await this.frontWindow(windowId);
+   * and the input is refused, with none of it sent, while Windows keeps
+   * another window in front. Afterwards the foreground goes back to the
+   * window that had it, as CUA does for keyboard input it fronts a window for;
+   * a window that was clicked stays in front, as after CUA's own clicks. */
+  private async front(
+    windowId: number,
+    steps: readonly { name: string; args: Record<string, unknown> }[],
+  ): Promise<{ giveBack(): Promise<void> }> {
+    const none = { giveBack: async () => {} };
+    if (!this.frontWindow || !steps.some(inForeground)) return none;
+    const fronted = await this.frontWindow.front(windowId);
     if (!fronted.front)
       throw new ComputerBackendError(
         "unavailable",
-        `Windows kept ${fronted.inFront} in front and would not bring this window forward, so no input was sent. Close or dismiss that window first, then try again`,
+        `Windows kept ${fronted.inFront} in front and would not bring this window forward, so none of this action's input was sent. Close or dismiss that window first, then try again`,
         false,
         false,
       );
+    const frontWindow = this.frontWindow;
+    if (!fronted.previous || steps.some(clicks)) return none;
+    return { giveBack: async () => await frontWindow.giveBack(windowId, fronted.previous) };
   }
 }
 
-function inForeground(operation: Operation): boolean {
+/** The CUA tools that click with the pointer; CUA leaves a window it clicked
+ * in the foreground. */
+const CLICK_TOOLS = new Set(["click", "double_click", "right_click", "drag"]);
+
+function clicks(step: { name: string; args: Record<string, unknown> }): boolean {
+  return inForeground(step) && CLICK_TOOLS.has(step.name);
+}
+
+function inForeground(operation: { args: Record<string, unknown> }): boolean {
   return operation.args.delivery_mode === "foreground";
 }
 

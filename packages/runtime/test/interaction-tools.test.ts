@@ -4587,13 +4587,15 @@ describe("interaction attempt tools", () => {
     const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
     const captures: string[] = [];
     let captureFails = false;
+    let targets: ComputerTarget[] = [window, screen];
+    let frameGeneration: string | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         getComputerSession: async () => session,
         listComputerTargets: async () => ({
           computerSessionId,
           controllerGeneration: "controller-1",
-          targets: [window, screen],
+          targets,
         }),
         captureComputerTarget: async (_workspaceId, capturedSessionId, targetId) => {
           captures.push(`${capturedSessionId}:${targetId}`);
@@ -4603,7 +4605,8 @@ describe("interaction attempt tools", () => {
             computerSessionId,
             controllerGeneration: "controller-1",
             targetId,
-            targetGeneration: screen.targetGeneration,
+            targetGeneration:
+              frameGeneration ?? targets.find((target) => target.id === targetId)!.targetGeneration,
             sequence: 0,
             mediaType: "image/jpeg",
             width: 1024,
@@ -4659,6 +4662,47 @@ describe("interaction attempt tools", () => {
         text: "The computer opened, but its screenshot could not be captured: synthetic capture failure",
       },
     ]);
+    captureFails = false;
+
+    // Pixels of a screen that changed since it was listed are not returned.
+    frameGeneration = "target-3";
+    const changed = await definitions[0]!.execute(
+      { computerSessionId, includeScreenshot: true },
+      context(),
+    );
+    expect(changed.isError).toBeFalsy();
+    expect(changed.content).toEqual([
+      plain.content[0],
+      {
+        type: "text",
+        text: "The computer opened, but its screen changed while it was captured; observe it for a current screenshot.",
+      },
+    ]);
+    frameGeneration = null;
+
+    // With several screens, the one showing the focused window is captured,
+    // and the screen the computer works in comes before it.
+    const left: ComputerTarget = {
+      ...screen,
+      id: "screen-left",
+      focused: false,
+      bounds: { x: 0, y: 0, width: 1024, height: 640 },
+    };
+    const right: ComputerTarget = {
+      ...left,
+      id: "screen-right",
+      bounds: { x: 1024, y: 0, width: 1024, height: 640 },
+    };
+    const shown = { ...window, bounds: { x: 1200, y: 100, width: 400, height: 300 } };
+    for (const [listed, expected] of [
+      [[shown, left, right], "screen-right"],
+      [[shown, { ...left, current: true as const }, right], "screen-left"],
+    ] as const) {
+      targets = [...listed];
+      captures.length = 0;
+      await definitions[0]!.execute({ computerSessionId, includeScreenshot: true }, context());
+      expect(captures).toEqual([`${computerSessionId}:${expected}`]);
+    }
   });
 
   test("observes an app target from its tree when it has no screenshot", async () => {

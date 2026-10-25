@@ -15,6 +15,12 @@
  * this process the foreground right; and as a last resort its own title bar
  * is clicked. Only then is the input refused, and the refusal names the
  * window Windows kept in front.
+ *
+ * CUA gives the foreground back after keyboard input it fronted a window for,
+ * and leaves a window it clicked in front, as a person's click would. Fronting
+ * here first means CUA finds the window already in front, so the caller gives
+ * the foreground back the same way (see giveBack). A Start or Search surface
+ * that was dismissed is not given back.
  */
 
 /** What fronting needs from Windows. Window handles are plain numbers. */
@@ -38,18 +44,41 @@ export type Win32Foreground = {
   pressEscape(): void;
   /** A screen point on the window's own title bar that no other window covers. */
   captionPoint(window: number): { x: number; y: number } | null;
-  /** A left click at the point. The cursor stays there: injected clicks land
-   * where the cursor is when Windows processes them, after this returns. */
+  /** A left click at the point. Injected clicks land where the cursor is
+   * when Windows processes them, after this returns, so the cursor is moved
+   * back only once the click has had its effect. */
   click(point: { x: number; y: number }): void;
+  cursor(): { x: number; y: number } | null;
+  moveCursor(point: { x: number; y: number }): void;
 };
 
 export type ForegroundResult =
-  | { front: true }
+  | {
+      front: true;
+      /** The window that was in front before, to give the foreground back to
+       * after keyboard input, or 0 when there is none to give back. */
+      previous: number;
+    }
   | {
       front: false;
       /** The window Windows kept in front, as a person would name it. */
       inFront: string;
     };
+
+/** What the CUA backend uses on Windows: front a window before input, and
+ * give the foreground back after it. */
+export type WindowFronting = {
+  front(window: number): Promise<ForegroundResult>;
+  giveBack(window: number, previous: number): Promise<void>;
+};
+
+/** This process's Windows desktop as the CUA backend uses it. */
+export function windowsFronting(): WindowFronting {
+  return {
+    front: async (window) => await bringToFront(await windowsForeground(), window),
+    giveBack: async (window, previous) => giveBack(await windowsForeground(), window, previous),
+  };
+}
 
 /** The processes whose Start, Search and notification surfaces take the
  * foreground while open and give it to no other window until dismissed. */
@@ -122,30 +151,52 @@ export async function bringToFront(
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((done) => setTimeout(done, ms)),
 ): Promise<ForegroundResult> {
   // A window that is gone is CUA's to report, with its own target checks.
-  if (!win.isWindow(window) || inFront(win, window)) return { front: true };
+  if (!win.isWindow(window) || inFront(win, window)) return { front: true, previous: 0 };
   const front = () => inFront(win, window);
+  let previous = win.foreground();
   // Escape dismisses Start or Search the way it does for a person; nothing
-  // else takes the foreground from them.
-  for (let attempt = 0; attempt < 2 && isShellSurface(win, win.foreground()); attempt++) {
+  // else takes the foreground from them. The foreground is read again right
+  // before each Escape, so Escape reaches only such a surface.
+  for (let attempt = 0; attempt < 2; attempt++) {
     const surface = win.foreground();
+    if (!isShellSurface(win, surface)) break;
+    previous = 0;
     win.pressEscape();
     await waitFor(() => win.foreground() !== surface, DISMISS_WAIT_MS, sleep);
   }
-  if (front()) return { front: true };
+  const fronted = (): ForegroundResult => ({
+    front: true,
+    previous: previous && previous !== window && win.isWindow(previous) ? previous : 0,
+  });
+  if (front()) return fronted();
   if (win.isMinimized(window)) win.restore(window);
   win.activate(window);
-  if (await waitFor(front, ACTIVATE_WAIT_MS, sleep)) return { front: true };
+  if (await waitFor(front, ACTIVATE_WAIT_MS, sleep)) return fronted();
   win.claimInput();
   win.activate(window);
-  if (await waitFor(front, ACTIVATE_WAIT_MS, sleep)) return { front: true };
+  if (await waitFor(front, ACTIVATE_WAIT_MS, sleep)) return fronted();
   // Clicking a window's title bar activates it whoever holds the foreground,
-  // and does nothing else.
+  // and does nothing else. The point is found and the foreground read again
+  // right before the click.
   const caption = win.captionPoint(window);
+  if (front()) return fronted();
   if (caption) {
+    const cursor = win.cursor();
     win.click(caption);
-    if (await waitFor(front, CLICK_WAIT_MS, sleep)) return { front: true };
+    const clicked = await waitFor(front, CLICK_WAIT_MS, sleep);
+    if (cursor) win.moveCursor(cursor);
+    if (clicked) return fronted();
   }
   return { front: false, inFront: described(win, win.foreground()) };
+}
+
+/** After keyboard input, gives the foreground back to the window that had it
+ * before fronting, as CUA does when it fronts a window itself. Nothing is
+ * given back when the input moved the foreground elsewhere, such as to a
+ * window it opened in another program. */
+export function giveBack(win: Win32Foreground, window: number, previous: number): void {
+  if (!previous || !win.isWindow(previous) || !inFront(win, window)) return;
+  win.activate(previous);
 }
 
 const GA_ROOT = 2;
@@ -201,6 +252,7 @@ async function loadWin32Foreground(): Promise<Win32Foreground> {
       returns: FFIType.void,
     },
     SetCursorPos: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+    GetCursorPos: { args: [FFIType.ptr], returns: FFIType.i32 },
   }).symbols;
   const kernel32 = dlopen("kernel32.dll", {
     GetCurrentThreadId: { args: [], returns: FFIType.u32 },
@@ -299,6 +351,13 @@ async function loadWin32Foreground(): Promise<Win32Foreground> {
       user32.SetCursorPos(x, y);
       user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0n);
       user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0n);
+    },
+    cursor: () => {
+      const point = new Int32Array(2);
+      return user32.GetCursorPos(point) ? { x: point[0]!, y: point[1]! } : null;
+    },
+    moveCursor: ({ x, y }) => {
+      user32.SetCursorPos(x, y);
     },
   };
 }
