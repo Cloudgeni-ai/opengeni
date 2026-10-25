@@ -4869,16 +4869,23 @@ export type UpdateModelAccountPreferencesRequest = {
 };
 
 /**
- * Whether owners and admins may give agent sessions admin access. Off by
- * default; turning it off ends every session's admin access.
+ * What agents may do in the app for a person, organization-wide.
+ * `sessionAdminAccessAllowed`: members may give a session they started their
+ * own full access (off by default; turning it off ends every session's full
+ * access). `chatActionsAllowed`: in a chat a person started, the agent may do
+ * what that person could do in the app's pages and settings, each change only
+ * after the person confirms it in the chat (on by default).
  */
 export type OrganizationAgentAdminAccess = {
   sessionAdminAccessAllowed: boolean;
+  chatActionsAllowed: boolean;
   updatedAt: string | null;
 };
 
+/** Change either choice; an omitted one stays as it is. */
 export type UpdateOrganizationAgentAdminAccessRequest = {
-  sessionAdminAccessAllowed: boolean;
+  sessionAdminAccessAllowed?: boolean;
+  chatActionsAllowed?: boolean;
 };
 
 /**

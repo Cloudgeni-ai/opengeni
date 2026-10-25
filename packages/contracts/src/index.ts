@@ -4,7 +4,9 @@ import {
   workspaceControlUtf8Bytes,
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
+export * from "./secret-value";
 import { defineSchema } from "./define-schema";
+import { secretValue } from "./secret-value";
 export * from "./session-target";
 export * from "./turn-serving-policy";
 import { AzureOpenAIEndpoint } from "./direct-model-provider";
@@ -1382,18 +1384,23 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 } as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
- * Tools a session has only while it has admin access: the organization's
- * actions, run as the person who gave it, with exactly their access. Admin access, not the
- * session's tool selection, decides whether they are there.
+ * App actions: what the person could do in the app's pages and settings, run
+ * as that person in a session they started themselves. Reads run at once; a
+ * change waits for their confirmation in the chat unless the session has full
+ * access. Ordinary, selectable tools, never carried into a child session.
  */
-export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
+export const SESSION_APP_ACTION_TOOL_NAMES = [
   "admin_actions_search",
   "admin_action_describe",
   "admin_action_call",
 ] as const satisfies readonly FirstPartyMcpToolName[];
-export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(
-  SESSION_ADMIN_ACCESS_TOOL_NAMES,
+export const SESSION_APP_ACTION_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(
+  SESSION_APP_ACTION_TOOL_NAMES,
 );
+/** @deprecated Renamed to SESSION_APP_ACTION_TOOL_NAMES; these tools no longer need full access. */
+export const SESSION_ADMIN_ACCESS_TOOL_NAMES = SESSION_APP_ACTION_TOOL_NAMES;
+/** @deprecated Renamed to SESSION_APP_ACTION_TOOL_NAME_SET. */
+export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET = SESSION_APP_ACTION_TOOL_NAME_SET;
 
 /**
  * Connector-wide tools are explicit-only except prepared bot sending. Ordinary
@@ -1412,8 +1419,7 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
       name === "slack_bot_prepare_message" ||
       name === "slack_bot_send_prepared_message") &&
     !name.startsWith("fiken_") &&
-    !name.startsWith("atlassian_") &&
-    !SESSION_ADMIN_ACCESS_TOOL_NAME_SET.has(name),
+    !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -2851,19 +2857,35 @@ export function workspaceModelCompactionThreshold(
 }
 
 /**
- * Whether members may give a session they started their own access. Off by
- * default; turning it off ends every session's admin access.
+ * What agents may do in the app for a person, organization-wide.
+ * `sessionAdminAccessAllowed`: members may give a session they started their
+ * own full access. Off by default; turning it off ends every session's full
+ * access. `chatActionsAllowed`: in a chat a person started, the agent may do
+ * what that person could do in the app's pages and settings, each change only
+ * after the person confirms it in the chat. On by default.
  */
 export const OrganizationAgentAdminAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
     sessionAdminAccessAllowed: primitives.boolean,
+    chatActionsAllowed: primitives.boolean,
     updatedAt: primitives.nullableString,
   }),
 );
 export type OrganizationAgentAdminAccess = z.infer<typeof OrganizationAgentAdminAccess>;
 
+/** Change either choice; an omitted one stays as it is. */
 export const UpdateOrganizationAgentAdminAccessRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ sessionAdminAccessAllowed: primitives.boolean }).strict(),
+  z
+    .object({
+      sessionAdminAccessAllowed: primitives.optionalBoolean,
+      chatActionsAllowed: primitives.optionalBoolean,
+    })
+    .strict()
+    .refine(
+      (value) =>
+        value.sessionAdminAccessAllowed !== undefined || value.chatActionsAllowed !== undefined,
+      { message: "Change at least one setting." },
+    ),
 );
 export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
   typeof UpdateOrganizationAgentAdminAccessRequest
@@ -7757,7 +7779,7 @@ export const SessionMcpServerInput = /* @__PURE__ */ defineSchema(() =>
     requireApproval: SessionMcpApprovalPolicy.optional(),
     // Write-only credential headers. Values are encrypted at rest and never
     // returned in session responses or events; response metadata exposes names.
-    headers: z.record(primitives.string, primitives.string).optional(),
+    headers: secretValue(z.record(primitives.string, primitives.string)).optional(),
     // Non-secret pointer resolved by the native connection credential engine.
     connectionRef: McpServerConnectionRef.optional(),
   }),
@@ -7767,7 +7789,7 @@ export type SessionMcpServerInput = z.infer<typeof SessionMcpServerInput>;
 export const SessionMcpCredentialUpdateInput = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: SessionMcpServerId,
-    headers: z.record(primitives.string, primitives.string),
+    headers: secretValue(z.record(primitives.string, primitives.string)),
   }),
 );
 export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
@@ -7784,7 +7806,7 @@ export const RotateSessionMcpCredentialsRequest = /* @__PURE__ */ defineSchema((
               id: SessionMcpServerId,
               expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
               expectedServerUrl: httpsUrl,
-              headers: z.record(primitives.string, primitives.string),
+              headers: secretValue(z.record(primitives.string, primitives.string)),
             })
             .strict()
             .or(
@@ -14586,7 +14608,7 @@ function compareDescending(left: number | string, right: number | string): numbe
 }
 
 export const ConnectionCredentialBundle = /* @__PURE__ */ defineSchema(() =>
-  z.record(primitives.string, z.unknown()),
+  secretValue(z.record(primitives.string, z.unknown())),
 );
 export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
 
@@ -14998,7 +15020,7 @@ export const EnableCapabilityRequest = /* @__PURE__ */ defineSchema(() =>
      * workspace-variable-sets key, injected only into the runtime MCP client,
      * and never returned by the API — responses expose header names only.
      */
-    headers: z.record(primitives.string, primitives.string).default({}),
+    headers: secretValue(z.record(primitives.string, primitives.string)).default({}),
   }),
 );
 export type EnableCapabilityRequest = z.infer<typeof EnableCapabilityRequest>;

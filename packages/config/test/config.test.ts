@@ -1591,6 +1591,18 @@ describe("sandbox preparation profiles", () => {
     ).toBe(false);
   });
 
+  test("embedded app-action changes stay off unless a deployment turns them on", () => {
+    expect(withEnv({}, () => getSettings()).delegatedSignInAppActionChangesEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES: "false" }, () => getSettings())
+        .delegatedSignInAppActionChangesEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES: "true" }, () => getSettings())
+        .delegatedSignInAppActionChangesEnabled,
+    ).toBe(true);
+  });
+
   test("retries startup dependency operations with bounded backoff", async () => {
     const retries: string[] = [];
     let calls = 0;

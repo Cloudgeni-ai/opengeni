@@ -1,4 +1,4 @@
-import type { ActionCatalogEntry } from "./action-catalog-types";
+import type { ActionCatalogEntry } from "@opengeni/contracts/app-actions";
 
 /*
  * Plain-language descriptions for catalog actions, so an agent searching the

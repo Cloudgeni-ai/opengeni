@@ -115,6 +115,7 @@ import {
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
   resolveSessionAdminAuthority,
+  sessionStartedByPerson,
   rlsContextForWorkspace,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
@@ -1909,38 +1910,44 @@ export function createAppComposition(deps: AppDependencies): {
             await Promise.allSettled([mcp.close(), prepared.close()]);
           }
         }
-        // Only the current model catalog and admin access shape this surface.
-        // Legacy Memory settings/selectors no longer register tools; Knowledge
-        // resolves its own scope at execution. Keep the bound-session check
-        // alongside these reads and before anything reaches the response.
-        const [, [mcpDeps, sessionAdminAuthority]] = await alongsideAuthorization(
+        // Only the current model catalog and the app-action facts shape this
+        // surface. Legacy Memory settings/selectors no longer register tools;
+        // Knowledge resolves its own scope at execution. Keep the bound-session
+        // check alongside these reads and before anything reaches the response.
+        const sessionScope =
+          typeof boundSessionId === "string"
+            ? { accountId: grant.accountId, workspaceId, sessionId: boundSessionId }
+            : null;
+        const [, [mcpDeps, startedByPerson, fullAccess]] = await alongsideAuthorization(
           authorizeBoundSession(),
           () =>
             Promise.all([
               resolveWorkspaceMcpRouteDeps(routeDeps, grant),
-              // Checked live: allowed by the organization, given to this
-              // session, and the person who gave it is still an owner or admin.
-              typeof boundSessionId === "string"
-                ? resolveSessionAdminAuthority(routeDeps.db, {
-                    accountId: grant.accountId,
-                    workspaceId,
-                    sessionId: boundSessionId,
-                  })
+              // Fixed for the session's life: a person started it themselves.
+              sessionScope ? sessionStartedByPerson(routeDeps.db, sessionScope) : false,
+              // Live, as before: full access lists the tools whatever the selection.
+              sessionScope
+                ? resolveSessionAdminAuthority(routeDeps.db, sessionScope).then(
+                    (authority) => authority !== null,
+                  )
                 : false,
             ]),
         );
         reads.handOffToToolDispatch();
-        const sessionAdminAccess = sessionAdminAuthority
-          ? {
-              origin: new URL(c.req.url).origin,
-              dispatch: (request: Request) =>
-                outsideAgentContext(async () => await app.fetch(request, c.env)),
-              signal: c.req.raw.signal,
-            }
-          : null;
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
-          sessionAdminAccess,
+          appActions: sessionScope
+            ? {
+                access: {
+                  origin: new URL(c.req.url).origin,
+                  dispatch: (request: Request) =>
+                    outsideAgentContext(async () => await app.fetch(request, c.env)),
+                  signal: c.req.raw.signal,
+                },
+                startedByPerson,
+                fullAccess,
+              }
+            : null,
         });
         // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
         // worker that drops the call (Steer/Pause) aborts a blocking tool here.

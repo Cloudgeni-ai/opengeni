@@ -4849,6 +4849,10 @@ export const organizationAgentAdminAccess = pgTable("organization_agent_admin_ac
     .primaryKey()
     .references(() => managedAccounts.id, { onDelete: "cascade" }),
   sessionAdminAccessAllowed: boolean("session_admin_access_allowed").notNull().default(false),
+  // 0971: agents in a chat a person started may do app actions for them, each
+  // change after they confirm it in the chat. On unless an owner or admin
+  // turns it off.
+  chatActionsAllowed: boolean("chat_actions_allowed").notNull().default(true),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4892,6 +4896,26 @@ export const sessionAdminAccess = pgTable(
   },
   (table) => [index("session_admin_access_account_idx").on(table.accountId)],
 );
+
+// What one turn's message may do through app actions, frozen when the message
+// is accepted (0971): who sent it, whether they can confirm changes from where
+// they sent it, and at most their own access then. Written once; a turn
+// without a row runs no app actions.
+export const sessionTurnAppActionGrants = pgTable("session_turn_app_action_grants", {
+  turnId: uuid("turn_id")
+    .primaryKey()
+    .references(() => sessionTurns.id, { onDelete: "cascade" }),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id")
+    .notNull()
+    .references(() => workspaces.id, { onDelete: "cascade" }),
+  subjectId: text("subject_id").notNull(),
+  changes: text("changes").$type<"confirm" | "none">().notNull(),
+  permissions: text("permissions").array().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // One workspace-local short-lived holder per running Codex turn. Selection and
 // insertion happen atomically while codex_rotation_settings is locked FOR
@@ -8761,6 +8785,11 @@ export const connectorActionRequests = pgTable(
       .notNull(),
     decision: text("decision").$type<"approve" | "reject">(),
     decisionBySubjectId: text("decision_by_subject_id"),
+    // 0971: how the decider reached the card, and whether they were signed in
+    // where an app-action change may be confirmed: the app itself, or an embed
+    // the deployment opted in (never a key, chat integration or other token).
+    decisionByKind: text("decision_by_kind").$type<"human" | "api" | "agent_attempt" | "system">(),
+    decisionBySignedInPerson: boolean("decision_by_signed_in_person").notNull().default(false),
     decisionEventId: uuid("decision_event_id"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     executionStartedAt: timestamp("execution_started_at", {

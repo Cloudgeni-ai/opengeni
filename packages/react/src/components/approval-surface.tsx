@@ -293,32 +293,37 @@ function ApprovalRequest({
   }, [request]);
   const stableApproval = request.approval;
   const { formatToolName, approve: approveLabel } = messages;
-  const fallback = useMemo<ToolActionReview>(
-    () => ({
+  const toolName = stableApproval.display?.toolName ?? stableApproval.name;
+  // An app action's card asks the person a plain question ("Invite … to your
+  // organization?"), so its buttons answer it, in the host's language.
+  const appAction = toolName === "admin_action_call";
+  const answer = appAction
+    ? { approve: t("approvalSurface.allow"), reject: t("approvalSurface.cancel") }
+    : null;
+  const fallback = useMemo<ToolActionReview>(() => {
+    const action = toolReviewAction(toolName, stableApproval.arguments, {
+      kind: "generic",
+      title: stableApproval.display?.title ?? formatToolName(toolName),
+    });
+    return {
       version: 1,
       id: stableApproval.id,
       actionDigest: "",
       revision: "legacy",
       status: "pending",
-      ...toolReviewAction(stableApproval.name, stableApproval.arguments, {
-        kind: "generic",
-        title:
-          stableApproval.display?.title ??
-          formatToolName(stableApproval.display?.toolName ?? stableApproval.name),
-      }),
+      ...action,
       ...(stableApproval.display?.accountLabel
         ? { accountLabel: stableApproval.display.accountLabel }
         : {}),
-      ...toolReviewFields(stableApproval.arguments),
+      ...toolReviewFields(stableApproval.arguments, undefined, toolName),
       reason: "",
       createdAt: "",
       updatedAt: "",
       approveLabel,
       availableActions: stableApproval.arguments === undefined ? [] : ["approve", "reject"],
       detailsAvailable: stableApproval.arguments !== undefined,
-    }),
-    [stableApproval, formatToolName, approveLabel],
-  );
+    };
+  }, [stableApproval, toolName, formatToolName, approveLabel]);
   const loadLegacyDetails = useCallback<ToolReviewDetailsLoader>(
     async (value, path, offset) => ({
       version: 1,
@@ -373,7 +378,7 @@ function ApprovalRequest({
             <DeclineButton
               busy={Boolean(actions.disabled || actions.submitting)}
               submitting={actions.submitting === "reject"}
-              label={messages.reject}
+              label={answer?.reject ?? messages.reject}
               onClick={actions.onReject}
             />
           </div>
@@ -407,7 +412,7 @@ function ApprovalRequest({
               <DeclineButton
                 busy={Boolean(actions.disabled || actions.submitting)}
                 submitting={actions.submitting === "reject"}
-                label={messages.reject}
+                label={answer?.reject ?? messages.reject}
                 onClick={actions.onReject}
               />
             </div>
@@ -417,7 +422,8 @@ function ApprovalRequest({
         </ToolReviewFrame>
       </div>
     );
-  const review = loaded ?? fallback;
+  const saved = loaded ?? fallback;
+  const review = answer ? { ...saved, approveLabel: answer.approve } : saved;
   if (detailPath !== null)
     return (
       <ToolActionReviewDetails
@@ -450,7 +456,7 @@ function ApprovalRequest({
         review={review}
         {...actions}
         pendingLabel={messages.title}
-        rejectLabel={messages.reject}
+        rejectLabel={answer?.reject ?? messages.reject}
         onViewDetails={
           loaded && onViewDetails
             ? (path) => onViewDetails(review, path)

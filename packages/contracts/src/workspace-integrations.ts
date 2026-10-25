@@ -1,5 +1,6 @@
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
+import { secretValue } from "./secret-value";
 import { z } from "zod";
 import {
   NotificationFact,
@@ -536,7 +537,7 @@ export const CredentialProviderMcpHeaders = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       url: ProviderMcpUrl,
-      headers: z.record(primitives.string, primitives.string),
+      headers: secretValue(z.record(primitives.string, primitives.string)),
       expiresAt: z.iso.datetime({ offset: true }).optional(),
     })
     .strict()

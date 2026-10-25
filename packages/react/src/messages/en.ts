@@ -4,10 +4,14 @@
  */
 export const englishMessages = {
   "approvalSurface.actionsToReview": "Actions to review",
+  /** The button that answers an app action's question ("Invite … to your organization?"). */
+  "approvalSurface.allow": "Allow",
   "approvalSurface.approvalNeeded": "Approval needed",
   "approvalSurface.approveAction": "Approve action",
   "approvalSurface.approving": "Approving…",
   "approvalSurface.backToReview": "Back to review",
+  /** Declines an app action's question without running it. */
+  "approvalSurface.cancel": "Cancel",
   "approvalSurface.couldnTLoadThisAction":
     "Couldn't load this action, so it can't be approved yet. You can still decline it.",
   "approvalSurface.decline": "Decline",

@@ -1606,6 +1606,17 @@ const SettingsSchema = z.object({
   // EnvBoolean (NOT
   // z.coerce.boolean(), which coerces "false" -> true).
   agentOpStreamEnabled: EnvBoolean.default(true),
+  // In-chat app actions (admin_action_call without full access): a change
+  // waits for the person's confirmation in the chat, but only when they sent
+  // the message signed in to this app itself (its managed or local sign-in).
+  // Every other accepted person sign-in is delegated: an embed's host-issued
+  // token, an external user, or any other integration's person token. There
+  // someone else vouches for who the person is, so the route only reads.
+  // Turning this on lets every delegated sign-in confirm changes too (not only
+  // embeds); do it only when every issuer of such tokens maps each user to the
+  // right member. EnvBoolean (NOT z.coerce.boolean(), which coerces "false"
+  // -> true).
+  delegatedSignInAppActionChangesEnabled: EnvBoolean.default(false),
   // The HMAC secret the control plane signs the enrollment bearer credential with
   // (the `oge_` envelope the agent presents back to the control plane). Optional:
   // when ABSENT and sandboxSelfhostedEnabled is on, the poll route reports the
@@ -5628,6 +5639,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxLazyProvisionEnabled: optional("OPENGENI_SANDBOX_LAZY_PROVISION"),
     sandboxSelfhostedEnabled: optional("OPENGENI_SANDBOX_SELFHOSTED_ENABLED"),
     agentOpStreamEnabled: optional("OPENGENI_AGENT_OP_STREAM_ENABLED"),
+    delegatedSignInAppActionChangesEnabled: optional(
+      "OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES",
+    ),
     enrollmentSigningSecret: optional("OPENGENI_ENROLLMENT_SIGNING_SECRET"),
     selfhostedNatsUrl: optional("OPENGENI_SELFHOSTED_NATS_URL"),
     selfhostedRelayUrl: optional("OPENGENI_SELFHOSTED_RELAY_URL"),
@@ -10809,6 +10823,10 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // safe to cache / leave as-is.)
       cacheToolsList: false,
       setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
+      // App actions act as a person. The worker decides per call whether one
+      // waits for the person's confirmation in the chat (a change without full
+      // access) or runs at once (a read, or full access); the API enforces it.
+      requireApproval: ["admin_action_call"],
     },
     ...(hasFiles
       ? []
