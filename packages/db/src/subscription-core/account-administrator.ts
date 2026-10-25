@@ -71,6 +71,19 @@ export async function recordSubscriptionAccountAdministrator(
   ) {
     return false;
   }
+  // 0956 creates the grant without runtime EXECUTE: the previous release
+  // rejects a runtime grant on a definer it doesn't know, so a follow-up
+  // release grants it. Until then this is "not yet", and the transaction
+  // continues with membership authority only. The check is its own statement:
+  // PostgreSQL checks EXECUTE when it prepares a call, even on a branch that
+  // never runs, and a refusal would abort the transaction.
+  const [allowed] = await rawRows<{ allowed: boolean | null }>(
+    tx,
+    sql`select pg_catalog.has_function_privilege(
+      pg_catalog.to_regprocedure('opengeni_private.grant_subscription_account_administrator(jsonb)'),
+      'EXECUTE') as allowed`,
+  );
+  if (allowed?.allowed !== true) return false;
   const [row] = await rawRows<{ granted: boolean }>(
     tx,
     sql`select opengeni_private.grant_subscription_account_administrator(${JSON.stringify(stamp)}::jsonb) as granted`,

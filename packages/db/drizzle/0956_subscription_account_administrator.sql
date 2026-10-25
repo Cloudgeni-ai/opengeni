@@ -19,7 +19,11 @@
 --    account and subject. The constraints are replaced NOT VALID; 0957
 --    validates them. Every existing row satisfies the new definitions.
 -- 2. grant_subscription_account_administrator(stamp): SECURITY DEFINER,
---    executable by the application roles only. It refuses unless the stamp
+--    never PUBLIC, created WITHOUT runtime EXECUTE: the previous release
+--    rejects a runtime grant on a definer it doesn't know, so a follow-up
+--    rolling migration grants it once this binary is the previous release
+--    (as 0946 and 0950 did). Until then the API treats it as "not yet" and
+--    only membership administrators pass. It refuses unless the stamp
 --    names account:admin for exactly the current opengeni.account_id and
 --    opengeni.subject_id. A membership administrator needs no row. A session
 --    setting alone never grants anything: the row is keyed by backend and
@@ -207,33 +211,3 @@ $install$;
 REVOKE ALL ON FUNCTION opengeni_subscription_internal.subscription_core_administration_context(
   text, uuid, uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.grant_subscription_account_administrator(jsonb) FROM PUBLIC;
-
-DO $application_grants$
-DECLARE
-  data_schema text := current_schema();
-  role_name text;
-BEGIN
-  -- The established application grantees (0900), never capability-only roles.
-  FOR role_name IN
-    SELECT DISTINCT r.rolname FROM pg_catalog.pg_roles r
-    WHERE r.rolname = 'opengeni_app'
-      OR r.rolname IN (
-        SELECT configured.value FROM pg_catalog.jsonb_array_elements_text(
-          coalesce(nullif(pg_catalog.current_setting('opengeni.migration_application_roles',true),''),'[]')::jsonb
-        ) configured(value)
-      )
-      OR r.oid IN (
-        SELECT acl.grantee FROM pg_catalog.pg_proc helper
-        CROSS JOIN LATERAL pg_catalog.aclexplode(helper.proacl) acl
-        WHERE helper.oid = pg_catalog.format(
-          '%I.session_private_actor_visible(uuid,uuid,uuid,text)',data_schema
-        )::regprocedure
-        AND acl.privilege_type = 'EXECUTE' AND acl.grantee <> helper.proowner
-      )
-  LOOP
-    EXECUTE pg_catalog.format(
-      'GRANT EXECUTE ON FUNCTION opengeni_private.grant_subscription_account_administrator(jsonb) TO %I',
-      role_name);
-  END LOOP;
-END
-$application_grants$;
